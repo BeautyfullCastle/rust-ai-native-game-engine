@@ -1,0 +1,27 @@
+[package]
+name = "orr_sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+bytemuck = { version = "1", features = ["derive"] }
+subsecond = { version = "0.7.10", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[features]
+# Function-level hot patching (subsecond/Dioxus style) for system
+# invocations. OFF by default (see src/hotpatch.rs for the full design
+# note): enabling it routes every `System::run` call through
+# `subsecond::call`, so a running desktop dev build can pick up a
+# recompiled system body without restarting the simulation. Never enable
+# this for a release/CI/wasm build.
+hotpatch = ["dep:subsecond"]

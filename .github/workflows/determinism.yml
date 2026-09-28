@@ -1,0 +1,113 @@
+name: determinism
+
+# Cross-platform determinism CI (design doc §3.2): the same golden tests
+# (fixed input sequences with hardcoded/recorded checksums) must produce
+# bit-identical results on every supported target. A single differing bit
+# on any platform is a CI failure — that's the whole point of fixed-point,
+# integer-only simulation.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  native:
+    name: native (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: ubuntu-latest-x86_64
+          - os: windows-latest
+            name: windows-latest-x86_64
+          - os: macos-latest
+            name: macos-latest-arm64
+          - os: ubuntu-24.04-arm
+            name: ubuntu-24.04-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test --workspace --release
+        # Release, not debug: matches the profile the design doc's tick
+        # budget is measured against, and is what the golden tests (whose
+        # constants are pinned to a specific i64/i128 op sequence, not to
+        # a specific build profile) are expected to run under in CI.
+        run: cargo test --workspace --release
+
+      - name: cargo clippy --workspace --all-targets
+        # `-D warnings` only on the crates this task owns (`orr_sim`,
+        # `orr_session`, `orr_testgame`); other crates may be under
+        # concurrent work with their own warning budget.
+        run: |
+          cargo clippy --workspace --all-targets
+          cargo clippy -p orr_sim -p orr_session -p orr_testgame --all-targets -- -D warnings
+
+      - name: cargo build -p orr_sim --features hotpatch
+        # Desktop-only, off-by-default hot-patch hook (design doc decision
+        # #10 — see crates/orr_sim/src/hotpatch.rs): build-only check (not
+        # `test`/`run`) that the `subsecond`-backed code path still
+        # compiles on every native desktop target. Never build this
+        # feature for the wasm32 job below — subsecond has no wasm32
+        # code-swap story and the feature must never leak into a release
+        # or replay-verification build.
+        run: cargo build -p orr_sim --features hotpatch
+
+  wasm32:
+    name: wasm32-wasip1 (wasmtime)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (wasm32-wasip1 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasmtime
+        run: curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version v25.0.0
+      - run: echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: cargo test (orr_fp, orr_ecs, orr_session golden tests) on wasm32-wasip1
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+        # `orr_sim`/`orr_testgame` are exercised transitively through
+        # `orr_session`'s tests; listing packages explicitly keeps this
+        # job scoped to the crates whose determinism actually matters
+        # (avoids dragging in anything future-added that isn't
+        # `no_std`/wasm-clean yet).
+        run: |
+          cargo test --release --target wasm32-wasip1 -p orr_fp
+          cargo test --release --target wasm32-wasip1 -p orr_ecs
+          cargo test --release --target wasm32-wasip1 -p orr_session --test arena -- golden
+
+  cross_platform_checksum_compare:
+    name: cross-platform checksum comparison
+    needs: [native]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All native jobs passed with identical golden-checksum assertions
+        run: |
+          echo "Each 'native' matrix leg independently asserts the same"
+          echo "hardcoded golden checksums (see crates/orr_session/tests/arena.rs"
+          echo "and crates/orr_fp/tests/determinism_golden.rs). A leg failing"
+          echo "that assertion is exactly a cross-platform determinism failure,"
+          echo "so requiring every matrix leg to pass *is* the cross-platform"
+          echo "checksum comparison; this job just gives that fact a clear,"
+          echo "single required-status-check name for branch protection."

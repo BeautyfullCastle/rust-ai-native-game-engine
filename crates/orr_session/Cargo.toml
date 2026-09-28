@@ -1,0 +1,25 @@
+[package]
+name = "orr_session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+bytemuck = { version = "1", features = ["derive"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+
+[dev-dependencies]
+orr_testgame = { path = "../orr_testgame" }
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "session"
+harness = false

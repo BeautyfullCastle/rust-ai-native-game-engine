@@ -103,6 +103,7 @@ fn from_ratio_basic() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "negative input")]
 fn sqrt_negative_panics_in_debug() {
     let _ = fp!(-1).sqrt();

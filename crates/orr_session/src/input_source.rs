@@ -1,0 +1,161 @@
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::rc::Rc;
+
+use orr_fp::FrameRng;
+use orr_sim::{Game, PlayerSlot};
+
+/// One remote player's confirmed input (and any commands they submitted)
+/// for one tick, as delivered by an [`InputSource`].
+pub struct RemoteInput<G: Game> {
+    pub tick: u64,
+    pub slot: PlayerSlot,
+    pub input: G::Input,
+    pub commands: Vec<G::Command>,
+}
+
+/// Where a [`crate::Session`] gets other players' confirmed inputs from.
+///
+/// The local player's own input is *not* routed through this trait — the
+/// session already knows it with certainty the instant it's produced, so
+/// `Session::advance` records it directly. `InputSource` only needs to
+/// deliver everyone else's, whenever they arrive (immediately for
+/// [`LocalInputSource`]'s single-player case, after simulated latency for
+/// [`LoopbackNetwork`], or from a recorded file for a replay reader).
+pub trait InputSource<G: Game> {
+    /// Called once per [`crate::Session::advance`] with the local player's
+    /// input for `tick` (already offset by the session's input delay), so
+    /// a network implementation can transmit it to peers.
+    fn send_local(&mut self, tick: u64, slot: PlayerSlot, input: G::Input, commands: Vec<G::Command>);
+
+    /// Drains every remote input that has newly become available (i.e.
+    /// "arrived") since the last call. Order is not significant — the
+    /// session sorts by tick internally.
+    fn poll_remote(&mut self) -> Vec<RemoteInput<G>>;
+}
+
+/// A no-op transport for single-player sessions: there are no remote
+/// players, so nothing is ever delivered.
+#[derive(Default)]
+pub struct LocalInputSource;
+
+impl<G: Game> InputSource<G> for LocalInputSource {
+    fn send_local(&mut self, _tick: u64, _slot: PlayerSlot, _input: G::Input, _commands: Vec<G::Command>) {}
+    fn poll_remote(&mut self) -> Vec<RemoteInput<G>> {
+        Vec::new()
+    }
+}
+
+struct Envelope<G: Game> {
+    deliver_at: u64,
+    tick: u64,
+    slot: PlayerSlot,
+    input: G::Input,
+    commands: Vec<G::Command>,
+}
+
+struct Link<G: Game> {
+    latency: u64,
+    jitter: u64,
+    rng: FrameRng,
+    queue: VecDeque<Envelope<G>>,
+}
+
+/// Drives the shared "time in flight" clock for a [`LoopbackNetwork`]. Call
+/// [`LoopbackClock::tick`] once per round (e.g. right before both peers
+/// call `Session::advance`) so packets take the configured number of ticks
+/// to arrive, regardless of which peer's `advance` runs first.
+#[derive(Clone)]
+pub struct LoopbackClock(Rc<RefCell<u64>>);
+
+impl LoopbackClock {
+    pub fn tick(&self) {
+        *self.0.borrow_mut() += 1;
+    }
+
+    pub fn now(&self) -> u64 {
+        *self.0.borrow()
+    }
+}
+
+/// A local, two-peer, in-process fake network: exercises `Session`'s
+/// prediction/rollback path without real sockets. Latency and jitter are
+/// expressed in ticks.
+pub struct LoopbackNetwork;
+
+impl LoopbackNetwork {
+    /// Builds a connected pair of ends plus the [`LoopbackClock`] driving
+    /// both. `latency_ticks` is the one-way delivery delay; `jitter_ticks`
+    /// adds a deterministic `[0, jitter]` wobble (seeded, so runs are
+    /// reproducible) on top of it.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new<G: Game>(
+        latency_ticks: u64,
+        jitter_ticks: u64,
+        seed: u64,
+    ) -> (LoopbackEnd<G>, LoopbackEnd<G>, LoopbackClock) {
+        // `a_to_b` carries envelopes A sends that B receives, and vice
+        // versa; both ends share both links (one to send into, one to
+        // read from) plus one shared clock driving delivery times for
+        // both directions.
+        let clock = Rc::new(RefCell::new(0u64));
+        let a_to_b = Rc::new(RefCell::new(Link {
+            latency: latency_ticks,
+            jitter: jitter_ticks,
+            rng: FrameRng::new(seed),
+            queue: VecDeque::new(),
+        }));
+        let b_to_a = Rc::new(RefCell::new(Link {
+            latency: latency_ticks,
+            jitter: jitter_ticks,
+            rng: FrameRng::new(seed ^ 0x9E37_79B9_7F4A_7C15),
+            queue: VecDeque::new(),
+        }));
+        (
+            LoopbackEnd { send: a_to_b.clone(), recv: b_to_a.clone(), clock: clock.clone() },
+            LoopbackEnd { send: b_to_a, recv: a_to_b, clock: clock.clone() },
+            LoopbackClock(clock),
+        )
+    }
+}
+
+/// One side of a [`LoopbackNetwork`].
+pub struct LoopbackEnd<G: Game> {
+    send: Rc<RefCell<Link<G>>>,
+    recv: Rc<RefCell<Link<G>>>,
+    clock: Rc<RefCell<u64>>,
+}
+
+impl<G: Game> LoopbackEnd<G> {
+    fn now(&self) -> u64 {
+        *self.clock.borrow()
+    }
+}
+
+impl<G: Game> InputSource<G> for LoopbackEnd<G> {
+    fn send_local(&mut self, tick: u64, slot: PlayerSlot, input: G::Input, commands: Vec<G::Command>) {
+        let now = self.now();
+        let mut link = self.send.borrow_mut();
+        let jitter = if link.jitter > 0 { link.rng.next_u32() as u64 % (link.jitter + 1) } else { 0 };
+        let deliver_at = now + link.latency + jitter;
+        link.queue.push_back(Envelope { deliver_at, tick, slot, input, commands });
+    }
+
+    fn poll_remote(&mut self) -> Vec<RemoteInput<G>> {
+        let now = self.now();
+        let mut link = self.recv.borrow_mut();
+        let mut out = Vec::new();
+        // `queue` is FIFO by send order, not by `deliver_at` (jitter can
+        // reorder), so scan-and-remove rather than peek-front.
+        let mut i = 0;
+        while i < link.queue.len() {
+            if link.queue[i].deliver_at <= now {
+                let env = link.queue.remove(i).unwrap();
+                out.push(RemoteInput { tick: env.tick, slot: env.slot, input: env.input, commands: env.commands });
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+}

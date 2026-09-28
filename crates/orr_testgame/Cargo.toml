@@ -1,0 +1,16 @@
+[package]
+name = "orr_testgame"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+bytemuck = { version = "1", features = ["derive"] }
