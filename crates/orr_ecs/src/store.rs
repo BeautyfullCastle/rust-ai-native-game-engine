@@ -117,12 +117,12 @@ impl<T: Component> SparseSet<T> {
         &self.dense_entities
     }
 
-    #[allow(dead_code)]
+    #[inline]
     pub fn dense_data(&self) -> &[T] {
         &self.data
     }
 
-    #[allow(dead_code)]
+    #[inline]
     pub fn dense_data_mut(&mut self) -> &mut [T] {
         &mut self.data
     }

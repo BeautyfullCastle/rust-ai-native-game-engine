@@ -69,6 +69,20 @@ fn bench_iterate_integrate(c: &mut Criterion) {
     });
 }
 
+fn bench_iterate_integrate_plain_vec(c: &mut Criterion) {
+    let n = 1_000_000i64;
+    let mut pos: Vec<Pos> = (0..n).map(|_| Pos { x: 0, y: 0 }).collect();
+    let vel: Vec<Vel> = (0..n).map(|i| Vel { x: i % 7, y: i % 5 }).collect();
+    c.bench_function("iterate_1m_integrate_pos_vel_plain_vec", |b| {
+        b.iter(|| {
+            for (p, v) in pos.iter_mut().zip(vel.iter()) {
+                p.x += v.x;
+                p.y += v.y;
+            }
+        });
+    });
+}
+
 fn bench_add_remove(c: &mut Criterion) {
     let reg = registry();
     let mut f = Frame::new(reg);
@@ -120,5 +134,13 @@ fn bench_checksum(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_spawn, bench_iterate_integrate, bench_add_remove, bench_snapshot, bench_checksum);
+criterion_group!(
+    benches,
+    bench_spawn,
+    bench_iterate_integrate,
+    bench_iterate_integrate_plain_vec,
+    bench_add_remove,
+    bench_snapshot,
+    bench_checksum
+);
 criterion_main!(benches);
