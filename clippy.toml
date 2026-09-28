@@ -1,0 +1,7 @@
+# Sim crates additionally opt in to disallowed types via #![deny(clippy::disallowed_types)]
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "non-deterministic iteration order in sim code; use BTreeMap or FrameMap" },
+  { path = "std::collections::HashSet", reason = "non-deterministic iteration order in sim code" },
+  { path = "std::time::Instant", reason = "wall clock is forbidden in sim code" },
+  { path = "std::time::SystemTime", reason = "wall clock is forbidden in sim code" },
+]
