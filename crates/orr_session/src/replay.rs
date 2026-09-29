@@ -1,20 +1,24 @@
 //! `.orrp` replay file format: a header, a per-tick input/command stream
 //! (delta-compressed against the previous tick's inputs, then whole-body
-//! lz4 compressed), and a checksum table.
+//! lz4 compressed), a checksum table, and (v2) optional keyframes.
 //!
-//! Full-Frame snapshots for scrubbing (per the design doc's §6.3) are a
-//! documented TODO: `orr_ecs` doesn't expose a byte (de)serialization API
-//! for `Frame` (only `Clone`/`copy_from`, which need a live registry, not a
-//! byte stream) and this task must not modify `orr_ecs`. Until that API
-//! exists, `.orrp` stores only per-checkpoint checksums (fine for
-//! verification/CI/bug-repro) and reconstructs any tick by resimulating
-//! from tick 0 — the whole point of the format being replayable input logs.
+//! A keyframe is a full `orr_ecs::Frame` byte snapshot (`Frame::to_bytes`)
+//! taken every N ticks while recording. [`ReplayReader::seek`] restores the
+//! nearest keyframe at or before the target tick and resimulates forward
+//! from there, instead of from tick 0. A file without keyframes still seeks
+//! (from tick 0).
+//!
+//! Versions: v1 has no keyframe table. v2 appends `count u32` and, per
+//! keyframe, `tick u64, len u32, bytes` after the checksum table inside the
+//! compressed body. The reader accepts both; the writer always writes v2.
 use std::collections::BTreeMap;
 
+use orr_ecs::{Frame, FrameDecodeError};
 use orr_sim::{Game, PlayerSlot, SimCommand, Simulation};
 
 const MAGIC: &[u8; 4] = b"ORRP";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
+const MIN_FORMAT_VERSION: u32 = 1;
 
 /// `.orrp` file header.
 #[derive(Clone, Debug)]
@@ -43,6 +47,11 @@ pub enum ReplayError {
     /// decision: a replay recorded under one build/patch generation is not
     /// safe to resimulate-and-compare under another).
     BuildHashMismatch { header: u64, expected: u64 },
+    /// A keyframe snapshot did not decode against this game's registry, or
+    /// its frame tick disagrees with the tick it was recorded under.
+    BadKeyframe { tick: u64, source: FrameDecodeError },
+    /// [`ReplayReader::seek`] target is past the last recorded tick.
+    TickOutOfRange { tick: u64, last: u64 },
 }
 
 impl core::fmt::Display for ReplayError {
@@ -56,6 +65,10 @@ impl core::fmt::Display for ReplayError {
             ReplayError::BadCommand => write!(f, "malformed command in replay body"),
             ReplayError::BuildHashMismatch { header, expected } => {
                 write!(f, "replay build hash {header:#x} does not match expected build hash {expected:#x}")
+            }
+            ReplayError::BadKeyframe { tick, source } => write!(f, "bad keyframe at tick {tick}: {source}"),
+            ReplayError::TickOutOfRange { tick, last } => {
+                write!(f, "tick {tick} is past the last recorded tick {last}")
             }
         }
     }
@@ -82,7 +95,7 @@ impl<'a> Reader<'a> {
         Self { bytes, pos: 0 }
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8], ReplayError> {
-        if self.pos + n > self.bytes.len() {
+        if n > self.bytes.len() - self.pos {
             return Err(ReplayError::Truncated);
         }
         let s = &self.bytes[self.pos..self.pos + n];
@@ -120,11 +133,46 @@ pub struct ReplayWriter<G: Game> {
     header: ReplayHeader,
     ticks: BTreeMap<u64, RecordedTick<G>>,
     checksums: Vec<(u64, u64)>,
+    /// Ticks between keyframes for [`ReplayWriter::maybe_record_keyframe`];
+    /// `0` disables it.
+    keyframe_interval: u64,
+    /// Serialized `Frame`s by the frame's tick.
+    keyframes: BTreeMap<u64, Vec<u8>>,
 }
 
 impl<G: Game> ReplayWriter<G> {
+    /// The header's `format_version` is ignored: `finish` always writes the
+    /// current format version.
     pub fn new(header: ReplayHeader) -> Self {
-        Self { header, ticks: BTreeMap::new(), checksums: Vec::new() }
+        Self {
+            header,
+            ticks: BTreeMap::new(),
+            checksums: Vec::new(),
+            keyframe_interval: 0,
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    /// Makes [`maybe_record_keyframe`](Self::maybe_record_keyframe) snapshot
+    /// every `ticks` ticks (`0` = never, the default).
+    pub fn with_keyframe_interval(mut self, ticks: u64) -> Self {
+        self.keyframe_interval = ticks;
+        self
+    }
+
+    /// Stores a snapshot of `frame`, keyed by `frame.tick()`. Call it after
+    /// stepping that tick, with the frame the recorded inputs produced.
+    pub fn record_keyframe(&mut self, frame: &Frame) {
+        self.keyframes.insert(frame.tick(), frame.to_bytes());
+    }
+
+    /// Calls [`record_keyframe`](Self::record_keyframe) when `frame.tick()`
+    /// is a positive multiple of the keyframe interval. Cheap to call every
+    /// tick.
+    pub fn maybe_record_keyframe(&mut self, frame: &Frame) {
+        if self.keyframe_interval > 0 && frame.tick() > 0 && frame.tick() % self.keyframe_interval == 0 {
+            self.record_keyframe(frame);
+        }
     }
 
     pub fn record_tick(&mut self, tick: u64, inputs: &[G::Input], commands: &[(PlayerSlot, G::Command)]) {
@@ -140,7 +188,7 @@ impl<G: Game> ReplayWriter<G> {
     pub fn finish(self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
-        write_u32(&mut out, self.header.format_version);
+        write_u32(&mut out, FORMAT_VERSION);
         write_str(&mut out, &self.header.game_id);
         write_u64(&mut out, self.header.build_hash);
         write_u64(&mut out, self.header.seed);
@@ -189,6 +237,13 @@ impl<G: Game> ReplayWriter<G> {
             write_u64(&mut body, checksum);
         }
 
+        write_u32(&mut body, self.keyframes.len() as u32);
+        for (&tick, bytes) in &self.keyframes {
+            write_u64(&mut body, tick);
+            write_u32(&mut body, bytes.len() as u32);
+            body.extend_from_slice(bytes);
+        }
+
         let compressed = lz4_flex::block::compress_prepend_size(&body);
         write_u32(&mut out, compressed.len() as u32);
         out.extend_from_slice(&compressed);
@@ -204,6 +259,7 @@ pub struct ReplayReader<G: Game> {
     pub header: ReplayHeader,
     ticks: BTreeMap<u64, TickData<G>>,
     pub checksums: Vec<(u64, u64)>,
+    keyframes: BTreeMap<u64, Vec<u8>>,
     cursor: u64,
     first_tick: u64,
     last_tick: u64,
@@ -219,7 +275,7 @@ impl<G: Game> ReplayReader<G> {
         }
         let mut r = Reader::new(&bytes[4..]);
         let format_version = r.u32()?;
-        if format_version != FORMAT_VERSION {
+        if !(MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&format_version) {
             return Err(ReplayError::UnsupportedVersion(format_version));
         }
         let game_id = r.str()?;
@@ -270,9 +326,19 @@ impl<G: Game> ReplayReader<G> {
             checksums.push((tick, checksum));
         }
 
+        let mut keyframes = BTreeMap::new();
+        if format_version >= 2 {
+            let keyframe_count = br.u32()?;
+            for _ in 0..keyframe_count {
+                let tick = br.u64()?;
+                let len = br.u32()? as usize;
+                keyframes.insert(tick, br.take(len)?.to_vec());
+            }
+        }
+
         let first_tick = ticks.keys().next().copied().unwrap_or(1);
         let last_tick = ticks.keys().next_back().copied().unwrap_or(0);
-        Ok(Self { header, ticks, checksums, cursor: first_tick, first_tick, last_tick })
+        Ok(Self { header, ticks, checksums, keyframes, cursor: first_tick, first_tick, last_tick })
     }
 
     pub fn tick_count(&self) -> usize {
@@ -285,6 +351,42 @@ impl<G: Game> ReplayReader<G> {
 
     pub fn tick(&self, tick: u64) -> Option<&TickData<G>> {
         self.ticks.get(&tick)
+    }
+
+    pub fn keyframe_count(&self) -> usize {
+        self.keyframes.len()
+    }
+
+    /// Tick of the latest keyframe at or before `tick`, if any.
+    pub fn nearest_keyframe(&self, tick: u64) -> Option<u64> {
+        self.keyframes.range(..=tick).next_back().map(|(&t, _)| t)
+    }
+
+    /// Builds a [`Simulation`] positioned at `tick`, identical to one played
+    /// from tick 0: restores the nearest keyframe at or before `tick` (or
+    /// starts fresh when there is none) and resimulates the recorded inputs
+    /// forward. Does not check the header's `build_hash`; see
+    /// [`replay_seek_checked`].
+    pub fn seek(&self, config: G::Config, tick: u64) -> Result<Simulation<G>, ReplayError> {
+        if tick > self.last_tick {
+            return Err(ReplayError::TickOutOfRange { tick, last: self.last_tick });
+        }
+        let mut sim = Simulation::<G>::new(config, self.header.tick_rate, self.header.seed);
+        let mut from = 0;
+        if let Some(key) = self.nearest_keyframe(tick) {
+            let frame = Frame::from_bytes(sim.registry().clone(), &self.keyframes[&key])
+                .map_err(|source| ReplayError::BadKeyframe { tick: key, source })?;
+            if frame.tick() != key {
+                let source = FrameDecodeError::Corrupt("keyframe frame tick differs from its recorded tick");
+                return Err(ReplayError::BadKeyframe { tick: key, source });
+            }
+            sim.restore(&frame);
+            from = key;
+        }
+        for t in from + 1..=tick {
+            step_recorded(&mut sim, self, t);
+        }
+        Ok(sim)
     }
 
     /// Resets internal playback position to the first recorded tick, for
@@ -359,11 +461,43 @@ pub fn replay_verify_checked<G: Game>(
     build_id: u64,
 ) -> Result<VerifyReport, ReplayError> {
     let reader = ReplayReader::<G>::parse(bytes)?;
-    let expected_hash = orr_sim::build_hash_of(build_id, 0);
-    if expected_hash != 0 && reader.header.build_hash != 0 && expected_hash != reader.header.build_hash {
-        return Err(ReplayError::BuildHashMismatch { header: reader.header.build_hash, expected: expected_hash });
-    }
+    check_build_hash(&reader.header, build_id)?;
     replay_verify_reader::<G>(reader, config)
+}
+
+/// Parses `bytes`, checks the build hash exactly like
+/// [`replay_verify_checked`], then returns a [`Simulation`] at `tick`
+/// (see [`ReplayReader::seek`]).
+pub fn replay_seek_checked<G: Game>(
+    bytes: &[u8],
+    config: G::Config,
+    build_id: u64,
+    tick: u64,
+) -> Result<Simulation<G>, ReplayError> {
+    let reader = ReplayReader::<G>::parse(bytes)?;
+    check_build_hash(&reader.header, build_id)?;
+    reader.seek(config, tick)
+}
+
+fn check_build_hash(header: &ReplayHeader, build_id: u64) -> Result<(), ReplayError> {
+    let expected_hash = orr_sim::build_hash_of(build_id, 0);
+    if expected_hash != 0 && header.build_hash != 0 && expected_hash != header.build_hash {
+        return Err(ReplayError::BuildHashMismatch { header: header.build_hash, expected: expected_hash });
+    }
+    Ok(())
+}
+
+/// Steps `sim` once with the inputs and commands recorded for `tick`.
+/// Returns `false` (and does nothing) when the file has no such tick.
+fn step_recorded<G: Game>(sim: &mut Simulation<G>, reader: &ReplayReader<G>, tick: u64) -> bool {
+    let Some((inputs, commands)) = reader.tick(tick) else { return false };
+    let mut tick_inputs = orr_sim::TickInputs::<G::Input, G::Command>::new(tick, inputs.len() as u8);
+    for (i, inp) in inputs.iter().enumerate() {
+        tick_inputs.set_input(PlayerSlot(i as u8), *inp);
+    }
+    tick_inputs.set_commands(commands.clone());
+    let _events = sim.step(&tick_inputs);
+    true
 }
 
 fn replay_verify_reader<G: Game>(reader: ReplayReader<G>, config: G::Config) -> Result<VerifyReport, ReplayError> {
@@ -373,13 +507,9 @@ fn replay_verify_reader<G: Game>(reader: ReplayReader<G>, config: G::Config) -> 
     let mut mismatch = None;
 
     for tick in 1..=reader.last_tick() {
-        let Some((inputs, commands)) = reader.tick(tick) else { continue };
-        let mut tick_inputs = orr_sim::TickInputs::<G::Input, G::Command>::new(tick, inputs.len() as u8);
-        for (i, inp) in inputs.iter().enumerate() {
-            tick_inputs.set_input(PlayerSlot(i as u8), *inp);
+        if !step_recorded(&mut sim, &reader, tick) {
+            continue;
         }
-        tick_inputs.set_commands(commands.clone());
-        let _events = sim.step(&tick_inputs);
 
         if let Some(&recorded) = checksum_lookup.get(&tick) {
             checked += 1;

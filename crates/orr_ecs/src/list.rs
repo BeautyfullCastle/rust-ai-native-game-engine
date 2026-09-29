@@ -4,6 +4,7 @@ use core::marker::PhantomData;
 use bytemuck::{Pod, Zeroable};
 use xxhash_rust::xxh3::Xxh3;
 
+use crate::codec::{put_len, put_pods, put_u32, FrameDecodeError, Reader};
 use crate::component::Component;
 
 /// A `Pod` handle (index + version, like [`Entity`](crate::Entity)) into a
@@ -130,6 +131,12 @@ impl<T: Component> ListPool<T> {
 pub trait AnyListPool: Send + Sync {
     fn hash_into(&self, h: &mut Xxh3);
     fn copy_from(&mut self, other: &dyn AnyListPool);
+    /// Appends `slot_count u32`, per slot `version u32, alive u8, items`
+    /// (counted), then `free` as a counted `u32` array.
+    fn write_bytes(&self, out: &mut Vec<u8>);
+    /// Replaces `self` with what [`write_bytes`](Self::write_bytes) wrote,
+    /// checking the slot/free-list invariants `alloc`/`free` maintain.
+    fn read_bytes(&mut self, r: &mut Reader) -> Result<(), FrameDecodeError>;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -159,6 +166,50 @@ impl<T: Component> AnyListPool for ListPool<T> {
             dst.alive = src.alive;
             dst.items.clone_from(&src.items);
         }
+    }
+
+    fn write_bytes(&self, out: &mut Vec<u8>) {
+        put_len(out, self.slots.len());
+        for s in &self.slots {
+            put_u32(out, s.version);
+            out.push(s.alive as u8);
+            put_pods(out, &s.items);
+        }
+        put_pods(out, &self.free);
+    }
+
+    fn read_bytes(&mut self, r: &mut Reader) -> Result<(), FrameDecodeError> {
+        let slot_count = r.u32()?;
+        let mut slots = Vec::new();
+        for _ in 0..slot_count {
+            let version = r.u32()?;
+            let alive = match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(FrameDecodeError::Corrupt("list slot alive flag is not 0 or 1")),
+            };
+            let items: Vec<T> = r.counted_pods()?;
+            if !alive && !items.is_empty() {
+                return Err(FrameDecodeError::Corrupt("freed list slot still holds items"));
+            }
+            slots.push(Slot { version, alive, items });
+        }
+        let free: Vec<u32> = r.counted_pods()?;
+
+        let dead = slots.iter().filter(|s| !s.alive).count();
+        if free.len() != dead {
+            return Err(FrameDecodeError::Corrupt("list free list does not cover every dead slot"));
+        }
+        let mut in_free = vec![false; slots.len()];
+        for &idx in &free {
+            match in_free.get_mut(idx as usize) {
+                Some(seen) if !*seen && !slots[idx as usize].alive => *seen = true,
+                _ => return Err(FrameDecodeError::Corrupt("list free list has a live, duplicate or unknown slot")),
+            }
+        }
+        self.slots = slots;
+        self.free = free;
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {

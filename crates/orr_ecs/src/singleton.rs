@@ -1,11 +1,14 @@
 use core::any::Any;
 
+use crate::codec::{FrameDecodeError, Reader};
 use crate::component::Component;
 
 /// Type-erased holder for one registered singleton value.
 pub trait AnySingleton: Send + Sync {
     fn bytes(&self) -> &[u8];
     fn copy_from(&mut self, other: &dyn AnySingleton);
+    /// Overwrites the value from exactly `bytes().len()` bytes of `r`.
+    fn read_bytes(&mut self, r: &mut Reader) -> Result<(), FrameDecodeError>;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -32,6 +35,12 @@ impl<T: Component> AnySingleton for SingletonSlot<T> {
             .downcast_ref::<SingletonSlot<T>>()
             .expect("orr_ecs: copy_from between mismatched singleton types");
         self.0 = other.0;
+    }
+
+    fn read_bytes(&mut self, r: &mut Reader) -> Result<(), FrameDecodeError> {
+        let raw = r.take(core::mem::size_of::<T>())?;
+        bytemuck::bytes_of_mut(&mut self.0).copy_from_slice(raw);
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {

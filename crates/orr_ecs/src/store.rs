@@ -2,8 +2,9 @@ use core::any::Any;
 
 use xxhash_rust::xxh3::Xxh3;
 
+use crate::codec::{put_len, FrameDecodeError, Reader};
 use crate::component::Component;
-use crate::entity::Entity;
+use crate::entity::{Entity, EntityAllocator};
 
 const NONE: u32 = u32::MAX;
 
@@ -144,6 +145,13 @@ pub trait AnyStore: Send + Sync {
     /// Feeds this store's entire deterministic byte representation (dense
     /// entities, then dense data) into `h`.
     fn hash_into(&self, h: &mut Xxh3);
+    /// Appends `count u32`, the dense entities, then the dense data. The
+    /// sparse index is derived state and is not written.
+    fn write_bytes(&self, out: &mut Vec<u8>);
+    /// Replaces `self` with what [`write_bytes`](Self::write_bytes) wrote,
+    /// rebuilding the sparse index. Every entity must be live in `alloc`
+    /// and appear at most once.
+    fn read_bytes(&mut self, r: &mut Reader, alloc: &EntityAllocator) -> Result<(), FrameDecodeError>;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -184,6 +192,34 @@ impl<T: Component> AnyStore for SparseSet<T> {
     fn hash_into(&self, h: &mut Xxh3) {
         h.update(bytemuck::cast_slice(&self.dense_entities));
         h.update(bytemuck::cast_slice(&self.data));
+    }
+
+    fn write_bytes(&self, out: &mut Vec<u8>) {
+        let payload = core::mem::size_of_val(self.dense_entities.as_slice()) + core::mem::size_of_val(self.data.as_slice());
+        out.reserve(4 + payload);
+        put_len(out, self.dense_entities.len());
+        out.extend_from_slice(bytemuck::cast_slice(&self.dense_entities));
+        out.extend_from_slice(bytemuck::cast_slice(&self.data));
+    }
+
+    fn read_bytes(&mut self, r: &mut Reader, alloc: &EntityAllocator) -> Result<(), FrameDecodeError> {
+        let n = r.u32()?;
+        let dense_entities: Vec<Entity> = r.pods(n)?;
+        let data: Vec<T> = r.pods(n)?;
+        let mut set = SparseSet { sparse: Vec::new(), dense_entities, data };
+        for slot in 0..set.dense_entities.len() {
+            let e = set.dense_entities[slot];
+            if !alloc.exists(e) {
+                return Err(FrameDecodeError::Corrupt("component entity is not alive"));
+            }
+            set.ensure_sparse(e.index);
+            if set.sparse[e.index as usize] != NONE {
+                return Err(FrameDecodeError::Corrupt("entity appears twice in a component store"));
+            }
+            set.sparse[e.index as usize] = slot as u32;
+        }
+        *self = set;
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {

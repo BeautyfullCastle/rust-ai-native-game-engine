@@ -15,6 +15,7 @@
 //! determinism.
 #![deny(clippy::disallowed_types)]
 
+mod codec;
 mod commands;
 mod component;
 mod entity;
@@ -26,6 +27,7 @@ mod ring;
 mod singleton;
 mod store;
 
+pub use codec::FrameDecodeError;
 pub use commands::{Commands, EntityRef, PendingEntity};
 pub use component::{Component, ComponentId, ListId, SingletonId};
 pub use entity::{Entity, EntityAllocator};

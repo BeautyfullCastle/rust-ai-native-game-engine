@@ -1,5 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 
+use crate::codec::{put_pods, put_u32, FrameDecodeError, Reader};
+
 /// A handle to a simulation entity.
 ///
 /// `index` names a slot in the [`Frame`](crate::Frame)'s entity table; `version`
@@ -109,5 +111,44 @@ impl EntityAllocator {
         h.update(bytemuck::cast_slice(&self.versions));
         h.update(&self.alive);
         h.update(bytemuck::cast_slice(&self.free));
+    }
+
+    /// Layout: `alive_count u32`, `slot_count u32`, versions, alive flags,
+    /// then `free` as a counted `u32` array.
+    pub(crate) fn write_bytes(&self, out: &mut Vec<u8>) {
+        put_u32(out, self.alive_count);
+        put_pods(out, &self.versions);
+        out.extend_from_slice(&self.alive);
+        put_pods(out, &self.free);
+    }
+
+    /// Reads what [`write_bytes`](Self::write_bytes) wrote and checks the
+    /// invariants `spawn`/`despawn` maintain, so a corrupt stream cannot
+    /// yield an allocator that later panics or hands out a live index twice.
+    pub(crate) fn read_bytes(r: &mut Reader) -> Result<Self, FrameDecodeError> {
+        let alive_count = r.u32()?;
+        let versions: Vec<u32> = r.counted_pods()?;
+        let slots = versions.len() as u32;
+        let alive: Vec<u8> = r.pods(slots)?;
+        let free: Vec<u32> = r.counted_pods()?;
+
+        if alive.iter().any(|&a| a > 1) {
+            return Err(FrameDecodeError::Corrupt("entity alive flag is not 0 or 1"));
+        }
+        let live = alive.iter().filter(|&&a| a == 1).count();
+        if live != alive_count as usize {
+            return Err(FrameDecodeError::Corrupt("entity alive_count disagrees with alive flags"));
+        }
+        if free.len() != alive.len() - live {
+            return Err(FrameDecodeError::Corrupt("entity free list does not cover every dead slot"));
+        }
+        let mut in_free = vec![false; alive.len()];
+        for &idx in &free {
+            match in_free.get_mut(idx as usize) {
+                Some(seen) if !*seen && alive[idx as usize] == 0 => *seen = true,
+                _ => return Err(FrameDecodeError::Corrupt("entity free list has a live, duplicate or unknown slot")),
+            }
+        }
+        Ok(Self { versions, alive, free, alive_count })
     }
 }

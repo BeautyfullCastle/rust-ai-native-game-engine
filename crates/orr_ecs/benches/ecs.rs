@@ -134,6 +134,28 @@ fn bench_checksum(c: &mut Criterion) {
     });
 }
 
+fn bench_serialize(c: &mut Criterion) {
+    let reg = registry();
+    let mut group = c.benchmark_group("frame_bytes");
+    for &n in &[10_000i64, 100_000i64] {
+        let mut src = Frame::new(reg.clone());
+        for i in 0..n {
+            let e = src.spawn();
+            src.add(e, Pos { x: i, y: i });
+            src.add(e, Vel { x: 1, y: 1 });
+            src.add(e, Extra { a: i, b: i });
+        }
+        let bytes = src.to_bytes();
+        group.bench_function(format!("serialize_{n}_entities_3_components"), |b| {
+            b.iter(|| src.to_bytes());
+        });
+        group.bench_function(format!("deserialize_{n}_entities_3_components"), |b| {
+            b.iter(|| Frame::from_bytes(reg.clone(), &bytes).unwrap());
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_spawn,
@@ -141,6 +163,7 @@ criterion_group!(
     bench_iterate_integrate_plain_vec,
     bench_add_remove,
     bench_snapshot,
-    bench_checksum
+    bench_checksum,
+    bench_serialize
 );
 criterion_main!(benches);

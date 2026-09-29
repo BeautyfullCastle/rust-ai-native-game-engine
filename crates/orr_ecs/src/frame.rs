@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::component::Component;
+use crate::codec::{put_len, put_u32, put_u64, FrameDecodeError, Reader, FORMAT_VERSION, MAGIC};
+use crate::component::{Component, ComponentId, ListId, SingletonId};
 use crate::entity::{Entity, EntityAllocator};
 use crate::list::{FrameList, ListPool};
 use crate::registry::ComponentRegistry;
@@ -231,6 +232,145 @@ impl Frame {
         }
         h.digest()
     }
+
+    // ---- byte serialization ----
+
+    /// Serializes the entire frame (everything [`checksum`](Self::checksum)
+    /// covers) into a new byte vector. See [`write_bytes`](Self::write_bytes).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write_bytes(&mut out);
+        out
+    }
+
+    /// Appends the frame's byte form to `out`.
+    ///
+    /// Format v1, all integers little-endian, all lengths `u32`:
+    /// `"ORRF"`, `version u32`, `tick u64`; a schema block (for components,
+    /// singletons, then lists: `count u32`, and per type `name_len u32`,
+    /// name bytes, `elem_size u32`); the entity allocator; every component
+    /// store, singleton and list pool in registration order (raw `Pod`
+    /// bytes); finally the frame's `checksum u64`. Types are identified by
+    /// registration order, name and size, never by `TypeId`, so the bytes
+    /// are the same on every platform and process.
+    pub fn write_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&MAGIC);
+        put_u32(out, FORMAT_VERSION);
+        put_u64(out, self.tick);
+
+        put_len(out, self.components.len());
+        for i in 0..self.components.len() {
+            let id = ComponentId(i as u16);
+            put_schema_entry(out, self.registry.component_name(id), self.registry.component_size(id));
+        }
+        put_len(out, self.singletons.len());
+        for i in 0..self.singletons.len() {
+            let id = SingletonId(i as u16);
+            put_schema_entry(out, self.registry.singleton_name(id), self.registry.singleton_size(id));
+        }
+        put_len(out, self.lists.len());
+        for i in 0..self.lists.len() {
+            let id = ListId(i as u16);
+            put_schema_entry(out, self.registry.list_name(id), self.registry.list_size(id));
+        }
+
+        self.allocator.write_bytes(out);
+        for store in &self.components {
+            store.write_bytes(out);
+        }
+        for s in &self.singletons {
+            out.extend_from_slice(s.bytes());
+        }
+        for l in &self.lists {
+            l.write_bytes(out);
+        }
+        put_u64(out, self.checksum());
+    }
+
+    /// Rebuilds a frame from [`to_bytes`](Self::to_bytes) output.
+    ///
+    /// `registry` must describe the same types in the same order as the
+    /// registry the bytes were written with; otherwise this fails with a
+    /// schema error. Malformed input of any kind returns an error and never
+    /// panics: lengths are checked against the input before allocating,
+    /// entity/free-list invariants are re-validated, and the stored checksum
+    /// must match the rebuilt frame.
+    pub fn from_bytes(registry: Arc<ComponentRegistry>, bytes: &[u8]) -> Result<Frame, FrameDecodeError> {
+        let mut r = Reader::new(bytes);
+        if r.take(4)? != MAGIC {
+            return Err(FrameDecodeError::BadMagic);
+        }
+        let version = r.u32()?;
+        if version != FORMAT_VERSION {
+            return Err(FrameDecodeError::UnsupportedVersion(version));
+        }
+        let tick = r.u64()?;
+
+        check_schema(&mut r, "component", registry.component_count() as u32, |i| {
+            let id = ComponentId(i as u16);
+            (registry.component_name(id), registry.component_size(id))
+        })?;
+        check_schema(&mut r, "singleton", registry.singleton_count() as u32, |i| {
+            let id = SingletonId(i as u16);
+            (registry.singleton_name(id), registry.singleton_size(id))
+        })?;
+        check_schema(&mut r, "list", registry.list_count() as u32, |i| {
+            let id = ListId(i as u16);
+            (registry.list_name(id), registry.list_size(id))
+        })?;
+
+        let mut f = Frame::new(registry);
+        f.tick = tick;
+        f.allocator = EntityAllocator::read_bytes(&mut r)?;
+        for store in &mut f.components {
+            store.read_bytes(&mut r, &f.allocator)?;
+        }
+        for s in &mut f.singletons {
+            s.read_bytes(&mut r)?;
+        }
+        for l in &mut f.lists {
+            l.read_bytes(&mut r)?;
+        }
+
+        let expected = r.u64()?;
+        if r.remaining() != 0 {
+            return Err(FrameDecodeError::TrailingBytes);
+        }
+        let actual = f.checksum();
+        if actual != expected {
+            return Err(FrameDecodeError::ChecksumMismatch { expected, actual });
+        }
+        Ok(f)
+    }
+}
+
+fn put_schema_entry(out: &mut Vec<u8>, name: &str, elem_size: u32) {
+    put_len(out, name.len());
+    out.extend_from_slice(name.as_bytes());
+    put_u32(out, elem_size);
+}
+
+/// Checks one schema section against the registry's `(name, size)` per index.
+fn check_schema(
+    r: &mut Reader,
+    kind: &'static str,
+    expected: u32,
+    entry: impl Fn(u32) -> (&'static str, u32),
+) -> Result<(), FrameDecodeError> {
+    let found = r.u32()?;
+    if found != expected {
+        return Err(FrameDecodeError::SchemaCount { kind, expected, found });
+    }
+    for index in 0..expected {
+        let (name, size) = entry(index);
+        let name_len = r.u32()?;
+        let same_name = r.take(name_len as usize)? == name.as_bytes();
+        let same_size = r.u32()? == size;
+        if !same_name || !same_size {
+            return Err(FrameDecodeError::SchemaEntry { kind, index });
+        }
+    }
+    Ok(())
 }
 
 impl Clone for Frame {

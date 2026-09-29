@@ -9,14 +9,17 @@ use crate::store::{AnyStore, SparseSet};
 
 struct ComponentDescriptor {
     name: &'static str,
+    size: u32,
     make: fn() -> Box<dyn AnyStore>,
 }
 struct SingletonDescriptor {
     name: &'static str,
+    size: u32,
     make: fn() -> Box<dyn AnySingleton>,
 }
 struct ListDescriptor {
     name: &'static str,
+    size: u32,
     make: fn() -> Box<dyn AnyListPool>,
 }
 
@@ -69,6 +72,17 @@ impl ComponentRegistry {
         self.lists[id.0 as usize].name
     }
 
+    /// Byte size of one value of the type (part of the serialized schema).
+    pub fn component_size(&self, id: ComponentId) -> u32 {
+        self.components[id.0 as usize].size
+    }
+    pub fn singleton_size(&self, id: SingletonId) -> u32 {
+        self.singletons[id.0 as usize].size
+    }
+    pub fn list_size(&self, id: ListId) -> u32 {
+        self.lists[id.0 as usize].size
+    }
+
     pub(crate) fn make_components(&self) -> Vec<Box<dyn AnyStore>> {
         self.components.iter().map(|d| (d.make)()).collect()
     }
@@ -99,7 +113,7 @@ impl ComponentRegistryBuilder {
     }
 
     /// Registers `T` as a per-entity component under a stable `name` (used
-    /// for diagnostics and future schema/serialization work). Panics if `T`
+    /// for diagnostics and the [`Frame`](crate::Frame) byte format's schema check). Panics if `T`
     /// is already registered as a component.
     pub fn register_component<T: Component>(&mut self, name: &'static str) -> ComponentId {
         assert!(
@@ -107,7 +121,7 @@ impl ComponentRegistryBuilder {
             "orr_ecs: component type already registered"
         );
         let id = ComponentId(self.components.len() as u16);
-        self.components.push(ComponentDescriptor { name, make: || Box::new(SparseSet::<T>::default()) });
+        self.components.push(ComponentDescriptor { name, size: core::mem::size_of::<T>() as u32, make: || Box::new(SparseSet::<T>::default()) });
         id
     }
 
@@ -118,7 +132,7 @@ impl ComponentRegistryBuilder {
             "orr_ecs: singleton type already registered"
         );
         let id = SingletonId(self.singletons.len() as u16);
-        self.singletons.push(SingletonDescriptor { name, make: || Box::new(SingletonSlot::<T>::default()) });
+        self.singletons.push(SingletonDescriptor { name, size: core::mem::size_of::<T>() as u32, make: || Box::new(SingletonSlot::<T>::default()) });
         id
     }
 
@@ -129,7 +143,7 @@ impl ComponentRegistryBuilder {
             "orr_ecs: list element type already registered"
         );
         let id = ListId(self.lists.len() as u16);
-        self.lists.push(ListDescriptor { name, make: || Box::new(ListPool::<T>::default()) });
+        self.lists.push(ListDescriptor { name, size: core::mem::size_of::<T>() as u32, make: || Box::new(ListPool::<T>::default()) });
         id
     }
 

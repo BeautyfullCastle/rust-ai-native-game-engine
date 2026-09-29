@@ -328,3 +328,163 @@ fn stall_when_latency_exceeds_max_prediction() {
     }
     assert!(stalled, "expected session A to stall given latency 20 > max_prediction 8");
 }
+
+/// Records `ticks` scripted ticks and returns the file bytes plus the
+/// per-tick checksums of the straight-through run.
+fn record_replay(ticks: u64, keyframe_interval: u64) -> (Vec<u8>, BTreeMap<u64, u64>) {
+    let mut sim = Simulation::<Arena>::new(ArenaConfig { player_count: 2 }, 60, 808);
+    let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
+        format_version: 1,
+        game_id: "arena".to_string(),
+        build_hash: 0,
+        seed: 808,
+        player_count: 2,
+        tick_rate: 60,
+        input_size: std::mem::size_of::<ArenaInput>() as u32,
+    })
+    .with_keyframe_interval(keyframe_interval);
+
+    let mut rng = orr_fp::FrameRng::new(4242);
+    let mut checksums = BTreeMap::new();
+    checksums.insert(0, sim.checksum());
+    for tick in 1..=ticks {
+        let ia = scripted_input(&mut rng, 0, tick);
+        let ib = scripted_input(&mut rng, 1, tick);
+        let mut ti = TickInputs::<ArenaInput, SpawnBulletCmd>::new(tick, 2);
+        ti.set_input(PlayerSlot(0), ia);
+        ti.set_input(PlayerSlot(1), ib);
+        let mut cmds = tagged_commands(ia, 0);
+        cmds.extend(tagged_commands(ib, 1));
+        ti.set_commands(cmds.clone());
+        sim.step(&ti);
+        writer.record_tick(tick, &[ia, ib], &cmds);
+        writer.maybe_record_keyframe(sim.frame());
+        checksums.insert(tick, sim.checksum());
+    }
+    (writer.finish(), checksums)
+}
+
+#[test]
+fn replay_seek_matches_playing_from_start() {
+    const TICKS: u64 = 400;
+    let (bytes, checksums) = record_replay(TICKS, 50);
+    let reader = orr_session::ReplayReader::<Arena>::parse(&bytes).expect("parse");
+    assert_eq!(reader.keyframe_count(), 8);
+    assert_eq!(reader.nearest_keyframe(49), None);
+    assert_eq!(reader.nearest_keyframe(50), Some(50));
+    assert_eq!(reader.nearest_keyframe(199), Some(150));
+
+    // Keyframe ticks, ticks just around them, and both ends; backwards and
+    // forwards, to show seeking is independent of any earlier position.
+    for target in [0, 1, 49, 50, 51, 199, 200, 399, 400, 120, 10, 400, 0] {
+        let sim = reader.seek(ArenaConfig { player_count: 2 }, target).expect("seek");
+        assert_eq!(sim.tick(), target);
+        assert_eq!(sim.checksum(), checksums[&target], "seek to tick {target} diverged from playing from start");
+    }
+
+    // A seeked simulation keeps simulating identically to a fresh one: seek
+    // to a keyframe, then step with the recorded inputs and compare.
+    let mut from_key = reader.seek(ArenaConfig { player_count: 2 }, 250).unwrap();
+    let full = reader.seek(ArenaConfig { player_count: 2 }, 260).unwrap();
+    let mut rng = orr_fp::FrameRng::new(4242);
+    for tick in 1..=260u64 {
+        let ia = scripted_input(&mut rng, 0, tick);
+        let ib = scripted_input(&mut rng, 1, tick);
+        if tick > 250 {
+            let mut ti = TickInputs::<ArenaInput, SpawnBulletCmd>::new(tick, 2);
+            ti.set_input(PlayerSlot(0), ia);
+            ti.set_input(PlayerSlot(1), ib);
+            let mut cmds = tagged_commands(ia, 0);
+            cmds.extend(tagged_commands(ib, 1));
+            ti.set_commands(cmds);
+            from_key.step(&ti);
+        }
+    }
+    assert_eq!(from_key.checksum(), full.checksum());
+
+    assert!(matches!(
+        reader.seek(ArenaConfig { player_count: 2 }, TICKS + 1),
+        Err(orr_session::ReplayError::TickOutOfRange { tick: 401, last: 400 })
+    ));
+}
+
+#[test]
+fn replay_without_keyframes_seeks_from_start_and_verifies() {
+    let (bytes, checksums) = record_replay(120, 0);
+    let reader = orr_session::ReplayReader::<Arena>::parse(&bytes).unwrap();
+    assert_eq!(reader.keyframe_count(), 0);
+    let sim = reader.seek(ArenaConfig { player_count: 2 }, 77).unwrap();
+    assert_eq!(sim.checksum(), checksums[&77]);
+}
+
+#[test]
+fn keyframes_add_to_file_size() {
+    let (with_keys, _) = record_replay(400, 50);
+    let (without, _) = record_replay(400, 0);
+    eprintln!("400 ticks: {} bytes with keyframes every 50, {} without", with_keys.len(), without.len());
+    assert!(with_keys.len() > without.len());
+}
+
+#[test]
+fn v1_replay_still_parses_and_seeks() {
+    // Turn a v2 file without keyframes into the v1 layout: version 1 and no
+    // trailing keyframe count in the body.
+    let (v2, checksums) = record_replay(60, 0);
+    let header_len = 4 + 4 + (4 + "arena".len()) + 8 + 8 + 1 + 4 + 4;
+    let body_len = u32::from_le_bytes(v2[header_len..header_len + 4].try_into().unwrap()) as usize;
+    let compressed = &v2[header_len + 4..header_len + 4 + body_len];
+    let mut body = lz4_flex::block::decompress_size_prepended(compressed).unwrap();
+    assert_eq!(&body[body.len() - 4..], &[0, 0, 0, 0], "expected empty keyframe table");
+    body.truncate(body.len() - 4);
+    let recompressed = lz4_flex::block::compress_prepend_size(&body);
+
+    let mut v1 = v2[..header_len].to_vec();
+    v1[4..8].copy_from_slice(&1u32.to_le_bytes());
+    v1.extend_from_slice(&(recompressed.len() as u32).to_le_bytes());
+    v1.extend_from_slice(&recompressed);
+
+    let reader = orr_session::ReplayReader::<Arena>::parse(&v1).expect("v1 parses");
+    assert_eq!(reader.header.format_version, 1);
+    assert_eq!(reader.keyframe_count(), 0);
+    let sim = reader.seek(ArenaConfig { player_count: 2 }, 60).unwrap();
+    assert_eq!(sim.checksum(), checksums[&60]);
+
+    // Unknown future versions are still rejected.
+    let mut v3 = v2.clone();
+    v3[4..8].copy_from_slice(&3u32.to_le_bytes());
+    assert!(matches!(
+        orr_session::ReplayReader::<Arena>::parse(&v3),
+        Err(orr_session::ReplayError::UnsupportedVersion(3))
+    ));
+}
+
+#[test]
+fn replay_seek_checked_enforces_build_hash() {
+    const BUILD_ID: u64 = 0xC0FFEE_u64;
+    let mut sim = Simulation::<Arena>::with_build_id(ArenaConfig { player_count: 2 }, 60, 5, BUILD_ID);
+    let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
+        format_version: 2,
+        game_id: "arena".to_string(),
+        build_hash: sim.build_hash(),
+        seed: 5,
+        player_count: 2,
+        tick_rate: 60,
+        input_size: std::mem::size_of::<ArenaInput>() as u32,
+    })
+    .with_keyframe_interval(10);
+    for tick in 1..=30u64 {
+        let ti = TickInputs::<ArenaInput, SpawnBulletCmd>::new(tick, 2);
+        sim.step(&ti);
+        writer.record_tick(tick, &[ArenaInput::default(), ArenaInput::default()], &[]);
+        writer.maybe_record_keyframe(sim.frame());
+    }
+    let bytes = writer.finish();
+
+    let ok = orr_session::replay_seek_checked::<Arena>(&bytes, ArenaConfig { player_count: 2 }, BUILD_ID, 25)
+        .expect("matching build id seeks");
+    assert_eq!(ok.tick(), 25);
+    let err = orr_session::replay_seek_checked::<Arena>(&bytes, ArenaConfig { player_count: 2 }, 0xDEAD, 25)
+        .err()
+        .expect("mismatched build id must be rejected");
+    assert!(matches!(err, orr_session::ReplayError::BuildHashMismatch { .. }));
+}
