@@ -351,6 +351,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_physics"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "criterion",
+ "orr_ecs",
+ "orr_fp",
+ "orr_sim",
+]
+
+[[package]]
 name = "orr_session"
 version = "0.0.1"
 dependencies = [
