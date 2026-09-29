@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 
-use orr_ecs::FrameRing;
+use orr_ecs::{Frame, FrameRing};
 use orr_sim::{EventKey, Game, PlayerSlot, SimEvent, Simulation, TickInputs};
 
 use crate::events::{EventBatch, EventStatus};
-use crate::input_source::InputSource;
+use crate::input_source::{InputSource, RemoteInput};
+use crate::join::{self, JoinError};
 
 /// `Session` configuration.
 #[derive(Clone, Debug)]
@@ -30,6 +32,16 @@ pub struct SessionConfig {
     /// [`require_same_build_hash`] can actually catch a mismatched peer
     /// before trusting its confirmed inputs.
     pub build_id: u64,
+    /// Slots nobody plays yet. This peer authors default input for them on
+    /// every `advance`, so the other peers can verify ticks without waiting
+    /// for a player who is not there. Exactly one peer of a session must
+    /// list a given slot. [`Session::serve_join`] hands such a slot to a
+    /// late joiner. Defaults to none.
+    pub vacant_slots: Vec<PlayerSlot>,
+    /// How many ticks behind `verified_tick` the peer keeps the inputs it
+    /// authored, for [`Session::authored_since`] (a late joiner needs every
+    /// peer's inputs after the snapshot tick).
+    pub input_log_ticks: u32,
 }
 
 impl SessionConfig {
@@ -43,6 +55,8 @@ impl SessionConfig {
             seed,
             tick_rate,
             build_id: 0,
+            vacant_slots: Vec::new(),
+            input_log_ticks: 256,
         }
     }
 }
@@ -127,6 +141,9 @@ pub fn compare_checksums(local: &[(u64, u64)], remote: &[(u64, u64)]) -> Vec<Des
         .collect()
 }
 
+/// One input this peer authored: slot, input and the commands sent with it.
+type AuthoredInput<G> = (PlayerSlot, <G as Game>::Input, Vec<<G as Game>::Command>);
+
 struct TickRecord<G: Game> {
     inputs: TickInputs<G::Input, G::Command>,
     predicted: Vec<bool>,
@@ -153,6 +170,12 @@ pub struct Session<G: Game, S: InputSource<G>> {
     /// were announced with (for change detection across a rollback).
     announced: BTreeMap<EventKey, Vec<u8>>,
     checksums: Vec<(u64, u64)>,
+    /// Vacant slots this peer authors default input for, mapped to the
+    /// first tick it no longer does (`u64::MAX` while still open).
+    vacant: BTreeMap<PlayerSlot, u64>,
+    /// Inputs this peer authored (local slot and vacant slots) by tick, kept
+    /// for `input_log_ticks` behind `verified_tick`.
+    authored: BTreeMap<u64, Vec<AuthoredInput<G>>>,
 }
 
 fn event_bytes<E: bytemuck::Pod>(e: &E) -> Vec<u8> {
@@ -162,10 +185,16 @@ fn event_bytes<E: bytemuck::Pod>(e: &E) -> Vec<u8> {
 impl<G: Game, S: InputSource<G>> Session<G, S> {
     pub fn new(config: G::Config, cfg: SessionConfig, source: S) -> Self {
         let sim = Simulation::<G>::with_build_id(config, cfg.tick_rate, cfg.seed, cfg.build_id);
+        let next_send_tick = 1 + cfg.input_delay as u64;
+        Self::from_sim(sim, cfg, source, next_send_tick)
+    }
+
+    /// Wraps `sim`, whose current tick becomes the verified tick.
+    fn from_sim(sim: Simulation<G>, cfg: SessionConfig, source: S, next_send_tick: u64) -> Self {
+        let verified_tick = sim.tick();
         let mut ring = FrameRing::new(cfg.max_prediction + 2, sim.registry().clone());
         ring.store(sim.frame());
         let last_input = vec![G::Input::default(); cfg.player_count as usize];
-        let next_send_tick = 1 + cfg.input_delay as u64;
 
         // Bootstrap ticks `1..=input_delay` never get a real local/remote
         // send (the first real send targets `1 + input_delay`), so without
@@ -174,7 +203,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         // default input for every player — before any real input exists,
         // "nothing pressed" *is* the true input.
         let mut confirmed_input: BTreeMap<u64, BTreeMap<PlayerSlot, G::Input>> = BTreeMap::new();
-        for tick in 1..=cfg.input_delay as u64 {
+        for tick in verified_tick + 1..=cfg.input_delay as u64 {
             let mut per_player = BTreeMap::new();
             for slot in 0..cfg.player_count {
                 per_player.insert(PlayerSlot(slot), G::Input::default());
@@ -182,10 +211,12 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             confirmed_input.insert(tick, per_player);
         }
 
+        let vacant = cfg.vacant_slots.iter().map(|&slot| (slot, u64::MAX)).collect();
+
         Self {
             sim,
             ring,
-            verified_tick: 0,
+            verified_tick,
             cfg,
             source,
             history: BTreeMap::new(),
@@ -195,7 +226,92 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             next_send_tick,
             announced: BTreeMap::new(),
             checksums: Vec::new(),
+            vacant,
+            authored: BTreeMap::new(),
         }
+    }
+
+    /// Joins a running session from a snapshot message made by the host's
+    /// [`serve_join`](Self::serve_join). `cfg.local_slot` must be the slot
+    /// requested in [`join_request`], and `config`/`cfg` must match the
+    /// host's. The returned session starts at the snapshot's verified tick
+    /// and needs the other peers' inputs after it (see
+    /// [`authored_since`](Self::authored_since)) to move on.
+    ///
+    /// Rejects the message, before anything is simulated, when the build
+    /// hash or a session setting differs, or the snapshot does not decode,
+    /// or its tick or checksum differs from the message header.
+    pub fn from_join_snapshot(
+        config: G::Config,
+        cfg: SessionConfig,
+        source: S,
+        message: &[u8],
+    ) -> Result<Self, JoinError> {
+        let snap = join::decode_snapshot(message)?;
+        let mut sim = Simulation::<G>::with_build_id(config, cfg.tick_rate, cfg.seed, cfg.build_id);
+        snap.header.check_against(&cfg, sim.build_hash())?;
+        if snap.header.slot != cfg.local_slot {
+            return Err(JoinError::ConfigMismatch("slot"));
+        }
+        let frame = Frame::from_bytes(sim.registry().clone(), &snap.frame_bytes).map_err(JoinError::BadSnapshot)?;
+        if frame.tick() != snap.snapshot_tick {
+            return Err(JoinError::SnapshotMismatch { expected: snap.snapshot_tick, actual: frame.tick() });
+        }
+        if frame.checksum() != snap.checksum {
+            return Err(JoinError::SnapshotMismatch { expected: snap.checksum, actual: frame.checksum() });
+        }
+        sim.restore(&frame);
+        Ok(Self::from_sim(sim, cfg, source, snap.first_input_tick))
+    }
+
+    /// Answers a joiner's [`join_request`] with a snapshot message for
+    /// [`from_join_snapshot`](Self::from_join_snapshot). Only the peer that
+    /// lists the slot in `SessionConfig::vacant_slots` can serve it.
+    ///
+    /// The snapshot is this peer's frame at its `verified_tick` (never a
+    /// predicted one). From the `next_send_tick` at this call on, this peer
+    /// stops authoring default input for the slot: the joiner supplies it.
+    /// The caller must also connect the joiner to every other peer and have
+    /// each send `authored_since(0)` over the new link.
+    pub fn serve_join(&mut self, request: &[u8]) -> Result<Vec<u8>, JoinError> {
+        let req = join::decode_request(request)?;
+        req.check_against(&self.cfg, self.build_hash())?;
+        if self.vacant.get(&req.slot) != Some(&u64::MAX) {
+            return Err(JoinError::SlotNotVacant(req.slot));
+        }
+        let frame = self.ring.get(self.verified_tick).ok_or(JoinError::NoVerifiedFrame)?;
+        let header = join::JoinHeader { build_hash: self.build_hash(), ..req };
+        let message =
+            join::encode_snapshot(&header, self.verified_tick, self.next_send_tick, frame.checksum(), &frame.to_bytes());
+        self.vacant.insert(req.slot, self.next_send_tick);
+        Ok(message)
+    }
+
+    /// Inputs (and commands) this peer authored for ticks after `tick`:
+    /// its own slot and any vacant slot it still or previously filled.
+    /// Kept `input_log_ticks` behind `verified_tick`.
+    pub fn authored_since(&self, tick: u64) -> Vec<RemoteInput<G>> {
+        self.authored
+            .range((Bound::Excluded(tick), Bound::Unbounded))
+            .flat_map(|(&tick, list)| {
+                list.iter().map(move |(slot, input, commands)| RemoteInput {
+                    tick,
+                    slot: *slot,
+                    input: *input,
+                    commands: commands.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// The tick the next `advance` stamps the local input for.
+    pub fn next_send_tick(&self) -> u64 {
+        self.next_send_tick
+    }
+
+    /// The input source, e.g. to attach a new link for a late joiner.
+    pub fn source_mut(&mut self) -> &mut S {
+        &mut self.source
     }
 
     pub fn verified_tick(&self) -> u64 {
@@ -364,9 +480,25 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         if !local_commands.is_empty() {
             self.confirmed_commands.entry(send_tick).or_default().insert(self.cfg.local_slot, local_commands.clone());
         }
+        self.authored.entry(send_tick).or_default().push((self.cfg.local_slot, local_input, local_commands.clone()));
         self.source.send_local(send_tick, self.cfg.local_slot, local_input, local_commands);
 
+        // Vacant slots this peer still covers get default input, sent like
+        // any other peer's so everyone confirms the same thing.
+        let covered: Vec<PlayerSlot> =
+            self.vacant.iter().filter(|&(_, &until)| send_tick < until).map(|(&slot, _)| slot).collect();
+        for slot in covered {
+            let idle = G::Input::default();
+            self.confirmed_input.entry(send_tick).or_default().insert(slot, idle);
+            self.authored.entry(send_tick).or_default().push((slot, idle, Vec::new()));
+            self.source.send_local(send_tick, slot, idle, Vec::new());
+        }
+
         for remote in self.source.poll_remote() {
+            // Already verified (a late joiner is sent the whole input log).
+            if remote.tick <= self.verified_tick {
+                continue;
+            }
             self.confirmed_input.entry(remote.tick).or_default().insert(remote.slot, remote.input);
             if !remote.commands.is_empty() {
                 self.confirmed_commands.entry(remote.tick).or_default().insert(remote.slot, remote.commands);
@@ -380,6 +512,8 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         }
 
         self.advance_verified(&mut batch);
+        let keep_from = self.verified_tick.saturating_sub(self.cfg.input_log_ticks as u64);
+        self.authored = self.authored.split_off(&keep_from);
 
         if self.sim.tick() - self.verified_tick >= self.cfg.max_prediction as u64 {
             return AdvanceResult::Stalled { events: batch };

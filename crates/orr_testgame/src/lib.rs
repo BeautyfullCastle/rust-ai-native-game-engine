@@ -262,7 +262,10 @@ impl System<Arena> for BulletSystem {
         }
         for (victim, shooter) in hits {
             let score = ctx.frame.singleton_mut::<Score>();
-            score.kills[shooter as usize] += 1;
+            // A forged command (e.g. from a hostile replay) can name any owner.
+            if let Some(kills) = score.kills.get_mut(shooter as usize) {
+                *kills += 1;
+            }
             ctx.emit(Hit { victim_slot: victim, shooter_slot: shooter });
         }
     }

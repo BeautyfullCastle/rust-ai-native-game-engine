@@ -94,11 +94,24 @@ impl LoopbackNetwork {
         jitter_ticks: u64,
         seed: u64,
     ) -> (LoopbackEnd<G>, LoopbackEnd<G>, LoopbackClock) {
+        let clock = LoopbackClock(Rc::new(RefCell::new(0u64)));
+        let (a, b) = Self::with_clock(&clock, latency_ticks, jitter_ticks, seed);
+        (a, b, clock)
+    }
+
+    /// Like [`LoopbackNetwork::new`], but the pair shares an existing
+    /// `clock`, so a link added later (e.g. for a late joiner) runs on the
+    /// same time as the others.
+    pub fn with_clock<G: Game>(
+        clock: &LoopbackClock,
+        latency_ticks: u64,
+        jitter_ticks: u64,
+        seed: u64,
+    ) -> (LoopbackEnd<G>, LoopbackEnd<G>) {
         // `a_to_b` carries envelopes A sends that B receives, and vice
         // versa; both ends share both links (one to send into, one to
         // read from) plus one shared clock driving delivery times for
         // both directions.
-        let clock = Rc::new(RefCell::new(0u64));
         let a_to_b = Rc::new(RefCell::new(Link {
             latency: latency_ticks,
             jitter: jitter_ticks,
@@ -112,9 +125,8 @@ impl LoopbackNetwork {
             queue: VecDeque::new(),
         }));
         (
-            LoopbackEnd { send: a_to_b.clone(), recv: b_to_a.clone(), clock: clock.clone() },
-            LoopbackEnd { send: b_to_a, recv: a_to_b, clock: clock.clone() },
-            LoopbackClock(clock),
+            LoopbackEnd { send: a_to_b.clone(), recv: b_to_a.clone(), clock: clock.0.clone() },
+            LoopbackEnd { send: b_to_a, recv: a_to_b, clock: clock.0.clone() },
         )
     }
 }
