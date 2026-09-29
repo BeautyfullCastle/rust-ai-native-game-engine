@@ -1,0 +1,18 @@
+//! `orr_sample`: a runnable demo of the M2 view side.
+//!
+//! The arena test game runs through an `orr_bridge` adapter, as a local peer
+//! of a two-peer loopback session with simulated latency (so rollbacks
+//! happen). `orr_view` interpolates it and smooths rollback corrections,
+//! and a small wgpu renderer draws it in a winit window.
+//!
+//! - [`arena_view`]: what to draw, input mapping, the bot, the loopback session. No GPU.
+//! - [`render2d`]: the wgpu renderer (WGSL shader).
+//! - [`app`]: the winit loop.
+//!
+//! This crate is view layer: floats and the wall clock are fine here.
+#![allow(clippy::float_arithmetic)]
+#![allow(clippy::disallowed_types)]
+
+pub mod app;
+pub mod arena_view;
+pub mod render2d;

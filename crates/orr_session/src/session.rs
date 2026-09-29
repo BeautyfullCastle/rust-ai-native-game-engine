@@ -257,6 +257,9 @@ pub struct Session<G: Game, S: InputSource<G>> {
     last_remote_tick: BTreeMap<PlayerSlot, u64>,
     /// Set on a joiner that checks its backlogs.
     join: Option<JoinProgress<G>>,
+    /// How many rollbacks this session has done, and the latest one.
+    rollback_count: u64,
+    last_rollback: Option<RollbackInfo>,
 }
 
 fn event_bytes<E: bytemuck::Pod>(e: &E) -> Vec<u8> {
@@ -313,6 +316,8 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             holds: BTreeMap::new(),
             last_remote_tick: BTreeMap::new(),
             join: None,
+            rollback_count: 0,
+            last_rollback: None,
         }
     }
 
@@ -688,6 +693,22 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     pub fn verified_frame(&self) -> Option<&orr_ecs::Frame> {
         self.ring.get(self.verified_tick)
     }
+    /// The stored frame of `tick` (predicted or verified), while it is
+    /// still in the snapshot ring (about `max_prediction + 2` ticks back
+    /// from the head).
+    pub fn frame_at(&self, tick: u64) -> Option<&orr_ecs::Frame> {
+        self.ring.get(tick)
+    }
+    /// How many rollbacks this session has done so far. Also counts the
+    /// ones of an `advance` that returned `Stalled`, which carries no
+    /// `RollbackInfo`.
+    pub fn rollback_count(&self) -> u64 {
+        self.rollback_count
+    }
+    /// The latest rollback, if any.
+    pub fn last_rollback(&self) -> Option<RollbackInfo> {
+        self.last_rollback
+    }
     pub fn checksums(&self) -> &[(u64, u64)] {
         &self.checksums
     }
@@ -766,7 +787,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             diff_events(&old_events, new_events, &mut self.announced, batch);
         }
 
-        RollbackInfo { from_tick: from, to_tick: head, resim_count }
+        let info = RollbackInfo { from_tick: from, to_tick: head, resim_count };
+        self.rollback_count += 1;
+        self.last_rollback = Some(info);
+        info
     }
 
     /// Finds the earliest tick in `(verified_tick, head]` whose used input

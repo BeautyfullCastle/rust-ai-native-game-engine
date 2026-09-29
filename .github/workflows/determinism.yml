@@ -46,14 +46,18 @@ jobs:
         # budget is measured against, and is what the golden tests (whose
         # constants are pinned to a specific i64/i128 op sequence, not to
         # a specific build profile) are expected to run under in CI.
-        run: cargo test --workspace --release
+        #
+        # `orr_sample` (wgpu + winit window demo) is excluded: it is view
+        # layer, needs no determinism check, and its GPU stack should not
+        # be able to break the sim crates' CI. It is built by `sample-build`.
+        run: cargo test --workspace --release --exclude orr_sample
 
       - name: cargo clippy --workspace --all-targets
         # `-D warnings` only on the crates this task owns (`orr_sim`,
         # `orr_session`, `orr_testgame`); other crates may be under
         # concurrent work with their own warning budget.
         run: |
-          cargo clippy --workspace --all-targets
+          cargo clippy --workspace --exclude orr_sample --all-targets
           cargo clippy -p orr_sim -p orr_session -p orr_testgame --all-targets -- -D warnings
 
       - name: cargo build -p orr_sim --features hotpatch
@@ -65,6 +69,22 @@ jobs:
         # code-swap story and the feature must never leak into a release
         # or replay-verification build.
         run: cargo build -p orr_sim --features hotpatch
+
+  sample-build:
+    # View-layer demo (wgpu + winit). Build and test (no window, no GPU
+    # needed) on Linux and Windows; separate from the determinism jobs.
+    name: sample build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p orr_sample -p orr_view -p orr_bridge --release
+      - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge --all-targets
 
   wasm32:
     name: wasm32-wasip1 (wasmtime)
