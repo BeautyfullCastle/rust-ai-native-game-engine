@@ -181,9 +181,21 @@ pub struct Body {
     pub angular_damping: FP,
     /// [`BODY_STATIC`], [`BODY_DYNAMIC`] or [`BODY_KINEMATIC`].
     pub kind: u32,
+    /// Sleep state of a dynamic body. Bit 31 ([`SLEEP_FLAG`]) is set while
+    /// the body sleeps. The low bits count consecutive ticks below the
+    /// sleep speed limits, capped at `PhysicsConfig::sleep_ticks`. Use
+    /// [`crate::wake`] and [`crate::is_asleep`] instead of touching it.
+    pub sleep: u32,
+    /// While a body sleeps: the id of its sleep island (lowest entity
+    /// index of the group plus one). Waking one member wakes every body
+    /// with the same id. 0 for awake bodies.
+    pub island: u32,
     /// Explicit padding, keep 0.
     pub _pad: u32,
 }
+
+/// [`Body::sleep`] bit that marks a sleeping body.
+pub const SLEEP_FLAG: u32 = 1 << 31;
 
 impl Body {
     /// A static body at `pos` with rotation `angle`.
@@ -309,8 +321,14 @@ pub struct PhysicsConfig {
     pub max_angular_speed: FP,
     /// Sequential impulse iterations per tick.
     pub velocity_iterations: u32,
-    /// Explicit padding, keep 0.
-    pub _pad: u32,
+    /// A group of touching bodies falls asleep after every body in it has
+    /// been slower than the two sleep speeds for this many ticks. 0 turns
+    /// sleeping off.
+    pub sleep_ticks: u32,
+    /// Sleep limit for the linear speed.
+    pub sleep_linear_speed: FP,
+    /// Sleep limit for the angular speed (rad/s).
+    pub sleep_angular_speed: FP,
 }
 
 impl Default for PhysicsConfig {
@@ -326,7 +344,9 @@ impl Default for PhysicsConfig {
             max_linear_speed: fp!(500),
             max_angular_speed: fp!(60),
             velocity_iterations: 8,
-            _pad: 0,
+            sleep_ticks: 30,
+            sleep_linear_speed: fp!(0.05),
+            sleep_angular_speed: fp!(0.05),
         }
     }
 }

@@ -5,13 +5,13 @@ use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
 use orr_fp::{fp, FPVec2, FrameRng, FP};
 use orr_physics::{
-    circle_cast, init, move_and_slide, raycast, CharacterParams, register, spawn_body, step, Body, Collider, PhysicsConfig, PhysicsSystem, QueryFilter,
+    apply_impulse, circle_cast, init, is_asleep, move_and_slide, raycast, CharacterParams, register, spawn_body, step, Body, Collider, PhysicsConfig, PhysicsSystem, QueryFilter,
     Scratch, Shape, TriggerEvent, BODY_DYNAMIC, TRIGGER_ENTER, TRIGGER_EXIT,
 };
 use orr_sim::{Game, SimCommand, Simulation, System, TickInputs};
 
 /// Checksum of the scripted scene in [`golden_scene`] after `GOLDEN_TICKS`.
-const GOLDEN_CHECKSUM: u64 = 0x7ed61bde26ce839e;
+const GOLDEN_CHECKSUM: u64 = 0x9407b6ed32022f2b;
 const GOLDEN_TICKS: u32 = 300;
 
 fn new_frame(cfg: PhysicsConfig) -> Frame {
@@ -626,4 +626,385 @@ fn character_controller_moves_and_slides() {
     // The character's own collider can be ignored.
     let m = move_and_slide(&mut f, g, v2(FP::ZERO, fp!(0.5)), v2(FP::ZERO, -fp!(2)), &p);
     assert!(m.pos.y < fp!(-1), "ignoring ground, character falls through: {}", m.pos.y);
+}
+
+
+// ---- (f) sleeping ----
+
+fn stack(f: &mut Frame, x: FP, n: i32) -> Vec<Entity> {
+    (0..n).map(|i| box_body(f, x, fp!(0.5) + FP::from_int(i), fp!(0.5), fp!(0.5))).collect()
+}
+
+fn asleep_count(f: &Frame, es: &[Entity]) -> usize {
+    es.iter().filter(|&&e| is_asleep(f, e)).count()
+}
+
+#[test]
+fn resting_stack_falls_asleep_and_stays_put() {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    let es = stack(&mut f, FP::ZERO, 4);
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 240);
+    assert_eq!(asleep_count(&f, &es), 4, "a resting stack must be asleep after 4 s");
+    let before: Vec<Body> = es.iter().map(|&e| body(&f, e)).collect();
+    run(&mut f, &mut sc, 120);
+    let stats = sc.stats();
+    assert_eq!((stats.awake, stats.asleep, stats.pairs), (0, 4, 0), "a sleeping world costs no contacts: {stats:?}");
+    for (i, &e) in es.iter().enumerate() {
+        assert_eq!(body(&f, e), before[i], "sleeping box {i} must not change");
+        assert_eq!(body(&f, e).vel, FPVec2::ZERO);
+    }
+    // All members share one island id: the lowest entity index plus one.
+    let ids: Vec<u32> = es.iter().map(|&e| body(&f, e).island).collect();
+    assert!(ids.iter().all(|&i| i == ids[0] && i == es[0].index + 1), "ids {ids:?}");
+}
+
+#[test]
+fn sleeping_can_be_turned_off() {
+    let cfg = PhysicsConfig { sleep_ticks: 0, ..PhysicsConfig::default() };
+    let mut f = new_frame(cfg);
+    ground(&mut f);
+    let es = stack(&mut f, FP::ZERO, 3);
+    run(&mut f, &mut Scratch::new(), 300);
+    assert_eq!(asleep_count(&f, &es), 0);
+}
+
+#[test]
+fn falling_body_wakes_sleeping_stack() {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    let es = stack(&mut f, FP::ZERO, 3);
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 240);
+    assert_eq!(asleep_count(&f, &es), 3);
+    // A box lands on the stack from above.
+    let shape = Shape::box_shape(fp!(0.5), fp!(0.5));
+    let hit = spawn_body(
+        &mut f,
+        Body::new_dynamic(v2(FP::ZERO, fp!(6)), &shape, FP::ONE),
+        Collider::new(shape),
+    );
+    let mut woke_at = None;
+    for t in 0..120 {
+        run(&mut f, &mut sc, 1);
+        if woke_at.is_none() && asleep_count(&f, &es) == 0 {
+            woke_at = Some(t);
+        }
+    }
+    assert!(woke_at.is_some(), "the impact must wake the whole stack");
+    // Falling from y=6 to the top of the stack takes about 0.75 s.
+    assert!(woke_at.unwrap() > 30, "woke at {woke_at:?}: too early, nothing touched it");
+    run(&mut f, &mut sc, 300);
+    assert_eq!(asleep_count(&f, &es), 3, "and it falls asleep again");
+    assert!(is_asleep(&f, hit));
+    assert!(abs(body(&f, hit).pos.y - fp!(3.5)) < fp!(0.15), "box on top: y = {}", body(&f, hit).pos.y);
+}
+
+#[test]
+fn impulse_wakes_whole_island() {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    let es = stack(&mut f, FP::ZERO, 3);
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 240);
+    assert_eq!(asleep_count(&f, &es), 3);
+    let p0 = body(&f, es[0]).pos;
+    apply_impulse(&mut f, es[0], v2(fp!(6), FP::ZERO), p0);
+    assert!(!is_asleep(&f, es[0]));
+    run(&mut f, &mut sc, 1);
+    assert_eq!(asleep_count(&f, &es), 0, "one step wakes every body of the island");
+    run(&mut f, &mut sc, 60);
+    assert!(body(&f, es[0]).pos.x > fp!(0.5), "the pushed box moved");
+}
+
+#[test]
+fn writing_a_velocity_wakes_the_island() {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    let es = stack(&mut f, FP::ZERO, 2);
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 240);
+    assert_eq!(asleep_count(&f, &es), 2);
+    // Game code writes a velocity straight into the component.
+    f.get_mut::<Body>(es[1]).unwrap().vel = v2(fp!(3), FP::ZERO);
+    run(&mut f, &mut sc, 1);
+    assert_eq!(asleep_count(&f, &es), 0);
+    assert!(body(&f, es[1]).pos.x > FP::ZERO);
+}
+
+#[test]
+fn despawned_support_wakes_the_body_above() {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    let es = stack(&mut f, FP::ZERO, 2);
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 240);
+    assert_eq!(asleep_count(&f, &es), 2);
+    let y0 = body(&f, es[1]).pos.y;
+    f.despawn(es[0]);
+    run(&mut f, &mut sc, 30);
+    assert!(!is_asleep(&f, es[1]));
+    assert!(body(&f, es[1]).pos.y < y0 - fp!(0.5), "box fell: {} -> {}", y0, body(&f, es[1]).pos.y);
+}
+
+#[test]
+fn moving_kinematic_wakes_and_pushes_sleeper() {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    let b = box_body(&mut f, FP::ZERO, fp!(0.5), fp!(0.5), fp!(0.5));
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 200);
+    assert!(is_asleep(&f, b));
+    let mut k = Body::new_kinematic(v2(fp!(-4), fp!(0.5)));
+    k.vel = v2(fp!(2), FP::ZERO);
+    spawn_body(&mut f, k, Collider::new(Shape::box_shape(FP::HALF, FP::HALF)));
+    run(&mut f, &mut sc, 240);
+    assert!(body(&f, b).pos.x > fp!(2), "pushed to x = {}", body(&f, b).pos.x);
+    // A kinematic body that stands still does not wake anything.
+    let mut f2 = new_frame(PhysicsConfig::default());
+    ground(&mut f2);
+    let b2 = box_body(&mut f2, FP::ZERO, fp!(0.5), fp!(0.5), fp!(0.5));
+    spawn_body(&mut f2, Body::new_kinematic(v2(fp!(1.0), fp!(0.5))), Collider::new(Shape::box_shape(FP::HALF, FP::HALF)));
+    run(&mut f2, &mut sc, 300);
+    assert!(is_asleep(&f2, b2));
+}
+
+#[test]
+fn sleeping_body_in_a_sensor_raises_no_events() {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    spawn_body(
+        &mut f,
+        Body::new_static(v2(FP::ZERO, fp!(1)), FP::ZERO),
+        Collider::new(Shape::box_shape(fp!(3), fp!(2))).sensor(),
+    );
+    let b = box_body(&mut f, FP::ZERO, fp!(0.5), fp!(0.5), fp!(0.5));
+    let mut sc = Scratch::new();
+    let mut events = Vec::new();
+    let mut kinds = Vec::new();
+    for _ in 0..400 {
+        events.clear();
+        f.set_tick(f.tick() + 1);
+        step(&mut f, &mut sc, &mut events);
+        kinds.extend(events.iter().map(|e| e.kind));
+    }
+    assert!(is_asleep(&f, b));
+    // One enter for the ground and one for the box (both overlap the zone), never an exit.
+    assert_eq!(kinds, vec![TRIGGER_ENTER, TRIGGER_ENTER], "asleep in the zone: no events after the enters");
+}
+
+/// Advances with a brand-new `Scratch` every tick.
+fn run_fresh(frame: &mut Frame, ticks: u32) {
+    let mut events = Vec::new();
+    for _ in 0..ticks {
+        events.clear();
+        frame.set_tick(frame.tick() + 1);
+        step(frame, &mut Scratch::new(), &mut events);
+    }
+}
+
+/// A scattered set of small stacks: they settle, fall asleep, and one
+/// gets hit later.
+fn sleepy_scene() -> Frame {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    let mut rng = FrameRng::new(99);
+    for k in 0..12 {
+        let x = FP::from_int(k * 4 - 22) + rng.range_fp(-fp!(0.3), fp!(0.3));
+        for i in 0..3 {
+            if (k + i) % 3 == 0 {
+                ball(&mut f, x, fp!(0.5) + FP::from_int(i) * fp!(1.2), fp!(0.45), FP::ZERO);
+            } else {
+                box_body(&mut f, x, fp!(0.5) + FP::from_int(i) * fp!(1.1), fp!(0.5), fp!(0.5));
+            }
+        }
+    }
+    f
+}
+
+#[test]
+fn golden_sleep_state_is_scratch_independent() {
+    let mut a = sleepy_scene();
+    let mut b = sleepy_scene();
+    let mut sc = Scratch::new();
+    run(&mut a, &mut sc, 500);
+    run_fresh(&mut b, 500);
+    assert_eq!(a.checksum(), b.checksum(), "state must not depend on Scratch history");
+    let asleep = a.query::<(&Body,)>().filter(|(_, (b,))| b.sleep >> 31 != 0).count();
+    assert!(asleep >= 30, "most bodies should sleep, only {asleep}");
+}
+
+#[test]
+fn golden_sleep_rollback_replay() {
+    let mut f = sleepy_scene();
+    let mut sc = Scratch::new();
+    // Snapshot while bodies are falling asleep, then hit one stack.
+    run(&mut f, &mut sc, 150);
+    let snapshot = f.clone();
+    let hit = |f: &mut Frame| {
+        let e = f.query::<(&Body,)>().filter(|(_, (b,))| b.kind == BODY_DYNAMIC).map(|(e, _)| e).nth(10).unwrap();
+        let p = body(f, e).pos;
+        apply_impulse(f, e, v2(fp!(30), fp!(10)), p);
+    };
+    run(&mut f, &mut sc, 200);
+    hit(&mut f);
+    run(&mut f, &mut sc, 200);
+    let expected = f.checksum();
+
+    f.copy_from(&snapshot);
+    run(&mut f, &mut Scratch::new(), 200);
+    hit(&mut f);
+    run_fresh(&mut f, 200);
+    assert_eq!(f.checksum(), expected);
+
+    // Serialization in the middle of the sleep phase.
+    let mut g = sleepy_scene();
+    run(&mut g, &mut sc, 300);
+    let bytes = g.to_bytes();
+    let mut h = Frame::from_bytes(g.registry().clone(), &bytes).expect("decode");
+    assert_eq!(h.checksum(), g.checksum());
+    run(&mut g, &mut sc, 60);
+    run(&mut h, &mut Scratch::new(), 60);
+    assert_eq!(g.checksum(), h.checksum());
+}
+
+#[test]
+fn sleeping_matches_awake_physics_for_a_resting_stack() {
+    // With sleeping the stack ends where the always-awake run ends.
+    let end = |ticks: u32, sleep: bool| {
+        let mut cfg = PhysicsConfig::default();
+        if !sleep {
+            cfg.sleep_ticks = 0;
+        }
+        let mut f = new_frame(cfg);
+        ground(&mut f);
+        let es = stack(&mut f, FP::ZERO, 5);
+        run(&mut f, &mut Scratch::new(), ticks);
+        es.iter().map(|&e| body(&f, e).pos).collect::<Vec<_>>()
+    };
+    let (a, b) = (end(300, true), end(300, false));
+    for (p, q) in a.iter().zip(&b) {
+        assert!(abs(p.y - q.y) < fp!(0.05) && abs(p.x - q.x) < fp!(0.05), "{p:?} vs {q:?}");
+    }
+}
+
+#[test]
+fn tall_stack_of_twelve_stays_up() {
+    // Guards the solver quality: with the default 8 iterations a stack of
+    // 12 unit boxes settles almost where it started, awake or asleep.
+    for sleep in [true, false] {
+        let mut cfg = PhysicsConfig::default();
+        if !sleep {
+            cfg.sleep_ticks = 0;
+        }
+        let mut f = new_frame(cfg);
+        ground(&mut f);
+        let es = stack(&mut f, FP::ZERO, 12);
+        run(&mut f, &mut Scratch::new(), 600);
+        let top = body(&f, es[11]);
+        assert!(abs(top.pos.y - fp!(11.5)) < fp!(0.3), "sleep={sleep}: top y = {}", top.pos.y);
+        assert!(abs(top.pos.x) < fp!(0.3), "sleep={sleep}: top x = {}", top.pos.x);
+    }
+}
+
+/// Spawn/despawn churn while bodies sleep: the dense component order stops
+/// being ascending, and entities that lack a body or a collider show up.
+/// With `fresh`, every step gets a brand-new `Scratch`.
+fn churn(frame: &mut Frame, ticks: u32, fresh: bool) {
+    let mut rng = FrameRng::new(4242);
+    let mut sc = Scratch::new();
+    let mut events = Vec::new();
+    for t in 0..ticks {
+        if t % 20 == 10 {
+            let victims: Vec<Entity> =
+                frame.query::<(&Body, &Collider)>().filter(|(_, (b, _))| b.kind == BODY_DYNAMIC).map(|(e, _)| e).collect();
+            if !victims.is_empty() {
+                frame.despawn(victims[rng.range_i32(0, victims.len() as i32) as usize]);
+            }
+            let x = rng.range_fp(fp!(-20), fp!(20));
+            box_body(frame, x, fp!(8), fp!(0.5), fp!(0.5));
+        }
+        if t == 30 {
+            // A body without a collider and a collider without a body.
+            let e = frame.spawn();
+            frame.add(e, Body::new_kinematic(v2(fp!(50), fp!(50))));
+            let e = frame.spawn();
+            frame.add(e, Collider::new(Shape::circle(FP::HALF)));
+        }
+        if fresh {
+            sc = Scratch::new();
+        }
+        events.clear();
+        frame.set_tick(frame.tick() + 1);
+        step(frame, &mut sc, &mut events);
+    }
+}
+
+#[test]
+fn golden_churn_with_sleeping_is_scratch_independent() {
+    let (mut a, mut b) = (sleepy_scene(), sleepy_scene());
+    churn(&mut a, 400, false);
+    churn(&mut b, 400, true);
+    assert_eq!(a.checksum(), b.checksum());
+    assert!(a.query::<(&Body,)>().all(|(_, (bd,))| bd.pos.y > -FP::ONE && bd.pos.y < fp!(60)), "nothing escaped");
+    let asleep = a.query::<(&Body,)>().filter(|(_, (bd,))| bd.sleep >> 31 != 0).count();
+    assert!(asleep >= 20, "only {asleep} bodies asleep");
+}
+
+#[test]
+fn documented_range_limits_stay_inside_the_solver_ranges() {
+    // The solver multiplies in 64 bits (debug builds assert on overflow).
+    // Push mass, size and speed to the documented limits together.
+    let mut f = new_frame(PhysicsConfig::default());
+    spawn_body(
+        &mut f,
+        Body::new_static(v2(FP::ZERO, -fp!(500)), FP::ZERO),
+        Collider::new(Shape::box_shape(fp!(1000), fp!(500))),
+    );
+    // A huge, heavy box (mass 10 000) and tiny light balls (mass 0.001).
+    let big = Shape::box_shape(fp!(50), fp!(50));
+    let heavy = spawn_body(
+        &mut f,
+        Body::new_dynamic(v2(FP::ZERO, fp!(60)), &big, FP::ONE).with_velocity(v2(FP::ZERO, -fp!(500))),
+        Collider::new(big),
+    );
+    let tiny = Shape::circle(fp!(0.05));
+    let mut balls = Vec::new();
+    for i in 0..30 {
+        let x = FP::from_int(i - 15) * fp!(6);
+        balls.push(spawn_body(
+            &mut f,
+            Body::new_dynamic(v2(x, fp!(200)), &tiny, fp!(0.127)).with_velocity(v2(fp!(-300), -fp!(500))),
+            Collider::new(tiny),
+        ));
+    }
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 240);
+    for e in balls.iter().chain(&[heavy]) {
+        let b = body(&f, *e);
+        assert!(b.pos.x.abs() < fp!(30000) && b.pos.y.abs() < fp!(30000), "escaped: {:?}", b.pos);
+        assert!(b.vel.x.abs() <= fp!(500) && b.vel.y.abs() <= fp!(500));
+    }
+}
+
+/// Checksum of [`sleepy_scene`] after settling, one impulse and settling
+/// again: pins the sleep, island and wake code on every platform.
+const SLEEPY_GOLDEN_CHECKSUM: u64 = 0xd7045bf847e9c5e9;
+
+#[test]
+fn golden_sleepy_scene_checksum() {
+    let mut f = sleepy_scene();
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 300);
+    let asleep = f.query::<(&Body,)>().filter(|(_, (b,))| b.sleep >> 31 != 0).count();
+    assert!(asleep >= 25, "only {asleep} bodies asleep before the impulse");
+    let target = f.query::<(&Body,)>().filter(|(_, (b,))| b.kind == BODY_DYNAMIC).map(|(e, _)| e).nth(7).unwrap();
+    let p = body(&f, target).pos;
+    apply_impulse(&mut f, target, v2(fp!(25), fp!(15)), p);
+    run(&mut f, &mut sc, 300);
+    let asleep_after = f.query::<(&Body,)>().filter(|(_, (b,))| b.sleep >> 31 != 0).count();
+    assert!(asleep_after >= 25, "only {asleep_after} bodies asleep at the end");
+    println!("sleepy golden checksum: {:#018x}", f.checksum());
+    assert_eq!(f.checksum(), SLEEPY_GOLDEN_CHECKSUM, "sleepy golden changed; only update for an intended behavior change");
 }

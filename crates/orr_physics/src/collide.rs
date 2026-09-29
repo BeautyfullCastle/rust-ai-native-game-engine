@@ -6,6 +6,7 @@
 
 use orr_fp::{FPVec2, FP};
 
+use crate::fastmath::{self, mul, FastVec};
 use crate::types::{Shape, MAX_POLY_VERTS, SHAPE_CIRCLE};
 
 /// Rigid transform: position plus rotation given as `(cos, sin)`.
@@ -36,9 +37,15 @@ impl Xf {
     }
 }
 
+/// `v / s` per component, bit-identical to the operator but faster.
+#[inline]
+fn vdiv(v: FPVec2, s: FP) -> FPVec2 {
+    FPVec2::new(fastmath::div(v.x, s), fastmath::div(v.y, s))
+}
+
 #[inline]
 fn rotate(c: FP, s: FP, v: FPVec2) -> FPVec2 {
-    FPVec2::new(c * v.x - s * v.y, s * v.x + c * v.y)
+    FPVec2::new(mul(c, v.x) - mul(s, v.y), mul(s, v.x) + mul(c, v.y))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -86,8 +93,8 @@ fn circle_circle(ra: FP, pa: FPVec2, rb: FP, pb: FPVec2, margin: FP) -> Manifold
     if d2 > reach * reach {
         return Manifold::default();
     }
-    let dist = d2.sqrt();
-    let normal = if dist == FP::ZERO { FPVec2::Y } else { d / dist };
+    let dist = fastmath::sqrt(d2);
+    let normal = if dist == FP::ZERO { FPVec2::Y } else { vdiv(d, dist) };
     let sep = dist - rsum;
     single(normal, sep, pa + normal * (ra + sep / 2))
 }
@@ -101,7 +108,7 @@ fn poly_circle(poly: &Shape, xp: &Xf, cw: FPVec2, r: FP, margin: FP) -> Option<(
     let mut best = FP::MIN;
     let mut idx = 0usize;
     for i in 0..n {
-        let s = poly.normals[i].dot(c - poly.verts[i]);
+        let s = poly.normals[i].dotf(c - poly.verts[i]);
         if s > reach {
             return None;
         }
@@ -112,8 +119,8 @@ fn poly_circle(poly: &Shape, xp: &Xf, cw: FPVec2, r: FP, margin: FP) -> Option<(
     }
     let v1 = poly.verts[idx];
     let v2 = poly.verts[(idx + 1) % n];
-    let u1 = (c - v1).dot(v2 - v1);
-    let u2 = (c - v2).dot(v1 - v2);
+    let u1 = (c - v1).dotf(v2 - v1);
+    let u2 = (c - v2).dotf(v1 - v2);
     let corner = if u1 <= FP::ZERO {
         Some(v1)
     } else if u2 <= FP::ZERO {
@@ -127,8 +134,8 @@ fn poly_circle(poly: &Shape, xp: &Xf, cw: FPVec2, r: FP, margin: FP) -> Option<(
         if d2 > reach * reach {
             return None;
         }
-        let dist = d2.sqrt();
-        let nl = if dist == FP::ZERO { poly.normals[idx] } else { d / dist };
+        let dist = fastmath::sqrt(d2);
+        let nl = if dist == FP::ZERO { poly.normals[idx] } else { vdiv(d, dist) };
         let sep = dist - r;
         return Some((xp.rot(nl), sep, xp.apply(v + nl * (sep / 2))));
     }
@@ -153,7 +160,7 @@ fn find_max_sep(p1: &Shape, p2: &Shape, pos: FPVec2, rc: FP, rs: FP, margin: FP)
         let v = p1.verts[i];
         let mut si = FP::MAX;
         for w in v2.iter().take(n2) {
-            si = si.min(n.dot(*w - v));
+            si = si.min(n.dotf(*w - v));
         }
         if si > margin {
             return (si, i);
@@ -169,8 +176,8 @@ fn find_max_sep(p1: &Shape, p2: &Shape, pos: FPVec2, rc: FP, rs: FP, margin: FP)
 fn poly_poly(sa: &Shape, xa: &Xf, sb: &Shape, xb: &Xf, margin: FP) -> Manifold {
     // B relative to A.
     let pos_ab = xa.inv_rot(xb.p - xa.p);
-    let c_ab = xa.c * xb.c + xa.s * xb.s;
-    let s_ab = xa.c * xb.s - xa.s * xb.c;
+    let c_ab = mul(xa.c, xb.c) + mul(xa.s, xb.s);
+    let s_ab = mul(xa.c, xb.s) - mul(xa.s, xb.c);
     let (sep_a, edge_a) = find_max_sep(sa, sb, pos_ab, c_ab, s_ab, margin);
     if sep_a > margin {
         return Manifold::default();
@@ -196,7 +203,7 @@ fn poly_poly(sa: &Shape, xa: &Xf, sb: &Shape, xb: &Xf, margin: FP) -> Manifold {
     let mut inc = 0usize;
     let mut min_dot = FP::MAX;
     for i in 0..n2c {
-        let d = normal1.dot(rotate(rc, rs, p2.normals[i]));
+        let d = normal1.dotf(rotate(rc, rs, p2.normals[i]));
         if d < min_dot {
             min_dot = d;
             inc = i;
@@ -209,8 +216,8 @@ fn poly_poly(sa: &Shape, xa: &Xf, sb: &Shape, xb: &Xf, margin: FP) -> Manifold {
     let v11 = p1.verts[edge1];
     let v12 = p1.verts[(edge1 + 1) % n1c];
     let tangent = FPVec2::new(-normal1.y, normal1.x);
-    let side1 = -tangent.dot(v11);
-    let side2 = tangent.dot(v12);
+    let side1 = -tangent.dotf(v11);
+    let side2 = tangent.dotf(v12);
     let (c1, k1) = clip(iv, -tangent, side1);
     if k1 < 2 {
         return Manifold::default();
@@ -220,11 +227,11 @@ fn poly_poly(sa: &Shape, xa: &Xf, sb: &Shape, xb: &Xf, margin: FP) -> Manifold {
         return Manifold::default();
     }
 
-    let front = normal1.dot(v11);
+    let front = normal1.dotf(v11);
     let normal_world = xf1.rot(normal1);
     let mut m = Manifold { normal: if flip { -normal_world } else { normal_world }, ..Manifold::default() };
     for (k, cp) in c2.iter().enumerate() {
-        let sep = normal1.dot(*cp) - front;
+        let sep = normal1.dotf(*cp) - front;
         if sep <= margin {
             let id = ((flip as u32) << 24) | ((edge1 as u32) << 16) | ((inc as u32) << 8) | k as u32;
             let pt = xf1.apply(*cp - normal1 * (sep / 2));
@@ -238,8 +245,8 @@ fn poly_poly(sa: &Shape, xa: &Xf, sb: &Shape, xb: &Xf, margin: FP) -> Manifold {
 /// Clips a 2-point segment to `dot(n, v) <= offset`. Returns the surviving
 /// points (segment order kept) and their count.
 fn clip(v: [FPVec2; 2], n: FPVec2, offset: FP) -> ([FPVec2; 2], usize) {
-    let d0 = n.dot(v[0]) - offset;
-    let d1 = n.dot(v[1]) - offset;
+    let d0 = n.dotf(v[0]) - offset;
+    let d1 = n.dotf(v[1]) - offset;
     let mut out = [FPVec2::ZERO; 2];
     let mut k = 0;
     if d0 <= FP::ZERO {
@@ -270,8 +277,8 @@ pub(crate) fn overlap(sa: &Shape, xa: &Xf, sb: &Shape, xb: &Xf) -> bool {
         (true, false) => poly_circle(sb, xb, xa.p, sa.radius, FP::ZERO).is_some(),
         (false, false) => {
             let pos_ab = xa.inv_rot(xb.p - xa.p);
-            let c_ab = xa.c * xb.c + xa.s * xb.s;
-            let s_ab = xa.c * xb.s - xa.s * xb.c;
+            let c_ab = mul(xa.c, xb.c) + mul(xa.s, xb.s);
+            let s_ab = mul(xa.c, xb.s) - mul(xa.s, xb.c);
             if find_max_sep(sa, sb, pos_ab, c_ab, s_ab, FP::ZERO).0 > FP::ZERO {
                 return false;
             }
