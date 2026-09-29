@@ -1,7 +1,7 @@
 # Orrery 진행 현황
 
-최종 갱신: 2026-09-28 · 설계: `claude/engine-design-v1.md`
-코드: 세션 작업공간의 git 저장소 (커밋 3개, 약 7,300줄). 소스 zip `orrery-m1.zip`을 대화에 첨부함. **원격 저장소 미연결 — 새 세션은 zip으로 복원해야 함.**
+최종 갱신: 2026-09-29 · 설계: `docs/design-v1.md`
+코드: https://github.com/BeautyfullCastle/rust-ai-native-game-engine (`main`)
 
 ## 완료
 
@@ -12,12 +12,11 @@
 | `orr_sim` | Game/System/SimContext, TickInputs, 이벤트 키, 핫패치 간접 호출(`hotpatch` 기능, subsecond 연결), 빌드 해시 | |
 | `orr_session` | 예측/롤백, stall, 이벤트 3상태 조정, 체크섬 비교, `.orrp` 리플레이(lz4) + 빌드 해시 검사 | 1만 엔티티 틱 180µs, 8틱 재시뮬 787µs. 리플레이 약 19B/틱(2인) |
 | `orr_testgame` | arena 테스트 게임, 루프백 네트워크 2클라 2000틱 테스트 | 골든 `0x13cdc3c810d65459` |
-| CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 아직 실행 안 됨 (원격 없음) |
+| CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
 ## 다음
 
-1. 원격 저장소 연결 후 결정론 CI 실제 실행 (특히 wasm32)
-2. `orr_ecs` Frame 바이트 직렬화 → 리플레이 스냅샷, 늦은 참가
-3. 고정소수점 sin/cos LUT 경로 (현재 CORDIC 66ns → 목표 <10ns)
-4. `orr_bridge` (InProc/Threaded) + `orr_view` 보간 → M2
-5. 결정론 FP 물리 2D
+1. `orr_ecs` Frame 바이트 직렬화 → 리플레이 스냅샷, 늦은 참가
+2. 고정소수점 sin/cos LUT 경로 (현재 CORDIC 66ns → 목표 <10ns)
+3. `orr_bridge` (InProc/Threaded) + `orr_view` 보간 → M2
+4. 결정론 FP 물리 2D
