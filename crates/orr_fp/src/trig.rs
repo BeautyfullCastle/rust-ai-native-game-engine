@@ -7,13 +7,28 @@
 //!
 //! # Algorithm notes
 //!
-//! `sin`/`cos`/`tan` use classic rotation-mode CORDIC: starting from the
+//! `sin`/`cos`/`tan` run on a lookup table (see below). The CORDIC version
+//! is kept as [`FP::sin_cos_cordic`] and is the reference the table path
+//! reproduces bit for bit. Its recurrence is classic rotation-mode CORDIC: starting from the
 //! vector `(K, 0)` (`K` is the CORDIC gain, pre-multiplied in so the final
 //! `x`/`y` are directly `cos`/`sin`) and rotating it towards the target
 //! angle in 17 micro-steps of `atan(2^-i)`, accumulated from a `const`
 //! table. The angle is first reduced to `(-pi, pi]` and then folded into
 //! `[0, pi/2]` using standard trig symmetries, since CORDIC rotation mode
 //! only converges for angles in that range.
+//!
+//! The fast path (`sin_cos`) reduces the angle to `[0, pi/2]` (raw units
+//! `2^-16` rad), then picks the nearest of 1610 table nodes spaced `2^-10`
+//! rad apart. Each node stores `sin` and `cos` with 32 fractional bits.
+//! The offset `d` (at most `2^-11` rad) is applied with a second-order
+//! Taylor step: `sin(a+d) = S + C*d - S*d^2/2`, `cos(a+d) = C - S*d - C*d^2/2`.
+//! The truncated cubic term is below `2^-35`, so the result before the
+//! final round to `Q48.16` is accurate to about `2^-32`. That rounds to
+//! the CORDIC result at every input except a few that CORDIC itself
+//! rounds the wrong way. A small `const` list of `(raw input, +-1)`
+//! fixes patches those, guarded by a bitmap so the common call pays one
+//! bit test. `tests/trig_lut.rs` checks all `102945` inputs against
+//! CORDIC and regenerates the tables (`src/trig_tables.rs`).
 //!
 //! `atan` uses vectoring-mode CORDIC (same recurrence, opposite driving
 //! rule: drive `y` to zero instead of `z`), after reducing `|x| > 1` via
@@ -33,6 +48,7 @@
 //! literals — there is no runtime or build-time float dependency.
 
 use crate::fp::FP;
+use crate::trig_tables::{COS_FIX, COS_TAB, SIN_FIX, SIN_TAB};
 
 /// Number of CORDIC iterations, run at the *extended* internal precision
 /// (see [`EXT_SCALE`]). `atan(2^-i)` at that precision only underflows to
@@ -98,6 +114,65 @@ const LN2_RAW: i64 = 45_426;
 #[inline]
 fn round_down_from_ext(v: i64) -> i64 {
     (v + (1 << (EXT_FROM_FP_SHIFT - 1))) >> EXT_FROM_FP_SHIFT
+}
+
+/// Table node spacing: `2^SEG_SHIFT` raw units (`2^-10` rad).
+pub(crate) const SEG_SHIFT: u32 = 6;
+
+/// Exceptions are flagged per block of `2^FIX_BLOCK_SHIFT` raw inputs.
+const FIX_BLOCK_SHIFT: u32 = 4;
+const FIX_WORDS: usize = ((FP::HALF_PI.0 as usize >> FIX_BLOCK_SHIFT) >> 6) + 1;
+
+const fn fix_bitmap(fix: &[(u32, i8)]) -> [u64; FIX_WORDS] {
+    let mut map = [0u64; FIX_WORDS];
+    let mut i = 0;
+    while i < fix.len() {
+        let block = (fix[i].0 >> FIX_BLOCK_SHIFT) as usize;
+        map[block >> 6] |= 1u64 << (block & 63);
+        i += 1;
+    }
+    map
+}
+
+const SIN_FIX_MAP: [u64; FIX_WORDS] = fix_bitmap(&SIN_FIX);
+const COS_FIX_MAP: [u64; FIX_WORDS] = fix_bitmap(&COS_FIX);
+
+/// Correction for `raw` from a sorted exception list, guarded by `map`.
+#[inline]
+fn fix_delta(map: &[u64; FIX_WORDS], fix: &[(u32, i8)], raw: u32) -> i64 {
+    let block = (raw >> FIX_BLOCK_SHIFT) as usize;
+    if (map[block >> 6] >> (block & 63)) & 1 == 0 {
+        return 0;
+    }
+    match fix.binary_search_by_key(&raw, |e| e.0) {
+        Ok(i) => i64::from(fix[i].1),
+        Err(_) => 0,
+    }
+}
+
+/// Table interpolation without the exception fix-ups. `folded` must be in
+/// `[0, HALF_PI]` raw. Returns `(cos_raw, sin_raw)`.
+#[inline]
+fn lut_sin_cos_unpatched(folded: i64) -> (i64, i64) {
+    let i = ((folded + (1 << (SEG_SHIFT - 1))) >> SEG_SHIFT) as usize;
+    let d = folded - ((i as i64) << SEG_SHIFT);
+    let (s, c) = (SIN_TAB[i], COS_TAB[i]);
+    let dd = d * d;
+    let sin_ext = s + ((c * d) >> 16) - ((s * dd) >> 33);
+    let cos_ext = c - ((s * d) >> 16) - ((c * dd) >> 33);
+    (round_down_from_ext(cos_ext), round_down_from_ext(sin_ext))
+}
+
+/// Table `sin`/`cos` for `folded` in `[0, HALF_PI]` raw, equal to the
+/// CORDIC result at every input. Returns `(cos_raw, sin_raw)`.
+#[inline]
+fn lut_sin_cos(folded: i64) -> (i64, i64) {
+    let (cos, sin) = lut_sin_cos_unpatched(folded);
+    let raw = folded as u32;
+    (
+        cos + fix_delta(&COS_FIX_MAP, &COS_FIX, raw),
+        sin + fix_delta(&SIN_FIX_MAP, &SIN_FIX, raw),
+    )
 }
 
 /// Rotation-mode CORDIC: rotate `(CORDIC_K, 0)` by `theta` (extended
@@ -170,6 +245,9 @@ impl FP {
     #[must_use]
     pub fn wrap_angle(self) -> FP {
         let two_pi = FP::TWO_PI.0;
+        if self.0 > -FP::PI.0 && self.0 <= FP::PI.0 {
+            return self;
+        }
         let mut r = self.0 % two_pi;
         if r > FP::PI.0 {
             r -= two_pi;
@@ -179,24 +257,47 @@ impl FP {
         FP(r)
     }
 
-    /// Sine and cosine of `self` (radians) computed together, sharing one
-    /// CORDIC pass. Accuracy: absolute error `<= 2^-14` versus `f64`.
+    /// Fold `self` into `[0, pi/2]`: `(input negative, cos sign, folded raw)`.
+    #[inline]
+    fn fold_quadrant(self) -> (bool, i64, i64) {
+        let wrapped = self.wrap_angle();
+        let a_abs_raw = wrapped.0.wrapping_abs();
+        if a_abs_raw > FP::HALF_PI.0 {
+            (wrapped.0 < 0, -1, FP::PI.0 - a_abs_raw)
+        } else {
+            (wrapped.0 < 0, 1, a_abs_raw)
+        }
+    }
+
+    /// Sine and cosine of `self` (radians) computed together, from a
+    /// lookup table (see the module docs). Bit-identical to
+    /// [`FP::sin_cos_cordic`]. Accuracy: absolute error `<= 2^-14` versus
+    /// `f64` (in fact at most `0.5016` raw units, about `2^-16`).
     #[must_use]
     pub fn sin_cos(self) -> (FP, FP) {
-        let wrapped = self.wrap_angle();
-        let neg = wrapped.0 < 0;
-        let a_abs_raw = wrapped.0.wrapping_abs();
-        let (cos_sign, folded_raw) = if a_abs_raw > FP::HALF_PI.0 {
-            (-1i64, FP::PI.0 - a_abs_raw)
-        } else {
-            (1i64, a_abs_raw)
-        };
+        let (neg, cos_sign, folded_raw) = self.fold_quadrant();
+        let (cos_raw, sin_raw) = lut_sin_cos(folded_raw);
+        (FP(if neg { -sin_raw } else { sin_raw }), FP(cos_sign * cos_raw))
+    }
+
+    /// Reference `sin_cos` using 26-step CORDIC (about 15x slower than
+    /// [`FP::sin_cos`]). Kept so tests can check the table path against it.
+    #[must_use]
+    pub fn sin_cos_cordic(self) -> (FP, FP) {
+        let (neg, cos_sign, folded_raw) = self.fold_quadrant();
         let (cos_ext, sin_ext) = cordic_rotate_ext(folded_raw << EXT_FROM_FP_SHIFT);
         let cos_raw = round_down_from_ext(cos_ext);
         let sin_raw = round_down_from_ext(sin_ext);
-        let cos = FP(cos_sign * cos_raw);
-        let sin = FP(if neg { -sin_raw } else { sin_raw });
-        (sin, cos)
+        (FP(if neg { -sin_raw } else { sin_raw }), FP(cos_sign * cos_raw))
+    }
+
+    /// Table interpolation without exception fix-ups, for the table
+    /// generator in `tests/trig_lut.rs`. `self` must be in `[0, pi/2]`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn sin_cos_lut_unpatched(self) -> (FP, FP) {
+        let (cos, sin) = lut_sin_cos_unpatched(self.0);
+        (FP(sin), FP(cos))
     }
 
     /// Sine of `self` (radians). See [`FP::sin_cos`] for accuracy.
