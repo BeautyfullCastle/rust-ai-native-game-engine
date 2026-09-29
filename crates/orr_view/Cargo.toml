@@ -1,0 +1,15 @@
+[package]
+name = "orr_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_bridge = { path = "../orr_bridge" }
+orr_ecs = { path = "../orr_ecs" }
+# View layer: FP to f32 conversion lives behind this feature.
+orr_fp = { path = "../orr_fp", features = ["float-interop"] }

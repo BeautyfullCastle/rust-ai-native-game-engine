@@ -119,6 +119,15 @@ impl Frame {
         self.store::<T>().len()
     }
 
+    /// Read-only view of every `T` in dense (deterministic) order: the
+    /// owning entities and the component values, as parallel slices. Takes
+    /// `&self`, so read-only consumers (the view layer, through
+    /// `orr_bridge::FrameView`) can iterate without mutable access.
+    pub fn dense<T: Component>(&self) -> (&[Entity], &[T]) {
+        let s = self.store::<T>();
+        (s.dense_entities(), s.dense_data())
+    }
+
     pub(crate) fn components_mut(&mut self) -> &mut Vec<Box<dyn crate::store::AnyStore>> {
         &mut self.components
     }

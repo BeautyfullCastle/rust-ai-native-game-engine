@@ -1,0 +1,19 @@
+[package]
+name = "orr_bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+orr_session = { path = "../orr_session" }
+arc-swap = "1"
+
+[dev-dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_testgame = { path = "../orr_testgame" }

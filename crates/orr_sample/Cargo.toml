@@ -1,0 +1,25 @@
+[package]
+name = "orr_sample"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+default-run = "arena"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_bridge = { path = "../orr_bridge" }
+orr_view = { path = "../orr_view" }
+orr_testgame = { path = "../orr_testgame" }
+orr_session = { path = "../orr_session" }
+orr_sim = { path = "../orr_sim" }
+orr_ecs = { path = "../orr_ecs" }
+orr_fp = { path = "../orr_fp", features = ["float-interop"] }
+bytemuck = { version = "1", features = ["derive"] }
+# Rendering (view layer only): wgpu 30 with winit 0.30 (both use raw-window-handle 0.6).
+wgpu = "30"
+winit = "0.30"
+pollster = "1"

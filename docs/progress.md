@@ -1,6 +1,6 @@
 # Orrery 진행 현황
 
-최종 갱신: 2026-09-29 · 설계: `docs/design-v1.md`
+최종 갱신: 2026-09-29 (M2 코드 병합) · 설계: `docs/design-v1.md`
 코드: https://github.com/BeautyfullCastle/rust-ai-native-game-engine (`main`)
 
 ## 완료
@@ -15,10 +15,14 @@
 | 늦은 참가 | 확정 틱(`verified_tick`) Frame 스냅샷 + lz4, 빌드 해시·설정·체크섬 검증. 빈 슬롯은 호스트가 기본 입력으로 채움. 기존 피어는 `authored_since`로 입력 재전송. `.orrp` 파서: 신뢰할 수 없는 개수·lz4 크기·틱 경계 검사 | 3번째 피어가 150틱에 참가, 600라운드까지 체크섬 일치(롤백 1028회) |
 | 참가 복구 | 기존 피어가 `ORRB` 알림으로 보유 입력 구간을 알림 → 참가자가 빈틈을 시간 없이 판정(`InputGap`). 시도 번호로 재요청·새 스냅샷, 참가 중 입력 보관(hold), `max_join_attempts`(기본 3), `mark_slot_vacant`로 재입장 | 느린 전송(80라운드, 보관 4틱)도 재시도 없이 수렴. 누락→재요청, 재입장 모두 체크섬 일치 |
 | `orr_testgame` | arena 테스트 게임, 루프백 네트워크 2클라 2000틱 테스트 | 골든 `0x13cdc3c810d65459` |
+| `orr_physics` (M2) | 결정론 2D FP 물리: 원/볼록 다각형(박스·OBB), x축 sort-and-sweep, SAT 접촉점, 순차 임펄스(8회, 마찰·반발·warm start), 센서 트리거, raycast/circle_cast, 원형 캐릭터 컨트롤러. 상태 전부 Frame 안(롤백·직렬화 자동) | 골든 `0x7ed61bde26ce839e`. 1000바디 4.4ms/틱(정착 후 2.4ms), 5000바디 25ms — 예산 초과, 슬립/아일랜드 필요 |
+| `orr_bridge`·`orr_view`·`orr_sample` (M2) | 브리지 InProc/Threaded(arc-swap 무락 스냅샷, mpsc), 이벤트 3상태, 뷰 보간 + 롤백 오차 감쇠(τ 0.12s), wgpu 30 + winit 0.30 2D 렌더, WGSL. `cargo run -p orr_sample --release` | RTX 4060 60.6fps, 5초 롤백 28회(최대 6틱), 멈춤 0. 보정 시 프레임당 최대 이동 5.5(보정 없으면 82.3) |
 | CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
 ## 다음
 
 1. 참가 후속: `join_backlog_peers` 기본값 0이면 빈틈 검사 없음(참가자가 피어 수를 스스로 알 방법 필요). 자리 비우기 시 피어마다 떠난 플레이어 입력을 받은 범위가 다르면 채우지 않음(조정자 필요). 스냅샷 전 도착한 알림은 호출자가 버퍼링. 폐기된 시도의 링크 정리. Relay 서버 연동. 조작된 리플레이 입력이 debug 빌드에서 FP 오버플로 패닉
-2. `orr_bridge` (InProc/Threaded) + `orr_view` 보간 → M2
-3. 결정론 FP 물리 2D
+2. 물리 성능: 슬립/아일랜드 (1000바디 1ms 목표). 캡슐, 일반 shape cast, CCD, 조인트. 쿼리(raycast 등)가 `&mut Frame`을 요구하는 문제
+3. M2 마무리: `orr_rhi`/`orr_render`로 렌더러 분리, 화면 텍스트, 이벤트 채널 상한, 낮은 fps에서 롤백 보정 정확도. `sample-build` CI 리눅스 확인
+4. M3 네트워크: Relay 서버(참가 후속 문제 대부분 여기서 해결), QUIC/WebRTC, 시간 동기화, 디싱크 감지
+
