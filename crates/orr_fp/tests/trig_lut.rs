@@ -34,6 +34,18 @@ fn lut_sin_cos_equals_cordic_on_first_quadrant() {
     }
 }
 
+/// `-PI - k*TWO_PI` wraps to `PI + 1` (`TWO_PI` is `2*PI + 1` raw), which
+/// once indexed the table out of bounds.
+#[test]
+fn sin_cos_at_negative_pi_wraps_matches_cordic() {
+    for k in 0..8i64 {
+        for off in -2..=2i64 {
+            let x = FP::from_raw(-FP::PI.raw() - k * FP::TWO_PI.raw() + off);
+            assert_eq!(x.sin_cos(), x.sin_cos_cordic(), "raw {}", x.raw());
+        }
+    }
+}
+
 #[test]
 fn lut_sin_cos_equals_cordic_on_wide_range() {
     // Covers all quadrants, negative angles and multi-turn wrapping.

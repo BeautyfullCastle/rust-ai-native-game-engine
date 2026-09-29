@@ -334,6 +334,12 @@ impl FP {
     #[must_use]
     pub fn sin_cos(self) -> (FP, FP) {
         let (neg, cos_sign, folded_raw) = self.fold_quadrant();
+        // `TWO_PI` is one raw unit above `2 * PI`, so `wrap_angle` maps
+        // `-PI - k*TWO_PI` to `PI + 1` and the fold lands on `-1`, outside
+        // the table. CORDIC handles it, and matching it keeps goldens intact.
+        if folded_raw < 0 {
+            return self.sin_cos_cordic();
+        }
         let (cos_raw, sin_raw) = lut_sin_cos(folded_raw);
         (FP(if neg { -sin_raw } else { sin_raw }), FP(cos_sign * cos_raw))
     }
