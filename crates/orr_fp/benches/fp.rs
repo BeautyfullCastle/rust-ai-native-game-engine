@@ -25,6 +25,28 @@ fn bench_fp(c: &mut Criterion) {
     let anglef = std::f32::consts::FRAC_PI_4;
     c.bench_function("fp_sin", |bch| bch.iter(|| black_box(angle).sin()));
     c.bench_function("f32_sin", |bch| bch.iter(|| black_box(anglef).sin()));
+    c.bench_function("fp_cos", |bch| bch.iter(|| black_box(angle).cos()));
+    c.bench_function("fp_sin_cos", |bch| bch.iter(|| black_box(angle).sin_cos()));
+    c.bench_function("fp_tan", |bch| bch.iter(|| black_box(angle).tan()));
+
+    // Varying angles across the full turn, so a table lookup cannot hide
+    // cache misses behind a single hot entry.
+    let mut seed = 0x9e3779b97f4a7c15_u64;
+    let sweep: Vec<FP> = (0..4096)
+        .map(|_| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            FP::from_raw(((seed >> 33) as i64 % 411_775) - 205_887)
+        })
+        .collect();
+    c.bench_function("fp_sin_sweep", |bch| {
+        bch.iter(|| {
+            let mut acc = FP::ZERO;
+            for &a in &sweep {
+                acc += black_box(a).sin();
+            }
+            acc
+        })
+    });
 
     c.bench_function("fp_atan2", |bch| bch.iter(|| black_box(a).atan2(black_box(b))));
     c.bench_function("f32_atan2", |bch| bch.iter(|| black_box(af).atan2(black_box(bf))));

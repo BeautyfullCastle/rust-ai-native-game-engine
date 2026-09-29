@@ -74,7 +74,7 @@
 //! functions ([`FP::sin`], [`FP::cos`], [`FP::atan2`], [`FP::exp`],
 //! [`FP::ln`], ...) are implemented with CORDIC / fixed-point polynomial
 //! approximations driven entirely by `const` integer lookup tables
-//! (see `src/tables.rs`-equivalent constants in `trig.rs`), rather than by
+//! (see `trig.rs` and `trig_tables.rs`), rather than by
 //! calling into libm, so their results are likewise platform-independent.
 //!
 //! `tests/determinism_golden.rs` pins a checksum over a fixed sequence of
@@ -92,6 +92,7 @@ mod parse;
 mod quat;
 mod rng;
 mod trig;
+mod trig_tables;
 mod vec;
 
 #[cfg(feature = "float-interop")]
