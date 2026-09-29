@@ -41,6 +41,9 @@ pub enum ReplayError {
     Decompress(String),
     Truncated,
     BadCommand,
+    /// The header's player count exceeds the 32 slots the per-tick change
+    /// mask can describe.
+    BadPlayerCount(u8),
     /// [`replay_verify_checked`] was asked to verify against a build id
     /// whose resulting `Simulation::build_hash()` disagrees with the
     /// header's recorded `build_hash` (see the design doc's hot-patch
@@ -63,6 +66,7 @@ impl core::fmt::Display for ReplayError {
             ReplayError::Decompress(e) => write!(f, "decompression failed: {e}"),
             ReplayError::Truncated => write!(f, "replay body truncated/corrupt"),
             ReplayError::BadCommand => write!(f, "malformed command in replay body"),
+            ReplayError::BadPlayerCount(n) => write!(f, "replay player count {n} exceeds 32"),
             ReplayError::BuildHashMismatch { header, expected } => {
                 write!(f, "replay build hash {header:#x} does not match expected build hash {expected:#x}")
             }
@@ -94,8 +98,11 @@ impl<'a> Reader<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
     }
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.pos
+    }
     fn take(&mut self, n: usize) -> Result<&'a [u8], ReplayError> {
-        if n > self.bytes.len() - self.pos {
+        if n > self.remaining() {
             return Err(ReplayError::Truncated);
         }
         let s = &self.bytes[self.pos..self.pos + n];
@@ -284,12 +291,14 @@ impl<G: Game> ReplayReader<G> {
         let player_count = r.u8()?;
         let tick_rate = r.u32()?;
         let input_size = r.u32()?;
+        if player_count > 32 {
+            return Err(ReplayError::BadPlayerCount(player_count));
+        }
         let header = ReplayHeader { format_version, game_id, build_hash, seed, player_count, tick_rate, input_size };
 
         let compressed_len = r.u32()? as usize;
         let compressed = r.take(compressed_len)?;
-        let body = lz4_flex::block::decompress_size_prepended(compressed)
-            .map_err(|e| ReplayError::Decompress(e.to_string()))?;
+        let body = crate::wire::decompress_bounded(compressed).map_err(ReplayError::Decompress)?;
 
         let mut br = Reader::new(&body);
         let tick_count = br.u32()?;
@@ -306,7 +315,9 @@ impl<G: Game> ReplayReader<G> {
                 }
             }
             let cmd_count = br.u32()?;
-            let mut commands = Vec::with_capacity(cmd_count as usize);
+            // Each command takes at least 5 bytes (slot + length), so the
+            // remaining input bounds the allocation, not the forged count.
+            let mut commands = Vec::with_capacity((cmd_count as usize).min(br.remaining() / 5));
             for _ in 0..cmd_count {
                 let slot = PlayerSlot(br.u8()?);
                 let len = br.u32()? as usize;
@@ -319,7 +330,7 @@ impl<G: Game> ReplayReader<G> {
         }
 
         let checksum_count = br.u32()?;
-        let mut checksums = Vec::with_capacity(checksum_count as usize);
+        let mut checksums = Vec::with_capacity((checksum_count as usize).min(br.remaining() / 16));
         for _ in 0..checksum_count {
             let tick = br.u64()?;
             let checksum = br.u64()?;
@@ -383,8 +394,12 @@ impl<G: Game> ReplayReader<G> {
             sim.restore(&frame);
             from = key;
         }
-        for t in from + 1..=tick {
-            step_recorded(&mut sim, self, t);
+        // Walk recorded ticks only: `last_tick` comes from the file, so a
+        // counting loop up to `tick` could run for ever on a forged file.
+        if from < tick {
+            for (&t, _) in self.ticks.range(from + 1..=tick) {
+                step_recorded(&mut sim, self, t);
+            }
         }
         Ok(sim)
     }
@@ -506,7 +521,7 @@ fn replay_verify_reader<G: Game>(reader: ReplayReader<G>, config: G::Config) -> 
     let mut checked = 0u32;
     let mut mismatch = None;
 
-    for tick in 1..=reader.last_tick() {
+    for &tick in reader.ticks.keys() {
         if !step_recorded(&mut sim, &reader, tick) {
             continue;
         }

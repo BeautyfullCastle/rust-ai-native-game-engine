@@ -15,10 +15,13 @@
 
 mod events;
 mod input_source;
+mod join;
 mod replay;
 mod session;
+mod wire;
 
 pub use events::{EventBatch, EventStatus};
+pub use join::{join_request, JoinError};
 pub use input_source::{InputSource, LocalInputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RemoteInput};
 pub use replay::{
     replay_seek_checked, replay_verify, replay_verify_checked, ReplayError, ReplayHeader, ReplayReader, ReplayWriter,

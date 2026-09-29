@@ -12,12 +12,13 @@
 | `orr_sim` | Game/System/SimContext, TickInputs, 이벤트 키, 핫패치 간접 호출(`hotpatch` 기능, subsecond 연결), 빌드 해시 | |
 | `orr_session` | 예측/롤백, stall, 이벤트 3상태 조정, 체크섬 비교, `.orrp` 리플레이(lz4) + 빌드 해시 검사 | 1만 엔티티 틱 180µs, 8틱 재시뮬 787µs. 리플레이 약 19B/틱(2인) |
 | `orr_ecs` 직렬화 | `Frame::to_bytes`/`from_bytes` (ORRF v1, LE, u32 길이, 체크섬 검증, 잘못된 입력은 Err). `.orrp` v2 키프레임 + `seek` | 직렬화/역직렬화 1만 179/136µs, 10만 3.5/3.1ms. 키프레임 50틱 간격 시 400틱 2인 리플레이 7.5KB→10.6KB |
+| 늦은 참가 | 확정 틱(`verified_tick`) Frame 스냅샷 + lz4, 빌드 해시·설정·체크섬 검증. 빈 슬롯은 호스트가 기본 입력으로 채움. 기존 피어는 `authored_since`로 입력 재전송. `.orrp` 파서: 신뢰할 수 없는 개수·lz4 크기·틱 경계 검사 | 3번째 피어가 150틱에 참가, 600라운드까지 체크섬 일치(롤백 1028회) |
 | `orr_testgame` | arena 테스트 게임, 루프백 네트워크 2클라 2000틱 테스트 | 골든 `0x13cdc3c810d65459` |
 | CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
 ## 다음
 
-1. 늦은 참가 (Frame 바이트 API 위에 전송 경로). 리플레이 파서의 `Vec::with_capacity`를 신뢰할 수 없는 개수로 부르는 부분 강화
+1. 늦은 참가 후속: 입력 보관 기간(`input_log_ticks`)이 짧아 참가자가 멈추는 경우 감지, 참가 타임아웃, Relay 서버 연동. 조작된 리플레이 입력이 debug 빌드에서 FP 오버플로 패닉을 내는 문제
 2. atan/atan2 LUT (현재 벡터링 CORDIC 약 80ns). sin/cos는 LUT로 66ns → 6.5ns 완료, 골든 불변
 3. `orr_bridge` (InProc/Threaded) + `orr_view` 보간 → M2
 4. 결정론 FP 물리 2D
