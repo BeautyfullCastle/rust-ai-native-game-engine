@@ -7,7 +7,7 @@
 
 | 크레이트 | 내용 | 수치 |
 |---|---|---|
-| `orr_fp` | Q48.16 `FP`, Q16.16 `FP32`, Vec2/3, Quat, PCG32 `FrameRng`, `fp!` 컴파일타임 리터럴, LUT sin/cos(CORDIC 기준과 비트 동일) + CORDIC atan, 정수 sqrt, exp/ln. no_std, float 금지 lint | mul 0.72ns (f32 0.70), div 5.4ns, sqrt 81ns, sin/cos 6.5ns (CORDIC 66ns), atan2 79ns. 골든 `0x1555d30109e62487` |
+| `orr_fp` | Q48.16 `FP`, Q16.16 `FP32`, Vec2/3, Quat, PCG32 `FrameRng`, `fp!` 컴파일타임 리터럴, LUT sin/cos/atan/atan2(CORDIC 기준과 비트 동일, CORDIC 버전은 `*_cordic`으로 유지), 정수 sqrt, exp/ln. no_std, float 금지 lint | mul 0.72ns (f32 0.70), div 5.4ns, sqrt 81ns, sin/cos 7.0ns (CORDIC 66ns), atan 7.0ns (74ns), atan2 10ns, 연속 입력 19ns/호출 (CORDIC 93ns, f32 11ns). 골든 `0x1555d30109e62487` |
 | `orr_ecs` | Frame(스파스셋, Pod 컴포넌트), 결정론 엔티티 할당, 쿼리 1~4개 + Without, Commands, 싱글톤, FrameList, FrameRing, xxh3 체크섬 | 1M 순회 1.9ms (순수 Vec 1.2ms), 10만 스냅샷 0.66ms, 체크섬 0.48ms. 골든 `14364510420768418636` |
 | `orr_sim` | Game/System/SimContext, TickInputs, 이벤트 키, 핫패치 간접 호출(`hotpatch` 기능, subsecond 연결), 빌드 해시 | |
 | `orr_session` | 예측/롤백, stall, 이벤트 3상태 조정, 체크섬 비교, `.orrp` 리플레이(lz4) + 빌드 해시 검사 | 1만 엔티티 틱 180µs, 8틱 재시뮬 787µs. 리플레이 약 19B/틱(2인) |
@@ -19,6 +19,5 @@
 ## 다음
 
 1. 늦은 참가 후속: 입력 보관 기간(`input_log_ticks`)이 짧아 참가자가 멈추는 경우 감지, 참가 타임아웃, Relay 서버 연동. 조작된 리플레이 입력이 debug 빌드에서 FP 오버플로 패닉을 내는 문제
-2. atan/atan2 LUT (현재 벡터링 CORDIC 약 80ns). sin/cos는 LUT로 66ns → 6.5ns 완료, 골든 불변
-3. `orr_bridge` (InProc/Threaded) + `orr_view` 보간 → M2
-4. 결정론 FP 물리 2D
+2. `orr_bridge` (InProc/Threaded) + `orr_view` 보간 → M2
+3. 결정론 FP 물리 2D

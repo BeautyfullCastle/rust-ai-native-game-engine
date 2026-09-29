@@ -48,7 +48,42 @@ fn bench_fp(c: &mut Criterion) {
         })
     });
 
+    c.bench_function("fp_atan", |bch| bch.iter(|| black_box(a).atan()));
+    c.bench_function("fp_atan_cordic", |bch| bch.iter(|| black_box(a).atan_cordic()));
     c.bench_function("fp_atan2", |bch| bch.iter(|| black_box(a).atan2(black_box(b))));
+    c.bench_function("fp_atan2_cordic", |bch| {
+        bch.iter(|| black_box(a).atan2_cordic(black_box(b)))
+    });
+    // Varying (y, x) pairs of mixed magnitude and sign (game-like: up to
+    // a few hundred units), so both the `|y/x| <= 1` and `> 1` branches run.
+    let pairs: Vec<(FP, FP)> = (0..4096)
+        .map(|_| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let y = ((seed >> 33) as i64 % 40_000_000) - 20_000_000;
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let x = ((seed >> 33) as i64 % 40_000_000) - 20_000_000;
+            (FP::from_raw(y), FP::from_raw(x | 1))
+        })
+        .collect();
+    let ratios: Vec<FP> = pairs.iter().map(|&(y, x)| y / x).collect();
+    c.bench_function("fp_atan_sweep", |bch| {
+        bch.iter(|| {
+            let mut acc = FP::ZERO;
+            for &t in &ratios {
+                acc += black_box(t).atan();
+            }
+            acc
+        })
+    });
+    c.bench_function("fp_atan2_sweep", |bch| {
+        bch.iter(|| {
+            let mut acc = FP::ZERO;
+            for &(y, x) in &pairs {
+                acc += black_box(y).atan2(black_box(x));
+            }
+            acc
+        })
+    });
     c.bench_function("f32_atan2", |bch| bch.iter(|| black_box(af).atan2(black_box(bf))));
 
     let v = FPVec3::new(fp!(1.0), fp!(2.0), fp!(3.0));
