@@ -1,5 +1,7 @@
-// Minimal 2D pass: one instanced quad per entity; circles are cut out of the quad.
-// World space to clip space: (world - center) * scale.
+// Minimal 2D pass: one instanced quad per entity. Circles are cut out of the
+// quad with a signed distance in the fragment shader; boxes are the quad
+// itself, rotated by the instance angle. World space to clip space:
+// (world - center) * scale.
 
 struct Globals {
     center: vec2<f32>,
@@ -11,13 +13,15 @@ struct Globals {
 struct VsIn {
     @builtin(vertex_index) vertex: u32,
     @location(0) center: vec2<f32>,
-    @location(1) half_size: f32,
-    @location(2) shape: u32,
-    @location(3) color: vec4<f32>,
+    @location(1) half_size: vec2<f32>,
+    @location(2) rot: f32,
+    @location(3) shape: u32,
+    @location(4) color: vec4<f32>,
 };
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
+    // Corner in the body's own frame: -1..1 on each side of the quad.
     @location(0) local: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) shape: u32,
@@ -35,7 +39,11 @@ var<private> corners: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     let corner = corners[in.vertex];
-    let world = in.center + corner * in.half_size;
+    let offset = corner * in.half_size;
+    let c = cos(in.rot);
+    let s = sin(in.rot);
+    let rotated = vec2<f32>(c * offset.x - s * offset.y, s * offset.x + c * offset.y);
+    let world = in.center + rotated;
     var out: VsOut;
     out.position = vec4<f32>((world - globals.center) * globals.scale, 0.0, 1.0);
     out.local = corner;
@@ -53,7 +61,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if (coverage <= 0.0) {
             discard;
         }
-        return vec4<f32>(in.color.rgb, in.color.a * coverage);
+        // A dark dot on the +x side of the body shows its rotation.
+        let mark = 1.0 - smoothstep(0.16, 0.22, length(in.local - vec2<f32>(0.55, 0.0)));
+        let rgb = mix(in.color.rgb, in.color.rgb * 0.45, mark);
+        return vec4<f32>(rgb, in.color.a * coverage);
     }
     return in.color;
 }

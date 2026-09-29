@@ -9,12 +9,13 @@ use bytemuck::{Pod, Zeroable};
 use orr_view::{RenderItem, Shape};
 use winit::window::Window;
 
-/// One instance as the shader reads it (32 bytes).
+/// One instance as the shader reads it (40 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Instance {
     center: [f32; 2],
-    half_size: f32,
+    half_size: [f32; 2],
+    rot: f32,
     shape: u32,
     color: [f32; 4],
 }
@@ -45,6 +46,15 @@ impl Camera {
             [per_unit, per_unit * w / h]
         }
     }
+}
+
+/// The GPU instance of one render item: a circle, or a box turned by `transform.rot`.
+fn instance_of(i: &RenderItem) -> Instance {
+    let (shape, half_size) = match i.style.shape {
+        Shape::Circle => (0, [i.style.size; 2]),
+        Shape::Quad => (1, [i.style.size, if i.style.half_y > 0.0 { i.style.half_y } else { i.style.size }]),
+    };
+    Instance { center: [i.transform.pos.x, i.transform.pos.y], half_size, rot: i.transform.rot, shape, color: i.style.color }
 }
 
 const INITIAL_INSTANCES: usize = 1024;
@@ -136,7 +146,7 @@ impl Renderer {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Instance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Uint32, 3 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Uint32, 4 => Float32x4],
                 })],
             },
             fragment: Some(wgpu::FragmentState {
@@ -212,15 +222,7 @@ impl Renderer {
         };
 
         self.scratch.clear();
-        self.scratch.extend(items.iter().map(|i| Instance {
-            center: [i.transform.pos.x, i.transform.pos.y],
-            half_size: i.style.size,
-            shape: match i.style.shape {
-                Shape::Circle => 0,
-                Shape::Quad => 1,
-            },
-            color: i.style.color,
-        }));
+        self.scratch.extend(items.iter().map(instance_of));
         if self.scratch.len() > self.instance_capacity {
             self.instance_capacity = self.scratch.len().next_power_of_two();
             self.instance_buffer = Self::make_instance_buffer(&self.device, self.instance_capacity);
@@ -257,5 +259,31 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orr_ecs::Entity;
+    use orr_view::{Style, Transform2, Vec2};
+
+    fn item(shape: Shape, size: f32, half_y: f32, rot: f32) -> RenderItem {
+        RenderItem {
+            entity: Entity::NONE,
+            transform: Transform2::new(Vec2::new(3.0, -4.0), rot),
+            style: Style { shape, size, half_y, color: [1.0, 0.5, 0.25, 1.0] },
+        }
+    }
+
+    #[test]
+    fn instance_is_40_bytes_and_carries_rotation_and_extents() {
+        assert_eq!(std::mem::size_of::<Instance>(), 40);
+        let b = instance_of(&item(Shape::Quad, 2.0, 0.5, 1.25));
+        assert_eq!((b.shape, b.half_size, b.rot, b.center), (1, [2.0, 0.5], 1.25, [3.0, -4.0]));
+        // half_y = 0 keeps the old "square of side 2 * size" meaning.
+        assert_eq!(instance_of(&item(Shape::Quad, 2.0, 0.0, 0.0)).half_size, [2.0, 2.0]);
+        let c = instance_of(&item(Shape::Circle, 0.7, 0.0, 0.0));
+        assert_eq!((c.shape, c.half_size), (0, [0.7, 0.7]));
     }
 }
