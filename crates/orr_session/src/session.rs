@@ -6,7 +6,7 @@ use orr_sim::{EventKey, Game, PlayerSlot, SimEvent, Simulation, TickInputs};
 
 use crate::events::{EventBatch, EventStatus};
 use crate::input_source::{InputSource, RemoteInput};
-use crate::join::{self, JoinError};
+use crate::join::{self, JoinError, JoinTicket};
 
 /// `Session` configuration.
 #[derive(Clone, Debug)]
@@ -42,6 +42,21 @@ pub struct SessionConfig {
     /// authored, for [`Session::authored_since`] (a late joiner needs every
     /// peer's inputs after the snapshot tick).
     pub input_log_ticks: u32,
+    /// Joiner only: a nonce, chosen once per join, that lets the host tell a
+    /// retry of the same joiner from a different one. `0` = anonymous
+    /// one-shot join (never retried). See [`crate::JoinAttempts`].
+    pub join_id: u64,
+    /// Joiner only: number of the current join attempt (1, 2, ...). Set by
+    /// [`crate::JoinAttempts`]; `from_join_snapshot` refuses a snapshot of
+    /// another attempt.
+    pub join_attempt: u32,
+    /// Joiner only: how many existing peers will send a
+    /// [`Session::backlog_notice`]. When above `0`, the joiner checks the
+    /// notices for input gaps and sends no input until they are all in and
+    /// complete. `0` = no check (the joiner may stall on a gap).
+    pub join_backlog_peers: u32,
+    /// Joiner only: the most join requests [`crate::JoinAttempts`] makes.
+    pub max_join_attempts: u32,
 }
 
 impl SessionConfig {
@@ -57,6 +72,10 @@ impl SessionConfig {
             build_id: 0,
             vacant_slots: Vec::new(),
             input_log_ticks: 256,
+            join_id: 0,
+            join_attempt: 0,
+            join_backlog_peers: 0,
+            max_join_attempts: 3,
         }
     }
 }
@@ -144,6 +163,59 @@ pub fn compare_checksums(local: &[(u64, u64)], remote: &[(u64, u64)]) -> Vec<Des
 /// One input this peer authored: slot, input and the commands sent with it.
 type AuthoredInput<G> = (PlayerSlot, <G as Game>::Input, Vec<<G as Game>::Command>);
 
+/// The ticks a vacant slot's default input is authored for by this peer:
+/// `from <= tick < until` (`until` is `u64::MAX` while the slot is open).
+/// Only the latest interval is kept; earlier ones are done and only live on
+/// in the `authored` log.
+#[derive(Clone, Copy)]
+struct VacantSpan {
+    from: u64,
+    until: u64,
+}
+
+/// A join this host served: who asked, and the ticket the peers hold for.
+struct Grant {
+    joiner_id: u64,
+    ticket: JoinTicket,
+    /// The joiner's first input arrived: the transfer is over.
+    confirmed: bool,
+}
+
+/// Where a joiner stands on the input check of its backlogs.
+enum JoinState {
+    /// Backlog notices are still missing.
+    Syncing,
+    /// Every notice is in and the inputs cover the whole range needed.
+    Ready,
+    /// Proven hole (see `JoinError::InputGap`).
+    Gap { slot: PlayerSlot, needed_from: u64, available_from: u64 },
+}
+
+/// A joiner's view of the join: the notices received so far, and the
+/// inputs it authored meanwhile but has not sent (see `Session::emit`).
+struct JoinProgress<G: Game> {
+    attempt: u32,
+    snapshot_tick: u64,
+    first_input_tick: u64,
+    expected: u32,
+    notices: BTreeMap<PlayerSlot, Vec<join::Span>>,
+    state: JoinState,
+    held: Vec<(u64, AuthoredInput<G>)>,
+}
+
+/// How far a joiner's input check has come, see [`Session::join_status`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinStatus {
+    /// This session does not check backlogs (not a joiner, or
+    /// `join_backlog_peers` is `0`).
+    Unchecked,
+    /// `received` of the `expected` backlog notices are in.
+    Syncing { received: u32, expected: u32 },
+    /// All notices are in and no input is missing. The session sends its
+    /// own inputs.
+    Ready,
+}
+
 struct TickRecord<G: Game> {
     inputs: TickInputs<G::Input, G::Command>,
     predicted: Vec<bool>,
@@ -170,12 +242,21 @@ pub struct Session<G: Game, S: InputSource<G>> {
     /// were announced with (for change detection across a rollback).
     announced: BTreeMap<EventKey, Vec<u8>>,
     checksums: Vec<(u64, u64)>,
-    /// Vacant slots this peer authors default input for, mapped to the
-    /// first tick it no longer does (`u64::MAX` while still open).
-    vacant: BTreeMap<PlayerSlot, u64>,
+    /// Vacant slots this peer authors default input for.
+    vacant: BTreeMap<PlayerSlot, VacantSpan>,
     /// Inputs this peer authored (local slot and vacant slots) by tick, kept
-    /// for `input_log_ticks` behind `verified_tick`.
+    /// for `input_log_ticks` behind `verified_tick` (and longer while a join
+    /// holds them, see `holds`).
     authored: BTreeMap<u64, Vec<AuthoredInput<G>>>,
+    /// Joins this host served, by slot.
+    grants: BTreeMap<PlayerSlot, Grant>,
+    /// Joins in transfer, by slot: `authored` keeps every tick after the
+    /// ticket's `snapshot_tick` until the join is confirmed or dropped.
+    holds: BTreeMap<PlayerSlot, JoinTicket>,
+    /// Highest tick of an input received from a remote peer, by slot.
+    last_remote_tick: BTreeMap<PlayerSlot, u64>,
+    /// Set on a joiner that checks its backlogs.
+    join: Option<JoinProgress<G>>,
 }
 
 fn event_bytes<E: bytemuck::Pod>(e: &E) -> Vec<u8> {
@@ -211,7 +292,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             confirmed_input.insert(tick, per_player);
         }
 
-        let vacant = cfg.vacant_slots.iter().map(|&slot| (slot, u64::MAX)).collect();
+        let vacant = cfg.vacant_slots.iter().map(|&slot| (slot, VacantSpan { from: 0, until: u64::MAX })).collect();
 
         Self {
             sim,
@@ -228,6 +309,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             checksums: Vec::new(),
             vacant,
             authored: BTreeMap::new(),
+            grants: BTreeMap::new(),
+            holds: BTreeMap::new(),
+            last_remote_tick: BTreeMap::new(),
+            join: None,
         }
     }
 
@@ -240,7 +325,15 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     ///
     /// Rejects the message, before anything is simulated, when the build
     /// hash or a session setting differs, or the snapshot does not decode,
-    /// or its tick or checksum differs from the message header.
+    /// or its tick or checksum differs from the message header, or it
+    /// answers another attempt than `cfg.join_attempt`.
+    ///
+    /// With `cfg.join_backlog_peers > 0` the session then checks the peers'
+    /// [`backlog_notice`](Self::backlog_notice)s (see
+    /// [`receive_backlog`](Self::receive_backlog)) and keeps its own inputs
+    /// back until they prove nothing is missing. Until then it never
+    /// authors a tick anywhere but locally, so dropping a session that
+    /// found a gap leaves no input of its slot with any peer.
     pub fn from_join_snapshot(
         config: G::Config,
         cfg: SessionConfig,
@@ -260,8 +353,25 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         if frame.checksum() != snap.checksum {
             return Err(JoinError::SnapshotMismatch { expected: snap.checksum, actual: frame.checksum() });
         }
+        let attempt = snap.attempt?;
+        if attempt != cfg.join_attempt {
+            return Err(JoinError::StaleAttempt { current: cfg.join_attempt, got: attempt });
+        }
         sim.restore(&frame);
-        Ok(Self::from_sim(sim, cfg, source, snap.first_input_tick))
+        let expected = cfg.join_backlog_peers;
+        let mut session = Self::from_sim(sim, cfg, source, snap.first_input_tick);
+        if expected > 0 {
+            session.join = Some(JoinProgress {
+                attempt,
+                snapshot_tick: snap.snapshot_tick,
+                first_input_tick: snap.first_input_tick,
+                expected,
+                notices: BTreeMap::new(),
+                state: JoinState::Syncing,
+                held: Vec::new(),
+            });
+        }
+        Ok(session)
     }
 
     /// Answers a joiner's [`join_request`] with a snapshot message for
@@ -271,25 +381,277 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// The snapshot is this peer's frame at its `verified_tick` (never a
     /// predicted one). From the `next_send_tick` at this call on, this peer
     /// stops authoring default input for the slot: the joiner supplies it.
-    /// The caller must also connect the joiner to every other peer and have
-    /// each send `authored_since(0)` over the new link.
+    /// The caller must also connect the joiner to every other peer, give
+    /// each of them the [`pending_join`](Self::pending_join) ticket for
+    /// [`hold_inputs_for_join`](Self::hold_inputs_for_join), and have each
+    /// send its `authored_since(snapshot_tick)` and
+    /// [`backlog_notice`](Self::backlog_notice) over the new link.
+    ///
+    /// The slot is handed out once. While a join is pending, a request of
+    /// the same `joiner_id` with a higher `attempt` (a retry) supersedes it:
+    /// this peer takes the slot back, authoring the default input for every
+    /// tick since the old `first_input_tick`, and serves a fresh snapshot.
+    /// That is safe because a joiner that checks its backlogs
+    /// (`join_backlog_peers > 0`, required for a retry) sends no input
+    /// before it is `Ready`. A request with a lower or equal `attempt` gets
+    /// `StaleAttempt`; any other second request `SlotNotVacant`.
+    ///
+    /// Until the joiner's first input arrives, this peer holds its inputs
+    /// after `snapshot_tick`, whatever `input_log_ticks` says.
     pub fn serve_join(&mut self, request: &[u8]) -> Result<Vec<u8>, JoinError> {
         let req = join::decode_request(request)?;
-        req.check_against(&self.cfg, self.build_hash())?;
-        if self.vacant.get(&req.slot) != Some(&u64::MAX) {
-            return Err(JoinError::SlotNotVacant(req.slot));
-        }
+        req.header.check_against(&self.cfg, self.build_hash())?;
+        let slot = req.header.slot;
+        let open = self.vacant.get(&slot).is_some_and(|v| v.until == u64::MAX);
+        let takeover_from = match self.grants.get(&slot) {
+            None if open => None,
+            None => return Err(JoinError::SlotNotVacant(slot)),
+            Some(g) => {
+                let retry = req.joiner_id != 0 && req.backlog_peers > 0 && g.joiner_id == req.joiner_id;
+                if g.confirmed || !retry {
+                    return Err(JoinError::SlotNotVacant(slot));
+                }
+                if req.attempt <= g.ticket.attempt {
+                    return Err(JoinError::StaleAttempt { current: g.ticket.attempt, got: req.attempt });
+                }
+                // The old joiner never sent an input, so the slot's ticks
+                // from its `first_input_tick` on have no author yet.
+                Some(g.ticket.first_input_tick)
+            }
+        };
         let frame = self.ring.get(self.verified_tick).ok_or(JoinError::NoVerifiedFrame)?;
-        let header = join::JoinHeader { build_hash: self.build_hash(), ..req };
-        let message =
-            join::encode_snapshot(&header, self.verified_tick, self.next_send_tick, frame.checksum(), &frame.to_bytes());
-        self.vacant.insert(req.slot, self.next_send_tick);
+        let header = join::JoinHeader { build_hash: self.build_hash(), ..req.header };
+        let ticket = JoinTicket {
+            slot,
+            attempt: req.attempt,
+            snapshot_tick: self.verified_tick,
+            first_input_tick: self.next_send_tick,
+        };
+        let message = join::encode_snapshot(
+            &header,
+            ticket.snapshot_tick,
+            ticket.first_input_tick,
+            frame.checksum(),
+            ticket.attempt,
+            &frame.to_bytes(),
+        );
+        if let Some(from) = takeover_from {
+            self.author_defaults(slot, from, ticket.first_input_tick);
+        }
+        if let Some(span) = self.vacant.get_mut(&slot) {
+            span.until = ticket.first_input_tick;
+        }
+        self.grants.insert(slot, Grant { joiner_id: req.joiner_id, ticket, confirmed: false });
+        self.holds.insert(slot, ticket);
         Ok(message)
+    }
+
+    /// The ticket of the join this host is serving for `slot`, until the
+    /// joiner's first input arrives.
+    pub fn pending_join(&self, slot: PlayerSlot) -> Option<JoinTicket> {
+        self.grants.get(&slot).filter(|g| !g.confirmed).map(|g| g.ticket)
+    }
+
+    /// Keeps every input this peer authors after `ticket.snapshot_tick`
+    /// (whatever `input_log_ticks` says) so the joiner of `ticket.slot` can
+    /// catch up from it. Call it on every existing peer when a join starts;
+    /// a ticket of a retry replaces the old one. The hold ends when an input
+    /// of the slot at `first_input_tick` or later arrives (the joiner is
+    /// caught up), or on [`release_join_hold`](Self::release_join_hold).
+    pub fn hold_inputs_for_join(&mut self, ticket: JoinTicket) {
+        self.holds.insert(ticket.slot, ticket);
+    }
+
+    /// Ends the hold of `slot` (the join was given up), and drops this
+    /// host's pending grant for it. Does not vacate the slot; see
+    /// [`mark_slot_vacant`](Self::mark_slot_vacant).
+    pub fn release_join_hold(&mut self, slot: PlayerSlot) {
+        self.holds.remove(&slot);
+        self.grants.remove(&slot);
+    }
+
+    /// Makes `slot`, played by a peer that is gone, open again: this peer
+    /// authors default input for it from `from_tick` on, so
+    /// [`serve_join`](Self::serve_join) can hand it to a new player.
+    ///
+    /// Exactly one author per slot per tick holds because the old author
+    /// stops for good at `from_tick` (see below) and this peer starts
+    /// exactly there: it authors `from_tick..next_send_tick` at once (also
+    /// sending them) and every later tick in `advance`. `from_tick` must
+    /// be after `verified_tick` (a verified tick cannot change), not after
+    /// `next_send_tick`, and after every tick of the slot received from a
+    /// remote peer. The caller must make sure of the rest: the old author
+    /// sends nothing at or after `from_tick` (its link is closed), and
+    /// every peer holds its inputs up to `from_tick - 1`. Pick
+    /// `from_tick` as the highest [`last_remote_tick`](Self::last_remote_tick)
+    /// of the slot over all peers, plus one.
+    ///
+    /// Cancels a pending join of the slot (its hold and grant).
+    pub fn mark_slot_vacant(&mut self, slot: PlayerSlot, from_tick: u64) -> Result<(), JoinError> {
+        if slot == self.cfg.local_slot || slot.0 >= self.cfg.player_count {
+            return Err(JoinError::InvalidVacate("not a remote slot"));
+        }
+        let prev = self.vacant.get(&slot).copied();
+        if prev.is_some_and(|v| v.until == u64::MAX) {
+            return Err(JoinError::InvalidVacate("slot is already vacant"));
+        }
+        if from_tick <= self.verified_tick {
+            return Err(JoinError::InvalidVacate("from tick is already verified"));
+        }
+        if from_tick > self.next_send_tick {
+            return Err(JoinError::InvalidVacate("from tick is after the next send tick"));
+        }
+        if prev.is_some_and(|v| from_tick < v.until) {
+            return Err(JoinError::InvalidVacate("from tick overlaps the previous default input"));
+        }
+        if self.last_remote_tick.get(&slot).is_some_and(|&t| t >= from_tick) {
+            return Err(JoinError::InvalidVacate("an input at or after from tick was already received"));
+        }
+        self.vacant.insert(slot, VacantSpan { from: from_tick, until: u64::MAX });
+        self.holds.remove(&slot);
+        self.grants.remove(&slot);
+        self.author_defaults(slot, from_tick, self.next_send_tick);
+        Ok(())
+    }
+
+    /// The highest tick of an input of `slot` received from a remote peer.
+    /// Peers compare these to pick `from_tick` for `mark_slot_vacant`.
+    pub fn last_remote_tick(&self, slot: PlayerSlot) -> Option<u64> {
+        self.last_remote_tick.get(&slot).copied()
+    }
+
+    /// Describes what this peer's `authored_since` backlog holds, for the
+    /// joiner of `slot` (see [`hold_inputs_for_join`](Self::hold_inputs_for_join)).
+    /// `None` when this peer holds no join of that slot. Send it over the
+    /// same link as the backlog; the joiner reads it with
+    /// [`receive_backlog`](Self::receive_backlog).
+    pub fn backlog_notice(&self, slot: PlayerSlot) -> Option<Vec<u8>> {
+        let ticket = self.holds.get(&slot)?;
+        // Ticks are visited in order, so each slot's ticks form runs.
+        let mut runs: BTreeMap<PlayerSlot, (u64, u64)> = BTreeMap::new();
+        let mut spans = Vec::new();
+        for (&tick, list) in &self.authored {
+            for (s, ..) in list {
+                match runs.get_mut(s) {
+                    Some((_, last)) if *last + 1 == tick => *last = tick,
+                    Some(run) => {
+                        spans.push(join::Span { slot: *s, from: run.0, until: run.1 + 1 });
+                        *run = (tick, tick);
+                    }
+                    None => {
+                        runs.insert(*s, (tick, tick));
+                    }
+                }
+            }
+        }
+        for (s, (from, last)) in runs {
+            let open = s == self.cfg.local_slot || self.vacant.get(&s).is_some_and(|v| v.until == u64::MAX);
+            spans.push(join::Span { slot: s, from, until: if open { u64::MAX } else { last + 1 } });
+        }
+        Some(join::encode_backlog(ticket.attempt, self.cfg.local_slot, &spans))
+    }
+
+    /// Joiner: takes in one existing peer's [`backlog_notice`](Self::backlog_notice).
+    /// Once all `join_backlog_peers` notices are in, the spans of all peers
+    /// must cover, from the tick after the snapshot on, the input of every
+    /// remote slot (and of the joiner's own slot up to `first_input_tick`,
+    /// which the host authored). Then the session is `Ready` and sends the
+    /// inputs it held back. If a tick is offered by nobody, the gap can
+    /// never be filled and this returns `InputGap`: drop the session and
+    /// join again. Whether a missing input is late or gone is settled by
+    /// the notices, not by time: until all are in the status is `Syncing`.
+    ///
+    /// A notice of another attempt returns `StaleAttempt` and changes
+    /// nothing; a repeated notice of the same peer replaces the earlier one.
+    pub fn receive_backlog(&mut self, message: &[u8]) -> Result<JoinStatus, JoinError> {
+        let notice = join::decode_backlog(message)?;
+        let Some(progress) = self.join.as_mut() else { return Ok(JoinStatus::Unchecked) };
+        if notice.attempt != progress.attempt {
+            return Err(JoinError::StaleAttempt { current: progress.attempt, got: notice.attempt });
+        }
+        let player_count = self.cfg.player_count;
+        if notice.sender.0 >= player_count || notice.sender == self.cfg.local_slot {
+            return Err(JoinError::Corrupt("notice sender is not another peer"));
+        }
+        if notice.spans.iter().any(|s| s.slot.0 >= player_count) {
+            return Err(JoinError::Corrupt("notice span for an unknown slot"));
+        }
+        if matches!(progress.state, JoinState::Syncing) {
+            progress.notices.insert(notice.sender, notice.spans);
+            if progress.notices.len() as u64 >= u64::from(progress.expected) {
+                self.settle_join();
+            }
+        }
+        self.join_status()
+    }
+
+    /// All notices are in: decide between `Ready` and `Gap`.
+    fn settle_join(&mut self) {
+        let Some(progress) = self.join.as_mut() else { return };
+        // Ticks up to `input_delay` are pre-confirmed, not sent by anyone.
+        let need_from = (progress.snapshot_tick + 1).max(self.cfg.input_delay as u64 + 1);
+        for slot in 0..self.cfg.player_count {
+            let slot = PlayerSlot(slot);
+            let need_until = if slot == self.cfg.local_slot { progress.first_input_tick } else { u64::MAX };
+            let mut ranges: Vec<(u64, u64)> = progress
+                .notices
+                .values()
+                .flatten()
+                .filter(|s| s.slot == slot)
+                .map(|s| (s.from, s.until))
+                .collect();
+            if let Some((needed_from, available_from)) = join::first_gap(&mut ranges, need_from, need_until) {
+                progress.state = JoinState::Gap { slot, needed_from, available_from };
+                return;
+            }
+        }
+        progress.state = JoinState::Ready;
+        let held = std::mem::take(&mut progress.held);
+        for (tick, (slot, input, commands)) in held {
+            self.source.send_local(tick, slot, input, commands);
+        }
+    }
+
+    /// Joiner: how far the backlog check has come. `Err(InputGap)` once a
+    /// hole is proven.
+    pub fn join_status(&self) -> Result<JoinStatus, JoinError> {
+        let Some(progress) = &self.join else { return Ok(JoinStatus::Unchecked) };
+        match progress.state {
+            JoinState::Syncing => Ok(JoinStatus::Syncing {
+                received: progress.notices.len() as u32,
+                expected: progress.expected,
+            }),
+            JoinState::Ready => Ok(JoinStatus::Ready),
+            JoinState::Gap { slot, needed_from, available_from } => {
+                Err(JoinError::InputGap { slot, needed_from, available_from })
+            }
+        }
+    }
+
+    /// Authors default input for `slot` at ticks `from..to`, sending it as
+    /// this peer's own.
+    fn author_defaults(&mut self, slot: PlayerSlot, from: u64, to: u64) {
+        for tick in from..to {
+            let idle = G::Input::default();
+            self.confirmed_input.entry(tick).or_default().insert(slot, idle);
+            self.authored.entry(tick).or_default().push((slot, idle, Vec::new()));
+            self.emit(tick, slot, idle, Vec::new());
+        }
+    }
+
+    /// Sends an input this peer authored, unless it is a joiner that has
+    /// not yet proven its backlogs complete: then the input waits.
+    fn emit(&mut self, tick: u64, slot: PlayerSlot, input: G::Input, commands: Vec<G::Command>) {
+        match &mut self.join {
+            Some(p) if !matches!(p.state, JoinState::Ready) => p.held.push((tick, (slot, input, commands))),
+            _ => self.source.send_local(tick, slot, input, commands),
+        }
     }
 
     /// Inputs (and commands) this peer authored for ticks after `tick`:
     /// its own slot and any vacant slot it still or previously filled.
-    /// Kept `input_log_ticks` behind `verified_tick`.
+    /// Kept `input_log_ticks` behind `verified_tick`, or since the snapshot
+    /// tick of a join in transfer.
     pub fn authored_since(&self, tick: u64) -> Vec<RemoteInput<G>> {
         self.authored
             .range((Bound::Excluded(tick), Bound::Unbounded))
@@ -481,20 +843,31 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             self.confirmed_commands.entry(send_tick).or_default().insert(self.cfg.local_slot, local_commands.clone());
         }
         self.authored.entry(send_tick).or_default().push((self.cfg.local_slot, local_input, local_commands.clone()));
-        self.source.send_local(send_tick, self.cfg.local_slot, local_input, local_commands);
+        self.emit(send_tick, self.cfg.local_slot, local_input, local_commands);
 
         // Vacant slots this peer still covers get default input, sent like
         // any other peer's so everyone confirms the same thing.
-        let covered: Vec<PlayerSlot> =
-            self.vacant.iter().filter(|&(_, &until)| send_tick < until).map(|(&slot, _)| slot).collect();
+        let covered: Vec<PlayerSlot> = self
+            .vacant
+            .iter()
+            .filter(|&(_, span)| span.from <= send_tick && send_tick < span.until)
+            .map(|(&slot, _)| slot)
+            .collect();
         for slot in covered {
-            let idle = G::Input::default();
-            self.confirmed_input.entry(send_tick).or_default().insert(slot, idle);
-            self.authored.entry(send_tick).or_default().push((slot, idle, Vec::new()));
-            self.source.send_local(send_tick, slot, idle, Vec::new());
+            self.author_defaults(slot, send_tick, send_tick + 1);
         }
 
         for remote in self.source.poll_remote() {
+            let seen = self.last_remote_tick.entry(remote.slot).or_insert(0);
+            *seen = (*seen).max(remote.tick);
+            // The joiner is caught up once it sends input of its own: the
+            // hold on our inputs is over.
+            if self.holds.get(&remote.slot).is_some_and(|t| remote.tick >= t.first_input_tick) {
+                self.holds.remove(&remote.slot);
+                if let Some(g) = self.grants.get_mut(&remote.slot) {
+                    g.confirmed = true;
+                }
+            }
             // Already verified (a late joiner is sent the whole input log).
             if remote.tick <= self.verified_tick {
                 continue;
@@ -512,7 +885,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         }
 
         self.advance_verified(&mut batch);
-        let keep_from = self.verified_tick.saturating_sub(self.cfg.input_log_ticks as u64);
+        let mut keep_from = self.verified_tick.saturating_sub(self.cfg.input_log_ticks as u64);
+        for ticket in self.holds.values() {
+            keep_from = keep_from.min(ticket.snapshot_tick + 1);
+        }
         self.authored = self.authored.split_off(&keep_from);
 
         if self.sim.tick() - self.verified_tick >= self.cfg.max_prediction as u64 {
