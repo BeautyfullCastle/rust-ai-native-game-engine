@@ -1,4 +1,5 @@
-//! Narrow phase: contact manifolds for circle and convex polygon pairs.
+//! Narrow phase: contact manifolds for circle and convex polygon pairs
+//! (capsule pairs live in `capsule`).
 //!
 //! Every routine is a pure function of its inputs. Normals always point
 //! from shape A to shape B. `separation` is negative for penetration and
@@ -7,7 +8,8 @@
 use orr_fp::{FPVec2, FP};
 
 use crate::fastmath::{self, mul, FastVec};
-use crate::types::{Shape, MAX_POLY_VERTS, SHAPE_CIRCLE};
+use crate::capsule::collide_capsule;
+use crate::types::{Shape, MAX_POLY_VERTS, SHAPE_CAPSULE, SHAPE_CIRCLE};
 
 /// Rigid transform: position plus rotation given as `(cos, sin)`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -65,6 +67,9 @@ pub(crate) struct Manifold {
 
 /// Contact manifold of two shapes, `margin` extra distance still counts.
 pub(crate) fn collide(sa: &Shape, xa: &Xf, sb: &Shape, xb: &Xf, margin: FP) -> Manifold {
+    if sa.kind == SHAPE_CAPSULE || sb.kind == SHAPE_CAPSULE {
+        return collide_capsule(sa, xa, sb, xb, margin);
+    }
     match (sa.kind == SHAPE_CIRCLE, sb.kind == SHAPE_CIRCLE) {
         (true, true) => circle_circle(sa.radius, xa.p, sb.radius, xb.p, margin),
         (false, true) => match poly_circle(sa, xa, xb.p, sb.radius, margin) {
@@ -268,6 +273,9 @@ fn clip(v: [FPVec2; 2], n: FPVec2, offset: FP) -> ([FPVec2; 2], usize) {
 /// Exact boolean overlap test (touching counts as overlapping). Used for
 /// sensors, where the manifold itself is not needed.
 pub(crate) fn overlap(sa: &Shape, xa: &Xf, sb: &Shape, xb: &Xf) -> bool {
+    if sa.kind == SHAPE_CAPSULE || sb.kind == SHAPE_CAPSULE {
+        return collide_capsule(sa, xa, sb, xb, FP::ZERO).count > 0;
+    }
     match (sa.kind == SHAPE_CIRCLE, sb.kind == SHAPE_CIRCLE) {
         (true, true) => {
             let r = sa.radius + sb.radius;

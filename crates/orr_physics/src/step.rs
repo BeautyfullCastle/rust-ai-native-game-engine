@@ -20,7 +20,7 @@ use crate::fastmath::{self, mul, FastVec};
 use crate::solver::{self, Constraint, ContactPt, Vw};
 use crate::types::{
     Body, Collider, ContactCache, OverlapPair, PhysicsConfig, PhysicsState, TriggerEvent, BODY_DYNAMIC, BODY_STATIC,
-    SHAPE_CIRCLE, SLEEP_FLAG, TRIGGER_ENTER, TRIGGER_EXIT,
+    SHAPE_CAPSULE, SHAPE_CIRCLE, SLEEP_FLAG, TRIGGER_ENTER, TRIGGER_EXIT,
 };
 
 /// Body has mass and is simulated as a dynamic body (asleep or not).
@@ -329,6 +329,9 @@ impl Scratch {
             let sh = &c.shape;
             let mut bb = if sh.kind == SHAPE_CIRCLE {
                 Aabb { min: b.pos - FPVec2::splat(sh.radius), max: b.pos + FPVec2::splat(sh.radius) }
+            } else if sh.kind == SHAPE_CAPSULE {
+                let (p, q) = (xf.apply(sh.verts[0]), xf.apply(sh.verts[1]));
+                Aabb { min: p.min(q) - FPVec2::splat(sh.radius), max: p.max(q) + FPVec2::splat(sh.radius) }
             } else {
                 let mut mn = FPVec2::splat(FP::MAX);
                 let mut mx = FPVec2::splat(FP::MIN);

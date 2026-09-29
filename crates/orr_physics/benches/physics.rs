@@ -8,12 +8,14 @@
 //!   (at rest, sleep-eligible: the typical game case).
 //! - `shaker_awake_*`: the pile on a kinematic plate shaken at 3 Hz, so
 //!   nothing ever rests. This is the all-awake worst case.
+//! - `mixed_*`: the pile and shaker scenes with capsules (upright and
+//!   tilted) as two of five body kinds.
 //! - `rollback8_*`: the 8-tick resimulation a rollback would pay.
 mod scenes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use orr_ecs::Frame;
 use orr_physics::{step, Scratch};
-use scenes::{build, build_field, build_shaker, shake};
+use scenes::{build, build_field, build_mixed, build_mixed_shaker, build_shaker, shake};
 
 /// A scene plus whether the shaker plate has to be driven each tick.
 struct Scene {
@@ -87,10 +89,13 @@ fn benches(c: &mut Criterion) {
     for n in [1000, 5000] {
         bench_step(c, &format!("field_settled_{n}"), warmed(build_field(n), false, 1600));
     }
+    bench_step(c, "mixed_settling_1000", warmed(build_mixed(1000), false, 300));
+    bench_step(c, "mixed_shaker_awake_1000", warmed(build_mixed_shaker(1000), true, 400));
     bench_resim(c, "rollback8_pile_settling_1000", warmed(build(1000), false, 300));
     bench_resim(c, "rollback8_pile_settled_1000", warmed(build(1000), false, 1200));
     bench_resim(c, "rollback8_shaker_awake_1000", warmed(build_shaker(1000), true, 400));
     bench_resim(c, "rollback8_field_settled_1000", warmed(build_field(1000), false, 1600));
+    bench_resim(c, "rollback8_mixed_shaker_awake_1000", warmed(build_mixed_shaker(1000), true, 400));
 }
 
 criterion_group!(physics, benches);

@@ -5,7 +5,8 @@ use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
 use orr_fp::{fp, FPVec2, FrameRng, FP};
 use orr_physics::{
-    apply_impulse, circle_cast, init, is_asleep, move_and_slide, raycast, CharacterParams, register, spawn_body, step, Body, Collider, PhysicsConfig, PhysicsSystem, QueryFilter,
+    apply_impulse, circle_cast, init, is_asleep, move_and_slide, move_and_slide_capsule, raycast, shape_cast,
+    CapsuleCharacterParams, CharacterParams, register, spawn_body, step, Body, Collider, PhysicsConfig, PhysicsSystem, QueryFilter,
     Scratch, Shape, TriggerEvent, BODY_DYNAMIC, TRIGGER_ENTER, TRIGGER_EXIT,
 };
 use orr_sim::{Game, SimCommand, Simulation, System, TickInputs};
@@ -1007,4 +1008,194 @@ fn golden_sleepy_scene_checksum() {
     assert!(asleep_after >= 25, "only {asleep_after} bodies asleep at the end");
     println!("sleepy golden checksum: {:#018x}", f.checksum());
     assert_eq!(f.checksum(), SLEEPY_GOLDEN_CHECKSUM, "sleepy golden changed; only update for an intended behavior change");
+}
+
+// ---- (g) capsules ----
+
+/// Checksum of [`capsule_scene`] after `CAPSULE_GOLDEN_TICKS`.
+const CAPSULE_GOLDEN_CHECKSUM: u64 = 0x9a7a7a033ee3efe1;
+/// Hash of the ray and shape cast results over the settled capsule scene.
+const CAPSULE_QUERY_GOLDEN: u64 = 0x6b0ddaa803998756;
+const CAPSULE_GOLDEN_TICKS: u32 = 300;
+
+/// ~130 bodies: capsules lying and standing in stacks, capsules of random
+/// angle dropped together with circles, boxes and polygons, a spinning
+/// kinematic capsule, a capsule sensor zone, and a static capsule and slope.
+fn capsule_scene() -> Frame {
+    let mut f = new_frame(PhysicsConfig::default());
+    ground(&mut f);
+    for sx in [-1, 1] {
+        spawn_body(
+            &mut f,
+            Body::new_static(v2(FP::from_int(25 * sx), fp!(40)), FP::ZERO),
+            Collider::new(Shape::box_shape(FP::ONE, fp!(40))),
+        );
+    }
+    let cap = |f: &mut Frame, x: FP, y: FP, hl: FP, r: FP, angle: FP| {
+        let s = Shape::capsule(hl, r);
+        spawn_body(f, Body::new_dynamic(v2(x, y), &s, FP::ONE).with_angle(angle), Collider::new(s).with_restitution(fp!(0.1)))
+    };
+    // A stack of capsules on their sides and a row of upright ones.
+    for i in 0..5 {
+        cap(&mut f, fp!(-18), fp!(0.4) + FP::from_int(i) * fp!(0.85), fp!(1), fp!(0.4), FP::HALF_PI);
+    }
+    for k in 0..6 {
+        cap(&mut f, fp!(-12) + FP::from_int(k) * fp!(1.1), fp!(1.5), fp!(0.6), fp!(0.4), FP::ZERO);
+    }
+    // A static tilted capsule and a static ramp to roll over.
+    spawn_body(&mut f, Body::new_static(v2(fp!(-4), fp!(1.5)), fp!(0.6)), Collider::new(Shape::capsule(fp!(2), fp!(0.4))));
+    spawn_body(&mut f, Body::new_static(v2(fp!(6), fp!(0.5)), fp!(0.3)), Collider::new(Shape::box_shape(fp!(3), fp!(0.3))));
+    // A spinning kinematic capsule and a capsule sensor zone.
+    let mut rotor = Body::new_kinematic(v2(fp!(18), fp!(9)));
+    rotor.omega = FP::ONE;
+    spawn_body(&mut f, rotor, Collider::new(Shape::capsule(fp!(1.5), fp!(0.5))));
+    spawn_body(
+        &mut f,
+        Body::new_static(v2(fp!(4), fp!(3)), FP::HALF_PI),
+        Collider::new(Shape::capsule(fp!(3), fp!(1.5))).sensor(),
+    );
+    let mut rng = FrameRng::new(0xCA95);
+    for i in 0..140 {
+        let x = rng.range_fp(fp!(-14), fp!(14));
+        let y = rng.range_fp(fp!(6), fp!(50));
+        match i % 5 {
+            0..=2 => {
+                let hl = rng.range_fp(fp!(0.2), fp!(1.2));
+                let r = rng.range_fp(fp!(0.25), fp!(0.5));
+                let a = rng.range_fp(-FP::PI, FP::PI);
+                cap(&mut f, x, y, hl, r, a);
+            }
+            3 => {
+                ball(&mut f, x, y, rng.range_fp(fp!(0.3), fp!(0.6)), fp!(0.3));
+            }
+            _ => {
+                let shape = if i % 10 == 4 {
+                    Shape::box_shape(rng.range_fp(fp!(0.3), fp!(0.7)), rng.range_fp(fp!(0.3), fp!(0.7)))
+                } else {
+                    regular_polygon(3 + (i % 4) as u32, rng.range_fp(fp!(0.4), fp!(0.7)))
+                };
+                let angle = rng.range_fp(-FP::PI, FP::PI);
+                spawn_body(&mut f, Body::new_dynamic(v2(x, y), &shape, FP::ONE).with_angle(angle), Collider::new(shape));
+            }
+        }
+    }
+    // Rolling circles never stop without damping, and one moving body keeps
+    // its whole pile awake.
+    for (_, (b,)) in f.query::<(&mut Body,)>() {
+        if b.kind == BODY_DYNAMIC {
+            b.linear_damping = fp!(0.05);
+            b.angular_damping = fp!(0.3);
+        }
+    }
+    f
+}
+
+#[test]
+fn golden_capsule_scene_checksum() {
+    let mut f = capsule_scene();
+    assert!(f.alive_count() >= 150, "scene has {} bodies", f.alive_count());
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, CAPSULE_GOLDEN_TICKS);
+    let mut max_speed = FP::ZERO;
+    for (_, (b,)) in f.query::<(&Body,)>().filter(|(_, (b,))| b.kind == BODY_DYNAMIC) {
+        assert!(b.pos.x.abs() < fp!(26) && b.pos.y > -FP::ONE && b.pos.y < fp!(80), "body out of bounds: {:?}", b.pos);
+        max_speed = max_speed.max(b.vel.length());
+    }
+    assert!(max_speed < fp!(60), "max speed {max_speed}");
+    println!("capsule golden checksum: {:#018x}", f.checksum());
+    assert_eq!(f.checksum(), CAPSULE_GOLDEN_CHECKSUM, "capsule golden changed; only update for an intended behavior change");
+}
+
+#[test]
+fn golden_capsule_rollback_replay() {
+    let mut f = capsule_scene();
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 100);
+    let snapshot = f.clone();
+    run(&mut f, &mut sc, 150);
+    let expected = f.checksum();
+    assert_ne!(expected, snapshot.checksum());
+    f.copy_from(&snapshot);
+    run(&mut f, &mut Scratch::new(), 150);
+    assert_eq!(f.checksum(), expected);
+    // Fresh scratch every tick gives the same state (no hidden history).
+    let mut g = capsule_scene();
+    run_fresh(&mut g, 250);
+    assert_eq!(g.checksum(), expected);
+}
+
+#[test]
+fn golden_capsule_serialize_roundtrip() {
+    let mut f = capsule_scene();
+    let mut sc = Scratch::new();
+    run(&mut f, &mut sc, 120);
+    let bytes = f.to_bytes();
+    let mut g = Frame::from_bytes(f.registry().clone(), &bytes).expect("decode");
+    assert_eq!(g.checksum(), f.checksum());
+    run(&mut f, &mut sc, 120);
+    run(&mut g, &mut Scratch::new(), 120);
+    assert_eq!(f.checksum(), g.checksum());
+    // Snapshot again later, once the pile has landed.
+    run(&mut f, &mut sc, 300);
+    let mut h = Frame::from_bytes(f.registry().clone(), &f.to_bytes()).expect("decode");
+    assert_eq!(h.checksum(), f.checksum());
+    run(&mut f, &mut sc, 30);
+    run(&mut h, &mut Scratch::new(), 30);
+    assert_eq!(f.checksum(), h.checksum());
+}
+
+/// Folds the ray casts, shape casts and character moves over the settled
+/// capsule scene into one hash.
+fn capsule_query_hash() -> u64 {
+    let mut f = capsule_scene();
+    run(&mut f, &mut Scratch::new(), CAPSULE_GOLDEN_TICKS);
+    let mut h = 0xcbf29ce484222325u64;
+    let mut mix = |v: i64| {
+        h ^= v as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    };
+    let flt = QueryFilter::default();
+    let shapes =
+        [Shape::circle(fp!(0.4)), Shape::capsule(fp!(0.6), fp!(0.3)), Shape::box_shape(fp!(0.4), fp!(0.5)), regular_polygon(5, fp!(0.5))];
+    for i in 0..48 {
+        let a = FP::TWO_PI * FP::from_int(i) / FP::from_int(48);
+        let dir = FPVec2::from_angle(a);
+        let origin = v2(FP::from_int(i % 9 - 4) * fp!(2), fp!(3) + FP::from_int(i % 4));
+        if let Some(r) = raycast(&mut f, origin, dir, fp!(60), flt) {
+            mix(r.entity.index as i64);
+            mix(r.distance.raw());
+            mix(r.normal.x.raw());
+        } else {
+            mix(-1);
+        }
+        for (k, s) in shapes.iter().enumerate() {
+            let hit = shape_cast(&mut f, s, origin, a / 3 * FP::from_int(k as i32), dir, fp!(30), flt, Entity::NONE);
+            match hit {
+                Some(x) => {
+                    mix(x.entity.index as i64);
+                    mix(x.distance.raw());
+                    mix(x.point.x.raw());
+                    mix(x.point.y.raw());
+                    mix(x.normal.x.raw());
+                    mix(x.normal.y.raw());
+                }
+                None => mix(-1),
+            }
+        }
+        let p = CapsuleCharacterParams::new(fp!(0.5), fp!(0.3));
+        let m = move_and_slide_capsule(&mut f, Entity::NONE, origin, dir * fp!(4), &p);
+        mix(m.pos.x.raw());
+        mix(m.pos.y.raw());
+        mix(m.grounded as i64);
+        mix(m.hits as i64);
+    }
+    h
+}
+
+#[test]
+fn golden_capsule_query_hash() {
+    let a = capsule_query_hash();
+    assert_eq!(a, capsule_query_hash(), "queries are a pure function of the frame");
+    println!("capsule query hash: {a:#018x}");
+    assert_eq!(a, CAPSULE_QUERY_GOLDEN, "capsule query golden changed; only update for an intended behavior change");
 }

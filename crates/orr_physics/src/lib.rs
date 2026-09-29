@@ -25,7 +25,8 @@
 //!    A solid pair needs one dynamic body and one body that moves this
 //!    tick, so pairs of sleeping, static and idle bodies cost nothing.
 //! 3. Narrow phase: circle/circle, circle/polygon, polygon/polygon (SAT,
-//!    reference face clipping) with up to 2 contact points per pair. A
+//!    reference face clipping) and every pair with a capsule (see Capsules)
+//!    with up to 2 contact points per pair. A
 //!    contact between a moving body and a sleeping one wakes the sleeper's
 //!    island, and steps 2 and 3 run again (at most 3 times).
 //! 4. Sensor pairs: exact overlap test, enter/exit events. Sensors always
@@ -35,6 +36,54 @@
 //!    position correction with slop, restitution above a closing speed.
 //! 6. Sleep timers and islands, then integrate positions of the moving
 //!    bodies, write back, store the contact cache.
+//!
+//! # Capsules
+//!
+//! [`Shape::capsule`] is a segment grown by a radius, a stadium. It lives in
+//! the same `Shape` bytes as circles and polygons (`kind == SHAPE_CAPSULE`,
+//! end points in `verts[0..2]`, unit axis in `normals[0]`, length in
+//! `normals[1].x`), so `Body` and `Collider` keep their layout. The axis is
+//! the local y axis; `Body::angle` turns it. The broad phase box is the
+//! segment box grown by the radius. Mass is `density * (2h * 2r + pi r^2)`
+//! with the exact inertia of the stadium.
+//!
+//! Narrow phase, all in `FP` with exact 128-bit dot products for the
+//! closest points of segments:
+//!
+//! - capsule/circle: the circle against the closest point of the segment.
+//! - capsule/capsule: closest points of the two segments give the normal
+//!   and one point. If the axes are within about 6 degrees of parallel and
+//!   overlap along the axis, the overlap range is clipped to two points, so
+//!   a capsule rests on its side on another capsule.
+//! - capsule/polygon: if the segment is apart from the polygon, the exact
+//!   distance to the polygon boundary gives the normal and one point (so a
+//!   round end rolls over a corner without a false contact). A segment
+//!   within 6 degrees of a polygon edge and over it gets two points from
+//!   the clipped overlap. If the segment reaches into the polygon, the
+//!   axis of least penetration among the polygon faces and the segment
+//!   normal decides, as in SAT.
+//! - A sensor capsule uses the same routines with margin 0. Sensors are
+//!   exact for every shape pair.
+//!
+//! # Queries
+//!
+//! [`raycast`] supports every shape. [`shape_cast`] sweeps a circle, capsule
+//! or convex polygon along a direction with fixed rotation and returns the
+//! first hit: entity, time of impact as a fraction and distance, a contact
+//! point and the normal. It is exact, not iterated. The ray of the caster
+//! origin is cast against the Minkowski sum of the target and the mirrored
+//! caster (a convex polygon of at most 16 vertices, found with a monotone
+//! chain hull), grown by both radii: one plane per edge, offset by the
+//! radius, and one circle per vertex. The distance is accurate to a few
+//! 1/65536 units (rounding of the square roots and divisions); the tests
+//! compare it with an independent distance function on random pairs at
+//! 0.006 units. There is no conservative advancement step count, so there
+//! is nothing to tune and no tunnelling at any speed. Touching counts as a
+//! hit; a caster that already overlaps reports fraction 0; ties in
+//! distance go to the lower entity index. [`circle_cast`] keeps its
+//! own algorithm. [`move_and_slide_capsule`] is the capsule version of
+//! [`move_and_slide`], with slope limit, skin, step up, ground snapping and
+//! ground detection, built on [`shape_cast`].
 //!
 //! # Sleeping
 //!
@@ -75,10 +124,22 @@
 //! - body positions `|x|, |y| <= 30_000` units,
 //! - shape sizes `0.05 ..= 1_000`; density and mass so that
 //!   `0.001 <= mass <= 10_000`,
+//! - capsules: `radius >= 0.05` and `half_length + radius <= 1_000` (so a
+//!   capsule is at most 2 000 units long and its segment length is at most
+//!   2 000), with any aspect ratio inside those limits. The segment
+//!   geometry multiplies raw coordinates in `i128`, which is exact up to
+//!   these sizes and world positions up to 30 000 units. The test
+//!   `capsule_range_limits_stay_inside_the_solver_ranges` runs both
+//!   extremes (a 10 000 mass capsule of 900 x 100 and a 2 000 long rod,
+//!   next to 0.001 mass capsules) at the speed limit in debug builds,
+//! - shape casts and rays: origin, direction and the swept box inside the
+//!   30 000 unit world, cast distance up to 30 000 (the Minkowski hull
+//!   adds the two shapes' extents, at most 4 000),
 //! - speeds `<= max_linear_speed` (default 500 units/s, enforced for
 //!   dynamic bodies), angular speed `<= max_angular_speed`,
 //! - no continuous collision detection: a body faster than
-//!   `shape size * 60` units/s can tunnel through thin shapes.
+//!   `shape size * 60` units/s can tunnel through thin shapes (queries do
+//!   not tunnel).
 //!
 //! Precision is 1/65536 unit, so inverse masses below about `0.0005` lose
 //! most of their bits. The hot paths multiply in `i64` and fall back to
@@ -86,15 +147,17 @@
 //!
 //! # Not included yet
 //!
-//! Capsule shapes, capsule character controller (only a circle one,
-//! [`move_and_slide`]), general shape casts (only [`circle_cast`]),
-//! joints.
+//! Continuous collision detection for bodies (shape casts exist for
+//! queries only), joints, rounded polygons, casts with a rotating caster.
 #![deny(clippy::disallowed_types)]
 #![deny(clippy::float_arithmetic)]
 #![warn(missing_docs)]
 
+mod capsule;
+mod cast;
 mod collide;
 mod fastmath;
+mod geom;
 mod query;
 mod sleep;
 mod solver;
@@ -103,14 +166,15 @@ mod system;
 mod types;
 
 pub use query::{
-    circle_cast, circle_cast_ignoring, move_and_slide, raycast, CharacterMove, CharacterParams, QueryFilter, RayHit,
+    circle_cast, circle_cast_ignoring, move_and_slide, move_and_slide_capsule, raycast, shape_cast, CapsuleCharacterParams,
+    CharacterMove, CharacterParams, QueryFilter, RayHit, ShapeHit,
 };
 pub use sleep::{apply_impulse, is_asleep, set_velocity, wake, wake_all};
 pub use step::{step, step_probed, Phase, Scratch, StepStats};
 pub use system::PhysicsSystem;
 pub use types::{
     Body, Collider, ContactCache, MassData, OverlapPair, PhysicsConfig, PhysicsState, Shape, TriggerEvent, BODY_DYNAMIC,
-    BODY_KINEMATIC, BODY_STATIC, COLLIDER_SENSOR, MAX_POLY_VERTS, SHAPE_CIRCLE, SHAPE_POLYGON, SLEEP_FLAG, TRIGGER_ENTER,
+    BODY_KINEMATIC, BODY_STATIC, COLLIDER_SENSOR, MAX_POLY_VERTS, SHAPE_CAPSULE, SHAPE_CIRCLE, SHAPE_POLYGON, SLEEP_FLAG, TRIGGER_ENTER,
     TRIGGER_EXIT,
 };
 
