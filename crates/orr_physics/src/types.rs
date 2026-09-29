@@ -12,6 +12,10 @@ pub const SHAPE_CIRCLE: u32 = 0;
 /// `Shape::kind` for a convex polygon (boxes included).
 pub const SHAPE_POLYGON: u32 = 1;
 
+/// `Shape::kind` for a capsule: a segment (`verts[0]` to `verts[1]`) grown by
+/// `radius`.
+pub const SHAPE_CAPSULE: u32 = 2;
+
 /// `Body::kind`: never moves, infinite mass.
 pub const BODY_STATIC: u32 = 0;
 /// `Body::kind`: simulated (gravity, contacts).
@@ -24,17 +28,22 @@ pub const COLLIDER_SENSOR: u32 = 1;
 
 /// A convex collision shape in body-local space (origin = center of mass).
 ///
+/// A capsule stores its segment end points in `verts[0]` and `verts[1]`
+/// (`count == 2`), the unit axis `verts[0] -> verts[1]` in `normals[0]` and
+/// the segment length in `normals[1].x`.
+///
 /// Polygon vertices are counter-clockwise; `normals[i]` is the outward unit
 /// normal of the edge `verts[i] -> verts[i + 1]`. Both are stored so
 /// contact generation never has to recompute them.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct Shape {
-    /// [`SHAPE_CIRCLE`] or [`SHAPE_POLYGON`].
+    /// [`SHAPE_CIRCLE`], [`SHAPE_POLYGON`] or [`SHAPE_CAPSULE`].
     pub kind: u32,
-    /// Number of used entries in `verts` / `normals` (0 for a circle).
+    /// Number of used entries in `verts` / `normals` (0 for a circle, 2 for
+    /// a capsule).
     pub count: u32,
-    /// Circle radius (0 for polygons).
+    /// Circle or capsule radius (0 for polygons).
     pub radius: FP,
     /// Local vertices, CCW, centered on the centroid.
     pub verts: [FPVec2; MAX_POLY_VERTS],
@@ -62,6 +71,35 @@ impl Shape {
         let mut s = Shape::zeroed();
         s.kind = SHAPE_CIRCLE;
         s.radius = r;
+        s
+    }
+
+    /// An upright capsule: the segment runs along the local y axis from
+    /// `-half_length` to `+half_length`, grown by `radius`. Rotate it with
+    /// `Body::angle`. `half_length == 0` gives a circle. The overall height
+    /// is `2 * (half_length + radius)`.
+    pub fn capsule(half_length: FP, radius: FP) -> Shape {
+        Shape::capsule_segment(FPVec2::new(FP::ZERO, -half_length), FPVec2::new(FP::ZERO, half_length), radius)
+    }
+
+    /// A capsule around the segment `a`-`b`, grown by `radius`. The points
+    /// are re-centered on the segment midpoint, so the body origin is the
+    /// center of mass. Two equal points give a circle.
+    pub fn capsule_segment(a: FPVec2, b: FPVec2, radius: FP) -> Shape {
+        let d = b - a;
+        let len = d.length();
+        if len == FP::ZERO {
+            return Shape::circle(radius);
+        }
+        let mid = (a + b) * FP::HALF;
+        let mut s = Shape::zeroed();
+        s.kind = SHAPE_CAPSULE;
+        s.count = 2;
+        s.radius = radius;
+        s.verts[0] = a - mid;
+        s.verts[1] = b - mid;
+        s.normals[0] = d / len;
+        s.normals[1] = FPVec2::new(len, FP::ZERO);
         s
     }
 
@@ -130,6 +168,18 @@ impl Shape {
             let mass = density * FP::PI * self.radius * self.radius;
             return MassData { mass, inertia: mass * self.radius * self.radius / 2 };
         }
+        if self.kind == SHAPE_CAPSULE {
+            // Rectangle `len x 2r` plus a disc, with the parallel axis terms
+            // of the two half discs (centroid 4r / 3pi from the flat side).
+            let r = self.radius;
+            let len = self.normals[1].x;
+            let m_rect = density * len * r * 2;
+            let m_disc = density * FP::PI * r * r;
+            let k = fp!(0.4244131815783876); // 4 / (3 pi)
+            let i_rect = m_rect * (len * len + r * r * 4) / 12;
+            let i_disc = m_disc * (r * r / 2 + len * len / 4 + len * r * k);
+            return MassData { mass: m_rect + m_disc, inertia: i_rect + i_disc };
+        }
         let n = self.count as usize;
         let mut area2 = FP::ZERO;
         let mut inertia12 = FP::ZERO;
@@ -147,6 +197,9 @@ impl Shape {
     pub fn bounding_radius(&self) -> FP {
         if self.kind == SHAPE_CIRCLE {
             return self.radius;
+        }
+        if self.kind == SHAPE_CAPSULE {
+            return self.verts[0].length_sq().max(self.verts[1].length_sq()).sqrt() + self.radius;
         }
         let mut m = FP::ZERO;
         for i in 0..self.count as usize {

@@ -1,5 +1,5 @@
 //! Per-phase timing of `step`:
-//! `cargo run --release -p orr_physics --example profile -- <pile|shaker|field> <n> <warm> <measure>`.
+//! `cargo run --release -p orr_physics --example profile -- <pile|shaker|field|mixed|mixed-shaker> <n> <warm> <measure>`.
 //! The clock lives here, not in the sim crate. Optional env vars for
 //! experiments: `SLEEP_LIN`, `SLEEP_ANG`, `SLEEP_TICKS`, `ITERS` override
 //! the config; `RAIN=k` drops k bodies onto the scene after the warm-up;
@@ -17,10 +17,12 @@ fn main() {
     let n: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
     let warm: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(300);
     let meas: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(100);
-    let shaken = kind == "shaker";
+    let shaken = kind == "shaker" || kind == "mixed-shaker";
     let mut f = match kind {
         "shaker" => scenes::build_shaker(n),
         "field" => scenes::build_field(n),
+        "mixed" => scenes::build_mixed(n),
+        "mixed-shaker" => scenes::build_mixed_shaker(n),
         _ => scenes::build(n),
     };
     {

@@ -6,14 +6,25 @@ use orr_physics::{init, register, spawn_body, Body, Collider, PhysicsConfig, Sha
 
 /// Walled arena with mixed bodies dropped in a grid (piles up, then rests).
 pub fn build(n: u32) -> Frame {
-    build_scene(n, false)
+    build_scene(n, false, false)
+}
+
+/// Same arena with circles, boxes, hexagons and capsules (upright and
+/// tilted) in equal parts.
+pub fn build_mixed(n: u32) -> Frame {
+    build_scene(n, false, true)
+}
+
+/// [`build_mixed`] on the shaking plate (the all-awake worst case).
+pub fn build_mixed_shaker(n: u32) -> Frame {
+    build_scene(n, true, true)
 }
 
 /// Same arena, but the floor is a kinematic plate that shakes up and down
 /// (drive it with [`shake`] before every step). The pile keeps bouncing, so
 /// nothing ever falls asleep: the all-awake worst case.
 pub fn build_shaker(n: u32) -> Frame {
-    build_scene(n, true)
+    build_scene(n, true, false)
 }
 
 /// Sets the plate velocity so its position follows `A * sin(2 pi f t)`
@@ -29,7 +40,7 @@ pub fn shake(frame: &mut Frame, tick: u64) {
     }
 }
 
-fn build_scene(n: u32, shaker: bool) -> Frame {
+fn build_scene(n: u32, shaker: bool, capsules: bool) -> Frame {
     let mut b = ComponentRegistryBuilder::new();
     register(&mut b);
     let mut f = Frame::new(b.build());
@@ -67,7 +78,8 @@ fn build_scene(n: u32, shaker: bool) -> Frame {
         let x = FP::from_int(col * 2 - cols) * fp!(0.9) + rng.range_fp(-fp!(0.1), fp!(0.1));
         let y = fp!(1) + FP::from_int(row) * fp!(1.2);
         let pos = FPVec2::new(x, y);
-        match i % 3 {
+        let kind = if capsules { i % 5 } else { i % 3 };
+        match kind {
             0 => {
                 let s = Shape::circle(fp!(0.4));
                 spawn_body(&mut f, Body::new_dynamic(pos, &s, FP::ONE), Collider::new(s).with_restitution(fp!(0.2)));
@@ -76,8 +88,15 @@ fn build_scene(n: u32, shaker: bool) -> Frame {
                 let s = Shape::box_shape(fp!(0.4), fp!(0.4));
                 spawn_body(&mut f, Body::new_dynamic(pos, &s, FP::ONE), Collider::new(s));
             }
-            _ => {
+            2 => {
                 spawn_body(&mut f, Body::new_dynamic(pos, &hex, FP::ONE), Collider::new(hex));
+            }
+            _ => {
+                // Capsules 0.4 wide and 0.9 long: upright, or tilted by a
+                // fixed angle per index.
+                let s = Shape::capsule(fp!(0.25), fp!(0.2));
+                let angle = if kind == 3 { FP::ZERO } else { FP::PI * FP::from_int(i % 7) / FP::from_int(7) };
+                spawn_body(&mut f, Body::new_dynamic(pos, &s, FP::ONE).with_angle(angle), Collider::new(s));
             }
         }
     }
