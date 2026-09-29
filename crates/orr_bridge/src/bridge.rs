@@ -29,8 +29,26 @@ impl std::error::Error for BridgeError {}
 /// Turns one tick's input into commands (see [`BridgeConfig::commands_from_input`]).
 pub type CommandsFromInput<G> = Box<dyn Fn(&<G as Game>::Input) -> Vec<<G as Game>::Command> + Send>;
 
+/// Sim-side wall time of one [`Bridge`] step, given to a step observer
+/// (see [`BridgeConfig::with_step_observer`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StepTiming {
+    /// Time inside the sim host's `advance` (simulation, prediction, rollback resimulation).
+    pub host_advance: Duration,
+    /// Time to copy and publish the snapshot for the view (zero if nothing changed).
+    pub publish: Duration,
+    /// The host did not simulate a new tick because the prediction limit was reached.
+    pub stalled: bool,
+}
+
+/// Called on the sim side after every step. Must be quick and must not block.
+pub type StepObserver = Box<dyn FnMut(StepTiming) + Send>;
+
 /// Settings shared by all adapters.
 pub struct BridgeConfig<G: Game> {
+    /// Called with the timing of every sim step (for benchmarks and debug
+    /// overlays). Costs two clock reads per step; `None` costs nothing.
+    pub step_observer: Option<StepObserver>,
     /// Turns the input of one tick into commands for that tick, on the sim
     /// side. `orr_testgame`'s arena, for one, spawns a bullet command when the
     /// fire bit is set. Called once per simulated tick, in the sim's order,
@@ -41,11 +59,17 @@ pub struct BridgeConfig<G: Game> {
 
 impl<G: Game> Default for BridgeConfig<G> {
     fn default() -> Self {
-        Self { commands_from_input: None }
+        Self { commands_from_input: None, step_observer: None }
     }
 }
 
 impl<G: Game> BridgeConfig<G> {
+    /// Sets the step observer (see [`StepTiming`]).
+    pub fn with_step_observer(mut self, f: impl FnMut(StepTiming) + Send + 'static) -> Self {
+        self.step_observer = Some(Box::new(f));
+        self
+    }
+
     pub fn with_commands_from_input(mut self, f: impl Fn(&G::Input) -> Vec<G::Command> + Send + 'static) -> Self {
         self.commands_from_input = Some(Box::new(f));
         self

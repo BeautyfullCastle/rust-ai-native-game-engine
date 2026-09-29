@@ -29,11 +29,11 @@ impl Extractor for ArenaExtractor {
             if let Some(tag) = frame.get::<PlayerTag>(entity) {
                 let mode = if tag.slot == u32::from(LOCAL_SLOT) { InterpMode::Prediction } else { self.remote_mode };
                 let color = PLAYER_COLORS[tag.slot as usize % PLAYER_COLORS.len()];
-                let style = Style { shape: Shape::Circle, size: fp_to_f32(PLAYER_RADIUS), color };
+                let style = Style { shape: Shape::Circle, size: fp_to_f32(PLAYER_RADIUS), half_y: 0.0, color };
                 out.push(Extracted { entity, transform, mode, style });
             } else if let Some(bullet) = frame.get::<Bullet>(entity) {
                 let color = BULLET_COLORS[bullet.owner_slot as usize % BULLET_COLORS.len()];
-                let style = Style { shape: Shape::Circle, size: fp_to_f32(BULLET_RADIUS), color };
+                let style = Style { shape: Shape::Circle, size: fp_to_f32(BULLET_RADIUS), half_y: 0.0, color };
                 out.push(Extracted { entity, transform, mode: InterpMode::Prediction, style });
             }
         }
@@ -45,7 +45,7 @@ pub fn arena_floor() -> RenderItem {
     RenderItem {
         entity: Entity::NONE,
         transform: Transform2::new(Vec2::ZERO, 0.0),
-        style: Style { shape: Shape::Quad, size: fp_to_f32(ARENA_HALF), color: [0.07, 0.07, 0.11, 1.0] },
+        style: Style { shape: Shape::Quad, size: fp_to_f32(ARENA_HALF), half_y: 0.0, color: [0.07, 0.07, 0.11, 1.0] },
     }
 }
 

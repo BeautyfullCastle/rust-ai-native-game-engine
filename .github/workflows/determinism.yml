@@ -85,6 +85,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p orr_sample -p orr_view -p orr_bridge --release
       - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge --all-targets
+      # The physics sample's headless benchmark: no window, no GPU. Runs the
+      # physics game through the bridge with rollbacks (the checksum tests
+      # are in `crates/orr_sample/tests/physics_e2e.rs`, run above).
+      - run: cargo run -p orr_sample --release --bin physics -- --headless --bodies 300 --ticks 300
 
   wasm32:
     name: wasm32-wasip1 (wasmtime)

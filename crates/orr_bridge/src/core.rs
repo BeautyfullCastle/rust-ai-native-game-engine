@@ -4,13 +4,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use orr_ecs::Frame;
 use orr_session::AdvanceResult;
 use orr_sim::Game;
 
-use crate::bridge::BridgeConfig;
+use crate::bridge::{BridgeConfig, StepTiming};
 use crate::event::{BridgeEvent, BridgeStats, Lifecycle};
 use crate::host::SimHost;
 use crate::snapshot::{Snapshot, SnapshotData};
@@ -128,6 +129,8 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
         if let Some(derive) = &self.cfg.commands_from_input {
             commands.extend(derive(&input));
         }
+        let observing = self.cfg.step_observer.is_some();
+        let t_start = observing.then(Instant::now);
         let (batch, stalled) = match self.host.advance(input, commands) {
             AdvanceResult::Advanced { events, .. } => {
                 self.stats.ticks += 1;
@@ -138,6 +141,7 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
                 (events, true)
             }
         };
+        let t_advanced = observing.then(Instant::now);
         if stalled && !self.was_stalled {
             let head_tick = self.host.head_tick();
             let _ = self.events.send(BridgeEvent::Lifecycle(Lifecycle::Stalled { head_tick }));
@@ -166,6 +170,10 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
         });
         if changed {
             self.publish();
+        }
+        if let (Some(start), Some(advanced), Some(observer)) = (t_start, t_advanced, self.cfg.step_observer.as_mut()) {
+            // `advance` covers the host call only; the event sends in between are cheap.
+            observer(StepTiming { host_advance: advanced - start, publish: advanced.elapsed(), stalled });
         }
         self.steps_done.fetch_add(1, Ordering::Release);
     }

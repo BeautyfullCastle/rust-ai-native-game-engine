@@ -36,8 +36,10 @@ pub enum Shape {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Style {
     pub shape: Shape,
-    /// Radius (circle) or half side length (quad), in world units.
+    /// Radius (circle) or half width (quad), in world units.
     pub size: f32,
+    /// Quad only: half height. `0.0` means a square (`size` is used).
+    pub half_y: f32,
     pub color: [f32; 4],
 }
 

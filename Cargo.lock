@@ -1387,6 +1387,7 @@ dependencies = [
  "orr_bridge",
  "orr_ecs",
  "orr_fp",
+ "orr_physics",
  "orr_session",
  "orr_sim",
  "orr_testgame",

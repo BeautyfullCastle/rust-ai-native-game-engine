@@ -31,7 +31,7 @@ mod inproc;
 mod snapshot;
 mod threaded;
 
-pub use bridge::{Bridge, BridgeConfig, BridgeError};
+pub use bridge::{Bridge, BridgeConfig, BridgeError, StepObserver, StepTiming};
 pub use event::{BridgeEvent, BridgeStats, Lifecycle};
 pub use frame_view::FrameView;
 pub use host::{LoopbackPair, SimHost};

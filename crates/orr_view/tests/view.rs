@@ -14,7 +14,7 @@ impl Extractor for NoExtract {
     fn extract(&self, _: FrameView<'_>, _: &mut Vec<Extracted>) {}
 }
 
-const STYLE: Style = Style { shape: Shape::Circle, size: 1.0, color: [1.0; 4] };
+const STYLE: Style = Style { shape: Shape::Circle, size: 1.0, half_y: 0.0, color: [1.0; 4] };
 const RATE: f32 = 60.0;
 
 fn ent(index: u32, version: u32) -> Entity {
