@@ -21,14 +21,14 @@ mod session;
 mod wire;
 
 pub use events::{EventBatch, EventStatus};
-pub use join::{join_request, JoinError};
+pub use join::{join_request, JoinAttempts, JoinError, JoinTicket};
 pub use input_source::{InputSource, LocalInputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RemoteInput};
 pub use replay::{
     replay_seek_checked, replay_verify, replay_verify_checked, ReplayError, ReplayHeader, ReplayReader, ReplayWriter,
     VerifyReport,
 };
 pub use session::{
-    compare_checksums, require_same_build_hash, AdvanceResult, BuildHashMismatch, Desync, RollbackInfo, Session,
+    compare_checksums, require_same_build_hash, AdvanceResult, BuildHashMismatch, Desync, JoinStatus, RollbackInfo, Session,
     SessionConfig,
 };
 
