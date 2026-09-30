@@ -12,6 +12,10 @@ pub enum Cap {
     /// Start, stop and steer the play session. Also needed, together with
     /// `SceneEdit`, to change the state of a running sim (a debug edit).
     SimControl,
+    /// Accept a proposal into the document (`proposal.accept`). Kept apart
+    /// from `SceneEdit` so a host can let an agent propose and verify while
+    /// a person keeps the decision.
+    Approve,
 }
 
 impl Cap {
@@ -21,6 +25,7 @@ impl Cap {
             Cap::Read => "read",
             Cap::SceneEdit => "scene_edit",
             Cap::SimControl => "sim_control",
+            Cap::Approve => "approve",
         }
     }
 }
@@ -39,13 +44,14 @@ impl Caps {
     /// No capability.
     pub const NONE: Caps = Caps(0);
     /// Every capability.
-    pub const ALL: Caps = Caps(7);
+    pub const ALL: Caps = Caps(15);
 
     fn bit(c: Cap) -> u8 {
         match c {
             Cap::Read => 1,
             Cap::SceneEdit => 2,
             Cap::SimControl => 4,
+            Cap::Approve => 8,
         }
     }
 
@@ -61,10 +67,10 @@ impl Caps {
 
     /// The capabilities in the set, in a fixed order.
     pub fn list(self) -> Vec<Cap> {
-        [Cap::Read, Cap::SceneEdit, Cap::SimControl].into_iter().filter(|&c| self.has(c)).collect()
+        [Cap::Read, Cap::SceneEdit, Cap::SimControl, Cap::Approve].into_iter().filter(|&c| self.has(c)).collect()
     }
 
-    /// Parses `read,scene_edit,sim_control`, or `all`. Names may be
+    /// Parses `read,scene_edit,sim_control,approve`, or `all`. Names may be
     /// separated by commas or `+`.
     pub fn parse(text: &str) -> Result<Caps, String> {
         let mut caps = Caps::NONE;
@@ -74,7 +80,8 @@ impl Caps {
                 "read" => caps.0 |= Self::bit(Cap::Read),
                 "scene_edit" => caps.0 |= Self::bit(Cap::SceneEdit),
                 "sim_control" => caps.0 |= Self::bit(Cap::SimControl),
-                other => return Err(format!("unknown capability '{other}' (read, scene_edit, sim_control, all)")),
+                "approve" => caps.0 |= Self::bit(Cap::Approve),
+                other => return Err(format!("unknown capability '{other}' (read, scene_edit, sim_control, approve, all)")),
             }
         }
         Ok(caps)
@@ -144,6 +151,10 @@ mod tests {
         assert!(t.caps.has(Cap::Read) && t.caps.has(Cap::SceneEdit) && !t.caps.has(Cap::SimControl));
         assert_eq!(TokenEntry::parse("a:b:all").unwrap().caps, Caps::ALL);
         assert!(TokenEntry::parse("a:b:fly").is_err());
+        let a = TokenEntry::parse("a:b:read,scene_edit,approve").unwrap();
+        assert!(a.caps.has(Cap::Approve) && !a.caps.has(Cap::SimControl));
+        assert!(Caps::ALL.has(Cap::Approve));
+        assert_eq!(Caps::parse("read+approve").unwrap().to_string(), "read,approve");
         assert!(TokenEntry::parse("nocolon").is_err());
         assert!(TokenEntry::parse(":b:read").is_err());
     }

@@ -2637,6 +2637,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_mcp"
+version = "0.0.1"
+dependencies = [
+ "orr_edit",
+ "orr_reflect",
+ "orr_remote",
+ "orr_sample",
+ "orr_sim",
+ "serde_json",
+]
+
+[[package]]
 name = "orr_net"
 version = "0.0.1"
 dependencies = [

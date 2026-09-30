@@ -26,7 +26,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use orr_edit::EditorDoc;
+use orr_edit::{EditorDoc, StoppedPlay};
 use orr_session::PlayNote;
 use orr_sim::{EventKey, Game, SimEvent};
 use serde_json::{json, Value as J};
@@ -35,6 +35,7 @@ use crate::caps::{Auth, Caps};
 use crate::codec::hex_encode;
 use crate::dispatch::{authorize, call, CallCtx, Effects, ErpTarget, HostLimits, TxChange};
 use crate::error::*;
+use crate::proposals::ProposalWatch;
 use crate::net::{accept_loop, bind, notification, response_err, response_ok, ConnTx, Inbound, NetShared};
 use crate::wire::{checksum_text, debug_error_name, encode_frame_message, timeline_to_json};
 
@@ -104,6 +105,7 @@ struct Subs {
     hist_seen: Option<u64>,
     events: bool,
     notes: bool,
+    proposals: bool,
     frames: Option<FrameSub>,
 }
 
@@ -162,6 +164,9 @@ pub struct ErpServer {
     tx_owner: Option<(u64, Instant)>,
     events_out: Vec<(EventKey, Vec<u8>)>,
     last_hist_check: Option<Instant>,
+    last_prop_check: Option<Instant>,
+    prop_watch: Option<ProposalWatch>,
+    last_play: Option<StoppedPlay>,
     frame_cache: Option<CachedFrame>,
     stats: ServerStats,
 }
@@ -213,9 +218,20 @@ impl ErpServer {
             tx_owner: None,
             events_out: Vec::new(),
             last_hist_check: None,
+            last_prop_check: None,
+            prop_watch: None,
+            last_play: None,
             frame_cache: None,
             stats: ServerStats::default(),
         })
+    }
+
+    /// Tells the server about a play session the host stopped itself (for
+    /// example the editor's Stop button), so `{"kind":"last_play"}`
+    /// verification inputs can use its recording. Sessions stopped through
+    /// `sim.stop` are remembered without this call.
+    pub fn note_stopped_play(&mut self, stopped: StoppedPlay) {
+        self.last_play = Some(stopped);
     }
 
     /// The address the server listens on (with the real port).
@@ -311,7 +327,12 @@ impl ErpServer {
             self.watch(target, conn, caps, method, params)
         } else {
             let limits = self.cfg.limits.clone();
-            let ctx = CallCtx { client: &client, caps, tx_check: Some((conn, self.tx_owner.map(|(c, _)| c))) };
+            let ctx = CallCtx {
+                client: &client,
+                caps,
+                last_play: self.last_play.as_ref(),
+                tx_check: Some((conn, self.tx_owner.map(|(c, _)| c))),
+            };
             match std::panic::catch_unwind(AssertUnwindSafe(|| call(target, &limits, &ctx, &mut fx, method, params))) {
                 Ok(r) => r,
                 Err(_) => {
@@ -329,6 +350,9 @@ impl ErpServer {
             TxChange::Closed => self.tx_owner = None,
             TxChange::None => {}
         }
+        if let Some(stopped) = fx.stopped.take() {
+            self.last_play = Some(stopped);
+        }
         if !fx.events.is_empty() && self.conns.values().any(|c| c.subs.events) {
             self.events_out.append(&mut fx.events);
         }
@@ -340,6 +364,22 @@ impl ErpServer {
                 Ok(r) => response_ok(&id, r),
                 Err(e) => response_err(&id, &e),
             });
+        }
+        // Look right after each request that can change the proposals, so a client that
+        // chains requests quickly still produces one event per step.
+        if proposals_may_change(method) && self.conns.values().any(|c| c.subs.proposals) {
+            self.publish_proposals(target);
+        }
+    }
+
+    /// Sends `watch.proposals` to its subscribers if the proposals changed since last looked.
+    fn publish_proposals<G: Game>(&mut self, target: &ErpTarget<'_, G>) {
+        let watch = self.prop_watch.get_or_insert_with(|| ProposalWatch::capture(target.doc));
+        if let Some(params) = watch.advance(target.doc) {
+            let n = notification("watch.proposals", params);
+            for c in self.conns.values().filter(|c| c.subs.proposals) {
+                c.tx.send_text(n.clone());
+            }
         }
     }
 
@@ -360,7 +400,7 @@ impl ErpServer {
                 .map(|t| t.as_str().map(str::to_string).ok_or_else(|| RpcError::params("'topics' must be a list of strings")))
                 .collect::<Result<_, _>>()?,
             None | Some(J::Null) if method == "watch.unsubscribe" => Vec::new(),
-            _ => return Err(RpcError::params("'topics' must be a list of strings (tick, history, events, notes, frames)")),
+            _ => return Err(RpcError::params("'topics' must be a list of strings (tick, history, events, notes, proposals, frames)")),
         };
         let max_fps = match params.get("max_fps") {
             None | Some(J::Null) => 60,
@@ -386,13 +426,20 @@ impl ErpServer {
                     }
                     "events" => c.subs.events = true,
                     "notes" => c.subs.notes = true,
+                    "proposals" => {
+                        c.subs.proposals = true;
+                        if self.prop_watch.is_none() {
+                            self.prop_watch = Some(ProposalWatch::capture(target.doc));
+                        }
+                        initial.push(notification("watch.proposals", ProposalWatch::state_params(target.doc)));
+                    }
                     "frames" => {
                         if !c.binary {
                             return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
                         }
                         c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None });
                     }
-                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, frames)"))),
+                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, frames)"))),
                 }
             }
         } else if topics.is_empty() {
@@ -404,6 +451,7 @@ impl ErpServer {
                     "history" => c.subs.history = false,
                     "events" => c.subs.events = false,
                     "notes" => c.subs.notes = false,
+                    "proposals" => c.subs.proposals = false,
                     "frames" => c.subs.frames = None,
                     other => return Err(RpcError::params(format!("unknown topic '{other}'"))),
                 }
@@ -414,6 +462,7 @@ impl ErpServer {
             ("history", c.subs.history),
             ("events", c.subs.events),
             ("notes", c.subs.notes),
+            ("proposals", c.subs.proposals),
             ("frames", c.subs.frames.is_some()),
         ]
         .into_iter()
@@ -453,6 +502,16 @@ impl ErpServer {
                 c.subs.hist_seen = Some(sig);
                 c.tx.send_text(note.get_or_insert_with(|| history_note(target.doc)).clone());
             }
+        }
+        // proposals: checked after each request that can change them (see `request`), and every 25 ms
+        // here for changes made outside ERP (the editor UI); nothing is tracked while nobody listens
+        if self.conns.values().any(|c| c.subs.proposals) {
+            if self.last_prop_check.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(25)) {
+                self.last_prop_check = Some(now);
+                self.publish_proposals(target);
+            }
+        } else {
+            self.prop_watch = None;
         }
         // sim events
         if !self.events_out.is_empty() {
@@ -539,6 +598,14 @@ impl Drop for ErpServer {
             rt.shutdown_background();
         }
     }
+}
+
+/// Methods after which the list, size or staleness of the proposals may differ.
+fn proposals_may_change(method: &str) -> bool {
+    matches!(
+        method,
+        "proposal.begin" | "proposal.apply" | "proposal.accept" | "proposal.reject" | "scene.load" | "tx.commit" | "tx.rollback" | "history.undo" | "history.redo"
+    ) || (method.starts_with("world.") && !matches!(method, "world.query" | "world.get" | "world.singleton.get"))
 }
 
 fn tick_key<G: Game>(t: &ErpTarget<'_, G>) -> TickKey {

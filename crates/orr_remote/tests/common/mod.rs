@@ -8,13 +8,18 @@ use std::time::Duration;
 
 use orr_edit::EditorDoc;
 use orr_reflect::TypeRegistry;
-use orr_remote::{Auth, Caps, ErpClient, ErpServer, Host, ServerConfig, TokenEntry};
-use orr_sample::physics_game::{register_reflect, PhysGame};
-use orr_sim::Simulation;
+use orr_remote::{Auth, Caps, ErpClient, ErpServer, GameHooks, Host, ServerConfig, TokenEntry};
+use orr_sample::physics_game::{bot_input, register_reflect, PhysGame, PhysMetrics};
+use orr_sim::{PlayerSlot, Simulation};
 use serde_json::{json, Value as J};
 
 pub const DEMO_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes/physics_demo.scene.yaml");
 pub const SEED: u64 = 7;
+
+/// What `orr_remote_host` plugs in: PhysGame's metrics and scripted player.
+pub fn phys_hooks() -> GameHooks {
+    GameHooks::new("PhysGame").with_metrics(PhysMetrics).with_bot(|seed, tick, slot| bot_input(seed, tick, PlayerSlot(slot)))
+}
 
 pub fn types() -> TypeRegistry {
     let mut t = TypeRegistry::new();
@@ -47,7 +52,10 @@ impl TestHost {
         Self::start_with(cfg, demo_doc)
     }
 
-    pub fn start_with(cfg: ServerConfig, make_doc: impl FnOnce() -> EditorDoc + Send + 'static) -> TestHost {
+    pub fn start_with(mut cfg: ServerConfig, make_doc: impl FnOnce() -> EditorDoc + Send + 'static) -> TestHost {
+        if cfg.limits.game.metrics.is_none() {
+            cfg.limits.game = phys_hooks();
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         let s = stop.clone();
@@ -67,7 +75,7 @@ impl TestHost {
         Self::start(ServerConfig::new(Auth::Tokens(vec![
             token("claude", "tok-all", "all"),
             token("reader", "tok-read", "read"),
-            token("editor", "tok-edit", "read,scene_edit"),
+            token("editor", "tok-edit", "read,scene_edit"), // can propose and verify, cannot approve
             token("driver", "tok-sim", "read,sim_control"),
             token("other", "tok-other", "all"),
         ])))

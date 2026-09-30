@@ -251,7 +251,7 @@ fn dev_mode_is_explicit_and_loopback_only() {
     let mut c = ErpClient::connect(&host.url, None).unwrap();
     let d = c.call("rpc.discover", J::Null).unwrap();
     assert_eq!(d["you"]["client"], "dev");
-    assert_eq!(d["you"]["capabilities"], json!(["read", "scene_edit", "sim_control"]));
+    assert_eq!(d["you"]["capabilities"], json!(["read", "scene_edit", "sim_control", "approve"]));
     // Refused off loopback, and with no tokens at all.
     let mut cfg = ServerConfig::new(Auth::DevNoAuth);
     cfg.bind = "0.0.0.0:0".parse().unwrap();
