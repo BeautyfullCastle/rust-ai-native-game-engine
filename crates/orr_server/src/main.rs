@@ -23,7 +23,7 @@ impl Endpoint for NullEndpoint {
 }
 
 fn main() {
-    let mut server = RelayServer::new(NullEndpoint, 0x0DDB_A11);
+    let mut server = RelayServer::new(NullEndpoint, 0x00DD_BA11);
     server.create_room(1, RoomConfig::new(4, 60, 1, 16));
     eprintln!("orr_server: no transport wired yet (needs an orr_proto::Endpoint over orr_net); idling for 1s");
     let start = Instant::now();

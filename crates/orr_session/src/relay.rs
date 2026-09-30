@@ -47,14 +47,17 @@ pub trait DumpSink {
 
 /// A [`DumpSink`] that keeps dumps in memory; clones share the storage.
 #[derive(Clone, Default)]
-pub struct DumpCollector(Rc<RefCell<Vec<(String, Vec<u8>)>>>);
+pub struct DumpCollector(Rc<RefCell<Vec<Dump>>>);
+
+/// A written dump: name and bytes.
+pub type Dump = (String, Vec<u8>);
 
 impl DumpCollector {
     pub fn new() -> Self {
         Self::default()
     }
     /// Takes every dump written so far.
-    pub fn take(&self) -> Vec<(String, Vec<u8>)> {
+    pub fn take(&self) -> Vec<Dump> {
         std::mem::take(&mut self.0.borrow_mut())
     }
     pub fn len(&self) -> usize {
@@ -427,10 +430,12 @@ struct PendingSnapshot {
 
 const MICRO: u64 = 1_000_000;
 
+type ConfigFn<G> = Box<dyn FnMut(&Welcome) -> <G as Game>::Config>;
+
 /// See the module docs.
 pub struct RelayClient<G: Game, L: Link> {
     cfg: RelayClientConfig,
-    make_config: Box<dyn FnMut(&Welcome) -> G::Config>,
+    make_config: ConfigFn<G>,
     dumps: Box<dyn DumpSink>,
     source: Option<RelaySource<G, L>>,
     session: Option<Session<G, RelaySource<G, L>>>,
@@ -1007,13 +1012,11 @@ impl<G: Game, L: Link> RelayClient<G, L> {
             None => (0, 0, Vec::new()),
         };
         let mut ticks = Vec::new();
-        let mut expect = anchor_tick + 1;
-        for (&t, b) in self.src().log.range(anchor_tick + 1..) {
+        for (expect, (&t, b)) in (anchor_tick + 1..).zip(self.src().log.range(anchor_tick + 1..)) {
             if t != expect {
                 break;
             }
             ticks.push(b.clone());
-            expect += 1;
         }
         let local_checksum = session.checksums().iter().find(|(t, _)| *t == tick).map_or(0, |&(_, c)| c);
         let dump = DesyncDump {

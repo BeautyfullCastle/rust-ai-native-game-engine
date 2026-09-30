@@ -260,12 +260,10 @@ impl DesyncDump {
             sim.restore(&frame);
         }
         let mut out = Vec::new();
-        let mut expect = self.anchor_tick + 1;
-        for b in &self.ticks {
+        for (expect, b) in (self.anchor_tick + 1..).zip(&self.ticks) {
             if b.tick != expect || b.slots.len() != self.player_count as usize {
                 return Err(DumpError::Corrupt("ticks are not contiguous"));
             }
-            expect += 1;
             let mut ti = TickInputs::<G::Input, G::Command>::new(b.tick, self.player_count);
             let mut cmds = Vec::new();
             for (i, s) in b.slots.iter().enumerate() {

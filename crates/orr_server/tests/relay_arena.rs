@@ -30,6 +30,7 @@ fn four_clients_at_150ms_rtt_match_the_headless_run() {
     assert!(compared >= 4 * 90, "only {compared} checkpoints compared");
 
     let secs = (TICKS - 300) as f64 / 60.0;
+    #[allow(clippy::needless_range_loop)]
     for i in 0..4 {
         let end = client_counters(&h, i);
         let c = &h.clients[i].client;

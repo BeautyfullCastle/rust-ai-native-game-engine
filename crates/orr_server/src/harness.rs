@@ -12,7 +12,7 @@ use orr_proto::{Bundle, Welcome};
 use orr_session::{ClientState, DumpCollector, RelayClient, RelayClientConfig};
 use orr_sim::{Game, PlayerSlot, SimCommand, Simulation, TickInputs};
 
-use crate::{RelayServer, RoomConfig};
+use crate::{AcceptAll, InputValidator, RelayServer, RoomConfig};
 
 thread_local! {
     static CURRENT_CLIENT: Cell<usize> = const { Cell::new(usize::MAX) };
@@ -60,16 +60,18 @@ impl<G: Game> HarnessClient<G> {
     }
 }
 
+type ConfigFn<G> = Rc<dyn Fn(&Welcome) -> <G as Game>::Config>;
+
 pub struct Harness<G: Game> {
     pub net: SimNet,
-    pub server: RelayServer<SimEndpoint>,
+    pub server: RelayServer<SimEndpoint, Box<dyn InputValidator>>,
     pub clients: Vec<HarnessClient<G>>,
     pub now_us: u64,
     pub room: u64,
     /// Length of one harness step.
     pub step_us: u64,
     script: Script<G>,
-    make_config: Rc<dyn Fn(&Welcome) -> G::Config>,
+    make_config: ConfigFn<G>,
 }
 
 impl<G: Game> Harness<G> {
@@ -79,8 +81,19 @@ impl<G: Game> Harness<G> {
         script: Script<G>,
         make_config: impl Fn(&Welcome) -> G::Config + 'static,
     ) -> Self {
+        Self::with_validator(seed, room_cfg, script, make_config, Box::new(AcceptAll))
+    }
+
+    /// Relay + Validate: the server checks inputs with `validator`.
+    pub fn with_validator(
+        seed: u64,
+        room_cfg: RoomConfig,
+        script: Script<G>,
+        make_config: impl Fn(&Welcome) -> G::Config + 'static,
+        validator: Box<dyn InputValidator>,
+    ) -> Self {
         let net = SimNet::new(seed);
-        let mut server = RelayServer::new(net.endpoint(), seed ^ 0x51ED);
+        let mut server = RelayServer::with_validator(net.endpoint(), validator, seed ^ 0x51ED);
         let room = 1;
         server.create_room(room, room_cfg);
         Self {
@@ -108,6 +121,11 @@ impl<G: Game> Harness<G> {
         let client = RelayClient::<G, SimLink>::new(cfg, link, move |w| make(w), dumps.clone());
         self.clients.push(HarnessClient { client, link: conn, dumps, clock_ppm: spec.clock_ppm, started_at_us: self.now_us });
         idx
+    }
+
+    /// Changes the network path of client `i` from now on.
+    pub fn set_path(&mut self, i: usize, params: PathParams) {
+        self.net.set_params(self.clients[i].link, params);
     }
 
     /// Cuts client `i`'s connection as a network failure would.
@@ -160,6 +178,26 @@ impl<G: Game> Harness<G> {
             self.step();
         }
         true
+    }
+
+    /// Like [`run_until_all_playing`](Self::run_until_all_playing), ignoring
+    /// the clients in `skip`.
+    pub fn run_until_all_playing_except(&mut self, skip: &[usize], limit_us: u64) -> bool {
+        let end = self.now_us + limit_us;
+        loop {
+            let ok = self
+                .clients
+                .iter()
+                .enumerate()
+                .all(|(i, c)| skip.contains(&i) || *c.client.state() == ClientState::Playing);
+            if ok {
+                return true;
+            }
+            if self.now_us >= end {
+                return false;
+            }
+            self.step();
+        }
     }
 
     /// The confirmed bundles the server recorded (needs `record_all`).

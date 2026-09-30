@@ -718,7 +718,7 @@ impl Room {
             s.sent = s.sent.split_off(&(acked + 1));
             let mut chosen: Vec<Bundle> = Vec::new();
             let mut used = 0usize;
-            for (&t, b) in self.log.range(acked + 1..=self.finalized) {
+            for (&t, b) in self.log.range(acked + 1..).take_while(|(t, _)| **t <= self.finalized) {
                 let due = match s.sent.get(&t) {
                     None => true,
                     Some(r) => r.count < redundancy || now.saturating_sub(r.last_us) >= timeout,
@@ -885,7 +885,7 @@ impl Room {
         let mut backlog = 0u32;
         let mut chunk: Vec<Bundle> = Vec::new();
         let mut chunk_bytes = 0usize;
-        for (_, b) in self.log.range(tick + 1..=self.finalized) {
+        for (_, b) in self.log.range(tick + 1..).take_while(|(t, _)| **t <= self.finalized) {
             let len = b.encoded_len(input_size);
             if chunk_bytes + len > 60_000 && !chunk.is_empty() {
                 out.send(conn, Channel::Reliable, &ServerMsg::Confirmed { input_size, bundles: std::mem::take(&mut chunk) });

@@ -44,3 +44,9 @@ impl InputValidator for AcceptAll {
         Verdict::Accept
     }
 }
+
+impl<T: InputValidator + ?Sized> InputValidator for Box<T> {
+    fn validate(&mut self, ctx: &InputCtx<'_>, input: &[u8], commands: &[Vec<u8>]) -> Verdict {
+        (**self).validate(ctx, input, commands)
+    }
+}

@@ -925,6 +925,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// been confirmed.
     fn earliest_mismatch(&self) -> Option<u64> {
         let mut earliest = None;
+        if self.verified_tick >= self.sim.tick() {
+            return None;
+        }
         for (&tick, rec) in self.history.range((self.verified_tick + 1)..=self.sim.tick()) {
             let Some(confirmed) = self.confirmed_input.get(&tick) else { continue };
             if self.cfg.relay {
