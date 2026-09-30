@@ -118,6 +118,8 @@ struct Subs {
     proposals: bool,
     activity: Option<ActivitySub>,
     frames: Option<FrameSub>,
+    /// The view stream (`viewstream` topic); reuses the frame subscription's pacing.
+    viewstream: Option<FrameSub>,
 }
 
 struct ActivitySub {
@@ -199,6 +201,8 @@ type FrameKey = (u8, u64, u64, u64);
 struct BuiltFrame {
     wire: Option<Arc<Vec<u8>>>,
     local: Option<Arc<LocalFrame>>,
+    /// The view stream message of this frame.
+    stream: Option<Arc<Vec<u8>>>,
 }
 
 /// The ERP server. See the module docs.
@@ -220,6 +224,8 @@ pub struct ErpServer {
     prop_watch: Option<ProposalWatch>,
     last_play: Option<StoppedPlay>,
     frame_cache: Vec<(FrameKey, BuiltFrame)>,
+    /// What the last view stream frame was built from (kind, epoch or document revision), to flag a jump.
+    vs_last: Option<(u8, u64)>,
     stats: ServerStats,
     started: Instant,
     activity: VecDeque<ActivityEntry>,
@@ -291,6 +297,7 @@ impl ErpServer {
             prop_watch: None,
             last_play: None,
             frame_cache: Vec::new(),
+            vs_last: None,
             stats: ServerStats::default(),
             started: Instant::now(),
             activity: VecDeque::new(),
@@ -442,7 +449,7 @@ impl ErpServer {
     /// Hands the server sim events of ticks the host ran itself (real-time
     /// play), to forward to `events` subscribers. Dropped if nobody listens.
     pub fn push_events<E: bytemuck::Pod>(&mut self, events: &[SimEvent<E>]) {
-        if !self.conns.values().any(|c| c.subs.events) {
+        if !self.conns.values().any(|c| c.subs.events || c.subs.viewstream.is_some()) {
             return;
         }
         for e in events {
@@ -558,6 +565,10 @@ impl ErpServer {
         {
             // Something may have changed under the same frame key (a stopped and restarted session).
             self.frame_cache.clear();
+            // A new or ended session is a jump for the view stream (the epoch may repeat).
+            if matches!(method, "sim.start" | "sim.stop" | "scene.load") {
+                self.vs_last = None;
+            }
         }
         if let Some(c) = self.conns.get_mut(&conn) {
             c.requests += 1;
@@ -627,7 +638,7 @@ impl ErpServer {
                 .map(|t| t.as_str().map(str::to_string).ok_or_else(|| RpcError::params("'topics' must be a list of strings")))
                 .collect::<Result<_, _>>()?,
             None | Some(J::Null) if method == "watch.unsubscribe" => Vec::new(),
-            _ => return Err(RpcError::params("'topics' must be a list of strings (tick, history, events, notes, proposals, activity, frames)")),
+            _ => return Err(RpcError::params("'topics' must be a list of strings (tick, history, events, notes, proposals, activity, frames, viewstream)")),
         };
         let include_reads = params.get("include_reads").and_then(J::as_bool).unwrap_or(false);
         let last_seq = self.next_seq - 1;
@@ -670,7 +681,18 @@ impl ErpServer {
                         }
                         c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source });
                     }
-                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames)"))),
+                    "viewstream" => {
+                        let Some(hook) = self.cfg.limits.view_stream.as_ref() else {
+                            return Err(RpcError::params("this host has no view stream (the game did not configure one)"));
+                        };
+                        if matches!(source, FrameSource::Proposal(_)) {
+                            return Err(RpcError::params("'viewstream' shows the play session or the scene (`source`: sim or view), not a proposal"));
+                        }
+                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source });
+                        // The schema goes out right after the response, before any frame.
+                        initial.push(notification("watch.viewstream.schema", hook.lock().schema().to_json()));
+                    }
+                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames, viewstream)"))),
                 }
             }
         } else if topics.is_empty() {
@@ -685,6 +707,7 @@ impl ErpServer {
                     "proposals" => c.subs.proposals = false,
                     "activity" => c.subs.activity = None,
                     "frames" => c.subs.frames = None,
+                    "viewstream" => c.subs.viewstream = None,
                     other => return Err(RpcError::params(format!("unknown topic '{other}'"))),
                 }
             }
@@ -697,6 +720,7 @@ impl ErpServer {
             ("proposals", c.subs.proposals),
             ("activity", c.subs.activity.is_some()),
             ("frames", c.subs.frames.is_some()),
+            ("viewstream", c.subs.viewstream.is_some()),
         ]
         .into_iter()
         .filter(|(_, on)| *on)
@@ -763,6 +787,7 @@ impl ErpServer {
             }
         }
         // sim events
+        self.publish_stream_events();
         if !self.events_out.is_empty() {
             let list: Vec<J> = self
                 .events_out
@@ -788,6 +813,82 @@ impl ErpServer {
             }
         }
         self.publish_frames(target, now);
+        self.publish_viewstream(target, now);
+    }
+
+    /// Sends the sim events of the last ticks to the view stream subscribers,
+    /// as one event batch message. A play session has no rollback, so every
+    /// event is already verified.
+    fn publish_stream_events(&mut self) {
+        if self.events_out.is_empty() || !self.conns.values().any(|c| c.subs.viewstream.is_some()) {
+            return;
+        }
+        let Some(hook) = self.cfg.limits.view_stream.clone() else { return };
+        let events: Vec<orr_viewstream::EventRecord> = {
+            let producer = hook.lock();
+            self.events_out
+                .iter()
+                .map(|(k, payload)| orr_viewstream::EventRecord {
+                    tick: k.tick,
+                    system: u32::from(k.system_index),
+                    seq: k.seq,
+                    state: orr_viewstream::STATE_VERIFIED,
+                    event_type: producer.event_type(payload),
+                    payload: payload.clone(),
+                })
+                .collect()
+        };
+        let bytes = Arc::new(orr_viewstream::EventBatch { events }.encode());
+        for c in self.conns.values().filter(|c| c.subs.viewstream.is_some()) {
+            send_stream(c, &bytes);
+        }
+    }
+
+    fn publish_viewstream<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, now: Instant) {
+        let Some(hook) = self.cfg.limits.view_stream.clone() else { return };
+        let mut due: Vec<(u64, FrameKey)> = Vec::new();
+        for (id, c) in &self.conns {
+            let Some(f) = c.subs.viewstream.as_ref() else { continue };
+            let throttled = f.last_sent.is_some_and(|t| now.duration_since(t) < f.min_interval);
+            let Some(key) = frame_key(target, f.source) else { continue };
+            if f.last_key != Some(key) {
+                if throttled {
+                    self.frame_pending = true;
+                } else {
+                    due.push((*id, key));
+                }
+            }
+        }
+        for (id, key) in due {
+            let Some(c) = self.conns.get(&id) else { continue };
+            if c.tx.pending() > MAX_PENDING_BYTES {
+                self.stats.frames_skipped += 1;
+                continue;
+            }
+            let source = c.subs.viewstream.as_ref().map_or(FrameSource::Sim, |f| f.source);
+            let pos = match self.frame_cache.iter().position(|(k, _)| *k == key) {
+                Some(p) => p,
+                None => {
+                    if self.frame_cache.len() >= 4 {
+                        self.frame_cache.remove(0);
+                    }
+                    self.frame_cache.push((key, BuiltFrame::default()));
+                    self.frame_cache.len() - 1
+                }
+            };
+            if self.frame_cache[pos].1.stream.is_none() {
+                let bytes = build_stream_frame(target, &hook, source, key, &mut self.vs_last);
+                self.frame_cache[pos].1.stream = bytes.map(Arc::new);
+            }
+            let Some(bytes) = self.frame_cache[pos].1.stream.clone() else { continue };
+            let Some(c) = self.conns.get_mut(&id) else { continue };
+            send_stream(c, &bytes);
+            if let Some(f) = c.subs.viewstream.as_mut() {
+                f.last_sent = Some(now);
+                f.last_key = Some(key);
+            }
+            self.stats.frames_sent += 1;
+        }
     }
 
     fn publish_frames<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, now: Instant) {
@@ -856,6 +957,53 @@ impl ErpServer {
             self.stats.frames_sent += 1;
         }
     }
+}
+
+/// Sends a view stream message to one connection: a binary message, or, on a
+/// plain TCP connection, a `watch.viewstream` notification with the bytes in hex.
+fn send_stream(c: &Conn, bytes: &Arc<Vec<u8>>) {
+    if c.binary {
+        c.tx.send_stream(bytes.clone());
+    } else {
+        c.tx.send_text(notification("watch.viewstream", json!({"encoding": "hex", "data": hex_encode(bytes)})));
+    }
+}
+
+/// The view stream frame message for `key`: the frame, the one before it
+/// (none after a jump) and the flags.
+fn build_stream_frame<G: Game>(
+    t: &ErpTarget<'_, G>,
+    hook: &crate::viewstream::ViewStreamHook,
+    source: FrameSource,
+    key: FrameKey,
+    last: &mut Option<(u8, u64)>,
+) -> Option<Vec<u8>> {
+    use orr_viewstream::{FrameMeta, FLAG_DISCONTINUITY, FLAG_PAUSED};
+    let mut meta = FrameMeta::default();
+    // What the frame is built from; a change of it is a jump of the timeline.
+    let origin = (key.0, if key.0 == 1 { key.2 } else { key.1 });
+    if *last != Some(origin) {
+        meta.flags |= FLAG_DISCONTINUITY;
+    }
+    *last = Some(origin);
+    let (cur, prev): (&orr_ecs::Frame, Option<&orr_ecs::Frame>) = match (key.0, t.play.as_ref()) {
+        (1, Some(pc)) => {
+            let s = pc.session();
+            meta.tick = s.head_tick();
+            meta.verified_tick = meta.tick;
+            if !s.is_playing() {
+                meta.flags |= FLAG_PAUSED;
+            }
+            let prev = if meta.flags & FLAG_DISCONTINUITY == 0 && meta.tick > 0 { s.frame_at(meta.tick - 1) } else { None };
+            (s.frame(), prev)
+        }
+        (2, _) if matches!(source, FrameSource::View) => {
+            meta.flags |= FLAG_PAUSED;
+            (t.doc.frame(), None)
+        }
+        _ => return None,
+    };
+    Some(hook.lock().encode_frame(cur, prev, meta))
 }
 
 /// The `source` parameter of `watch.subscribe`.

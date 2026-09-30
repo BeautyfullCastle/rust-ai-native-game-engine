@@ -56,7 +56,19 @@ jobs:
         # This includes `orr_relay_net` and the relay end-to-end tests of
         # `orr_server` (`tests/net_e2e.rs`): real loopback QUIC/WebSocket with
         # a real-time server loop, a few seconds each.
+        #
+        # `orr_ffi` (the C ABI) is in it: its test compiles a C client with the
+        # runner's C compiler (gcc/clang, or MSVC through the `cc` crate), links
+        # it to the built cdylib and compares its output with the Rust bridge.
+        # Linux must have a compiler (required); elsewhere the test skips with a
+        # message if the runner has none.
         run: cargo test --workspace --release --exclude orr_sample --exclude orr_editor
+        env:
+          ORR_REQUIRE_C_COMPILER: ${{ runner.os == 'Linux' && '1' || '0' }}
+
+      - name: cargo build -p orr_ffi (cdylib + staticlib)
+        # The C ABI library must build on every desktop target.
+        run: cargo build -p orr_ffi --release
 
       - name: cargo clippy --workspace --all-targets
         # `-D warnings` only on the crates this task owns (`orr_sim`,
@@ -64,7 +76,7 @@ jobs:
         # under concurrent work with their own warning budget.
         run: |
           cargo clippy --workspace --exclude orr_sample --exclude orr_editor --all-targets
-          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli --all-targets -- -D warnings
+          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream --all-targets -- -D warnings
 
       - name: cargo build -p orr_sim --features hotpatch
         # Desktop-only, off-by-default hot-patch hook (design doc decision

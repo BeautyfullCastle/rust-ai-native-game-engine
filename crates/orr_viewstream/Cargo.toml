@@ -1,0 +1,21 @@
+[package]
+name = "orr_viewstream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Orrery view stream: a language-neutral, versioned binary format for what a view shows of a simulation (C ABI, sockets, other engines)"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_bridge = { path = "../orr_bridge" }
+orr_view = { path = "../orr_view" }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+orr_reflect = { path = "../orr_reflect", default-features = false }
+bytemuck = "1"
+# Keys stay in the order the schema is written in (foreign readers may scan for them).
+serde_json = { version = "1", features = ["preserve_order"] }

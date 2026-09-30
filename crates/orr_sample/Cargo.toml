@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
+orr_viewstream = { path = "../orr_viewstream" }
 orr_render = { path = "../orr_render" }
 orr_testgame = { path = "../orr_testgame" }
 orr_session = { path = "../orr_session" }
@@ -29,6 +30,7 @@ winit = "0.30"
 [dev-dependencies]
 orr_server = { path = "../orr_server", features = ["harness"] }
 orr_proto = { path = "../orr_proto" }
+orr_edit = { path = "../orr_edit" }
 
 [[bench]]
 name = "seek"

@@ -23,6 +23,7 @@ orr_sim = { path = "../orr_sim" }
 orr_session = { path = "../orr_session" }
 orr_bridge = { path = "../orr_bridge" }
 orr_edit = { path = "../orr_edit" }
+orr_viewstream = { path = "../orr_viewstream" }
 orr_reflect = { path = "../orr_reflect", features = ["scene"] }
 # `arbitrary_precision`: JSON numbers keep their exact text, so fixed-point
 # values never pass through f64. `preserve_order`: objects keep field order.

@@ -18,6 +18,7 @@ use crate::error::*;
 use crate::json::{desc_at_path, handle_text, json_to_value, map_entity_refs, parse_handle, value_to_json};
 use crate::methods::{self, MethodDoc};
 use crate::proposals::{self, GameHooks};
+use crate::viewstream::ViewStreamHook;
 use crate::wire::{checksum_text, debug_error_name, debug_from_json};
 
 /// The host's model an ERP request runs against. It borrows the host's
@@ -56,6 +57,9 @@ pub struct HostLimits {
     pub allow_scene_paths: bool,
     /// Enables the `debug.panic` test hook (default false).
     pub debug_hooks: bool,
+    /// The game's view stream producer (the `viewstream` topic of
+    /// `watch.subscribe`); `None` = the host has no view stream.
+    pub view_stream: Option<ViewStreamHook>,
 }
 
 impl Default for HostLimits {
@@ -70,6 +74,7 @@ impl Default for HostLimits {
             game: GameHooks::default(),
             allow_scene_paths: false,
             debug_hooks: false,
+            view_stream: None,
         }
     }
 }

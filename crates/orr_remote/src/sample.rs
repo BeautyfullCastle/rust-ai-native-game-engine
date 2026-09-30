@@ -8,11 +8,13 @@ use std::path::PathBuf;
 use orr_edit::{EditError, EditorDoc};
 use orr_reflect::TypeRegistry;
 use orr_sample::physics_game::{bot_input, register_reflect, PhysGame, PhysMetrics, TICK_RATE};
+use orr_sample::physics_stream::phys_stream_source;
 use orr_sim::{PlayerSlot, Simulation};
 
 use crate::dispatch::HostLimits;
 use crate::local::LocalHost;
 use crate::proposals::{default_build_id, GameHooks};
+use crate::viewstream::ViewStreamHook;
 use crate::server::ServerConfig;
 
 /// Seed of the preview frame and of the play sessions.
@@ -33,7 +35,7 @@ pub fn phys_doc(text: &str) -> Result<EditorDoc, EditError> {
 }
 
 /// The game-specific parts of a host for `PhysGame`: players, tick rate,
-/// build id, metrics and the scripted player. Sets `scene_path` as the file
+/// build id, metrics, the scripted player and the view stream (`viewstream` topic). Sets `scene_path` as the file
 /// `scene.save {write: true}` writes.
 pub fn configure_phys(limits: &mut HostLimits, scene_path: Option<PathBuf>) {
     limits.player_count = PLAYERS;
@@ -41,6 +43,7 @@ pub fn configure_phys(limits: &mut HostLimits, scene_path: Option<PathBuf>) {
     limits.scene_path = scene_path;
     limits.build_id = default_build_id("PhysGame");
     limits.game = GameHooks::new("PhysGame").with_metrics(PhysMetrics).with_bot(|seed, tick, slot| bot_input(seed, tick, PlayerSlot(slot)));
+    limits.view_stream = Some(ViewStreamHook::new(phys_stream_source(limits.build_id, PLAYERS)));
 }
 
 /// Starts a host thread of `PhysGame` on the scene `text`. `cfg.limits` get
