@@ -19,7 +19,8 @@ use crate::net_client::{log_lifecycle, relay_title};
 use crate::physics_game::{PhysConfig, PhysGame, TICK_RATE};
 use crate::physics_host::{physics_bridge_config, physics_pair, scripted_local, SimMetrics, SimReport};
 use crate::physics_view::{scene_camera, scene_floor, PhysExtractor, PhysKeys};
-use crate::render2d::Renderer;
+use orr_render::orr_rhi::Wgpu;
+use orr_render::{extract_items, RenderList, WindowRenderer};
 
 /// Frames at the start that are left out of the render statistics (shader
 /// compile, window creation, first snapshots).
@@ -101,7 +102,7 @@ struct Stages {
 
 struct Gfx {
     window: Arc<Window>,
-    renderer: Renderer,
+    renderer: WindowRenderer<Wgpu>,
 }
 
 struct App<B: Bridge<PhysGame>> {
@@ -114,6 +115,7 @@ struct App<B: Bridge<PhysGame>> {
     keys: PhysKeys,
     sent_keys: Option<PhysKeys>,
     items: Vec<RenderItem>,
+    list: RenderList,
     started: Instant,
     last_frame: Instant,
     window_frames: u32,
@@ -158,11 +160,13 @@ impl<B: Bridge<PhysGame>> App<B> {
         self.items.clear();
         self.items.push(scene_floor(self.scene.bodies));
         self.view.render_items(&mut self.items);
+        self.list.clear();
+        extract_items(&self.items, &mut self.list);
         self.stages.items.push(ms(t.elapsed()));
 
         let t = Instant::now();
         if let Some(gfx) = &mut self.gfx {
-            gfx.renderer.render(&self.items, &scene_camera(self.scene.bodies));
+            gfx.renderer.render(&self.list, &scene_camera(self.scene.bodies));
         }
         self.stages.render.push(ms(t.elapsed()));
 
@@ -228,9 +232,9 @@ impl<B: Bridge<PhysGame>> ApplicationHandler for App<B> {
                 return;
             }
         };
-        match Renderer::new(window.clone(), self.opts.vsync) {
+        match WindowRenderer::new(window.clone(), (window.inner_size().width, window.inner_size().height), self.opts.vsync) {
             Ok(renderer) => {
-                self.summary.adapter = renderer.adapter_name().to_string();
+                self.summary.adapter = renderer.adapter_name();
                 println!("adapter: {}", self.summary.adapter);
                 self.gfx = Some(Gfx { window, renderer });
                 self.started = Instant::now();
@@ -302,6 +306,7 @@ pub fn run_window<B: Bridge<PhysGame>>(
         keys: PhysKeys::default(),
         sent_keys: None,
         items: Vec::new(),
+        list: RenderList::new(),
         started: now,
         last_frame: now,
         window_frames: 0,

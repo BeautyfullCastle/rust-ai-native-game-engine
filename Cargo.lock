@@ -1700,6 +1700,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_render"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_rhi",
+ "orr_view",
+]
+
+[[package]]
+name = "orr_rhi"
+version = "0.0.1"
+dependencies = [
+ "pollster",
+ "raw-window-handle",
+ "wgpu",
+]
+
+[[package]]
 name = "orr_sample"
 version = "0.0.1"
 dependencies = [
@@ -1710,13 +1729,12 @@ dependencies = [
  "orr_physics",
  "orr_proto",
  "orr_relay_net",
+ "orr_render",
  "orr_server",
  "orr_session",
  "orr_sim",
  "orr_testgame",
  "orr_view",
- "pollster",
- "wgpu",
  "winit",
 ]
 

@@ -3,10 +3,9 @@
 //! The arena test game runs through an `orr_bridge` adapter, as a local peer
 //! of a two-peer loopback session with simulated latency (so rollbacks
 //! happen). `orr_view` interpolates it and smooths rollback corrections,
-//! and a small wgpu renderer draws it in a winit window.
+//! and `orr_render` (wgpu through `orr_rhi`) draws it in a winit window.
 //!
 //! - [`arena_view`]: what to draw, input mapping, the bot, the loopback session. No GPU.
-//! - [`render2d`]: the wgpu renderer (WGSL shader).
 //! - [`app`]: the winit loop.
 //!
 //! This crate is view layer: floats and the wall clock are fine here.
@@ -20,4 +19,3 @@ pub mod physics_app;
 pub mod physics_game;
 pub mod physics_host;
 pub mod physics_view;
-pub mod render2d;

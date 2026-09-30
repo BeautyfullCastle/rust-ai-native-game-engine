@@ -16,7 +16,8 @@ use winit::window::{Window, WindowId};
 
 use crate::arena_view::{arena_floor, ArenaExtractor, Keys};
 use crate::net_client::{log_lifecycle, relay_title};
-use crate::render2d::{Camera, Renderer};
+use orr_render::orr_rhi::Wgpu;
+use orr_render::{extract_items, Camera, RenderList, WindowRenderer};
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -51,7 +52,7 @@ pub struct Summary {
 
 struct Gfx {
     window: Arc<Window>,
-    renderer: Renderer,
+    renderer: WindowRenderer<Wgpu>,
 }
 
 struct App<B: Bridge<Arena>> {
@@ -62,6 +63,7 @@ struct App<B: Bridge<Arena>> {
     keys: Keys,
     sent_keys: Option<Keys>,
     items: Vec<RenderItem>,
+    list: RenderList,
     started: Instant,
     last_frame: Instant,
     window_frames: u32,
@@ -100,9 +102,11 @@ impl<B: Bridge<Arena>> App<B> {
         self.items.clear();
         self.items.push(arena_floor());
         self.view.render_items(&mut self.items);
+        self.list.clear();
+        extract_items(&self.items, &mut self.list);
         if let Some(gfx) = &mut self.gfx {
-            let camera = Camera { center: [0.0, 0.0], half_extent: 2100.0 };
-            gfx.renderer.render(&self.items, &camera);
+            let camera = Camera::new([0.0, 0.0], 2100.0);
+            gfx.renderer.render(&self.list, &camera);
         }
 
         self.frames += 1;
@@ -154,9 +158,9 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
                 return;
             }
         };
-        match Renderer::new(window.clone(), self.opts.vsync) {
+        match WindowRenderer::new(window.clone(), (window.inner_size().width, window.inner_size().height), self.opts.vsync) {
             Ok(renderer) => {
-                self.summary.adapter = renderer.adapter_name().to_string();
+                self.summary.adapter = renderer.adapter_name();
                 println!("adapter: {}", self.summary.adapter);
                 self.gfx = Some(Gfx { window, renderer });
                 self.started = Instant::now();
@@ -219,6 +223,7 @@ pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String
         keys: Keys::default(),
         sent_keys: None,
         items: Vec::new(),
+        list: RenderList::new(),
         started: now,
         last_frame: now,
         window_frames: 0,

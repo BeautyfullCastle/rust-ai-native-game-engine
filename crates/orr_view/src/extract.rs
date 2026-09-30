@@ -30,15 +30,18 @@ pub enum InterpMode {
 pub enum Shape {
     Circle,
     Quad,
+    /// A segment along the local x axis grown by a radius. `Style::size` is
+    /// the half length of the segment, `Style::half_y` the radius.
+    Capsule,
 }
 
 /// How an entity looks. Not interpolated: the newest value is used.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Style {
     pub shape: Shape,
-    /// Radius (circle) or half width (quad), in world units.
+    /// Radius (circle), half width (quad) or half segment length (capsule), in world units.
     pub size: f32,
-    /// Quad only: half height. `0.0` means a square (`size` is used).
+    /// Quad: half height (`0.0` means a square, `size` is used). Capsule: the radius.
     pub half_y: f32,
     pub color: [f32; 4],
 }

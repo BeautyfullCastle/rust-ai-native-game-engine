@@ -1,0 +1,18 @@
+[package]
+name = "orr_render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "2D renderer on orr_rhi (view layer)"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_rhi = { path = "../orr_rhi" }
+orr_view = { path = "../orr_view" }
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+orr_ecs = { path = "../orr_ecs" }

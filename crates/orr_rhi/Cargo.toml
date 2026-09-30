@@ -1,0 +1,15 @@
+[package]
+name = "orr_rhi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Thin render hardware interface over wgpu (view layer)"
+
+[lints]
+workspace = true
+
+[dependencies]
+wgpu = "30"
+pollster = "1"
+raw-window-handle = "0.6"

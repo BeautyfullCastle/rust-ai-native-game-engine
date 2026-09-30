@@ -331,7 +331,14 @@ fn build_scene(frame: &mut Frame, cfg: &PhysConfig) {
         if keep_out.iter().any(|&(c, r)| (c - pos).length_sq() < r * r) {
             continue;
         }
-        let (mut body, collider) = random_body(&mut rng, pos, true);
+        let (mut body, mut collider) = random_body(&mut rng, pos, true);
+        // The mixer also has capsules: every fourth body (the random stream is
+        // used as before, so other scenes and body positions are unchanged).
+        if cfg.mode == SceneMode::Mixer && placed % 4 == 3 {
+            let shape = Shape::capsule(fp!(0.3), fp!(0.28));
+            body = Body::new_dynamic(pos, &shape, FP::ONE).with_angle(body.angle);
+            collider = Collider::new(shape).with_restitution(fp!(0.15));
+        }
         if cfg.mode == SceneMode::Rain {
             body.vel = v2(rng.range_fp(-FP::ONE, FP::ONE), FP::ZERO);
         }
