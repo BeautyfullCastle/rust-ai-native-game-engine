@@ -112,13 +112,15 @@ pub fn layout(bodies: u32) -> Layout {
 
 /// One player's input: paddle stick, spin and buttons.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Pod, Zeroable, Reflect)]
 pub struct PhysInput {
     /// -1, 0 or 1 (other values are clamped).
     pub axis_x: FP,
     pub axis_y: FP,
     /// -1, 0 or 1.
     pub spin: i32,
+    /// Button bits.
+    #[reflect(flags = "shoot=1")]
     pub buttons: u32,
 }
 

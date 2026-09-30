@@ -99,6 +99,21 @@ impl ConnTx {
             let _ = tx.send(Out::Binary(b));
         }
     }
+    /// A view stream message: a binary message on a socket, an `Incoming::Wire` in process.
+    pub(crate) fn send_stream(&self, b: Arc<Vec<u8>>) {
+        if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
+            return;
+        }
+        self.pending.fetch_add(b.len(), Relaxed);
+        match &self.sink {
+            Sink::Net(tx) => {
+                let _ = tx.send(Out::Binary(b));
+            }
+            Sink::Local(tx) => {
+                let _ = tx.send(Incoming::Wire(b.to_vec()));
+            }
+        }
+    }
     /// A frame for an in-process client: shared, never serialized.
     pub(crate) fn send_local_frame(&self, f: Arc<LocalFrame>) {
         if let Sink::Local(tx) = &self.sink {

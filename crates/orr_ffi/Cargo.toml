@@ -1,0 +1,29 @@
+[package]
+name = "orr_ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Orrery C ABI: host a simulation, read its view stream and drive it from C, C++, C# or any language that loads a C library"
+
+[lints]
+workspace = true
+
+[lib]
+# cdylib: liborr_ffi.so / .dylib / orr_ffi.dll; staticlib: for consoles and
+# engines that link statically; rlib: for the Rust tests.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+orr_remote = { path = "../orr_remote" }
+orr_viewstream = { path = "../orr_viewstream" }
+serde_json = "1"
+
+[dev-dependencies]
+cc = "1"
+orr_sample = { path = "../orr_sample" }
+orr_bridge = { path = "../orr_bridge" }
+orr_edit = { path = "../orr_edit" }
+orr_session = { path = "../orr_session" }
+orr_sim = { path = "../orr_sim" }

@@ -24,6 +24,14 @@ impl<'a> FrameView<'a> {
         Self { frame }
     }
 
+    /// A read-only window onto a frame that does not come from a snapshot:
+    /// a host that holds a `Frame` itself and runs view-side code on it
+    /// (the view stream of `orr_viewstream`, an editor viewport). It grants
+    /// exactly what a snapshot's view does: reads only.
+    pub fn of(frame: &'a Frame) -> Self {
+        Self { frame }
+    }
+
     /// The sim tick this frame is the state of.
     pub fn tick(&self) -> u64 {
         self.frame.tick()

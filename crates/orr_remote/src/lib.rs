@@ -75,6 +75,7 @@ mod remote;
 #[cfg(feature = "sample-host")]
 pub mod sample;
 mod server;
+mod viewstream;
 pub mod wire;
 
 pub use activity::{ActivityEntry, ActivityKind, ClientInfo, ValueChange, VerifyDetail, DEFAULT_ACTIVITY_CAPACITY};
@@ -87,4 +88,5 @@ pub use link::{Incoming, LocalConnector, LocalFrame, LocalTransport, PumpedWs, R
 pub use local::LocalHost;
 pub use proposals::{default_build_id, BotFn, GameHooks};
 pub use remote::{RemoteBridge, RemoteConfig, RemoteMetrics};
+pub use viewstream::ViewStreamHook;
 pub use server::{ErpServer, PollReport, ServerConfig, ServerError, ServerStats, MAX_PENDING_BYTES};
