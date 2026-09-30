@@ -8,12 +8,12 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use orr_ecs::Frame;
-use orr_session::AdvanceResult;
-use orr_sim::Game;
+use orr_session::{AdvanceResult, ControlOp, EventBatch, Timeline};
+use orr_sim::{DebugCommand, Game};
 
 use crate::bridge::{BridgeConfig, StepTiming};
 use crate::event::{BridgeEvent, BridgeStats, Lifecycle};
-use crate::host::SimHost;
+use crate::host::{HostOutcome, SimHost};
 use crate::snapshot::{Snapshot, SnapshotData};
 
 /// View to sim messages (Threaded). `Step` and `Shutdown` are control, not
@@ -22,6 +22,10 @@ pub(crate) enum ToSim<G: Game> {
     Input(G::Input),
     Command(G::Command),
     Step(u32),
+    /// A timeline control (play session).
+    Control(ControlOp),
+    /// A debug command (play session).
+    Debug(DebugCommand),
     Shutdown,
 }
 
@@ -54,6 +58,8 @@ struct Published {
     head: u64,
     verified_tick: u64,
     rollbacks: u64,
+    epoch: u64,
+    timeline: Option<Timeline>,
     predicted: Arc<Frame>,
     prev: Option<Arc<Frame>>,
     verified: Option<Arc<Frame>>,
@@ -118,12 +124,66 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
         match msg {
             ToSim::Input(input) => self.input = input,
             ToSim::Command(command) => self.commands.push(command),
+            ToSim::Control(ControlOp::Step(n)) => {
+                for _ in 0..n {
+                    self.run_tick();
+                }
+                self.steps_done.fetch_add(1, Ordering::Release);
+            }
+            ToSim::Control(op) => {
+                let outcome = self.host.control(op);
+                self.finish_call(outcome);
+            }
+            ToSim::Debug(cmd) => {
+                let outcome = self.host.debug_command(cmd);
+                self.finish_call(outcome);
+            }
             ToSim::Step(_) | ToSim::Shutdown => {}
         }
     }
 
-    /// Runs one sim tick and publishes the result.
+    /// Sends what a control or debug call produced, publishes if anything
+    /// changed, and counts the call as one finished step (manual pacing
+    /// waits on the count).
+    fn finish_call(&mut self, outcome: HostOutcome<G>) {
+        let HostOutcome { events, lifecycle } = outcome;
+        for note in lifecycle {
+            let _ = self.events.send(BridgeEvent::Lifecycle(note));
+        }
+        self.send_events(events);
+        if self.needs_publish() {
+            self.publish();
+        }
+        self.steps_done.fetch_add(1, Ordering::Release);
+    }
+
+    fn send_events(&self, batch: EventBatch<G::Event>) {
+        for (key, status) in batch.into_vec() {
+            let _ = self.events.send(BridgeEvent::Sim { key, status });
+        }
+    }
+
+    fn needs_publish(&self) -> bool {
+        let rollbacks = self.seen_rollbacks;
+        self.last.as_ref().is_none_or(|p| {
+            p.head != self.host.head_tick()
+                || p.verified_tick != self.host.verified_tick()
+                || p.rollbacks != rollbacks
+                || p.epoch != self.host.epoch()
+                || p.timeline != self.host.timeline()
+        })
+    }
+
+    /// One clock tick: runs a sim tick and publishes the result. Does
+    /// nothing while the host does not want a tick (a paused play session).
     pub(crate) fn step(&mut self) {
+        if self.host.wants_tick() {
+            self.run_tick();
+        }
+        self.steps_done.fetch_add(1, Ordering::Release);
+    }
+
+    fn run_tick(&mut self) {
         let input = self.input;
         let mut commands = std::mem::take(&mut self.commands);
         if let Some(derive) = &self.cfg.commands_from_input {
@@ -162,31 +222,25 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
         for note in self.host.take_lifecycle() {
             let _ = self.events.send(BridgeEvent::Lifecycle(note));
         }
-        for (key, status) in batch.into_vec() {
-            let _ = self.events.send(BridgeEvent::Sim { key, status });
-        }
+        self.send_events(batch);
 
-        let changed = self.last.as_ref().is_none_or(|p| {
-            p.head != self.host.head_tick()
-                || p.verified_tick != self.host.verified_tick()
-                || p.rollbacks != self.seen_rollbacks
-        });
-        if changed {
+        if self.needs_publish() {
             self.publish();
         }
         if let (Some(start), Some(advanced), Some(observer)) = (t_start, t_advanced, self.cfg.step_observer.as_mut()) {
             // `advance` covers the host call only; the event sends in between are cheap.
             observer(StepTiming { host_advance: advanced - start, publish: advanced.elapsed(), stalled });
         }
-        self.steps_done.fetch_add(1, Ordering::Release);
     }
 
     fn publish(&mut self) {
         let head = self.host.head_tick();
         let verified_tick = self.host.verified_tick();
         let rollbacks = self.seen_rollbacks;
+        let epoch = self.host.epoch();
+        let timeline = self.host.timeline();
 
-        let same_history = self.last.as_ref().filter(|p| p.rollbacks == rollbacks);
+        let same_history = self.last.as_ref().filter(|p| p.rollbacks == rollbacks && p.epoch == epoch);
         let same_head = same_history.filter(|p| p.head == head);
         let predicted = match same_head {
             Some(p) => p.predicted.clone(),
@@ -203,7 +257,7 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
             self.host.frame_at(head - 1).map(|f| self.pool.acquire(f))
         };
         // A verified frame never changes, so it is reused until the tick moves.
-        let verified = match self.last.as_ref().and_then(|p| p.verified.as_ref()) {
+        let verified = match self.last.as_ref().filter(|p| p.epoch == epoch).and_then(|p| p.verified.as_ref()) {
             Some(v) if v.tick() == verified_tick => Some(v.clone()),
             _ => self.host.verified_frame().map(|f| self.pool.acquire(f)),
         };
@@ -219,9 +273,10 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
             verified: verified.clone(),
             stats: self.stats,
             last_rollback: self.host.last_rollback(),
+            timeline: timeline.clone(),
         });
         self.slot.store(Some(data));
-        self.last = Some(Published { head, verified_tick, rollbacks, predicted, prev, verified });
+        self.last = Some(Published { head, verified_tick, rollbacks, epoch, timeline, predicted, prev, verified });
     }
 }
 

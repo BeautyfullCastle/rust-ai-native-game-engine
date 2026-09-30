@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use orr_sim::{Game, PlayerSlot};
+use orr_session::{ControlOp, Timeline};
+use orr_sim::{DebugCommand, Game, PlayerSlot};
 
 use crate::event::BridgeEvent;
 use crate::snapshot::Snapshot;
@@ -111,4 +112,28 @@ pub trait Bridge<G: Game> {
 
     /// `false` once the sim side has stopped (Threaded: the thread ended).
     fn is_alive(&self) -> bool;
+}
+
+/// The editor's timeline controls for a play session
+/// ([`orr_session::PlaySession`] behind a [`crate::PlayHost`]). Implemented
+/// by every adapter with the same behavior. Calls never block the caller
+/// (except [`crate::Threaded`] with manual pacing, which waits so tests are
+/// exact). The effects show up in the next [`Bridge::snapshot`] (its
+/// [`Snapshot::timeline`]) and in [`crate::Lifecycle`] events.
+///
+/// A host without a play session ignores controls and refuses debug commands
+/// (a `DebugRejected` lifecycle event).
+pub trait SimControl<G: Game>: Bridge<G> {
+    /// Play, pause, step, set speed, seek or branch.
+    fn control(&mut self, op: ControlOp) -> Result<(), BridgeError>;
+
+    /// Sends a byte-level edit. It is applied at a tick boundary inside the
+    /// sim and recorded in the replay. It is not part of the game's
+    /// `Command` type. See [`orr_sim::DebugCommand`].
+    fn debug_command(&mut self, cmd: DebugCommand) -> Result<(), BridgeError>;
+
+    /// The newest published timeline.
+    fn timeline(&self) -> Option<Timeline> {
+        self.snapshot().and_then(|s| s.timeline().cloned())
+    }
 }

@@ -17,6 +17,7 @@
 
 mod command;
 mod context;
+mod debug;
 mod event;
 mod game;
 mod hotpatch;
@@ -26,6 +27,7 @@ mod system;
 
 pub use command::{decode_pod, encode_pod, SimCommand};
 pub use context::SimContext;
+pub use debug::{DebugCommand, DebugError};
 pub use event::{EventKey, SimEvent};
 pub use game::Game;
 pub use hotpatch::{DirectCall, HotPatchHook};
@@ -35,5 +37,5 @@ pub use system::System;
 
 // Re-exported so games don't need a direct `orr_ecs`/`orr_fp` dependency
 // just to write systems.
-pub use orr_ecs::{Commands, Component, ComponentRegistryBuilder, Entity, Frame};
+pub use orr_ecs::{Commands, Component, ComponentId, ComponentRegistryBuilder, Entity, Frame, SingletonId};
 pub use orr_fp::{fp, FPVec2, FPVec3, FrameRng, FP};

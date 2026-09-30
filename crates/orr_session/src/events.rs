@@ -34,6 +34,12 @@ impl<E> EventBatch<E> {
         self.items.push((key, status));
     }
 
+    /// A batch where every event is final (`Verified`), in the given order.
+    /// For hosts without prediction, such as a local play session.
+    pub fn verified(events: Vec<orr_sim::SimEvent<E>>) -> Self {
+        Self { items: events.into_iter().map(|e| (e.key, EventStatus::Verified(e.payload))).collect() }
+    }
+
     /// An empty batch.
     pub fn empty() -> Self {
         Self { items: Vec::new() }

@@ -4,6 +4,7 @@ use orr_ecs::{Commands, ComponentRegistry, ComponentRegistryBuilder, Frame};
 use orr_fp::FrameRng;
 
 use crate::context::SimContext;
+use crate::debug::{DebugCommand, DebugError};
 use crate::event::SimEvent;
 use crate::game::Game;
 use crate::hotpatch::invoke_system;
@@ -80,15 +81,41 @@ impl<G: Game> Simulation<G> {
     /// Like [`Simulation::new`], but with an explicit `build_id` (see
     /// [`Simulation::build_hash`]).
     pub fn with_build_id(config: G::Config, tick_rate: u32, seed: u64, build_id: u64) -> Self {
+        Self::with_setup(tick_rate, seed, build_id, |frame| G::setup(frame, &config))
+    }
+
+    /// Registers `G`'s types (after the engine's own) and returns the
+    /// registry a `Simulation<G>` uses. Two calls give registries with the
+    /// same layout, so a `Frame` built against one can be moved into another
+    /// simulation with `Frame::to_bytes`/`from_bytes` (see
+    /// [`Simulation::from_frame`]).
+    pub fn build_registry() -> Arc<ComponentRegistry> {
         let mut builder = ComponentRegistryBuilder::new();
         builder.register_singleton::<FrameRng>("orr_sim::FrameRng");
         G::register(&mut builder);
-        let registry = builder.build();
+        builder.build()
+    }
 
+    /// Like [`Simulation::with_build_id`], but `setup` fills the fresh
+    /// `Frame` (RNG already seeded) instead of `G::setup`. An editor uses
+    /// this to start from a baked scene.
+    pub fn with_setup(tick_rate: u32, seed: u64, build_id: u64, setup: impl FnOnce(&mut Frame)) -> Self {
+        let registry = Self::build_registry();
         let mut frame = Frame::new(registry.clone());
         frame.set_singleton(FrameRng::new(seed));
-        G::setup(&mut frame, &config);
+        setup(&mut frame);
+        Self::from_parts(registry, frame, tick_rate, build_id)
+    }
 
+    /// Starts from a copy of `initial` (any tick; any registry with the
+    /// same layout as `G`'s). Fails if the layout differs.
+    pub fn from_frame(initial: &Frame, tick_rate: u32, build_id: u64) -> Result<Self, orr_ecs::FrameDecodeError> {
+        let registry = Self::build_registry();
+        let frame = Frame::from_bytes(registry.clone(), &initial.to_bytes())?;
+        Ok(Self::from_parts(registry, frame, tick_rate, build_id))
+    }
+
+    fn from_parts(registry: Arc<ComponentRegistry>, frame: Frame, tick_rate: u32, build_id: u64) -> Self {
         Self {
             registry,
             frame,
@@ -187,6 +214,26 @@ impl<G: Game> Simulation<G> {
     /// changing this method's external behavior for non-overlapping
     /// systems.
     pub fn step(&mut self, inputs: &TickInputs<G::Input, G::Command>) -> Vec<SimEvent<G::Event>> {
+        self.step_with_debug(inputs, &[])
+    }
+
+    /// Applies one debug command to the current frame, at the boundary
+    /// between two ticks. See [`DebugCommand`].
+    pub fn apply_debug(&mut self, cmd: &DebugCommand) -> Result<Option<orr_ecs::Entity>, DebugError> {
+        cmd.apply(&mut self.frame)
+    }
+
+    /// Like [`Simulation::step`], but first applies `debug` in order, at the
+    /// tick boundary. A command that fails its check is skipped. The error
+    /// depends only on the frame, so every replay skips it too.
+    pub fn step_with_debug(
+        &mut self,
+        inputs: &TickInputs<G::Input, G::Command>,
+        debug: &[DebugCommand],
+    ) -> Vec<SimEvent<G::Event>> {
+        for cmd in debug {
+            let _ = cmd.apply(&mut self.frame);
+        }
         let tick = self.frame.tick() + 1;
         self.frame.set_tick(tick);
         let mut events = Vec::new();

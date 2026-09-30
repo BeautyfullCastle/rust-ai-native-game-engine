@@ -426,35 +426,36 @@ fn keyframes_add_to_file_size() {
 }
 
 #[test]
-fn v1_replay_still_parses_and_seeks() {
-    // Turn a v2 file without keyframes into the v1 layout: version 1 and no
-    // trailing keyframe count in the body.
-    let (v2, checksums) = record_replay(60, 0);
+fn v1_and_v2_replays_still_parse_and_seek() {
+    // Turn a v3 file without keyframes or debug commands into the older
+    // layouts: v2 has no trailing debug count, v1 has no keyframe count either.
+    let (v3, checksums) = record_replay(60, 0);
     let header_len = 4 + 4 + (4 + "arena".len()) + 8 + 8 + 1 + 4 + 4;
-    let body_len = u32::from_le_bytes(v2[header_len..header_len + 4].try_into().unwrap()) as usize;
-    let compressed = &v2[header_len + 4..header_len + 4 + body_len];
-    let mut body = lz4_flex::block::decompress_size_prepended(compressed).unwrap();
-    assert_eq!(&body[body.len() - 4..], &[0, 0, 0, 0], "expected empty keyframe table");
-    body.truncate(body.len() - 4);
-    let recompressed = lz4_flex::block::compress_prepend_size(&body);
+    let body_len = u32::from_le_bytes(v3[header_len..header_len + 4].try_into().unwrap()) as usize;
+    let compressed = &v3[header_len + 4..header_len + 4 + body_len];
+    let body = lz4_flex::block::decompress_size_prepended(compressed).unwrap();
+    assert_eq!(&body[body.len() - 8..], &[0; 8], "expected empty keyframe and debug tables");
 
-    let mut v1 = v2[..header_len].to_vec();
-    v1[4..8].copy_from_slice(&1u32.to_le_bytes());
-    v1.extend_from_slice(&(recompressed.len() as u32).to_le_bytes());
-    v1.extend_from_slice(&recompressed);
+    for (version, cut) in [(2u32, 4usize), (1u32, 8usize)] {
+        let recompressed = lz4_flex::block::compress_prepend_size(&body[..body.len() - cut]);
+        let mut old = v3[..header_len].to_vec();
+        old[4..8].copy_from_slice(&version.to_le_bytes());
+        old.extend_from_slice(&(recompressed.len() as u32).to_le_bytes());
+        old.extend_from_slice(&recompressed);
 
-    let reader = orr_session::ReplayReader::<Arena>::parse(&v1).expect("v1 parses");
-    assert_eq!(reader.header.format_version, 1);
-    assert_eq!(reader.keyframe_count(), 0);
-    let sim = reader.seek(ArenaConfig { player_count: 2 }, 60).unwrap();
-    assert_eq!(sim.checksum(), checksums[&60]);
+        let reader = orr_session::ReplayReader::<Arena>::parse(&old).expect("old version parses");
+        assert_eq!(reader.header.format_version, version);
+        assert_eq!(reader.keyframe_count(), 0);
+        let sim = reader.seek(ArenaConfig { player_count: 2 }, 60).unwrap();
+        assert_eq!(sim.checksum(), checksums[&60]);
+    }
 
     // Unknown future versions are still rejected.
-    let mut v3 = v2.clone();
-    v3[4..8].copy_from_slice(&3u32.to_le_bytes());
+    let mut v4 = v3.clone();
+    v4[4..8].copy_from_slice(&4u32.to_le_bytes());
     assert!(matches!(
-        orr_session::ReplayReader::<Arena>::parse(&v3),
-        Err(orr_session::ReplayError::UnsupportedVersion(3))
+        orr_session::ReplayReader::<Arena>::parse(&v4),
+        Err(orr_session::ReplayError::UnsupportedVersion(4))
     ));
 }
 

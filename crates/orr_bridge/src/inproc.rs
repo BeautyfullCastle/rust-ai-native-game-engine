@@ -6,13 +6,18 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use orr_sim::{Game, PlayerSlot};
 
-use crate::bridge::{Bridge, BridgeConfig, BridgeError};
+use orr_session::ControlOp;
+use orr_sim::DebugCommand;
+
+use crate::bridge::{Bridge, BridgeConfig, BridgeError, SimControl};
 use crate::core::{load_snapshot, SimCore, SnapshotSlot, ToSim};
 use crate::event::BridgeEvent;
 use crate::host::SimHost;
 use crate::snapshot::Snapshot;
 
 const NANOS: u128 = 1_000_000_000;
+/// One tick in accumulator units: nanosecond x tick rate x speed (in thousandths).
+const TICK_UNITS: u128 = NANOS * 1000;
 
 /// Same-thread adapter: the caller's [`Bridge::update`] runs the sim ticks
 /// that are due, then returns. For tests, tools, and platforms without
@@ -27,7 +32,7 @@ pub struct InProc<G: Game, H: SimHost<G>> {
     local_slot: PlayerSlot,
     tick_rate: u32,
     player_count: u8,
-    /// Elapsed time in units of (nanosecond x tick rate); one tick is 1e9 units.
+    /// Elapsed time in units of (nanosecond x tick rate x speed); one tick is `TICK_UNITS`.
     acc: u128,
     max_catchup: u32,
 }
@@ -89,13 +94,19 @@ impl<G: Game, H: SimHost<G>> Bridge<G> for InProc<G, H> {
     }
 
     fn update(&mut self, elapsed: Duration) {
-        self.acc += elapsed.as_nanos() * u128::from(self.tick_rate);
-        let due = self.acc / NANOS;
+        if !self.core.host().wants_tick() {
+            // Paused: time does not pile up, so resuming does not burst.
+            self.acc = 0;
+            return;
+        }
+        let speed = u128::from(self.core.host().speed().permille());
+        self.acc += elapsed.as_nanos() * u128::from(self.tick_rate) * speed;
+        let due = self.acc / TICK_UNITS;
         let run = due.min(u128::from(self.max_catchup)) as u32;
-        self.acc -= u128::from(run) * NANOS;
+        self.acc -= u128::from(run) * TICK_UNITS;
         if due > u128::from(run) {
             // Too far behind: drop the rest instead of spiralling.
-            self.acc %= NANOS;
+            self.acc %= TICK_UNITS;
         }
         self.step(run);
     }
@@ -110,5 +121,17 @@ impl<G: Game, H: SimHost<G>> Bridge<G> for InProc<G, H> {
 
     fn is_alive(&self) -> bool {
         true
+    }
+}
+
+impl<G: Game, H: SimHost<G>> SimControl<G> for InProc<G, H> {
+    fn control(&mut self, op: ControlOp) -> Result<(), BridgeError> {
+        self.core.apply(ToSim::Control(op));
+        Ok(())
+    }
+
+    fn debug_command(&mut self, cmd: DebugCommand) -> Result<(), BridgeError> {
+        self.core.apply(ToSim::Debug(cmd));
+        Ok(())
     }
 }

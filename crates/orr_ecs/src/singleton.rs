@@ -6,6 +6,7 @@ use crate::component::Component;
 /// Type-erased holder for one registered singleton value.
 pub trait AnySingleton: Send + Sync {
     fn bytes(&self) -> &[u8];
+    fn bytes_mut(&mut self) -> &mut [u8];
     fn copy_from(&mut self, other: &dyn AnySingleton);
     /// Overwrites the value from exactly `bytes().len()` bytes of `r`.
     fn read_bytes(&mut self, r: &mut Reader) -> Result<(), FrameDecodeError>;
@@ -27,6 +28,10 @@ impl<T: Component> Default for SingletonSlot<T> {
 impl<T: Component> AnySingleton for SingletonSlot<T> {
     fn bytes(&self) -> &[u8] {
         bytemuck::bytes_of(&self.0)
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        bytemuck::bytes_of_mut(&mut self.0)
     }
 
     fn copy_from(&mut self, other: &dyn AnySingleton) {

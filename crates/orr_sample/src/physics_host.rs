@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use orr_bridge::{BridgeConfig, SimHost, StepTiming};
+use orr_bridge::{BridgeConfig, PlayConfig, PlayHost, PlaySession, SimHost, StepTiming};
 use orr_ecs::Frame;
 use orr_fp::FrameRng;
 use orr_session::{AdvanceResult, LoopbackClock, LoopbackEnd, LoopbackNetwork, RollbackInfo, Session, SessionConfig};
@@ -319,6 +319,17 @@ pub fn session_configs() -> (SessionConfig, SessionConfig) {
 pub fn physics_pair(scene: PhysConfig, net: Loopback, metrics: Arc<SimMetrics>) -> TimedPair<PhysGame> {
     let (cfg_a, cfg_b) = session_configs();
     TimedPair::new(move || scene, cfg_a, cfg_b, net, NET_SEED, phys_bot(1234), metrics)
+}
+
+/// The physics scene as a local play session (the editor's play mode): one
+/// machine, no network, a bot on the second paddle, everything recorded so
+/// the timeline can seek and branch. Build it on the sim thread.
+pub fn physics_play_host(scene: PhysConfig) -> PlayHost<PhysGame> {
+    let mut cfg = PlayConfig::new(2, SESSION_SEED, TICK_RATE);
+    cfg.game_id = "physics".to_string();
+    let session = PlaySession::<PhysGame>::new(cfg, scene);
+    let mut bot = phys_bot(1234);
+    PlayHost::new(session, PlayerSlot(LOCAL_SLOT)).with_bot(move |_slot, tick| bot(tick).0)
 }
 
 /// Bridge settings of the physics sample: timing goes to `metrics`.

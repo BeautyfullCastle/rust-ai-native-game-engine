@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use orr_ecs::Frame;
-use orr_session::RollbackInfo;
+use orr_session::{RollbackInfo, Timeline};
 
 use crate::event::BridgeStats;
 use crate::frame_view::FrameView;
@@ -16,6 +16,7 @@ pub(crate) struct SnapshotData {
     pub(crate) verified: Option<Arc<Frame>>,
     pub(crate) stats: BridgeStats,
     pub(crate) last_rollback: Option<RollbackInfo>,
+    pub(crate) timeline: Option<Timeline>,
 }
 
 /// An immutable copy of what the view needs, published by the sim side
@@ -69,6 +70,12 @@ impl Snapshot {
 
     pub fn stats(&self) -> BridgeStats {
         self.0.stats
+    }
+
+    /// The timeline of a play session (tick, recorded range, keyframes,
+    /// playing/paused, speed, checksums). `None` for hosts without one.
+    pub fn timeline(&self) -> Option<&Timeline> {
+        self.0.timeline.as_ref()
     }
 
     /// The latest rollback (of the whole session, not of this publish).
