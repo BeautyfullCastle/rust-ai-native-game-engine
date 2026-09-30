@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use orr_bridge::{Bridge, BridgeEvent, EventStatus, Lifecycle, PlayerSlot};
+use orr_bridge::{Bridge, BridgeEvent, EventStatus, RelayMetrics};
 use orr_testgame::Arena;
 use orr_view::{InterpMode, RenderItem, ViewConfig, ViewWorld};
 use winit::application::ApplicationHandler;
@@ -14,7 +14,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::arena_view::{arena_floor, ArenaExtractor, Keys, LOCAL_SLOT};
+use crate::arena_view::{arena_floor, ArenaExtractor, Keys};
+use crate::net_client::{log_lifecycle, relay_title};
 use crate::render2d::{Camera, Renderer};
 
 #[derive(Clone, Debug)]
@@ -26,6 +27,8 @@ pub struct Options {
     pub seconds: Option<f32>,
     pub remote_mode: InterpMode,
     pub view: ViewConfig,
+    /// Relay play: numbers for the window title (round trip, delay, ...).
+    pub relay: Option<Arc<RelayMetrics>>,
 }
 
 /// What a run measured.
@@ -80,7 +83,7 @@ impl<B: Bridge<Arena>> App<B> {
 
         if self.sent_keys != Some(self.keys) {
             self.sent_keys = Some(self.keys);
-            let _ = self.bridge.set_input(PlayerSlot(LOCAL_SLOT), self.keys.to_input());
+            let _ = self.bridge.set_input(self.bridge.local_slot(), self.keys.to_input());
         }
         self.bridge.update(dt);
         let snapshot = self.bridge.snapshot();
@@ -90,7 +93,7 @@ impl<B: Bridge<Arena>> App<B> {
                 BridgeEvent::Sim { status: EventStatus::Predicted(_), .. } => self.summary.predicted_hits += 1,
                 BridgeEvent::Sim { status: EventStatus::Verified(_), .. } => self.summary.verified_hits += 1,
                 BridgeEvent::Sim { status: EventStatus::Canceled, .. } => self.summary.canceled_events += 1,
-                BridgeEvent::Lifecycle(Lifecycle::Stalled { .. }) | BridgeEvent::Lifecycle(_) => {}
+                BridgeEvent::Lifecycle(note) => log_lifecycle(&note),
             }
         }
 
@@ -109,8 +112,9 @@ impl<B: Bridge<Arena>> App<B> {
             let fps = self.window_frames as f32 / window_secs;
             let stats = snapshot.as_ref().map(|s| (s.tick(), s.verified_tick(), s.stats()));
             if let (Some(gfx), Some((tick, verified, stats))) = (&self.gfx, stats) {
+                let net = self.opts.relay.as_ref().map(|m| relay_title(&m.status())).unwrap_or_default();
                 gfx.window.set_title(&format!(
-                    "Orrery arena [{}] fps {:.0} | tick {} (verified {}) | rollbacks {} (deepest {})",
+                    "Orrery arena [{}] fps {:.0} | tick {} (verified {}) | rollbacks {} (deepest {}){net}",
                     self.opts.label, fps, tick, verified, stats.rollbacks, stats.max_rollback_depth
                 ));
             }
@@ -205,7 +209,8 @@ pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let now = Instant::now();
-    let extractor = ArenaExtractor { remote_mode: opts.remote_mode };
+    let local_slot = bridge.local_slot().0;
+    let extractor = ArenaExtractor { remote_mode: opts.remote_mode, local_slot };
     let mut app = App {
         bridge,
         view: ViewWorld::new(extractor, opts.view),

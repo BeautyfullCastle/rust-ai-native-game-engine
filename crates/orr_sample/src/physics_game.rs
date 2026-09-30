@@ -62,11 +62,34 @@ pub struct PhysConfig {
     pub max_entities: u32,
     /// Seed of the scene layout (the sim RNG seed is the session seed).
     pub layout_seed: u64,
+    /// Paddles in the scene, one per slot (2 in the local samples; relay
+    /// play sets the room's player count).
+    pub paddles: u32,
 }
 
 impl PhysConfig {
+    /// Reads the scene from a room config blob (see `orr_server::presets`).
+    /// `player_count` is the room's, and sets the number of paddles.
+    pub fn from_blob(blob: &[u8], player_count: u8) -> Option<Self> {
+        let rest = blob.strip_prefix(b"PHY1")?;
+        let bodies = u32::from_le_bytes(rest.get(0..4)?.try_into().ok()?);
+        let mode = match *rest.get(4)? {
+            0 => SceneMode::Rain,
+            1 => SceneMode::Pile,
+            2 => SceneMode::Mixer,
+            _ => return None,
+        };
+        let spawn_rate = u32::from_le_bytes(rest.get(5..9)?.try_into().ok()?);
+        let max_entities = u32::from_le_bytes(rest.get(9..13)?.try_into().ok()?);
+        let layout_seed = u64::from_le_bytes(rest.get(13..21)?.try_into().ok()?);
+        if rest.len() != 21 || bodies == 0 {
+            return None;
+        }
+        Some(Self { bodies, mode, spawn_rate, max_entities, layout_seed, paddles: u32::from(player_count.max(1)) })
+    }
+
     pub fn new(bodies: u32, mode: SceneMode) -> Self {
-        Self { bodies, mode, spawn_rate: 0, max_entities: 20_000, layout_seed: 0x0DDB_A110 }
+        Self { bodies, mode, spawn_rate: 0, max_entities: 20_000, layout_seed: 0x0DDB_A110, paddles: 2 }
     }
 }
 
@@ -278,8 +301,13 @@ fn build_scene(frame: &mut Frame, cfg: &PhysConfig) {
 
     // One paddle per player, side by side above the block (or low, in the rain).
     let paddle_y = if cfg.mode == SceneMode::Rain { height * fp!(0.2) } else { (pile_top + fp!(4)).min(height * fp!(0.9)) };
-    for slot in 0..2u32 {
-        let x = if slot == 0 { -half_w / 2 } else { half_w / 2 };
+    for slot in 0..cfg.paddles {
+        let x = match (cfg.paddles, slot) {
+            (2, 0) => -half_w / 2,
+            (2, _) => half_w / 2,
+            // More (or fewer) players: evenly spread across the box.
+            (n, s) => -half_w + half_w * 2 * (s as i32 * 2 + 1) / (n as i32 * 2),
+        };
         let pos = v2(x, paddle_y);
         let paddle = spawn_body(
             frame,

@@ -12,6 +12,14 @@ pub enum Lifecycle {
     /// The predicted head reached the prediction limit, so the sim waits for
     /// remote input. Sent once per stall, not once per tick.
     Stalled { head_tick: u64 },
+    /// Relay play only: the server found different checksums at `tick`
+    /// (a desync dump was written on this client).
+    Desync { tick: u64 },
+    /// Relay play only: the connection to the server is gone. The sim stays
+    /// at its last tick.
+    Disconnected,
+    /// Relay play only: the client changed its input delay (in ticks).
+    DelayChanged { delay: u32 },
 }
 
 /// One notification from the sim to the view.

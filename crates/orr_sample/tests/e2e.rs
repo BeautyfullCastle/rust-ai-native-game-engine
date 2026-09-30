@@ -15,7 +15,7 @@ const FRAMES_PER_TICK: u32 = 3;
 /// step of any player circle (by entity), and how many rollbacks happened.
 fn run(cfg: ViewConfig, ticks: u32) -> (f32, u64) {
     let mut bridge = InProc::new(loopback_pair(Loopback { latency_ticks: 6, jitter_ticks: 2 }), arena_bridge_config());
-    let mut view = ViewWorld::new(ArenaExtractor { remote_mode: InterpMode::Prediction }, cfg);
+    let mut view = ViewWorld::new(ArenaExtractor { remote_mode: InterpMode::Prediction, local_slot: LOCAL_SLOT }, cfg);
     let dt = Duration::from_secs_f64(1.0 / 60.0 / f64::from(FRAMES_PER_TICK));
     // The local player walks in a square so both peers keep changing direction.
     let mut last: Vec<(orr_ecs::Entity, f32, f32)> = Vec::new();
@@ -66,7 +66,7 @@ fn threaded_bridge_drives_the_same_view() {
         ThreadedConfig { pacing: Pacing::Manual, max_catchup: 8 },
     )
     .unwrap();
-    let mut view = ViewWorld::new(ArenaExtractor { remote_mode: InterpMode::Snapshot }, ViewConfig::default());
+    let mut view = ViewWorld::new(ArenaExtractor { remote_mode: InterpMode::Snapshot, local_slot: LOCAL_SLOT }, ViewConfig::default());
     let mut items = Vec::new();
     for _ in 0..240 {
         bridge.update(Duration::from_nanos(16_666_667));

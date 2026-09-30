@@ -159,6 +159,9 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
                 let _ = self.events.send(BridgeEvent::Lifecycle(Lifecycle::Rollback(info)));
             }
         }
+        for note in self.host.take_lifecycle() {
+            let _ = self.events.send(BridgeEvent::Lifecycle(note));
+        }
         for (key, status) in batch.into_vec() {
             let _ = self.events.send(BridgeEvent::Sim { key, status });
         }

@@ -13,13 +13,17 @@ use orr_view::{fp_to_f32, fp_to_vec2, Extracted, Extractor, InterpMode, RenderIt
 /// Slot of the player at the keyboard.
 pub const LOCAL_SLOT: u8 = 0;
 
-const PLAYER_COLORS: [[f32; 4]; 2] = [[0.25, 0.6, 1.0, 1.0], [1.0, 0.55, 0.2, 1.0]];
-const BULLET_COLORS: [[f32; 4]; 2] = [[0.7, 0.85, 1.0, 1.0], [1.0, 0.8, 0.55, 1.0]];
+const PLAYER_COLORS: [[f32; 4]; 4] =
+    [[0.25, 0.6, 1.0, 1.0], [1.0, 0.55, 0.2, 1.0], [0.4, 0.9, 0.4, 1.0], [0.95, 0.4, 0.75, 1.0]];
+const BULLET_COLORS: [[f32; 4]; 4] =
+    [[0.7, 0.85, 1.0, 1.0], [1.0, 0.8, 0.55, 1.0], [0.75, 1.0, 0.75, 1.0], [1.0, 0.75, 0.9, 1.0]];
 
 /// Reads players and bullets out of an arena frame.
 /// The local player and all bullets are predicted; other players use `remote_mode`.
 pub struct ArenaExtractor {
     pub remote_mode: InterpMode,
+    /// Slot of the player at the keyboard.
+    pub local_slot: u8,
 }
 
 impl Extractor for ArenaExtractor {
@@ -27,7 +31,7 @@ impl Extractor for ArenaExtractor {
         for (entity, position) in frame.iter::<Position>() {
             let transform = Transform2::new(fp_to_vec2(position.pos), 0.0);
             if let Some(tag) = frame.get::<PlayerTag>(entity) {
-                let mode = if tag.slot == u32::from(LOCAL_SLOT) { InterpMode::Prediction } else { self.remote_mode };
+                let mode = if tag.slot == u32::from(self.local_slot) { InterpMode::Prediction } else { self.remote_mode };
                 let color = PLAYER_COLORS[tag.slot as usize % PLAYER_COLORS.len()];
                 let style = Style { shape: Shape::Circle, size: fp_to_f32(PLAYER_RADIUS), half_y: 0.0, color };
                 out.push(Extracted { entity, transform, mode, style });
@@ -60,6 +64,13 @@ fn fire_commands(owner: u32, input: &ArenaInput) -> Vec<SpawnBulletCmd> {
 /// Bridge settings for the arena: a set fire bit spawns a bullet command.
 pub fn arena_bridge_config() -> BridgeConfig<Arena> {
     BridgeConfig::default().with_commands_from_input(|input| fire_commands(u32::from(LOCAL_SLOT), input))
+}
+
+/// Commands of one tick's input for player `owner`: a set fire bit spawns a
+/// bullet. Relay play passes this to `RelayHostOptions::commands_from_input`
+/// (the client's slot is the owner).
+pub fn arena_fire_commands(owner: u32, input: &ArenaInput) -> Vec<SpawnBulletCmd> {
+    fire_commands(owner, input)
 }
 
 /// The keys of the local player.

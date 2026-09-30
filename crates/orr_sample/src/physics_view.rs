@@ -6,11 +6,11 @@ use orr_ecs::Entity;
 use orr_physics::{Body, Collider, BODY_DYNAMIC, BODY_KINEMATIC, SHAPE_CIRCLE};
 use orr_view::{fp_to_f32, fp_to_vec2, Extracted, Extractor, InterpMode, RenderItem, Shape, Style, Transform2, Vec2};
 
-use crate::arena_view::LOCAL_SLOT;
 use crate::physics_game::{layout, PaddleTag, PhysInput};
 use crate::render2d::Camera;
 
-const PADDLE_COLORS: [[f32; 4]; 2] = [[0.25, 0.6, 1.0, 1.0], [1.0, 0.55, 0.2, 1.0]];
+const PADDLE_COLORS: [[f32; 4]; 4] =
+    [[0.25, 0.6, 1.0, 1.0], [1.0, 0.55, 0.2, 1.0], [0.4, 0.9, 0.4, 1.0], [0.95, 0.4, 0.75, 1.0]];
 const STATIC_COLOR: [f32; 4] = [0.36, 0.38, 0.47, 1.0];
 const BAR_COLOR: [f32; 4] = [0.72, 0.42, 0.86, 1.0];
 const CIRCLE_COLOR: [f32; 3] = [0.25, 0.85, 0.75];
@@ -23,6 +23,8 @@ const FULL_BRIGHT_SPEED: f32 = 8.0;
 /// obstacles never move; the remote paddle uses `remote_mode`.
 pub struct PhysExtractor {
     pub remote_mode: InterpMode,
+    /// Slot of the player at the keyboard (its paddle is predicted).
+    pub local_slot: u8,
 }
 
 impl Extractor for PhysExtractor {
@@ -41,7 +43,7 @@ impl Extractor for PhysExtractor {
                 }
                 BODY_KINEMATIC => match frame.get::<PaddleTag>(entity) {
                     Some(tag) => {
-                        let mode = if tag.slot == u32::from(LOCAL_SLOT) { InterpMode::Prediction } else { self.remote_mode };
+                        let mode = if tag.slot == u32::from(self.local_slot) { InterpMode::Prediction } else { self.remote_mode };
                         (mode, PADDLE_COLORS[tag.slot as usize % PADDLE_COLORS.len()])
                     }
                     None => (InterpMode::Prediction, BAR_COLOR),

@@ -9,12 +9,22 @@
 //!   --tau SECONDS                rollback smoothing time constant (default 0.12, 0 = off)
 //!   --no-vsync                   do not wait for the display (measure raw speed)
 //!   --seconds N                  close after N seconds and print a summary
+//!   --headless                   with --connect --bot: no window, play as a scripted bot (default 30 s)
 //! ```
-//! Keys: WASD or arrows move, space fires, Escape quits. The other player is a bot.
+//! Play on a relay server (`orr_server`) instead of the local loopback with
+//! `--connect HOST:PORT` (options: see `orr_sample::net_client::NET_HELP`):
+//! ```text
+//!   --connect HOST:PORT  --transport quic|ws  --trust-fingerprint HEX | --insecure-dev
+//!   --room N  --slot N  --name TEXT  --sim-latency MS  --sim-jitter MS  --sim-loss P
+//!   --desync-dir DIR  --bot  --connect-timeout SECONDS
+//! ```
+//! Keys: WASD or arrows move, space fires, Escape quits. In local mode the other player is a bot.
 use std::process::ExitCode;
 
 use orr_bridge::{Bridge, InProc, Threaded, ThreadedConfig};
+use orr_bridge::RelayMetrics;
 use orr_sample::app::{run, Options, Summary};
+use orr_sample::net_client::{arena_bridge, print_bot_report, print_relay_status, run_arena_bot, NetArgs};
 use orr_sample::arena_view::{arena_bridge_config, loopback_pair, Loopback};
 use orr_view::{InterpMode, ViewConfig};
 
@@ -31,17 +41,24 @@ fn main() -> ExitCode {
 fn real_main() -> Result<(), String> {
     let mut threaded = true;
     let mut net = Loopback::default();
+    let mut netargs = NetArgs::default();
+    let mut headless = false;
     let mut opts = Options {
         label: String::new(),
         vsync: true,
         seconds: None,
         remote_mode: InterpMode::Snapshot,
         view: ViewConfig::default(),
+        relay: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
+        if netargs.parse_option(&arg, &mut |name| value(name))? {
+            continue;
+        }
         match arg.as_str() {
+            "--headless" => headless = true,
             "--bridge" => {
                 threaded = match value("--bridge")?.as_str() {
                     "threaded" => true,
@@ -64,6 +81,29 @@ fn real_main() -> Result<(), String> {
             "--seconds" => opts.seconds = Some(value("--seconds")?.parse().map_err(|e| format!("--seconds: {e}"))?),
             other => return Err(format!("unknown option '{other}' (see the header of this file)")),
         }
+    }
+
+    if netargs.connect.is_some() {
+        if headless {
+            if !netargs.bot {
+                return Err("--headless needs --bot (nobody is at the keyboard)".to_string());
+            }
+            let report = run_arena_bot(&netargs, opts.seconds.unwrap_or(30.0))?;
+            print_bot_report(&netargs.name, &report);
+            return Ok(());
+        }
+        opts.label = format!("relay {}", netargs.name);
+        let metrics = RelayMetrics::new();
+        opts.relay = Some(metrics.clone());
+        eprintln!("connecting to {} ...", netargs.connect.as_deref().unwrap_or(""));
+        let bridge = arena_bridge(&netargs, metrics.clone())?;
+        let summary = run_with(bridge, opts)?;
+        print_summary(&summary);
+        print_relay_status(&metrics.status());
+        return Ok(());
+    }
+    if headless {
+        return Err("--headless is only for --connect --bot".to_string());
     }
 
     let summary = if threaded {

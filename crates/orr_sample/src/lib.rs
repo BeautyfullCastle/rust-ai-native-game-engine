@@ -15,6 +15,7 @@
 
 pub mod app;
 pub mod arena_view;
+pub mod net_client;
 pub mod physics_app;
 pub mod physics_game;
 pub mod physics_host;

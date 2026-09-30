@@ -28,6 +28,7 @@ mod event;
 mod frame_view;
 mod host;
 mod inproc;
+mod relay_host;
 mod snapshot;
 mod threaded;
 
@@ -36,6 +37,7 @@ pub use event::{BridgeEvent, BridgeStats, Lifecycle};
 pub use frame_view::FrameView;
 pub use host::{LoopbackPair, SimHost};
 pub use inproc::InProc;
+pub use relay_host::{ConnectError, RelayHost, RelayHostOptions, RelayMetrics, RelayStatus, StatusFn};
 pub use snapshot::Snapshot;
 pub use threaded::{Pacing, Threaded, ThreadedConfig};
 

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use orr_bridge::{Bridge, InProc, PlayerSlot};
+use orr_bridge::{Bridge, BridgeEvent, InProc, PlayerSlot};
 use orr_view::{RenderItem, ViewWorld};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -15,6 +15,7 @@ use winit::window::{Window, WindowId};
 
 use crate::app::Options;
 use crate::arena_view::{Loopback, LOCAL_SLOT};
+use crate::net_client::{log_lifecycle, relay_title};
 use crate::physics_game::{PhysConfig, PhysGame, TICK_RATE};
 use crate::physics_host::{physics_bridge_config, physics_pair, scripted_local, SimMetrics, SimReport};
 use crate::physics_view::{scene_camera, scene_floor, PhysExtractor, PhysKeys};
@@ -138,7 +139,7 @@ impl<B: Bridge<PhysGame>> App<B> {
 
         if self.sent_keys != Some(self.keys) {
             self.sent_keys = Some(self.keys);
-            let _ = self.bridge.set_input(PlayerSlot(LOCAL_SLOT), self.keys.to_input());
+            let _ = self.bridge.set_input(self.bridge.local_slot(), self.keys.to_input());
         }
         self.bridge.update(dt);
         let snapshot = self.bridge.snapshot();
@@ -146,8 +147,12 @@ impl<B: Bridge<PhysGame>> App<B> {
         let t = Instant::now();
         self.view.update(dt.as_secs_f32().min(0.1), snapshot.as_ref());
         self.stages.view_update.push(ms(t.elapsed()));
-        // Events are not used by this scene, but the queue must not grow.
-        drop(self.bridge.drain_events());
+        // Game events are not used by this scene, but the queue must not grow.
+        for event in self.bridge.drain_events() {
+            if let BridgeEvent::Lifecycle(note) = event {
+                log_lifecycle(&note);
+            }
+        }
 
         let t = Instant::now();
         self.items.clear();
@@ -168,8 +173,9 @@ impl<B: Bridge<PhysGame>> App<B> {
             let (sim_avg, sim_max) = self.metrics.take_window();
             if let (Some(gfx), Some(s)) = (&self.gfx, &snapshot) {
                 let stats = s.stats();
+                let net = self.opts.relay.as_ref().map(|m| relay_title(&m.status())).unwrap_or_default();
                 gfx.window.set_title(&format!(
-                    "Orrery physics [{}] {} bodies | fps {:.0} | sim {:.1}/{:.1} ms | tick {} (verified {}) | rollbacks {} (deepest {}) | stalls {}",
+                    "Orrery physics [{}] {} bodies | fps {:.0} | sim {:.1}/{:.1} ms | tick {} (verified {}) | rollbacks {} (deepest {}) | stalls {}{net}",
                     self.opts.label,
                     s.predicted().alive_count(),
                     fps,
@@ -285,9 +291,10 @@ pub fn run_window<B: Bridge<PhysGame>>(
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let now = Instant::now();
+    let local_slot = bridge.local_slot().0;
     let mut app = App {
         bridge,
-        view: ViewWorld::new(PhysExtractor { remote_mode: opts.remote_mode }, opts.view),
+        view: ViewWorld::new(PhysExtractor { remote_mode: opts.remote_mode, local_slot }, opts.view),
         opts,
         scene,
         metrics: metrics.clone(),

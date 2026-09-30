@@ -1,0 +1,16 @@
+[package]
+name = "orr_relay_net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Orrery relay over real sockets: orr_proto Link/Endpoint adapters on orr_net (QUIC, WebSocket), connect helpers, headless client driver"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_net = { path = "../orr_net", features = ["conditioner"] }
+orr_proto = { path = "../orr_proto" }
+orr_session = { path = "../orr_session" }
+orr_sim = { path = "../orr_sim" }

@@ -1,34 +1,324 @@
-//! Relay server binary (thin shell). The core is in the library; what is
-//! missing here is a real `orr_proto::Endpoint` (QUIC / WebSocket over
-//! `orr_net`) and room creation from a config file. Until then this runs
-//! the core on a `NullEndpoint` with the wall clock, to show how it is
-//! driven.
+//! The relay server program: `orr_server`.
+//!
+//! ```text
+//! orr_server [options]
+//!   --bind ADDR              listen address (default 0.0.0.0:4433)
+//!   --transport quic|ws      (default quic; ws is plain, put TLS in a reverse proxy)
+//!   --tls-cert FILE --tls-key FILE   PEM certificate chain and key (QUIC).
+//!                            Without them a self-signed development certificate is made
+//!                            and its SHA-256 fingerprint is printed for `--trust-fingerprint`.
+//!   --tls-name NAME          extra name for the self-signed certificate (repeatable)
+//!
+//!   --game arena|physics|custom   what the rooms play (default arena)
+//!   --players N              slots per room (default 4)
+//!   --min-players N          the room starts when this many are ready (default: players)
+//!   --tick-rate HZ           (default 60)
+//!   --seed N                 sim seed the clients get (default a fixed sample seed)
+//!   --room ID                first room id (default 1)   --rooms N   number of rooms (default 1)
+//!   --checksum-interval N    clients report a checksum every N verified ticks (default 30)
+//!
+//!   physics game:  --bodies N (1000)  --mode rain|pile|mixer  --spawn-rate R  --max-entities N
+//!   custom game:   --input-size BYTES  --build-id N (or --any-build)  --config-hex HEX
+//!                  (these also override the presets)
+//!
+//!   --stats-secs N           print room statistics every N seconds (default 5, 0 = off)
+//!   --sim-latency MS --sim-jitter MS --sim-loss P   add network conditions on the server side
+//!   --run-seconds N          stop by itself (same graceful path as Ctrl+C) after N seconds
+//! ```
+//!
+//! The server does not simulate: it collects inputs, confirms each tick at
+//! its deadline, and relays. What the players must agree on (build hash,
+//! input size, seed, game configuration) is the room config it hands out in
+//! `Welcome`. Ctrl+C stops it gracefully.
 // The core takes its time from the caller; only this shell reads a clock.
 #![allow(clippy::disallowed_types)]
 
+use std::collections::BTreeMap;
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use orr_proto::{ConnId, Endpoint, Channel, ServerEvent};
-use orr_server::{RelayServer, RoomConfig};
+use orr_relay_net::{format_fingerprint, listen, ListenOptions, SimConditions, Tls, TransportKind};
+use orr_server::presets::{self, Game, PhysicsScene};
+use orr_server::serve::run_wall_clock;
+use orr_server::{RelayServer, ServerNote};
 
-/// An endpoint with no connections.
-struct NullEndpoint;
-
-impl Endpoint for NullEndpoint {
-    fn send(&mut self, _conn: ConnId, _channel: Channel, _data: &[u8]) {}
-    fn poll(&mut self) -> Option<ServerEvent> {
-        None
-    }
-    fn disconnect(&mut self, _conn: ConnId) {}
+struct Args {
+    bind: std::net::SocketAddr,
+    kind: TransportKind,
+    tls_cert: Option<std::path::PathBuf>,
+    tls_key: Option<std::path::PathBuf>,
+    tls_names: Vec<String>,
+    game: Game,
+    players: u8,
+    min_players: Option<u8>,
+    tick_rate: u32,
+    seed: u64,
+    room: u64,
+    rooms: u64,
+    checksum_interval: u32,
+    scene: PhysicsScene,
+    input_size: Option<u32>,
+    build_id: Option<u64>,
+    any_build: bool,
+    config_hex: Option<String>,
+    stats_secs: u64,
+    run_seconds: Option<f64>,
+    sim: SimConditions,
 }
 
-fn main() {
-    let mut server = RelayServer::new(NullEndpoint, 0x00DD_BA11);
-    server.create_room(1, RoomConfig::new(4, 60, 1, 16));
-    eprintln!("orr_server: no transport wired yet (needs an orr_proto::Endpoint over orr_net); idling for 1s");
+fn parse<T: std::str::FromStr>(name: &str, v: String) -> Result<T, String>
+where
+    T::Err: std::fmt::Display,
+{
+    v.parse().map_err(|e| format!("{name}: {e}"))
+}
+
+fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if s.len() % 2 != 0 {
+        return Err("--config-hex needs an even number of hex digits".into());
+    }
+    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|e| format!("--config-hex: {e}"))).collect()
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut a = Args {
+        bind: "0.0.0.0:4433".parse().unwrap(),
+        kind: TransportKind::Quic,
+        tls_cert: None,
+        tls_key: None,
+        tls_names: Vec::new(),
+        game: Game::Arena,
+        players: 4,
+        min_players: None,
+        tick_rate: 60,
+        seed: presets::SAMPLE_SEED,
+        room: 1,
+        rooms: 1,
+        checksum_interval: 30,
+        scene: PhysicsScene::default(),
+        input_size: None,
+        build_id: None,
+        any_build: false,
+        config_hex: None,
+        stats_secs: 5,
+        run_seconds: None,
+        sim: SimConditions { latency_ms: 0, jitter_ms: 0, loss: 0.0, seed: 0x5EED },
+    };
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
+        match arg.as_str() {
+            "--bind" => a.bind = parse("--bind", value("--bind")?)?,
+            "--transport" => a.kind = parse("--transport", value("--transport")?)?,
+            "--tls-cert" => a.tls_cert = Some(value("--tls-cert")?.into()),
+            "--tls-key" => a.tls_key = Some(value("--tls-key")?.into()),
+            "--tls-name" => a.tls_names.push(value("--tls-name")?),
+            "--game" => a.game = parse("--game", value("--game")?)?,
+            "--players" => a.players = parse("--players", value("--players")?)?,
+            "--min-players" => a.min_players = Some(parse("--min-players", value("--min-players")?)?),
+            "--tick-rate" => a.tick_rate = parse("--tick-rate", value("--tick-rate")?)?,
+            "--seed" => a.seed = parse("--seed", value("--seed")?)?,
+            "--room" => a.room = parse("--room", value("--room")?)?,
+            "--rooms" => a.rooms = parse("--rooms", value("--rooms")?)?,
+            "--checksum-interval" => a.checksum_interval = parse("--checksum-interval", value("--checksum-interval")?)?,
+            "--bodies" => a.scene.bodies = parse("--bodies", value("--bodies")?)?,
+            "--mode" => {
+                a.scene.mode = match value("--mode")?.as_str() {
+                    "rain" => 0,
+                    "pile" => 1,
+                    "mixer" => 2,
+                    other => return Err(format!("unknown mode '{other}'")),
+                }
+            }
+            "--spawn-rate" => a.scene.spawn_rate = parse("--spawn-rate", value("--spawn-rate")?)?,
+            "--max-entities" => a.scene.max_entities = parse("--max-entities", value("--max-entities")?)?,
+            "--input-size" => a.input_size = Some(parse("--input-size", value("--input-size")?)?),
+            "--build-id" => a.build_id = Some(parse("--build-id", value("--build-id")?)?),
+            "--any-build" => a.any_build = true,
+            "--config-hex" => a.config_hex = Some(value("--config-hex")?),
+            "--run-seconds" => a.run_seconds = Some(parse("--run-seconds", value("--run-seconds")?)?),
+            "--stats-secs" => a.stats_secs = parse("--stats-secs", value("--stats-secs")?)?,
+            "--sim-latency" => a.sim.latency_ms = parse("--sim-latency", value("--sim-latency")?)?,
+            "--sim-jitter" => a.sim.jitter_ms = parse("--sim-jitter", value("--sim-jitter")?)?,
+            "--sim-loss" => a.sim.loss = parse("--sim-loss", value("--sim-loss")?)?,
+            "-h" | "--help" => return Err("see the header of crates/orr_server/src/main.rs for the options".into()),
+            other => return Err(format!("unknown option '{other}' (--help)")),
+        }
+    }
+    if a.tls_cert.is_some() != a.tls_key.is_some() {
+        return Err("--tls-cert and --tls-key go together".into());
+    }
+    if a.players == 0 || a.rooms == 0 {
+        return Err("--players and --rooms must be at least 1".into());
+    }
+    Ok(a)
+}
+
+/// What the log keeps per room.
+#[derive(Default)]
+struct RoomLog {
+    present: Vec<u8>,
+    last_repeated: Vec<u64>,
+    last_late: Vec<u64>,
+}
+
+fn stamp(start: Instant) -> String {
+    format!("[{:8.2}s]", start.elapsed().as_secs_f64())
+}
+
+fn run() -> Result<(), String> {
+    let a = parse_args()?;
+    let mut room_cfg = presets::room_config(a.game, a.players, a.tick_rate, a.seed, a.scene);
+    room_cfg.checksum_interval = a.checksum_interval;
+    room_cfg.min_players_to_start = a.min_players.unwrap_or(a.players).clamp(1, a.players);
+    if let Some(n) = a.input_size {
+        room_cfg.input_size = n;
+        room_cfg.default_input = vec![0; n as usize];
+    }
+    if let Some(id) = a.build_id {
+        room_cfg.build_hash = orr_sim::build_hash_of(id, 0);
+    }
+    if a.any_build {
+        room_cfg.build_hash = 0;
+    }
+    if let Some(hex) = &a.config_hex {
+        room_cfg.config_blob = parse_hex(hex)?;
+    }
+
+    let mut lo = ListenOptions::new(a.bind, a.kind);
+    lo.tls = match (&a.tls_cert, &a.tls_key) {
+        (Some(c), Some(k)) => Tls::Pem { cert_chain: c.clone(), private_key: k.clone() },
+        _ => Tls::SelfSigned { extra_names: a.tls_names.clone() },
+    };
+    lo.sim = Some(a.sim).filter(SimConditions::is_active);
+    let endpoint = listen(&lo)?;
+    let addr = endpoint.local_addr();
+    let fingerprint = endpoint.cert_sha256();
+
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(1) {
-        server.update(start.elapsed().as_micros() as u64);
-        std::thread::sleep(Duration::from_millis(4));
+    println!("{} orr_server listening on {addr} ({})", stamp(start), if a.kind == TransportKind::Quic { "quic" } else { "ws" });
+    match fingerprint {
+        Some(fp) => println!("{} self-signed certificate, sha256 fingerprint: {}", stamp(start), format_fingerprint(&fp)),
+        None if a.kind == TransportKind::Quic => println!("{} certificate from PEM files", stamp(start)),
+        None => {}
+    }
+    if a.sim.is_active() {
+        println!("{} server-side network simulation: {:?}", stamp(start), a.sim);
+    }
+
+    let mut server = RelayServer::new(endpoint, a.seed ^ 0x0BAD_5EED_0BAD_5EED);
+    for i in 0..a.rooms {
+        let id = a.room + i;
+        server.create_room(id, room_cfg.clone());
+        println!(
+            "{} room {id}: game {:?}, {} players (starts at {}), {} Hz, input {} B, build hash {:#x}, seed {:#x}, config {} B",
+            stamp(start),
+            a.game,
+            room_cfg.player_count,
+            room_cfg.min_players_to_start,
+            room_cfg.tick_rate,
+            room_cfg.input_size,
+            room_cfg.build_hash,
+            room_cfg.seed,
+            room_cfg.config_blob.len()
+        );
+    }
+    if let Some(fp) = fingerprint {
+        println!(
+            "{} client: orr_sample --connect {addr} --trust-fingerprint {} (use --insecure-dev on a trusted network)",
+            stamp(start),
+            format_fingerprint(&fp)
+        );
+    }
+    println!("{} Ctrl+C stops the server", stamp(start));
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = stop.clone();
+    ctrlc::set_handler(move || stop_flag.store(true, Ordering::Relaxed)).map_err(|e| format!("Ctrl+C handler: {e}"))?;
+
+    let mut logs: BTreeMap<u64, RoomLog> = BTreeMap::new();
+    let stats_every = (a.stats_secs > 0).then(|| Duration::from_secs(a.stats_secs));
+    let mut next_stats = stats_every.map(|d| start + d);
+    let (first, last) = (a.room, a.room + a.rooms - 1);
+    let hook_stop = stop.clone();
+    run_wall_clock(&mut server, &stop, Duration::from_millis(1), |server, _now_us| {
+        if a.run_seconds.is_some_and(|s| start.elapsed().as_secs_f64() >= s) {
+            hook_stop.store(true, Ordering::Relaxed);
+        }
+        for note in server.drain_notes() {
+            match &note {
+                ServerNote::PlayerJoined { room, slot, from_tick } => {
+                    let log = logs.entry(*room).or_default();
+                    if !log.present.contains(slot) {
+                        log.present.push(*slot);
+                    }
+                    println!(
+                        "{} room {room}: slot {slot} joined at tick {from_tick} ({} connected)",
+                        stamp(start),
+                        log.present.len()
+                    );
+                }
+                ServerNote::PlayerLeft { room, slot, from_tick } => {
+                    let log = logs.entry(*room).or_default();
+                    log.present.retain(|s| s != slot);
+                    println!(
+                        "{} room {room}: slot {slot} left at tick {from_tick} ({} connected)",
+                        stamp(start),
+                        log.present.len()
+                    );
+                }
+                ServerNote::Desync { room, tick, finalized, reports } => {
+                    println!("{} room {room}: DESYNC at tick {tick} (found at {finalized}), checksums by slot {reports:x?}", stamp(start));
+                }
+                other => println!("{} {other:?}", stamp(start)),
+            }
+        }
+        if let Some(t) = next_stats {
+            if Instant::now() >= t {
+                next_stats = stats_every.map(|d| t + d);
+                for id in first..=last {
+                    let Some(st) = server.room_stats(id) else { continue };
+                    let log = logs.entry(id).or_default();
+                    log.last_repeated.resize(st.slots.len(), 0);
+                    log.last_late.resize(st.slots.len(), 0);
+                    let repeated: Vec<u64> = st.slots.iter().map(|s| s.repeated).collect();
+                    let late: Vec<u64> = st.slots.iter().map(|s| s.late_dropped).collect();
+                    let d_rep: Vec<u64> = repeated.iter().zip(&log.last_repeated).map(|(n, o)| n - o).collect();
+                    let d_late: Vec<u64> = late.iter().zip(&log.last_late).map(|(n, o)| n - o).collect();
+                    println!(
+                        "{} room {id}: {} tick {} | clients {} | repeated inputs by slot {repeated:?} (+{d_rep:?}) | late inputs {late:?} (+{d_late:?}) | desyncs {}",
+                        stamp(start),
+                        if server.is_running(id) { "running" } else { "waiting" },
+                        st.finalized,
+                        log.present.len(),
+                        st.desyncs
+                    );
+                    log.last_repeated = repeated;
+                    log.last_late = late;
+                }
+            }
+        }
+    });
+    println!("{} shutting down", stamp(start));
+    for id in first..=last {
+        if let Some(st) = server.room_stats(id) {
+            println!("{} room {id}: final tick {}, desyncs {}", stamp(start), st.finalized, st.desyncs);
+        }
+    }
+    // Dropping the server drops the endpoint, which closes connections gracefully.
+    drop(server);
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
     }
 }

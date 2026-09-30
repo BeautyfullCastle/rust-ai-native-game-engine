@@ -50,6 +50,10 @@ jobs:
         # `orr_sample` (wgpu + winit window demo) is excluded: it is view
         # layer, needs no determinism check, and its GPU stack should not
         # be able to break the sim crates' CI. It is built by `sample-build`.
+        #
+        # This includes `orr_relay_net` and the relay end-to-end tests of
+        # `orr_server` (`tests/net_e2e.rs`): real loopback QUIC/WebSocket with
+        # a real-time server loop, a few seconds each.
         run: cargo test --workspace --release --exclude orr_sample
 
       - name: cargo clippy --workspace --all-targets
@@ -58,7 +62,7 @@ jobs:
         # under concurrent work with their own warning budget.
         run: |
           cargo clippy --workspace --exclude orr_sample --all-targets
-          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_proto -p orr_server --all-targets -- -D warnings
+          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_proto -p orr_server -p orr_relay_net --all-targets -- -D warnings
 
       - name: cargo build -p orr_sim --features hotpatch
         # Desktop-only, off-by-default hot-patch hook (design doc decision
@@ -83,6 +87,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
       - run: cargo test -p orr_sample -p orr_view -p orr_bridge --release
       - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge --all-targets
       # The physics sample's headless benchmark: no window, no GPU. Runs the
