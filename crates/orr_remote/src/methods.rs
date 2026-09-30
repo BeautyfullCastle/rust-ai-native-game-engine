@@ -40,6 +40,29 @@ const COMPONENT: ParamDoc = p("component", "string", true, "registered component
 const PATH: ParamDoc = p("path", "string", false, "field path like `pos.x` or `shape.half_extents`; empty or missing = the whole value");
 const VALUE: ParamDoc = p("value", "json", true, "the value in the format of `registry.schema` (fixed-point numbers as exact decimals)");
 
+const PROPOSAL: ParamDoc = p("id", "string", true, "proposal id `p1` (from proposal.begin)");
+const OPS: ParamDoc = p(
+    "ops",
+    "object[]",
+    true,
+    "edits, each `{ op, ... }` with the params of the world.* method: `patch` {entity, component, path?, value}, `insert` {entity, component, value?}, `remove` {entity, component}, `spawn` {name?, guid?, components?}, `despawn` {entity}, `rename` {entity, name}, `singleton.patch` {name, path?, value}",
+);
+const INPUTS: ParamDoc = p(
+    "inputs",
+    "object",
+    true,
+    "what to run: `{kind:\"last_play\"}` (recording of the last stopped play session), `{kind:\"replay\", base64}` (a .orrp), `{kind:\"bot\", ticks, seed?, players?}` (scripted players), `{kind:\"idle\", ticks, players?}` (default inputs)",
+);
+const TICKS: ParamDoc = p("ticks", "integer", false, "run at most this many ticks (of a recording)");
+const CHECKS: ParamDoc = p(
+    "checks",
+    "string[]",
+    false,
+    "rules judged on the report, e.g. `lost_bodies.max == 0`, `mean_height >= 2.5`, `base:dynamic_bodies.final == 40`, `kinetic_energy.delta <= 10`, `no_divergence`, `no_divergence_before 300`, `recording_matches` (metric.stat with stat = start|final|min|max|delta; no stat = final; `base:` = the base run)",
+);
+const SAMPLE_EVERY: ParamDoc = p("sample_every", "integer", false, "sample metrics and checksums every this many ticks (default 60; 0 = only start and end)");
+const SERIES: ParamDoc = p("series", "bool", false, "also return every sampled value of each metric (default false)");
+
 /// Every method, in the order `rpc.discover` lists them.
 pub static METHODS: &[MethodDoc] = &[
     MethodDoc { name: "rpc.discover", cap: None, summary: "List the methods with their parameters and required capabilities, and the value format.", params: &[], result: "{ erp_version, methods, value_format, you }" },
@@ -76,7 +99,16 @@ pub static METHODS: &[MethodDoc] = &[
     MethodDoc { name: "sim.debug", cap: Some(Cap::SimControl), summary: "A raw byte-level debug command (what the Remote bridge sends): applied at a tick boundary and recorded.", params: &[p("cmd", "string", true, "set_field | set_singleton_field | spawn | despawn | add_component | remove_component"), p("entity", "string", false, "handle `12v0`"), p("component", "integer", false, "component id"), p("singleton", "integer", false, "singleton id"), p("offset", "integer", false, "byte offset"), p("bytes", "string", false, "hex bytes"), p("components", "object[]", false, "for spawn: [{ component, bytes }]")], result: "{ ok }" },
     MethodDoc { name: "sim.input", cap: Some(Cap::SimControl), summary: "Set the held input of a player (raw bytes of the game's Input type).", params: &[p("player", "integer", true, "player slot"), p("input", "string", true, "hex bytes")], result: "{ ok }" },
     MethodDoc { name: "sim.command", cap: Some(Cap::SimControl), summary: "Queue a game command for the next tick (encoded bytes of the game's Command type).", params: &[p("player", "integer", false, "player slot (default 0)"), p("command", "string", true, "hex bytes")], result: "{ ok }" },
-    MethodDoc { name: "watch.subscribe", cap: Some(Cap::Read), summary: "Have the server push notifications: `watch.tick`, `watch.history`, `watch.events`, `watch.notes`, and binary frame messages (`frames`, WebSocket only).", params: &[p("topics", "string[]", true, "tick | history | events | notes | frames"), p("max_fps", "integer", false, "cap for `frames` (default 60)")], result: "{ topics }" },
+    MethodDoc { name: "proposal.begin", cap: Some(Cap::SceneEdit), summary: "Start a proposal: a named set of edits staged on a private copy of the scene, for you to build, look at and verify before anyone accepts it. The scene is untouched. Its history entry will carry your client name.", params: &[p("label", "string", false, "name of the proposal (and of the history entry it becomes)")], result: "{ id, label, origin }" },
+    MethodDoc { name: "proposal.apply", cap: Some(Cap::SceneEdit), summary: "Stage edits on a proposal. All or nothing per call: if one op is invalid, none is staged.", params: &[PROPOSAL, OPS], result: "{ id, applied, changed, op_count, spawned: [{ index, guid }], checksum }" },
+    MethodDoc { name: "proposal.list", cap: Some(Cap::Read), summary: "The open proposals, oldest first. `stale` = the scene changed since the proposal was begun.", params: &[], result: "{ proposals: [{ id, label, origin, op_count, stale }] }" },
+    MethodDoc { name: "proposal.get", cap: Some(Cap::Read), summary: "One proposal: its ops, a unified text diff of the scene, a structured summary, and whether it would accept cleanly now.", params: &[PROPOSAL], result: "{ id, label, origin, stale, op_count, ops, diff, summary, accepts_cleanly, accept_error? }" },
+    MethodDoc { name: "proposal.preview", cap: Some(Cap::Read), summary: "Read the staged scene as it would be after accept: one entity (`entity`) like world.get, or a list like world.query (with component values by default).", params: &[PROPOSAL, p("entity", "string", false, "GUID; missing = list entities"), p("components", "string[]", false, "list: keep entities with all of these components"), p("name", "string", false, "list: keep entities whose name contains this"), p("values", "bool", false, "list: include component values (default true)"), p("limit", "integer", false, "list: at most this many (default 1000)"), p("offset", "integer", false, "list: skip this many")], result: "{ entity, components } or { entities, total, truncated, checksum }" },
+    MethodDoc { name: "proposal.verify", cap: Some(Cap::Read), summary: "Run the scene (base) and the scene with the proposal (candidate) headlessly on the same inputs and compare checksums and metrics; optionally judge with `checks`. Runs on the host thread: keep `ticks` moderate.", params: &[PROPOSAL, INPUTS, TICKS, CHECKS, SAMPLE_EVERY, SERIES], result: "verify report: { ticks, identical, first_divergence, checksums, metrics: [{ name, kind, base, candidate, delta }], recording?, checks?: { passed, results }, lines }" },
+    MethodDoc { name: "verify.self", cap: Some(Cap::Read), summary: "Baseline run of the scene against itself on the same inputs: its metrics, and for a recording whether the scene reproduces it. Same result shape as proposal.verify.", params: &[INPUTS, TICKS, CHECKS, SAMPLE_EVERY, SERIES], result: "verify report" },
+    MethodDoc { name: "proposal.accept", cap: Some(Cap::Approve), summary: "Apply the proposal to the scene as one history entry (origin = who began it; `history.undo` takes it back). Fails with a conflict, changing nothing, if the scene changed so that an op no longer applies. Edit mode only.", params: &[PROPOSAL], result: "{ history_id, applied, checksum }" },
+    MethodDoc { name: "proposal.reject", cap: Some(Cap::SceneEdit), summary: "Discard a proposal.", params: &[PROPOSAL], result: "{ ok }" },
+    MethodDoc { name: "watch.subscribe", cap: Some(Cap::Read), summary: "Have the server push notifications: `watch.tick`, `watch.history`, `watch.events`, `watch.notes`, `watch.proposals`, and binary frame messages (`frames`, WebSocket only).", params: &[p("topics", "string[]", true, "tick | history | events | notes | proposals | frames"), p("max_fps", "integer", false, "cap for `frames` (default 60)")], result: "{ topics }" },
     MethodDoc { name: "watch.unsubscribe", cap: Some(Cap::Read), summary: "Stop pushes (all topics, or the listed ones).", params: &[p("topics", "string[]", false, "topics to stop; missing = all")], result: "{ topics }" },
 ];
 
@@ -112,9 +144,9 @@ pub fn discover(client: &str, caps: Caps) -> J {
         "erp_version": 1,
         "protocol": "JSON-RPC 2.0 over WebSocket (text messages) or newline-delimited JSON over TCP",
         "auth": "first message {\"method\":\"auth\",\"params\":{\"token\":...}}, or ?token= in the WebSocket URL; no token = only in dev mode",
-        "capabilities": ["read", "scene_edit", "sim_control"],
+        "capabilities": ["read", "scene_edit", "sim_control", "approve"],
         "methods": methods,
-        "notifications": ["watch.tick", "watch.history", "watch.events", "watch.notes"],
+        "notifications": ["watch.tick", "watch.history", "watch.events", "watch.notes", "watch.proposals"],
         "value_format": VALUE_FORMAT,
         "you": { "client": client, "capabilities": caps.list().into_iter().map(Cap::name).collect::<Vec<_>>() },
     })

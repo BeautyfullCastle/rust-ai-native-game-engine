@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use orr_edit::{Accepted, EditError, EditorDoc, Op, Origin, PlayController, ProposalId, StoppedPlay, Target, View};
 use orr_fp::{FPVec2, FP};
 use orr_reflect::{decimal, Guid, TypeRegistry, Value};
-use orr_remote::{ErpServer, ErpTarget, ServerConfig};
+use orr_remote::{default_build_id, ErpServer, ErpTarget, GameHooks, ServerConfig};
 use orr_render::Camera;
 use orr_sample::physics_game::{register_reflect, PhysGame};
 use orr_session::{ControlOp, Speed, Timeline};
@@ -676,6 +676,10 @@ impl Editor {
         cfg.limits.player_count = PLAYERS;
         cfg.limits.tick_rate = TICK_RATE;
         cfg.limits.scene_path = self.path.clone();
+        cfg.limits.build_id = default_build_id("PhysGame");
+        cfg.limits.game = GameHooks::new("PhysGame")
+            .with_metrics(orr_sample::physics_game::PhysMetrics)
+            .with_bot(|seed, tick, slot| orr_sample::physics_game::bot_input(seed, tick, orr_sim::PlayerSlot(slot)));
         let server = ErpServer::start(cfg).map_err(|e| format!("ERP: {e}"))?;
         let url = server.url();
         self.erp = Some(server);
@@ -780,7 +784,12 @@ impl Editor {
     /// recording stays available from [`last_stopped`](Self::last_stopped).
     pub fn stop(&mut self) -> Option<&StoppedPlay> {
         let p = self.play.take()?;
-        self.stopped = Some(p.stop_play());
+        let stopped = p.stop_play();
+        if let Some(server) = &mut self.erp {
+            // ERP `last_play` inputs then verify against the person's play too.
+            server.note_stopped_play(stopped.clone());
+        }
+        self.stopped = Some(stopped);
         self.sanitize_selection();
         self.info("play stopped");
         self.stopped.as_ref()

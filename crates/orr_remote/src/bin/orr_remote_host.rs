@@ -8,10 +8,13 @@
 //!
 //! ```text
 //! orr_remote_host [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]
-//!                 [--seed N] [--players N] [--tick-rate N] [--max-step N]
+//!                 [--seed N] [--players N] [--tick-rate N] [--max-step N] [--build-id N]
 //! ```
 //!
-//! Capabilities: `read`, `scene_edit`, `sim_control` (comma separated) or `all`.
+//! Capabilities: `read`, `scene_edit`, `sim_control`, `approve` (comma
+//! separated) or `all`. `approve` is what accepts an agent's proposal into
+//! the scene: give an agent `read,scene_edit` to let it propose and verify
+//! while a person decides.
 //! Without `--token` or `--dev-no-auth` the host refuses to start.
 //! `--dev-no-auth` is only allowed on a loopback address.
 
@@ -23,13 +26,13 @@ use std::time::Duration;
 
 use orr_edit::EditorDoc;
 use orr_reflect::TypeRegistry;
-use orr_remote::{Auth, ErpServer, Host, ServerConfig, TokenEntry};
-use orr_sample::physics_game::{register_reflect, PhysGame};
-use orr_sim::Simulation;
+use orr_remote::{default_build_id, Auth, ErpServer, GameHooks, Host, ServerConfig, TokenEntry};
+use orr_sample::physics_game::{bot_input, register_reflect, PhysGame, PhysMetrics};
+use orr_sim::{PlayerSlot, Simulation};
 
 const USAGE: &str = "usage: orr_remote_host [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]\n\
-                     \x20                       [--seed N] [--players N] [--tick-rate N] [--max-step N]\n\
-                     caps: read, scene_edit, sim_control (comma separated) or all\n\
+                     \x20                       [--seed N] [--players N] [--tick-rate N] [--max-step N] [--build-id N]\n\
+                     caps: read, scene_edit, sim_control, approve (comma separated) or all\n\
                      default scene: scenes/physics_demo.scene.yaml, default bind: 127.0.0.1:7777";
 
 struct Args {
@@ -41,6 +44,7 @@ struct Args {
     players: u8,
     tick_rate: u32,
     max_step: u32,
+    build_id: Option<u64>,
 }
 
 fn default_scene() -> PathBuf {
@@ -61,6 +65,7 @@ fn parse_args() -> Result<Args, String> {
         players: 2,
         tick_rate: 60,
         max_step: 20_000,
+        build_id: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -74,6 +79,7 @@ fn parse_args() -> Result<Args, String> {
             "--players" => a.players = value("--players")?.parse().map_err(|e| format!("--players: {e}"))?,
             "--tick-rate" => a.tick_rate = value("--tick-rate")?.parse().map_err(|e| format!("--tick-rate: {e}"))?,
             "--max-step" => a.max_step = value("--max-step")?.parse().map_err(|e| format!("--max-step: {e}"))?,
+            "--build-id" => a.build_id = Some(value("--build-id")?.parse().map_err(|e| format!("--build-id: {e}"))?),
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown flag '{other}'")),
         }
@@ -123,6 +129,10 @@ fn main() -> ExitCode {
     cfg.limits.tick_rate = args.tick_rate;
     cfg.limits.max_step_per_call = args.max_step;
     cfg.limits.scene_path = Some(args.scene.clone());
+    cfg.limits.build_id = args.build_id.unwrap_or_else(|| default_build_id("PhysGame"));
+    cfg.limits.game = GameHooks::new("PhysGame")
+        .with_metrics(PhysMetrics)
+        .with_bot(|seed, tick, slot| bot_input(seed, tick, PlayerSlot(slot)));
     let server = match ErpServer::start(cfg) {
         Ok(s) => s,
         Err(e) => {

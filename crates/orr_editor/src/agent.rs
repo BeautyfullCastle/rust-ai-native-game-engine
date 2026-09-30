@@ -52,22 +52,15 @@ impl VerifySource {
     }
 }
 
-/// A small deterministic scripted player: each slot sweeps its paddle left
-/// and right, spins back and forth, and shoots every half second. A pure
-/// function of `(tick, slot)`, so a verification with it is reproducible.
+/// Seed of the editor's bot, the same default as ERP's `bot` inputs, so a
+/// verification in the panel and one by an agent over ERP match.
+pub const BOT_SEED: u64 = 1;
+
+/// The scripted player of verifications: `orr_sample`'s `bot_input` with
+/// [`BOT_SEED`]. A pure function of `(tick, slot)`, so a verification with it
+/// is reproducible.
 pub fn bot_input(tick: u64, slot: PlayerSlot) -> PhysInput {
-    let phase = tick + u64::from(slot.0) * 37;
-    let axis_x = match (phase / 45) % 4 {
-        0 => 1,
-        2 => -1,
-        _ => 0,
-    };
-    let spin = match (phase / 90) % 3 {
-        0 => 1,
-        1 => 0,
-        _ => -1,
-    };
-    PhysInput::new(axis_x, 0, spin, phase.is_multiple_of(30))
+    orr_sample::physics_game::bot_input(BOT_SEED, tick, slot)
 }
 
 /// Why the last `accept` failed, for the panel.

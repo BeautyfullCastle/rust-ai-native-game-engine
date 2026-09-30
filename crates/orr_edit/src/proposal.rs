@@ -136,6 +136,28 @@ impl EditorDoc {
         Ok(applied)
     }
 
+    /// Stages several ops as one step: all or nothing. If any op is invalid,
+    /// none is staged and the proposal is unchanged. Otherwise like
+    /// [`proposal_apply`](Self::proposal_apply) for each op, in order.
+    pub fn proposal_apply_all(&mut self, id: ProposalId, ops: Vec<Op>) -> Result<Vec<Applied>, EditError> {
+        self.proposal(id)?;
+        let mut filled = Vec::with_capacity(ops.len());
+        for op in ops {
+            filled.push(match op {
+                Op::SpawnEntity { guid: None, name, components } => Op::SpawnEntity { guid: Some(self.fresh_guid()), name, components },
+                other => other,
+            });
+        }
+        let p = self.proposals.map.get_mut(&id.0).ok_or(EditError::UnknownProposal(id.0))?;
+        let applied = p.staged.apply_batch(&p.label, filled.clone(), p.origin.clone())?;
+        for (op, a) in filled.into_iter().zip(&applied) {
+            if a.changed {
+                p.ops.push(op);
+            }
+        }
+        Ok(applied)
+    }
+
     /// A GUID no entity of the document or of any proposal uses.
     fn fresh_guid(&mut self) -> Guid {
         loop {

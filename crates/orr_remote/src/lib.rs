@@ -20,7 +20,14 @@
 //! - [`json`]: the exact JSON form of `orr_reflect::Value` (fixed-point
 //!   numbers are exact decimals, never `f64`).
 //! - [`Caps`], [`Auth`]: capability tokens (`read`, `scene_edit`,
-//!   `sim_control`).
+//!   `sim_control`, `approve`).
+//! - Proposals (`proposal.*`, `verify.self`): an agent stages edits on a
+//!   private copy of the scene, reads the diff, verifies it by replaying
+//!   inputs on the scene with and without the edits (checksums, metrics,
+//!   pass/fail `checks`), and accepts it (needs `approve`) as one undoable
+//!   history entry. [`GameHooks`] (in [`HostLimits`]) gives the host's game
+//!   metrics and scripted players; `watch.proposals` tells every subscriber
+//!   what happened to the proposals.
 //! - [`RemoteBridge`]: an `orr_bridge::Bridge` + `SimControl` over ERP, so
 //!   view code can attach to a sim in another process. The server streams
 //!   frame snapshots (binary, lz4) and the bridge rebuilds `Snapshot`s.
@@ -45,6 +52,7 @@ mod host;
 pub mod json;
 pub mod methods;
 mod net;
+mod proposals;
 mod remote;
 mod server;
 pub mod wire;
@@ -54,5 +62,6 @@ pub use client::{ClientError, ErpClient};
 pub use dispatch::{call_local, ErpTarget, HostLimits};
 pub use error::*;
 pub use host::{Host, Pacer};
+pub use proposals::{default_build_id, BotFn, GameHooks};
 pub use remote::{RemoteBridge, RemoteConfig, RemoteMetrics};
 pub use server::{ErpServer, PollReport, ServerConfig, ServerError, ServerStats, MAX_PENDING_BYTES};

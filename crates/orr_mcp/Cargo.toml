@@ -1,0 +1,23 @@
+[package]
+name = "orr_mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Orrery MCP adapter: a Model Context Protocol server (stdio) that bridges AI agents to an ERP endpoint"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The ERP client only: no GUI, no sample game.
+orr_remote = { path = "../orr_remote", default-features = false }
+# Same features as orr_remote: fixed-point numbers keep their exact decimal text.
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+
+[dev-dependencies]
+orr_edit = { path = "../orr_edit" }
+orr_reflect = { path = "../orr_reflect" }
+orr_sample = { path = "../orr_sample" }
+orr_sim = { path = "../orr_sim" }

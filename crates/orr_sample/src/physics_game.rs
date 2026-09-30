@@ -133,6 +133,21 @@ impl PhysInput {
     }
 }
 
+/// A deterministic scripted player for verification runs: a pure function of
+/// `(seed, tick, slot)` that holds a stick direction and spin for 30 ticks at
+/// a time and shoots in short bursts. Integers only.
+pub fn bot_input(seed: u64, tick: u64, slot: PlayerSlot) -> PhysInput {
+    fn mix(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    let s = u64::from(slot.0);
+    let h = mix(seed ^ mix((tick / 30) ^ (s << 40)));
+    PhysInput::new((h % 3) as i32 - 1, ((h >> 8) % 3) as i32 - 1, ((h >> 16) % 3) as i32 - 1, tick % 90 < 10 && (h >> 24) % 2 == 0)
+}
+
 /// The game has no one-off commands; this exists to satisfy the `Game` trait.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Pod, Zeroable)]

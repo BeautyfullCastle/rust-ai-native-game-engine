@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use orr_ecs::Entity;
-use orr_edit::{EditorDoc, EntityInfo, Op, Origin, PlayController, Target, View};
+use orr_edit::{EditorDoc, EntityInfo, Op, Origin, PlayController, StoppedPlay, Target, View};
 use orr_reflect::{Guid, TypeInfo, TypeKind, Value};
 use orr_session::{ControlOp, Speed};
 use orr_sim::{EventKey, Game, PlayerSlot, SimCommand};
@@ -17,6 +17,7 @@ use crate::codec::{b64_encode, hex_decode};
 use crate::error::*;
 use crate::json::{desc_at_path, handle_text, json_to_value, map_entity_refs, parse_handle, value_to_json};
 use crate::methods::{self, MethodDoc};
+use crate::proposals::{self, GameHooks};
 use crate::wire::{checksum_text, debug_error_name, debug_from_json};
 
 /// The host's model an ERP request runs against. It borrows the host's
@@ -41,11 +42,27 @@ pub struct HostLimits {
     pub max_step_per_call: u32,
     /// The scene file `scene.save` with `write: true` writes; `None` = never writes a file.
     pub scene_path: Option<PathBuf>,
+    /// Most ticks one `proposal.verify` / `verify.self` call may run (the
+    /// host thread is busy meanwhile). Default 6000.
+    pub max_verify_ticks: u32,
+    /// Build id of the host's simulation (shown in `rpc.discover`, given to
+    /// the verification runs). Default 0 = not tracked.
+    pub build_id: u64,
+    /// The game-specific parts of verification (metrics, scripted players).
+    pub game: GameHooks,
 }
 
 impl Default for HostLimits {
     fn default() -> Self {
-        Self { player_count: 2, tick_rate: 60, max_step_per_call: 600, scene_path: None }
+        Self {
+            player_count: 2,
+            tick_rate: 60,
+            max_step_per_call: 600,
+            scene_path: None,
+            max_verify_ticks: 6000,
+            build_id: 0,
+            game: GameHooks::default(),
+        }
     }
 }
 
@@ -53,6 +70,8 @@ impl Default for HostLimits {
 pub(crate) struct CallCtx<'a> {
     pub client: &'a str,
     pub caps: Caps,
+    /// The recording of the last stopped play session of the host, if known.
+    pub last_play: Option<&'a StoppedPlay>,
     /// The connection making the call, and the one that opened the current
     /// transaction; `None` skips the ownership check (in-process callers).
     pub tx_check: Option<(u64, Option<u64>)>,
@@ -64,6 +83,8 @@ pub(crate) struct Effects {
     /// Sim events of ticks the call ran (`sim.step`), as `(key, payload bytes)`.
     pub events: Vec<(EventKey, Vec<u8>)>,
     pub tx: TxChange,
+    /// The recording of a play session this call stopped.
+    pub stopped: Option<StoppedPlay>,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -85,7 +106,7 @@ pub fn call_local<G: Game>(
     params: &J,
 ) -> Result<J, RpcError> {
     let mut fx = Effects::default();
-    call(target, limits, &CallCtx { client, caps, tx_check: None }, &mut fx, method, params)
+    call(target, limits, &CallCtx { client, caps, last_play: None, tx_check: None }, &mut fx, method, params)
 }
 
 /// Only the connection that opened a transaction may end it.
@@ -151,7 +172,19 @@ pub(crate) fn call<G: Game>(
     let p = P(obj);
     let origin = Origin::Agent(ctx.client.to_string());
     match method {
-        "rpc.discover" => Ok(methods::discover(ctx.client, ctx.caps)),
+        "rpc.discover" => Ok(proposals::discover_with_engine(t, lim, ctx)),
+        "proposal.begin" => proposals::begin(t, &p, origin),
+        "proposal.apply" => proposals::apply(t, &p),
+        "proposal.list" => Ok(proposals::list(t)),
+        "proposal.get" => proposals::get(t, &p),
+        "proposal.preview" => proposals::preview(t, &p),
+        "proposal.verify" => proposals::verify(t, lim, ctx, &p, true),
+        "verify.self" => proposals::verify(t, lim, ctx, &p, false),
+        "proposal.accept" => {
+            require_edit_mode(t, "proposal.accept")?;
+            proposals::accept(t, &p)
+        }
+        "proposal.reject" => proposals::reject(t, &p),
         "registry.schema" => registry_schema(t, &p),
         "registry.types" => Ok(registry_types(t)),
         "world.query" => world_query(t, &p),
@@ -205,7 +238,7 @@ pub(crate) fn call<G: Game>(
         "sim.state" => Ok(state_json(t, lim)),
         "sim.checksum" => sim_checksum(t, &p),
         "sim.start" => sim_start(t, lim, &p),
-        "sim.stop" => sim_stop(t, &p),
+        "sim.stop" => sim_stop(t, &p, fx),
         "sim.play" => control(t, lim, ControlOp::Play),
         "sim.pause" => control(t, lim, ControlOp::Pause),
         "sim.branch" => control(t, lim, ControlOp::Branch),
@@ -233,48 +266,48 @@ pub(crate) fn call<G: Game>(
 
 // ---- params ----
 
-struct P<'a>(&'a Map<String, J>);
+pub(crate) struct P<'a>(pub(crate) &'a Map<String, J>);
 
 impl<'a> P<'a> {
-    fn raw(&self, name: &str) -> Option<&'a J> {
+    pub(crate) fn raw(&self, name: &str) -> Option<&'a J> {
         self.0.get(name)
     }
-    fn req_raw(&self, name: &str) -> Result<&'a J, RpcError> {
+    pub(crate) fn req_raw(&self, name: &str) -> Result<&'a J, RpcError> {
         self.raw(name).ok_or_else(|| RpcError::params(format!("missing parameter '{name}'")))
     }
-    fn opt_str(&self, name: &str) -> Result<Option<&'a str>, RpcError> {
+    pub(crate) fn opt_str(&self, name: &str) -> Result<Option<&'a str>, RpcError> {
         match self.raw(name) {
             None | Some(J::Null) => Ok(None),
             Some(J::String(s)) => Ok(Some(s)),
             Some(_) => Err(RpcError::params(format!("'{name}' must be a string"))),
         }
     }
-    fn str(&self, name: &str) -> Result<&'a str, RpcError> {
+    pub(crate) fn str(&self, name: &str) -> Result<&'a str, RpcError> {
         self.opt_str(name)?.ok_or_else(|| RpcError::params(format!("missing parameter '{name}' (string)")))
     }
-    fn opt_u64(&self, name: &str) -> Result<Option<u64>, RpcError> {
+    pub(crate) fn opt_u64(&self, name: &str) -> Result<Option<u64>, RpcError> {
         match self.raw(name) {
             None | Some(J::Null) => Ok(None),
             Some(J::Number(n)) => n.as_u64().map(Some).ok_or_else(|| RpcError::params(format!("'{name}' must be a non-negative integer"))),
             Some(_) => Err(RpcError::params(format!("'{name}' must be a non-negative integer"))),
         }
     }
-    fn req_u64(&self, name: &str) -> Result<u64, RpcError> {
+    pub(crate) fn req_u64(&self, name: &str) -> Result<u64, RpcError> {
         self.opt_u64(name)?.ok_or_else(|| RpcError::params(format!("missing parameter '{name}' (integer)")))
     }
-    fn opt_bool(&self, name: &str) -> Result<Option<bool>, RpcError> {
+    pub(crate) fn opt_bool(&self, name: &str) -> Result<Option<bool>, RpcError> {
         match self.raw(name) {
             None | Some(J::Null) => Ok(None),
             Some(J::Bool(b)) => Ok(Some(*b)),
             Some(_) => Err(RpcError::params(format!("'{name}' must be true or false"))),
         }
     }
-    fn target(&self) -> Result<Target, RpcError> {
+    pub(crate) fn target(&self) -> Result<Target, RpcError> {
         parse_target(self.str("entity")?)
     }
 }
 
-fn parse_target(s: &str) -> Result<Target, RpcError> {
+pub(crate) fn parse_target(s: &str) -> Result<Target, RpcError> {
     if Guid::parse(s).is_ok() {
         Ok(Target::Guid(Guid::parse(s).expect("checked")))
     } else if let Some(e) = parse_handle(s) {
@@ -286,7 +319,7 @@ fn parse_target(s: &str) -> Result<Target, RpcError> {
 
 // ---- helpers ----
 
-fn view<'a, G: Game>(t: &'a ErpTarget<'_, G>) -> View<'a> {
+pub(crate) fn view<'a, G: Game>(t: &'a ErpTarget<'_, G>) -> View<'a> {
     match t.play.as_ref() {
         Some(pc) => pc.view(),
         None => t.doc.view(),
@@ -300,7 +333,7 @@ fn live_checksum<G: Game>(t: &ErpTarget<'_, G>) -> u64 {
     }
 }
 
-fn require_edit_mode<G: Game>(t: &ErpTarget<'_, G>, what: &str) -> Result<(), RpcError> {
+pub(crate) fn require_edit_mode<G: Game>(t: &ErpTarget<'_, G>, what: &str) -> Result<(), RpcError> {
     if t.play.is_some() {
         return Err(RpcError::state("sim_running", format!("'{what}' changes the scene document; stop the play session first (sim.stop)")));
     }
@@ -311,19 +344,19 @@ fn play_mut<'a, 'b, G: Game>(t: &'a mut ErpTarget<'b, G>) -> Result<&'a mut Play
     t.play.as_mut().ok_or_else(|| RpcError::state("no_play", "no play session (call sim.start)"))
 }
 
-fn component_type<'a>(v: &View<'a>, name: &str) -> Result<&'a TypeInfo, RpcError> {
+pub(crate) fn component_type<'a>(v: &View<'a>, name: &str) -> Result<&'a TypeInfo, RpcError> {
     v.types().get(name).filter(|ti| ti.kind() == TypeKind::Component).ok_or_else(|| {
         RpcError::new(NOT_FOUND, "unknown_type", format!("unknown component type '{name}' (see registry.types)"))
     })
 }
 
-fn singleton_type<'a>(v: &View<'a>, name: &str) -> Result<&'a TypeInfo, RpcError> {
+pub(crate) fn singleton_type<'a>(v: &View<'a>, name: &str) -> Result<&'a TypeInfo, RpcError> {
     v.types().get(name).filter(|ti| ti.kind() == TypeKind::Singleton).ok_or_else(|| {
         RpcError::new(NOT_FOUND, "unknown_type", format!("unknown singleton type '{name}' (see registry.types)"))
     })
 }
 
-fn invalid_value(msg: String) -> RpcError {
+pub(crate) fn invalid_value(msg: String) -> RpcError {
     RpcError::new(INVALID_VALUE, "invalid_value", msg)
 }
 
@@ -336,8 +369,12 @@ fn decode_value<G: Game>(t: &ErpTarget<'_, G>, ti: &TypeInfo, path: &str, j: &J)
     if t.play.is_some() {
         return Ok(v);
     }
-    let view = t.doc.view();
-    map_entity_refs(&v, &mut |r| match r {
+    scene_form(&t.doc.view(), &v)
+}
+
+/// The scene form of a decoded value: entity handles become GUIDs (looked up in `view`).
+pub(crate) fn scene_form(view: &View<'_>, v: &Value) -> Result<Value, RpcError> {
+    map_entity_refs(v, &mut |r| match r {
         Value::Entity(e) if *e == Entity::NONE => Ok(Value::EntityGuid(None)),
         Value::Entity(e) => view
             .guid_of(*e)
@@ -409,7 +446,7 @@ fn registry_types<G: Game>(t: &ErpTarget<'_, G>) -> J {
 
 // ---- world reads ----
 
-fn entity_json(v: &View<'_>, info: &EntityInfo, values: bool) -> Result<J, RpcError> {
+pub(crate) fn entity_json(v: &View<'_>, info: &EntityInfo, values: bool) -> Result<J, RpcError> {
     let handle = handle_text(info.entity);
     let mut o = Map::new();
     o.insert("id".into(), json!(info.guid.as_ref().map_or_else(|| handle.clone(), |g| g.to_string())));
@@ -428,7 +465,13 @@ fn entity_json(v: &View<'_>, info: &EntityInfo, values: bool) -> Result<J, RpcEr
 }
 
 fn world_query<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
-    let v = view(t);
+    query_view(&view(t), p, false)
+}
+
+/// `world.query` over any view (the scene, the play frame, a proposal
+/// preview). `values_default`: whether component values are included when
+/// `values` is not given.
+pub(crate) fn query_view(v: &View<'_>, p: &P<'_>, values_default: bool) -> Result<J, RpcError> {
     let filter: Vec<String> = match p.raw("components") {
         None | Some(J::Null) => Vec::new(),
         Some(J::Array(items)) => items
@@ -438,10 +481,10 @@ fn world_query<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> 
         Some(_) => return Err(RpcError::params("'components' must be a list of strings")),
     };
     for c in &filter {
-        component_type(&v, c)?;
+        component_type(v, c)?;
     }
     let name_filter = p.opt_str("name")?;
-    let values = p.opt_bool("values")?.unwrap_or(false);
+    let values = p.opt_bool("values")?.unwrap_or(values_default);
     let limit = p.opt_u64("limit")?.unwrap_or(1000).min(20_000) as usize;
     let offset = p.opt_u64("offset")?.unwrap_or(0) as usize;
     let mut total = 0usize;
@@ -457,7 +500,7 @@ fn world_query<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> 
         }
         total += 1;
         if total > offset && out.len() < limit {
-            out.push(entity_json(&v, &info, values)?);
+            out.push(entity_json(v, &info, values)?);
         }
     }
     Ok(json!({
@@ -470,11 +513,15 @@ fn world_query<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> 
 }
 
 fn world_get<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
-    let v = view(t);
+    get_view(&view(t), p)
+}
+
+/// `world.get` over any view.
+pub(crate) fn get_view(v: &View<'_>, p: &P<'_>) -> Result<J, RpcError> {
     let target = p.target()?;
     match p.opt_str("component")? {
         Some(c) => {
-            component_type(&v, c)?;
+            component_type(v, c)?;
             let value = v.field(&target, c, p.opt_str("path")?.unwrap_or(""))?;
             Ok(json!({"value": value_to_json(&value)}))
         }
@@ -487,7 +534,7 @@ fn world_get<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
             for (name, val) in v.components(&target)? {
                 vals.insert(name, value_to_json(&val));
             }
-            Ok(json!({"entity": entity_json(&v, &info, false)?, "components": vals}))
+            Ok(json!({"entity": entity_json(v, &info, false)?, "components": vals}))
         }
     }
 }
@@ -534,7 +581,7 @@ fn world_patch<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> 
 
 /// `patch` laid over `base`: struct fields of `patch` replace the ones of
 /// `base` (recursively); any other value replaces `base` whole.
-fn overlay(base: &Value, patch: &Value) -> Value {
+pub(crate) fn overlay(base: &Value, patch: &Value) -> Value {
     match (base, patch) {
         (Value::Struct(b), Value::Struct(p)) => {
             let mut out: Vec<(String, Value)> = b
@@ -798,7 +845,7 @@ fn sim_start<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) -> 
     Ok(state_json(t, lim))
 }
 
-fn sim_stop<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
+fn sim_stop<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, fx: &mut Effects) -> Result<J, RpcError> {
     let include = p.opt_bool("include_replay")?.unwrap_or(false);
     let pc = t.play.take().ok_or_else(|| RpcError::state("no_play", "no play session (call sim.start)"))?;
     let stopped = pc.stop_play();
@@ -810,6 +857,7 @@ fn sim_stop<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError>
     if include {
         o["replay"] = json!(b64_encode(&stopped.replay));
     }
+    fx.stopped = Some(stopped);
     Ok(o)
 }
 

@@ -1,6 +1,6 @@
 # Orrery 진행 현황
 
-최종 갱신: 2026-09-30 (M4 완료) · 설계: `docs/design-v1.md`
+최종 갱신: 2026-09-30 (M5 완료) · 설계: `docs/design-v1.md`
 코드: https://github.com/BeautyfullCastle/rust-ai-native-game-engine (`main`)
 
 ## 완료
@@ -29,6 +29,9 @@
 | `orr_edit` (M4 2단계 기반) | GUI 없는 에디터 코어: `EditorDoc`(씬 + 굽기 프리뷰 Frame 동기화 + undo/redo + 트랜잭션·병합 + origin 기록 이력), `Op` 8종, `PlayController<G>`(플레이 중 편집을 `DebugCommand`로 기록, 타임라인 제어, stop_play), `View`(엔티티·컴포넌트·스키마 조회). `scenes/physics_demo.scene.yaml`(40바디), `orr_sample::physics_game::register_reflect` | 데모 씬(49 엔티티)에서 필드 편집+프리뷰 갱신 약 6µs(제자리 패치), 전체 재굽기 약 113µs. 골든 불변 |
 | `orr_editor` (M4 2단계 D) | eframe/egui 0.36 에디터: 계층(필터·생성·삭제), 리플렉션 기반 인스펙터(FP는 정확한 십진 텍스트, 제스처 1회 = 트랜잭션 1개, 종류 전환·리스트·플래그·열거), `orr_render` 뷰포트(eframe wgpu 장치 공유, 클릭 선택·드래그 이동·팬·줌), 타임라인(재생/일시정지/스텝/배속/틱 이동/분기), 이력 탭, undo/redo, CLI 스크린샷(앱 자기 프레임버퍼). 스크린샷 `docs/img/editor-{edit,play,erp}.png` | **M4 루프 테스트**: 편집 → 120틱 → 30틱으로 되감기 → 120틱 재실행 체크섬 일치. 모델 17 + UI(kittest) 15 + GPU 2 + ERP 3 테스트. 리눅스 Xvfb + lavapipe에서 실제 창 확인. Rust 1.95 이상 필요 |
 | `orr_remote` (M4 2단계 E) | ERP: JSON-RPC 2.0(WebSocket + 같은 포트 NDJSON TCP), 권한 토큰(read/scene_edit/sim_control, 개발용 무인증은 루프백만), world/registry/tx/history/scene/sim/watch 메서드, FP는 JSON에서 정확한 십진(f64 경유 없음). `RemoteBridge`(Bridge + SimControl, 전체 프레임 lz4 스트림), 헤드리스 `orr_remote_host`. **에디터 내장**: `orr_editor --erp 127.0.0.1:7777 --erp-dev`(또는 `--erp-token name:token:caps`) → 에이전트 편집이 창의 같은 문서·undo 이력(origin `agent:이름`)·플레이 세션에 들어감 | 스냅샷 데모 6.4KB/틱, 1000바디 113KB/틱(60Hz 6.9MB/s, 델타 없음). step→뷰 스냅샷 중앙값 1.3/2.9ms, 요청 왕복 0.64ms |
+| 제안·검증 (M5 코어) | `orr_edit`: 에이전트 제안(문서 사본에 편집 누적, 미리보기 Frame, YAML unified diff + 구조 요약, 수락 = undo 1회 이력 1줄·origin 기록, 충돌 시 무변경), 리플레이 기반 검증(`verify_proposal`: 기록 리플레이/스크립트 입력을 원본·후보에 똑같이 헤드리스 실행, 체크섬·지표 비교), 텍스트 조건(`lost_bodies.max == 0` 등). 지표: `orr_sim::Metrics`, `ReflectMetrics`, `PhysMetrics`(떨어진 물체·높이·속도·운동에너지·잠든 수) | 데모 600틱 검증 약 21ms(2스레드) |
+| ERP 제안·MCP (M5) | ERP `proposal.*`(begin/apply/get/list/preview/verify/accept/reject), `verify.self`, 입력 `last_play`/`replay`/`bot`/`idle`, 새 권한 `approve`(수락 전용 — 에이전트는 제안·검증만, 수락은 사람에게 남길 수 있음), `watch.proposals`. `orr_mcp`: MCP(2025-06-18, stdio) ↔ ERP 어댑터, 도구 11개(그룹 on/off), 리소스 scene/schema/agents. 엔진 버전 고정 `docs/AGENTS.md` 자동 생성(재생성 테스트). 등록: `claude mcp add orrery -- orr_mcp --erp ws://127.0.0.1:7777 --token …` | **M5 기준 테스트**: MCP 자식 프로세스로 제안 → 검증(조건 통과) → 수락 → 이력 `agent:claude` → undo 정확 복원 |
+| Agent 패널 (M5) | 에디터 하단 Agent 탭: 제안 목록(배지·stale), 변경 요약·색 diff, 뷰포트 미리보기(변경 청록·추가 초록·원래 위치 잔상), 백그라운드 검증(last play / bot, 조건 입력, 지표 표), 수락·거절(충돌 표시). 에디터 내장 ERP도 물리 지표·봇·사람 플레이(`last_play`) 연결. 스크린샷 `docs/img/editor-{agent,mcp}.png` | 리눅스 Xvfb에서 스크립트 MCP 에이전트 → `orr_mcp` → 에디터 ERP → 패널에 제안 표시 확인 |
 | CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
 ## 다음
@@ -38,4 +41,5 @@
 3. M2 마무리: 화면 텍스트, 이벤트 채널 상한, 낮은 fps에서 롤백 보정 정확도. `sample-build` CI 리눅스 확인
 4. M3 후속: `TickInputs` 끊김/예측 플래그 미연결, `resim_ticks` 과소 집계, 창 클라가 방 시작 후에야 열림, 서버 속도 제한. 브라우저 클라는 WebTransport로 결정(설계 §6.1, 2026-09-30) — 미구현, Safari 호환 시험 구현 먼저. `wss://` 미구현
 5. **M4 에디터 MVP — 완료 (2026-09-30)**. 완료 기준(씬 편집 → 플레이 → 되감기 루프) 충족: 에디터 창과 ERP 에이전트 양쪽에서 테스트. 남은 것: 에디터가 `PhysGame` 전용(`Game` 제네릭화), 시뮬이 UI 스레드에서 돎(Threaded 호스트로), 계층 트리·기즈모·박스 선택·네이티브 파일 대화상자·도킹 없음, 플레이 중 편집 undo 없음(되감기로 대체), ERP 프레임 델타 없음·편집 모드 프레임 스트림 없음, MCP 어댑터 미구현, Windows 실제 GPU에서 에디터 확인 필요. 규칙: 화면 전체 캡처 금지(앱 자기 프레임버퍼·GPU 리드백만), 서브에이전트는 Sonnet/Haiku, 파일은 LF.
+6. **M5 AI — 완료 (2026-09-30)**. 완료 기준(에이전트가 수정 → 검증 → 수락까지 한 번에) 충족: MCP 자식 프로세스 테스트 + 에디터 내장 ERP 테스트 + 리눅스 실제 창 확인. 남은 것: 실제 LLM(Claude Code)으로 `orr_mcp` 사용 시험(Windows에서), 사람과 제안이 같은 필드를 바꾸면 제안 값이 이김(경고 없음), 제안 안 편집 하나만 빼기 없음, `proposal.verify`가 호스트 스레드를 막음(취소 없음, 최대 6000틱), 제안 소유자 구분 없음, 검증 스크린샷(`view.screenshot`) 없음, 리플레이 디버그 커맨드가 엔티티 번호 변경에 취약. 부하 민감 테스트: `orr_server` `disconnect_and_rejoin_over_quic`, `orr_net` `max_connections_enforced::quic` — 실시간 기반이라 CPU를 여러 빌드가 나눠 쓸 때 실패한 적 있음(단독 6/6 통과), 진행량 기준으로 바꾸는 것이 과제.
 

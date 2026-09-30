@@ -274,3 +274,27 @@ fn an_empty_document_can_propose_too() {
     doc.accept(id).unwrap();
     assert_eq!(doc.view().entities().len(), 1);
 }
+
+#[test]
+fn apply_all_is_all_or_nothing() {
+    let mut doc = demo_doc();
+    let b1 = guid_named(&doc, "body_01");
+    let id = doc.propose("batch", agent()).unwrap();
+    let spawn = Op::SpawnEntity { guid: None, name: Some("marker".into()), components: vec![] };
+    let ok = doc.proposal_apply_all(id, vec![set(&b1, BODY, "pos", vec2(1, 8)), spawn]).unwrap();
+    assert_eq!(ok.len(), 2);
+    assert!(matches!(&doc.proposal_ops(id).unwrap()[1], Op::SpawnEntity { guid: Some(_), .. }), "the GUID is filled in");
+    assert_eq!(doc.proposal_ops(id).unwrap().len(), 2);
+    let staged = doc.proposal_diff(id).unwrap();
+
+    // The second op is invalid: the first (valid) one must not stay staged.
+    let bad = doc.proposal_apply_all(id, vec![set(&b1, BODY, "pos", vec2(5, 5)), set(&b1, BODY, "kind", Value::Enum("nope".into()))]);
+    assert!(bad.is_err());
+    assert_eq!(doc.proposal_ops(id).unwrap().len(), 2);
+    assert_eq!(doc.proposal_diff(id).unwrap(), staged);
+    assert_eq!(body_pos(doc.proposal_preview(id).unwrap(), &b1), vec2(1, 8));
+
+    let a = doc.accept(id).unwrap();
+    assert!(a.history_id.is_some());
+    assert_eq!(body_pos(doc.view(), &b1), vec2(1, 8));
+}

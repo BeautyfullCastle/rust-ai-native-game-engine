@@ -120,3 +120,61 @@ fn agent_stop_returns_the_window_to_edit_mode() {
     assert_eq!(editor.mode(), Mode::Edit);
     assert!(editor.erp_status().is_some());
 }
+
+/// The M5 flow against the editor itself: an agent proposes over ERP, the
+/// proposal waits in the window's Agent list, the agent verifies it with the
+/// game's metrics and the bot, and accepts it; the person can undo it.
+#[test]
+fn agent_proposes_verifies_and_accepts_in_the_editor() {
+    let (mut editor, url) = editor_with_erp();
+    let guid = body_guid(&editor, "body_05");
+    let before_yaml = editor.doc().to_yaml();
+
+    let g = guid.clone();
+    let id = with_agent(&mut editor, &url, move |c| {
+        let id = c.call("proposal.begin", json!({"label": "raise body_05"})).unwrap()["id"].as_str().unwrap().to_string();
+        c.call(
+            "proposal.apply",
+            json!({"id": id, "ops": [
+                {"op": "rename", "entity": g, "name": "hero"},
+                {"op": "patch", "entity": g, "component": BODY, "path": "pos", "value": [0, 12.5]},
+            ]}),
+        )
+        .unwrap();
+        id
+    });
+
+    // Waiting in the window, the document itself untouched.
+    let open = editor.doc().list_proposals();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].origin, Origin::Agent("dev".into()));
+    assert_eq!(editor.doc().to_yaml(), before_yaml);
+
+    let report = with_agent(&mut editor, &url, move |c| {
+        let r = c
+            .call("proposal.verify", json!({"id": id, "inputs": {"kind": "bot", "ticks": 120}, "checks": ["lost_bodies.max == 0"]}))
+            .unwrap();
+        c.call("proposal.accept", json!({"id": id})).unwrap();
+        r
+    });
+    assert_eq!(report["passed"], true, "{report}");
+    assert!(report.to_string().contains("lost_bodies"), "the editor's ERP must report the game's metrics");
+
+    assert!(editor.doc().list_proposals().is_empty());
+    let last = editor.doc().history().into_iter().last().unwrap();
+    assert_eq!(last.origin, Origin::Agent("dev".into()));
+    assert_ne!(editor.doc().to_yaml(), before_yaml);
+    editor.undo();
+    assert_eq!(editor.doc().to_yaml(), before_yaml);
+}
+
+/// A person's Stop hands the recording to ERP, so an agent can verify
+/// against the play the person just made.
+#[test]
+fn person_play_is_the_agents_last_play() {
+    let (mut editor, url) = editor_with_erp();
+    editor.step(90);
+    editor.stop();
+    let r = with_agent(&mut editor, &url, |c| c.call("verify.self", json!({"inputs": {"kind": "last_play"}})).unwrap());
+    assert_eq!(r["ticks"], 90, "{r}");
+}
