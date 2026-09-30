@@ -19,6 +19,11 @@
 //!    into pass/fail.
 //! 4. `accept_proposal` (one undoable history entry) or `reject_proposal`.
 //!
+//! The command line `orr` (crate `orr_cli`) is the primary path for agents
+//! with a shell; it reuses this crate's connection ([`Bridge`]), tool
+//! functions ([`tools::run`], [`tools::stage_proposal`]) and report texts
+//! ([`report`]). This adapter is for clients without one.
+//!
 //! Also `list_proposals`, `history`, `undo` and `sim_run`. Tool groups
 //! (`scene`, `propose`, `verify`, `sim`, `history`) switch on and off with
 //! `--tools`, to keep the prompt small. Resources: `orrery://scene`,
@@ -62,9 +67,10 @@
 //!
 //! ## AGENTS.md
 //!
-//! `orr_mcp --print-agents-md` prints an agent guide generated from the
-//! host: engine version and build id, the type registry, the metric names,
-//! the tools and the workflow. It is pinned to the version it was generated
+//! `orr agents-md` (and `orr_mcp --print-agents-md`) prints an agent guide
+//! generated from the host: engine version and build id, the type registry,
+//! the metric names, the `orr` workflow, and the tools as the MCP
+//! alternative. It is pinned to the version it was generated
 //! from; `docs/AGENTS.md` is the one for the demo scene (a test regenerates
 //! it and fails when it is stale: run it with `ORR_UPDATE_AGENTS=1` to
 //! rewrite the file). The same text is the resource `orrery://agents`.
@@ -82,11 +88,11 @@
 
 pub mod agents_md;
 pub mod bridge;
-mod report;
+pub mod report;
 pub mod server;
 pub mod tools;
 
 pub use agents_md::generate as generate_agents_md;
-pub use bridge::{Bridge, Connector, ErpCall, Fail};
+pub use bridge::{Bridge, Connector, ErpCall, Fail, Style};
 pub use server::{serve, McpServer, PROTOCOL_VERSION};
 pub use tools::{ToolGroups, GROUPS};

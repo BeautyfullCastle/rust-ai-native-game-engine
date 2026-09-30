@@ -336,7 +336,8 @@ impl ErpServer {
         if truncated {
             list.drain(..list.len() - lp.limit);
         }
-        json!({"entries": list.iter().map(|e| e.to_json()).collect::<Vec<_>>(), "last_seq": self.next_seq - 1, "truncated": truncated})
+        let clients: Vec<J> = self.conns.values().map(|c| json!({"client": c.client, "capabilities": c.caps.list().into_iter().map(crate::caps::Cap::name).collect::<Vec<_>>()})).collect();
+        json!({"entries": list.iter().map(|e| e.to_json()).collect::<Vec<_>>(), "last_seq": self.next_seq - 1, "truncated": truncated, "clients": clients})
     }
 
     /// Counters.

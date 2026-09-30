@@ -5,6 +5,7 @@
 ## 구조
 - `orr_fp` 고정소수점(Q48.16 `FP`) 수학 · `orr_ecs` Frame(스파스셋, Pod 컴포넌트, 스냅샷/체크섬)
 - `orr_sim` Game/System/이벤트/핫패치 훅 · `orr_session` 예측·롤백·리플레이 · `orr_testgame` arena 테스트 게임
+- 도구: `orr_edit` 편집 코어(문서·undo·제안·검증) · `orr_editor` egui 에디터 · `orr_remote` ERP 서버 · `orr_cli`(`orr`) 에이전트용 CLI(주 경로) · `orr_mcp` MCP 어댑터. 외부 에이전트 사용법은 `AGENTS.md` → `docs/AGENTS.md`
 
 ## 절대 규칙 (시뮬 크레이트: orr_fp, orr_ecs, orr_sim, orr_session)
 - f32/f64 금지 (뷰 레이어와 `float-interop` 기능만 예외). 모든 시뮬 수치는 `FP`.

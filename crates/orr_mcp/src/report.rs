@@ -40,7 +40,7 @@ pub fn verify_text(r: &J) -> String {
                 out.push_str(&format!("  [{}] {}  ({})\n", if c["passed"] == true { "pass" } else { "FAIL" }, s(&c["check"]), s(&c["reason"])));
             }
         }
-        None => out.push_str("No checks given: pass `checks` (e.g. [\"lost_bodies.max == 0\"]) to get pass/fail.\n"),
+        None => out.push_str("No checks given: add checks (e.g. `lost_bodies.max == 0`) to get pass/fail.\n"),
     }
 
     let is_baseline = r["proposal"].is_null();
@@ -140,4 +140,38 @@ pub fn history_text(r: &J) -> String {
     }
     out.push_str(&format!("can_undo: {}, can_redo: {}, unsaved changes: {}.\n", r["can_undo"], r["can_redo"], r["dirty"]));
     out
+}
+
+/// A proposal as text: label, who, the changed lines and the diff.
+pub fn describe_proposal(id: &str, got: &J) -> String {
+    let mut text = format!(
+        "Proposal {id} \"{}\" by {}: {} op(s) staged.\n",
+        s(&got["label"]),
+        s(&got["origin"]),
+        got["op_count"]
+    );
+    let lines: Vec<&str> = got["summary"]["lines"].as_array().map(|l| l.iter().map(s).collect()).unwrap_or_default();
+    if lines.is_empty() {
+        text.push_str("No effective change: the ops leave the scene as it is.\n");
+    } else {
+        text.push_str("Changes:\n");
+        for l in lines {
+            text.push_str(&format!("  {l}\n"));
+        }
+        text.push_str("\nDiff of the scene text:\n");
+        text.push_str(s(&got["diff"]));
+    }
+    if got["accepts_cleanly"] == false {
+        text.push_str(&format!("\nWARNING: it would not accept cleanly now: {}\n", s(&got["accept_error"])));
+    }
+    text
+}
+
+/// `Spawned: op N creates entity GUID` lines from the `spawned` list of `proposal.apply`.
+pub fn spawned_text(spawned: &J) -> String {
+    let mut text = String::new();
+    for e in spawned.as_array().map(Vec::as_slice).unwrap_or_default() {
+        text.push_str(&format!("Spawned: op {} creates entity {}\n", e["index"], s(&e["guid"])));
+    }
+    text
 }

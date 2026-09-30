@@ -52,8 +52,13 @@ fn the_guide_is_pinned_to_the_engine_and_describes_the_workflow() {
     ] {
         assert!(text.contains(want), "the guide mentions {want}");
     }
-    // Pure text: no address, no port, no timestamp, no token.
-    assert!(!text.contains("127.0.0.1") && !text.contains("claude-tok") && !text.contains("ws://"));
+    // The guide is CLI-first: the commands, the exit codes, and MCP as the alternative at the end.
+    for want in ["orr apply", "orr set", "orr activity -f", "ORR_ERP_TOKEN", "## Exit codes and errors", "## MCP alternative", "orr_remote_host --dev-no-auth"] {
+        assert!(text.contains(want), "the guide mentions {want}");
+    }
+    assert!(text.find("## The workflow").unwrap() < text.find("## MCP alternative").unwrap());
+    // Pure text: no address of the host it was made from, no timestamp, no token.
+    assert!(!text.contains(&host.url) && !text.contains("claude-tok"));
     assert!(text.ends_with('\n') && !text.contains("\r"));
 }
 

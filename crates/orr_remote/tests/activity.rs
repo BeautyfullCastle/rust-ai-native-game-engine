@@ -258,3 +258,18 @@ fn in_process_api_and_old_values() {
     assert_eq!(server.activity_since(last - 1).len(), 1);
     agent.join().unwrap();
 }
+
+#[test]
+fn activity_list_names_the_connected_clients() {
+    let host = TestHost::dev();
+    let mut a = ErpClient::connect(&host.url, None).unwrap();
+    let r = a.call("activity.list", json!({"limit": 1})).unwrap();
+    let clients = r["clients"].as_array().unwrap();
+    assert_eq!(clients.len(), 1, "{r}");
+    assert_eq!(clients[0]["client"], "dev");
+    assert!(clients[0]["capabilities"].as_array().unwrap().iter().any(|c| c == "read"));
+    let mut b = ErpClient::connect(&host.url, None).unwrap();
+    b.call("sim.state", J::Null).unwrap();
+    assert_eq!(a.call("activity.list", json!({"limit": 1})).unwrap()["clients"].as_array().unwrap().len(), 2);
+    drop(b);
+}
