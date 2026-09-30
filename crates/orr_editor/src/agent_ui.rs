@@ -29,6 +29,8 @@ pub const LBL_PREVIEW: &str = "Preview";
 pub const TXT_PASSED: &str = "all checks passed";
 /// The header when no agent is connected.
 pub const TXT_NO_AGENT: &str = "no agent connected";
+/// How long an agent counts as recently active in the header (ms).
+pub const RECENT_MS: u64 = 60_000;
 /// Rows the feed draws at most (the newest ones); older ones stay in the log.
 pub const MAX_ROWS: usize = 400;
 
@@ -96,7 +98,7 @@ fn row_job(e: &ActivityEntry, font: &egui::FontId) -> LayoutJob {
     add(format!("{:<8} ", e.client), agent_color(&e.client));
     add(format!("{tag} "), color);
     add(e.summary.clone(), if e.ok { if e.read { Color32::GRAY } else { Color32::from_gray(225) } } else { RED });
-    add(if e.ok { "  \u{2714}".to_string() } else { "  \u{2718}".to_string() }, if e.ok { GREEN } else { RED });
+    add(if e.ok { "  \u{2714}".to_string() } else { "  \u{d7}".to_string() }, if e.ok { GREEN } else { RED });
     job
 }
 
@@ -130,13 +132,29 @@ impl EditorApp {
     fn agent_header(&mut self, ui: &mut Ui) {
         let agents = self.editor.agents();
         let erp = self.editor.erp_status();
-        if !agents.is_empty() {
+        // A CLI agent connects once per command: also show who acted lately.
+        let now = self.editor.erp_elapsed_ms().unwrap_or(0);
+        let recent: Vec<_> = self
+            .editor
+            .feed()
+            .recent_agents(now.saturating_sub(RECENT_MS))
+            .into_iter()
+            .filter(|r| !agents.iter().any(|a| a.name == r.name))
+            .collect();
+        if !agents.is_empty() || !recent.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Agents").strong());
                 for a in &agents {
                     dot(ui, agent_color(&a.name), true);
                     ui.label(RichText::new(&a.name).strong().color(agent_color(&a.name)));
                     ui.weak(format!("{} \u{b7} {} req", a.caps, a.requests));
+                    ui.add_space(10.0);
+                }
+                for r in &recent {
+                    dot(ui, agent_color(&r.name), false);
+                    ui.label(RichText::new(&r.name).strong().color(agent_color(&r.name)));
+                    let ago = now.saturating_sub(r.last_ms) / 1000;
+                    ui.weak(format!("last action {ago}s ago \u{b7} {} action{}", r.actions, if r.actions == 1 { "" } else { "s" }));
                     ui.add_space(10.0);
                 }
             });
@@ -158,7 +176,8 @@ impl EditorApp {
         if erp.is_none() {
             mono(ui, "orr_editor --erp 127.0.0.1:7777 --erp-dev".to_string());
         }
-        mono(ui, format!("claude mcp add orrery -- orr_mcp --erp {url}      # or: ORR_ERP_URL={url} orr_mcp"));
+        mono(ui, format!("ORR_ERP={url} orr status        # CLI (see AGENTS.md)"));
+        mono(ui, format!("claude mcp add orrery -- orr_mcp --erp {url}      # or MCP"));
     }
 
     /// The filter toggles.
@@ -172,6 +191,7 @@ impl EditorApp {
             ui.toggle_value(&mut f.verify, "verify");
             ui.toggle_value(&mut f.sim, "sim");
             ui.toggle_value(&mut f.reads, format!("reads ({unseen_reads})"));
+            ui.toggle_value(&mut f.sessions, "connections");
             ui.weak("\u{b7} read-only view: Undo (Ctrl+Z) takes an agent edit back");
         });
     }
@@ -417,7 +437,7 @@ fn report_widget(ui: &mut Ui, report: &VerifyReport, outcome: Option<&CheckOutco
             ui.label(RichText::new(format!("{bad} of {} checks FAILED", outcome.results.len())).color(RED).strong().size(14.0));
         }
         for r in &outcome.results {
-            let (mark, color) = if r.passed { ("\u{2714}", GREEN) } else { ("\u{2718}", RED) };
+            let (mark, color) = if r.passed { ("\u{2714}", GREEN) } else { ("\u{d7}", RED) };
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(mark).color(color));
                 ui.label(RichText::new(&r.check).monospace());

@@ -563,6 +563,12 @@ impl Editor {
         &mut self.feed
     }
 
+    /// Milliseconds since the embedded ERP server started (the clock of
+    /// activity entries), if it runs.
+    pub fn erp_elapsed_ms(&self) -> Option<u64> {
+        self.erp.as_ref().map(ErpServer::elapsed_ms)
+    }
+
     /// The clients connected to the embedded ERP server right now.
     pub fn agents(&self) -> Vec<ClientInfo> {
         self.erp.as_ref().map(ErpServer::clients).unwrap_or_default()

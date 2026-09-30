@@ -187,7 +187,7 @@ Examples:
         "orr sim start [--players N] | stop | play | pause | step [N] | seek <tick> | speed <x> | state
 
 Drives a play session (a copy of the scene; the scene document is untouched).
-  start   begin paused     step N   run N ticks now (default 1)   seek T   go to a recorded tick
+  start   begin paused     step N   run N ticks now (default 1; starts a paused session if none)   seek T   go to a recorded tick
   play / pause   run by the wall clock or not      speed X   wall-clock speed, e.g. 0.5 or 2
   stop    end it; the recording stays for `orr verify --last-play`     state   mode, tick, checksum
 

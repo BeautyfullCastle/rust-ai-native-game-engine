@@ -752,6 +752,11 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
         }
         "step" => {
             let n = if arg.is_some() { num("a tick count")? } else { 1 };
+            // Like the editor's Step button: start a (paused) session first
+            // when none runs, so `orr sim step 60` just works.
+            if ctx.call("sim.state", json!({}))?["mode"] != "play" {
+                ctx.call("sim.start", json!({}))?;
+            }
             ctx.tool("sim_run", json!({"action": "step", "n": n}))?
         }
         "seek" => ctx.tool("sim_run", json!({"action": "seek", "tick": num("a tick")?}))?,

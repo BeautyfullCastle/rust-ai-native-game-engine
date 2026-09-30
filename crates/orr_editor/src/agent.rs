@@ -34,17 +34,20 @@ pub struct FeedFilter {
     pub sim: bool,
     /// Read-only requests (hidden by default).
     pub reads: bool,
+    /// Connect / disconnect / auth events (hidden by default: a CLI agent
+    /// connects once per command).
+    pub sessions: bool,
 }
 
 impl Default for FeedFilter {
     fn default() -> Self {
-        Self { edits: true, proposals: true, verify: true, sim: true, reads: false }
+        Self { edits: true, proposals: true, verify: true, sim: true, reads: false, sessions: false }
     }
 }
 
 impl FeedFilter {
-    /// True if `e` passes. Session events always do, and so do errors (a
-    /// failed read is worth seeing).
+    /// True if `e` passes. Errors always do (a failed read or a refused
+    /// token is worth seeing).
     pub fn shows(&self, e: &ActivityEntry) -> bool {
         match e.kind {
             ActivityKind::Edit => self.edits,
@@ -52,9 +55,20 @@ impl FeedFilter {
             ActivityKind::Verify => self.verify,
             ActivityKind::Sim => self.sim,
             ActivityKind::Read => self.reads || !e.ok,
-            ActivityKind::Session => true,
+            ActivityKind::Session => self.sessions || !e.ok,
         }
     }
+}
+
+/// An agent seen in the feed recently (a CLI agent is connected only while
+/// a command runs, so "connected now" alone would mostly read "nobody").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentAgent {
+    pub name: String,
+    /// Server time of its newest non-read, non-session entry.
+    pub last_ms: u64,
+    /// Its non-read, non-session entries in the feed.
+    pub actions: usize,
 }
 
 /// The activity feed of the window (copied from the ERP server's log).
@@ -73,6 +87,23 @@ pub struct Feed {
 }
 
 impl Feed {
+    /// Agents with actions (not reads or connects) at or after `since_ms`
+    /// server time, newest first.
+    pub fn recent_agents(&self, since_ms: u64) -> Vec<RecentAgent> {
+        let mut out: Vec<RecentAgent> = Vec::new();
+        for e in self.entries.iter().filter(|e| !e.read && e.kind != ActivityKind::Session && e.at_ms >= since_ms) {
+            match out.iter_mut().find(|a| a.name == e.client) {
+                Some(a) => {
+                    a.last_ms = a.last_ms.max(e.at_ms);
+                    a.actions += 1;
+                }
+                None => out.push(RecentAgent { name: e.client.clone(), last_ms: e.at_ms, actions: 1 }),
+            }
+        }
+        out.sort_by(|a, b| b.last_ms.cmp(&a.last_ms).then_with(|| a.name.cmp(&b.name)));
+        out
+    }
+
     /// Adds entries from the server (in `seq` order).
     pub(crate) fn push(&mut self, list: Vec<ActivityEntry>) {
         for e in list {
@@ -81,7 +112,8 @@ impl Feed {
                 self.touched.extend(e.entities.iter().cloned());
             }
             if !e.read && e.kind != ActivityKind::Session {
-                self.last_action = Some(format!("agent {}: {}", e.client, e.summary));
+                // The status bar font has no arrow glyph.
+                self.last_action = Some(format!("agent {}: {}", e.client, e.summary.replace('\u{2192}', "->")));
             }
             if self.entries.len() >= FEED_LIMIT {
                 self.entries.pop_front();

@@ -320,7 +320,7 @@ fn a_failed_request_is_shown_with_its_error() {
     assert!(bad.is_err());
     open_agent_tab(&mut h);
     assert!(shows(&h, "world.patch e_deadbeef"));
-    assert!(shows(&h, "\u{2718}"));
+    assert!(shows(&h, "\u{d7}"));
     expand(&mut h, "world.patch e_deadbeef");
     assert!(shows(&h, "error: "));
 }
@@ -341,4 +341,31 @@ fn staged_proposals_can_be_previewed_and_nothing_can_approve_them() {
     h.run_steps(2);
     assert!(h.state().editor.previewing().is_some());
     assert!(h.query_by_label("Accept").is_none() && h.query_by_label("Reject").is_none() && h.query_by_label("Verify").is_none());
+}
+
+/// A CLI agent connects once per command: after it leaves, the header still
+/// names it (last action), and its connect/disconnect rows stay hidden
+/// unless "connections" is switched on.
+#[test]
+fn a_cli_style_agent_stays_visible_after_it_disconnects() {
+    let (mut h, agent) = with_agent();
+    let g = body_guid(&h, "body_05");
+    agent.call(&mut h, "world.patch", json!({"entity": g, "component": BODY, "path": "pos.x", "value": 1})).unwrap();
+    drop(agent);
+    for _ in 0..200 {
+        h.step();
+        if h.state().editor.agents().is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    open_agent_tab(&mut h);
+    h.run_steps(2);
+    assert!(!shows(&h, TXT_NO_AGENT), "a recently active agent is not 'no agent'");
+    assert!(shows(&h, "last action"));
+    assert!(shows(&h, "world.patch"));
+    assert!(!shows(&h, "disconnected"), "connection rows are hidden by default");
+    h.get_by_label("connections").click();
+    h.run_steps(2);
+    assert!(shows(&h, "disconnected"));
 }

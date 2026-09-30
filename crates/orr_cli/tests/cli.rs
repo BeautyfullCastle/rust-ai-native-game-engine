@@ -541,3 +541,16 @@ fn secrets_are_never_printed() {
     // The activity feed knows the client name, not the token.
     assert!(!host.orr(&["activity", "--reads", "-n", "500"]).all().contains(secret));
 }
+
+/// `orr sim step` without `sim start` starts a paused session first, like
+/// the editor's Step button.
+#[test]
+fn sim_step_starts_a_session_when_none_runs() {
+    let host = TestHost::start();
+    let st = host.orr(&["sim", "step", "45"]);
+    assert_eq!(st.code, 0, "{}\n{}", st.out, st.err);
+    assert!(st.out.contains("tick 45"), "{}", st.out);
+    let state = host.orr(&["sim", "state", "--json"]).json();
+    assert_eq!(state["mode"], "play");
+    assert_eq!(state["head_tick"], 45);
+}
