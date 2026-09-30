@@ -44,12 +44,12 @@ struct Tx {
 ///
 /// Nothing here touches a window, a socket or a clock.
 pub struct EditorDoc {
-    scene: Scene,
-    types: Arc<TypeRegistry>,
-    frame_registry: Arc<ComponentRegistry>,
-    seed: u64,
-    frame: Frame,
-    index: SceneIndex,
+    pub(crate) scene: Scene,
+    pub(crate) types: Arc<TypeRegistry>,
+    pub(crate) frame_registry: Arc<ComponentRegistry>,
+    pub(crate) seed: u64,
+    pub(crate) frame: Frame,
+    pub(crate) index: SceneIndex,
     /// Text the document was loaded from or last saved as.
     source: Option<String>,
     undo: Vec<Entry>,
@@ -57,8 +57,9 @@ pub struct EditorDoc {
     /// History id at the last load or save (0 = start).
     clean_id: u64,
     next_id: u64,
-    next_guid: u32,
+    pub(crate) next_guid: u32,
     tx: Option<Tx>,
+    pub(crate) proposals: crate::proposal::Proposals,
 }
 
 impl EditorDoc {
@@ -109,6 +110,7 @@ impl EditorDoc {
             next_id: 1,
             next_guid,
             tx: None,
+            proposals: Default::default(),
         })
     }
 
@@ -129,7 +131,31 @@ impl EditorDoc {
         self.undo.clear();
         self.redo.clear();
         self.clean_id = 0;
+        self.proposals.clear();
         Ok(())
+    }
+
+    /// A copy for staging: same scene, frame (same entity handles), index and
+    /// GUID counter; empty history, no proposals.
+    pub(crate) fn fork(&self) -> Result<EditorDoc, EditError> {
+        let frame = Frame::from_bytes(self.frame_registry.clone(), &self.frame.to_bytes())
+            .map_err(|e| EditError::Invalid(format!("cannot copy the preview frame: {e}")))?;
+        Ok(EditorDoc {
+            scene: self.scene.clone(),
+            types: self.types.clone(),
+            frame_registry: self.frame_registry.clone(),
+            seed: self.seed,
+            frame,
+            index: self.index.clone(),
+            source: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            clean_id: 0,
+            next_id: 1,
+            next_guid: self.next_guid,
+            tx: None,
+            proposals: Default::default(),
+        })
     }
 
     // ---- saving ----
