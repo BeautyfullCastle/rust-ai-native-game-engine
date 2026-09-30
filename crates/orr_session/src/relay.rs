@@ -396,6 +396,8 @@ pub struct ClientStats {
     pub stall_episodes: u64,
     /// Local time spent stalled, microseconds.
     pub stalled_us: u64,
+    /// Longest single stall episode, microseconds.
+    pub max_stall_us: u64,
     /// Largest `head - verified` seen.
     pub max_prediction_depth: u64,
     pub delay_changes: u32,
@@ -466,6 +468,7 @@ pub struct RelayClient<G: Game, L: Link> {
     hard_streak: u8,
 
     stalled_prev: bool,
+    stall_run_us: u64,
     reported: usize,
     base_anchor: Option<Anchor>,
     stats: ClientStats,
@@ -509,6 +512,7 @@ impl<G: Game, L: Link> RelayClient<G, L> {
             below_since: None,
             hard_streak: 0,
             stalled_prev: false,
+            stall_run_us: 0,
             reported: 0,
             base_anchor: None,
             stats: ClientStats::default(),
@@ -963,7 +967,10 @@ impl<G: Game, L: Link> RelayClient<G, L> {
             self.stats.stalled_us += dt;
             if !self.stalled_prev {
                 self.stats.stall_episodes += 1;
+                self.stall_run_us = 0;
             }
+            self.stall_run_us += dt;
+            self.stats.max_stall_us = self.stats.max_stall_us.max(self.stall_run_us);
         }
         self.stalled_prev = stalled;
         let head = session.head_tick();

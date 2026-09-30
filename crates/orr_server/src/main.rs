@@ -22,7 +22,7 @@
 //!                  (these also override the presets)
 //!
 //!   --stats-secs N           print room statistics every N seconds (default 5, 0 = off)
-//!   --sim-latency MS --sim-jitter MS --sim-loss P   add network conditions on the server side
+//!   --sim-latency MS --sim-jitter MS --sim-loss P  --sim-seed N   add network conditions on the server side
 //!   --run-seconds N          stop by itself (same graceful path as Ctrl+C) after N seconds
 //! ```
 //!
@@ -143,6 +143,7 @@ fn parse_args() -> Result<Args, String> {
             "--stats-secs" => a.stats_secs = parse("--stats-secs", value("--stats-secs")?)?,
             "--sim-latency" => a.sim.latency_ms = parse("--sim-latency", value("--sim-latency")?)?,
             "--sim-jitter" => a.sim.jitter_ms = parse("--sim-jitter", value("--sim-jitter")?)?,
+            "--sim-seed" => a.sim.seed = parse("--sim-seed", value("--sim-seed")?)?,
             "--sim-loss" => a.sim.loss = parse("--sim-loss", value("--sim-loss")?)?,
             "-h" | "--help" => return Err("see the header of crates/orr_server/src/main.rs for the options".into()),
             other => return Err(format!("unknown option '{other}' (--help)")),

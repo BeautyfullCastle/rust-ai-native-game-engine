@@ -21,7 +21,7 @@
 //! `--headless --bot` a scripted bot plays (for `--seconds`, default 30):
 //! ```text
 //!   --connect HOST:PORT  --transport quic|ws  --trust-fingerprint HEX | --insecure-dev
-//!   --room N  --slot N  --name TEXT  --sim-latency MS  --sim-jitter MS  --sim-loss P
+//!   --room N  --slot N  --name TEXT  --sim-latency MS  --sim-jitter MS  --sim-loss P  --sim-seed N
 //!   --desync-dir DIR  --bot  --connect-timeout SECONDS
 //! ```
 //! Keys: WASD or arrows move your paddle (blue), Q/E turn it, space shoots

@@ -68,6 +68,20 @@ impl SimConditions {
     }
 }
 
+/// A seed that differs per call and per process, for simulated conditions
+/// when the user gave none: process id, a counter and the clock, mixed.
+/// Print it so a run can be repeated with an explicit seed.
+pub fn fresh_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let mut z = u64::from(std::process::id()).rotate_left(32) ^ nanos ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// Wraps `ep` in the conditioner when `sim` asks for any effect.
 fn condition(ep: Endpoint, sim: Option<SimConditions>) -> Box<dyn Transport + Send> {
     match sim.filter(SimConditions::is_active) {

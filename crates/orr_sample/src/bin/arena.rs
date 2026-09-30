@@ -15,7 +15,7 @@
 //! `--connect HOST:PORT` (options: see `orr_sample::net_client::NET_HELP`):
 //! ```text
 //!   --connect HOST:PORT  --transport quic|ws  --trust-fingerprint HEX | --insecure-dev
-//!   --room N  --slot N  --name TEXT  --sim-latency MS  --sim-jitter MS  --sim-loss P
+//!   --room N  --slot N  --name TEXT  --sim-latency MS  --sim-jitter MS  --sim-loss P  --sim-seed N
 //!   --desync-dir DIR  --bot  --connect-timeout SECONDS
 //! ```
 //! Keys: WASD or arrows move, space fires, Escape quits. In local mode the other player is a bot.

@@ -44,6 +44,13 @@ impl Default for LinkConditions {
 
 struct Rng(u64);
 impl Rng {
+    /// Independent stream `n` of `seed` (splitmix64 of the mixed value).
+    fn stream(seed: u64, n: u64) -> Rng {
+        let mut z = seed.wrapping_add(n.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        Rng((z ^ (z >> 31)).max(1))
+    }
     fn next(&mut self) -> u64 {
         // xorshift64*
         self.0 ^= self.0 >> 12;
@@ -78,13 +85,23 @@ impl<T> Ord for Item<T> {
     }
 }
 
+struct DirRng {
+    loss: Rng,
+    jitter: Rng,
+}
+
+const OUT: usize = 0;
+const IN: usize = 1;
+
 type Queue<T> = BinaryHeap<Reverse<Item<T>>>;
 
 /// A [`Transport`] with simulated network conditions.
 pub struct Conditioned<T: Transport> {
     inner: T,
     cond: LinkConditions,
-    rng: Rng,
+    /// Loss and jitter draws have their own stream per direction, so a send
+    /// never shifts the loss decisions of the receive side (and the reverse).
+    rng: [DirRng; 2],
     seq: u64,
     out_q: Queue<(ConnId, Channel, Vec<u8>)>,
     in_q: Queue<Event>,
@@ -100,7 +117,10 @@ impl<T: Transport> Conditioned<T> {
         Conditioned {
             inner,
             cond,
-            rng: Rng(cond.seed.max(1)),
+            rng: [
+                DirRng { loss: Rng::stream(cond.seed, 0), jitter: Rng::stream(cond.seed, 1) },
+                DirRng { loss: Rng::stream(cond.seed, 2), jitter: Rng::stream(cond.seed, 3) },
+            ],
             seq: 0,
             out_q: BinaryHeap::new(),
             in_q: BinaryHeap::new(),
@@ -127,11 +147,11 @@ impl<T: Transport> Conditioned<T> {
     }
 
     /// Release time for a new item, or `None` when it is lost.
-    fn schedule(&mut self, channel: Channel, last: Option<Instant>) -> Option<Instant> {
-        let lost = self.cond.loss > 0.0 && self.rng.unit() < self.cond.loss;
+    fn schedule(&mut self, dir: usize, channel: Channel, last: Option<Instant>) -> Option<Instant> {
+        let lost = self.cond.loss > 0.0 && self.rng[dir].loss.unit() < self.cond.loss;
         let mut delay = self.cond.latency;
         if !self.cond.jitter.is_zero() {
-            delay += self.cond.jitter.mul_f32(self.rng.unit());
+            delay += self.cond.jitter.mul_f32(self.rng[dir].jitter.unit());
         }
         let mut release = Instant::now() + delay;
         match channel {
@@ -173,7 +193,7 @@ impl<T: Transport> Conditioned<T> {
             let (conn, release) = match &ev {
                 Event::Message { conn, channel, .. } => {
                     let last = self.in_last.get(conn).copied();
-                    match self.schedule(*channel, last) {
+                    match self.schedule(IN, *channel, last) {
                         Some(r) => (*conn, r),
                         None => continue,
                     }
@@ -214,7 +234,7 @@ impl<T: Transport> Transport for Conditioned<T> {
 
     fn send(&mut self, conn: ConnId, channel: Channel, bytes: &[u8]) -> Result<(), SendError> {
         let last = self.out_last.get(&conn).copied();
-        if let Some(release) = self.schedule(channel, last) {
+        if let Some(release) = self.schedule(OUT, channel, last) {
             if channel == Channel::Reliable {
                 self.out_last.insert(conn, release);
             }

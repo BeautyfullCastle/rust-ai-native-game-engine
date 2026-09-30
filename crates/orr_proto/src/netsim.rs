@@ -33,6 +33,11 @@ pub struct LinkParams {
     /// more delay (so it arrives after later ones).
     pub reorder_ppm: u32,
     pub reorder_extra_us: u64,
+    /// Burst loss (Gilbert-Elliott): per unreliable message, the chance the
+    /// link enters the bad state, where every message is lost. `0` = off.
+    pub burst_enter_ppm: u32,
+    /// Chance per message to leave the bad state (mean burst = 1e6 / this).
+    pub burst_leave_ppm: u32,
 }
 
 impl LinkParams {
@@ -43,6 +48,16 @@ impl LinkParams {
 
     pub fn with_loss_ppm(mut self, loss_ppm: u32) -> Self {
         self.loss_ppm = loss_ppm;
+        self
+    }
+
+    /// Burst loss with `avg_loss_ppm` of all unreliable messages lost in
+    /// bursts of `mean_burst` messages on average (geometric lengths).
+    pub fn with_burst_loss(mut self, avg_loss_ppm: u32, mean_burst: u32) -> Self {
+        let leave = 1_000_000 / mean_burst.max(1);
+        let avg = u64::from(avg_loss_ppm.min(999_999));
+        self.burst_leave_ppm = leave;
+        self.burst_enter_ppm = (u64::from(leave) * avg / (1_000_000 - avg)) as u32;
         self
     }
 
@@ -86,6 +101,10 @@ pub struct NetStats {
     pub reliable_sent: u64,
     pub bytes_up: u64,
     pub bytes_down: u64,
+    /// Most unreliable messages lost in a row on one connection, client to
+    /// server and server to client.
+    pub longest_loss_run_up: u32,
+    pub longest_loss_run_down: u32,
 }
 
 /// Small seeded generator (SplitMix64).
@@ -126,6 +145,12 @@ struct Conn {
     last_reliable_down: u64,
     /// Events for the client of this connection, ordered by delivery time.
     to_client: BTreeMap<(u64, u64), Ev>,
+    /// Burst-loss state per direction: the link is in its bad state.
+    burst_up: bool,
+    burst_down: bool,
+    /// Unreliable messages lost in a row right now, per direction.
+    loss_run_up: u32,
+    loss_run_down: u32,
 }
 
 struct Inner {
@@ -166,7 +191,26 @@ impl Inner {
                     self.stats.oversize_dropped += 1;
                     return;
                 }
-                if self.rng.chance_ppm(p.loss_ppm) {
+                let mut burst = false;
+                if p.burst_leave_ppm > 0 {
+                    let c = self.conns.get_mut(&conn).unwrap();
+                    let bad = if to_server { &mut c.burst_up } else { &mut c.burst_down };
+                    if *bad {
+                        if self.rng.chance_ppm(p.burst_leave_ppm) {
+                            *bad = false;
+                        }
+                    } else if self.rng.chance_ppm(p.burst_enter_ppm) {
+                        *bad = true;
+                    }
+                    burst = *bad;
+                }
+                let lost = burst || self.rng.chance_ppm(p.loss_ppm);
+                let c = self.conns.get_mut(&conn).unwrap();
+                let run = if to_server { &mut c.loss_run_up } else { &mut c.loss_run_down };
+                *run = if lost { *run + 1 } else { 0 };
+                let longest = if to_server { &mut self.stats.longest_loss_run_up } else { &mut self.stats.longest_loss_run_down };
+                *longest = (*longest).max(*run);
+                if lost {
                     self.stats.unreliable_lost += 1;
                     return;
                 }
@@ -260,7 +304,17 @@ impl SimNet {
         let now = i.now_us;
         i.conns.insert(
             id,
-            Conn { params, open: true, last_reliable_up: 0, last_reliable_down: 0, to_client: BTreeMap::new() },
+            Conn {
+                params,
+                open: true,
+                last_reliable_up: 0,
+                last_reliable_down: 0,
+                to_client: BTreeMap::new(),
+                burst_up: false,
+                burst_down: false,
+                loss_run_up: 0,
+                loss_run_down: 0,
+            },
         );
         let up = params.up.latency_us;
         let down = params.down.latency_us;
@@ -446,6 +500,32 @@ mod tests {
         assert_eq!(run(5), run(5));
         let n = run(5);
         assert!(n > 100 && n < 240, "{n}");
+    }
+
+    #[test]
+    fn burst_loss_matches_average_and_mean_length() {
+        let net = SimNet::new(9);
+        let mut ep = net.endpoint();
+        let mut link = net.connect(PathParams::symmetric(LinkParams::new(1000, 0).with_burst_loss(20_000, 4)));
+        net.advance_us(100_000);
+        let _ = drain(&mut ep);
+        let n = 100_000u32;
+        for i in 0..n {
+            link.send(Channel::Unreliable, &i.to_le_bytes());
+        }
+        net.advance_us(1_000_000);
+        let mut got = vec![false; n as usize];
+        for e in drain(&mut ep) {
+            if let ServerEvent::Message { data, .. } = e {
+                got[u32::from_le_bytes(data[..4].try_into().unwrap()) as usize] = true;
+            }
+        }
+        let lost = got.iter().filter(|g| !**g).count() as f64;
+        let bursts = got.windows(2).filter(|w| w[0] && !w[1]).count() as f64;
+        let avg = lost / f64::from(n);
+        let mean = lost / bursts;
+        assert!((0.014..0.026).contains(&avg), "avg loss {avg}");
+        assert!((3.2..4.8).contains(&mean), "mean burst {mean}");
     }
 
     #[test]
