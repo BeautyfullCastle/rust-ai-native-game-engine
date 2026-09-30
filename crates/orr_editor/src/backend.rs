@@ -24,6 +24,7 @@ use serde_json::{json, Value as J};
 
 /// Where the simulation runs.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // one per editor, never in a collection
 pub enum HostSpec {
     /// A host thread of this process on a scene file.
     Local {
@@ -120,6 +121,9 @@ impl Backend {
                 erp.call_timeout = CALL_TIMEOUT;
                 let mut rc = RemoteConfig::new("");
                 rc.source = "view".to_string();
+                // In process a frame is a copy, not a message: let an edit show at once instead of
+                // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
+                rc.max_fps = 240;
                 let bridge = RemoteBridge::<PhysGame>::connect_transport(Box::new(link("frames")?), rc)?;
                 let url = host.url().map(str::to_string);
                 let mut b = Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client: USER_CLIENT.to_string(), url, game: String::new() };

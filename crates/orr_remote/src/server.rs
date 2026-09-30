@@ -180,6 +180,9 @@ pub struct PollReport {
     pub more: bool,
     /// A client called `debug.panic`: the host is to panic (see [`Host::frame`](crate::Host::frame)).
     pub crash: bool,
+    /// A subscriber is waiting out its frame rate cap with a newer frame to
+    /// get: the host should look again soon, not sleep.
+    pub frame_pending: bool,
 }
 
 type TickKey = (bool, u64, u64, bool);
@@ -207,6 +210,7 @@ pub struct ErpServer {
     net: Arc<NetShared>,
     stash: Option<Inbound>,
     crash: bool,
+    frame_pending: bool,
     events_out: Vec<(EventKey, Vec<u8>)>,
     last_hist_check: Option<Instant>,
     last_prop_check: Option<Instant>,
@@ -271,6 +275,7 @@ impl ErpServer {
             net: shared,
             stash: None,
             crash: false,
+            frame_pending: false,
             addr,
             inbox,
             queued,
@@ -495,6 +500,7 @@ impl ErpServer {
         }
         self.publish(target, now);
         report.crash = std::mem::take(&mut self.crash);
+        report.frame_pending = std::mem::take(&mut self.frame_pending);
         report
     }
 
@@ -786,12 +792,14 @@ impl ErpServer {
         let mut due: Vec<(u64, FrameKey)> = Vec::new();
         for (id, c) in &self.conns {
             let Some(f) = c.subs.frames.as_ref() else { continue };
-            if f.last_sent.is_some_and(|t| now.duration_since(t) < f.min_interval) {
-                continue;
-            }
+            let throttled = f.last_sent.is_some_and(|t| now.duration_since(t) < f.min_interval);
             let Some(key) = frame_key(target, f.source) else { continue };
             if f.last_key != Some(key) {
-                due.push((*id, key));
+                if throttled {
+                    self.frame_pending = true;
+                } else {
+                    due.push((*id, key));
+                }
             }
         }
         if due.is_empty() {

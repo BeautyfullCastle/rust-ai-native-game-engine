@@ -94,7 +94,9 @@ impl<G: Game> Host<G> {
             let report = self.frame();
             if report.requests == 0 && !report.more {
                 let ticking = self.play.as_ref().is_some_and(|pc| pc.session().wants_tick());
-                self.server.wait_for_request(if ticking { idle } else { idle * 10 });
+                // A frame held back by a rate cap goes out a moment later: do not sleep through it.
+                let wait = if ticking || report.frame_pending { idle } else { idle * 10 };
+                self.server.wait_for_request(wait);
             }
         }
     }
