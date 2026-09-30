@@ -24,6 +24,7 @@
 | M3 통합 | `orr_relay_net`(orr_net 위 `Link`/`Endpoint`), `orr_server` 실행 파일(QUIC/WS, 자체서명 지문), `RelayHost`(브리지 SimHost), 샘플 `--connect`/`--headless --bot`, `--sim-latency/jitter/loss` | 실제 QUIC 프로세스 분리 4인, RTT 약 160ms·손실 2%·30~60초: 체크섬 일치, 디싱크 0, 롤백 22~25/초, 멈춤 대부분 수십 ms(클라 1개가 1회 약 280ms). 물리 1000바디 창 클라 58.6fps. **M3 완료 기준 충족(수치 기준)** |
 | 전달 개선 (M3 후속) | 280ms 멈춤 원인은 테스트 조절기 시드가 모든 클라에서 같았던 것(손실 동시 발생) → 클라별 시드 + `--sim-seed`. 서버는 확인 응답 전까지 모든 미확인 번들을 매 패킷에 반복, `Confirmed` 압축 인코딩(프로토콜 v2) | 몰린 손실(평균 3연속)에서 최대 멈춤 578→147ms, 누적 24.7→4.9초. 하향 대역폭 동일(약 25KB/s). 실제 QUIC 4인 30초×2: 최대 멈춤 13ms, 디싱크 0 |
 | 시뮬 제어 (M4 1단계 C) | `orr_session::PlaySession`: 재생/일시정지/n틱 전진/배속(0.25~4x, 틱 간격만 변경)/틱 이동(seek)/분기, 링 + 직렬화 키프레임(예산 초과 시 간격 2배), 틱 경계 `DebugCommand`(`orr_sim::debug`, `.orrp` v3에 기록), 리플레이 뷰어 모드. 브리지 `PlayHost`·제어 API | 물리 1000바디 1200틱 후 600틱 뒤로: 키프레임 적중 0.35ms, 최악(+59틱 재시뮬) 43ms, 링 안 0.06ms, 앞으로 600틱 21ms. 기록 포함 틱 0.85ms. 1500틱 `.orrp` 2.7MB. 기존 골든 불변 |
+| 리플렉션·씬 (M4 1단계 A) | `orr_reflect`(+`orr_reflect_derive`): 필드 단위 리플렉션(범위·열거·플래그·skip·기본값), 타입 레지스트리, JSON Schema(골든 파일). Strict YAML 씬(`saphyr-parser`, 앵커·별칭·태그·암묵 타입 거부, GUID 키 정렬, 줄·칸 오류, 여러 오류 동시 보고), 십진↔FP 정확 변환, 씬↔Frame 굽기/되굽기(`SceneIndex`). `orr_physics` 컴포넌트에 `Reflect` | 무작위 텍스트 2만 개·변형 씬 퍼즈에서 패닉 0. 기존 골든 불변 |
 | CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
 ## 다음
@@ -35,7 +36,7 @@
 5. **M4 에디터 MVP — 진행 중 (2026-09-30 중단, 이어서 할 것)**
    - 계획: 1단계 A·B·C 병렬 → 2단계 D(egui 에디터: 계층·인스펙터·뷰포트·타임라인·undo) + E(ERP + `Remote` 어댑터). 완료 기준: 씬 편집 → 플레이 → 되감기 루프.
    - 1단계 진행분은 원격 브랜치에 WIP 커밋으로 있음(빌드 보장 안 됨, `main` `eb1665a` 기준):
-     - `wip/m4-a-reflect-yaml` — `orr_reflect`(필드 단위 리플렉션, derive, JSON Schema), Strict YAML 씬 읽기/쓰기(앵커·태그·암묵 변환 금지, GUID 키 정렬, 줄·칸 오류), FP 십진 정확 변환, 씬↔Frame 굽기. 중단 시점: 엄격성 테스트 재작성 중.
+     - `wip/m4-a-reflect-yaml` — **완료·병합** (위 표 "리플렉션·씬").
      - `wip/m4-b-render-split` — `orr_rhi`/`orr_render`로 렌더러 분리, 캡슐·디버그 선·카메라, 텍스처 렌더(에디터 뷰포트용), GPU 리드백 픽셀 테스트. 중단 시점: 구현 중반.
      - `wip/m4-c-sim-control` — **완료·병합** (위 표 "시뮬 제어").
    - 이어가는 법: 각 브랜치를 체크아웃해 `cargo test --workspace --release`로 상태 확인 → 남은 부분 완성 → `main`에 병합. C부터 권장.

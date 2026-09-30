@@ -13,8 +13,11 @@ orr_fp = { path = "../orr_fp" }
 orr_ecs = { path = "../orr_ecs" }
 orr_sim = { path = "../orr_sim" }
 bytemuck = { version = "1", features = ["derive"] }
+# Descriptors and the derive only; scene files are a dev-dependency (tests).
+orr_reflect = { path = "../orr_reflect", default-features = false }
 
 [dev-dependencies]
+orr_reflect = { path = "../orr_reflect", features = ["scene"] }
 criterion = { version = "0.5", default-features = false }
 
 [[bench]]

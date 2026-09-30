@@ -159,6 +159,7 @@ mod collide;
 mod fastmath;
 mod geom;
 mod query;
+mod reflection;
 mod sleep;
 mod solver;
 mod step;
@@ -169,6 +170,7 @@ pub use query::{
     circle_cast, circle_cast_ignoring, move_and_slide, move_and_slide_capsule, raycast, shape_cast, CapsuleCharacterParams,
     CharacterMove, CharacterParams, QueryFilter, RayHit, ShapeHit,
 };
+pub use reflection::register_reflect;
 pub use sleep::{apply_impulse, is_asleep, set_velocity, wake, wake_all};
 pub use step::{step, step_probed, Phase, Scratch, StepStats};
 pub use system::PhysicsSystem;

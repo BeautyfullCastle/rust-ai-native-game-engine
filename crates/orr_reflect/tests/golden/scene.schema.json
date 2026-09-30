@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Orrery scene (orr.scene/1)",
+  "description": "Strict YAML scene file. No anchors, aliases or tags. Types come from this schema, not from the YAML text.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "orr.scene/1"
+    },
+    "singletons": {
+      "type": "object",
+      "description": "One value per singleton type of the frame.",
+      "properties": {
+        "Stats": {
+          "$ref": "#/$defs/Stats"
+        }
+      },
+      "additionalProperties": false
+    },
+    "entities": {
+      "type": "object",
+      "description": "Entities by stable GUID. Keys are sorted on save.",
+      "propertyNames": {
+        "pattern": "^e_[0-9a-f]{8,32}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/orr.SceneEntity"
+      }
+    }
+  },
+  "required": ["schema", "entities"],
+  "additionalProperties": false,
+  "$defs": {
+    "orr.Fixed": {
+      "type": "number",
+      "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value."
+    },
+    "orr.Fixed32": {
+      "type": "number",
+      "minimum": -32768,
+      "maximum": 32767.99998,
+      "description": "Fixed-point number, Q16.16 (1/65536 steps, range -32768 to 32767.99998). Same text rules as the 64-bit fixed-point number: a plain decimal, rounded to the nearest 1/65536."
+    },
+    "orr.EntityRef": {
+      "type": ["string", "null"],
+      "pattern": "^e_[0-9a-f]{8,32}$",
+      "description": "GUID of another entity of the scene (e_ and 8 to 32 lowercase hex digits), or null for no entity."
+    },
+    "Blob": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "dot"
+            },
+            "radius": {
+              "type": "number",
+              "description": "Radius.",
+              "minimum": 0.05,
+              "maximum": 100
+            }
+          },
+          "required": ["kind", "radius"],
+          "additionalProperties": false,
+          "description": "A circle."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "box"
+            },
+            "half": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number",
+                  "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+                  "minimum": -100,
+                  "maximum": 100
+                },
+                {
+                  "type": "number",
+                  "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+                  "minimum": -100,
+                  "maximum": 100
+                }
+              ],
+              "items": false,
+              "minItems": 2,
+              "maxItems": 2,
+              "description": "Half extents."
+            }
+          },
+          "required": ["kind", "half"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "poly"
+            },
+            "pts": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "number",
+                    "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+                    "minimum": -100,
+                    "maximum": 100
+                  },
+                  {
+                    "type": "number",
+                    "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+                    "minimum": -100,
+                    "maximum": 100
+                  }
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "minItems": 3,
+              "maxItems": 4,
+              "description": "Corners."
+            }
+          },
+          "required": ["kind", "pts"],
+          "additionalProperties": false
+        }
+      ],
+      "description": "A blob."
+    },
+    "Follow": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/orr.EntityRef"
+        },
+        "mode": {
+          "enum": ["idle", "chase", "flee"]
+        },
+        "traits": {
+          "type": "array",
+          "items": {
+            "enum": ["fast", "armored", "flying"]
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": ["target", "mode", "traits"],
+      "additionalProperties": false
+    },
+    "Health": {
+      "type": "object",
+      "properties": {
+        "current": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "alive": {
+          "type": "boolean"
+        }
+      },
+      "required": ["current", "max", "alive"],
+      "additionalProperties": false,
+      "description": "Hit points."
+    },
+    "Stats": {
+      "type": "object",
+      "properties": {
+        "scores": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "gravity": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/orr.Fixed"
+            },
+            {
+              "$ref": "#/$defs/orr.Fixed"
+            }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "weight": {
+          "$ref": "#/$defs/orr.Fixed32"
+        }
+      },
+      "required": ["scores", "gravity", "weight"],
+      "additionalProperties": false
+    },
+    "Transform": {
+      "type": "object",
+      "properties": {
+        "pos": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number",
+              "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+              "minimum": -1000,
+              "maximum": 1000
+            },
+            {
+              "type": "number",
+              "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+              "minimum": -1000,
+              "maximum": 1000
+            }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "World position."
+        },
+        "rot": {
+          "$ref": "#/$defs/orr.Fixed",
+          "description": "Heading in degrees."
+        }
+      },
+      "required": ["pos", "rot"],
+      "additionalProperties": false,
+      "description": "Position and heading."
+    },
+    "orr.SceneEntity": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Display name (editor only)."
+        },
+        "Blob": {
+          "$ref": "#/$defs/Blob"
+        },
+        "Follow": {
+          "$ref": "#/$defs/Follow"
+        },
+        "Health": {
+          "$ref": "#/$defs/Health"
+        },
+        "Transform": {
+          "$ref": "#/$defs/Transform"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

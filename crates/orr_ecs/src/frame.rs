@@ -76,6 +76,12 @@ impl Frame {
         self.allocator.alive_count()
     }
 
+    /// Every live entity, including ones without components, in ascending
+    /// index order (tools such as the scene saver use this).
+    pub fn entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.allocator.iter_alive()
+    }
+
 
     // ---- components ----
 
