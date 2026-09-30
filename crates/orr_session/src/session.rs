@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Bound;
 
 use orr_ecs::{Frame, FrameRing};
-use orr_sim::{EventKey, Game, PlayerSlot, SimEvent, Simulation, TickInputs};
+use orr_sim::{EventKey, Game, PlayerSlot, SimCommand, SimEvent, Simulation, TickInputs};
 
 use crate::events::{EventBatch, EventStatus};
 use crate::input_source::{InputSource, RemoteInput};
@@ -57,6 +57,15 @@ pub struct SessionConfig {
     pub join_backlog_peers: u32,
     /// Joiner only: the most join requests [`crate::JoinAttempts`] makes.
     pub max_join_attempts: u32,
+    /// Relay mode: the session's own input is not confirmed by itself. It
+    /// is predicted until the server's confirmed bundle for the tick
+    /// arrives, and the bundle (all slots, including this one) is the truth.
+    /// Inputs are submitted with [`Session::submit_local`], one per tick,
+    /// independently of simulating. See [`crate::RelayClient`].
+    pub relay: bool,
+    /// Keep the verified frame (as `Frame::to_bytes`) of the last this many
+    /// checksum ticks, for desync diagnostics. `0` = none.
+    pub keep_anchors: u32,
 }
 
 impl SessionConfig {
@@ -76,6 +85,8 @@ impl SessionConfig {
             join_attempt: 0,
             join_backlog_peers: 0,
             max_join_attempts: 3,
+            relay: false,
+            keep_anchors: 0,
         }
     }
 }
@@ -220,6 +231,18 @@ struct TickRecord<G: Game> {
     inputs: TickInputs<G::Input, G::Command>,
     predicted: Vec<bool>,
     events: Vec<SimEvent<G::Event>>,
+    /// Encoded commands the tick was simulated with (relay mode only).
+    cmds: Vec<(PlayerSlot, Vec<u8>)>,
+}
+
+/// A verified frame kept for desync diagnostics (see
+/// `SessionConfig::keep_anchors`).
+#[derive(Clone, Debug)]
+pub struct Anchor {
+    pub tick: u64,
+    pub checksum: u64,
+    /// `Frame::to_bytes` of the verified frame at `tick`.
+    pub frame_bytes: Vec<u8>,
 }
 
 /// Owns a rollback-capable [`Simulation<G>`] plus everything needed to
@@ -260,6 +283,10 @@ pub struct Session<G: Game, S: InputSource<G>> {
     /// How many rollbacks this session has done, and the latest one.
     rollback_count: u64,
     last_rollback: Option<RollbackInfo>,
+    /// Relay mode: this peer's own inputs (and commands) by tick, used as
+    /// its prediction until the server's bundle confirms the tick.
+    local_pending: BTreeMap<u64, (G::Input, Vec<G::Command>)>,
+    anchors: VecDeque<Anchor>,
 }
 
 fn event_bytes<E: bytemuck::Pod>(e: &E) -> Vec<u8> {
@@ -286,8 +313,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         // `verified_tick` could never leave 0. Pre-confirm them with
         // default input for every player — before any real input exists,
         // "nothing pressed" *is* the true input.
+        // (Relay mode has none: the server confirms every tick from 1.)
         let mut confirmed_input: BTreeMap<u64, BTreeMap<PlayerSlot, G::Input>> = BTreeMap::new();
-        for tick in verified_tick + 1..=cfg.input_delay as u64 {
+        let bootstrap_until = if cfg.relay { verified_tick } else { cfg.input_delay as u64 };
+        for tick in verified_tick + 1..=bootstrap_until {
             let mut per_player = BTreeMap::new();
             for slot in 0..cfg.player_count {
                 per_player.insert(PlayerSlot(slot), G::Input::default());
@@ -318,6 +347,8 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             join: None,
             rollback_count: 0,
             last_rollback: None,
+            local_pending: BTreeMap::new(),
+            anchors: VecDeque::new(),
         }
     }
 
@@ -377,6 +408,37 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             });
         }
         Ok(session)
+    }
+
+    /// Relay mode: starts a session from a snapshot a donor client
+    /// uploaded and the server relayed. `frame_bytes` is the donor's
+    /// `Frame::to_bytes` of its verified frame at `tick` (already
+    /// decompressed), `checksum` its checksum. `cfg.relay` must be set.
+    ///
+    /// The session starts with `tick` as its verified tick; it needs the
+    /// server's confirmed bundles after `tick` to move on. On error the
+    /// input source is handed back.
+    pub fn from_relay_snapshot(
+        config: G::Config,
+        cfg: SessionConfig,
+        source: S,
+        tick: u64,
+        checksum: u64,
+        frame_bytes: &[u8],
+    ) -> Result<Self, (JoinError, S)> {
+        let mut sim = Simulation::<G>::with_build_id(config, cfg.tick_rate, cfg.seed, cfg.build_id);
+        let frame = match Frame::from_bytes(sim.registry().clone(), frame_bytes) {
+            Ok(f) => f,
+            Err(e) => return Err((JoinError::BadSnapshot(e), source)),
+        };
+        if frame.tick() != tick {
+            return Err((JoinError::SnapshotMismatch { expected: tick, actual: frame.tick() }, source));
+        }
+        if frame.checksum() != checksum {
+            return Err((JoinError::SnapshotMismatch { expected: checksum, actual: frame.checksum() }, source));
+        }
+        sim.restore(&frame);
+        Ok(Self::from_sim(sim, cfg, source, tick + 1))
     }
 
     /// Answers a joiner's [`join_request`] with a snapshot message for
@@ -676,6 +738,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         self.next_send_tick
     }
 
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
     /// The input source, e.g. to attach a new link for a late joiner.
     pub fn source_mut(&mut self) -> &mut S {
         &mut self.source
@@ -712,6 +778,11 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     pub fn checksums(&self) -> &[(u64, u64)] {
         &self.checksums
     }
+    /// Verified frames kept for desync diagnostics, oldest first (see
+    /// `SessionConfig::keep_anchors`).
+    pub fn anchors(&self) -> &VecDeque<Anchor> {
+        &self.anchors
+    }
     pub fn config(&self) -> &SessionConfig {
         &self.cfg
     }
@@ -729,10 +800,17 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         let mut predicted = vec![false; n as usize];
         let confirmed = self.confirmed_input.get(&tick);
         let mut cmds = Vec::new();
+        let mut local_predicted = false;
         for slot in 0..n {
             let ps = PlayerSlot(slot);
             if let Some(v) = confirmed.and_then(|m| m.get(&ps)) {
                 ti.set_input(ps, *v);
+            } else if self.cfg.relay && ps == self.cfg.local_slot {
+                // Relay: the own input is a prediction until the bundle.
+                let own = self.local_pending.get(&tick).map(|p| p.0).unwrap_or(self.last_input[slot as usize]);
+                ti.set_input(ps, own);
+                predicted[slot as usize] = true;
+                local_predicted = true;
             } else {
                 ti.set_input(ps, self.last_input[slot as usize]);
                 predicted[slot as usize] = true;
@@ -743,6 +821,15 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 for c in list {
                     cmds.push((slot, c.clone()));
                 }
+            }
+        }
+        if local_predicted {
+            if let Some((_, own)) = self.local_pending.get(&tick) {
+                for c in own {
+                    cmds.push((self.cfg.local_slot, c.clone()));
+                }
+                // Stable: keeps each slot's commands in submission order.
+                cmds.sort_by_key(|(slot, _)| slot.0);
             }
         }
         ti.set_commands(cmds);
@@ -759,7 +846,47 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 self.last_input[slot] = *inputs.input(PlayerSlot(slot as u8));
             }
         }
-        self.history.insert(tick, TickRecord { inputs, predicted, events });
+        let cmds = if self.cfg.relay {
+            inputs
+                .commands()
+                .iter()
+                .map(|(slot, c)| {
+                    let mut bytes = Vec::new();
+                    c.encode(&mut bytes);
+                    (*slot, bytes)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.history.insert(tick, TickRecord { inputs, predicted, events, cmds });
+    }
+
+    /// Relay mode: whether the confirmed bundle of `tick` differs from what
+    /// the tick was simulated with, in any slot that was only predicted:
+    /// its input, or its commands (a confirmed slot that had commands the
+    /// prediction lacked, or the reverse).
+    fn relay_tick_mismatch(&self, tick: u64, rec: &TickRecord<G>) -> bool {
+        let Some(confirmed) = self.confirmed_input.get(&tick) else { return false };
+        let commands = self.confirmed_commands.get(&tick);
+        for (&slot, &val) in confirmed {
+            if !rec.predicted[slot.0 as usize] {
+                continue;
+            }
+            if *rec.inputs.input(slot) != val {
+                return true;
+            }
+            let used = rec.cmds.iter().filter(|(s, _)| *s == slot).map(|(_, b)| b);
+            let want = commands.and_then(|m| m.get(&slot)).into_iter().flatten().map(|c| {
+                let mut bytes = Vec::new();
+                c.encode(&mut bytes);
+                bytes
+            });
+            if !used.eq(want.collect::<Vec<_>>().iter()) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Restores the ring snapshot just before `from` and resimulates
@@ -800,6 +927,12 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         let mut earliest = None;
         for (&tick, rec) in self.history.range((self.verified_tick + 1)..=self.sim.tick()) {
             let Some(confirmed) = self.confirmed_input.get(&tick) else { continue };
+            if self.cfg.relay {
+                if self.relay_tick_mismatch(tick, rec) {
+                    earliest = Some(earliest.map_or(tick, |e: u64| e.min(tick)));
+                }
+                continue;
+            }
             for (&slot, &val) in confirmed {
                 if rec.predicted[slot.0 as usize] && *rec.inputs.input(slot) != val {
                     earliest = Some(earliest.map_or(tick, |e: u64| e.min(tick)));
@@ -827,7 +960,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             let matches = (0..self.cfg.player_count).all(|slot| {
                 let ps = PlayerSlot(slot);
                 confirmed.get(&ps) == Some(rec.inputs.input(ps))
-            });
+            }) && !(self.cfg.relay && self.relay_tick_mismatch(t, rec));
             if !matches {
                 // A mismatch here means `earliest_mismatch`/resim above
                 // should already have corrected it earlier this call; if
@@ -848,7 +981,18 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
 
             if self.verified_tick % self.cfg.checksum_interval as u64 == 0 {
                 if let Some(f) = self.ring.get(self.verified_tick) {
-                    self.checksums.push((self.verified_tick, f.checksum()));
+                    let checksum = f.checksum();
+                    self.checksums.push((self.verified_tick, checksum));
+                    if self.cfg.keep_anchors > 0 {
+                        self.anchors.push_back(Anchor {
+                            tick: self.verified_tick,
+                            checksum,
+                            frame_bytes: f.to_bytes(),
+                        });
+                        while self.anchors.len() > self.cfg.keep_anchors as usize {
+                            self.anchors.pop_front();
+                        }
+                    }
                 }
             }
         }
@@ -859,9 +1003,18 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// rollback + resimulation, advances `verified_tick` through any newly
     /// fully-confirmed ticks, and — unless prediction is already at the
     /// cap — simulates one new tick.
+    ///
+    /// In relay mode this submits the input for the next send tick (see
+    /// [`submit_local`](Self::submit_local)) and then calls
+    /// [`step`](Self::step); a relay client that wants to submit inputs and
+    /// simulate on separate schedules calls those two directly.
     pub fn advance(&mut self, local_input: G::Input, local_commands: Vec<G::Command>) -> AdvanceResult<G> {
         let send_tick = self.next_send_tick;
         self.next_send_tick += 1;
+        if self.cfg.relay {
+            self.submit_local(send_tick, local_input, local_commands);
+            return self.step();
+        }
         self.confirmed_input.entry(send_tick).or_default().insert(self.cfg.local_slot, local_input);
         if !local_commands.is_empty() {
             self.confirmed_commands.entry(send_tick).or_default().insert(self.cfg.local_slot, local_commands.clone());
@@ -880,7 +1033,52 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         for slot in covered {
             self.author_defaults(slot, send_tick, send_tick + 1);
         }
+        self.step()
+    }
 
+    /// Relay mode: records this peer's input for `tick` as its own
+    /// prediction and sends it to the server through the input source. The
+    /// input is *not* confirmed: only the server's bundle for the tick
+    /// confirms it (possibly with a different value, if the server had to
+    /// repeat or override it, which then rolls the session back).
+    ///
+    /// Call it once per tick, `input delay` ticks ahead of the tick being
+    /// simulated. Ticks that were already verified are ignored.
+    pub fn submit_local(&mut self, tick: u64, input: G::Input, commands: Vec<G::Command>) {
+        debug_assert!(self.cfg.relay, "submit_local is for relay sessions");
+        if tick <= self.verified_tick {
+            return;
+        }
+        self.local_pending.insert(tick, (input, commands.clone()));
+        self.source.send_local(tick, self.cfg.local_slot, input, commands);
+    }
+
+    /// Everything of [`advance`](Self::advance) after the local input is
+    /// recorded: takes in arrived confirmed inputs, rolls back on a
+    /// misprediction, verifies, and simulates one tick unless the
+    /// prediction limit is reached.
+    pub fn step(&mut self) -> AdvanceResult<G> {
+        let (mut batch, rollback) = self.poll_confirmed();
+        if self.sim.tick() - self.verified_tick >= self.cfg.max_prediction as u64 {
+            return AdvanceResult::Stalled { events: batch };
+        }
+
+        let next = self.sim.tick() + 1;
+        self.simulate_tick(next);
+        for e in &self.history[&next].events {
+            let bytes = event_bytes(&e.payload);
+            self.announced.insert(e.key, bytes);
+            batch.push(e.key, EventStatus::Predicted(e.payload));
+        }
+
+        AdvanceResult::Advanced { tick: next, events: batch, rollback }
+    }
+
+    /// Takes in the inputs that arrived since the last call, rolls back and
+    /// resimulates on a misprediction, and verifies every tick that is now
+    /// fully confirmed, without simulating a new tick. [`step`](Self::step)
+    /// is this plus one predicted tick.
+    pub fn poll_confirmed(&mut self) -> (EventBatch<G::Event>, Option<RollbackInfo>) {
         for remote in self.source.poll_remote() {
             let seen = self.last_remote_tick.entry(remote.slot).or_insert(0);
             *seen = (*seen).max(remote.tick);
@@ -909,25 +1107,15 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         }
 
         self.advance_verified(&mut batch);
+        if self.cfg.relay {
+            self.local_pending = self.local_pending.split_off(&(self.verified_tick + 1));
+        }
         let mut keep_from = self.verified_tick.saturating_sub(self.cfg.input_log_ticks as u64);
         for ticket in self.holds.values() {
             keep_from = keep_from.min(ticket.snapshot_tick + 1);
         }
         self.authored = self.authored.split_off(&keep_from);
-
-        if self.sim.tick() - self.verified_tick >= self.cfg.max_prediction as u64 {
-            return AdvanceResult::Stalled { events: batch };
-        }
-
-        let next = self.sim.tick() + 1;
-        self.simulate_tick(next);
-        for e in &self.history[&next].events {
-            let bytes = event_bytes(&e.payload);
-            self.announced.insert(e.key, bytes);
-            batch.push(e.key, EventStatus::Predicted(e.payload));
-        }
-
-        AdvanceResult::Advanced { tick: next, events: batch, rollback }
+        (batch, rollback)
     }
 }
 

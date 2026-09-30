@@ -1380,6 +1380,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_proto"
+version = "0.0.1"
+dependencies = [
+ "xxhash-rust",
+]
+
+[[package]]
 name = "orr_sample"
 version = "0.0.1"
 dependencies = [
@@ -1398,6 +1405,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_server"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_fp",
+ "orr_proto",
+ "orr_server",
+ "orr_session",
+ "orr_sim",
+ "orr_testgame",
+]
+
+[[package]]
 name = "orr_session"
 version = "0.0.1"
 dependencies = [
@@ -1406,6 +1427,7 @@ dependencies = [
  "lz4_flex",
  "orr_ecs",
  "orr_fp",
+ "orr_proto",
  "orr_sim",
  "orr_testgame",
  "xxhash-rust",

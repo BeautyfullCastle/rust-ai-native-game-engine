@@ -12,6 +12,7 @@ workspace = true
 orr_fp = { path = "../orr_fp" }
 orr_ecs = { path = "../orr_ecs" }
 orr_sim = { path = "../orr_sim" }
+orr_proto = { path = "../orr_proto" }
 bytemuck = { version = "1", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }

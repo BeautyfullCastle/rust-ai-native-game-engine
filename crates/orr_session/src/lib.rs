@@ -13,13 +13,20 @@
 #![deny(clippy::disallowed_types)]
 #![deny(clippy::float_arithmetic)]
 
+mod dump;
 mod events;
 mod input_source;
 mod join;
+mod relay;
 mod replay;
 mod session;
 mod wire;
 
+pub use dump::{DesyncDump, DumpError};
+pub use relay::{
+    ClientEvent, ClientState, ClientStats, DumpCollector, DumpSink, RelayClient, RelayClientConfig, RelaySource,
+    RelayUpdate, SourceStats,
+};
 pub use events::{EventBatch, EventStatus};
 pub use join::{join_request, JoinAttempts, JoinError, JoinTicket};
 pub use input_source::{InputSource, LocalInputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RemoteInput};
@@ -28,7 +35,7 @@ pub use replay::{
     VerifyReport,
 };
 pub use session::{
-    compare_checksums, require_same_build_hash, AdvanceResult, BuildHashMismatch, Desync, JoinStatus, RollbackInfo, Session,
+    compare_checksums, require_same_build_hash, AdvanceResult, Anchor, BuildHashMismatch, Desync, JoinStatus, RollbackInfo, Session,
     SessionConfig,
 };
 

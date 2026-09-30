@@ -1,0 +1,30 @@
+[package]
+name = "orr_server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Test harness (`orr_server::harness`): server + clients on a simulated
+# network. Pulls in the session and sim crates; off for the plain server.
+harness = ["dep:orr_session", "dep:orr_sim", "dep:bytemuck"]
+
+[dependencies]
+orr_proto = { path = "../orr_proto" }
+orr_session = { path = "../orr_session", optional = true }
+orr_sim = { path = "../orr_sim", optional = true }
+bytemuck = { version = "1", optional = true }
+
+[dev-dependencies]
+# Turns the harness on for this crate's own tests.
+orr_server = { path = ".", features = ["harness"] }
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+orr_session = { path = "../orr_session" }
+orr_testgame = { path = "../orr_testgame" }
+bytemuck = { version = "1", features = ["derive"] }

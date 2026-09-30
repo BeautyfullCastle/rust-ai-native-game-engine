@@ -1,0 +1,12 @@
+[package]
+name = "orr_proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
