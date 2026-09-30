@@ -464,3 +464,50 @@ pub fn dynamic_count(frame: &mut Frame) -> u32 {
     frame.query::<(&Body,)>().filter(|(_, (b,))| b.kind == BODY_DYNAMIC).count() as u32
 }
 
+/// Verification metrics of a `PhysGame` frame (see `orr_sim::Metrics`), all
+/// integers or `FP`. Names: `dynamic_bodies`, `sleeping_bodies`,
+/// `lost_bodies` (dynamic bodies below the floor top, `y < 0`, or outside the
+/// side walls), `mean_height`, `max_height`, `min_height` (of dynamic bodies,
+/// 0 if none), `max_speed`, `kinetic_energy` (sum of `m * v^2 / 2`, mass from
+/// `1 / inv_mass`).
+pub struct PhysMetrics;
+
+impl orr_sim::Metrics for PhysMetrics {
+    fn sample(&self, frame: &Frame) -> Vec<(String, orr_sim::MetricValue)> {
+        use orr_sim::MetricValue::{Fixed, Int};
+        let half_w = if frame.registry().singleton_id::<Scene>().is_some() { frame.singleton::<Scene>().half_w } else { FP::MAX };
+        let (mut dynamic, mut sleeping, mut lost) = (0i64, 0i64, 0i64);
+        let (mut sum_y, mut max_y, mut min_y) = (0i128, FP::ZERO, FP::ZERO);
+        let (mut max_v2, mut energy) = (FP::ZERO, FP::ZERO);
+        let (_, bodies) = frame.dense::<Body>();
+        for b in bodies.iter().filter(|b| b.kind == BODY_DYNAMIC) {
+            if dynamic == 0 {
+                (max_y, min_y) = (b.pos.y, b.pos.y);
+            }
+            dynamic += 1;
+            sleeping += i64::from(b.sleep & orr_physics::SLEEP_FLAG != 0);
+            lost += i64::from(b.pos.y < FP::ZERO || b.pos.x.abs() > half_w);
+            sum_y += i128::from(b.pos.y.raw());
+            max_y = max_y.max(b.pos.y);
+            min_y = min_y.min(b.pos.y);
+            let v2 = b.vel.length_sq();
+            max_v2 = max_v2.max(v2);
+            if b.inv_mass > FP::ZERO {
+                energy += (v2 / b.inv_mass) / 2;
+            }
+        }
+        let mean = if dynamic > 0 { FP((sum_y / i128::from(dynamic)) as i64) } else { FP::ZERO };
+        let name = |s: &str| s.to_string();
+        vec![
+            (name("dynamic_bodies"), Int(dynamic)),
+            (name("sleeping_bodies"), Int(sleeping)),
+            (name("lost_bodies"), Int(lost)),
+            (name("mean_height"), Fixed(mean)),
+            (name("max_height"), Fixed(max_y)),
+            (name("min_height"), Fixed(min_y)),
+            (name("max_speed"), Fixed(max_v2.sqrt())),
+            (name("kinetic_energy"), Fixed(energy)),
+        ]
+    }
+}
+

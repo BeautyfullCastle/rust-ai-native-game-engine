@@ -22,6 +22,7 @@ mod event;
 mod game;
 mod hotpatch;
 mod input;
+mod metrics;
 mod simulation;
 mod system;
 
@@ -31,6 +32,7 @@ pub use debug::{DebugCommand, DebugError};
 pub use event::{EventKey, SimEvent};
 pub use game::Game;
 pub use hotpatch::{DirectCall, HotPatchHook};
+pub use metrics::{MetricValue, Metrics, NoMetrics};
 pub use input::{PlayerFlags, PlayerSlot, SimInput, TickInputs};
 pub use simulation::{build_hash_of, Simulation};
 pub use system::System;

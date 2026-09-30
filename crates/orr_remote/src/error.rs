@@ -113,6 +113,9 @@ impl From<EditError> for RpcError {
             EditError::RegistryMismatch(_) => RpcError::new(INTERNAL_ERROR, "registry_mismatch", msg),
             EditError::Debug(_) => RpcError::new(DEBUG_REFUSED, "debug_refused", msg),
             EditError::PlayStart(_) => RpcError::state("play_start_failed", msg),
+            EditError::UnknownProposal(_) => RpcError::new(NOT_FOUND, "unknown_proposal", msg),
+            EditError::ProposalConflict { .. } => RpcError::new(CONFLICT, "proposal_conflict", msg),
+            EditError::Verify(_) => RpcError::new(INVALID_VALUE, "verify_failed", msg),
         }
     }
 }

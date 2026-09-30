@@ -63,6 +63,22 @@ pub enum EditError {
     Debug(DebugError),
     /// The play session could not start.
     PlayStart(String),
+    /// No proposal with this id (never made, already accepted or rejected,
+    /// or dropped by `load_yaml`).
+    UnknownProposal(u64),
+    /// A proposal cannot be accepted any more: the document changed since it
+    /// was made and one of its ops no longer applies. Nothing was changed.
+    ProposalConflict {
+        /// The proposal.
+        proposal: u64,
+        /// Index (in `proposal_ops`) of the op that failed.
+        op_index: usize,
+        /// Why it failed against the current document.
+        cause: Box<EditError>,
+    },
+    /// A verification run could not be set up (bad replay, mismatched
+    /// frames, no ticks) or a check rule could not be parsed.
+    Verify(String),
 }
 
 impl fmt::Display for EditError {
@@ -86,6 +102,11 @@ impl fmt::Display for EditError {
             EditError::RegistryMismatch(m) => write!(f, "type registry does not match the frame: {}", m.join("; ")),
             EditError::Debug(e) => write!(f, "debug command refused: {e}"),
             EditError::PlayStart(m) => write!(f, "cannot start play: {m}"),
+            EditError::UnknownProposal(id) => write!(f, "unknown proposal {id}"),
+            EditError::ProposalConflict { proposal, op_index, cause } => {
+                write!(f, "proposal {proposal} conflicts with the document: op {op_index} no longer applies: {cause}")
+            }
+            EditError::Verify(m) => write!(f, "verify: {m}"),
         }
     }
 }

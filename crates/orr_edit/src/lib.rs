@@ -15,6 +15,14 @@
 //! - [`PlayController`]: play mode. Copies the baked frame into a
 //!   `PlaySession`, sends edits as recorded `DebugCommand`s, and exposes the
 //!   timeline (play, pause, step, seek, branch).
+//! - Proposals ([`EditorDoc::propose`]): an agent stages [`Op`]s on a private
+//!   copy of the document (preview via [`EditorDoc::proposal_preview`], text and
+//!   structural diff via [`EditorDoc::proposal_diff`]) while the person keeps
+//!   editing; [`EditorDoc::accept`] applies them as one history entry.
+//! - Verification ([`verify_frames`], [`EditorDoc::verify_proposal`]): run the
+//!   base and the candidate headlessly on recorded or scripted inputs and
+//!   compare checksums and [`Metrics`]; [`Check`] rules turn the
+//!   [`VerifyReport`] into pass/fail.
 //! - [`View`]: read-only queries (entities, components as `Value`s, singletons,
 //!   JSON Schema) over the preview frame or the live play frame.
 //!
@@ -35,16 +43,29 @@
 //!   rebake (entities are numbered in GUID order); GUIDs never change.
 //! - This is a tool crate: no floats for sim values, `BTreeMap` for order.
 
+mod checks;
+mod diff;
 mod doc;
 mod error;
 mod op;
 mod play;
+mod proposal;
 mod query;
 mod refs;
 mod scene_ops;
+mod verify;
 
+pub use checks::{evaluate_checks, Check, CheckOutcome, CheckResult, Cmp, MetricStat, Side};
+pub use diff::{format_value, summarize, unified_diff, EntityRef, FieldChange, ProposalSummary, Renamed};
 pub use doc::EditorDoc;
 pub use error::EditError;
 pub use op::{Applied, HistoryEntry, Op, Origin};
 pub use play::{PlayController, StoppedPlay};
+pub use proposal::{Accepted, ProposalDiff, ProposalId, ProposalInfo};
 pub use query::{EntityInfo, Target, View};
+pub use verify::{
+    verify_frames, ChecksumSample, MetricComparison, MetricStats, RecordingCheck, ReflectMetrics, VerifyInputs, VerifyOptions,
+    VerifyReport,
+};
+
+pub use orr_sim::{MetricValue, Metrics, NoMetrics};
