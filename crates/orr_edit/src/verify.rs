@@ -452,6 +452,24 @@ impl EditorDoc {
         verify_frames::<G>(self.frame(), candidate.frame(), inputs, metrics, opts)
     }
 
+    /// Copies of the two frames [`verify_proposal`](Self::verify_proposal)
+    /// runs: `(base, candidate)`. Owned, so a verification can run on
+    /// another thread (with [`verify_frames`]) while the document stays
+    /// editable. Errors like `verify_proposal` (unknown id, conflict).
+    pub fn proposal_frames(&self, id: ProposalId) -> Result<(Frame, Frame), EditError> {
+        let mut candidate = self.fork()?;
+        let (ops, origin) = {
+            let info = self.proposal_info(id)?;
+            (self.proposal_ops(id)?.to_vec(), info.origin)
+        };
+        apply_staged(&mut candidate, id, ops, &origin)?;
+        let base = Frame::from_bytes(self.frame_registry.clone(), &self.frame.to_bytes())
+            .map_err(|e| EditError::Invalid(format!("cannot copy the preview frame: {e}")))?;
+        let cand = Frame::from_bytes(self.frame_registry.clone(), &candidate.frame.to_bytes())
+            .map_err(|e| EditError::Invalid(format!("cannot copy the candidate frame: {e}")))?;
+        Ok((base, cand))
+    }
+
     /// Runs the document against itself: a baseline run (its metrics, and
     /// for a recording, whether the document reproduces it).
     pub fn verify_self<G: Game>(

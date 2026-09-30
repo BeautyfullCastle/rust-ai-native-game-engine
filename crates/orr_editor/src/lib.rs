@@ -14,6 +14,8 @@
 //! - [`viewport`]: the render list of the frame on screen (`orr_render`),
 //!   picking, and the offscreen texture shared with egui on eframe's own
 //!   wgpu device.
+//! - [`agent`]: the Agent panel's state: proposal selection, preview,
+//!   background verification.
 //! - [`app`]: [`EditorApp`], the `eframe::App` with all panels.
 //! - [`cli`] and [`script`]: command line flags (`--scene`, `--screenshot`,
 //!   `--frames`, `--play-ticks`, `--select`, `--script`) for headless checks.
@@ -28,6 +30,8 @@
 #![allow(clippy::float_arithmetic)]
 #![allow(clippy::disallowed_types)]
 
+pub mod agent;
+pub mod agent_ui;
 pub mod app;
 pub mod cli;
 pub mod editor;

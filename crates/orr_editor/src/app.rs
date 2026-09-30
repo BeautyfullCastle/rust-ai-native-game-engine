@@ -35,6 +35,8 @@ pub enum BottomTab {
     Timeline,
     /// The undo history.
     History,
+    /// Proposals from AI agents: review, preview, verify, accept.
+    Agent,
 }
 
 /// A path prompt (no native file dialog in the MVP).
@@ -75,6 +77,8 @@ pub struct UiState {
     pub viewport_rect: Option<Rect>,
     /// Size of the viewport in pixels last frame.
     pub viewport_px: (u32, u32),
+    /// Diffs of the open proposals (see [`crate::agent_ui::cached_diff`]).
+    pub diffs: crate::agent_ui::DiffCache,
     body_drag: Option<BodyDrag>,
 }
 
@@ -143,6 +147,14 @@ impl eframe::App for EditorApp {
 
         let dt = f64::from(ctx.input(|i| i.unstable_dt));
         self.editor.poll_erp();
+        self.editor.poll_verify();
+        if self.editor.agent().running().is_some() {
+            // The spinner animates and the result is collected on a later frame.
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+        if self.editor.agent_mut().take_tab_request() {
+            self.ui.bottom_tab = BottomTab::Agent;
+        }
         self.editor.advance(dt);
         if self.editor.erp_status().is_some() {
             // Keep polling ERP requests while the window is idle.
@@ -156,7 +168,9 @@ impl eframe::App for EditorApp {
 
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        egui::Panel::bottom("bottom").resizable(true).default_size(120.0).show(ui, |ui| self.bottom(ui));
+        // The Agent tab needs more room than the timeline; each has its own remembered height.
+        let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 390.0) } else { ("bottom", 120.0) };
+        egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).show(ui, |ui| self.bottom(ui));
         egui::Panel::left("hierarchy").resizable(true).default_size(230.0).show(ui, |ui| self.hierarchy(ui));
         egui::Panel::right("inspector").resizable(true).default_size(340.0).show(ui, |ui| self.inspector(ui));
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
@@ -434,8 +448,10 @@ impl EditorApp {
             }
         }
 
+        // While a proposal is previewed the viewport is read-only (the frame on screen is not the document's).
+        let previewing = self.editor.previewing();
         // Select and move bodies with the primary button.
-        if resp.drag_started_by(PointerButton::Primary) {
+        if previewing.is_none() && resp.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
                 let world = self.editor.camera.screen_to_world(to_px(origin), px);
                 let hit = viewport::pick(&self.editor.view(), world);
@@ -461,7 +477,7 @@ impl EditorApp {
         if resp.drag_stopped() && self.ui.body_drag.take().is_some() {
             self.editor.end_edit();
         }
-        if resp.clicked_by(PointerButton::Primary) {
+        if previewing.is_none() && resp.clicked_by(PointerButton::Primary) {
             if let Some(at) = resp.interact_pointer_pos() {
                 let world = self.editor.camera.screen_to_world(to_px(at), px);
                 let hit = viewport::pick(&self.editor.view(), world);
@@ -470,7 +486,12 @@ impl EditorApp {
         }
 
         // Draw.
-        let list = viewport::build_list(&self.editor.view(), self.editor.selection(), &self.editor.camera, px);
+        let list = match previewing.and_then(|id| crate::agent_ui::cached_diff(&self.editor, &mut self.ui.diffs, id)) {
+            Some(diff) => {
+                viewport::build_preview_list(&self.editor.viewport_view(), &self.editor.doc().view(), &diff.summary, self.editor.selection(), &self.editor.camera, px)
+            }
+            None => viewport::build_list(&self.editor.view(), self.editor.selection(), &self.editor.camera, px),
+        };
         match &self.render_state {
             Some(rs) => {
                 let gpu = self.gpu.get_or_insert_with(|| GpuViewport::new(rs, px));
@@ -487,6 +508,20 @@ impl EditorApp {
             None => "EDIT".to_string(),
         };
         ui.painter().text(rect.min + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, egui::FontId::monospace(13.0), Color32::from_gray(200));
+        if let Some(id) = previewing {
+            let font = egui::FontId::monospace(15.0);
+            let text = format!("PREVIEW {id}");
+            let galley = ui.painter().layout_no_wrap(text, font, Color32::BLACK);
+            let box_rect = Rect::from_min_size(rect.min + egui::vec2(8.0, 26.0), galley.size() + egui::vec2(14.0, 6.0));
+            ui.painter().rect_filled(box_rect, 3.0, Color32::from_rgb(90, 200, 240));
+            ui.painter().galley(box_rect.min + egui::vec2(7.0, 3.0), galley, Color32::BLACK);
+            let hint = "cyan = changed, green = added, ghost = removed / old place";
+            let hint_galley = ui.painter().layout_no_wrap(hint.to_string(), egui::FontId::monospace(11.0), Color32::from_gray(210));
+            let hint_rect = Rect::from_min_size(box_rect.left_bottom() + egui::vec2(0.0, 4.0), hint_galley.size() + egui::vec2(8.0, 4.0));
+            ui.painter().rect_filled(hint_rect, 3.0, Color32::from_rgba_unmultiplied(10, 10, 16, 200));
+            ui.painter().galley(hint_rect.min + egui::vec2(4.0, 2.0), hint_galley, Color32::from_gray(210));
+            ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(2.0, Color32::from_rgb(90, 200, 240)), egui::StrokeKind::Inside);
+        }
         if self.editor.is_playing_mode() {
             ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(2.0, Color32::from_rgb(255, 150, 60)), egui::StrokeKind::Inside);
         }
@@ -498,11 +533,19 @@ impl EditorApp {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::Timeline, "Timeline");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::History, "History");
+            ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::Agent, "Agent");
+            let waiting = self.proposal_count();
+            if waiting > 0 {
+                // Badge: proposals are waiting for a decision.
+                ui.label(RichText::new(format!(" {waiting} ")).strong().color(Color32::BLACK).background_color(Color32::from_rgb(240, 170, 60)))
+                    .on_hover_text(format!("{waiting} proposal(s) waiting"));
+            }
         });
         ui.separator();
         match self.ui.bottom_tab {
             BottomTab::Timeline => self.timeline(ui),
             BottomTab::History => self.history(ui),
+            BottomTab::Agent => self.agent_tab(ui),
         }
     }
 

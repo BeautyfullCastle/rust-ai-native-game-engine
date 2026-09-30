@@ -9,13 +9,26 @@
 //! set Scene max_entities 5000          # a singleton
 //! spawn | delete | undo | redo | save [path]
 //! play | pause | step [n] | seek <tick> | speed <x> | branch | stop
+//!
+//! # agent proposals (what an ERP agent does, for tests and screenshots)
+//! propose [--as <agent>] <label>          # new proposal, origin agent:<agent> (default "script"); selects it
+//! propose.set <id> <entity> <component> <path> <value>   # stage a field edit
+//! propose.rename <id> <entity> <name>     # stage a rename
+//! checks <check> [; <check>]...           # the checks box; `checks default` restores it
+//! verify <id> [bot <n>]                   # run and wait; default inputs: the last play
+//! preview <id> | preview off              # viewport preview (edit mode)
+//! accept <id> | reject <id>
+//! agent_tab                               # open the Agent tab at start
 //! ```
+//! `<id>` is `p3`, `3` or `last`.
 
 use std::path::Path;
 
 use orr_fp::{FPVec2, FPVec3, FP};
-use orr_reflect::{decimal, TypeKind, Value};
+use orr_edit::{Op, Origin, ProposalId, Target};
+use orr_reflect::{decimal, Guid, TypeKind, Value};
 
+use crate::agent::{VerifySource, DEFAULT_CHECKS};
 use crate::editor::{Editor, Owner};
 
 /// Parses `text` into a value of the same kind as `current`.
@@ -43,6 +56,25 @@ pub fn parse_like(current: &Value, text: &str) -> Result<Value, String> {
         Value::Vec3(_) => nums(3).map(|v| Value::Vec3(FPVec3::new(v[0], v[1], v[2]))),
         other => Err(format!("cannot set a {} from text", other.kind_name())),
     }
+}
+
+fn proposal_id(ed: &Editor, text: &str) -> Result<ProposalId, String> {
+    if text == "last" {
+        return ed.doc().list_proposals().last().map(|i| i.id).ok_or_else(|| "there are no proposals".to_string());
+    }
+    let n = text.strip_prefix('p').unwrap_or(text);
+    let id = ProposalId(n.parse().map_err(|_| format!("'{text}' is not a proposal id (p3, 3 or last)"))?);
+    ed.doc().proposal_info(id).map(|i| i.id).map_err(|e| e.to_string())
+}
+
+fn entity_guid(ed: &Editor, name: &str) -> Result<Guid, String> {
+    ed.doc()
+        .view()
+        .entities()
+        .into_iter()
+        .find(|e| e.name.as_deref() == Some(name) || e.guid.as_ref().is_some_and(|g| g.to_string() == name))
+        .and_then(|e| e.guid)
+        .ok_or_else(|| format!("no entity named '{name}'"))
 }
 
 fn last_error(ed: &Editor) -> String {
@@ -127,6 +159,80 @@ pub fn run_command(ed: &mut Editor, line: &str) -> Result<(), String> {
         "stop" => {
             ed.stop();
         }
+        "propose" => {
+            let (agent, label) = match rest.as_slice() {
+                ["--as", name, label @ ..] => (*name, label.join(" ")),
+                label => ("script", label.join(" ")),
+            };
+            if label.is_empty() {
+                return Err("'propose' needs a label".into());
+            }
+            let id = ed.doc_mut().propose(&label, Origin::Agent(agent.to_string())).map_err(|e| e.to_string())?;
+            ed.select_proposal(Some(id));
+            ed.info(format!("proposal {id} \"{label}\" by agent:{agent}"));
+        }
+        "propose.set" => {
+            need(5)?;
+            let id = proposal_id(ed, rest[0])?;
+            let (guid, comp, path) = (entity_guid(ed, rest[1])?, rest[2], rest[3]);
+            let current = ed.doc().proposal_preview(id).and_then(|v| v.field(&Target::Guid(guid.clone()), comp, path)).map_err(|e| e.to_string())?;
+            let value = parse_like(&current, &rest[4..].join(" "))?;
+            let op = Op::SetField { guid, component: comp.to_string(), path: path.to_string(), value };
+            ed.doc_mut().proposal_apply(id, op).map_err(|e| e.to_string())?;
+        }
+        "propose.rename" => {
+            need(3)?;
+            let id = proposal_id(ed, rest[0])?;
+            let guid = entity_guid(ed, rest[1])?;
+            let op = Op::Rename { guid, name: Some(rest[2..].join(" ")) };
+            ed.doc_mut().proposal_apply(id, op).map_err(|e| e.to_string())?;
+        }
+        "checks" => {
+            need(1)?;
+            ed.agent_mut().checks = if rest[0] == "default" { DEFAULT_CHECKS.to_string() } else { rest.join(" ").split(';').map(str::trim).collect::<Vec<_>>().join("\n") };
+        }
+        "verify" => {
+            need(1)?;
+            let id = proposal_id(ed, rest[0])?;
+            let source = match rest.get(1..) {
+                Some(["bot", n]) => VerifySource::Bot(n.parse().map_err(|_| "bot needs a tick count")?),
+                Some(["bot"]) => VerifySource::Bot(ed.agent().bot_ticks),
+                Some([]) | None => VerifySource::LastPlay,
+                Some(_) => return Err("verify <id> [bot <ticks>]".into()),
+            };
+            ed.agent_mut().source = source;
+            ed.select_proposal(Some(id));
+            ed.start_verify(id, source)?;
+            ed.wait_verify();
+            let text = match ed.verify_result() {
+                Some(run) => match (&run.report, &run.outcome) {
+                    (Err(e), _) => format!("verify {id}: {e}"),
+                    (Ok(_), Some(o)) if o.passed => format!("verify {id}: all checks passed ({} ms)", run.millis),
+                    (Ok(_), Some(o)) => format!("verify {id}: {} check(s) FAILED", o.results.iter().filter(|r| !r.passed).count()),
+                    (Ok(_), None) => format!("verify {id}: done"),
+                },
+                None => format!("verify {id}: no result"),
+            };
+            ed.info(text);
+        }
+        "preview" => {
+            need(1)?;
+            let id = if rest[0] == "off" { None } else { Some(proposal_id(ed, rest[0])?) };
+            if !ed.set_preview(id) {
+                return Err(last_error(ed));
+            }
+        }
+        "accept" => {
+            need(1)?;
+            let id = proposal_id(ed, rest[0])?;
+            ed.accept_proposal(id).map_err(|e| e.to_string())?;
+        }
+        "reject" => {
+            need(1)?;
+            let id = proposal_id(ed, rest[0])?;
+            ed.reject_proposal(id).map_err(|e| e.to_string())?;
+        }
+        "agent_tab" => ed.agent_mut().request_tab(),
         other => return Err(format!("unknown command '{other}'")),
     }
     Ok(())

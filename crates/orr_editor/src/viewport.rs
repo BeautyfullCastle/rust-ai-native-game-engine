@@ -12,7 +12,8 @@
 //! View layer: floats are fine here.
 
 use orr_ecs::Entity;
-use orr_edit::{Target, View};
+use orr_edit::{ProposalSummary, Target, View};
+use orr_reflect::Guid;
 use orr_physics::{Body, Collider, Shape, SHAPE_CAPSULE, SHAPE_CIRCLE};
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu};
 use orr_render::{instance_of, Camera, OffscreenTarget, RenderList, Renderer};
@@ -24,6 +25,12 @@ use orr_view::{fp_to_vec2, RenderItem, Transform2, Vec2};
 pub const HIGHLIGHT: [f32; 4] = [1.0, 0.85, 0.2, 1.0];
 /// Collider outline color (translucent white).
 pub const OUTLINE: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
+/// Outline of an entity a previewed proposal changes.
+pub const PREVIEW_CHANGED: [f32; 4] = [0.25, 0.85, 1.0, 1.0];
+/// Outline of an entity a previewed proposal adds.
+pub const PREVIEW_ADDED: [f32; 4] = [0.4, 1.0, 0.45, 1.0];
+/// Ghost of an entity a previewed proposal removes, or of where a changed one was.
+pub const PREVIEW_GHOST: [f32; 4] = [0.75, 0.75, 0.9, 0.5];
 const GRID_MINOR: [f32; 4] = [0.085, 0.085, 0.13, 1.0];
 const GRID_MAJOR: [f32; 4] = [0.13, 0.13, 0.2, 1.0];
 const AXIS_X: [f32; 4] = [0.45, 0.16, 0.16, 1.0];
@@ -156,6 +163,60 @@ pub fn build_list(view: &View<'_>, selection: Option<&Target>, camera: &Camera, 
         let (pos, angle) = (v2(body.pos), orr_view::fp_to_f32(body.angle));
         shape_outline(&mut list, pos, angle, &collider.shape, 3.0, HIGHLIGHT);
         list.cross(pos, 4.0 / camera.pixels_per_unit(vp.0, vp.1), 2.0, HIGHLIGHT);
+    }
+    list
+}
+
+/// Which entities a proposal touches, by GUID: `(changed, added, removed)`.
+pub fn preview_marks(summary: &ProposalSummary) -> (Vec<Guid>, Vec<Guid>, Vec<Guid>) {
+    let mut changed: Vec<Guid> = summary.fields_changed.iter().filter_map(|f| f.entity.clone()).collect();
+    changed.extend(summary.entities_renamed.iter().map(|r| r.guid.clone()));
+    changed.extend(summary.components_added.iter().map(|(g, _)| g.clone()));
+    changed.extend(summary.components_removed.iter().map(|(g, _)| g.clone()));
+    changed.sort();
+    changed.dedup();
+    let added = summary.entities_added.iter().map(|e| e.guid.clone()).collect();
+    let removed = summary.entities_removed.iter().map(|e| e.guid.clone()).collect();
+    (changed, added, removed)
+}
+
+fn pose_of(view: &View<'_>, guid: &Guid) -> Option<([f32; 2], f32, Collider)> {
+    let e = view.entity_of(guid)?;
+    let body = view.frame().get::<Body>(e)?;
+    let collider = view.frame().get::<Collider>(e)?;
+    Some((v2(body.pos), orr_view::fp_to_f32(body.angle), *collider))
+}
+
+/// Builds the render list of a proposal preview: `preview` is the staged
+/// frame (drawn like any frame), `base` the document's own. Changed entities
+/// get a cyan outline, added ones a green one; a changed entity that moved
+/// leaves a ghost at its old place, and removed ones are drawn as ghosts
+/// from `base`.
+pub fn build_preview_list(preview: &View<'_>, base: &View<'_>, summary: &ProposalSummary, selection: Option<&Target>, camera: &Camera, vp: (u32, u32)) -> RenderList {
+    let mut list = build_list(preview, selection, camera, vp);
+    let (changed, added, removed) = preview_marks(summary);
+    let mark = |list: &mut RenderList, guid: &Guid, color: [f32; 4]| {
+        if let Some((pos, angle, c)) = pose_of(preview, guid) {
+            shape_outline(list, pos, angle, &c.shape, 3.0, color);
+        }
+    };
+    for g in &changed {
+        mark(&mut list, g, PREVIEW_CHANGED);
+        if let (Some((new, ..)), Some((old, angle, c))) = (pose_of(preview, g), pose_of(base, g)) {
+            if new != old {
+                shape_outline(&mut list, old, angle, &c.shape, 2.0, PREVIEW_GHOST);
+                list.line(old, new, 1.5, PREVIEW_GHOST);
+            }
+        }
+    }
+    for g in &added {
+        mark(&mut list, g, PREVIEW_ADDED);
+    }
+    for g in &removed {
+        if let Some((pos, angle, c)) = pose_of(base, g) {
+            shape_outline(&mut list, pos, angle, &c.shape, 2.0, PREVIEW_GHOST);
+            list.cross(pos, 6.0 / camera.pixels_per_unit(vp.0, vp.1), 2.0, PREVIEW_GHOST);
+        }
     }
     list
 }
