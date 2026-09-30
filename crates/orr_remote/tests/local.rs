@@ -210,3 +210,21 @@ fn debug_hooks_are_off_by_default() {
     assert_eq!(c.call_err("debug.panic", J::Null).kind(), Some("disabled"));
     assert!(h.is_running());
 }
+
+#[test]
+fn pause_and_speed_reach_the_view_even_though_the_tick_does_not_change() {
+    let h = host(false);
+    let mut view = local_client(&h, "user");
+    let t = h.connector().connect("user", Caps::ALL).unwrap();
+    let mut cfg = RemoteConfig::new("");
+    cfg.source = "view".into();
+    let mut b = RemoteBridge::<PhysGame>::connect_transport(Box::new(t), cfg).unwrap();
+    view.call("sim.start", json!({"run": true})).unwrap();
+    wait_snapshot(&b, |s| s.timeline().is_some_and(|t| t.playing && t.tick >= 2));
+    b.control(orr_bridge::ControlOp::Pause).unwrap();
+    let s = wait_snapshot(&b, |s| s.timeline().is_some_and(|t| !t.playing));
+    let tick = s.tick();
+    b.control(orr_bridge::ControlOp::SetSpeed(orr_bridge::Speed::from_permille(2000))).unwrap();
+    let s = wait_snapshot(&b, |s| s.timeline().is_some_and(|t| t.speed.permille() == 2000));
+    assert_eq!(s.tick(), tick, "nothing ticked");
+}

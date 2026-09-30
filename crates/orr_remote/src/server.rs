@@ -188,7 +188,10 @@ pub struct PollReport {
 type TickKey = (bool, u64, u64, bool);
 /// Identifies one published frame: `(kind, a, b)`. Play: (1, head tick, epoch);
 /// scene preview: (2, document revision, 0); proposal preview: (3, id, checksum).
-type FrameKey = (u8, u64, u64);
+/// The last number of a play key stands for what the timeline shows besides the
+/// tick (playing or paused, speed, recorded range, branches): pausing changes
+/// the timeline of a frame without changing its tick, and a view must hear of it.
+type FrameKey = (u8, u64, u64, u64);
 
 /// A frame built for the subscribers that want it: the wire message (sockets)
 /// and the shared copy (in-process), each made on first use.
@@ -874,15 +877,24 @@ fn frame_source(params: &J) -> Result<FrameSource, RpcError> {
 
 /// The key of the frame a subscription would get now, `None` if it gets none.
 fn frame_key<G: Game>(t: &ErpTarget<'_, G>, source: FrameSource) -> Option<FrameKey> {
-    let play = || t.play.as_ref().map(|pc| (1u8, pc.session().head_tick(), pc.session().epoch()));
+    let play = || {
+        t.play.as_ref().map(|pc| {
+            let s = pc.session();
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for v in [u64::from(s.is_playing()), u64::from(s.speed().permille()), s.last_tick(), u64::from(s.branch_count())] {
+                h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
+            }
+            (1u8, s.head_tick(), s.epoch(), h)
+        })
+    };
     match source {
         FrameSource::Sim => play(),
-        FrameSource::View => play().or(Some((2, t.doc.revision(), 0))),
+        FrameSource::View => play().or(Some((2, t.doc.revision(), 0, 0))),
         FrameSource::Proposal(n) => {
             if t.play.is_some() {
                 return None;
             }
-            t.doc.proposal_preview(orr_edit::ProposalId(n)).ok().map(|v| (3, n, v.checksum()))
+            t.doc.proposal_preview(orr_edit::ProposalId(n)).ok().map(|v| (3, n, v.checksum(), 0))
         }
     }
 }

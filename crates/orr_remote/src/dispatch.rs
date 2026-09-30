@@ -1,7 +1,7 @@
 //! Executes ERP methods against the host's model.
 //!
-//! Everything here is synchronous and runs on the host thread (the editor's
-//! UI thread or the headless loop), inside [`crate::ErpServer::poll`].
+//! Everything here is synchronous and runs on the host thread (a
+//! [`crate::LocalHost`] thread or the headless loop), inside [`crate::ErpServer::poll`].
 
 use std::path::PathBuf;
 
@@ -21,8 +21,8 @@ use crate::proposals::{self, GameHooks};
 use crate::wire::{checksum_text, debug_error_name, debug_from_json};
 
 /// The host's model an ERP request runs against. It borrows the host's
-/// state, so the egui editor (which owns them) and the headless binary can
-/// both embed the server. Human edits made on the same `doc` share its undo
+/// state, so any host loop (`Host`, or a test) can embed the server. A
+/// person's edits (client `user`) made on the same `doc` share its undo
 /// stack with agent edits.
 pub struct ErpTarget<'a, G: Game> {
     /// The scene document (edit mode, undo history).

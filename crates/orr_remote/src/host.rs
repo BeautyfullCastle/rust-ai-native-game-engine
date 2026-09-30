@@ -49,9 +49,11 @@ impl Pacer {
     }
 }
 
-/// A headless host: a document, an optional play session, the ERP server
-/// and a pacer. The editor embeds the server itself; this is what
-/// `orr_remote_host` and the tests run.
+/// A host: a document, an optional play session, the ERP server and a
+/// pacer. It owns everything that simulates or edits. `orr_remote_host` runs
+/// one on its main thread; [`LocalHost`](crate::LocalHost) runs one on a
+/// thread of a program that has a view (the editor), which then talks to it
+/// through an in-process connection.
 pub struct Host<G: Game> {
     /// The scene document (shared undo stack of every client).
     pub doc: EditorDoc,
