@@ -35,7 +35,7 @@
 //! (sleep state of a body, `FrameList` handles) are not saved, so a baked scene
 //! starts them from their defaults.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 
 use orr_ecs::{Entity, Frame};
 
@@ -241,10 +241,10 @@ pub(super) fn unbake(reg: &TypeRegistry, frame: &Frame, index: Option<&SceneInde
         }
     }
     for &e in &live {
-        if !map.contains_key(&e) {
+        if let Entry::Vacant(slot) = map.entry(e) {
             let g = generated_guid(e, &used);
             used.insert(g.clone());
-            map.insert(e, g);
+            slot.insert(g);
         }
     }
 

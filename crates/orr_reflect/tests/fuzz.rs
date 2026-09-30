@@ -98,7 +98,6 @@ fn mutated_scenes_never_panic() {
 
 #[test]
 fn random_text_never_panics() {
-    let reg = types();
     let mut rng = Lcg(0xBEEF);
     let alphabet: Vec<char> = "abcXYZ019 _:-#&*!{}[],.\"'|>?%~\n\t\\eEnul".chars().collect();
     for _ in 0..20_000 {

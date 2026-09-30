@@ -161,7 +161,7 @@ fn long_values_use_block_style_and_still_round_trip() {
 
 #[test]
 fn anchors_aliases_tags_and_merge_keys_are_rejected() {
-    expect_err(&one_entity("Health: ¦&h { current: 1, max: 2, alive: true }").replace("&h {", "&h ¦{").replace("¦&h", "&h"), "anchors");
+    expect_err(&one_entity("Health: &h ¦{ current: 1, max: 2, alive: true }"), "anchors");
     expect_err(&one_entity("Health: { current: 1, max: 2, alive: true }\n    Transform: &t ¦{ pos: [0, 0], rot: 0 }"), "anchors");
     expect_err(&one_entity("Health: !!map ¦{ current: 1, max: 2, alive: true }"), "tags");
     expect_err(&one_entity("Health: { current: !!int ¦1, max: 2, alive: true }"), "tags");

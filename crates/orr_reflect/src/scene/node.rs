@@ -106,12 +106,12 @@ enum Frame {
 
 /// Parses `src` into one node tree, or fails with the first problem.
 pub fn parse(src: &str) -> Result<Node, Diag> {
-    let mut parser = Parser::new_from_str(src);
+    let parser = Parser::new_from_str(src);
     let mut stack: Vec<Frame> = Vec::new();
     let mut root: Option<Node> = None;
     let mut docs = 0usize;
 
-    while let Some(ev) = parser.next() {
+    for ev in parser {
         let (ev, span) = ev.map_err(|e| {
             let m = e.marker();
             Diag::new(Pos { line: m.line(), col: m.col() + 1 }, format!("YAML syntax error: {}", e.info()))
