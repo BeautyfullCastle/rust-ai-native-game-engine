@@ -6,22 +6,24 @@
 //! Accept / Reject / Verify here: the tab shows what happened. Undo (Ctrl+Z,
 //! the History tab) takes an agent edit back like any other.
 //!
+//! Everything shown comes from the host through ERP (`activity.list` /
+//! `watch.activity`, `proposal.get`, `watch.proposals`); the tab has no
+//! access to a document.
+//!
 //! Layout: a header (connected agents, or how to connect one), filter
 //! toggles, the feed (newest at the bottom, follows new entries unless the
 //! person scrolled up; a row expands to its detail) and, on the right, the
 //! open proposals.
 
-use std::collections::BTreeMap;
-
 use egui::text::LayoutJob;
 use egui::{Color32, RichText, TextFormat, Ui};
-use orr_edit::{format_value, CheckOutcome, ProposalDiff, ProposalId, Target, VerifyReport};
-use orr_remote::{ActivityEntry, ActivityKind, VerifyDetail};
-use orr_sim::MetricValue;
+use orr_remote::ActivityKind;
+use serde_json::Value as J;
 
-use crate::agent::summary_line;
+use crate::agent::{summary_line, FeedEntry};
 use crate::app::EditorApp;
 use crate::editor::{Editor, Mode};
+use crate::model::{format_json, EntityRef, ProposalInfo, Summary, Target};
 
 /// The preview toggle of an open proposal (tests click it by this text).
 pub const LBL_PREVIEW: &str = "Preview";
@@ -40,21 +42,6 @@ const AMBER: Color32 = Color32::from_rgb(240, 190, 80);
 const CYAN: Color32 = Color32::from_rgb(90, 200, 240);
 const VIOLET: Color32 = Color32::from_rgb(190, 150, 250);
 const BLUE: Color32 = Color32::from_rgb(120, 160, 250);
-
-/// Cached diffs of the open proposals: `id -> (ops when computed, diff)`.
-/// A proposal's diff only changes when ops are added, so `op_count` is the key.
-pub type DiffCache = BTreeMap<u64, (usize, ProposalDiff)>;
-
-/// The diff of proposal `id`, computed once per op count.
-pub fn cached_diff<'a>(editor: &Editor, cache: &'a mut DiffCache, id: ProposalId) -> Option<&'a ProposalDiff> {
-    let info = editor.doc().proposal_info(id).ok()?;
-    let stale = cache.get(&id.0).is_none_or(|(n, _)| *n != info.op_count);
-    if stale {
-        let diff = editor.doc().proposal_diff(id).ok()?;
-        cache.insert(id.0, (info.op_count, diff));
-    }
-    cache.get(&id.0).map(|(_, d)| d)
-}
 
 /// Color and tag of an entry kind.
 fn kind_style(kind: ActivityKind) -> (&'static str, Color32) {
@@ -88,7 +75,7 @@ fn clock(ms: u64) -> String {
 }
 
 /// The header row of a feed entry as one colored line.
-fn row_job(e: &ActivityEntry, font: &egui::FontId) -> LayoutJob {
+fn row_job(e: &FeedEntry, font: &egui::FontId) -> LayoutJob {
     let mut job = LayoutJob::default();
     let mut add = |text: String, color: Color32| {
         job.append(&text, 0.0, TextFormat { font_id: font.clone(), color, ..Default::default() });
@@ -118,19 +105,18 @@ impl EditorApp {
         self.agent_header(ui);
         self.agent_toolbar(ui);
         ui.separator();
-        let infos = self.editor.doc().list_proposals();
-        self.ui.diffs.retain(|id, _| infos.iter().any(|i| i.id.0 == *id));
+        let infos = self.editor.proposals().to_vec();
         egui::Panel::right("agent_open").resizable(true).default_size(290.0).show_separator_line(true).show(ui, |ui| {
             self.open_proposals(ui, &infos);
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            feed_ui(ui, &self.editor, &mut self.ui.diffs);
+            feed_ui(ui, &self.editor);
         });
     }
 
     /// Connected agents, or how to connect one.
     fn agent_header(&mut self, ui: &mut Ui) {
-        let agents = self.editor.agents();
+        let agents = self.editor.agents().to_vec();
         let erp = self.editor.erp_status();
         // A CLI agent connects once per command: also show who acted lately.
         let now = self.editor.erp_elapsed_ms().unwrap_or(0);
@@ -197,17 +183,17 @@ impl EditorApp {
     }
 
     /// Proposals an agent has open: label, origin, op count, a view-only preview toggle.
-    fn open_proposals(&mut self, ui: &mut Ui, infos: &[orr_edit::ProposalInfo]) {
+    fn open_proposals(&mut self, ui: &mut Ui, infos: &[ProposalInfo]) {
         ui.label(RichText::new(format!("Open proposals ({})", infos.len())).strong());
         if infos.is_empty() {
             ui.weak("none");
             return;
         }
         let editing = self.editor.mode() == Mode::Edit;
-        let mut toggle: Option<(ProposalId, bool)> = None;
+        let mut toggle: Option<(String, bool)> = None;
         egui::ScrollArea::vertical().id_salt("agent_open_scroll").auto_shrink([false, false]).show(ui, |ui| {
             for info in infos {
-                let previewing = self.editor.previewing() == Some(info.id);
+                let previewing = self.editor.previewing() == Some(info.id.as_str());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{}  {}", info.id, info.label)).strong());
                     if info.stale {
@@ -218,10 +204,10 @@ impl EditorApp {
                     ui.weak(format!("{} \u{b7} {} op{}", info.origin, info.op_count, if info.op_count == 1 { "" } else { "s" }));
                     let b = ui.add_enabled(editing, egui::Button::new(LBL_PREVIEW).selected(previewing));
                     if b.on_hover_text("Draw the proposal's staged scene in the viewport (view only)").on_disabled_hover_text("Preview needs edit mode").clicked() {
-                        toggle = Some((info.id, !previewing));
+                        toggle = Some((info.id.clone(), !previewing));
                     }
                 });
-                let line = cached_diff(&self.editor, &mut self.ui.diffs, info.id).map_or_else(|| "?".to_string(), |d| summary_line(&d.summary));
+                let line = self.editor.proposal_detail(&info.id).map_or_else(|| "?".to_string(), |d| summary_line(&d.summary));
                 ui.label(RichText::new(line).monospace().small());
                 ui.separator();
             }
@@ -233,8 +219,8 @@ impl EditorApp {
 }
 
 /// The feed: newest at the bottom, sticks to the bottom until the person scrolls up.
-fn feed_ui(ui: &mut Ui, editor: &Editor, diffs: &mut DiffCache) {
-    let rows: Vec<&ActivityEntry> = editor.feed().visible().collect();
+fn feed_ui(ui: &mut Ui, editor: &Editor) {
+    let rows: Vec<&FeedEntry> = editor.feed().visible().collect();
     if rows.is_empty() {
         let total = editor.feed().entries().len();
         if total == 0 {
@@ -259,74 +245,72 @@ fn feed_ui(ui: &mut Ui, editor: &Editor, diffs: &mut DiffCache) {
                 continue;
             }
             let open = editor.agent().expand_methods.contains(&e.method);
-            egui::CollapsingHeader::new(job).id_salt(("agent_row", e.seq)).default_open(open).show(ui, |ui| detail_ui(ui, editor, diffs, e));
+            egui::CollapsingHeader::new(job).id_salt(("agent_row", e.seq)).default_open(open).show(ui, |ui| detail_ui(ui, editor, e));
         }
     });
 }
 
 /// True if a row has something to expand.
-fn has_detail(e: &ActivityEntry) -> bool {
+fn has_detail(e: &FeedEntry) -> bool {
     e.error.is_some() || e.change.is_some() || e.diff.is_some() || e.verify.is_some() || e.proposal.is_some() || !e.entities.is_empty()
 }
 
-fn detail_ui(ui: &mut Ui, editor: &Editor, diffs: &mut DiffCache, e: &ActivityEntry) {
-    let name_of = |s: &str| -> String {
-        let target = orr_remote::json::parse_handle(s).map(Target::Entity).or_else(|| orr_reflect::Guid::parse(s).ok().map(Target::Guid));
-        match target.and_then(|t| editor.view().entity(&t).ok()).and_then(|i| i.name) {
-            Some(n) => format!("{n} ({s})"),
-            None => s.to_string(),
-        }
-    };
+/// An entity as `name (id)` if the hierarchy knows its name.
+fn name_of(editor: &Editor, s: &str) -> String {
+    match Target::parse(s).and_then(|t| editor.row_of(&t).and_then(|r| r.name.clone())) {
+        Some(n) => format!("{n} ({s})"),
+        None => s.to_string(),
+    }
+}
+
+fn detail_ui(ui: &mut Ui, editor: &Editor, e: &FeedEntry) {
     if let Some(err) = &e.error {
         ui.label(RichText::new(format!("error: {err}")).color(RED));
     }
     if let Some(c) = &e.change {
-        let who = c.entity.as_deref().map_or_else(|| "singleton".to_string(), name_of);
+        let who = c.entity.as_deref().map_or_else(|| "singleton".to_string(), |s| name_of(editor, s));
         let dot = if c.path.is_empty() { String::new() } else { format!(".{}", c.path) };
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(format!("{who}  {}{dot}:", c.component)).monospace());
-            let show = |v: &Option<orr_reflect::Value>| v.as_ref().map_or_else(|| "?".to_string(), format_value);
+            let show = |v: &Option<J>| v.as_ref().map_or_else(|| "?".to_string(), format_json);
             ui.label(RichText::new(show(&c.old)).monospace().color(RED));
             ui.label(RichText::new("\u{2192}").color(Color32::GRAY));
             ui.label(RichText::new(show(&c.new)).monospace().color(GREEN));
         });
     } else if !e.entities.is_empty() && e.diff.is_none() {
         for g in e.entities.iter().take(8) {
-            ui.label(RichText::new(name_of(g)).monospace());
+            ui.label(RichText::new(name_of(editor, g)).monospace());
         }
     }
     if let Some(v) = &e.verify {
         report_ui(ui, v);
     }
     if let Some(p) = &e.proposal {
-        proposal_detail(ui, editor, diffs, e, p);
+        proposal_detail(ui, editor, e, p);
     }
 }
 
 /// The structured summary and the colored diff of a proposal: taken when the
 /// entry was made (accept / reject), else from the open proposal, else from
 /// the accept / reject entry the feed saw later.
-fn proposal_detail(ui: &mut Ui, editor: &Editor, diffs: &mut DiffCache, e: &ActivityEntry, id: &str) {
+fn proposal_detail(ui: &mut Ui, editor: &Editor, e: &FeedEntry, id: &str) {
     if e.method == "proposal.verify" {
         return;
     }
-    let open = id.strip_prefix('p').and_then(|n| n.parse().ok()).map(ProposalId).filter(|i| editor.doc().proposal_info(*i).is_ok());
-    let closed;
-    let diff: Option<&ProposalDiff> = match (&e.diff, open) {
-        (Some(d), _) => Some(d.as_ref()),
-        (None, Some(i)) => cached_diff(editor, diffs, i),
-        (None, None) => {
-            closed = editor.feed().closed_diff(id).and_then(|c| c.diff.clone());
-            closed.as_deref()
-        }
+    let (text, summary): (&str, &Summary) = match (&e.diff, editor.proposal_detail(id)) {
+        (Some(d), _) => (&d.text, &d.summary),
+        (None, Some(d)) => (&d.diff, &d.summary),
+        (None, None) => match editor.feed().closed_diff(id).and_then(|c| c.diff.as_ref()) {
+            Some(d) => (&d.text, &d.summary),
+            None => {
+                ui.weak(format!("{id} is no longer open"));
+                return;
+            }
+        },
     };
-    let Some(diff) = diff else {
-        ui.weak(format!("{id} is no longer open"));
-        return;
-    };
-    ui.label(RichText::new(summary_line(&diff.summary)).strong());
-    summary_ui(ui, editor, diff);
-    diff_ui(ui, &diff.text);
+    ui.label(RichText::new(summary_line(summary)).strong());
+    summary_ui(ui, editor, summary);
+    diff_ui(ui, text);
 }
 
 fn line_color(line: &str) -> Option<Color32> {
@@ -365,13 +349,12 @@ fn diff_ui(ui: &mut Ui, text: &str) {
 
 /// The structural summary: entities added, removed, renamed; components;
 /// fields old -> new.
-fn summary_ui(ui: &mut Ui, editor: &Editor, diff: &ProposalDiff) {
-    let s = &diff.summary;
+fn summary_ui(ui: &mut Ui, editor: &Editor, s: &Summary) {
     if s.is_empty() {
         return;
     }
     let name_of = |g: &orr_reflect::Guid| {
-        editor.view().entity(&Target::Guid(g.clone())).ok().and_then(|i| i.name).map_or_else(|| g.to_string(), |n| format!("{n} ({g})"))
+        editor.row_of(&Target::Guid(g.clone())).and_then(|r| r.name.clone()).map_or_else(|| g.to_string(), |n| format!("{n} ({g})"))
     };
     for e in &s.entities_added {
         ui.label(RichText::new(format!("+ entity {}", entity_text(e))).color(GREEN));
@@ -398,85 +381,93 @@ fn summary_ui(ui: &mut Ui, editor: &Editor, diff: &ProposalDiff) {
     for f in &s.fields_changed {
         let who = f.entity.as_ref().map_or_else(|| "singleton".to_string(), &name_of);
         let dot = if f.path.is_empty() { String::new() } else { format!(".{}", f.path) };
-        ui.label(RichText::new(format!("~ {who}  {}{dot}:  {} -> {}", f.component, format_value(&f.old), format_value(&f.new))).color(AMBER));
+        ui.label(RichText::new(format!("~ {who}  {}{dot}:  {} -> {}", f.component, format_json(&f.old), format_json(&f.new))).color(AMBER));
     }
 }
 
-fn entity_text(e: &orr_edit::EntityRef) -> String {
+fn entity_text(e: &EntityRef) -> String {
     match &e.name {
         Some(n) => format!("{n} ({})", e.guid),
         None => e.guid.to_string(),
     }
 }
 
-/// The verification report of a feed row.
-fn report_ui(ui: &mut Ui, v: &VerifyDetail) {
-    let text = v.inputs.as_object().map_or_else(String::new, |o| {
+/// The verification report of a feed row (the `verify` JSON of the entry).
+fn report_ui(ui: &mut Ui, v: &J) {
+    let text = v.get("inputs").and_then(J::as_object).map_or_else(String::new, |o| {
         let kind = o.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
         match o.get("ticks") {
             Some(t) => format!("{kind}, {t} ticks"),
             None => kind.to_string(),
         }
     });
-    report_widget(ui, &v.report, v.outcome.as_ref(), &text);
+    report_widget(ui, v, &text);
 }
 
-fn changed(a: MetricValue, b: MetricValue) -> bool {
-    a != b
+/// A metric value of the report as text.
+fn metric(j: &J, stat: &str, side: &str) -> J {
+    j.get(side).and_then(|s| s.get(stat)).cloned().unwrap_or(J::Null)
 }
 
 /// The verification report: verdict, per-check results, divergence, metric table.
-fn report_widget(ui: &mut Ui, report: &VerifyReport, outcome: Option<&CheckOutcome>, inputs: &str) {
-    if let Some(outcome) = outcome {
-        if outcome.results.is_empty() {
-            ui.label(RichText::new("no checks were set (report only)").color(AMBER));
-        } else if outcome.passed {
-            ui.label(RichText::new(TXT_PASSED).color(GREEN).strong().size(14.0));
-        } else {
-            let bad = outcome.results.iter().filter(|r| !r.passed).count();
-            ui.label(RichText::new(format!("{bad} of {} checks FAILED", outcome.results.len())).color(RED).strong().size(14.0));
-        }
-        for r in &outcome.results {
-            let (mark, color) = if r.passed { ("\u{2714}", GREEN) } else { ("\u{d7}", RED) };
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(mark).color(color));
-                ui.label(RichText::new(&r.check).monospace());
-                ui.weak(format!("\u{2014} {}", r.reason));
-            });
-        }
-    } else {
+fn report_widget(ui: &mut Ui, report: &J, inputs: &str) {
+    let checks = report.get("checks").filter(|c| !c.is_null());
+    let results = checks.and_then(|c| c.get("results")).and_then(J::as_array).cloned().unwrap_or_default();
+    if checks.is_none() || results.is_empty() {
         ui.label(RichText::new("no checks were set (report only)").color(AMBER));
+    } else if checks.and_then(|c| c.get("passed")).and_then(J::as_bool) == Some(true) {
+        ui.label(RichText::new(TXT_PASSED).color(GREEN).strong().size(14.0));
+    } else {
+        let bad = results.iter().filter(|r| r.get("passed").and_then(J::as_bool) != Some(true)).count();
+        ui.label(RichText::new(format!("{bad} of {} checks FAILED", results.len())).color(RED).strong().size(14.0));
     }
-    ui.weak(format!("{} ticks ({}..{}) on {inputs}", report.ticks, report.start_tick, report.end_tick));
-    match report.first_divergence {
+    for r in &results {
+        let passed = r.get("passed").and_then(J::as_bool) == Some(true);
+        let (mark, color) = if passed { ("\u{2714}", GREEN) } else { ("\u{d7}", RED) };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(mark).color(color));
+            ui.label(RichText::new(r.get("check").and_then(J::as_str).unwrap_or("?")).monospace());
+            ui.weak(format!("\u{2014} {}", r.get("reason").and_then(J::as_str).unwrap_or("")));
+        });
+    }
+    let u = |k: &str| report.get(k).and_then(J::as_u64).unwrap_or(0);
+    ui.weak(format!("{} ticks ({}..{}) on {inputs}", u("ticks"), u("start_tick"), u("end_tick")));
+    match report.get("first_divergence").and_then(J::as_u64) {
         None => ui.label("no checksum divergence"),
-        Some(t) if t == report.start_tick => ui.label(format!("first checksum divergence: tick {t} (the scenes differ from the start)")),
+        Some(t) if t == u("start_tick") => ui.label(format!("first checksum divergence: tick {t} (the scenes differ from the start)")),
         Some(t) => ui.label(format!("first checksum divergence: tick {t}")),
     };
-    match report.first_metric_difference {
+    match report.get("first_metric_difference").and_then(J::as_u64) {
         None => ui.label("metrics identical at every sample"),
         Some(t) => ui.label(format!("first metric difference: tick {t}")),
     };
     // Metrics the proposal changed are listed; the ones that did not change are folded away.
-    let differs = |m: &orr_edit::MetricComparison| changed(m.base.end, m.candidate.end) || changed(m.base.min, m.candidate.min) || changed(m.base.max, m.candidate.max);
-    let (hot, cold): (Vec<_>, Vec<_>) = report.metrics.iter().partition(|m| differs(m));
-    let table = |ui: &mut Ui, id: &str, rows: &[&orr_edit::MetricComparison]| {
+    let metrics: Vec<&J> = report.get("metrics").and_then(J::as_array).map(|a| a.iter().collect()).unwrap_or_default();
+    let differs = |m: &J| ["end", "min", "max"].iter().any(|s| metric(m, s, "base") != metric(m, s, "candidate"));
+    let (hot, cold): (Vec<&J>, Vec<&J>) = metrics.into_iter().partition(|m| differs(m));
+    let table = |ui: &mut Ui, id: &str, rows: &[&J]| {
         egui::Grid::new(id).striped(true).spacing([14.0, 2.0]).show(ui, |ui| {
             for h in ["metric", "end (base -> cand)", "min", "max", "delta"] {
                 ui.label(RichText::new(h).weak().small());
             }
             ui.end_row();
             for m in rows {
-                let pair = |a: MetricValue, b: MetricValue| if a == b { a.to_string() } else { format!("{a} -> {b}") };
+                let pair = |s: &str| {
+                    let (a, b) = (metric(m, s, "base"), metric(m, s, "candidate"));
+                    (if a == b { format_json(&a) } else { format!("{} -> {}", format_json(&a), format_json(&b)) }, a != b)
+                };
                 let cell = |ui: &mut Ui, text: String, hot: bool| {
                     let t = RichText::new(text).monospace();
                     ui.label(if hot { t.color(AMBER).strong() } else { t });
                 };
-                cell(ui, m.name.clone(), differs(m));
-                cell(ui, pair(m.base.end, m.candidate.end), changed(m.base.end, m.candidate.end));
-                cell(ui, pair(m.base.min, m.candidate.min), changed(m.base.min, m.candidate.min));
-                cell(ui, pair(m.base.max, m.candidate.max), changed(m.base.max, m.candidate.max));
-                cell(ui, m.delta.to_string(), m.delta != m.delta.zero_like());
+                cell(ui, m.get("name").and_then(J::as_str).unwrap_or("?").to_string(), differs(m));
+                for s in ["end", "min", "max"] {
+                    let (text, hot) = pair(s);
+                    cell(ui, text, hot);
+                }
+                let delta = m.get("delta").cloned().unwrap_or(J::Null);
+                let zero = matches!(format_json(&delta).as_str(), "0" | "0.0" | "null");
+                cell(ui, format_json(&delta), !zero);
                 ui.end_row();
             }
         });

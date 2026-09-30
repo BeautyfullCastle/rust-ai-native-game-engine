@@ -411,8 +411,19 @@ impl ErpServer {
         if truncated {
             list.drain(..list.len() - lp.limit);
         }
-        let clients: Vec<J> = self.conns.values().map(|c| json!({"client": c.client, "capabilities": c.caps.list().into_iter().map(crate::caps::Cap::name).collect::<Vec<_>>()})).collect();
-        json!({"entries": list.iter().map(|e| e.to_json()).collect::<Vec<_>>(), "last_seq": self.next_seq - 1, "truncated": truncated, "clients": clients})
+        let clients: Vec<J> = self
+            .conns
+            .values()
+            .map(|c| {
+                json!({
+                    "client": c.client,
+                    "capabilities": c.caps.list().into_iter().map(crate::caps::Cap::name).collect::<Vec<_>>(),
+                    "requests": c.requests,
+                    "connected_ms": c.connected_ms,
+                })
+            })
+            .collect();
+        json!({"entries": list.iter().map(|e| e.to_json()).collect::<Vec<_>>(), "last_seq": self.next_seq - 1, "truncated": truncated, "clients": clients, "now_ms": self.elapsed_ms()})
     }
 
     /// Counters.
@@ -451,11 +462,13 @@ impl ErpServer {
             match msg {
                 Inbound::Connected { conn, client, caps, tx, binary } => {
                     let connected_ms = self.elapsed_ms();
-                    self.session_event(&client, "session.connect", activity::session_summary("connected", Some(caps)), true);
+                    if client != crate::caps::USER_CLIENT {
+                        self.session_event(&client, "session.connect", activity::session_summary("connected", Some(caps)), true);
+                    }
                     self.conns.insert(conn, Conn { tx, client, caps, binary, subs: Subs::default(), requests: 0, connected_ms });
                 }
                 Inbound::Disconnected { conn } => {
-                    if let Some(c) = self.conns.get(&conn) {
+                    if let Some(c) = self.conns.get(&conn).filter(|c| c.client != crate::caps::USER_CLIENT) {
                         let (name, n) = (c.client.clone(), c.requests);
                         self.session_event(&name, "session.disconnect", format!("disconnected ({n} requests)"), true);
                     }
@@ -500,7 +513,9 @@ impl ErpServer {
         let Some(c) = self.conns.get(&conn) else { return };
         let (client, caps, tx) = (c.client.clone(), c.caps, c.tx.clone());
         let mut fx = Effects::default();
-        let recorded = method != "activity.list";
+        // A person's own view reads all the time (the editor refreshes its panels): not recorded,
+        // so the log keeps what agents did. Its edits are recorded like anyone's.
+        let recorded = method != "activity.list" && !(client == crate::caps::USER_CLIENT && activity::classify(method, params).1);
         let pre = if recorded && !method.starts_with("watch.") { activity::before(target, method, params) } else { Default::default() };
         let result = if method == "activity.list" {
             authorize(method, caps, false, params).and_then(|_| activity::list_params(params)).map(|_| self.activity_list(params))

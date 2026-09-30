@@ -162,7 +162,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
 }
 
 /// A zero value of a type, for a new list element.
-fn zero_value(ty: &TypeDesc) -> Value {
+pub(crate) fn zero_value(ty: &TypeDesc) -> Value {
     match &ty.kind {
         Kind::Bool { .. } => Value::Bool(false),
         Kind::Int { range, .. } => Value::Int(range.min.map_or(0, |m| m.max(0))),

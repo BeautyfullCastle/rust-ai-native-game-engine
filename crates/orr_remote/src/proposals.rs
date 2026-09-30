@@ -310,7 +310,7 @@ fn op_json(op: &Op) -> J {
     J::Object(o)
 }
 
-fn summary_json(s: &ProposalSummary) -> J {
+pub(crate) fn summary_json(s: &ProposalSummary) -> J {
     let entity = |e: &orr_edit::EntityRef| json!({"guid": e.guid.to_string(), "name": e.name});
     json!({
         "entities_added": s.entities_added.iter().map(entity).collect::<Vec<_>>(),

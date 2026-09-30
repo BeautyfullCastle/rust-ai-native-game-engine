@@ -1,63 +1,74 @@
 //! `Editor`: the state machine behind the window. No egui in here.
 //!
-//! It wraps an `EditorDoc` (edit mode) and, while playing, a
-//! `PlayController` (play mode), plus what a person has selected. Every edit
-//! a person makes goes through these methods with `Origin::User`:
+//! # The editor is a client of a simulation host
 //!
-//! - edit mode: `EditorDoc::apply` (undoable, one history entry per gesture);
-//! - play mode: `PlayController::set_field` and friends (recorded
-//!   `DebugCommand`s, so the play stays deterministic and can be rewound).
+//! It owns no `EditorDoc`, no play session and no ERP server. Everything
+//! that simulates or edits lives in a **host** (`orr_remote::Host`), on a
+//! thread of this process or in another process ([`HostSpec`]). The editor
+//! reaches it through exactly two channels (see [`crate::backend`]):
 //!
-//! The play session runs on the UI thread in this MVP: [`Editor::advance`]
-//! runs the ticks the frame time and speed ask for. A 1000-body physics tick
-//! is under a millisecond, so this is fine at 60 Hz. A threaded host would
-//! be the next step.
+//! - **ERP** for everything a person does: edits (`world.*`, one `tx.*`
+//!   transaction per gesture), undo and redo, save and open, play control,
+//!   proposals and their diffs, and the queries that fill the panels;
+//! - the **bridge** (`RemoteBridge`: `Bridge` + `SimControl` + `Snapshot`) for
+//!   the frames the viewport draws.
 //!
-//! An ERP server can run inside the editor ([`Editor::start_erp`]). Its
-//! requests run in [`Editor::poll_erp`] on the UI thread, against the same
-//! `EditorDoc` and play session, so an AI agent's edits land in the same
-//! undo history (origin `agent:<name>`) and show up in the window at once.
+//! What the panels show are **caches** of host answers ([`SimState`], the
+//! hierarchy rows, the inspected entity, the history, ...). They are filled by
+//! requests that never wait for the answer ([`Editor::pump`], once per UI
+//! frame) and refreshed when a notification (`watch.tick`, `watch.history`,
+//! `watch.proposals`, `watch.activity`) or a new frame says the host changed.
+//! The viewport never waits for a request: it draws the newest snapshot.
+//!
+//! A person's actions (Undo, Play, a typed value, ...) are blocking calls:
+//! they return the host's answer, which is a round trip (microseconds for a
+//! host thread, a network round trip for a remote host). A drag is the
+//! exception: its `set_field`s are posted without waiting, between a
+//! blocking `tx.begin` and `tx.commit`, so one drag is one undo step.
+//!
+//! If the host thread panics, or the remote host goes away, the editor keeps
+//! running: [`Editor::down`] says why and [`Editor::restart`] starts the host
+//! again (local: the scene file is opened afresh, so edits that were not
+//! saved are lost) or reconnects (remote).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use orr_edit::{EditError, EditorDoc, Op, Origin, PlayController, ProposalId, StoppedPlay, Target, View};
+use orr_bridge::{Bridge, BridgeEvent, ControlOp, Lifecycle, Snapshot, Timeline};
+use orr_ecs::Entity;
 use orr_fp::{FPVec2, FP};
 use orr_reflect::{decimal, Guid, TypeRegistry, Value};
-use orr_remote::{default_build_id, ClientInfo, ErpServer, ErpTarget, GameHooks, ServerConfig};
-use orr_render::Camera;
+use orr_remote::codec::b64_decode;
+use orr_remote::json::{json_to_value, value_to_json};
+use orr_remote::{ClientError, ErpClient, RemoteBridge};
+use orr_render::{Camera, RenderList};
 use orr_sample::physics_game::{register_reflect, PhysGame};
-use orr_session::{ControlOp, Speed, Timeline};
-use orr_sim::Simulation;
+use orr_sample::physics_view::{body_views, BodyView};
+use serde_json::{json, Value as J};
 
-use crate::agent::{AgentState, Feed};
+use crate::agent::{AgentState, Feed, FeedEntry};
+use crate::backend::{Backend, HostSpec};
+use crate::model::{ClientInfo, EntityRow, History, ProposalDetail, ProposalInfo, SimState, Stopped, Target};
+pub use crate::model::Mode;
+use crate::viewport::{self, Scene};
 
-/// Seed of the preview frame and of play sessions started from the editor.
-pub const SEED: u64 = 7;
-/// Sim rate of play sessions (the sample's rate).
-pub const TICK_RATE: u32 = orr_sample::physics_game::TICK_RATE;
-/// Players of a play session (`PhysGame` has one paddle per player).
-pub const PLAYERS: u8 = 2;
-/// Most ticks one [`Editor::advance`] call runs. More would mean the machine
-/// cannot keep up; the extra time is dropped instead of piling up.
-pub const MAX_TICKS_PER_ADVANCE: u32 = 8;
-
+/// Most entities one hierarchy refresh asks for.
+const ROWS_LIMIT: u64 = 20_000;
+/// Least time between two refreshes of the inspector while the host changes all the time.
+const INSPECT_EVERY: Duration = Duration::from_millis(50);
+/// How often the list of connected clients is refreshed.
+const CLIENTS_EVERY: Duration = Duration::from_millis(500);
+/// Most messages the log keeps.
 const LOG_LIMIT: usize = 200;
 
-/// The type registry of `PhysGame` (physics types, `PaddleTag`, `Scene`).
+/// The type registry of `PhysGame` (physics types, `PaddleTag`, `Scene`): the
+/// shipped descriptors the inspector draws its widgets from.
 pub fn make_types() -> TypeRegistry {
     let mut t = TypeRegistry::new();
     register_reflect(&mut t);
     t
-}
-
-/// Loads scene text into a document for `PhysGame`.
-pub fn doc_from_text(text: &str) -> Result<EditorDoc, EditError> {
-    EditorDoc::from_yaml(text, make_types(), Simulation::<PhysGame>::build_registry(), SEED)
-}
-
-/// An empty document for `PhysGame`.
-pub fn empty_doc() -> Result<EditorDoc, EditError> {
-    EditorDoc::for_game::<PhysGame>(make_types(), SEED)
 }
 
 /// The demo scene: `scenes/physics_demo.scene.yaml` of the working directory
@@ -68,15 +79,6 @@ pub fn default_scene_path() -> PathBuf {
         return local;
     }
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes/physics_demo.scene.yaml"))
-}
-
-/// Edit mode or play mode.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode {
-    /// The scene document is being edited.
-    Edit,
-    /// A play session runs (or is paused / rewound).
-    Play,
 }
 
 /// A line of the status bar and the log.
@@ -97,97 +99,335 @@ pub enum Owner {
     Singleton(String),
 }
 
+/// Why the editor cannot reach its host any more.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Down {
+    /// `simulation host stopped: <reason>` or `disconnected: <reason>`.
+    pub reason: String,
+    /// True if the host was started by this editor (a panic), false if it is a remote host.
+    pub local: bool,
+}
+
+/// The components of the selected entity, as the host last reported them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Inspect {
+    /// The entity.
+    pub target: Target,
+    /// Its list row.
+    pub row: Option<EntityRow>,
+    /// `(type name, value)` of its reflected components.
+    pub components: Vec<(String, Value)>,
+}
+
+/// What the answer to a request that was sent without waiting is for.
+enum Pend {
+    Rows(u64),
+    Inspect(Target),
+    Singletons,
+    History,
+    State,
+    Clients,
+    Detail(String),
+    PreviewRows(String),
+    Edit(String),
+}
+
+#[derive(Default)]
+struct Dirty {
+    rows: bool,
+    inspect: bool,
+    singletons: bool,
+    history: bool,
+    state: bool,
+}
+
+#[derive(Default)]
+struct InFlight {
+    rows: bool,
+    inspect: bool,
+    singletons: bool,
+    history: bool,
+    state: bool,
+    clients: bool,
+    details: Vec<String>,
+    preview_rows: bool,
+}
+
+/// The proposal whose staged frame the viewport shows.
+struct Preview {
+    id: String,
+    stream: RemoteBridge<PhysGame>,
+    seq: u64,
+    bodies: Vec<BodyView>,
+    rows: Vec<EntityRow>,
+}
+
 /// See the module docs.
 pub struct Editor {
-    doc: EditorDoc,
-    path: Option<PathBuf>,
-    /// The play session. Its type is what `orr_remote::ErpTarget` borrows,
-    /// so ERP clients drive the same session.
-    play: Option<PlayController<PhysGame>>,
-    /// Seconds of (speed scaled) real time not yet turned into ticks.
-    play_acc: f64,
-    /// The embedded ERP server, if started (see [`Editor::start_erp`]).
-    erp: Option<ErpServer>,
-    stopped: Option<StoppedPlay>,
+    backend: Backend,
+    types: Arc<TypeRegistry>,
+    down: Option<Down>,
     selection: Option<Target>,
     /// The viewport camera (world units, y up).
     pub camera: Camera,
     status: Option<Message>,
     log: Vec<Message>,
+    // caches of host answers
+    sim: SimState,
+    history: History,
+    rows: Vec<EntityRow>,
+    inspect: Option<Inspect>,
+    singletons: Vec<(String, Value)>,
+    proposals: Vec<ProposalInfo>,
+    details: BTreeMap<String, ProposalDetail>,
+    clients: Vec<ClientInfo>,
+    server_now_ms: u64,
+    stopped: Option<Stopped>,
+    // the newest frame
+    snapshot: Option<Snapshot>,
+    bodies: Vec<BodyView>,
+    checksum: u64,
+    snap_entities: u32,
+    preview: Option<Preview>,
+    // requests that are in flight, and what to ask for next
+    pending: BTreeMap<u64, Pend>,
+    dirty: Dirty,
+    inflight: InFlight,
+    change_gen: u64,
+    last_inspect: Option<Instant>,
+    last_clients: Option<Instant>,
+    gesture: Option<String>,
+    refit: bool,
     agent: AgentState,
     feed: Feed,
+    agent_clients: BTreeMap<String, ErpClient>,
+    script_owner: BTreeMap<String, String>,
 }
 
 impl Editor {
-    /// An editor on `doc`, saved as `path` (if any).
-    pub fn new(doc: EditorDoc, path: Option<PathBuf>) -> Self {
-        let mut e = Self { doc, path, play: None, play_acc: 0.0, erp: None, stopped: None, selection: None, camera: Camera::new([0.0, 0.0], 20.0), status: None, log: Vec::new(), agent: AgentState::default(), feed: Feed::default() };
-        e.fit_camera();
-        e
+    /// An editor on a host thread of this process that loads `path`.
+    pub fn open(path: &Path) -> Result<Self, String> {
+        Self::start(&HostSpec::local(path))
     }
 
-    /// Reads a scene file.
-    pub fn open(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let doc = doc_from_text(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Self::new(doc, Some(path.to_path_buf())))
+    /// An editor attached to the host at `url` (`ws://host:port`), for example an
+    /// `orr_remote_host`.
+    pub fn attach(url: &str, token: Option<&str>) -> Result<Self, String> {
+        Self::start(&HostSpec::remote(url, token))
+    }
+
+    /// Starts the host (or attaches to it) and reads its state.
+    pub fn start(spec: &HostSpec) -> Result<Self, String> {
+        let backend = Backend::connect(spec)?;
+        let mut e = Self::on_backend(backend)?;
+        let local = spec.is_local();
+        if local {
+            e.info("ready");
+        } else {
+            e.info(format!("attached to {}", e.backend.url.clone().unwrap_or_default()));
+        }
+        Ok(e)
+    }
+
+    fn on_backend(backend: Backend) -> Result<Self, String> {
+        let mut feed = Feed::default();
+        feed.own.clone_from(&backend.own_client);
+        let mut e = Self {
+            backend,
+            types: Arc::new(make_types()),
+            down: None,
+            selection: None,
+            camera: Camera::new([0.0, 0.0], 20.0),
+            status: None,
+            log: Vec::new(),
+            sim: SimState::default(),
+            history: History::default(),
+            rows: Vec::new(),
+            inspect: None,
+            singletons: Vec::new(),
+            proposals: Vec::new(),
+            details: BTreeMap::new(),
+            clients: Vec::new(),
+            server_now_ms: 0,
+            stopped: None,
+            snapshot: None,
+            bodies: Vec::new(),
+            checksum: 0,
+            snap_entities: 0,
+            preview: None,
+            pending: BTreeMap::new(),
+            dirty: Dirty::default(),
+            inflight: InFlight::default(),
+            change_gen: 0,
+            last_inspect: None,
+            last_clients: None,
+            gesture: None,
+            refit: false,
+            agent: AgentState::default(),
+            feed,
+            agent_clients: BTreeMap::new(),
+            script_owner: BTreeMap::new(),
+        };
+        e.check_registry()?;
+        e.backend.subscribe()?;
+        // Everything the panels need, once, so the first frame is not empty.
+        e.read_state()?;
+        e.read_history()?;
+        e.read_rows()?;
+        e.read_singletons()?;
+        e.read_proposals()?;
+        e.read_clients(true)?;
+        e.fit_camera();
+        e.ingest();
+        e.refresh_snapshot();
+        Ok(e)
+    }
+
+    /// The host must know every type the editor's shipped descriptors know.
+    fn check_registry(&mut self) -> Result<(), String> {
+        let r = self.backend.erp.call("registry.types", J::Null).map_err(|e| format!("registry.types: {e}"))?;
+        let host: Vec<String> = r["types"].as_array().map(|a| a.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let missing: Vec<&str> = self.types.types().map(|t| t.name()).filter(|n| !host.iter().any(|h| h == n)).collect();
+        if !missing.is_empty() {
+            return Err(format!("the host does not know the type(s) {}: its game differs from the one this editor ships descriptors for", missing.join(", ")));
+        }
+        Ok(())
+    }
+
+    fn read_state(&mut self) -> Result<(), String> {
+        let r = self.backend.erp.call("sim.state", J::Null).map_err(|e| format!("sim.state: {e}"))?;
+        self.sim = SimState::from_json(&r);
+        Ok(())
+    }
+
+    fn read_history(&mut self) -> Result<(), String> {
+        let r = self.backend.erp.call("history.list", J::Null).map_err(|e| format!("history.list: {e}"))?;
+        self.history = History::from_json(&r);
+        Ok(())
+    }
+
+    fn read_rows(&mut self) -> Result<(), String> {
+        let r = self.backend.erp.call("world.query", json!({"limit": ROWS_LIMIT})).map_err(|e| format!("world.query: {e}"))?;
+        self.rows = rows_of(&r);
+        Ok(())
+    }
+
+    fn read_singletons(&mut self) -> Result<(), String> {
+        let r = self.backend.erp.call("world.singleton.get", J::Null).map_err(|e| format!("world.singleton.get: {e}"))?;
+        self.singletons = singletons_of(&self.types, &r);
+        Ok(())
+    }
+
+    fn read_proposals(&mut self) -> Result<(), String> {
+        let r = self.backend.erp.call("proposal.list", J::Null).map_err(|e| format!("proposal.list: {e}"))?;
+        self.proposals = r["proposals"].as_array().map(|a| a.iter().filter_map(ProposalInfo::from_json).collect()).unwrap_or_default();
+        Ok(())
+    }
+
+    fn read_clients(&mut self, backlog: bool) -> Result<(), String> {
+        let params = if backlog { json!({"since": 0, "include_reads": true, "limit": 2000}) } else { json!({"since": self.feed.last_seq, "include_reads": true, "limit": 200}) };
+        let r = self.backend.erp.call("activity.list", params).map_err(|e| format!("activity.list: {e}"))?;
+        self.apply_activity_list(&r);
+        Ok(())
     }
 
     // ---- reads ----
 
-    /// The scene document (edit mode state; play never changes it).
-    pub fn doc(&self) -> &EditorDoc {
-        &self.doc
+    /// Where the editor's host is and how it was started.
+    pub fn spec(&self) -> &HostSpec {
+        &self.backend.spec
     }
 
-    /// The scene document, mutably, for hosts and tests that stage proposals
-    /// the way an ERP client does (`propose`, `proposal_apply`). Person
-    /// edits go through the `Editor` methods, which pick the right mode.
-    pub fn doc_mut(&mut self) -> &mut EditorDoc {
-        &mut self.doc
+    /// The type registry the inspector draws its widgets from.
+    pub fn types(&self) -> &TypeRegistry {
+        &self.types
+    }
+
+    /// Set once the host is gone (see the module docs); `None` while it is reachable.
+    pub fn down(&self) -> Option<&Down> {
+        self.down.as_ref()
+    }
+
+    /// The host's state (mode, ticks, dirty flag, scene file), as last reported.
+    pub fn sim(&self) -> &SimState {
+        &self.sim
     }
 
     /// The mode.
     pub fn mode(&self) -> Mode {
-        if self.play.is_some() {
-            Mode::Play
-        } else {
-            Mode::Edit
-        }
+        self.sim.mode
     }
 
-    /// True while a play session exists.
+    /// True while a play session exists on the host.
     pub fn is_playing_mode(&self) -> bool {
-        self.play.is_some()
+        self.sim.mode == Mode::Play
     }
 
-    /// Queries on what the viewport shows: the live play frame in play mode,
-    /// else the preview frame.
-    pub fn view(&self) -> View<'_> {
-        match &self.play {
-            Some(p) => p.view(),
-            None => self.doc.view(),
-        }
-    }
-
-    /// The play controller, in play mode.
-    pub fn play_controller(&self) -> Option<&PlayController<PhysGame>> {
-        self.play.as_ref()
-    }
-
-    /// The timeline of the play session.
+    /// The timeline of the play session, from the newest frame (`None` in edit mode).
     pub fn timeline(&self) -> Option<Timeline> {
-        self.play.as_ref().map(|p| p.timeline())
+        if self.sim.mode != Mode::Play {
+            return None;
+        }
+        self.snapshot.as_ref().and_then(|s| s.timeline().cloned())
+    }
+
+    /// The newest frame the host published.
+    pub fn snapshot(&self) -> Option<&Snapshot> {
+        self.snapshot.as_ref()
+    }
+
+    /// The drawable bodies of the frame on screen (the scene's preview frame in
+    /// edit mode, the live frame in play mode).
+    pub fn bodies(&self) -> &[BodyView] {
+        &self.bodies
+    }
+
+    /// The drawable bodies of the staged frame of the previewed proposal, once it has arrived.
+    pub fn preview_bodies(&self) -> Option<&[BodyView]> {
+        self.preview.as_ref().filter(|p| p.seq > 0).map(|p| p.bodies.as_slice())
     }
 
     /// The recording of the last play that was stopped.
-    pub fn last_stopped(&self) -> Option<&StoppedPlay> {
+    pub fn last_stopped(&self) -> Option<&Stopped> {
         self.stopped.as_ref()
     }
 
-    /// The scene file path.
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
+    /// The scene file of the host.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.sim.scene_path.as_ref().map(PathBuf::from)
+    }
+
+    /// The hierarchy: every entity of the frame on screen.
+    pub fn rows(&self) -> &[EntityRow] {
+        &self.rows
+    }
+
+    /// The row of an entity.
+    pub fn row_of(&self, t: &Target) -> Option<&EntityRow> {
+        match t {
+            Target::Guid(g) => self.rows.iter().find(|r| r.guid.as_ref() == Some(g)),
+            Target::Entity(e) => self.rows.iter().find(|r| r.entity == *e),
+        }
+    }
+
+    /// The frame entity a target names, as far as the hierarchy knows.
+    pub fn entity_of(&self, t: &Target) -> Option<Entity> {
+        self.row_of(t).map(|r| r.entity)
+    }
+
+    /// The components of the selected entity.
+    pub fn inspect(&self) -> Option<&Inspect> {
+        self.inspect.as_ref().filter(|i| Some(&i.target) == self.selection.as_ref())
+    }
+
+    /// The singletons and their values.
+    pub fn singletons(&self) -> &[(String, Value)] {
+        &self.singletons
+    }
+
+    /// The undo history.
+    pub fn history(&self) -> &History {
+        &self.history
     }
 
     /// The selected entity.
@@ -199,20 +439,24 @@ impl Editor {
     pub fn selected_guid(&self) -> Option<Guid> {
         match self.selection.as_ref()? {
             Target::Guid(g) => Some(g.clone()),
-            Target::Entity(e) => self.view().guid_of(*e).cloned(),
+            Target::Entity(e) => self.rows.iter().find(|r| r.entity == *e).and_then(|r| r.guid.clone()),
         }
     }
 
     /// True if the document has unsaved changes.
     pub fn is_dirty(&self) -> bool {
-        self.doc.is_dirty()
+        self.history.dirty || self.sim.dirty
     }
 
     /// The window title, with a `*` when there are unsaved changes.
     pub fn title(&self) -> String {
-        let name = self.path.as_deref().and_then(Path::file_name).map_or_else(|| "untitled".to_string(), |n| n.to_string_lossy().into_owned());
-        let mode = if self.play.is_some() { " [play]" } else { "" };
-        format!("{}{name}{mode} - Orrery Editor", if self.is_dirty() { "*" } else { "" })
+        let name = self.sim.scene_path.as_deref().and_then(|p| Path::new(p).file_name()).map_or_else(|| "untitled".to_string(), |n| n.to_string_lossy().into_owned());
+        let mode = if self.sim.mode == Mode::Play { " [play]" } else { "" };
+        let host = match (&self.backend.spec, &self.backend.url) {
+            (HostSpec::Remote { .. }, Some(u)) => format!(" @ {u}"),
+            _ => String::new(),
+        };
+        format!("{}{name}{mode}{host} - Orrery Editor", if self.is_dirty() { "*" } else { "" })
     }
 
     /// The last message (status bar).
@@ -227,16 +471,7 @@ impl Editor {
 
     /// Checksum of the frame on screen.
     pub fn checksum(&self) -> u64 {
-        self.view().checksum()
-    }
-
-    /// Display text of an entity in lists: its name, else its GUID, else its frame handle.
-    pub fn entity_label(info: &orr_edit::EntityInfo) -> String {
-        match (&info.name, &info.guid) {
-            (Some(n), _) => n.clone(),
-            (None, Some(g)) => g.to_string(),
-            (None, None) => format!("entity {}v{} (play)", info.entity.index, info.entity.version),
-        }
+        self.checksum
     }
 
     // ---- messages ----
@@ -259,29 +494,24 @@ impl Editor {
         }
     }
 
-    fn report<T>(&mut self, what: &str, r: Result<T, EditError>) -> Option<T> {
-        match r {
-            Ok(v) => Some(v),
-            Err(e) => {
-                self.error(format!("{what}: {e}"));
-                None
-            }
-        }
-    }
-
     // ---- selection and camera ----
 
     /// Selects an entity (or clears the selection).
     pub fn select(&mut self, target: Option<Target>) {
-        self.selection = target;
+        if self.selection != target {
+            self.selection = target;
+            self.inspect = None;
+            self.dirty.inspect = true;
+            self.last_inspect = None;
+        }
     }
 
     /// Selects the entity with this display name or GUID text.
     pub fn select_named(&mut self, name: &str) -> bool {
-        let found = self.view().entities().into_iter().find(|e| e.name.as_deref() == Some(name) || e.guid.as_ref().is_some_and(|g| g.to_string() == name));
+        let found = self.rows.iter().find(|r| r.name.as_deref() == Some(name) || r.guid.as_ref().is_some_and(|g| g.to_string() == name)).map(EntityRow::target);
         match found {
-            Some(info) => {
-                self.selection = Some(info.guid.map_or(Target::Entity(info.entity), Target::Guid));
+            Some(t) => {
+                self.select(Some(t));
                 true
             }
             None => false,
@@ -290,22 +520,469 @@ impl Editor {
 
     /// Drops a selection that no longer exists (after an undo, a despawn or a rewind).
     pub fn sanitize_selection(&mut self) {
-        self.agent.sanitize(&self.doc);
         if let Some(t) = &self.selection {
-            if self.view().resolve(t).is_err() {
-                self.selection = None;
+            if !self.rows.is_empty() && self.row_of(t).is_none() {
+                self.select(None);
+            }
+        }
+        if let Some(id) = self.agent.preview.clone() {
+            if !self.proposals.iter().any(|p| p.id == id) {
+                self.set_preview(None);
             }
         }
     }
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
-        let get = |name: &str| match self.view().singleton("Scene", name) {
-            Ok(Value::Fixed(f)) => Some(fp_to_f64(f)),
-            _ => None,
+        let get = |name: &str| {
+            let (_, v) = self.singletons.iter().find(|(n, _)| n == "Scene")?;
+            let Value::Struct(fields) = v else { return None };
+            match fields.iter().find(|(n, _)| n == name)? {
+                (_, Value::Fixed(f)) => Some(fp_to_f64(*f)),
+                _ => None,
+            }
         };
         if let (Some(half_w), Some(height)) = (get("half_w"), get("height")) {
             self.camera = Camera::new([0.0, (height / 2.0) as f32], (half_w.max(height / 2.0) * 1.06) as f32);
+        }
+    }
+
+    // ---- talking to the host ----
+
+    /// Runs a method and waits for the answer. `Err` carries the host's message.
+    fn call(&mut self, method: &str, params: J) -> Result<J, String> {
+        if let Some(d) = &self.down {
+            return Err(d.reason.clone());
+        }
+        let r = self.backend.erp.call(method, params);
+        self.ingest();
+        match r {
+            Ok(v) => Ok(v),
+            Err(ClientError::Rpc(e)) => Err(e.message),
+            Err(other) => {
+                self.connection_lost(&other.to_string());
+                Err(other.to_string())
+            }
+        }
+    }
+
+    /// Sends a request without waiting; the answer is handled by [`pump`](Self::pump).
+    fn post(&mut self, method: &str, params: J, kind: Pend) {
+        if self.down.is_some() {
+            return;
+        }
+        match self.backend.erp.post(method, params) {
+            Ok(id) => {
+                self.pending.insert(id, kind);
+            }
+            Err(e) => self.connection_lost(&e.to_string()),
+        }
+    }
+
+    /// Takes in what the ERP client collected: notifications and answers.
+    fn ingest(&mut self) {
+        let notes: Vec<J> = self.backend.erp.notifications.drain(..).collect();
+        for n in notes {
+            let (Some(method), Some(params)) = (n.get("method").and_then(J::as_str), n.get("params")) else { continue };
+            self.on_notification(method, params);
+        }
+        let answers: Vec<_> = self.backend.erp.responses.drain(..).collect();
+        for (id, r) in answers {
+            if let Some(kind) = self.pending.remove(&id) {
+                self.on_answer(kind, r);
+            }
+        }
+        // Frames are not asked for on this channel.
+        self.backend.erp.frames.clear();
+        self.backend.erp.local_frames.clear();
+    }
+
+    fn on_notification(&mut self, method: &str, params: &J) {
+        match method {
+            "watch.tick" => {
+                let u = |k: &str| params.get(k).and_then(J::as_u64).unwrap_or(0);
+                let mode = if params.get("mode").and_then(J::as_str) == Some("play") { Mode::Play } else { Mode::Edit };
+                let epoch = u("epoch");
+                let changed = mode != self.sim.mode || (mode == Mode::Play && epoch != self.sim.epoch);
+                self.sim.mode = mode;
+                self.sim.head_tick = u("tick");
+                self.sim.last_tick = u("last_tick");
+                self.sim.epoch = epoch;
+                self.sim.playing = params.get("playing").and_then(J::as_bool).unwrap_or(false);
+                if changed {
+                    self.mark_changed();
+                    self.dirty.state = true;
+                } else if mode == Mode::Play {
+                    self.dirty.inspect = true;
+                }
+            }
+            "watch.history" => {
+                let b = |k: &str| params.get(k).and_then(J::as_bool).unwrap_or(false);
+                self.history.can_undo = b("can_undo");
+                self.history.can_redo = b("can_redo");
+                self.history.dirty = b("dirty");
+                self.history.in_tx = b("in_tx");
+                self.dirty.history = true;
+                self.dirty.state = true;
+                self.mark_changed();
+            }
+            "watch.proposals" => {
+                if let Some(open) = params.get("open").and_then(J::as_array) {
+                    self.proposals = open.iter().filter_map(ProposalInfo::from_json).collect();
+                    let ids: Vec<String> = self.proposals.iter().map(|p| p.id.clone()).collect();
+                    self.details.retain(|id, d| ids.contains(id) && self.proposals.iter().any(|p| p.id == *id && p.op_count == d.info.op_count && p.stale == d.info.stale));
+                    self.sanitize_selection();
+                }
+            }
+            "watch.activity" => {
+                if let Some(list) = params.get("entries").and_then(J::as_array) {
+                    self.feed.push(list.iter().filter_map(FeedEntry::from_json).collect());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_answer(&mut self, kind: Pend, r: Result<J, orr_remote::RpcError>) {
+        match kind {
+            Pend::Edit(what) => {
+                if let Err(e) = r {
+                    self.error(format!("{what}: {}", e.message));
+                }
+            }
+            Pend::Rows(gen) => {
+                self.inflight.rows = false;
+                if let Ok(v) = r {
+                    self.rows = rows_of(&v);
+                    if gen == self.change_gen {
+                        self.sanitize_selection();
+                    }
+                }
+            }
+            Pend::Inspect(t) => {
+                self.inflight.inspect = false;
+                match r {
+                    Ok(v) => self.apply_entity(&t, &v),
+                    Err(_) => {
+                        if self.inspect.as_ref().is_some_and(|i| i.target == t) {
+                            self.inspect = None;
+                        }
+                    }
+                }
+            }
+            Pend::Singletons => {
+                self.inflight.singletons = false;
+                if let Ok(v) = r {
+                    self.singletons = singletons_of(&self.types, &v);
+                    if self.refit {
+                        self.refit = false;
+                        self.fit_camera();
+                    }
+                }
+            }
+            Pend::History => {
+                self.inflight.history = false;
+                if let Ok(v) = r {
+                    self.history = History::from_json(&v);
+                }
+            }
+            Pend::State => {
+                self.inflight.state = false;
+                if let Ok(v) = r {
+                    self.apply_state(&v);
+                }
+            }
+            Pend::Clients => {
+                self.inflight.clients = false;
+                if let Ok(v) = r {
+                    self.apply_activity_list(&v);
+                }
+            }
+            Pend::Detail(id) => {
+                self.inflight.details.retain(|d| *d != id);
+                if let Ok(v) = r {
+                    if let Some(d) = ProposalDetail::from_json(&v) {
+                        self.details.insert(id, d);
+                    }
+                }
+            }
+            Pend::PreviewRows(id) => {
+                self.inflight.preview_rows = false;
+                if let (Ok(v), Some(p)) = (r, self.preview.as_mut()) {
+                    if p.id == id {
+                        p.rows = rows_of(&v);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_state(&mut self, v: &J) {
+        let was = self.sim.mode;
+        self.sim = SimState::from_json(v);
+        if was != self.sim.mode {
+            self.mark_changed();
+        }
+        if self.sim.dirty != self.history.dirty {
+            self.history.dirty = self.sim.dirty;
+        }
+        self.history.in_tx = self.sim.in_tx;
+    }
+
+    fn apply_activity_list(&mut self, v: &J) {
+        if let Some(list) = v.get("entries").and_then(J::as_array) {
+            self.feed.push(list.iter().filter_map(FeedEntry::from_json).collect());
+        }
+        if let Some(ms) = v.get("now_ms").and_then(J::as_u64) {
+            self.server_now_ms = ms;
+        }
+        if let Some(list) = v.get("clients").and_then(J::as_array) {
+            self.clients = list
+                .iter()
+                .filter_map(|c| {
+                    let caps = c.get("capabilities")?.as_array()?.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",");
+                    Some(ClientInfo { name: c.get("client")?.as_str()?.to_string(), caps, requests: c.get("requests").and_then(J::as_u64).unwrap_or(0) })
+                })
+                .filter(|c| c.name != self.backend.own_client)
+                .collect();
+        }
+    }
+
+    /// The answer to `world.get` of the selected entity.
+    fn apply_entity(&mut self, t: &Target, v: &J) {
+        if self.selection.as_ref() != Some(t) {
+            return;
+        }
+        let row = v.get("entity").and_then(EntityRow::from_json);
+        let mut components = Vec::new();
+        if let Some(obj) = v.get("components").and_then(J::as_object) {
+            for (name, j) in obj {
+                let Some(ty) = self.types.get(name) else { continue };
+                if let Ok(val) = json_to_value(ty.desc(), j, false) {
+                    components.push((name.clone(), val));
+                }
+            }
+        }
+        self.inspect = Some(Inspect { target: t.clone(), row, components });
+    }
+
+    /// The host says something changed that the caches may not know: ask again.
+    fn mark_changed(&mut self) {
+        self.change_gen += 1;
+        self.dirty.rows = true;
+        self.dirty.inspect = true;
+        self.dirty.singletons = true;
+    }
+
+    fn mark_edited(&mut self) {
+        self.mark_changed();
+        self.dirty.history = true;
+        self.dirty.state = true;
+    }
+
+    fn connection_lost(&mut self, err: &str) {
+        if self.down.is_some() {
+            return;
+        }
+        let down = match &self.backend.host {
+            Some(h) => {
+                let why = h.stopped_reason(Duration::from_millis(2000));
+                match why {
+                    Some(w) => Down { reason: format!("simulation host stopped: {w}"), local: true },
+                    None => Down { reason: format!("disconnected: {err}"), local: true },
+                }
+            }
+            None => Down { reason: format!("disconnected: {err}"), local: false },
+        };
+        self.error(down.reason.clone());
+        self.gesture = None;
+        self.pending.clear();
+        self.down = Some(down);
+    }
+
+    // ---- per frame ----
+
+    /// Call once per UI frame: takes in notifications, answers and the newest
+    /// frame, and sends the requests that refresh what changed. Never waits
+    /// for the host.
+    pub fn pump(&mut self) {
+        if self.down.is_some() {
+            return;
+        }
+        if let Err(e) = self.backend.erp.poll() {
+            self.ingest();
+            self.connection_lost(&e.to_string());
+            return;
+        }
+        self.ingest();
+        self.drain_bridge();
+        if self.down.is_some() {
+            return;
+        }
+        self.refresh_snapshot();
+        self.refresh_preview();
+        self.send_refreshes();
+    }
+
+    fn drain_bridge(&mut self) {
+        for ev in self.backend.bridge.drain_events() {
+            match ev {
+                BridgeEvent::Lifecycle(Lifecycle::DebugRejected(e)) => self.error(format!("debug edit refused: {e}")),
+                BridgeEvent::Lifecycle(Lifecycle::Disconnected) => {
+                    self.connection_lost("the frame stream closed");
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if !self.backend.bridge.is_alive() {
+            self.connection_lost("the frame stream closed");
+        }
+    }
+
+    fn refresh_snapshot(&mut self) {
+        let Some(s) = self.backend.bridge.snapshot() else { return };
+        if self.snapshot.as_ref().is_some_and(|o| o.seq() == s.seq()) {
+            return;
+        }
+        let frame = s.predicted();
+        self.bodies = body_views(frame);
+        self.checksum = frame.checksum();
+        let alive = frame.alive_count();
+        if alive != self.snap_entities {
+            self.snap_entities = alive;
+            if alive as usize != self.rows.len() {
+                self.dirty.rows = true;
+            }
+        }
+        self.dirty.inspect = true;
+        if self.sim.mode == Mode::Play {
+            self.dirty.singletons = true;
+        }
+        self.snapshot = Some(s);
+    }
+
+    fn refresh_preview(&mut self) {
+        let Some(p) = self.preview.as_mut() else { return };
+        if !p.stream.is_alive() {
+            self.preview = None;
+            return;
+        }
+        let Some(s) = p.stream.snapshot() else { return };
+        if s.seq() == p.seq {
+            return;
+        }
+        p.seq = s.seq();
+        p.bodies = body_views(s.predicted());
+        let id = p.id.clone();
+        if !self.inflight.preview_rows {
+            self.inflight.preview_rows = true;
+            self.post("proposal.preview", json!({"id": id, "values": false, "limit": ROWS_LIMIT}), Pend::PreviewRows(id));
+        }
+    }
+
+    fn send_refreshes(&mut self) {
+        let now = Instant::now();
+        if self.dirty.state && !self.inflight.state {
+            self.dirty.state = false;
+            self.inflight.state = true;
+            self.post("sim.state", J::Null, Pend::State);
+        }
+        if self.dirty.history && !self.inflight.history {
+            self.dirty.history = false;
+            self.inflight.history = true;
+            self.post("history.list", J::Null, Pend::History);
+        }
+        if self.dirty.rows && !self.inflight.rows {
+            self.dirty.rows = false;
+            self.inflight.rows = true;
+            let gen = self.change_gen;
+            self.post("world.query", json!({"limit": ROWS_LIMIT}), Pend::Rows(gen));
+        }
+        let due = self.last_inspect.is_none_or(|t| now.duration_since(t) >= INSPECT_EVERY);
+        if due && self.dirty.inspect {
+            if let (Some(t), false) = (self.selection.clone(), self.inflight.inspect) {
+                self.dirty.inspect = false;
+                self.inflight.inspect = true;
+                self.last_inspect = Some(now);
+                self.post("world.get", json!({"entity": t.param()}), Pend::Inspect(t));
+            } else if self.selection.is_none() {
+                self.dirty.inspect = false;
+            }
+        }
+        if due && self.dirty.singletons && !self.inflight.singletons {
+            self.dirty.singletons = false;
+            self.inflight.singletons = true;
+            self.last_inspect = Some(now);
+            self.post("world.singleton.get", J::Null, Pend::Singletons);
+        }
+        let want: Vec<String> = self.proposals.iter().filter(|p| !self.details.contains_key(&p.id) && !self.inflight.details.contains(&p.id)).map(|p| p.id.clone()).collect();
+        for id in want {
+            self.inflight.details.push(id.clone());
+            self.post("proposal.get", json!({"id": id}), Pend::Detail(id));
+        }
+        if !self.inflight.clients && self.last_clients.is_none_or(|t| now.duration_since(t) >= CLIENTS_EVERY) {
+            self.last_clients = Some(now);
+            self.inflight.clients = true;
+            let since = self.feed.last_seq;
+            self.post("activity.list", json!({"since": since, "include_reads": true, "limit": 200}), Pend::Clients);
+        }
+    }
+
+    /// Brings every cache up to date and waits for the frame of the host's
+    /// current state: what a test (or a script) calls before it looks at the
+    /// editor. The UI never calls it.
+    pub fn sync(&mut self) {
+        // Notifications lag a little behind the host (it checks the history a few times a second):
+        // ask for everything once, so the caches are what the host has now.
+        self.mark_edited();
+        for _ in 0..12 {
+            self.last_inspect = None;
+            self.last_clients = None;
+            self.pump();
+            if self.down.is_some() {
+                return;
+            }
+            // The host answers in order: this returns after every request sent so far.
+            let Ok(state) = self.call("sim.state", J::Null) else { return };
+            self.apply_state(&state);
+            // The frame the host publishes for that state.
+            if !self.sim.playing {
+                let want = self.sim.checksum;
+                let end = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < end {
+                    self.drain_bridge();
+                    self.refresh_snapshot();
+                    if self.down.is_some() || self.checksum == want {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            self.wait_preview();
+            self.pump();
+            let quiet = !(self.dirty.rows || self.dirty.inspect || self.dirty.singletons || self.dirty.history || self.dirty.state) && self.pending.is_empty();
+            if quiet {
+                break;
+            }
+            // One more barrier, so the answers to what `pump` just sent have arrived.
+            if self.call("sim.state", J::Null).is_err() {
+                return;
+            }
+        }
+        let _ = self.backend.erp.poll();
+        self.ingest();
+    }
+
+    /// Waits (briefly) until the staged frame of the previewed proposal and its entities have arrived.
+    fn wait_preview(&mut self) {
+        let end = Instant::now() + Duration::from_secs(3);
+        while self.down.is_none() && self.preview.as_ref().is_some_and(|p| p.seq == 0 || p.rows.is_empty() || self.inflight.preview_rows) {
+            if Instant::now() > end {
+                break;
+            }
+            self.pump();
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -313,21 +990,27 @@ impl Editor {
 
     /// Replaces the document with a scene file. Refused in play mode.
     pub fn open_path(&mut self, path: &Path) -> bool {
-        if self.play.is_some() {
+        if self.sim.mode == Mode::Play {
             self.error("stop play before opening a scene");
             return false;
         }
-        match Self::open(path) {
-            Ok(mut fresh) => {
-                fresh.log = std::mem::take(&mut self.log);
-                fresh.camera = self.camera;
-                *self = fresh;
-                self.fit_camera();
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.error(format!("cannot read {}: {e}", path.display()));
+                return false;
+            }
+        };
+        match self.call("scene.load", json!({"text": text, "path": path.display().to_string()})) {
+            Ok(_) => {
+                self.select(None);
+                self.refit = true;
+                self.mark_edited();
                 self.info(format!("opened {}", path.display()));
                 true
             }
             Err(e) => {
-                self.error(e);
+                self.error(format!("{}: {e}", path.display()));
                 false
             }
         }
@@ -335,31 +1018,36 @@ impl Editor {
 
     /// Saves to the current path. `false` (and a message) if there is none or it fails.
     pub fn save(&mut self) -> bool {
-        match self.path.clone() {
-            Some(p) => self.save_as(&p),
-            None => {
-                self.error("no file name yet: use Save As");
-                false
-            }
+        if self.sim.scene_path.is_none() {
+            self.error("no file name yet: use Save As");
+            return false;
         }
+        self.save_with(json!({"write": true}))
     }
 
     /// Saves the scene text to `path` and makes it the current path.
     pub fn save_as(&mut self, path: &Path) -> bool {
-        if self.doc.in_tx() {
+        self.save_with(json!({"write": true, "path": path.display().to_string()}))
+    }
+
+    fn save_with(&mut self, params: J) -> bool {
+        if self.history.in_tx || self.gesture.is_some() {
             self.error("finish the current edit before saving");
             return false;
         }
-        let text = self.doc.to_yaml();
-        match std::fs::write(path, &text) {
-            Ok(()) => {
-                self.doc.save_yaml();
-                self.path = Some(path.to_path_buf());
-                self.info(format!("saved {}", path.display()));
+        match self.call("scene.save", params) {
+            Ok(r) => {
+                let written = r.get("written").and_then(J::as_str).unwrap_or_default().to_string();
+                self.sim.scene_path = Some(written.clone());
+                self.sim.dirty = false;
+                self.history.dirty = false;
+                self.dirty.state = true;
+                self.dirty.history = true;
+                self.info(format!("saved {written}"));
                 true
             }
             Err(e) => {
-                self.error(format!("cannot write {}: {e}", path.display()));
+                self.error(format!("cannot save: {e}"));
                 false
             }
         }
@@ -371,44 +1059,159 @@ impl Editor {
     /// is one undo step. Edit mode only; in play mode edits are recorded
     /// debug commands and there is nothing to group.
     pub fn begin_edit(&mut self, label: &str) {
-        if self.play.is_none() && !self.doc.in_tx() {
-            let r = self.doc.begin_tx(label, Origin::User);
-            self.report("edit", r);
+        if self.sim.mode == Mode::Edit && self.gesture.is_none() {
+            match self.call("tx.begin", json!({"label": label})) {
+                Ok(_) => self.gesture = Some(label.to_string()),
+                Err(e) => self.error(format!("edit: {e}")),
+            }
         }
     }
 
     /// Ends the gesture started by [`begin_edit`](Self::begin_edit).
     pub fn end_edit(&mut self) {
-        if self.doc.in_tx() {
-            let r = self.doc.commit_tx();
-            self.report("edit", r);
+        if self.gesture.take().is_some() {
+            match self.call("tx.commit", J::Null) {
+                Ok(r) => {
+                    if let Some(h) = r.get("history") {
+                        self.history = History::from_json(h);
+                    }
+                    self.mark_edited();
+                }
+                Err(e) => self.error(format!("edit: {e}")),
+            }
         }
+    }
+
+    /// True while a gesture is open.
+    pub fn in_gesture(&self) -> bool {
+        self.gesture.is_some()
     }
 
     /// Sets one field of the selected entity's component (or a singleton).
     /// `path` is a reflect path (`"pos.x"`, `""` = whole). Returns true if
-    /// something changed. A refusal is reported as an error message.
+    /// something changed. A refusal is reported as an error message. Inside a
+    /// gesture the edit is sent without waiting (and assumed to succeed; a
+    /// refusal is reported when the host answers).
     pub fn set_field(&mut self, owner: &Owner, path: &str, value: Value) -> bool {
-        let what = match owner {
-            Owner::Component(c) | Owner::Singleton(c) => format!("set {c}.{path}"),
-        };
-        let guid = self.selected_guid();
-        let sel = self.selection.clone();
-        let result = match (&mut self.play, owner) {
-            (None, Owner::Component(c)) => match guid {
-                Some(guid) => self.doc.apply(Op::SetField { guid, component: c.clone(), path: path.to_string(), value }, Origin::User).map(|a| a.changed),
-                None => Err(EditError::Invalid("nothing selected".into())),
-            },
-            (None, Owner::Singleton(s)) => {
-                self.doc.apply(Op::SetSingletonField { singleton: s.clone(), path: path.to_string(), value }, Origin::User).map(|a| a.changed)
+        let (path, value) = self.variant_switch(owner, path, value);
+        let (path, value) = (path.as_str(), value);
+        let (what, method, params) = match owner {
+            Owner::Component(c) => {
+                let Some(t) = &self.selection else {
+                    self.error(format!("set {c}.{path}: nothing selected"));
+                    return false;
+                };
+                (format!("set {c}.{path}"), "world.patch", json!({"entity": t.param(), "component": c, "path": path, "value": value_to_json(&value)}))
             }
-            (Some(p), Owner::Component(c)) => match sel {
-                Some(t) => p.set_field(&t, c, path, value),
-                None => Err(EditError::Invalid("nothing selected".into())),
-            },
-            (Some(p), Owner::Singleton(s)) => p.set_singleton_field(s, path, value),
+            Owner::Singleton(s) => (format!("set {s}.{path}"), "world.singleton.patch", json!({"name": s, "path": path, "value": value_to_json(&value)})),
         };
-        self.report(&what, result).unwrap_or(false)
+        self.patch_cached(owner, path, &value);
+        if self.gesture.is_some() {
+            self.post(method, params, Pend::Edit(what));
+            self.history.dirty = true;
+            self.dirty.inspect = true;
+            return true;
+        }
+        match self.call(method, params) {
+            Ok(r) => {
+                let changed = r.get("changed").and_then(J::as_bool).unwrap_or(false);
+                if changed {
+                    if self.sim.mode == Mode::Edit {
+                        self.history.dirty = true;
+                    }
+                    self.mark_edited();
+                }
+                changed
+            }
+            Err(e) => {
+                self.error(format!("{what}: {e}"));
+                // The cache was changed ahead of the host: take it back.
+                self.dirty.inspect = true;
+                self.dirty.singletons = true;
+                false
+            }
+        }
+    }
+
+    /// ERP writes a tagged value whole: switching `shape.kind` to `circle`
+    /// becomes writing `shape` as the circle variant with its default fields
+    /// (what the widget's combo box means).
+    fn variant_switch(&self, owner: &Owner, path: &str, value: Value) -> (String, Value) {
+        let (Owner::Component(name) | Owner::Singleton(name)) = owner;
+        let Value::Enum(variant) = &value else { return (path.to_string(), value) };
+        let Some(parent) = path.strip_suffix(".kind").or_else(|| (path == "kind").then_some("")) else { return (path.to_string(), value) };
+        let Some(ty) = self.types.get(name) else { return (path.to_string(), value) };
+        let Ok(desc) = orr_remote::json::desc_at_path(ty.desc(), parent) else { return (path.to_string(), value) };
+        if let orr_reflect::Kind::Tagged(t) = &desc.kind {
+            if let Some(v) = t.variants.iter().find(|v| &v.name == variant) {
+                return (parent.to_string(), Value::Variant(v.name.clone(), v.default.clone()));
+            }
+        }
+        (path.to_string(), value)
+    }
+
+    /// Changes the cached value the widgets show, ahead of the host's answer.
+    fn patch_cached(&mut self, owner: &Owner, path: &str, value: &Value) {
+        let (list, name): (&mut Vec<(String, Value)>, &str) = match owner {
+            Owner::Component(c) => match self.inspect.as_mut() {
+                Some(i) if Some(&i.target) == self.selection.as_ref() => (&mut i.components, c.as_str()),
+                _ => return,
+            },
+            Owner::Singleton(s) => (&mut self.singletons, s.as_str()),
+        };
+        let Some((_, cur)) = list.iter_mut().find(|(n, _)| n == name) else { return };
+        if path.is_empty() {
+            *cur = value.clone();
+            return;
+        }
+        let Some(ty) = self.types.get(name) else { return };
+        let desc = ty.desc();
+        let mut bytes = vec![0u8; desc.size()];
+        if desc.write_unranged(&mut bytes, cur).is_err() || ty.set(&mut bytes, path, value.clone()).is_err() {
+            return;
+        }
+        *cur = desc.read(&bytes);
+    }
+
+    /// Reads one field of the selected entity (or a singleton) from the host.
+    pub fn read_field(&mut self, owner: &Owner, path: &str) -> Result<Value, String> {
+        match owner {
+            Owner::Component(c) => {
+                let t = self.selection.clone().ok_or("nothing selected")?;
+                self.field_of(&t, c, path)
+            }
+            Owner::Singleton(s) => {
+                let r = self.call("world.singleton.get", json!({"name": s, "path": path}))?;
+                self.decode_field(s, path, &r["value"])
+            }
+        }
+    }
+
+    /// Reads one field of any entity from the host (`path` like `pos.x`, empty = the whole component).
+    pub fn field_of(&mut self, t: &Target, component: &str, path: &str) -> Result<Value, String> {
+        let r = self.call("world.get", json!({"entity": t.param(), "component": component, "path": path}))?;
+        self.decode_field(component, path, &r["value"])
+    }
+
+    fn decode_field(&self, type_name: &str, path: &str, j: &J) -> Result<Value, String> {
+        let ty = self.types.get(type_name).ok_or_else(|| format!("unknown type '{type_name}'"))?;
+        let desc = orr_remote::json::desc_at_path(ty.desc(), path)?;
+        json_to_value(&desc, j, false)
+    }
+
+    /// Runs any ERP method on the host and waits for the answer: the escape
+    /// hatch for tools and tests (the editor's own actions have methods of
+    /// their own). `Err` carries the host's message.
+    pub fn host_call(&mut self, method: &str, params: J) -> Result<J, String> {
+        self.call(method, params)
+    }
+
+    /// Parses text as a value of the field `path` of type `type_name` (a
+    /// component or singleton), like a person typing it.
+    pub fn parse_field_text(&self, type_name: &str, path: &str, text: &str) -> Result<Value, String> {
+        let ty = self.types.get(type_name).ok_or_else(|| format!("unknown type '{type_name}'"))?;
+        let desc = orr_remote::json::desc_at_path(ty.desc(), path)?;
+        crate::script::parse_like(&crate::inspector::zero_value(&desc), text)
     }
 
     /// Adds a component (default value) to the selected entity.
@@ -417,16 +1220,16 @@ impl Editor {
             self.error("nothing selected");
             return false;
         };
-        let what = format!("add {component}");
-        let guid = self.selected_guid();
-        let r = match &mut self.play {
-            None => match guid {
-                Some(guid) => self.doc.apply(Op::AddComponent { guid, component: component.to_string(), value: None }, Origin::User).map(|_| ()),
-                None => Err(EditError::UnknownEntity("selection".into())),
-            },
-            Some(p) => p.add_component(&t, component, None),
-        };
-        self.report(&what, r).is_some()
+        match self.call("world.insert", json!({"entity": t.param(), "component": component})) {
+            Ok(_) => {
+                self.mark_edited();
+                true
+            }
+            Err(e) => {
+                self.error(format!("add {component}: {e}"));
+                false
+            }
+        }
     }
 
     /// Removes a component from the selected entity.
@@ -435,64 +1238,53 @@ impl Editor {
             self.error("nothing selected");
             return false;
         };
-        let what = format!("remove {component}");
-        let guid = self.selected_guid();
-        let r = match &mut self.play {
-            None => match guid {
-                Some(guid) => self.doc.apply(Op::RemoveComponent { guid, component: component.to_string() }, Origin::User).map(|_| ()),
-                None => Err(EditError::UnknownEntity("selection".into())),
-            },
-            Some(p) => p.remove_component(&t, component),
-        };
-        self.report(&what, r).is_some()
+        match self.call("world.remove", json!({"entity": t.param(), "component": component})) {
+            Ok(_) => {
+                self.mark_edited();
+                true
+            }
+            Err(e) => {
+                self.error(format!("remove {component}: {e}"));
+                false
+            }
+        }
     }
 
     /// Spawns a dynamic circle body at `at` (world units) and selects it.
     pub fn spawn_body(&mut self, at: [f32; 2]) -> bool {
         let pos = FPVec2::new(fp_of_f64(f64::from(at[0])).unwrap_or(FP::ZERO), fp_of_f64(f64::from(at[1])).unwrap_or(FP::ZERO));
-        let components = vec![
-            (
-                "orr_physics::Body".to_string(),
-                Value::Struct(vec![
-                    ("pos".into(), Value::Vec2(pos)),
-                    ("inv_mass".into(), Value::Fixed(FP::ONE)),
-                    // A unit-mass disc of radius 0.5: I = m r^2 / 2 = 0.125, so 1 / I = 8.
-                    ("inv_inertia".into(), Value::Fixed(FP::from_int(8))),
-                    ("kind".into(), Value::Enum("dynamic".into())),
-                ]),
-            ),
-            ("orr_physics::Collider".to_string(), Value::Struct(Vec::new())),
-        ];
-        match &mut self.play {
-            None => {
-                let name = self.fresh_name();
-                let r = self.doc.apply(Op::SpawnEntity { guid: None, name: Some(name), components }, Origin::User);
-                match self.report("spawn", r) {
-                    Some(a) => {
-                        self.selection = a.guid.map(Target::Guid);
-                        true
-                    }
-                    None => false,
-                }
+        let body = Value::Struct(vec![
+            ("pos".into(), Value::Vec2(pos)),
+            ("inv_mass".into(), Value::Fixed(FP::ONE)),
+            // A unit-mass disc of radius 0.5: I = m r^2 / 2 = 0.125, so 1 / I = 8.
+            ("inv_inertia".into(), Value::Fixed(FP::from_int(8))),
+            ("kind".into(), Value::Enum("dynamic".into())),
+        ]);
+        let mut params = json!({"components": {"orr_physics::Body": value_to_json(&body), "orr_physics::Collider": {}}});
+        if self.sim.mode == Mode::Edit {
+            params["name"] = json!(self.fresh_name());
+        }
+        match self.call("world.spawn", params) {
+            Ok(r) => {
+                let t = r.get("guid").and_then(J::as_str).or_else(|| r.get("handle").and_then(J::as_str)).and_then(Target::parse);
+                self.mark_edited();
+                // The new entity is not in the hierarchy yet: keep the selection through the next refresh.
+                self.selection = t;
+                self.inspect = None;
+                self.dirty.inspect = true;
+                true
             }
-            Some(p) => {
-                let r = p.spawn(&components);
-                match self.report("spawn", r) {
-                    Some(e) => {
-                        self.selection = Some(Target::Entity(e));
-                        true
-                    }
-                    None => false,
-                }
+            Err(e) => {
+                self.error(format!("spawn: {e}"));
+                false
             }
         }
     }
 
     fn fresh_name(&self) -> String {
-        let names: Vec<Option<String>> = self.doc.view().entities().into_iter().map(|e| e.name).collect();
         (1..)
             .map(|n| format!("new_body_{n}"))
-            .find(|c| !names.iter().any(|n| n.as_deref() == Some(c.as_str())))
+            .find(|c| !self.rows.iter().any(|r| r.name.as_deref() == Some(c.as_str())))
             .expect("an unused name exists")
     }
 
@@ -502,43 +1294,49 @@ impl Editor {
             self.error("nothing selected");
             return false;
         };
-        let guid = self.selected_guid();
-        let r = match &mut self.play {
-            None => match guid {
-                Some(guid) => self.doc.apply(Op::DespawnEntity { guid }, Origin::User).map(|_| ()),
-                None => Err(EditError::UnknownEntity("selection".into())),
-            },
-            Some(p) => p.despawn(&t),
-        };
-        let ok = self.report("delete", r).is_some();
-        if ok {
-            self.selection = None;
+        match self.call("world.despawn", json!({"entity": t.param()})) {
+            Ok(_) => {
+                self.selection = None;
+                self.inspect = None;
+                self.mark_edited();
+                true
+            }
+            Err(e) => {
+                self.error(format!("delete: {e}"));
+                false
+            }
         }
-        ok
     }
 
     /// Takes back the last edit (edit mode only).
     pub fn undo(&mut self) -> bool {
-        if self.play.is_some() {
-            self.error("undo works in edit mode; stop play first");
-            return false;
-        }
-        let r = self.doc.undo();
-        let ok = self.report("undo", r).is_some();
-        self.sanitize_selection();
-        ok
+        self.history_step("history.undo", "undo")
     }
 
     /// Repeats the last undone edit (edit mode only).
     pub fn redo(&mut self) -> bool {
-        if self.play.is_some() {
-            self.error("redo works in edit mode; stop play first");
+        self.history_step("history.redo", "redo")
+    }
+
+    fn history_step(&mut self, method: &str, what: &str) -> bool {
+        if self.sim.mode == Mode::Play {
+            self.error(format!("{what} works in edit mode; stop play first"));
             return false;
         }
-        let r = self.doc.redo();
-        let ok = self.report("redo", r).is_some();
-        self.sanitize_selection();
-        ok
+        match self.call(method, J::Null) {
+            Ok(r) => {
+                if let Some(h) = r.get("history") {
+                    self.history = History::from_json(h);
+                    self.sim.dirty = self.history.dirty;
+                }
+                self.mark_edited();
+                true
+            }
+            Err(e) => {
+                self.error(format!("{what}: {e}"));
+                false
+            }
+        }
     }
 
     // ---- agent activity and proposals ----
@@ -563,125 +1361,170 @@ impl Editor {
         &mut self.feed
     }
 
-    /// Milliseconds since the embedded ERP server started (the clock of
-    /// activity entries), if it runs.
+    /// Milliseconds since the host's ERP server started (the clock of
+    /// activity entries), as of the last refresh.
     pub fn erp_elapsed_ms(&self) -> Option<u64> {
-        self.erp.as_ref().map(ErpServer::elapsed_ms)
+        (self.server_now_ms > 0).then_some(self.server_now_ms)
     }
 
-    /// The clients connected to the embedded ERP server right now.
-    pub fn agents(&self) -> Vec<ClientInfo> {
-        self.erp.as_ref().map(ErpServer::clients).unwrap_or_default()
+    /// The other clients connected to the host right now (not this editor).
+    pub fn agents(&self) -> &[ClientInfo] {
+        &self.clients
     }
 
-    /// What the viewport draws: the staged frame of the previewed proposal
-    /// (edit mode only), else the same as [`view`](Self::view).
-    pub fn viewport_view(&self) -> View<'_> {
-        if let (None, Some(id)) = (&self.play, self.agent.preview) {
-            if let Ok(v) = self.doc.proposal_preview(id) {
-                return v;
-            }
-        }
-        self.view()
+    /// The ERP address agents can connect to, and how many are connected. For
+    /// a local host that is the `--erp` listener (none without it); for an
+    /// attached one, the host's address.
+    pub fn erp_status(&self) -> Option<(String, usize)> {
+        self.backend.url.clone().map(|u| (u, self.clients.len()))
+    }
+
+    /// The open proposals.
+    pub fn proposals(&self) -> &[ProposalInfo] {
+        &self.proposals
+    }
+
+    /// The diff and summary of an open proposal, once the host has sent them.
+    pub fn proposal_detail(&self, id: &str) -> Option<&ProposalDetail> {
+        self.details.get(id)
     }
 
     /// The proposal the viewport currently previews (edit mode only).
-    pub fn previewing(&self) -> Option<ProposalId> {
-        if self.play.is_some() {
+    pub fn previewing(&self) -> Option<&str> {
+        if self.sim.mode == Mode::Play {
             return None;
         }
-        self.agent.preview.filter(|&i| self.doc.proposal_info(i).is_ok())
+        self.preview.as_ref().map(|p| p.id.as_str()).filter(|id| self.proposals.iter().any(|p| p.id == *id))
     }
 
-    /// Turns the preview of a proposal on (`Some`) or off (`None`). Refused in play mode.
-    pub fn set_preview(&mut self, id: Option<ProposalId>) -> bool {
+    /// Turns the preview of a proposal on (`Some`) or off (`None`). Refused in
+    /// play mode. The staged frame reaches the viewport through a second frame
+    /// stream of the host (`watch.subscribe` source `proposal:<id>`).
+    pub fn set_preview(&mut self, id: Option<String>) -> bool {
         match id {
-            Some(_) if self.play.is_some() => {
+            Some(_) if self.sim.mode == Mode::Play => {
                 self.error("preview needs edit mode; stop play first");
                 false
             }
-            Some(i) if self.doc.proposal_info(i).is_err() => {
+            Some(i) if !self.proposals.iter().any(|p| p.id == i) => {
                 self.error(format!("unknown proposal {i}"));
                 false
             }
-            other => {
-                self.agent.preview = other;
+            Some(i) => {
+                if self.preview.as_ref().is_some_and(|p| p.id == i) {
+                    return true;
+                }
+                match self.backend.frame_stream(&format!("proposal:{i}")) {
+                    Ok(stream) => {
+                        self.preview = Some(Preview { id: i.clone(), stream, seq: 0, bodies: Vec::new(), rows: Vec::new() });
+                        self.agent.preview = Some(i);
+                        true
+                    }
+                    Err(e) => {
+                        self.error(format!("preview: {e}"));
+                        false
+                    }
+                }
+            }
+            None => {
+                self.preview = None;
+                self.agent.preview = None;
+                self.inflight.preview_rows = false;
                 true
             }
         }
     }
 
-    // ---- ERP ----
-
-    /// Starts the embedded ERP server. The play defaults (players, tick rate)
-    /// and the scene path for `scene.save {write: true}` are the editor's.
-    /// Returns the URL clients connect to.
-    pub fn start_erp(&mut self, mut cfg: ServerConfig) -> Result<String, String> {
-        if self.erp.is_some() {
-            return Err("the ERP server is already running".into());
+    /// The render list of what the viewport shows: the scene's frame, or the
+    /// staged frame of the previewed proposal with its changes marked, plus
+    /// the pulses (`(entity, fade)`) of entities an agent just edited.
+    pub fn viewport_list(&self, vp: (u32, u32), pulses: &[(Target, f32)]) -> RenderList {
+        let selected = self.selection.as_ref().and_then(|t| self.entity_of(t));
+        let previewing = self.previewing();
+        let staged = self.preview.as_ref().filter(|p| Some(p.id.as_str()) == previewing && p.seq > 0);
+        let (mut list, bodies, rows): (RenderList, &[BodyView], &[EntityRow]) = match staged {
+            Some(p) => {
+                let scene = Scene { bodies: &p.bodies, rows: &p.rows };
+                let base = Scene { bodies: &self.bodies, rows: &self.rows };
+                let sel = self.selection.as_ref().and_then(|t| match t {
+                    Target::Guid(g) => scene.entity_of(g),
+                    Target::Entity(e) => Some(*e),
+                });
+                let list = match self.details.get(&p.id) {
+                    Some(d) => viewport::build_preview_list(&scene, &base, &d.summary, sel, &self.camera, vp),
+                    None => viewport::build_list(&p.bodies, sel, &self.camera, vp),
+                };
+                (list, &p.bodies, &p.rows)
+            }
+            None => (viewport::build_list(&self.bodies, selected, &self.camera, vp), &self.bodies, &self.rows),
+        };
+        if !pulses.is_empty() {
+            let live: Vec<(Entity, f32)> = pulses
+                .iter()
+                .filter_map(|(t, f)| {
+                    let e = match t {
+                        Target::Entity(e) => Some(*e),
+                        Target::Guid(g) => rows.iter().find(|r| r.guid.as_ref() == Some(g)).map(|r| r.entity),
+                    }?;
+                    Some((e, *f))
+                })
+                .collect();
+            viewport::add_pulses(&mut list, bodies, &live);
         }
-        cfg.limits.player_count = PLAYERS;
-        cfg.limits.tick_rate = TICK_RATE;
-        cfg.limits.scene_path = self.path.clone();
-        cfg.limits.build_id = default_build_id("PhysGame");
-        cfg.limits.game = GameHooks::new("PhysGame")
-            .with_metrics(orr_sample::physics_game::PhysMetrics)
-            .with_bot(|seed, tick, slot| orr_sample::physics_game::bot_input(seed, tick, orr_sim::PlayerSlot(slot)));
-        let server = ErpServer::start(cfg).map_err(|e| format!("ERP: {e}"))?;
-        let url = server.url();
-        self.erp = Some(server);
-        self.info(format!("ERP listening on {url}"));
-        Ok(url)
+        list
     }
 
-    /// The ERP server's URL and connection count, if it runs.
-    pub fn erp_status(&self) -> Option<(String, usize)> {
-        self.erp.as_ref().map(|s| (s.url(), s.connection_count()))
+    /// The body under a world point (of the frame on screen), as a target.
+    pub fn pick(&self, world: [f32; 2]) -> Option<Target> {
+        let e = viewport::pick(&self.bodies, world)?;
+        Some(self.row_of(&Target::Entity(e)).map_or(Target::Entity(e), EntityRow::target))
     }
 
-    /// Takes the ERP activity recorded since the last call into the feed.
-    fn pull_activity(&mut self) {
-        let Some(server) = &self.erp else { return };
-        if server.activity_last_seq() > self.feed.last_seq {
-            let list = server.activity_since(self.feed.last_seq);
-            self.feed.push(list);
-        }
+    /// World position of the body of a target, as the frame on screen has it.
+    pub fn body_pos(&self, t: &Target) -> Option<[f32; 2]> {
+        viewport::body_pos(&self.bodies, self.entity_of(t)?)
     }
 
-    /// Runs the ERP requests that arrived since the last call (call once per
-    /// frame). Returns how many ran.
-    pub fn poll_erp(&mut self) -> usize {
-        let Some(server) = &mut self.erp else { return 0 };
-        let had_play = self.play.is_some();
-        let report = server.poll(&mut ErpTarget { doc: &mut self.doc, play: &mut self.play });
-        if had_play != self.play.is_some() {
-            self.play_acc = 0.0;
+    /// A client with the name of an agent, on the editor's own host (scripts
+    /// stage proposals through it, the way an ERP agent would).
+    pub fn agent_client(&mut self, name: &str) -> Result<&mut ErpClient, String> {
+        if !self.agent_clients.contains_key(name) {
+            let c = self.backend.agent_client(name)?;
+            self.agent_clients.insert(name.to_string(), c);
         }
-        if report.requests > 0 {
-            self.sanitize_selection();
-        }
-        self.pull_activity();
-        report.requests
+        Ok(self.agent_clients.get_mut(name).expect("inserted above"))
+    }
+
+    /// Remembers which agent made a proposal a script staged.
+    pub(crate) fn note_script_proposal(&mut self, id: &str, agent: &str) {
+        self.script_owner.insert(id.to_string(), agent.to_string());
+    }
+
+    /// The agent a script staged proposal `id` as.
+    pub(crate) fn script_proposal_owner(&self, id: &str) -> Option<&str> {
+        self.script_owner.get(id).map(String::as_str)
     }
 
     // ---- play ----
 
-    /// Starts a play session from the scene, paused at tick 0. Refused if
-    /// one already runs or an edit gesture is open.
+    /// Starts a play session from the scene, paused at tick 0. Does nothing
+    /// if one already runs.
     pub fn start_play(&mut self) -> bool {
-        if self.play.is_some() {
+        if self.sim.mode == Mode::Play {
             return true;
         }
         self.end_edit();
-        let r = PlayController::<PhysGame>::start_play(&self.doc, self.doc.play_config(PLAYERS, TICK_RATE));
-        match self.report("play", r) {
-            Some(ctl) => {
-                self.play = Some(ctl);
-                self.play_acc = 0.0;
+        match self.call("sim.start", json!({})) {
+            Ok(r) => {
+                self.apply_state(&r);
+                self.mark_changed();
                 self.info("play started");
                 true
             }
-            None => false,
+            Err(e) => {
+                self.error(format!("play: {e}"));
+                false
+            }
         }
     }
 
@@ -707,29 +1550,37 @@ impl Editor {
 
     /// Runs a timeline control (play mode only).
     pub fn control(&mut self, op: ControlOp) {
-        if let Some(p) = &mut self.play {
-            p.control(op);
-            self.play_acc = 0.0;
-            for note in p.session_mut().take_notes() {
-                if let orr_session::PlayNote::DebugRejected(e) = note {
-                    let text = format!("debug edit refused: {e}");
-                    self.status = Some(Message { text: text.clone(), error: true });
-                    self.log.push(Message { text, error: true });
+        if self.sim.mode != Mode::Play {
+            return;
+        }
+        let (method, params) = match op {
+            ControlOp::Play => ("sim.play", J::Null),
+            ControlOp::Pause => ("sim.pause", J::Null),
+            ControlOp::Step(n) => ("sim.step", json!({"n": n})),
+            ControlOp::SetSpeed(s) => ("sim.speed", json!({"permille": s.permille()})),
+            ControlOp::Seek(t) => ("sim.seek", json!({"tick": t})),
+            ControlOp::Branch => ("sim.branch", J::Null),
+        };
+        match self.call(method, params) {
+            Ok(r) => {
+                self.apply_state(&r);
+                if matches!(op, ControlOp::Seek(_) | ControlOp::Branch | ControlOp::Step(_)) {
+                    self.mark_changed();
                 }
             }
+            Err(e) => self.error(format!("{method}: {e}")),
         }
     }
 
     /// Goes to a recorded tick (pauses).
     pub fn seek(&mut self, tick: u64) {
         self.control(ControlOp::Seek(tick));
-        self.sanitize_selection();
     }
 
     /// Sets the play speed (0.25 to 4).
     pub fn set_speed(&mut self, factor: f32) {
         let permille = (f64::from(factor) * 1000.0).round().max(0.0) as u32;
-        self.control(ControlOp::SetSpeed(Speed::from_permille(permille)));
+        self.control(ControlOp::SetSpeed(orr_bridge::Speed::from_permille(permille)));
     }
 
     /// Drops the recorded future after the head tick.
@@ -739,42 +1590,85 @@ impl Editor {
 
     /// Ends play. The document is exactly as it was before play; the
     /// recording stays available from [`last_stopped`](Self::last_stopped).
-    pub fn stop(&mut self) -> Option<&StoppedPlay> {
-        let p = self.play.take()?;
-        let stopped = p.stop_play();
-        if let Some(server) = &mut self.erp {
-            // ERP `last_play` inputs then verify against the person's play too.
-            server.note_stopped_play(stopped.clone());
+    pub fn stop(&mut self) -> Option<&Stopped> {
+        if self.sim.mode != Mode::Play {
+            return None;
         }
-        self.stopped = Some(stopped);
-        self.sanitize_selection();
-        self.info("play stopped");
-        self.stopped.as_ref()
+        match self.call("sim.stop", json!({"include_replay": true})) {
+            Ok(r) => {
+                let replay = r.get("replay").and_then(J::as_str).and_then(b64_decode).unwrap_or_default();
+                let checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum).unwrap_or(0);
+                self.stopped = Some(Stopped { tick: r.get("tick").and_then(J::as_u64).unwrap_or(0), checksum, replay });
+                self.sim.mode = Mode::Edit;
+                self.sim.playing = false;
+                self.mark_edited();
+                self.info("play stopped");
+                self.stopped.as_ref()
+            }
+            Err(e) => {
+                self.error(format!("stop: {e}"));
+                None
+            }
+        }
     }
 
-    /// Runs the ticks that `dt` seconds of wall clock call for (a fixed step
-    /// accumulator scaled by the play speed). Returns how many ran.
-    pub fn advance(&mut self, dt: f64) -> u32 {
-        let Some(p) = &mut self.play else { return 0 };
-        let session = p.session();
-        if !session.is_playing() {
-            self.play_acc = 0.0;
-            return 0;
+    // ---- when the host is gone ----
+
+    /// Starts the host again and reconnects: a local host reopens the scene file
+    /// (edits that were not saved are lost), a remote one is connected to afresh.
+    /// On failure the editor stays down and says why.
+    pub fn restart(&mut self) -> bool {
+        let spec = self.backend.spec.clone();
+        let local = spec.is_local();
+        let backend = match Backend::connect(&spec) {
+            Ok(b) => b,
+            Err(e) => {
+                self.error(format!("restart failed: {e}"));
+                return false;
+            }
+        };
+        let mut fresh = match Self::on_backend(backend) {
+            Ok(f) => f,
+            Err(e) => {
+                self.error(format!("restart failed: {e}"));
+                return false;
+            }
+        };
+        fresh.log = std::mem::take(&mut self.log);
+        fresh.camera = self.camera;
+        fresh.feed.filter = self.feed.filter;
+        fresh.agent.expand_methods = std::mem::take(&mut self.agent.expand_methods);
+        *self = fresh;
+        if local {
+            self.info("simulation host restarted: the scene was opened again; edits that were not saved are lost");
+        } else {
+            self.info("reconnected");
         }
-        let speed = f64::from(session.speed().permille()) / 1000.0;
-        let step = 1.0 / f64::from(session.tick_rate().max(1));
-        self.play_acc += dt.clamp(0.0, 1.0) * speed;
-        let mut ran = 0;
-        while self.play_acc >= step && ran < MAX_TICKS_PER_ADVANCE {
-            p.session_mut().tick();
-            self.play_acc -= step;
-            ran += 1;
-        }
-        if ran == MAX_TICKS_PER_ADVANCE {
-            self.play_acc = 0.0;
-        }
-        ran
+        true
     }
+
+    /// Makes the host thread panic (needs a host started with debug hooks):
+    /// the test of crash isolation.
+    pub fn debug_crash_host(&mut self) {
+        let _ = self.call("debug.panic", J::Null);
+    }
+}
+
+fn rows_of(v: &J) -> Vec<EntityRow> {
+    v.get("entities").and_then(J::as_array).map(|a| a.iter().filter_map(EntityRow::from_json).collect()).unwrap_or_default()
+}
+
+fn singletons_of(types: &TypeRegistry, v: &J) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    if let Some(obj) = v.get("singletons").and_then(J::as_object) {
+        for (name, j) in obj {
+            let Some(ty) = types.get(name) else { continue };
+            if let Ok(val) = json_to_value(ty.desc(), j, false) {
+                out.push((name.clone(), val));
+            }
+        }
+    }
+    out
 }
 
 /// `FP` as `f64`, for the view layer only (drag speeds, camera).
