@@ -21,6 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::caps::{secret_eq, Auth, Caps};
 use crate::error::*;
+use crate::link::{Incoming, LocalFrame};
 
 /// How long a connection may take to finish the WebSocket handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -49,31 +50,75 @@ pub(crate) enum Out {
     Close,
 }
 
+/// Where the messages of one connection go: to a socket writer task, or
+/// straight into the channel of an in-process client.
+#[derive(Clone)]
+pub(crate) enum Sink {
+    Net(UnboundedSender<Out>),
+    Local(std::sync::mpsc::Sender<Incoming>),
+}
+
 /// The way to write to one connection, from any thread.
 #[derive(Clone)]
 pub(crate) struct ConnTx {
-    tx: UnboundedSender<Out>,
-    /// Bytes queued and not yet written (for dropping frames to slow readers).
+    sink: Sink,
+    /// Bytes queued and not yet written or taken (for dropping frames to slow readers).
     pending: Arc<AtomicUsize>,
 }
 
 impl ConnTx {
+    /// The writing end of an in-process connection (its reading end is the client's).
+    pub(crate) fn local(tx: std::sync::mpsc::Sender<Incoming>, pending: Arc<AtomicUsize>) -> Self {
+        Self { sink: Sink::Local(tx), pending }
+    }
+
+    pub(crate) fn is_local(&self) -> bool {
+        matches!(self.sink, Sink::Local(_))
+    }
+
     pub(crate) fn send_text(&self, s: String) {
         if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
             return;
         }
         self.pending.fetch_add(s.len(), Relaxed);
-        let _ = self.tx.send(Out::Text(s));
+        match &self.sink {
+            Sink::Net(tx) => {
+                let _ = tx.send(Out::Text(s));
+            }
+            Sink::Local(tx) => {
+                let _ = tx.send(Incoming::Text(s));
+            }
+        }
     }
     pub(crate) fn send_binary(&self, b: Arc<Vec<u8>>) {
         if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
             return;
         }
-        self.pending.fetch_add(b.len(), Relaxed);
-        let _ = self.tx.send(Out::Binary(b));
+        if let Sink::Net(tx) = &self.sink {
+            self.pending.fetch_add(b.len(), Relaxed);
+            let _ = tx.send(Out::Binary(b));
+        }
+    }
+    /// A frame for an in-process client: shared, never serialized.
+    pub(crate) fn send_local_frame(&self, f: Arc<LocalFrame>) {
+        if let Sink::Local(tx) = &self.sink {
+            self.pending.fetch_add(f.cost, Relaxed);
+            let _ = tx.send(Incoming::Local(f));
+        }
     }
     pub(crate) fn pending(&self) -> usize {
         self.pending.load(Relaxed)
+    }
+    fn close(&self) {
+        if let Sink::Net(tx) = &self.sink {
+            let _ = tx.send(Out::Close);
+        }
+    }
+    async fn closed(&self) {
+        match &self.sink {
+            Sink::Net(tx) => tx.closed().await,
+            Sink::Local(_) => std::future::pending::<()>().await,
+        }
     }
 }
 
@@ -140,7 +185,7 @@ impl Link {
         if self.announced {
             let _ = self.shared.inbox.send(Inbound::Disconnected { conn: self.id });
         }
-        let _ = self.out.tx.send(Out::Close);
+        self.out.close();
     }
 
     /// Handles one text message (a JSON-RPC request).
@@ -284,7 +329,7 @@ fn new_link(shared: &Arc<NetShared>, binary: bool) -> (Link, tokio::sync::mpsc::
     let link = Link {
         id: shared.next_id.fetch_add(1, Relaxed),
         shared: shared.clone(),
-        out: ConnTx { tx, pending: pending.clone() },
+        out: ConnTx { sink: Sink::Net(tx), pending: pending.clone() },
         binary,
         identity: None,
         failures: 0,
@@ -323,6 +368,11 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// A client name a dev-mode client may give: short, printable, no spaces.
+fn valid_client_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 32 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+}
+
 fn refuse(status: http::StatusCode, why: &str) -> ErrorResponse {
     let mut e = ErrorResponse::new(Some(why.to_string()));
     *e.status_mut() = status;
@@ -334,6 +384,7 @@ async fn ws_conn(shared: Arc<NetShared>, stream: TcpStream) {
     let hard = shared.max_message_bytes.saturating_mul(4).max(1 << 16);
     let cfg = WebSocketConfig::default().max_message_size(Some(hard)).max_frame_size(Some(hard));
     let mut url_identity: Option<(String, Caps)> = None;
+    let mut dev_client: Option<String> = None;
     let check = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
         // A browser page must not be able to drive a local server: browsers
         // always send `Origin`, tools do not.
@@ -341,6 +392,10 @@ async fn ws_conn(shared: Arc<NetShared>, stream: TcpStream) {
             if !shared.allowed_origins.iter().any(|o| o == origin) {
                 return Err(refuse(http::StatusCode::FORBIDDEN, "origin not allowed"));
             }
+        }
+        if matches!(shared.auth, Auth::DevNoAuth) {
+            // Dev mode has no tokens, so a client may say who it is: `?client=user` is a person's view.
+            dev_client = req.uri().query().and_then(|q| query_param(q, "client")).filter(|n| valid_client_name(n));
         }
         if let Auth::Tokens(list) = &shared.auth {
             if let Some(token) = req.uri().query().and_then(|q| query_param(q, "token")) {
@@ -357,7 +412,7 @@ async fn ws_conn(shared: Arc<NetShared>, stream: TcpStream) {
     let (mut sink, mut source) = ws.split();
     let (mut link, mut rx, pending) = new_link(&shared, true);
     match (&shared.auth, url_identity) {
-        (Auth::DevNoAuth, _) => link.set_identity("dev".to_string(), Caps::ALL),
+        (Auth::DevNoAuth, _) => link.set_identity(dev_client.unwrap_or_else(|| "dev".to_string()), Caps::ALL),
         (_, Some((client, caps))) => link.set_identity(client, caps),
         _ => {}
     }
@@ -400,7 +455,7 @@ async fn ws_conn(shared: Arc<NetShared>, stream: TcpStream) {
                 Some(Ok(_)) => {}
             },
             () = &mut deadline, if link.identity.is_none() => break,
-            () = link.out.tx.closed() => break,
+            () = link.out.closed() => break,
         }
     }
     link.finish();
@@ -447,7 +502,7 @@ async fn ndjson_conn(shared: Arc<NetShared>, stream: TcpStream) {
         let n = tokio::select! {
             n = read => n,
             () = &mut deadline, if link.identity.is_none() => break,
-            () = link.out.tx.closed() => break,
+            () = link.out.closed() => break,
         };
         match n {
             Ok(0) | Err(_) => break,

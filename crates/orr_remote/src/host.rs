@@ -75,6 +75,7 @@ impl<G: Game> Host<G> {
         let elapsed = now.duration_since(self.last);
         self.last = now;
         let report = self.server.poll(&mut ErpTarget { doc: &mut self.doc, play: &mut self.play });
+        assert!(!report.crash, "debug.panic: a client asked the host to panic");
         if let Some(pc) = self.play.as_mut() {
             let events = self.pacer.advance(pc.session_mut(), elapsed);
             if !events.is_empty() {
@@ -84,13 +85,16 @@ impl<G: Game> Host<G> {
         report
     }
 
-    /// Runs frames until `stop` is set, sleeping `idle` between frames that had no request
-    /// (a frame with requests runs the next one at once).
+    /// Runs frames until `stop` is set. A frame that had no request waits for
+    /// the next one (at most `idle` while a play session runs by the clock,
+    /// at most ten times that otherwise), so a request is served at once and
+    /// an idle host sleeps. A frame with requests runs the next one at once.
     pub fn run(&mut self, stop: &AtomicBool, idle: Duration) {
         while !stop.load(Ordering::Relaxed) {
             let report = self.frame();
             if report.requests == 0 && !report.more {
-                std::thread::sleep(idle);
+                let ticking = self.play.as_ref().is_some_and(|pc| pc.session().wants_tick());
+                self.server.wait_for_request(if ticking { idle } else { idle * 10 });
             }
         }
     }

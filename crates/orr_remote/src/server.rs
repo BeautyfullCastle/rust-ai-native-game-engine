@@ -36,6 +36,7 @@ use crate::caps::{Auth, Caps};
 use crate::codec::hex_encode;
 use crate::dispatch::{authorize, call, CallCtx, Effects, ErpTarget, HostLimits, TxChange};
 use crate::error::*;
+use crate::link::{LocalConnector, LocalFrame};
 use crate::proposals::ProposalWatch;
 use crate::net::{accept_loop, bind, notification, response_err, response_ok, ConnTx, Inbound, NetShared};
 use crate::wire::{checksum_text, debug_error_name, encode_frame_message, timeline_to_json};
@@ -68,6 +69,10 @@ pub struct ServerConfig {
     pub limits: HostLimits,
     /// Entries of the activity log the server keeps (default 2000).
     pub activity_capacity: usize,
+    /// Listen on `bind` (default true). Off, the server only serves in-process
+    /// clients that connect through [`ErpServer::connector`]: no socket, no
+    /// network threads.
+    pub listen: bool,
 }
 
 impl ServerConfig {
@@ -84,6 +89,7 @@ impl ServerConfig {
             tx_timeout: Duration::from_secs(60),
             limits: HostLimits::default(),
             activity_capacity: DEFAULT_ACTIVITY_CAPACITY,
+            listen: true,
         }
     }
 }
@@ -120,10 +126,22 @@ struct ActivitySub {
     reads: bool,
 }
 
+/// What a `frames` subscription carries (`watch.subscribe` parameter `source`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameSource {
+    /// The play session's frames; nothing in edit mode.
+    Sim,
+    /// The play frame while playing, else the scene's preview frame.
+    View,
+    /// The staged scene of a proposal (edit mode only).
+    Proposal(u64),
+}
+
 struct FrameSub {
     min_interval: Duration,
     last_sent: Option<Instant>,
-    last_key: Option<(u64, u64)>,
+    last_key: Option<FrameKey>,
+    source: FrameSource,
 }
 
 struct Conn {
@@ -160,11 +178,22 @@ pub struct PollReport {
     pub requests: usize,
     /// True if requests are left in the queue (the cap per poll was reached).
     pub more: bool,
+    /// A client called `debug.panic`: the host is to panic (see [`Host::frame`](crate::Host::frame)).
+    pub crash: bool,
 }
 
 type TickKey = (bool, u64, u64, bool);
-type FrameKey = (u64, u64);
-type CachedFrame = (FrameKey, Arc<Vec<u8>>);
+/// Identifies one published frame: `(kind, a, b)`. Play: (1, head tick, epoch);
+/// scene preview: (2, document revision, 0); proposal preview: (3, id, checksum).
+type FrameKey = (u8, u64, u64);
+
+/// A frame built for the subscribers that want it: the wire message (sockets)
+/// and the shared copy (in-process), each made on first use.
+#[derive(Default)]
+struct BuiltFrame {
+    wire: Option<Arc<Vec<u8>>>,
+    local: Option<Arc<LocalFrame>>,
+}
 
 /// The ERP server. See the module docs.
 pub struct ErpServer {
@@ -175,12 +204,15 @@ pub struct ErpServer {
     cfg: ServerConfig,
     conns: BTreeMap<u64, Conn>,
     tx_owner: Option<(u64, Instant)>,
+    net: Arc<NetShared>,
+    stash: Option<Inbound>,
+    crash: bool,
     events_out: Vec<(EventKey, Vec<u8>)>,
     last_hist_check: Option<Instant>,
     last_prop_check: Option<Instant>,
     prop_watch: Option<ProposalWatch>,
     last_play: Option<StoppedPlay>,
-    frame_cache: Option<CachedFrame>,
+    frame_cache: Vec<(FrameKey, BuiltFrame)>,
     stats: ServerStats,
     started: Instant,
     activity: VecDeque<ActivityEntry>,
@@ -202,14 +234,22 @@ impl ErpServer {
             Auth::Tokens(t) if t.is_empty() => return Err(ServerError("no tokens configured (use Auth::DevNoAuth for local development)".into())),
             _ => {}
         }
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("orr-erp")
-            .enable_all()
-            .build()
-            .map_err(|e| ServerError(format!("cannot start the network runtime: {e}")))?;
-        let listener = bind(&rt, cfg.bind).map_err(|e| ServerError(format!("cannot listen on {}: {e}", cfg.bind)))?;
-        let addr = listener.local_addr().map_err(|e| ServerError(e.to_string()))?;
+        let (rt, listener) = if cfg.listen {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("orr-erp")
+                .enable_all()
+                .build()
+                .map_err(|e| ServerError(format!("cannot start the network runtime: {e}")))?;
+            let listener = bind(&rt, cfg.bind).map_err(|e| ServerError(format!("cannot listen on {}: {e}", cfg.bind)))?;
+            (Some(rt), Some(listener))
+        } else {
+            (None, None)
+        };
+        let addr = match &listener {
+            Some(l) => l.local_addr().map_err(|e| ServerError(e.to_string()))?,
+            None => SocketAddr::from(([0, 0, 0, 0], 0)),
+        };
         let (tx, inbox) = channel();
         let queued = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(NetShared {
@@ -223,9 +263,14 @@ impl ErpServer {
             conns: AtomicUsize::new(0),
             queued: queued.clone(),
         });
-        rt.spawn(accept_loop(listener, shared));
+        if let (Some(rt), Some(listener)) = (&rt, listener) {
+            rt.spawn(accept_loop(listener, shared.clone()));
+        }
         Ok(ErpServer {
-            rt: Some(rt),
+            rt,
+            net: shared,
+            stash: None,
+            crash: false,
             addr,
             inbox,
             queued,
@@ -237,7 +282,7 @@ impl ErpServer {
             last_prop_check: None,
             prop_watch: None,
             last_play: None,
-            frame_cache: None,
+            frame_cache: Vec::new(),
             stats: ServerStats::default(),
             started: Instant::now(),
             activity: VecDeque::new(),
@@ -253,14 +298,44 @@ impl ErpServer {
         self.last_play = Some(stopped);
     }
 
-    /// The address the server listens on (with the real port).
+    /// The address the server listens on (with the real port); `0.0.0.0:0`
+    /// if it does not listen (see [`ServerConfig::listen`]).
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
     }
 
-    /// `ws://host:port`.
+    /// True if the server listens on a socket.
+    pub fn is_listening(&self) -> bool {
+        self.rt.is_some()
+    }
+
+    /// `ws://host:port` (empty if the server does not listen).
     pub fn url(&self) -> String {
-        format!("ws://{}", self.addr)
+        if self.is_listening() {
+            format!("ws://{}", self.addr)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Makes in-process connections to this server: hand it to the thread
+    /// that owns the client (an editor UI) while the host thread runs
+    /// [`poll`](Self::poll). See [`crate::link`].
+    pub fn connector(&self) -> LocalConnector {
+        LocalConnector { shared: self.net.clone() }
+    }
+
+    /// Sleeps until a request or a connection event arrives, at most
+    /// `timeout`. A host with nothing to tick calls it instead of polling in
+    /// a sleep loop, so a request is served at once and an idle host costs
+    /// nothing.
+    pub fn wait_for_request(&mut self, timeout: Duration) {
+        if self.stash.is_some() {
+            return;
+        }
+        if let Ok(m) = self.inbox.recv_timeout(timeout) {
+            self.stash = Some(m);
+        }
     }
 
     /// The settings the server runs with.
@@ -366,7 +441,13 @@ impl ErpServer {
         let mut report = PollReport::default();
         let mut budget = self.cfg.max_requests_per_poll;
         loop {
-            let Ok(msg) = self.inbox.try_recv() else { break };
+            let msg = match self.stash.take() {
+                Some(m) => m,
+                None => match self.inbox.try_recv() {
+                    Ok(m) => m,
+                    Err(_) => break,
+                },
+            };
             match msg {
                 Inbound::Connected { conn, client, caps, tx, binary } => {
                     let connected_ms = self.elapsed_ms();
@@ -400,6 +481,7 @@ impl ErpServer {
             }
         }
         self.publish(target, now);
+        report.crash = std::mem::take(&mut self.crash);
         report
     }
 
@@ -444,6 +526,15 @@ impl ErpServer {
             }
         };
         self.stats.requests += 1;
+        if !matches!(
+            method,
+            "world.query" | "world.get" | "world.singleton.get" | "sim.state" | "sim.checksum" | "registry.schema" | "registry.types" | "rpc.discover"
+                | "history.list" | "proposal.list" | "proposal.get" | "proposal.preview" | "activity.list"
+        ) && !method.starts_with("watch.")
+        {
+            // Something may have changed under the same frame key (a stopped and restarted session).
+            self.frame_cache.clear();
+        }
         if let Some(c) = self.conns.get_mut(&conn) {
             c.requests += 1;
         }
@@ -458,6 +549,12 @@ impl ErpServer {
         }
         if let Some(stopped) = fx.stopped.take() {
             self.last_play = Some(stopped);
+        }
+        if let Some(path) = fx.scene_path.take() {
+            self.cfg.limits.scene_path = Some(path);
+        }
+        if fx.crash {
+            self.crash = true;
         }
         if !fx.events.is_empty() && self.conns.values().any(|c| c.subs.events) {
             self.events_out.append(&mut fx.events);
@@ -514,6 +611,7 @@ impl ErpServer {
             None | Some(J::Null) => 60,
             Some(v) => v.as_u64().filter(|n| *n >= 1).ok_or_else(|| RpcError::params("'max_fps' must be a positive integer"))?.min(1000),
         };
+        let source = frame_source(params)?;
         let Some(c) = self.conns.get_mut(&conn) else { return Err(RpcError::new(INTERNAL_ERROR, "gone", "connection is gone")) };
         let mut initial: Vec<String> = Vec::new();
         if method == "watch.subscribe" {
@@ -546,7 +644,7 @@ impl ErpServer {
                         if !c.binary {
                             return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
                         }
-                        c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None });
+                        c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source });
                     }
                     other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames)"))),
                 }
@@ -669,53 +767,131 @@ impl ErpServer {
     }
 
     fn publish_frames<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, now: Instant) {
-        let Some(pc) = target.play.as_ref() else { return };
-        let key = (pc.session().head_tick(), pc.session().epoch());
-        let due: Vec<u64> = self
-            .conns
-            .iter()
-            .filter(|(_, c)| {
-                c.subs.frames.as_ref().is_some_and(|f| {
-                    f.last_key != Some(key) && f.last_sent.is_none_or(|t| now.duration_since(t) >= f.min_interval)
-                })
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        // Who is due, and with which frame.
+        let mut due: Vec<(u64, FrameKey)> = Vec::new();
+        for (id, c) in &self.conns {
+            let Some(f) = c.subs.frames.as_ref() else { continue };
+            if f.last_sent.is_some_and(|t| now.duration_since(t) < f.min_interval) {
+                continue;
+            }
+            let Some(key) = frame_key(target, f.source) else { continue };
+            if f.last_key != Some(key) {
+                due.push((*id, key));
+            }
+        }
         if due.is_empty() {
             return;
         }
-        let msg = match &self.frame_cache {
-            Some((k, m)) if *k == key => m.clone(),
-            _ => {
-                let s = pc.session();
-                let sent_at_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
-                let meta = json!({
-                    "tick": key.0,
-                    "epoch": key.1,
-                    "tick_rate": s.tick_rate(),
-                    "player_count": s.player_count(),
-                    "sent_at_us": sent_at_us,
-                    "timeline": timeline_to_json(&pc.timeline()),
-                });
-                let m = Arc::new(encode_frame_message(&meta, &s.frame().to_bytes()));
-                self.stats.frames_built += 1;
-                self.stats.last_frame_bytes = m.len() as u64;
-                self.frame_cache = Some((key, m.clone()));
-                m
-            }
-        };
-        for id in due {
-            let Some(c) = self.conns.get_mut(&id) else { continue };
-            let Some(f) = c.subs.frames.as_mut() else { continue };
+        for (id, key) in due {
+            let Some(c) = self.conns.get(&id) else { continue };
+            let local = c.tx.is_local();
+            let source = c.subs.frames.as_ref().map_or(FrameSource::Sim, |f| f.source);
             if c.tx.pending() > MAX_PENDING_BYTES {
                 self.stats.frames_skipped += 1;
                 continue;
             }
-            c.tx.send_binary(msg.clone());
+            // Build it once per key and kind of subscriber.
+            let pos = match self.frame_cache.iter().position(|(k, _)| *k == key) {
+                Some(p) => p,
+                None => {
+                    if self.frame_cache.len() >= 4 {
+                        self.frame_cache.remove(0);
+                    }
+                    self.frame_cache.push((key, BuiltFrame::default()));
+                    self.frame_cache.len() - 1
+                }
+            };
+            let built = &mut self.frame_cache[pos].1;
+            let missing = if local { built.local.is_none() } else { built.wire.is_none() };
+            if missing {
+                let lim = &self.cfg.limits;
+                let Some((meta, frame)) = frame_parts(target, source, key, (lim.tick_rate, lim.player_count)) else { continue };
+                if local {
+                    let cost = 4096 + 160 * frame.alive_count() as usize;
+                    built.local = Some(Arc::new(LocalFrame { meta, frame: Arc::new(frame.clone()), cost }));
+                } else {
+                    let m = Arc::new(encode_frame_message(&meta, &frame.to_bytes()));
+                    self.stats.last_frame_bytes = m.len() as u64;
+                    built.wire = Some(m);
+                }
+                self.stats.frames_built += 1;
+            }
+            let Some(c) = self.conns.get_mut(&id) else { continue };
+            let Some(f) = c.subs.frames.as_mut() else { continue };
+            if local {
+                if let Some(lf) = &built.local {
+                    c.tx.send_local_frame(lf.clone());
+                }
+            } else if let Some(m) = &built.wire {
+                c.tx.send_binary(m.clone());
+            }
             f.last_sent = Some(now);
             f.last_key = Some(key);
             self.stats.frames_sent += 1;
         }
+    }
+}
+
+/// The `source` parameter of `watch.subscribe`.
+fn frame_source(params: &J) -> Result<FrameSource, RpcError> {
+    let bad = || RpcError::params("'source' must be `sim`, `view` or `proposal:p<N>`");
+    match params.get("source") {
+        None | Some(J::Null) => Ok(FrameSource::Sim),
+        Some(J::String(s)) => match s.as_str() {
+            "sim" => Ok(FrameSource::Sim),
+            "view" => Ok(FrameSource::View),
+            other => {
+                let id = other.strip_prefix("proposal:").ok_or_else(bad)?;
+                id.strip_prefix('p').unwrap_or(id).parse::<u64>().map(FrameSource::Proposal).map_err(|_| bad())
+            }
+        },
+        Some(_) => Err(bad()),
+    }
+}
+
+/// The key of the frame a subscription would get now, `None` if it gets none.
+fn frame_key<G: Game>(t: &ErpTarget<'_, G>, source: FrameSource) -> Option<FrameKey> {
+    let play = || t.play.as_ref().map(|pc| (1u8, pc.session().head_tick(), pc.session().epoch()));
+    match source {
+        FrameSource::Sim => play(),
+        FrameSource::View => play().or(Some((2, t.doc.revision(), 0))),
+        FrameSource::Proposal(n) => {
+            if t.play.is_some() {
+                return None;
+            }
+            t.doc.proposal_preview(orr_edit::ProposalId(n)).ok().map(|v| (3, n, v.checksum()))
+        }
+    }
+}
+
+/// The metadata and the frame of `key` (as [`frame_key`] named it).
+fn frame_parts<'a, G: Game>(t: &'a ErpTarget<'_, G>, source: FrameSource, key: FrameKey, defaults: (u32, u8)) -> Option<(J, &'a orr_ecs::Frame)> {
+    let sent_at_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
+    match (key.0, t.play.as_ref()) {
+        (1, Some(pc)) => {
+            let s = pc.session();
+            let meta = json!({
+                "tick": key.1,
+                "epoch": key.2,
+                "tick_rate": s.tick_rate(),
+                "player_count": s.player_count(),
+                "sent_at_us": sent_at_us,
+                "mode": "play",
+                "timeline": timeline_to_json(&pc.timeline()),
+            });
+            Some((meta, s.frame()))
+        }
+        (2, _) => {
+            let meta = json!({"tick": 0, "epoch": key.1, "tick_rate": defaults.0, "player_count": defaults.1, "sent_at_us": sent_at_us, "mode": "edit", "timeline": J::Null});
+            Some((meta, t.doc.frame()))
+        }
+        (3, _) => {
+            let FrameSource::Proposal(n) = source else { return None };
+            let view = t.doc.proposal_preview(orr_edit::ProposalId(n)).ok()?;
+            let meta = json!({"tick": 0, "epoch": key.2, "tick_rate": defaults.0, "player_count": defaults.1, "sent_at_us": sent_at_us, "mode": "edit", "proposal": format!("p{n}"), "timeline": J::Null});
+            Some((meta, view.frame()))
+        }
+        _ => None,
     }
 }
 

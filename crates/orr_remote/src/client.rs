@@ -1,14 +1,14 @@
-//! [`ErpClient`]: a small blocking ERP client (tests, scripts, tools).
+//! [`ErpClient`]: an ERP client over any [`Transport`] (tests, scripts,
+//! tools, and the editor).
 
 use std::collections::VecDeque;
-use std::net::TcpStream;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value as J};
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
 
 use crate::error::RpcError;
+use crate::link::{Incoming, LocalFrame, PumpedWs, Request, Transport, TxHandle, WsTransport};
 
 /// Why a call failed.
 #[derive(Debug)]
@@ -42,32 +42,81 @@ impl ClientError {
     }
 }
 
-/// A blocking JSON-RPC client over WebSocket. Notifications and binary
-/// frame messages that arrive while a call waits are kept in
-/// [`notifications`](Self::notifications) and [`frames`](Self::frames).
+/// Responses that nobody waited for are kept (oldest dropped above this many).
+const MAX_STASHED_RESPONSES: usize = 1024;
+
+/// A JSON-RPC client over any [`Transport`]: a blocking WebSocket
+/// ([`connect`](Self::connect)), a WebSocket on a background thread
+/// ([`connect_pumped`](Self::connect_pumped)) or an in-process link to a
+/// host in the same process ([`with_transport`](Self::with_transport) on a
+/// [`LocalTransport`](crate::LocalTransport)). The same calls work on all of them.
+///
+/// Two ways to use it:
+///
+/// - [`call`](Self::call) sends a request and waits for its response;
+///   notifications and frames that arrive meanwhile are kept in
+///   [`notifications`](Self::notifications), [`frames`](Self::frames) and
+///   [`local_frames`](Self::local_frames).
+/// - [`post`](Self::post) sends without waiting, and [`poll`](Self::poll)
+///   (non-blocking) collects what came in: responses go to
+///   [`responses`](Self::responses). A UI uses this so a request never
+///   stalls a frame. The server answers in order, so a `call` after some
+///   `post`s returns after the posts were handled.
 pub struct ErpClient {
-    ws: WebSocket<MaybeTlsStream<TcpStream>>,
+    t: Box<dyn Transport>,
     next_id: u64,
     /// Notifications received so far (oldest first).
     pub notifications: VecDeque<J>,
-    /// Binary frame messages received so far.
+    /// Binary frame messages received so far (sockets).
     pub frames: VecDeque<Vec<u8>>,
+    /// Frames received from an in-process host.
+    pub local_frames: VecDeque<Arc<LocalFrame>>,
+    /// Responses to [`post`](Self::post)ed requests (and any other response
+    /// nobody waited for), as `(id, result)`, oldest first.
+    pub responses: VecDeque<(u64, Result<J, RpcError>)>,
     /// How long a call may wait for its response (default 30 s).
     pub call_timeout: Duration,
 }
 
-fn transport(e: impl core::fmt::Display) -> ClientError {
-    ClientError::Transport(e.to_string())
+fn parse(text: &str) -> Result<J, ClientError> {
+    serde_json::from_str(text).map_err(|e| ClientError::Protocol(format!("bad JSON from server: {e}")))
+}
+
+fn result_of(msg: &J) -> Result<J, RpcError> {
+    match msg.get("error") {
+        Some(e) => Err(RpcError::from_json(e)),
+        None => Ok(msg.get("result").cloned().unwrap_or(J::Null)),
+    }
 }
 
 impl ErpClient {
+    /// A client on an already connected transport (no authentication is done).
+    pub fn with_transport(t: Box<dyn Transport>) -> ErpClient {
+        ErpClient {
+            t,
+            next_id: 1,
+            notifications: VecDeque::new(),
+            frames: VecDeque::new(),
+            local_frames: VecDeque::new(),
+            responses: VecDeque::new(),
+            call_timeout: Duration::from_secs(30),
+        }
+    }
+
     /// Connects and, if `token` is given, authenticates with an `auth` message.
     pub fn connect(url: &str, token: Option<&str>) -> Result<ErpClient, ClientError> {
-        let (ws, _) = tungstenite::connect(url).map_err(transport)?;
-        if let MaybeTlsStream::Plain(s) = ws.get_ref() {
-            let _ = s.set_nodelay(true);
+        let mut c = ErpClient::with_transport(Box::new(WsTransport::connect(url)?));
+        if let Some(t) = token {
+            c.call("auth", json!({"token": t}))?;
         }
-        let mut c = ErpClient { ws, next_id: 1, notifications: VecDeque::new(), frames: VecDeque::new(), call_timeout: Duration::from_secs(30) };
+        Ok(c)
+    }
+
+    /// Like [`connect`](Self::connect), but the socket lives on a background
+    /// thread: [`post`](Self::post) and [`poll`](Self::poll) never wait for the
+    /// network. A UI attaches to a remote host this way.
+    pub fn connect_pumped(url: &str, token: Option<&str>) -> Result<ErpClient, ClientError> {
+        let mut c = ErpClient::with_transport(Box::new(PumpedWs::connect(url, Duration::from_secs(10))?));
         if let Some(t) = token {
             c.call("auth", json!({"token": t}))?;
         }
@@ -91,36 +140,35 @@ impl ErpClient {
         ErpClient::connect(&format!("{url}{sep}token={enc}"), None)
     }
 
-    fn set_read_timeout(&mut self, d: Option<Duration>) {
-        if let MaybeTlsStream::Plain(s) = self.ws.get_ref() {
-            let _ = s.set_read_timeout(d);
-        }
+    /// A handle other threads can send requests through (not every transport has one).
+    pub fn sender(&self) -> Option<Arc<dyn TxHandle>> {
+        self.t.sender()
     }
 
     /// Sends raw text as one message (for tests of malformed input).
     pub fn send_text(&mut self, text: &str) -> Result<(), ClientError> {
-        self.ws.send(Message::text(text)).map_err(transport)
+        self.t.send_raw_text(text)
     }
 
     /// Sends raw bytes as one binary message.
     pub fn send_binary(&mut self, bytes: &[u8]) -> Result<(), ClientError> {
-        self.ws.send(Message::binary(bytes.to_vec())).map_err(transport)
+        self.t.send_raw_binary(bytes)
     }
 
     /// Reads the next message: `Ok(None)` on timeout. Text is returned as
-    /// text; binary messages are pushed to `frames` and `Ok(None)` is returned.
+    /// text; frames are kept and `Ok(None)` is returned.
     fn read_one(&mut self, timeout: Duration) -> Result<Option<String>, ClientError> {
-        self.set_read_timeout(Some(timeout.max(Duration::from_millis(1))));
-        match self.ws.read() {
-            Ok(Message::Text(t)) => Ok(Some(t.as_str().to_string())),
-            Ok(Message::Binary(b)) => {
-                self.frames.push_back(b.to_vec());
+        match self.t.recv(timeout)? {
+            Some(Incoming::Text(t)) => Ok(Some(t)),
+            Some(Incoming::Wire(b)) => {
+                self.frames.push_back(b);
                 Ok(None)
             }
-            Ok(Message::Close(_)) => Err(ClientError::Transport("closed by the server".into())),
-            Ok(_) => Ok(None),
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Ok(None),
-            Err(e) => Err(transport(e)),
+            Some(Incoming::Local(f)) => {
+                self.local_frames.push_back(f);
+                Ok(None)
+            }
+            None => Ok(None),
         }
     }
 
@@ -138,12 +186,78 @@ impl ErpClient {
         }
     }
 
-    /// Calls a method and waits for its response.
-    pub fn call(&mut self, method: &str, params: J) -> Result<J, ClientError> {
+    fn stash_response(&mut self, id: u64, r: Result<J, RpcError>) {
+        if self.responses.len() >= MAX_STASHED_RESPONSES {
+            self.responses.pop_front();
+        }
+        self.responses.push_back((id, r));
+    }
+
+    /// Sorts one text message: a notification is kept, a response to an
+    /// earlier [`post`](Self::post) is stashed. Returns the message if it is
+    /// the response to `want`.
+    fn route(&mut self, text: &str, want: Option<u64>) -> Result<Option<J>, ClientError> {
+        let msg = parse(text)?;
+        if msg.get("method").is_some() && msg.get("id").is_none() {
+            self.notifications.push_back(msg);
+            return Ok(None);
+        }
+        let rid = msg.get("id");
+        if want.is_some() && (rid == want.map(|w| json!(w)).as_ref() || rid == Some(&J::Null)) {
+            return Ok(Some(msg));
+        }
+        if let Some(id) = rid.and_then(J::as_u64) {
+            let r = result_of(&msg);
+            self.stash_response(id, r);
+        }
+        Ok(None)
+    }
+
+    /// Sends a request and returns its id, without waiting. The response
+    /// shows up in [`responses`](Self::responses) after a [`poll`](Self::poll).
+    pub fn post(&mut self, method: &str, params: J) -> Result<u64, ClientError> {
         let id = self.next_id;
         self.next_id += 1;
-        let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        self.send_text(&req.to_string())?;
+        self.t.send(Request { id: Some(id), method: method.to_string(), params })?;
+        Ok(id)
+    }
+
+    /// Collects everything that has arrived, without waiting: notifications,
+    /// frames and responses are sorted into their queues. Returns how many
+    /// messages came in. `Err` once the connection is gone (messages that
+    /// arrived before are still queued).
+    pub fn poll(&mut self) -> Result<usize, ClientError> {
+        let mut n = 0;
+        // Bounded, so a flood cannot hold the caller.
+        for _ in 0..4096 {
+            match self.t.recv(Duration::ZERO)? {
+                None => break,
+                Some(Incoming::Text(t)) => {
+                    self.route(&t, None)?;
+                    n += 1;
+                }
+                Some(Incoming::Wire(b)) => {
+                    self.frames.push_back(b);
+                    n += 1;
+                }
+                Some(Incoming::Local(f)) => {
+                    self.local_frames.push_back(f);
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// Takes the stashed response to request `id`, if it has arrived.
+    pub fn take_response(&mut self, id: u64) -> Option<Result<J, RpcError>> {
+        let i = self.responses.iter().position(|(rid, _)| *rid == id)?;
+        self.responses.remove(i).map(|(_, r)| r)
+    }
+
+    /// Calls a method and waits for its response.
+    pub fn call(&mut self, method: &str, params: J) -> Result<J, ClientError> {
+        let id = self.post(method, params)?;
         let end = Instant::now() + self.call_timeout;
         loop {
             let left = end.saturating_duration_since(Instant::now());
@@ -151,19 +265,12 @@ impl ErpClient {
                 return Err(ClientError::Transport(format!("timed out waiting for the response to {method}")));
             }
             let Some(text) = self.read_one(left)? else { continue };
-            let msg: J = serde_json::from_str(&text).map_err(|e| ClientError::Protocol(format!("bad JSON from server: {e}")))?;
-            if msg.get("method").is_some() && msg.get("id").is_none() {
-                self.notifications.push_back(msg);
-                continue;
-            }
-            let rid = msg.get("id");
-            if rid == Some(&json!(id)) || rid == Some(&J::Null) {
+            if let Some(msg) = self.route(&text, Some(id))? {
                 return match msg.get("error") {
                     Some(e) => Err(ClientError::Rpc(RpcError::from_json(e))),
                     None => Ok(msg.get("result").cloned().unwrap_or(J::Null)),
                 };
             }
-            // A response to something else: ignore.
         }
     }
 
@@ -188,8 +295,7 @@ impl ErpClient {
                 return Ok(None);
             }
             if let Some(text) = self.read_one(left)? {
-                let msg: J = serde_json::from_str(&text).map_err(|e| ClientError::Protocol(format!("bad JSON from server: {e}")))?;
-                self.notifications.push_back(msg);
+                self.route(&text, None)?;
             }
         }
     }
@@ -206,8 +312,7 @@ impl ErpClient {
                 return Ok(None);
             }
             if let Some(text) = self.read_one(left)? {
-                let msg: J = serde_json::from_str(&text).map_err(|e| ClientError::Protocol(format!("bad JSON from server: {e}")))?;
-                self.notifications.push_back(msg);
+                self.route(&text, None)?;
             }
         }
     }

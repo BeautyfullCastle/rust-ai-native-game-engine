@@ -2,6 +2,24 @@
 
 use core::fmt;
 
+use orr_edit::Origin;
+
+/// The client name of a person's own view (the editor): its edits carry
+/// `Origin::User` instead of `Origin::Agent(..)`, so the history tells a
+/// person from an agent. A token is named by the host's operator, so only
+/// a token the operator called `user` (or the in-process link of the
+/// embedding editor) gets this.
+pub const USER_CLIENT: &str = "user";
+
+/// The history origin of the edits of client `name`.
+pub fn origin_of_client(name: &str) -> Origin {
+    if name == USER_CLIENT {
+        Origin::User
+    } else {
+        Origin::Agent(name.to_string())
+    }
+}
+
 /// One capability. A method requires exactly one (see [`crate::methods`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Cap {
