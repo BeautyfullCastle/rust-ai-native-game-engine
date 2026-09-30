@@ -24,3 +24,7 @@ bytemuck = { version = "1", features = ["derive"] }
 wgpu = "30"
 winit = "0.30"
 pollster = "1"
+
+[dev-dependencies]
+orr_server = { path = "../orr_server", features = ["harness"] }
+orr_proto = { path = "../orr_proto" }

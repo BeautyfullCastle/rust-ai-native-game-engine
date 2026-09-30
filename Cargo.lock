@@ -1657,6 +1657,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_proto"
+version = "0.0.1"
+dependencies = [
+ "xxhash-rust",
+]
+
+[[package]]
 name = "orr_sample"
 version = "0.0.1"
 dependencies = [
@@ -1665,6 +1672,8 @@ dependencies = [
  "orr_ecs",
  "orr_fp",
  "orr_physics",
+ "orr_proto",
+ "orr_server",
  "orr_session",
  "orr_sim",
  "orr_testgame",
@@ -1672,6 +1681,20 @@ dependencies = [
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "orr_server"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_fp",
+ "orr_proto",
+ "orr_server",
+ "orr_session",
+ "orr_sim",
+ "orr_testgame",
 ]
 
 [[package]]
@@ -1683,6 +1706,7 @@ dependencies = [
  "lz4_flex",
  "orr_ecs",
  "orr_fp",
+ "orr_proto",
  "orr_sim",
  "orr_testgame",
  "xxhash-rust",
