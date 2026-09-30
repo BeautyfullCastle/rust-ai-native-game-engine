@@ -33,39 +33,51 @@ impl Extractor for PhysExtractor {
         out.reserve(frame.count::<Body>() as usize);
         for (entity, body) in frame.iter::<Body>() {
             let Some(collider) = frame.get::<Collider>(entity) else { continue };
-            let (mode, color) = match body.kind {
-                BODY_DYNAMIC => {
-                    let speed = fp_to_vec2(body.vel).length();
-                    let base = match collider.shape.kind {
-                        SHAPE_CIRCLE => CIRCLE_COLOR,
-                        SHAPE_CAPSULE => CAPSULE_COLOR,
-                        _ => BOX_COLOR,
-                    };
-                    // Resting bodies are dim, moving ones bright.
-                    let k = 0.4 + 0.6 * (speed / FULL_BRIGHT_SPEED).min(1.0);
-                    (InterpMode::Prediction, [base[0] * k, base[1] * k, base[2] * k, 1.0])
-                }
-                BODY_KINEMATIC => match frame.get::<PaddleTag>(entity) {
-                    Some(tag) => {
-                        let mode = if tag.slot == u32::from(self.local_slot) { InterpMode::Prediction } else { self.remote_mode };
-                        (mode, PADDLE_COLORS[tag.slot as usize % PADDLE_COLORS.len()])
-                    }
-                    None => (InterpMode::Prediction, BAR_COLOR),
+            let tag = frame.get::<PaddleTag>(entity);
+            let mode = match body.kind {
+                BODY_DYNAMIC => InterpMode::Prediction,
+                BODY_KINEMATIC => match tag {
+                    Some(tag) if tag.slot != u32::from(self.local_slot) => self.remote_mode,
+                    _ => InterpMode::Prediction,
                 },
-                _ => (InterpMode::None, STATIC_COLOR),
+                _ => InterpMode::None,
             };
-            let (style, turn) = style_of(collider, color);
+            let (style, turn) = body_look(body, collider, tag.map(|t| t.slot));
             let transform = Transform2::new(fp_to_vec2(body.pos), fp_to_f32(body.angle) + turn);
             out.push(Extracted { entity, transform, mode, style });
         }
     }
 }
 
+/// How one body is drawn: its style (shape and color by kind, speed and
+/// paddle slot) and the angle added to the body angle (see [`style_of`]).
+/// Shared by the sample view and the editor viewport.
+pub fn body_look(body: &Body, collider: &Collider, paddle_slot: Option<u32>) -> (Style, f32) {
+    let color = match body.kind {
+        BODY_DYNAMIC => {
+            let speed = fp_to_vec2(body.vel).length();
+            let base = match collider.shape.kind {
+                SHAPE_CIRCLE => CIRCLE_COLOR,
+                SHAPE_CAPSULE => CAPSULE_COLOR,
+                _ => BOX_COLOR,
+            };
+            // Resting bodies are dim, moving ones bright.
+            let k = 0.4 + 0.6 * (speed / FULL_BRIGHT_SPEED).min(1.0);
+            [base[0] * k, base[1] * k, base[2] * k, 1.0]
+        }
+        BODY_KINEMATIC => match paddle_slot {
+            Some(slot) => PADDLE_COLORS[slot as usize % PADDLE_COLORS.len()],
+            None => BAR_COLOR,
+        },
+        _ => STATIC_COLOR,
+    };
+    style_of(&collider.shape, color)
+}
+
 /// Draw shape of a collider: a circle, a capsule, or the local bounding box of a
 /// polygon. The second value is an angle added to the body angle (a capsule's
 /// segment need not lie along local x; the renderer draws it along x).
-fn style_of(collider: &Collider, color: [f32; 4]) -> (Style, f32) {
-    let shape = &collider.shape;
+pub fn style_of(shape: &orr_physics::Shape, color: [f32; 4]) -> (Style, f32) {
     if shape.kind == SHAPE_CIRCLE {
         return (Style { shape: Shape::Circle, size: fp_to_f32(shape.radius), half_y: 0.0, color }, 0.0);
     }

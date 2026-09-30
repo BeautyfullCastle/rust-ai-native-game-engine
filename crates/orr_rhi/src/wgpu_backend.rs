@@ -194,6 +194,13 @@ impl Wgpu {
         Ok(WgpuSurface { surface, config, format })
     }
 
+    /// Wraps a device that someone else created (for example eframe's
+    /// `egui_wgpu::RenderState`), so the renderer can draw with the same
+    /// device and queue that a UI toolkit uses. The parts must belong together.
+    pub fn from_parts(instance: wgpu::Instance, adapter: wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self { instance, adapter, device, queue }
+    }
+
     /// The raw wgpu device, for integrations such as egui-wgpu.
     pub fn device(&self) -> &wgpu::Device {
         &self.device
