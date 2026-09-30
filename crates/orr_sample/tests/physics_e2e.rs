@@ -137,7 +137,7 @@ fn extractor_reads_every_body_with_its_shape() {
     bridge.step(5);
     let snap = bridge.snapshot().unwrap();
     let mut out = Vec::new();
-    PhysExtractor { remote_mode: InterpMode::Prediction }.extract(snap.predicted(), &mut out);
+    PhysExtractor { remote_mode: InterpMode::Prediction, local_slot: 0 }.extract(snap.predicted(), &mut out);
     // Every entity is a body: walls (3), obstacles, paddles (2) and the dynamic ones.
     assert_eq!(out.len() as u32, snap.predicted().alive_count());
     let boxes = out.iter().filter(|e| e.style.half_y > 0.0).count();
@@ -154,7 +154,7 @@ fn worst_step(cfg: ViewConfig, ticks: u32) -> (f32, u32, u64) {
     const FRAMES_PER_TICK: u32 = 3;
     let scene = PhysConfig::new(200, SceneMode::Mixer);
     let mut bridge = InProc::new(physics_pair(scene, NET, SimMetrics::new()), BridgeConfig::default());
-    let mut view = ViewWorld::new(PhysExtractor { remote_mode: InterpMode::Prediction }, cfg);
+    let mut view = ViewWorld::new(PhysExtractor { remote_mode: InterpMode::Prediction, local_slot: 0 }, cfg);
     let dt = Duration::from_secs_f64(1.0 / 60.0 / f64::from(FRAMES_PER_TICK));
     let mut last: BTreeMap<Entity, (f32, f32)> = BTreeMap::new();
     let mut worst = 0.0_f32;

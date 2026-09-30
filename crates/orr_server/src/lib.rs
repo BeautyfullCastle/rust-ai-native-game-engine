@@ -22,7 +22,9 @@
 
 #[cfg(feature = "harness")]
 pub mod harness;
+pub mod presets;
 mod room;
+pub mod serve;
 mod server;
 mod validate;
 

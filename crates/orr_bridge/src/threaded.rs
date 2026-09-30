@@ -73,9 +73,20 @@ impl<G: Game> Threaded<G> {
         cfg: BridgeConfig<G>,
         threaded: ThreadedConfig,
     ) -> Result<Self, BridgeError> {
+        Self::try_spawn(move || Ok(make_host()), cfg, threaded).map_err(|_| BridgeError::Disconnected)
+    }
+
+    /// Like [`spawn`](Self::spawn), for a host that can fail to start (a
+    /// network host that cannot reach or join the server). The error text
+    /// of `make_host` is returned as is.
+    pub fn try_spawn<H: SimHost<G> + 'static>(
+        make_host: impl FnOnce() -> Result<H, String> + Send + 'static,
+        cfg: BridgeConfig<G>,
+        threaded: ThreadedConfig,
+    ) -> Result<Self, String> {
         let (to_sim, from_view) = channel::<ToSim<G>>();
         let (event_tx, events) = channel();
-        let (ready_tx, ready_rx) = channel::<(PlayerSlot, u32, u8)>();
+        let (ready_tx, ready_rx) = channel::<Result<(PlayerSlot, u32, u8), String>>();
         let slot: SnapshotSlot = Arc::new(ArcSwapOption::empty());
         let steps_done = Arc::new(AtomicU64::new(0));
 
@@ -83,19 +94,32 @@ impl<G: Game> Threaded<G> {
         let handle = thread::Builder::new()
             .name("orr-sim".to_string())
             .spawn(move || {
-                let host = make_host();
+                let host = match make_host() {
+                    Ok(host) => host,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
                 let info = (host.local_slot(), host.tick_rate(), host.player_count());
                 let core = SimCore::new(host, cfg, event_tx, thread_slot, thread_steps);
-                let _ = ready_tx.send(info);
+                let _ = ready_tx.send(Ok(info));
                 match threaded.pacing {
                     Pacing::Manual => run_manual(from_view, core),
                     Pacing::Realtime => run_realtime(from_view, core, info.1, threaded.max_catchup.max(1)),
                 }
             })
-            .map_err(|_| BridgeError::Disconnected)?;
+            .map_err(|e| format!("start sim thread: {e}"))?;
 
         // If the factory panicked, `ready_tx` is dropped and this errors.
-        let (local_slot, tick_rate, player_count) = ready_rx.recv().map_err(|_| BridgeError::Disconnected)?;
+        let (local_slot, tick_rate, player_count) = match ready_rx.recv() {
+            Ok(Ok(info)) => info,
+            Ok(Err(e)) => {
+                let _ = handle.join();
+                return Err(e);
+            }
+            Err(_) => return Err(BridgeError::Disconnected.to_string()),
+        };
         Ok(Self {
             to_sim,
             events,

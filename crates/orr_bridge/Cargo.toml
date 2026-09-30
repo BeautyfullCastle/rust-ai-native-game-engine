@@ -12,6 +12,7 @@ workspace = true
 orr_ecs = { path = "../orr_ecs" }
 orr_sim = { path = "../orr_sim" }
 orr_session = { path = "../orr_session" }
+orr_proto = { path = "../orr_proto" }
 arc-swap = "1"
 
 [dev-dependencies]

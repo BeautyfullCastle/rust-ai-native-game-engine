@@ -34,6 +34,16 @@ impl<E> EventBatch<E> {
         self.items.push((key, status));
     }
 
+    /// An empty batch.
+    pub fn empty() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    /// Adds every item of `other` after this batch's own, keeping order.
+    pub fn append(&mut self, other: EventBatch<E>) {
+        self.items.extend(other.items);
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &(EventKey, EventStatus<E>)> {
         self.items.iter()
     }

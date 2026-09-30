@@ -1,4 +1,6 @@
 use orr_ecs::Frame;
+
+use crate::event::Lifecycle;
 use orr_session::{AdvanceResult, InputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RollbackInfo, Session, SessionConfig};
 use orr_sim::{Game, PlayerSlot};
 
@@ -23,6 +25,12 @@ pub trait SimHost<G: Game> {
     fn frame_at(&self, tick: u64) -> Option<&Frame>;
     fn rollback_count(&self) -> u64;
     fn last_rollback(&self) -> Option<RollbackInfo>;
+
+    /// Notifications of the host itself (network play: desync, disconnect),
+    /// taken after every `advance`. Default: none.
+    fn take_lifecycle(&mut self) -> Vec<Lifecycle> {
+        Vec::new()
+    }
 }
 
 impl<G: Game, S: InputSource<G>> SimHost<G> for Session<G, S> {
