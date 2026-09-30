@@ -489,40 +489,24 @@ fn strip_fixed_docs(schema: &J) -> J {
     }
 }
 
-fn describe_proposal(id: &str, got: &J) -> String {
-    let mut text = format!(
-        "Proposal {id} \"{}\" by {}: {} op(s) staged.\n",
-        s(&got["label"]),
-        s(&got["origin"]),
-        got["op_count"]
-    );
-    let lines: Vec<&str> = got["summary"]["lines"].as_array().map(|l| l.iter().map(s).collect()).unwrap_or_default();
-    if lines.is_empty() {
-        text.push_str("No effective change: the ops leave the scene as it is.\n");
-    } else {
-        text.push_str("Changes:\n");
-        for l in lines {
-            text.push_str(&format!("  {l}\n"));
-        }
-        text.push_str("\nDiff of the scene text:\n");
-        text.push_str(s(&got["diff"]));
-    }
-    if got["accepts_cleanly"] == false {
-        text.push_str(&format!("\nWARNING: it would not accept cleanly now: {}\n", s(&got["accept_error"])));
-    }
-    text
+/// A proposal staged by [`stage_proposal`].
+pub struct Staged {
+    /// The proposal id (`p1`).
+    pub id: String,
+    /// `proposal.get` of it: ops, diff, summary.
+    pub got: J,
+    /// `proposal.apply`'s `spawned` list (op index and GUID of each new entity).
+    pub spawned: J,
 }
 
-fn propose_changes(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
-    let ops = match a.raw("ops") {
-        Some(J::Array(list)) => J::Array(list.clone()),
-        Some(_) => return Err(Fail::new("argument 'ops' must be a list of op objects")),
-        None => return Err(Fail::new("missing argument 'ops'")),
-    };
-    let (id, created) = match a.opt_str("proposal_id")? {
+/// Stages `ops` on a proposal: a new one named `label`, or the open one `existing`.
+/// All ops apply or none: on failure a proposal made here is discarded again
+/// and the error says so.
+pub fn stage_proposal(b: &mut Bridge, label: &str, ops: J, existing: Option<&str>) -> Result<Staged, Fail> {
+    let (id, created) = match existing {
         Some(id) => (id.to_string(), false),
         None => {
-            let r = b.call("proposal.begin", json!({"label": a.opt_str("label")?.unwrap_or("agent changes")}))?;
+            let r = b.call("proposal.begin", json!({"label": label}))?;
             (s(&r["id"]).to_string(), true)
         }
     };
@@ -539,24 +523,31 @@ fn propose_changes(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
         }
     };
     let got = b.call("proposal.get", json!({"id": id}))?;
-    let mut text = describe_proposal(&id, &got);
-    if let Some(sp) = applied["spawned"].as_array() {
-        for e in sp {
-            text.push_str(&format!("Spawned: op {} creates entity {}\n", e["index"], s(&e["guid"])));
-        }
-    }
+    Ok(Staged { id, got, spawned: applied["spawned"].clone() })
+}
+
+fn propose_changes(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+    let ops = match a.raw("ops") {
+        Some(J::Array(list)) => J::Array(list.clone()),
+        Some(_) => return Err(Fail::new("argument 'ops' must be a list of op objects")),
+        None => return Err(Fail::new("missing argument 'ops'")),
+    };
+    let label = a.opt_str("label")?.unwrap_or("agent changes");
+    let Staged { id, got, spawned } = stage_proposal(b, label, ops, a.opt_str("proposal_id")?)?;
+    let mut text = report::describe_proposal(&id, &got);
+    text.push_str(&report::spawned_text(&spawned));
     text.push_str(&format!(
         "\nThe scene is unchanged. Next: verify_proposal {{\"proposal_id\":\"{id}\",\"checks\":[...]}}, then accept_proposal, or reject_proposal.\n"
     ));
     let mut structured = got;
-    structured["spawned"] = applied["spawned"].clone();
+    structured["spawned"] = spawned;
     text_out(text, structured)
 }
 
 fn list_proposals(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     if let Some(id) = a.opt_str("proposal_id")? {
         let got = b.call("proposal.get", json!({"id": id}))?;
-        let mut text = describe_proposal(id, &got);
+        let mut text = report::describe_proposal(id, &got);
         if got["stale"] == true {
             text.push_str("The scene changed since this proposal was made.\n");
         }
