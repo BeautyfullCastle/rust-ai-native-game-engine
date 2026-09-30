@@ -35,7 +35,7 @@ pub enum BottomTab {
     Timeline,
     /// The undo history.
     History,
-    /// Proposals from AI agents: review, preview, verify, accept.
+    /// What AI agents do through ERP: a read-only activity feed.
     Agent,
 }
 
@@ -55,6 +55,15 @@ pub struct Dialog {
     pub kind: DialogKind,
     /// The text of the path field.
     pub text: String,
+}
+
+/// An entity an agent just edited: the viewport outlines it for [`viewport::PULSE_SECONDS`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pulse {
+    /// The entity (GUID, or handle in play mode).
+    pub target: Target,
+    /// egui time (seconds) the pulse started.
+    pub started: f64,
 }
 
 /// A viewport drag of a body in progress.
@@ -79,6 +88,8 @@ pub struct UiState {
     pub viewport_px: (u32, u32),
     /// Diffs of the open proposals (see [`crate::agent_ui::cached_diff`]).
     pub diffs: crate::agent_ui::DiffCache,
+    /// Entities an agent just edited, pulsing in the viewport (see [`Pulse`]).
+    pub pulses: Vec<Pulse>,
     body_drag: Option<BodyDrag>,
 }
 
@@ -147,11 +158,7 @@ impl eframe::App for EditorApp {
 
         let dt = f64::from(ctx.input(|i| i.unstable_dt));
         self.editor.poll_erp();
-        self.editor.poll_verify();
-        if self.editor.agent().running().is_some() {
-            // The spinner animates and the result is collected on a later frame.
-            ctx.request_repaint_after(std::time::Duration::from_millis(30));
-        }
+        self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {
             self.ui.bottom_tab = BottomTab::Agent;
         }
@@ -169,13 +176,17 @@ impl eframe::App for EditorApp {
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         // The Agent tab needs more room than the timeline; each has its own remembered height.
-        let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 390.0) } else { ("bottom", 120.0) };
+        let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 470.0) } else { ("bottom", 120.0) };
         egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).show(ui, |ui| self.bottom(ui));
         egui::Panel::left("hierarchy").resizable(true).default_size(230.0).show(ui, |ui| self.hierarchy(ui));
         egui::Panel::right("inspector").resizable(true).default_size(340.0).show(ui, |ui| self.inspector(ui));
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
 
         self.dialogs(&ctx);
+        if !self.ui.pulses.is_empty() {
+            // The pulses animate until they expire.
+            ctx.request_repaint();
+        }
 
         let title = self.editor.title();
         if title != self.last_title {
@@ -187,6 +198,18 @@ impl eframe::App for EditorApp {
 }
 
 impl EditorApp {
+    /// Turns the entities agents just touched into pulses (and drops the expired ones).
+    fn start_pulses(&mut self, now: f64) {
+        for name in self.editor.feed_mut().take_touched() {
+            let target = orr_remote::json::parse_handle(&name).map(Target::Entity).or_else(|| orr_reflect::Guid::parse(&name).ok().map(Target::Guid));
+            if let Some(target) = target {
+                self.ui.pulses.retain(|p| p.target != target);
+                self.ui.pulses.push(Pulse { target, started: now });
+            }
+        }
+        self.ui.pulses.retain(|p| now - p.started < viewport::PULSE_SECONDS);
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -288,6 +311,10 @@ impl EditorApp {
                 ui.weak(format!("checksum {:#018x}", self.editor.checksum()));
                 if let Some((url, clients)) = self.editor.erp_status() {
                     ui.weak(format!("ERP {url} ({clients} connected)"));
+                }
+                if let Some(action) = self.editor.feed().last_action() {
+                    let short: String = if action.chars().count() > 70 { action.chars().take(69).chain(std::iter::once('\u{2026}')).collect() } else { action.to_string() };
+                    ui.label(RichText::new(short).color(Color32::from_rgb(120, 200, 255)));
                 }
             });
         });
@@ -486,12 +513,17 @@ impl EditorApp {
         }
 
         // Draw.
-        let list = match previewing.and_then(|id| crate::agent_ui::cached_diff(&self.editor, &mut self.ui.diffs, id)) {
+        let mut list = match previewing.and_then(|id| crate::agent_ui::cached_diff(&self.editor, &mut self.ui.diffs, id)) {
             Some(diff) => {
                 viewport::build_preview_list(&self.editor.viewport_view(), &self.editor.doc().view(), &diff.summary, self.editor.selection(), &self.editor.camera, px)
             }
             None => viewport::build_list(&self.editor.view(), self.editor.selection(), &self.editor.camera, px),
         };
+        if !self.ui.pulses.is_empty() {
+            let now = ui.ctx().input(|i| i.time);
+            let live: Vec<(Target, f32)> = self.ui.pulses.iter().map(|p| (p.target.clone(), (1.0 - (now - p.started) / viewport::PULSE_SECONDS).clamp(0.0, 1.0) as f32)).collect();
+            viewport::add_pulses(&mut list, &self.editor.viewport_view(), &live);
+        }
         match &self.render_state {
             Some(rs) => {
                 let gpu = self.gpu.get_or_insert_with(|| GpuViewport::new(rs, px));
@@ -534,18 +566,21 @@ impl EditorApp {
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::Timeline, "Timeline");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::History, "History");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::Agent, "Agent");
-            let waiting = self.proposal_count();
-            if waiting > 0 {
-                // Badge: proposals are waiting for a decision.
-                ui.label(RichText::new(format!(" {waiting} ")).strong().color(Color32::BLACK).background_color(Color32::from_rgb(240, 170, 60)))
-                    .on_hover_text(format!("{waiting} proposal(s) waiting"));
+            let unseen = self.editor.feed().unseen();
+            if unseen > 0 && self.ui.bottom_tab != BottomTab::Agent {
+                // Badge: what agents did since the tab was last shown (reads excluded).
+                ui.label(RichText::new(format!(" {unseen} ")).strong().color(Color32::BLACK).background_color(Color32::from_rgb(240, 170, 60)))
+                    .on_hover_text(format!("{unseen} new agent action(s)"));
             }
         });
         ui.separator();
         match self.ui.bottom_tab {
             BottomTab::Timeline => self.timeline(ui),
             BottomTab::History => self.history(ui),
-            BottomTab::Agent => self.agent_tab(ui),
+            BottomTab::Agent => {
+                self.agent_tab(ui);
+                self.editor.feed_mut().mark_seen();
+            }
         }
     }
 

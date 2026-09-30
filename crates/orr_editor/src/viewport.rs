@@ -31,6 +31,10 @@ pub const PREVIEW_CHANGED: [f32; 4] = [0.25, 0.85, 1.0, 1.0];
 pub const PREVIEW_ADDED: [f32; 4] = [0.4, 1.0, 0.45, 1.0];
 /// Ghost of an entity a previewed proposal removes, or of where a changed one was.
 pub const PREVIEW_GHOST: [f32; 4] = [0.75, 0.75, 0.9, 0.5];
+/// Pulse around an entity an agent just edited.
+pub const PULSE: [f32; 4] = [1.0, 0.4, 0.9, 1.0];
+/// How long an agent edit pulses, in seconds.
+pub const PULSE_SECONDS: f64 = 1.5;
 const GRID_MINOR: [f32; 4] = [0.085, 0.085, 0.13, 1.0];
 const GRID_MAJOR: [f32; 4] = [0.13, 0.13, 0.2, 1.0];
 const AXIS_X: [f32; 4] = [0.45, 0.16, 0.16, 1.0];
@@ -219,6 +223,31 @@ pub fn build_preview_list(preview: &View<'_>, base: &View<'_>, summary: &Proposa
         }
     }
     list
+}
+
+/// Draws the pulses of entities an agent just edited: an outline and a ring that
+/// grows and fades. `fade` is 1 at the start of a pulse and 0 at its end. Targets
+/// that are not drawn (no body and collider, or gone) are skipped.
+pub fn add_pulses(list: &mut RenderList, view: &View<'_>, pulses: &[(Target, f32)]) {
+    for (target, fade) in pulses {
+        let Ok(e) = view.resolve(target) else { continue };
+        let (Some(body), Some(collider)) = (view.frame().get::<Body>(e), view.frame().get::<Collider>(e)) else { continue };
+        let (pos, angle) = (v2(body.pos), orr_view::fp_to_f32(body.angle));
+        let color = [PULSE[0], PULSE[1], PULSE[2], fade.clamp(0.0, 1.0)];
+        shape_outline(list, pos, angle, &collider.shape, 2.0 + 3.0 * fade, color);
+        let ring = shape_extent(&collider.shape) + 0.25 + (1.0 - fade) * 1.5;
+        list.circle_outline(pos, ring, 40, 2.0, color);
+    }
+}
+
+/// Largest distance of the shape from its origin (a bounding radius).
+fn shape_extent(shape: &Shape) -> f32 {
+    let radius = orr_view::fp_to_f32(shape.radius);
+    match shape.kind {
+        SHAPE_CIRCLE => radius,
+        SHAPE_CAPSULE => v2(shape.verts[0]).iter().chain(v2(shape.verts[1]).iter()).fold(0.0f32, |m, c| m.max(c.abs())) + radius,
+        _ => shape.verts[..shape.count as usize].iter().map(|&v| v2(v)[0].hypot(v2(v)[1])).fold(0.0f32, f32::max),
+    }
 }
 
 /// Is the world point `p` inside the collider shape at this pose?

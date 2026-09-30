@@ -38,6 +38,8 @@ const MAX_AUTH_FAILURES: u32 = 5;
 pub(crate) enum Inbound {
     Connected { conn: u64, client: String, caps: Caps, tx: ConnTx, binary: bool },
     Disconnected { conn: u64 },
+    /// A connection presented a token that was refused.
+    AuthFailed,
     Request { conn: u64, id: Option<J>, method: String, params: J },
 }
 
@@ -231,6 +233,7 @@ impl Link {
             }
             None => {
                 self.failures += 1;
+                let _ = self.shared.inbox.send(Inbound::AuthFailed);
                 self.reply_err(reply_id, RpcError::new(UNAUTHENTICATED, "bad_token", "the token was refused"));
                 if self.failures >= MAX_AUTH_FAILURES {
                     Flow::Close

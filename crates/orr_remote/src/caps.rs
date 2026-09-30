@@ -14,7 +14,7 @@ pub enum Cap {
     SimControl,
     /// Accept a proposal into the document (`proposal.accept`). Kept apart
     /// from `SceneEdit` so a host can let an agent propose and verify while
-    /// a person keeps the decision.
+    /// a person keeps the decision. `all` and dev mode (`--erp-dev`) include it.
     Approve,
 }
 

@@ -154,6 +154,15 @@ fn entity_mut<'a>(scene: &'a mut Scene, guid: &Guid) -> Result<&'a mut SceneEnti
     scene.entities.get_mut(guid).ok_or_else(|| EditError::UnknownEntity(guid.to_string()))
 }
 
+/// An entity name may be absent but not empty: the scene format has no empty
+/// names, so one would make the saved scene unloadable.
+fn check_name(name: &Option<String>) -> Result<(), EditError> {
+    match name {
+        Some(n) if n.is_empty() => Err(EditError::Invalid("an entity name must not be empty (use null to clear it)".into())),
+        _ => Ok(()),
+    }
+}
+
 /// Applies `op` to `scene`. `op`'s `SpawnEntity` must already carry a GUID.
 pub(crate) fn apply(scene: &mut Scene, reg: &TypeRegistry, op: &Op) -> Result<Done, EditError> {
     match op {
@@ -219,6 +228,7 @@ pub(crate) fn apply(scene: &mut Scene, reg: &TypeRegistry, op: &Op) -> Result<Do
         }
         Op::SpawnEntity { guid, name, components } => {
             let guid = guid.clone().ok_or_else(|| EditError::Invalid("SpawnEntity needs a GUID here".into()))?;
+            check_name(name)?;
             if scene.entities.contains_key(&guid) {
                 return Err(EditError::GuidExists(guid));
             }
@@ -256,6 +266,7 @@ pub(crate) fn apply(scene: &mut Scene, reg: &TypeRegistry, op: &Op) -> Result<Do
             Ok(Done { forward: op.clone(), inverse, effect: Effect::Structural, changed: true, guid: None })
         }
         Op::Rename { guid, name } => {
+            check_name(name)?;
             let ent = entity_mut(scene, guid)?;
             if &ent.name == name {
                 return Ok(unchanged(op));

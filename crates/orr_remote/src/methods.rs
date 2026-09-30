@@ -108,7 +108,8 @@ pub static METHODS: &[MethodDoc] = &[
     MethodDoc { name: "verify.self", cap: Some(Cap::Read), summary: "Baseline run of the scene against itself on the same inputs: its metrics, and for a recording whether the scene reproduces it. Same result shape as proposal.verify.", params: &[INPUTS, TICKS, CHECKS, SAMPLE_EVERY, SERIES], result: "verify report" },
     MethodDoc { name: "proposal.accept", cap: Some(Cap::Approve), summary: "Apply the proposal to the scene as one history entry (origin = who began it; `history.undo` takes it back). Fails with a conflict, changing nothing, if the scene changed so that an op no longer applies. Edit mode only.", params: &[PROPOSAL], result: "{ history_id, applied, checksum }" },
     MethodDoc { name: "proposal.reject", cap: Some(Cap::SceneEdit), summary: "Discard a proposal.", params: &[PROPOSAL], result: "{ ok }" },
-    MethodDoc { name: "watch.subscribe", cap: Some(Cap::Read), summary: "Have the server push notifications: `watch.tick`, `watch.history`, `watch.events`, `watch.notes`, `watch.proposals`, and binary frame messages (`frames`, WebSocket only).", params: &[p("topics", "string[]", true, "tick | history | events | notes | proposals | frames"), p("max_fps", "integer", false, "cap for `frames` (default 60)")], result: "{ topics }" },
+    MethodDoc { name: "activity.list", cap: Some(Cap::Read), summary: "The activity log: what every client's requests did, one line each (newest last), with the entities touched, old/new values of field writes, and verification outcomes. A bounded ring; this call itself is not recorded.", params: &[p("since", "integer", false, "only entries with a larger `seq` (default 0 = all still kept)"), p("limit", "integer", false, "at most this many, the newest (default 200, max 2000)"), p("include_reads", "bool", false, "also the read-only requests (default false)")], result: "{ entries: [{ seq, at_ms, client, kind, method, summary, ok, read, error?, entities?, proposal?, change?, diff?, verify? }], last_seq, truncated }" },
+    MethodDoc { name: "watch.subscribe", cap: Some(Cap::Read), summary: "Have the server push notifications: `watch.tick`, `watch.history`, `watch.events`, `watch.notes`, `watch.proposals`, `watch.activity` (new activity entries), and binary frame messages (`frames`, WebSocket only).", params: &[p("topics", "string[]", true, "tick | history | events | notes | proposals | activity | frames"), p("max_fps", "integer", false, "cap for `frames` (default 60)"), p("include_reads", "bool", false, "`activity`: also push read-only requests (default false)")], result: "{ topics }" },
     MethodDoc { name: "watch.unsubscribe", cap: Some(Cap::Read), summary: "Stop pushes (all topics, or the listed ones).", params: &[p("topics", "string[]", false, "topics to stop; missing = all")], result: "{ topics }" },
 ];
 
@@ -146,7 +147,7 @@ pub fn discover(client: &str, caps: Caps) -> J {
         "auth": "first message {\"method\":\"auth\",\"params\":{\"token\":...}}, or ?token= in the WebSocket URL; no token = only in dev mode",
         "capabilities": ["read", "scene_edit", "sim_control", "approve"],
         "methods": methods,
-        "notifications": ["watch.tick", "watch.history", "watch.events", "watch.notes", "watch.proposals"],
+        "notifications": ["watch.tick", "watch.history", "watch.events", "watch.notes", "watch.proposals", "watch.activity"],
         "value_format": VALUE_FORMAT,
         "you": { "client": client, "capabilities": caps.list().into_iter().map(Cap::name).collect::<Vec<_>>() },
     })

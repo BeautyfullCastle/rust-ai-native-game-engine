@@ -382,3 +382,19 @@ fn queries_list_entities_components_and_schema() {
     let scene_val = &doc.scene().entities[a.guid.as_ref().unwrap()].components[0].1;
     assert_eq!(&comps[0].1, scene_val);
 }
+
+/// The scene format has no empty names: an empty one is refused (it used to
+/// be accepted and made the saved scene unloadable).
+#[test]
+fn an_empty_entity_name_is_refused() {
+    let mut doc = demo_doc();
+    let body = guid_named(&doc, "body_01");
+    let before = doc.to_yaml();
+    let e = doc.apply(Op::Rename { guid: body.clone(), name: Some(String::new()) }, Origin::User).unwrap_err();
+    assert!(matches!(e, EditError::Invalid(_)), "{e}");
+    let e = doc.apply(Op::SpawnEntity { guid: None, name: Some(String::new()), components: Vec::new() }, Origin::User).unwrap_err();
+    assert!(matches!(e, EditError::Invalid(_)), "{e}");
+    assert_eq!(doc.to_yaml(), before);
+    assert!(doc.history().is_empty());
+    doc.apply(Op::Rename { guid: body, name: None }, Origin::User).unwrap();
+}

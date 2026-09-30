@@ -18,9 +18,10 @@ use orr_reflect::{Guid, Value};
 use orr_sim::{Game, PlayerSlot};
 use serde_json::{json, Map, Value as J};
 
+use crate::activity::VerifyDetail;
 use crate::codec::b64_decode;
 use crate::dispatch::{
-    component_type, get_view, overlay, query_view, scene_form, singleton_type, CallCtx, ErpTarget, HostLimits, P,
+    component_type, get_view, overlay, query_view, scene_form, singleton_type, CallCtx, Effects, ErpTarget, HostLimits, P,
 };
 use crate::error::*;
 use crate::json::{desc_at_path, json_to_value, value_to_json};
@@ -139,7 +140,7 @@ pub(crate) fn discover_with_engine<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimi
 
 // ---- ids, ops ----
 
-fn proposal_id(p: &P<'_>) -> Result<ProposalId, RpcError> {
+pub(crate) fn proposal_id(p: &P<'_>) -> Result<ProposalId, RpcError> {
     let bad = || RpcError::params("'id' must be a proposal id like `p1` (from proposal.begin)");
     match p.raw("id") {
         Some(J::String(s)) => s.strip_prefix('p').unwrap_or(s).parse::<u64>().map(ProposalId).map_err(|_| bad()),
@@ -507,7 +508,7 @@ fn stats_json(s: &orr_edit::MetricStats, series: bool) -> J {
     o
 }
 
-fn report_json(r: &VerifyReport, outcome: Option<&CheckOutcome>, series: bool) -> J {
+pub(crate) fn report_json(r: &VerifyReport, outcome: Option<&CheckOutcome>, series: bool) -> J {
     let metrics: Vec<J> = r
         .metrics
         .iter()
@@ -547,7 +548,7 @@ fn report_json(r: &VerifyReport, outcome: Option<&CheckOutcome>, series: bool) -
     o
 }
 
-pub(crate) fn verify<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits, ctx: &CallCtx<'_>, p: &P<'_>, with_proposal: bool) -> Result<J, RpcError> {
+pub(crate) fn verify<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits, ctx: &CallCtx<'_>, fx: &mut Effects, p: &P<'_>, with_proposal: bool) -> Result<J, RpcError> {
     let id = if with_proposal { Some(proposal_id(p)?) } else { None };
     if let Some(id) = id {
         t.doc.proposal_info(id)?;
@@ -577,10 +578,11 @@ pub(crate) fn verify<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits, ctx: &Call
     };
     let outcome = if checks.is_empty() { None } else { Some(report.check(&checks)) };
     let mut out = report_json(&report, outcome.as_ref(), series);
-    out["inputs"] = described;
+    out["inputs"] = described.clone();
     if let Some(id) = id {
         out["proposal"] = json!(id.to_string());
     }
+    fx.verify = Some(std::sync::Arc::new(VerifyDetail { proposal: id.map(|i| i.to_string()), inputs: described, report, outcome }));
     Ok(out)
 }
 
