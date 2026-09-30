@@ -26,6 +26,7 @@
 | 시뮬 제어 (M4 1단계 C) | `orr_session::PlaySession`: 재생/일시정지/n틱 전진/배속(0.25~4x, 틱 간격만 변경)/틱 이동(seek)/분기, 링 + 직렬화 키프레임(예산 초과 시 간격 2배), 틱 경계 `DebugCommand`(`orr_sim::debug`, `.orrp` v3에 기록), 리플레이 뷰어 모드. 브리지 `PlayHost`·제어 API | 물리 1000바디 1200틱 후 600틱 뒤로: 키프레임 적중 0.35ms, 최악(+59틱 재시뮬) 43ms, 링 안 0.06ms, 앞으로 600틱 21ms. 기록 포함 틱 0.85ms. 1500틱 `.orrp` 2.7MB. 기존 골든 불변 |
 | 리플렉션·씬 (M4 1단계 A) | `orr_reflect`(+`orr_reflect_derive`): 필드 단위 리플렉션(범위·열거·플래그·skip·기본값), 타입 레지스트리, JSON Schema(골든 파일). Strict YAML 씬(`saphyr-parser`, 앵커·별칭·태그·암묵 타입 거부, GUID 키 정렬, 줄·칸 오류, 여러 오류 동시 보고), 십진↔FP 정확 변환, 씬↔Frame 굽기/되굽기(`SceneIndex`). `orr_physics` 컴포넌트에 `Reflect` | 무작위 텍스트 2만 개·변형 씬 퍼즈에서 패닉 0. 기존 골든 불변 |
 | 렌더러 분리 (M4 1단계 B) | `orr_rhi`(백엔드 추상 + wgpu 구현) / `orr_render`(RenderList: 원·박스·캡슐·디버그 선·외곽선, 카메라, 오프스크린 텍스처 = 에디터 뷰포트용, sRGB). `orr_sample`의 `render2d`를 대체, 샘플 캡슐 렌더링 | GPU 리드백 픽셀 테스트 9개. GPU 없으면 SKIP(`ORR_REQUIRE_GPU=1`이면 실패), CI 리눅스는 lavapipe(소프트웨어 Vulkan)로 실제 실행. 인스턴스 1만 개 색 개별 확인 |
+| `orr_edit` (M4 2단계 기반) | GUI 없는 에디터 코어: `EditorDoc`(씬 + 굽기 프리뷰 Frame 동기화 + undo/redo + 트랜잭션·병합 + origin 기록 이력), `Op` 8종, `PlayController<G>`(플레이 중 편집을 `DebugCommand`로 기록, 타임라인 제어, stop_play), `View`(엔티티·컴포넌트·스키마 조회). `scenes/physics_demo.scene.yaml`(40바디), `orr_sample::physics_game::register_reflect` | 데모 씬(49 엔티티)에서 필드 편집+프리뷰 갱신 약 6µs(제자리 패치), 전체 재굽기 약 113µs. 골든 불변 |
 | CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
 ## 다음

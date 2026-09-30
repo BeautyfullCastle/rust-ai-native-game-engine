@@ -1,0 +1,990 @@
+# Physics demo: 40 bodies, floor, walls, obstacles and two paddles.
+# Generated from PhysGame's setup: cargo run -p orr_edit --example gen_physics_demo
+schema: orr.scene/1
+singletons:
+  Scene: { half_w: 20, height: 40, spawn_batch: 0, spawn_interval: 0, max_entities: 20000, mode: 0 }
+  orr_physics::PhysicsState:
+    config:
+      gravity: [0, -10]
+      dt: 0.01666
+      baumgarte: 0.2
+      linear_slop: 0.01
+      contact_margin: 0.02
+      restitution_threshold: 1
+      max_correction_speed: 6
+      max_linear_speed: 40
+      max_angular_speed: 60
+      velocity_iterations: 8
+      sleep_ticks: 30
+      sleep_linear_speed: 0.05
+      sleep_angular_speed: 0.05
+entities:
+  e_00000001:
+    name: floor
+    orr_physics::Body:
+      pos: [0, -2]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [23, 2] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000002:
+    name: wall_left
+    orr_physics::Body:
+      pos: [-21, 40]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [1, 80] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000003:
+    name: wall_right
+    orr_physics::Body:
+      pos: [21, 40]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [1, 80] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000004:
+    name: obstacle_1
+    orr_physics::Body:
+      pos: [-4.88, 24.8672]
+      angle: 0.3081
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-2.5, -0.39998], [2.5, -0.39998], [2.5, 0.40001], [-2.5, 0.40001]]
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000005:
+    name: obstacle_2
+    orr_physics::Body:
+      pos: [-7.05084, 25.27353]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 1.94987 }
+      restitution: 0.4
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000006:
+    name: obstacle_3
+    orr_physics::Body:
+      pos: [-12.11755, 30.8094]
+      angle: 0.05583
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-2.5, -0.39998], [2.5, -0.39998], [2.5, 0.40001], [-2.5, 0.40001]]
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000007:
+    name: obstacle_4
+    orr_physics::Body:
+      pos: [-4.34937, 25.09079]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 1.50052 }
+      restitution: 0.4
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000008:
+    name: paddle_0
+    PaddleTag: { slot: 0 }
+    orr_physics::Body:
+      pos: [-10, 7.99988]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: kinematic
+    orr_physics::Collider:
+      shape: { kind: polygon, verts: [[-5, -0.69998], [5, -0.69998], [5, 0.70001], [-5, 0.70001]] }
+      restitution: 0
+      friction: 0.6
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000009:
+    name: paddle_1
+    PaddleTag: { slot: 1 }
+    orr_physics::Body:
+      pos: [10, 7.99988]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: kinematic
+    orr_physics::Collider:
+      shape: { kind: polygon, verts: [[-5, -0.69998], [5, -0.69998], [5, 0.70001], [-5, 0.70001]] }
+      restitution: 0
+      friction: 0.6
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000000a:
+    name: body_01
+    orr_physics::Body:
+      pos: [-18.30666, 19.97716]
+      angle: 1.93665
+      vel: [-0.39624, 0]
+      omega: 0
+      inv_mass: 3.19827
+      inv_inertia: 61.36328
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.28497, -0.27426], [0.285, -0.27426], [0.285, 0.27429], [-0.28497, 0.27429]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000000b:
+    name: body_02
+    orr_physics::Body:
+      pos: [-17.0002, 19.97342]
+      angle: -0.88818
+      vel: [-0.40524, 0]
+      omega: 0
+      inv_mass: 2.74748
+      inv_inertia: 44.1915
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.26971, -0.33733], [0.26974, -0.33733], [0.26974, 0.33736], [-0.26971, 0.33736]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000000c:
+    name: body_03
+    orr_physics::Body:
+      pos: [-15.63448, 20.0043]
+      angle: 0
+      vel: [-0.15149, 0]
+      omega: 0
+      inv_mass: 2.26306
+      inv_inertia: 32.1886
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.37505 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000000d:
+    name: body_04
+    orr_physics::Body:
+      pos: [-14.27382, 19.99709]
+      angle: 0
+      vel: [0.17789, 0]
+      omega: 0
+      inv_mass: 2.76138
+      inv_inertia: 47.94147
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.33952 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000000e:
+    name: body_05
+    orr_physics::Body:
+      pos: [-12.90433, 19.97954]
+      angle: 0.806
+      vel: [0.89279, 0]
+      omega: 0
+      inv_mass: 2.89494
+      inv_inertia: 48.18823
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.25343, -0.34071], [0.25346, -0.34071], [0.25346, 0.34074], [-0.25343, 0.34074]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000000f:
+    name: body_06
+    orr_physics::Body:
+      pos: [-11.57135, 19.97737]
+      angle: 0
+      vel: [-0.70648, 0]
+      omega: 0
+      inv_mass: 2.19551
+      inv_inertia: 30.29865
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.38077 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000010:
+    name: body_07
+    orr_physics::Body:
+      pos: [-10.2451, 20.00017]
+      angle: 0
+      vel: [-0.62341, 0]
+      omega: 0
+      inv_mass: 2.50214
+      inv_inertia: 39.33733
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.35667 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000011:
+    name: body_08
+    orr_physics::Body:
+      pos: [-8.8825, 20.02084]
+      angle: 0
+      vel: [0.00073, 0]
+      omega: 0
+      inv_mass: 1.62181
+      inv_inertia: 16.52861
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.44302 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000012:
+    name: body_09
+    orr_physics::Body:
+      pos: [-7.55396, 20.02068]
+      angle: 0
+      vel: [-0.90067, 0]
+      omega: 0
+      inv_mass: 1.99854
+      inv_inertia: 25.09996
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.3991 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000013:
+    name: body_10
+    orr_physics::Body:
+      pos: [-6.18076, 19.98735]
+      angle: 0
+      vel: [-0.36337, 0]
+      omega: 0
+      inv_mass: 2.29845
+      inv_inertia: 33.19958
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.37215 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000014:
+    name: body_11
+    orr_physics::Body:
+      pos: [-4.85434, 19.97539]
+      angle: 0
+      vel: [-0.07278, 0]
+      omega: 0
+      inv_mass: 2.42914
+      inv_inertia: 37.08884
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.362 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000015:
+    name: body_12
+    orr_physics::Body:
+      pos: [-3.45583, 19.99396]
+      angle: 0
+      vel: [0.96243, 0]
+      omega: 0
+      inv_mass: 2.8208
+      inv_inertia: 50.02747
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.33592 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000016:
+    name: body_13
+    orr_physics::Body:
+      pos: [-2.13278, 20.02248]
+      angle: 0
+      vel: [-0.95773, 0]
+      omega: 0
+      inv_mass: 3.82468
+      inv_inertia: 91.91585
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.2885 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000017:
+    name: body_14
+    orr_physics::Body:
+      pos: [-0.78851, 20.02904]
+      angle: -0.07317
+      vel: [0.60733, 0]
+      omega: 0
+      inv_mass: 2.96448
+      inv_inertia: 51.48154
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.25981, -0.32455], [0.25984, -0.32455], [0.25984, 0.32458], [-0.25981, 0.32458]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000018:
+    name: body_15
+    orr_physics::Body:
+      pos: [0.5529, 19.97462]
+      angle: 0
+      vel: [0.03036, 0]
+      omega: 0
+      inv_mass: 4.64366
+      inv_inertia: 135.68529
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.26183 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000019:
+    name: body_16
+    orr_physics::Body:
+      pos: [1.94502, 19.98976]
+      angle: -2.08151
+      vel: [0.74606, 0]
+      omega: 0
+      inv_mass: 2.01854
+      inv_inertia: 22.11812
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.44196, -0.28021], [0.44199, -0.28021], [0.44199, 0.28024], [-0.44196, 0.28024]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000001a:
+    name: body_17
+    orr_physics::Body:
+      pos: [3.24846, 20.02647]
+      angle: 2.56834
+      vel: [-0.96768, 0]
+      omega: 0
+      inv_mass: 1.4497
+      inv_inertia: 12.61278
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.41515, -0.41536], [0.41518, -0.41536], [0.41518, 0.41539], [-0.41515, 0.41539]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000001b:
+    name: body_18
+    orr_physics::Body:
+      pos: [4.59935, 20.02]
+      angle: 1.79503
+      vel: [0.18369, 0]
+      omega: 0
+      inv_mass: 2.14836
+      inv_inertia: 24.24565
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.44409, -0.26201], [0.44412, -0.26201], [0.44412, 0.26204], [-0.44409, 0.26204]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000001c:
+    name: body_19
+    orr_physics::Body:
+      pos: [5.95152, 20.02618]
+      angle: 0
+      vel: [0.2254, 0]
+      omega: 0
+      inv_mass: 2.65768
+      inv_inertia: 44.40108
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.34608 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000001d:
+    name: body_20
+    orr_physics::Body:
+      pos: [7.3174, 20.00493]
+      angle: 2.01315
+      vel: [-0.72644, 0]
+      omega: 0
+      inv_mass: 2.97525
+      inv_inertia: 51.60315
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.3275, -0.25655], [0.32753, -0.25655], [0.32753, 0.25658], [-0.3275, 0.25658]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000001e:
+    name: body_21
+    orr_physics::Body:
+      pos: [8.67339, 19.99081]
+      angle: 0
+      vel: [-0.13641, 0]
+      omega: 0
+      inv_mass: 2.17178
+      inv_inertia: 29.64088
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.38284 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000001f:
+    name: body_22
+    orr_physics::Body:
+      pos: [10.05179, 19.99077]
+      angle: 0
+      vel: [-0.43448, 0]
+      omega: 0
+      inv_mass: 1.59863
+      inv_inertia: 16.0588
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.44623 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000020:
+    name: body_23
+    orr_physics::Body:
+      pos: [11.39041, 19.98727]
+      angle: 0
+      vel: [-0.34622, 0]
+      omega: 0
+      inv_mass: 1.68352
+      inv_inertia: 17.80869
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.43483 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000021:
+    name: body_24
+    orr_physics::Body:
+      pos: [12.73619, 20.02258]
+      angle: 0
+      vel: [0.30655, 0]
+      omega: 0
+      inv_mass: 1.99957
+      inv_inertia: 25.12883
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.39899 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000022:
+    name: body_25
+    orr_physics::Body:
+      pos: [14.04768, 19.99603]
+      angle: 1.10925
+      vel: [-0.63895, 0]
+      omega: 0
+      inv_mass: 1.29944
+      inv_inertia: 10.13234
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.43935, -0.43788], [0.43938, -0.43788], [0.43938, 0.43791], [-0.43935, 0.43791]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000023:
+    name: body_26
+    orr_physics::Body:
+      pos: [15.41106, 20.01184]
+      angle: 0
+      vel: [0.30997, 0]
+      omega: 0
+      inv_mass: 2.88425
+      inv_inertia: 52.30327
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.33221 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000024:
+    name: body_27
+    orr_physics::Body:
+      pos: [16.78795, 19.97693]
+      angle: 0
+      vel: [-0.17636, 0]
+      omega: 0
+      inv_mass: 3.12537
+      inv_inertia: 61.42079
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.31914 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000025:
+    name: body_28
+    orr_physics::Body:
+      pos: [18.13232, 20.01698]
+      angle: 1.87471
+      vel: [0.5451, 0]
+      omega: 0
+      inv_mass: 2.28706
+      inv_inertia: 27.37509
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.43205, -0.25298], [0.43208, -0.25298], [0.43208, 0.253], [-0.43205, 0.253]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000026:
+    name: body_29
+    orr_physics::Body:
+      pos: [-18.3104, 21.36046]
+      angle: -2.55264
+      vel: [-0.85904, 0]
+      omega: 0
+      inv_mass: 2.08434
+      inv_inertia: 26.05804
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.33983, -0.35292], [0.33986, -0.35292], [0.33986, 0.35295], [-0.33983, 0.35295]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000027:
+    name: body_30
+    orr_physics::Body:
+      pos: [-16.96486, 21.33768]
+      angle: 0
+      vel: [0.37479, 0]
+      omega: 0
+      inv_mass: 1.71492
+      inv_inertia: 18.48166
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.43083 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000028:
+    name: body_31
+    orr_physics::Body:
+      pos: [-15.62701, 21.33142]
+      angle: 2.86153
+      vel: [0.05795, 0]
+      omega: 0
+      inv_mass: 2.1509
+      inv_inertia: 27.60573
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.35956, -0.32323], [0.35959, -0.32323], [0.35959, 0.32326], [-0.35956, 0.32326]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000029:
+    name: body_32
+    orr_physics::Body:
+      pos: [-14.25862, 21.37035]
+      angle: 0
+      vel: [-0.25134, 0]
+      omega: 0
+      inv_mass: 2.18481
+      inv_inertia: 29.99359
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.3817 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000002a:
+    name: body_33
+    orr_physics::Body:
+      pos: [-12.91876, 21.34079]
+      angle: -0.4511
+      vel: [-0.9896, 0]
+      omega: 0
+      inv_mass: 1.47093
+      inv_inertia: 12.97485
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.4201, -0.40453], [0.42014, -0.40453], [0.42014, 0.40456], [-0.4201, 0.40456]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000002b:
+    name: body_34
+    orr_physics::Body:
+      pos: [-11.5769, 21.34181]
+      angle: 0
+      vel: [0.988, 0]
+      omega: 0
+      inv_mass: 2.53073
+      inv_inertia: 40.25552
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.35466 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000002c:
+    name: body_35
+    orr_physics::Body:
+      pos: [-10.24976, 21.34413]
+      angle: 0
+      vel: [0.3211, 0]
+      omega: 0
+      inv_mass: 1.75609
+      inv_inertia: 19.37787
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.42575 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000002d:
+    name: body_36
+    orr_physics::Body:
+      pos: [-8.87547, 21.33163]
+      angle: 2.94197
+      vel: [-0.25607, 0]
+      omega: 0
+      inv_mass: 1.60129
+      inv_inertia: 15.30142
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.3747, -0.41664], [0.37473, -0.41664], [0.37473, 0.41667], [-0.3747, 0.41667]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000002e:
+    name: body_37
+    orr_physics::Body:
+      pos: [-7.53343, 21.36223]
+      angle: 0
+      vel: [0.51031, 0]
+      omega: 0
+      inv_mass: 2.05867
+      inv_inertia: 26.64064
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.39322 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_0000002f:
+    name: body_38
+    orr_physics::Body:
+      pos: [-6.20268, 21.37335]
+      angle: 0
+      vel: [0.77844, 0]
+      omega: 0
+      inv_mass: 3.63483
+      inv_inertia: 83.0621
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.29593 }
+      restitution: 0.2
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000030:
+    name: body_39
+    orr_physics::Body:
+      pos: [-3.44743, 21.3587]
+      angle: 0.78088
+      vel: [0.46704, 0]
+      omega: 0
+      inv_mass: 1.8466
+      inv_inertia: 19.29231
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.4377, -0.30928], [0.43773, -0.30928], [0.43773, 0.30931], [-0.4377, 0.30931]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000031:
+    name: body_40
+    orr_physics::Body:
+      pos: [-2.12936, 21.35405]
+      angle: 0.7619
+      vel: [0.61319, 0]
+      omega: 0
+      inv_mass: 1.6278
+      inv_inertia: 15.40935
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape:
+        kind: polygon
+        verts: [[-0.34544, -0.44455], [0.34547, -0.44455], [0.34547, 0.44458], [-0.34544, 0.44458]]
+      restitution: 0.1
+      friction: 0.5
+      layer: 1
+      mask: 4294967295
+      flags: []

@@ -11,6 +11,7 @@
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
 use orr_fp::{fp, FPVec2, FrameRng, FP};
+use orr_reflect::{Reflect, TypeRegistry};
 use orr_physics::{
     spawn_body, Body, Collider, PhysicsConfig, PhysicsSystem, Shape, TriggerEvent, BODY_DYNAMIC,
 };
@@ -165,14 +166,14 @@ fn map_trigger(e: TriggerEvent) -> PhysEvent {
 
 /// Marks the paddle of a player.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable, Reflect)]
 pub struct PaddleTag {
     pub slot: u32,
 }
 
 /// Scene constants, set once in `setup`.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable, Reflect)]
 pub struct Scene {
     pub half_w: FP,
     pub height: FP,
@@ -184,6 +185,14 @@ pub struct Scene {
 }
 
 pub struct PhysGame;
+
+/// Registers every reflected type `PhysGame` uses (physics types, `PaddleTag`
+/// and the `Scene` singleton) under the names of its `ComponentRegistry`.
+pub fn register_reflect(types: &mut TypeRegistry) {
+    orr_physics::register_reflect(types);
+    types.register_component::<PaddleTag>("PaddleTag");
+    types.register_singleton::<Scene>("Scene");
+}
 
 impl Game for PhysGame {
     type Input = PhysInput;

@@ -1,0 +1,21 @@
+[package]
+name = "orr_edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+orr_session = { path = "../orr_session" }
+orr_reflect = { path = "../orr_reflect", features = ["scene"] }
+
+[dev-dependencies]
+orr_sample = { path = "../orr_sample" }
+orr_physics = { path = "../orr_physics" }
