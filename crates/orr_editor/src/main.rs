@@ -1,12 +1,14 @@
 //! The editor window. `cargo run -p orr_editor --release`.
 //!
 //! Flags: see `--help` (`--scene`, `--select`, `--play-ticks`, `--script`,
-//! `--screenshot <png> --frames <n>`).
+//! `--screenshot <png> --frames <n>`, `--erp <addr>` with `--erp-token` or
+//! `--erp-dev`).
 use std::path::PathBuf;
 
 use orr_editor::cli::{Args, USAGE};
 use orr_editor::editor::{default_scene_path, Editor};
 use orr_editor::{script, EditorApp, ScreenshotJob};
+use orr_remote::{Auth, ServerConfig, TokenEntry};
 
 fn fail(msg: &str) -> ! {
     eprintln!("{msg}");
@@ -33,6 +35,20 @@ fn main() {
         if let Err(e) = script::run_script(&mut editor, &text) {
             fail(&e);
         }
+    }
+    if let Some(bind) = args.erp {
+        let auth = if args.erp_dev {
+            Auth::DevNoAuth
+        } else if args.erp_tokens.is_empty() {
+            fail("--erp needs --erp-token name:token:caps or --erp-dev");
+        } else {
+            let tokens = args.erp_tokens.iter().map(|t| TokenEntry::parse(t).unwrap_or_else(|e| fail(&format!("--erp-token: {e}"))));
+            Auth::Tokens(tokens.collect())
+        };
+        let mut cfg = ServerConfig::new(auth);
+        cfg.bind = bind;
+        let url = editor.start_erp(cfg).unwrap_or_else(|e| fail(&e));
+        println!("ERP: {url}");
     }
     if let Some(n) = args.play_ticks {
         editor.step(n);

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 orr_editor [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
            [--screenshot <out.png> [--frames <n>]] [--size <WxH>]
+           [--erp <addr>] [--erp-token <name:token:caps>]... [--erp-dev]
 
   --scene <file>        scene to open (default scenes/physics_demo.scene.yaml)
   --select <name>       select the entity with this name (or GUID) at start
@@ -15,6 +16,13 @@ orr_editor [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file
                         framebuffer to the PNG and exit
   --frames <n>          frames before the screenshot (default 30)
   --size <WxH>          window size in points (default 1600x900)
+  --erp <addr>          serve ERP (JSON-RPC over WebSocket) on this address,
+                        e.g. 127.0.0.1:7777, so AI agents can edit and play
+                        the open scene (same undo history as the window)
+  --erp-token <n:t:c>   a client token: name:token:caps, caps = read,
+                        scene_edit, sim_control (comma separated) or all
+  --erp-dev             no tokens, every client has every capability
+                        (loopback addresses only)
 ";
 
 /// Parsed flags.
@@ -34,11 +42,17 @@ pub struct Args {
     pub frames: u64,
     /// `--size`.
     pub size: (f32, f32),
+    /// `--erp`.
+    pub erp: Option<std::net::SocketAddr>,
+    /// `--erp-token`, as given.
+    pub erp_tokens: Vec<String>,
+    /// `--erp-dev`.
+    pub erp_dev: bool,
 }
 
 impl Default for Args {
     fn default() -> Self {
-        Self { scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, size: (1600.0, 900.0) }
+        Self { scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false }
     }
 }
 
@@ -62,6 +76,9 @@ impl Args {
                     let (w, h) = v.split_once('x').ok_or("--size needs WxH, like 1600x900")?;
                     out.size = (w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?);
                 }
+                "--erp" => out.erp = Some(value("--erp")?.parse().map_err(|e| format!("--erp: {e}"))?),
+                "--erp-token" => out.erp_tokens.push(value("--erp-token")?),
+                "--erp-dev" => out.erp_dev = true,
                 "-h" | "--help" => return Err(USAGE.to_string()),
                 other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
             }

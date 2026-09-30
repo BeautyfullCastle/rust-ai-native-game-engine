@@ -142,7 +142,12 @@ impl eframe::App for EditorApp {
         self.frames += 1;
 
         let dt = f64::from(ctx.input(|i| i.unstable_dt));
+        self.editor.poll_erp();
         self.editor.advance(dt);
+        if self.editor.erp_status().is_some() {
+            // Keep polling ERP requests while the window is idle.
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
         self.editor.sanitize_selection();
         if self.editor.is_playing_mode() && self.editor.timeline().is_some_and(|t| t.playing) {
             ctx.request_repaint();
@@ -267,6 +272,9 @@ impl EditorApp {
                 let gpu = self.gpu.as_ref().map_or_else(|| "no GPU".to_string(), |g| g.gpu().adapter_name());
                 ui.weak(gpu);
                 ui.weak(format!("checksum {:#018x}", self.editor.checksum()));
+                if let Some((url, clients)) = self.editor.erp_status() {
+                    ui.weak(format!("ERP {url} ({clients} connected)"));
+                }
             });
         });
     }

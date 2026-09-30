@@ -12,12 +12,18 @@
 //! runs the ticks the frame time and speed ask for. A 1000-body physics tick
 //! is under a millisecond, so this is fine at 60 Hz. A threaded host would
 //! be the next step.
+//!
+//! An ERP server can run inside the editor ([`Editor::start_erp`]). Its
+//! requests run in [`Editor::poll_erp`] on the UI thread, against the same
+//! `EditorDoc` and play session, so an AI agent's edits land in the same
+//! undo history (origin `agent:<name>`) and show up in the window at once.
 
 use std::path::{Path, PathBuf};
 
 use orr_edit::{EditError, EditorDoc, Op, Origin, PlayController, StoppedPlay, Target, View};
 use orr_fp::{FPVec2, FP};
 use orr_reflect::{decimal, Guid, TypeRegistry, Value};
+use orr_remote::{ErpServer, ErpTarget, ServerConfig};
 use orr_render::Camera;
 use orr_sample::physics_game::{register_reflect, PhysGame};
 use orr_session::{ControlOp, Speed, Timeline};
@@ -89,18 +95,17 @@ pub enum Owner {
     Singleton(String),
 }
 
-/// A running play session and its wall-clock accumulator.
-struct Play {
-    ctl: PlayController<PhysGame>,
-    /// Seconds of (speed scaled) real time not yet turned into ticks.
-    acc: f64,
-}
-
 /// See the module docs.
 pub struct Editor {
     doc: EditorDoc,
     path: Option<PathBuf>,
-    play: Option<Play>,
+    /// The play session. Its type is what `orr_remote::ErpTarget` borrows,
+    /// so ERP clients drive the same session.
+    play: Option<PlayController<PhysGame>>,
+    /// Seconds of (speed scaled) real time not yet turned into ticks.
+    play_acc: f64,
+    /// The embedded ERP server, if started (see [`Editor::start_erp`]).
+    erp: Option<ErpServer>,
     stopped: Option<StoppedPlay>,
     selection: Option<Target>,
     /// The viewport camera (world units, y up).
@@ -112,7 +117,7 @@ pub struct Editor {
 impl Editor {
     /// An editor on `doc`, saved as `path` (if any).
     pub fn new(doc: EditorDoc, path: Option<PathBuf>) -> Self {
-        let mut e = Self { doc, path, play: None, stopped: None, selection: None, camera: Camera::new([0.0, 0.0], 20.0), status: None, log: Vec::new() };
+        let mut e = Self { doc, path, play: None, play_acc: 0.0, erp: None, stopped: None, selection: None, camera: Camera::new([0.0, 0.0], 20.0), status: None, log: Vec::new() };
         e.fit_camera();
         e
     }
@@ -149,19 +154,19 @@ impl Editor {
     /// else the preview frame.
     pub fn view(&self) -> View<'_> {
         match &self.play {
-            Some(p) => p.ctl.view(),
+            Some(p) => p.view(),
             None => self.doc.view(),
         }
     }
 
     /// The play controller, in play mode.
     pub fn play_controller(&self) -> Option<&PlayController<PhysGame>> {
-        self.play.as_ref().map(|p| &p.ctl)
+        self.play.as_ref()
     }
 
     /// The timeline of the play session.
     pub fn timeline(&self) -> Option<Timeline> {
-        self.play.as_ref().map(|p| p.ctl.timeline())
+        self.play.as_ref().map(|p| p.timeline())
     }
 
     /// The recording of the last play that was stopped.
@@ -386,10 +391,10 @@ impl Editor {
                 self.doc.apply(Op::SetSingletonField { singleton: s.clone(), path: path.to_string(), value }, Origin::User).map(|a| a.changed)
             }
             (Some(p), Owner::Component(c)) => match sel {
-                Some(t) => p.ctl.set_field(&t, c, path, value),
+                Some(t) => p.set_field(&t, c, path, value),
                 None => Err(EditError::Invalid("nothing selected".into())),
             },
-            (Some(p), Owner::Singleton(s)) => p.ctl.set_singleton_field(s, path, value),
+            (Some(p), Owner::Singleton(s)) => p.set_singleton_field(s, path, value),
         };
         self.report(&what, result).unwrap_or(false)
     }
@@ -407,7 +412,7 @@ impl Editor {
                 Some(guid) => self.doc.apply(Op::AddComponent { guid, component: component.to_string(), value: None }, Origin::User).map(|_| ()),
                 None => Err(EditError::UnknownEntity("selection".into())),
             },
-            Some(p) => p.ctl.add_component(&t, component, None),
+            Some(p) => p.add_component(&t, component, None),
         };
         self.report(&what, r).is_some()
     }
@@ -425,7 +430,7 @@ impl Editor {
                 Some(guid) => self.doc.apply(Op::RemoveComponent { guid, component: component.to_string() }, Origin::User).map(|_| ()),
                 None => Err(EditError::UnknownEntity("selection".into())),
             },
-            Some(p) => p.ctl.remove_component(&t, component),
+            Some(p) => p.remove_component(&t, component),
         };
         self.report(&what, r).is_some()
     }
@@ -459,7 +464,7 @@ impl Editor {
                 }
             }
             Some(p) => {
-                let r = p.ctl.spawn(&components);
+                let r = p.spawn(&components);
                 match self.report("spawn", r) {
                     Some(e) => {
                         self.selection = Some(Target::Entity(e));
@@ -491,7 +496,7 @@ impl Editor {
                 Some(guid) => self.doc.apply(Op::DespawnEntity { guid }, Origin::User).map(|_| ()),
                 None => Err(EditError::UnknownEntity("selection".into())),
             },
-            Some(p) => p.ctl.despawn(&t),
+            Some(p) => p.despawn(&t),
         };
         let ok = self.report("delete", r).is_some();
         if ok {
@@ -524,6 +529,45 @@ impl Editor {
         ok
     }
 
+    // ---- ERP ----
+
+    /// Starts the embedded ERP server. The play defaults (players, tick rate)
+    /// and the scene path for `scene.save {write: true}` are the editor's.
+    /// Returns the URL clients connect to.
+    pub fn start_erp(&mut self, mut cfg: ServerConfig) -> Result<String, String> {
+        if self.erp.is_some() {
+            return Err("the ERP server is already running".into());
+        }
+        cfg.limits.player_count = PLAYERS;
+        cfg.limits.tick_rate = TICK_RATE;
+        cfg.limits.scene_path = self.path.clone();
+        let server = ErpServer::start(cfg).map_err(|e| format!("ERP: {e}"))?;
+        let url = server.url();
+        self.erp = Some(server);
+        self.info(format!("ERP listening on {url}"));
+        Ok(url)
+    }
+
+    /// The ERP server's URL and connection count, if it runs.
+    pub fn erp_status(&self) -> Option<(String, usize)> {
+        self.erp.as_ref().map(|s| (s.url(), s.connection_count()))
+    }
+
+    /// Runs the ERP requests that arrived since the last call (call once per
+    /// frame). Returns how many ran.
+    pub fn poll_erp(&mut self) -> usize {
+        let Some(server) = &mut self.erp else { return 0 };
+        let had_play = self.play.is_some();
+        let report = server.poll(&mut ErpTarget { doc: &mut self.doc, play: &mut self.play });
+        if had_play != self.play.is_some() {
+            self.play_acc = 0.0;
+        }
+        if report.requests > 0 {
+            self.sanitize_selection();
+        }
+        report.requests
+    }
+
     // ---- play ----
 
     /// Starts a play session from the scene, paused at tick 0. Refused if
@@ -536,7 +580,8 @@ impl Editor {
         let r = PlayController::<PhysGame>::start_play(&self.doc, self.doc.play_config(PLAYERS, TICK_RATE));
         match self.report("play", r) {
             Some(ctl) => {
-                self.play = Some(Play { ctl, acc: 0.0 });
+                self.play = Some(ctl);
+                self.play_acc = 0.0;
                 self.info("play started");
                 true
             }
@@ -567,9 +612,9 @@ impl Editor {
     /// Runs a timeline control (play mode only).
     pub fn control(&mut self, op: ControlOp) {
         if let Some(p) = &mut self.play {
-            p.ctl.control(op);
-            p.acc = 0.0;
-            for note in p.ctl.session_mut().take_notes() {
+            p.control(op);
+            self.play_acc = 0.0;
+            for note in p.session_mut().take_notes() {
                 if let orr_session::PlayNote::DebugRejected(e) = note {
                     let text = format!("debug edit refused: {e}");
                     self.status = Some(Message { text: text.clone(), error: true });
@@ -600,7 +645,7 @@ impl Editor {
     /// recording stays available from [`last_stopped`](Self::last_stopped).
     pub fn stop(&mut self) -> Option<&StoppedPlay> {
         let p = self.play.take()?;
-        self.stopped = Some(p.ctl.stop_play());
+        self.stopped = Some(p.stop_play());
         self.sanitize_selection();
         self.info("play stopped");
         self.stopped.as_ref()
@@ -610,22 +655,22 @@ impl Editor {
     /// accumulator scaled by the play speed). Returns how many ran.
     pub fn advance(&mut self, dt: f64) -> u32 {
         let Some(p) = &mut self.play else { return 0 };
-        let session = p.ctl.session();
+        let session = p.session();
         if !session.is_playing() {
-            p.acc = 0.0;
+            self.play_acc = 0.0;
             return 0;
         }
         let speed = f64::from(session.speed().permille()) / 1000.0;
         let step = 1.0 / f64::from(session.tick_rate().max(1));
-        p.acc += dt.clamp(0.0, 1.0) * speed;
+        self.play_acc += dt.clamp(0.0, 1.0) * speed;
         let mut ran = 0;
-        while p.acc >= step && ran < MAX_TICKS_PER_ADVANCE {
-            p.ctl.session_mut().tick();
-            p.acc -= step;
+        while self.play_acc >= step && ran < MAX_TICKS_PER_ADVANCE {
+            p.session_mut().tick();
+            self.play_acc -= step;
             ran += 1;
         }
         if ran == MAX_TICKS_PER_ADVANCE {
-            p.acc = 0.0;
+            self.play_acc = 0.0;
         }
         ran
     }
