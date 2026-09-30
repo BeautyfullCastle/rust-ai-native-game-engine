@@ -3,6 +3,7 @@
 //! They skip (with a message) when no adapter exists, for example on a CI
 //! runner without a GPU. Set `ORR_REQUIRE_GPU=1` to fail instead of skipping.
 //! Hardware is preferred; a software adapter (WARP, llvmpipe) is the fallback.
+#![allow(clippy::float_arithmetic)] // a view-layer test: pixel colors are floats
 
 use orr_render::orr_rhi::{TextureFormat, Wgpu, WgpuOptions};
 use orr_render::{Camera, OffscreenTarget, RenderList, Renderer};

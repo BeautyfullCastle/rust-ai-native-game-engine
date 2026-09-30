@@ -181,7 +181,7 @@ pub enum Topology {
     LineList,
 }
 
-pub struct PipelineDesc<'a, B: Rhi + ?Sized> {
+pub struct PipelineDesc<'a, B: Rhi> {
     pub label: &'a str,
     pub shader: &'a B::Shader,
     pub vs_entry: &'a str,
@@ -193,18 +193,18 @@ pub struct PipelineDesc<'a, B: Rhi + ?Sized> {
 }
 
 /// One binding of a bind group. Only uniform buffers for now.
-pub enum Binding<'a, B: Rhi + ?Sized> {
+pub enum Binding<'a, B: Rhi> {
     Uniform { binding: u32, buffer: &'a B::Buffer },
 }
 
-pub struct ColorAttachment<'a, B: Rhi + ?Sized> {
+pub struct ColorAttachment<'a, B: Rhi> {
     pub view: &'a B::TextureView,
     /// `Some(color)` clears first, `None` keeps the old contents.
     pub clear: Option<[f64; 4]>,
 }
 
 /// A backend neutral render command (recorded, then replayed by the backend).
-pub enum Command<'a, B: Rhi + ?Sized> {
+pub enum Command<'a, B: Rhi> {
     SetPipeline(&'a B::Pipeline),
     SetBindGroup(u32, &'a B::BindGroup),
     SetVertexBuffer(u32, &'a B::Buffer),

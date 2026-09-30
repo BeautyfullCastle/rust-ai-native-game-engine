@@ -121,6 +121,7 @@ impl RenderList {
     }
 
     /// Outline of a capsule (same parameters as [`RenderList::capsule`]).
+    #[allow(clippy::too_many_arguments)] // mirrors `capsule` plus the outline's segments and width
     pub fn capsule_outline(
         &mut self,
         center: [f32; 2],
