@@ -85,6 +85,8 @@ pub(crate) struct Effects {
     pub tx: TxChange,
     /// The recording of a play session this call stopped.
     pub stopped: Option<StoppedPlay>,
+    /// The typed report of a verification this call ran.
+    pub verify: Option<std::sync::Arc<crate::activity::VerifyDetail>>,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -178,8 +180,8 @@ pub(crate) fn call<G: Game>(
         "proposal.list" => Ok(proposals::list(t)),
         "proposal.get" => proposals::get(t, &p),
         "proposal.preview" => proposals::preview(t, &p),
-        "proposal.verify" => proposals::verify(t, lim, ctx, &p, true),
-        "verify.self" => proposals::verify(t, lim, ctx, &p, false),
+        "proposal.verify" => proposals::verify(t, lim, ctx, fx, &p, true),
+        "verify.self" => proposals::verify(t, lim, ctx, fx, &p, false),
         "proposal.accept" => {
             require_edit_mode(t, "proposal.accept")?;
             proposals::accept(t, &p)

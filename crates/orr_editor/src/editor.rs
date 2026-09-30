@@ -20,16 +20,16 @@
 
 use std::path::{Path, PathBuf};
 
-use orr_edit::{Accepted, EditError, EditorDoc, Op, Origin, PlayController, ProposalId, StoppedPlay, Target, View};
+use orr_edit::{EditError, EditorDoc, Op, Origin, PlayController, ProposalId, StoppedPlay, Target, View};
 use orr_fp::{FPVec2, FP};
 use orr_reflect::{decimal, Guid, TypeRegistry, Value};
-use orr_remote::{default_build_id, ErpServer, ErpTarget, GameHooks, ServerConfig};
+use orr_remote::{default_build_id, ClientInfo, ErpServer, ErpTarget, GameHooks, ServerConfig};
 use orr_render::Camera;
 use orr_sample::physics_game::{register_reflect, PhysGame};
 use orr_session::{ControlOp, Speed, Timeline};
 use orr_sim::Simulation;
 
-use crate::agent::{conflict_of, AgentState, VerifyRun, VerifySource};
+use crate::agent::{AgentState, Feed};
 
 /// Seed of the preview frame and of play sessions started from the editor.
 pub const SEED: u64 = 7;
@@ -115,12 +115,13 @@ pub struct Editor {
     status: Option<Message>,
     log: Vec<Message>,
     agent: AgentState,
+    feed: Feed,
 }
 
 impl Editor {
     /// An editor on `doc`, saved as `path` (if any).
     pub fn new(doc: EditorDoc, path: Option<PathBuf>) -> Self {
-        let mut e = Self { doc, path, play: None, play_acc: 0.0, erp: None, stopped: None, selection: None, camera: Camera::new([0.0, 0.0], 20.0), status: None, log: Vec::new(), agent: AgentState::default() };
+        let mut e = Self { doc, path, play: None, play_acc: 0.0, erp: None, stopped: None, selection: None, camera: Camera::new([0.0, 0.0], 20.0), status: None, log: Vec::new(), agent: AgentState::default(), feed: Feed::default() };
         e.fit_camera();
         e
     }
@@ -540,22 +541,31 @@ impl Editor {
         ok
     }
 
-    // ---- agent proposals ----
+    // ---- agent activity and proposals ----
 
-    /// The window state of the Agent panel.
+    /// The window state of the Agent tab.
     pub fn agent(&self) -> &AgentState {
         &self.agent
     }
 
-    /// The Agent panel state, mutably (checks text, input source).
+    /// The Agent tab state, mutably.
     pub fn agent_mut(&mut self) -> &mut AgentState {
         &mut self.agent
     }
 
-    /// Selects a proposal in the panel (or clears the selection).
-    pub fn select_proposal(&mut self, id: Option<ProposalId>) {
-        self.agent.selected = id.filter(|&i| self.doc.proposal_info(i).is_ok());
-        self.agent.conflict = None;
+    /// The activity feed: what agents did through ERP.
+    pub fn feed(&self) -> &Feed {
+        &self.feed
+    }
+
+    /// The activity feed, mutably (filters, marking as seen).
+    pub fn feed_mut(&mut self) -> &mut Feed {
+        &mut self.feed
+    }
+
+    /// The clients connected to the embedded ERP server right now.
+    pub fn agents(&self) -> Vec<ClientInfo> {
+        self.erp.as_ref().map(ErpServer::clients).unwrap_or_default()
     }
 
     /// What the viewport draws: the staged frame of the previewed proposal
@@ -590,78 +600,9 @@ impl Editor {
             }
             other => {
                 self.agent.preview = other;
-                if let Some(i) = other {
-                    self.agent.selected = Some(i);
-                }
                 true
             }
         }
-    }
-
-    /// Accepts a proposal: one history entry with its origin. A conflict
-    /// is reported and kept in [`AgentState::conflict`]; nothing changes then.
-    pub fn accept_proposal(&mut self, id: ProposalId) -> Result<Accepted, EditError> {
-        if self.play.is_some() {
-            let e = EditError::Invalid("stop play before accepting a proposal".into());
-            self.error(format!("accept {id}: {e}"));
-            return Err(e);
-        }
-        self.end_edit();
-        let label = self.doc.proposal_info(id).map(|i| i.label).unwrap_or_default();
-        match self.doc.accept(id) {
-            Ok(a) => {
-                self.agent.conflict = None;
-                self.info(format!("accepted {id} \"{label}\""));
-                self.sanitize_selection();
-                Ok(a)
-            }
-            Err(e) => {
-                self.agent.conflict = conflict_of(&self.doc, &e);
-                self.error(format!("accept {id}: {e}"));
-                Err(e)
-            }
-        }
-    }
-
-    /// Discards a proposal.
-    pub fn reject_proposal(&mut self, id: ProposalId) -> Result<(), EditError> {
-        let r = self.doc.reject(id);
-        match &r {
-            Ok(()) => {
-                self.info(format!("rejected {id}"));
-                self.sanitize_selection();
-            }
-            Err(e) => self.error(format!("reject {id}: {e}")),
-        }
-        r
-    }
-
-    /// Starts verifying a proposal on a background thread (see
-    /// [`crate::agent`]). One job at a time. The checks are the checks text
-    /// of [`AgentState`].
-    pub fn start_verify(&mut self, id: ProposalId, source: VerifySource) -> Result<(), String> {
-        let replay = self.stopped.as_ref().map(|s| s.replay.clone());
-        let r = self.agent.start(&self.doc, id, source, replay);
-        match &r {
-            Ok(()) => self.info(format!("verifying {id} on {}", source.label())),
-            Err(e) => self.error(format!("verify {id}: {e}")),
-        }
-        r
-    }
-
-    /// Collects a finished verification (call once per frame). True if one just finished.
-    pub fn poll_verify(&mut self) -> bool {
-        self.agent.poll()
-    }
-
-    /// Blocks until the running verification (if any) is done.
-    pub fn wait_verify(&mut self) {
-        self.agent.wait();
-    }
-
-    /// The last finished verification.
-    pub fn verify_result(&self) -> Option<&VerifyRun> {
-        self.agent.last_run()
     }
 
     // ---- ERP ----
@@ -692,6 +633,15 @@ impl Editor {
         self.erp.as_ref().map(|s| (s.url(), s.connection_count()))
     }
 
+    /// Takes the ERP activity recorded since the last call into the feed.
+    fn pull_activity(&mut self) {
+        let Some(server) = &self.erp else { return };
+        if server.activity_last_seq() > self.feed.last_seq {
+            let list = server.activity_since(self.feed.last_seq);
+            self.feed.push(list);
+        }
+    }
+
     /// Runs the ERP requests that arrived since the last call (call once per
     /// frame). Returns how many ran.
     pub fn poll_erp(&mut self) -> usize {
@@ -704,6 +654,7 @@ impl Editor {
         if report.requests > 0 {
             self.sanitize_selection();
         }
+        self.pull_activity();
         report.requests
     }
 

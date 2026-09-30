@@ -24,10 +24,15 @@
 //! - Proposals (`proposal.*`, `verify.self`): an agent stages edits on a
 //!   private copy of the scene, reads the diff, verifies it by replaying
 //!   inputs on the scene with and without the edits (checksums, metrics,
-//!   pass/fail `checks`), and accepts it (needs `approve`) as one undoable
-//!   history entry. [`GameHooks`] (in [`HostLimits`]) gives the host's game
+//!   pass/fail `checks`), and accepts it (needs `approve`, which `all` and dev mode include) as one
+//!   undoable history entry. [`GameHooks`] (in [`HostLimits`]) gives the host's game
 //!   metrics and scripted players; `watch.proposals` tells every subscriber
 //!   what happened to the proposals.
+//! - The activity log ([`ActivityEntry`], [`ErpServer::activity_since`],
+//!   `activity.list`, `watch.activity`): a bounded record of what every
+//!   request did, in one line each, with old/new values of field writes, the
+//!   diff of an accepted proposal and the report of a verification. It is
+//!   for people watching an agent work (the editor's Agent tab).
 //! - [`RemoteBridge`]: an `orr_bridge::Bridge` + `SimControl` over ERP, so
 //!   view code can attach to a sim in another process. The server streams
 //!   frame snapshots (binary, lz4) and the bridge rebuilds `Snapshot`s.
@@ -43,6 +48,7 @@
 #![deny(clippy::float_arithmetic)]
 #![allow(clippy::disallowed_types)]
 
+mod activity;
 mod caps;
 mod client;
 pub mod codec;
@@ -57,6 +63,7 @@ mod remote;
 mod server;
 pub mod wire;
 
+pub use activity::{ActivityEntry, ActivityKind, ClientInfo, ValueChange, VerifyDetail, DEFAULT_ACTIVITY_CAPACITY};
 pub use caps::{Auth, Cap, Caps, TokenEntry};
 pub use client::{ClientError, ErpClient};
 pub use dispatch::{call_local, ErpTarget, HostLimits};

@@ -14,8 +14,9 @@
 //! - [`viewport`]: the render list of the frame on screen (`orr_render`),
 //!   picking, and the offscreen texture shared with egui on eframe's own
 //!   wgpu device.
-//! - [`agent`]: the Agent panel's state: proposal selection, preview,
-//!   background verification.
+//! - [`agent`] and [`agent_ui`]: the Agent tab, a read-only activity feed of
+//!   what AI agents do through ERP (no approval step; Undo takes a change
+//!   back), plus a view-only preview of the proposals an agent has open.
 //! - [`app`]: [`EditorApp`], the `eframe::App` with all panels.
 //! - [`cli`] and [`script`]: command line flags (`--scene`, `--screenshot`,
 //!   `--frames`, `--play-ticks`, `--select`, `--script`) for headless checks.

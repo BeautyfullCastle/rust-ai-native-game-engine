@@ -18,7 +18,7 @@
 //! is behind (over [`MAX_PENDING_BYTES`] queued) skips frames instead of
 //! making the queue grow.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -31,6 +31,7 @@ use orr_session::PlayNote;
 use orr_sim::{EventKey, Game, SimEvent};
 use serde_json::{json, Value as J};
 
+use crate::activity::{self, ActivityEntry, ActivityKind, ClientInfo, DEFAULT_ACTIVITY_CAPACITY};
 use crate::caps::{Auth, Caps};
 use crate::codec::hex_encode;
 use crate::dispatch::{authorize, call, CallCtx, Effects, ErpTarget, HostLimits, TxChange};
@@ -65,6 +66,8 @@ pub struct ServerConfig {
     pub tx_timeout: Duration,
     /// Settings of the methods (players, tick rate, step limit, scene file).
     pub limits: HostLimits,
+    /// Entries of the activity log the server keeps (default 2000).
+    pub activity_capacity: usize,
 }
 
 impl ServerConfig {
@@ -80,6 +83,7 @@ impl ServerConfig {
             max_requests_per_poll: 256,
             tx_timeout: Duration::from_secs(60),
             limits: HostLimits::default(),
+            activity_capacity: DEFAULT_ACTIVITY_CAPACITY,
         }
     }
 }
@@ -106,7 +110,14 @@ struct Subs {
     events: bool,
     notes: bool,
     proposals: bool,
+    activity: Option<ActivitySub>,
     frames: Option<FrameSub>,
+}
+
+struct ActivitySub {
+    /// The newest entry the connection was sent (or was there when it subscribed).
+    seen: u64,
+    reads: bool,
 }
 
 struct FrameSub {
@@ -121,6 +132,8 @@ struct Conn {
     caps: Caps,
     binary: bool,
     subs: Subs,
+    requests: u64,
+    connected_ms: u64,
 }
 
 /// Counters, for logs and tests.
@@ -169,6 +182,9 @@ pub struct ErpServer {
     last_play: Option<StoppedPlay>,
     frame_cache: Option<CachedFrame>,
     stats: ServerStats,
+    started: Instant,
+    activity: VecDeque<ActivityEntry>,
+    next_seq: u64,
 }
 
 impl ErpServer {
@@ -223,6 +239,9 @@ impl ErpServer {
             last_play: None,
             frame_cache: None,
             stats: ServerStats::default(),
+            started: Instant::now(),
+            activity: VecDeque::new(),
+            next_seq: 1,
         })
     }
 
@@ -254,6 +273,72 @@ impl ErpServer {
         self.conns.len()
     }
 
+    /// The clients connected right now (as of the last `poll`), oldest first.
+    pub fn clients(&self) -> Vec<ClientInfo> {
+        self.conns
+            .iter()
+            .map(|(id, c)| ClientInfo { id: *id, name: c.client.clone(), caps: c.caps, connected_ms: c.connected_ms, requests: c.requests })
+            .collect()
+    }
+
+    /// The activity entries recorded after `seq` (0 = all still kept), oldest
+    /// first, reads included. Hosts that draw the log (the editor) call this
+    /// once per frame with the last `seq` they saw.
+    pub fn activity_since(&self, seq: u64) -> Vec<ActivityEntry> {
+        let start = self.activity.partition_point(|e| e.seq <= seq);
+        self.activity.iter().skip(start).cloned().collect()
+    }
+
+    /// The `seq` of the newest entry (0 = none yet).
+    pub fn activity_last_seq(&self) -> u64 {
+        self.next_seq - 1
+    }
+
+    /// Milliseconds since the server started (the clock of `ActivityEntry::at_ms`).
+    pub fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn push_activity(&mut self, mut e: ActivityEntry) {
+        e.seq = self.next_seq;
+        self.next_seq += 1;
+        e.at_ms = self.elapsed_ms();
+        while self.activity.len() >= self.cfg.activity_capacity.max(1) {
+            self.activity.pop_front();
+        }
+        self.activity.push_back(e);
+    }
+
+    fn session_event(&mut self, client: &str, method: &str, summary: String, ok: bool) {
+        self.push_activity(ActivityEntry {
+            seq: 0,
+            at_ms: 0,
+            client: client.to_string(),
+            kind: ActivityKind::Session,
+            method: method.to_string(),
+            summary,
+            ok,
+            error: (!ok).then(|| "the token was refused".to_string()),
+            read: false,
+            entities: Vec::new(),
+            proposal: None,
+            change: None,
+            diff: None,
+            verify: None,
+        });
+    }
+
+    fn activity_list(&self, params: &J) -> J {
+        let lp = activity::list_params(params).unwrap_or(activity::ListParams { since: 0, limit: 200, include_reads: false });
+        let start = self.activity.partition_point(|e| e.seq <= lp.since);
+        let mut list: Vec<&ActivityEntry> = self.activity.iter().skip(start).filter(|e| lp.include_reads || !e.read).collect();
+        let truncated = list.len() > lp.limit;
+        if truncated {
+            list.drain(..list.len() - lp.limit);
+        }
+        json!({"entries": list.iter().map(|e| e.to_json()).collect::<Vec<_>>(), "last_seq": self.next_seq - 1, "truncated": truncated})
+    }
+
     /// Counters.
     pub fn stats(&self) -> ServerStats {
         self.stats
@@ -283,9 +368,18 @@ impl ErpServer {
             let Ok(msg) = self.inbox.try_recv() else { break };
             match msg {
                 Inbound::Connected { conn, client, caps, tx, binary } => {
-                    self.conns.insert(conn, Conn { tx, client, caps, binary, subs: Subs::default() });
+                    let connected_ms = self.elapsed_ms();
+                    self.session_event(&client, "session.connect", activity::session_summary("connected", Some(caps)), true);
+                    self.conns.insert(conn, Conn { tx, client, caps, binary, subs: Subs::default(), requests: 0, connected_ms });
                 }
-                Inbound::Disconnected { conn } => self.disconnected(conn, target),
+                Inbound::Disconnected { conn } => {
+                    if let Some(c) = self.conns.get(&conn) {
+                        let (name, n) = (c.client.clone(), c.requests);
+                        self.session_event(&name, "session.disconnect", format!("disconnected ({n} requests)"), true);
+                    }
+                    self.disconnected(conn, target);
+                }
+                Inbound::AuthFailed => self.session_event("?", "session.auth_failed", "authentication failed".to_string(), false),
                 Inbound::Request { conn, id, method, params } => {
                     self.queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     self.request(target, conn, id, &method, &params);
@@ -323,7 +417,11 @@ impl ErpServer {
         let Some(c) = self.conns.get(&conn) else { return };
         let (client, caps, tx) = (c.client.clone(), c.caps, c.tx.clone());
         let mut fx = Effects::default();
-        let result = if method.starts_with("watch.") {
+        let recorded = method != "activity.list";
+        let pre = if recorded && !method.starts_with("watch.") { activity::before(target, method, params) } else { Default::default() };
+        let result = if method == "activity.list" {
+            authorize(method, caps, false, params).and_then(|_| activity::list_params(params)).map(|_| self.activity_list(params))
+        } else if method.starts_with("watch.") {
             self.watch(target, conn, caps, method, params)
         } else {
             let limits = self.cfg.limits.clone();
@@ -345,6 +443,13 @@ impl ErpServer {
             }
         };
         self.stats.requests += 1;
+        if let Some(c) = self.conns.get_mut(&conn) {
+            c.requests += 1;
+        }
+        if recorded {
+            let entry = activity::build(target, &client, method, params, &result, pre, fx.verify.take());
+            self.push_activity(entry);
+        }
         match fx.tx {
             TxChange::Opened => self.tx_owner = Some((conn, Instant::now())),
             TxChange::Closed => self.tx_owner = None,
@@ -400,8 +505,10 @@ impl ErpServer {
                 .map(|t| t.as_str().map(str::to_string).ok_or_else(|| RpcError::params("'topics' must be a list of strings")))
                 .collect::<Result<_, _>>()?,
             None | Some(J::Null) if method == "watch.unsubscribe" => Vec::new(),
-            _ => return Err(RpcError::params("'topics' must be a list of strings (tick, history, events, notes, proposals, frames)")),
+            _ => return Err(RpcError::params("'topics' must be a list of strings (tick, history, events, notes, proposals, activity, frames)")),
         };
+        let include_reads = params.get("include_reads").and_then(J::as_bool).unwrap_or(false);
+        let last_seq = self.next_seq - 1;
         let max_fps = match params.get("max_fps") {
             None | Some(J::Null) => 60,
             Some(v) => v.as_u64().filter(|n| *n >= 1).ok_or_else(|| RpcError::params("'max_fps' must be a positive integer"))?.min(1000),
@@ -433,13 +540,14 @@ impl ErpServer {
                         }
                         initial.push(notification("watch.proposals", ProposalWatch::state_params(target.doc)));
                     }
+                    "activity" => c.subs.activity = Some(ActivitySub { seen: last_seq, reads: include_reads }),
                     "frames" => {
                         if !c.binary {
                             return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
                         }
                         c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None });
                     }
-                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, frames)"))),
+                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames)"))),
                 }
             }
         } else if topics.is_empty() {
@@ -452,6 +560,7 @@ impl ErpServer {
                     "events" => c.subs.events = false,
                     "notes" => c.subs.notes = false,
                     "proposals" => c.subs.proposals = false,
+                    "activity" => c.subs.activity = None,
                     "frames" => c.subs.frames = None,
                     other => return Err(RpcError::params(format!("unknown topic '{other}'"))),
                 }
@@ -463,6 +572,7 @@ impl ErpServer {
             ("events", c.subs.events),
             ("notes", c.subs.notes),
             ("proposals", c.subs.proposals),
+            ("activity", c.subs.activity.is_some()),
             ("frames", c.subs.frames.is_some()),
         ]
         .into_iter()
@@ -512,6 +622,22 @@ impl ErpServer {
             }
         } else {
             self.prop_watch = None;
+        }
+        // activity: entries recorded since each subscriber was last sent one
+        if self.conns.values().any(|c| c.subs.activity.is_some()) {
+            let last = self.next_seq - 1;
+            for c in self.conns.values_mut() {
+                let Some(sub) = c.subs.activity.as_mut() else { continue };
+                if sub.seen >= last {
+                    continue;
+                }
+                let start = self.activity.partition_point(|e| e.seq <= sub.seen);
+                let list: Vec<J> = self.activity.iter().skip(start).filter(|e| sub.reads || !e.read).map(ActivityEntry::to_json).collect();
+                sub.seen = last;
+                if !list.is_empty() {
+                    c.tx.send_text(notification("watch.activity", json!({"entries": list})));
+                }
+            }
         }
         // sim events
         if !self.events_out.is_empty() {

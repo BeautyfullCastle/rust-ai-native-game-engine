@@ -178,3 +178,77 @@ fn person_play_is_the_agents_last_play() {
     let r = with_agent(&mut editor, &url, |c| c.call("verify.self", json!({"inputs": {"kind": "last_play"}})).unwrap());
     assert_eq!(r["ticks"], 90, "{r}");
 }
+
+/// What an agent did lands in the window's activity feed: one line each, the
+/// old value of an edit, the touched entities, and reads flagged.
+#[test]
+fn agent_activity_reaches_the_feed_with_old_values() {
+    let (mut editor, url) = editor_with_erp();
+    let guid = body_guid(&editor, "body_05");
+    let before_x = pos_x(&editor, &guid);
+
+    let g = guid.clone();
+    with_agent(&mut editor, &url, move |c| {
+        c.call("world.query", json!({"limit": 1})).unwrap();
+        c.call("world.patch", json!({"entity": g, "component": BODY, "path": "pos.x", "value": "1.5"})).unwrap();
+    });
+    editor.poll_erp();
+
+    let feed = editor.feed();
+    let patch = feed.entries().iter().find(|e| e.method == "world.patch").expect("the edit is in the feed");
+    assert_eq!(patch.client, "dev");
+    assert_eq!(patch.summary, format!("world.patch {guid} {BODY}.pos.x = 1.5"));
+    let change = patch.change.as_ref().unwrap();
+    assert_eq!(change.old.as_ref(), Some(&before_x));
+    assert_eq!(change.new, Some(Value::Fixed(decimal::parse_fp("1.5").unwrap())));
+    assert_eq!(patch.entities, vec![guid.clone()]);
+    assert!(feed.last_action().unwrap().starts_with("agent dev: world.patch"));
+
+    // Reads are in the log but hidden by the default filter and not counted as unseen.
+    assert!(feed.entries().iter().any(|e| e.method == "world.query" && e.read));
+    assert!(feed.visible().all(|e| !e.read));
+    assert!(editor.feed().unseen() >= 2, "connect and the edit");
+
+    // The entity the agent touched is handed to the window once, for the viewport pulse.
+    assert_eq!(editor.feed_mut().take_touched(), vec![guid]);
+    assert!(editor.feed_mut().take_touched().is_empty());
+    editor.feed_mut().mark_seen();
+    assert_eq!(editor.feed().unseen(), 0);
+}
+
+/// The whole agent flow without a person: propose, verify, accept. The feed
+/// keeps the diff of the proposal that is gone and the verification report.
+#[test]
+fn agent_flow_leaves_the_diff_and_the_report_in_the_feed() {
+    let (mut editor, url) = editor_with_erp();
+    let guid = body_guid(&editor, "body_05");
+    let before_yaml = editor.doc().to_yaml();
+
+    with_agent(&mut editor, &url, move |c| {
+        let id = c.call("proposal.begin", json!({"label": "raise"})).unwrap()["id"].as_str().unwrap().to_string();
+        c.call("proposal.apply", json!({"id": id, "ops": [{"op": "patch", "entity": guid, "component": BODY, "path": "pos", "value": [0, 12.5]}]})).unwrap();
+        c.call("proposal.verify", json!({"id": id, "inputs": {"kind": "bot", "ticks": 60}, "checks": ["lost_bodies.max == 0", "dynamic_bodies.delta == 0"]})).unwrap();
+        c.call("proposal.accept", json!({"id": id})).unwrap();
+    });
+    editor.poll_erp();
+
+    let entries = editor.feed().entries();
+    let accept = entries.iter().find(|e| e.method == "proposal.accept").unwrap();
+    assert_eq!(accept.proposal.as_deref(), Some("p1"));
+    let diff = accept.diff.as_ref().expect("the diff was captured before accept");
+    assert!(diff.text.contains("pos: [0, 12.5]"), "{}", diff.text);
+    assert_eq!(diff.summary.fields_changed.len(), 1);
+    assert!(editor.doc().list_proposals().is_empty(), "the proposal is gone, the feed still has its diff");
+    assert!(editor.feed().closed_diff("p1").is_some());
+
+    let verify = entries.iter().find(|e| e.method == "proposal.verify").unwrap();
+    let detail = verify.verify.as_ref().unwrap();
+    assert_eq!(detail.report.ticks, 60);
+    assert_eq!(detail.outcome.as_ref().unwrap().results.len(), 2);
+    assert!(verify.summary.starts_with("proposal.verify p1: "), "{}", verify.summary);
+    assert_eq!(editor.doc().history().into_iter().last().unwrap().origin, Origin::Agent("dev".into()));
+
+    // The person takes it back with Undo.
+    editor.undo();
+    assert_eq!(editor.doc().to_yaml(), before_yaml);
+}
