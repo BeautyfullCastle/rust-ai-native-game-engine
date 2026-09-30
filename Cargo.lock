@@ -1741,6 +1741,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_remote"
+version = "0.0.1"
+dependencies = [
+ "arc-swap",
+ "bytemuck",
+ "futures-util",
+ "lz4_flex",
+ "orr_bridge",
+ "orr_ecs",
+ "orr_edit",
+ "orr_fp",
+ "orr_physics",
+ "orr_reflect",
+ "orr_sample",
+ "orr_session",
+ "orr_sim",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tungstenite",
+]
+
+[[package]]
 name = "orr_render"
 version = "0.0.1"
 dependencies = [
@@ -2407,6 +2430,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

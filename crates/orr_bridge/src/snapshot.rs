@@ -19,6 +19,32 @@ pub(crate) struct SnapshotData {
     pub(crate) timeline: Option<Timeline>,
 }
 
+/// The parts of a [`Snapshot`], for adapters that live outside this crate
+/// (`orr_remote`'s `RemoteBridge` rebuilds snapshots from a network stream).
+/// The in-crate adapters build snapshots directly.
+pub struct SnapshotParts {
+    /// See [`Snapshot::seq`].
+    pub seq: u64,
+    /// See [`Snapshot::tick`].
+    pub tick: u64,
+    /// See [`Snapshot::verified_tick`].
+    pub verified_tick: u64,
+    /// See [`Snapshot::tick_rate`].
+    pub tick_rate: u32,
+    /// See [`Snapshot::predicted`].
+    pub predicted: Arc<Frame>,
+    /// See [`Snapshot::predicted_prev`].
+    pub predicted_prev: Option<Arc<Frame>>,
+    /// See [`Snapshot::verified`].
+    pub verified: Option<Arc<Frame>>,
+    /// See [`Snapshot::stats`].
+    pub stats: BridgeStats,
+    /// See [`Snapshot::last_rollback`].
+    pub last_rollback: Option<RollbackInfo>,
+    /// See [`Snapshot::timeline`].
+    pub timeline: Option<Timeline>,
+}
+
 /// An immutable copy of what the view needs, published by the sim side
 /// whenever the predicted head, the verified tick or history (rollback)
 /// changes (design doc 5.2, "FrameView").
@@ -37,6 +63,22 @@ pub(crate) struct SnapshotData {
 pub struct Snapshot(pub(crate) Arc<SnapshotData>);
 
 impl Snapshot {
+    /// Builds a snapshot from parts (see [`SnapshotParts`]).
+    pub fn from_parts(p: SnapshotParts) -> Snapshot {
+        Snapshot(Arc::new(SnapshotData {
+            seq: p.seq,
+            tick: p.tick,
+            verified_tick: p.verified_tick,
+            tick_rate: p.tick_rate,
+            predicted: p.predicted,
+            predicted_prev: p.predicted_prev,
+            verified: p.verified,
+            stats: p.stats,
+            last_rollback: p.last_rollback,
+            timeline: p.timeline,
+        }))
+    }
+
     /// Increases by one for every publish. Equal `seq` means the same snapshot.
     pub fn seq(&self) -> u64 {
         self.0.seq

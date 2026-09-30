@@ -1,0 +1,46 @@
+[package]
+name = "orr_remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Orrery ERP (Engine Remote Protocol): JSON-RPC server for the editor document and play session, and the Remote bridge adapter"
+
+[lints]
+workspace = true
+
+[features]
+default = ["sample-host"]
+# The headless host binary `orr_remote_host` (PhysGame from `orr_sample`).
+# Off = the library only, without the wgpu/winit stack of `orr_sample`.
+sample-host = ["dep:orr_sample"]
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+orr_session = { path = "../orr_session" }
+orr_bridge = { path = "../orr_bridge" }
+orr_edit = { path = "../orr_edit" }
+orr_reflect = { path = "../orr_reflect", features = ["scene"] }
+# `arbitrary_precision`: JSON numbers keep their exact text, so fixed-point
+# values never pass through f64. `preserve_order`: objects keep field order.
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+tokio-tungstenite = "0.30"
+tungstenite = "0.30"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+arc-swap = "1"
+bytemuck = "1"
+orr_sample = { path = "../orr_sample", optional = true }
+
+[dev-dependencies]
+orr_sample = { path = "../orr_sample" }
+orr_physics = { path = "../orr_physics" }
+
+[[bin]]
+name = "orr_remote_host"
+path = "src/bin/orr_remote_host.rs"
+required-features = ["sample-host"]

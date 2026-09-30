@@ -1,0 +1,619 @@
+//! [`ErpServer`]: the host-facing half of the ERP server.
+//!
+//! # Threading
+//!
+//! The network runs on its own tokio runtime (worker threads named
+//! `orr-erp`). It accepts, authenticates and parses, then queues requests.
+//! The host calls [`ErpServer::poll`] once per frame with an [`ErpTarget`]
+//! that borrows its state; requests run there, synchronously, and the
+//! responses and notifications go back through the connections' write
+//! queues. `poll` never waits for the network.
+//!
+//! # Notifications and the frame stream
+//!
+//! `watch.subscribe` turns on pushes (see [`crate::methods`]). Frame
+//! snapshots are binary WebSocket messages ([`crate::wire`]): the full
+//! `Frame` bytes, lz4-compressed, once per published tick at most
+//! `max_fps` times a second per subscriber. A subscriber whose socket
+//! is behind (over [`MAX_PENDING_BYTES`] queued) skips frames instead of
+//! making the queue grow.
+
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use orr_edit::EditorDoc;
+use orr_session::PlayNote;
+use orr_sim::{EventKey, Game, SimEvent};
+use serde_json::{json, Value as J};
+
+use crate::caps::{Auth, Caps};
+use crate::codec::hex_encode;
+use crate::dispatch::{authorize, call, CallCtx, Effects, ErpTarget, HostLimits, TxChange};
+use crate::error::*;
+use crate::net::{accept_loop, bind, notification, response_err, response_ok, ConnTx, Inbound, NetShared};
+use crate::wire::{checksum_text, debug_error_name, encode_frame_message, timeline_to_json};
+
+/// Frame data queued to one connection above which frames are skipped for it.
+pub const MAX_PENDING_BYTES: usize = 16 << 20;
+
+/// Settings of an [`ErpServer`].
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    /// Address to listen on (default `127.0.0.1:0`: loopback, any free port).
+    pub bind: SocketAddr,
+    /// How clients authenticate. No default: see [`Auth`].
+    pub auth: Auth,
+    /// Largest accepted request, in bytes (default 4 MiB). A larger one gets
+    /// an error reply; one over four times as large closes the connection.
+    pub max_message_bytes: usize,
+    /// Browser `Origin` values that may connect (default none: only clients
+    /// that send no `Origin`, that is, not web pages).
+    pub allowed_origins: Vec<String>,
+    /// Most simultaneous connections (default 64).
+    pub max_connections: usize,
+    /// Most requests waiting for the host (default 4096); more get a "busy" error.
+    pub max_queued_requests: usize,
+    /// Most requests `poll` runs per call (default 256), so a flood cannot stall a frame.
+    pub max_requests_per_poll: usize,
+    /// A transaction that a client leaves open this long is rolled back (default 60 s).
+    pub tx_timeout: Duration,
+    /// Settings of the methods (players, tick rate, step limit, scene file).
+    pub limits: HostLimits,
+}
+
+impl ServerConfig {
+    /// Loopback, any port, default limits.
+    pub fn new(auth: Auth) -> Self {
+        Self {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            auth,
+            max_message_bytes: 4 << 20,
+            allowed_origins: Vec::new(),
+            max_connections: 64,
+            max_queued_requests: 4096,
+            max_requests_per_poll: 256,
+            tx_timeout: Duration::from_secs(60),
+            limits: HostLimits::default(),
+        }
+    }
+}
+
+/// Why the server could not start.
+#[derive(Debug)]
+pub struct ServerError(pub String);
+
+impl core::fmt::Display for ServerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ServerError {}
+
+#[derive(Default)]
+struct Subs {
+    tick: bool,
+    /// The tick key the connection was last told about.
+    tick_seen: Option<TickKey>,
+    history: bool,
+    /// The history signature the connection was last told about.
+    hist_seen: Option<u64>,
+    events: bool,
+    notes: bool,
+    frames: Option<FrameSub>,
+}
+
+struct FrameSub {
+    min_interval: Duration,
+    last_sent: Option<Instant>,
+    last_key: Option<(u64, u64)>,
+}
+
+struct Conn {
+    tx: ConnTx,
+    client: String,
+    caps: Caps,
+    binary: bool,
+    subs: Subs,
+}
+
+/// Counters, for logs and tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServerStats {
+    /// Requests executed.
+    pub requests: u64,
+    /// Requests that ended in an error.
+    pub errors: u64,
+    /// Frame messages built.
+    pub frames_built: u64,
+    /// Frame messages sent (one per subscriber).
+    pub frames_sent: u64,
+    /// Frame messages skipped because a subscriber was behind.
+    pub frames_skipped: u64,
+    /// Size in bytes of the newest frame message.
+    pub last_frame_bytes: u64,
+}
+
+/// What one [`ErpServer::poll`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PollReport {
+    /// Requests executed.
+    pub requests: usize,
+    /// True if requests are left in the queue (the cap per poll was reached).
+    pub more: bool,
+}
+
+type TickKey = (bool, u64, u64, bool);
+type FrameKey = (u64, u64);
+type CachedFrame = (FrameKey, Arc<Vec<u8>>);
+
+/// The ERP server. See the module docs.
+pub struct ErpServer {
+    rt: Option<tokio::runtime::Runtime>,
+    addr: SocketAddr,
+    inbox: Receiver<Inbound>,
+    queued: Arc<AtomicUsize>,
+    cfg: ServerConfig,
+    conns: BTreeMap<u64, Conn>,
+    tx_owner: Option<(u64, Instant)>,
+    events_out: Vec<(EventKey, Vec<u8>)>,
+    last_hist_check: Option<Instant>,
+    frame_cache: Option<CachedFrame>,
+    stats: ServerStats,
+}
+
+impl ErpServer {
+    /// Binds the socket and starts the network threads.
+    ///
+    /// Refuses `Auth::DevNoAuth` on a non-loopback address, and an empty token list.
+    pub fn start(cfg: ServerConfig) -> Result<ErpServer, ServerError> {
+        match &cfg.auth {
+            Auth::DevNoAuth if !cfg.bind.ip().is_loopback() => {
+                return Err(ServerError(format!(
+                    "refusing to serve without tokens on {}: dev mode is only allowed on a loopback address",
+                    cfg.bind
+                )));
+            }
+            Auth::Tokens(t) if t.is_empty() => return Err(ServerError("no tokens configured (use Auth::DevNoAuth for local development)".into())),
+            _ => {}
+        }
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("orr-erp")
+            .enable_all()
+            .build()
+            .map_err(|e| ServerError(format!("cannot start the network runtime: {e}")))?;
+        let listener = bind(&rt, cfg.bind).map_err(|e| ServerError(format!("cannot listen on {}: {e}", cfg.bind)))?;
+        let addr = listener.local_addr().map_err(|e| ServerError(e.to_string()))?;
+        let (tx, inbox) = channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let shared = Arc::new(NetShared {
+            auth: cfg.auth.clone(),
+            max_message_bytes: cfg.max_message_bytes,
+            allowed_origins: cfg.allowed_origins.clone(),
+            max_connections: cfg.max_connections,
+            max_queued: cfg.max_queued_requests,
+            inbox: tx,
+            next_id: AtomicU64::new(1),
+            conns: AtomicUsize::new(0),
+            queued: queued.clone(),
+        });
+        rt.spawn(accept_loop(listener, shared));
+        Ok(ErpServer {
+            rt: Some(rt),
+            addr,
+            inbox,
+            queued,
+            cfg,
+            conns: BTreeMap::new(),
+            tx_owner: None,
+            events_out: Vec::new(),
+            last_hist_check: None,
+            frame_cache: None,
+            stats: ServerStats::default(),
+        })
+    }
+
+    /// The address the server listens on (with the real port).
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// `ws://host:port`.
+    pub fn url(&self) -> String {
+        format!("ws://{}", self.addr)
+    }
+
+    /// The settings the server runs with.
+    pub fn config(&self) -> &ServerConfig {
+        &self.cfg
+    }
+
+    /// Authenticated connections right now (as of the last `poll`).
+    pub fn connection_count(&self) -> usize {
+        self.conns.len()
+    }
+
+    /// Counters.
+    pub fn stats(&self) -> ServerStats {
+        self.stats
+    }
+
+    /// Hands the server sim events of ticks the host ran itself (real-time
+    /// play), to forward to `events` subscribers. Dropped if nobody listens.
+    pub fn push_events<E: bytemuck::Pod>(&mut self, events: &[SimEvent<E>]) {
+        if !self.conns.values().any(|c| c.subs.events) {
+            return;
+        }
+        for e in events {
+            if self.events_out.len() >= 100_000 {
+                break;
+            }
+            self.events_out.push((e.key, bytemuck::bytes_of(&e.payload).to_vec()));
+        }
+    }
+
+    /// Runs the queued requests against `target`, then sends notifications
+    /// and frame snapshots. Call it once per host frame. Never blocks on the network.
+    pub fn poll<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) -> PollReport {
+        let now = Instant::now();
+        let mut report = PollReport::default();
+        let mut budget = self.cfg.max_requests_per_poll;
+        loop {
+            let Ok(msg) = self.inbox.try_recv() else { break };
+            match msg {
+                Inbound::Connected { conn, client, caps, tx, binary } => {
+                    self.conns.insert(conn, Conn { tx, client, caps, binary, subs: Subs::default() });
+                }
+                Inbound::Disconnected { conn } => self.disconnected(conn, target),
+                Inbound::Request { conn, id, method, params } => {
+                    self.queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    self.request(target, conn, id, &method, &params);
+                    report.requests += 1;
+                    budget -= 1;
+                    if budget == 0 {
+                        report.more = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some((_, since)) = self.tx_owner {
+            if now.duration_since(since) > self.cfg.tx_timeout && target.doc.in_tx() {
+                let _ = target.doc.rollback_tx();
+                self.tx_owner = None;
+            }
+        }
+        self.publish(target, now);
+        report
+    }
+
+    fn disconnected<G: Game>(&mut self, conn: u64, target: &mut ErpTarget<'_, G>) {
+        self.conns.remove(&conn);
+        if self.tx_owner.is_some_and(|(c, _)| c == conn) {
+            // The client left with a transaction open: take it back.
+            if target.doc.in_tx() {
+                let _ = target.doc.rollback_tx();
+            }
+            self.tx_owner = None;
+        }
+    }
+
+    fn request<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, conn: u64, id: Option<J>, method: &str, params: &J) {
+        let Some(c) = self.conns.get(&conn) else { return };
+        let (client, caps, tx) = (c.client.clone(), c.caps, c.tx.clone());
+        let mut fx = Effects::default();
+        let result = if method.starts_with("watch.") {
+            self.watch(target, conn, caps, method, params)
+        } else {
+            let limits = self.cfg.limits.clone();
+            let ctx = CallCtx { client: &client, caps, tx_check: Some((conn, self.tx_owner.map(|(c, _)| c))) };
+            match std::panic::catch_unwind(AssertUnwindSafe(|| call(target, &limits, &ctx, &mut fx, method, params))) {
+                Ok(r) => r,
+                Err(_) => {
+                    // A panic may have left the sim half-stepped: drop the play session
+                    // rather than keep serving from an inconsistent state.
+                    let dropped = target.play.take().is_some();
+                    let note = if dropped { "; the play session was dropped" } else { "" };
+                    Err(RpcError::new(INTERNAL_ERROR, "panic", format!("the request made the host panic (a bug){note}")))
+                }
+            }
+        };
+        self.stats.requests += 1;
+        match fx.tx {
+            TxChange::Opened => self.tx_owner = Some((conn, Instant::now())),
+            TxChange::Closed => self.tx_owner = None,
+            TxChange::None => {}
+        }
+        if !fx.events.is_empty() && self.conns.values().any(|c| c.subs.events) {
+            self.events_out.append(&mut fx.events);
+        }
+        if result.is_err() {
+            self.stats.errors += 1;
+        }
+        if let Some(id) = id {
+            tx.send_text(match result {
+                Ok(r) => response_ok(&id, r),
+                Err(e) => response_err(&id, &e),
+            });
+        }
+    }
+
+    // ---- watch ----
+
+    fn watch<G: Game>(
+        &mut self,
+        target: &mut ErpTarget<'_, G>,
+        conn: u64,
+        caps: Caps,
+        method: &str,
+        params: &J,
+    ) -> Result<J, RpcError> {
+        authorize(method, caps, false, params)?;
+        let topics: Vec<String> = match params.get("topics") {
+            Some(J::Array(a)) => a
+                .iter()
+                .map(|t| t.as_str().map(str::to_string).ok_or_else(|| RpcError::params("'topics' must be a list of strings")))
+                .collect::<Result<_, _>>()?,
+            None | Some(J::Null) if method == "watch.unsubscribe" => Vec::new(),
+            _ => return Err(RpcError::params("'topics' must be a list of strings (tick, history, events, notes, frames)")),
+        };
+        let max_fps = match params.get("max_fps") {
+            None | Some(J::Null) => 60,
+            Some(v) => v.as_u64().filter(|n| *n >= 1).ok_or_else(|| RpcError::params("'max_fps' must be a positive integer"))?.min(1000),
+        };
+        let Some(c) = self.conns.get_mut(&conn) else { return Err(RpcError::new(INTERNAL_ERROR, "gone", "connection is gone")) };
+        let mut initial: Vec<String> = Vec::new();
+        if method == "watch.subscribe" {
+            if topics.is_empty() {
+                return Err(RpcError::params("'topics' must not be empty"));
+            }
+            for t in &topics {
+                match t.as_str() {
+                    "tick" => {
+                        c.subs.tick = true;
+                        c.subs.tick_seen = Some(tick_key(target));
+                        initial.push(tick_note(target));
+                    }
+                    "history" => {
+                        c.subs.history = true;
+                        c.subs.hist_seen = Some(history_signature(target.doc));
+                        initial.push(history_note(target.doc));
+                    }
+                    "events" => c.subs.events = true,
+                    "notes" => c.subs.notes = true,
+                    "frames" => {
+                        if !c.binary {
+                            return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
+                        }
+                        c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None });
+                    }
+                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, frames)"))),
+                }
+            }
+        } else if topics.is_empty() {
+            c.subs = Subs::default();
+        } else {
+            for t in &topics {
+                match t.as_str() {
+                    "tick" => c.subs.tick = false,
+                    "history" => c.subs.history = false,
+                    "events" => c.subs.events = false,
+                    "notes" => c.subs.notes = false,
+                    "frames" => c.subs.frames = None,
+                    other => return Err(RpcError::params(format!("unknown topic '{other}'"))),
+                }
+            }
+        }
+        let active: Vec<&str> = [
+            ("tick", c.subs.tick),
+            ("history", c.subs.history),
+            ("events", c.subs.events),
+            ("notes", c.subs.notes),
+            ("frames", c.subs.frames.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(n, _)| n)
+        .collect();
+        let result = json!({"topics": active});
+        // The current state goes out right after the response.
+        for n in initial {
+            c.tx.send_text(n);
+        }
+        Ok(result)
+    }
+
+    // ---- publishing ----
+
+    fn publish<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, now: Instant) {
+        if self.conns.is_empty() {
+            self.events_out.clear();
+            return;
+        }
+        // tick: each connection is told when its own last-seen key differs
+        if self.conns.values().any(|c| c.subs.tick) {
+            let key = tick_key(target);
+            let mut note: Option<String> = None;
+            for c in self.conns.values_mut().filter(|c| c.subs.tick && c.subs.tick_seen != Some(key)) {
+                c.subs.tick_seen = Some(key);
+                c.tx.send_text(note.get_or_insert_with(|| tick_note(target)).clone());
+            }
+        }
+        // history (checked at most every 25 ms: it walks the whole list)
+        if self.conns.values().any(|c| c.subs.history) && self.last_hist_check.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(25)) {
+            self.last_hist_check = Some(now);
+            let sig = history_signature(target.doc);
+            let mut note: Option<String> = None;
+            for c in self.conns.values_mut().filter(|c| c.subs.history && c.subs.hist_seen != Some(sig)) {
+                c.subs.hist_seen = Some(sig);
+                c.tx.send_text(note.get_or_insert_with(|| history_note(target.doc)).clone());
+            }
+        }
+        // sim events
+        if !self.events_out.is_empty() {
+            let list: Vec<J> = self
+                .events_out
+                .drain(..)
+                .map(|(k, payload)| json!({"tick": k.tick, "system": k.system_index, "seq": k.seq, "payload": hex_encode(&payload)}))
+                .collect();
+            let n = notification("watch.events", json!({"events": list}));
+            for c in self.conns.values().filter(|c| c.subs.events) {
+                c.tx.send_text(n.clone());
+            }
+        }
+        // play notes
+        if self.conns.values().any(|c| c.subs.notes) {
+            if let Some(pc) = target.play.as_mut() {
+                let notes = pc.session_mut().take_notes();
+                if !notes.is_empty() {
+                    let list: Vec<J> = notes.into_iter().map(note_json).collect();
+                    let n = notification("watch.notes", json!({"notes": list}));
+                    for c in self.conns.values().filter(|c| c.subs.notes) {
+                        c.tx.send_text(n.clone());
+                    }
+                }
+            }
+        }
+        self.publish_frames(target, now);
+    }
+
+    fn publish_frames<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, now: Instant) {
+        let Some(pc) = target.play.as_ref() else { return };
+        let key = (pc.session().head_tick(), pc.session().epoch());
+        let due: Vec<u64> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| {
+                c.subs.frames.as_ref().is_some_and(|f| {
+                    f.last_key != Some(key) && f.last_sent.is_none_or(|t| now.duration_since(t) >= f.min_interval)
+                })
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let msg = match &self.frame_cache {
+            Some((k, m)) if *k == key => m.clone(),
+            _ => {
+                let s = pc.session();
+                let sent_at_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
+                let meta = json!({
+                    "tick": key.0,
+                    "epoch": key.1,
+                    "tick_rate": s.tick_rate(),
+                    "player_count": s.player_count(),
+                    "sent_at_us": sent_at_us,
+                    "timeline": timeline_to_json(&pc.timeline()),
+                });
+                let m = Arc::new(encode_frame_message(&meta, &s.frame().to_bytes()));
+                self.stats.frames_built += 1;
+                self.stats.last_frame_bytes = m.len() as u64;
+                self.frame_cache = Some((key, m.clone()));
+                m
+            }
+        };
+        for id in due {
+            let Some(c) = self.conns.get_mut(&id) else { continue };
+            let Some(f) = c.subs.frames.as_mut() else { continue };
+            if c.tx.pending() > MAX_PENDING_BYTES {
+                self.stats.frames_skipped += 1;
+                continue;
+            }
+            c.tx.send_binary(msg.clone());
+            f.last_sent = Some(now);
+            f.last_key = Some(key);
+            self.stats.frames_sent += 1;
+        }
+    }
+}
+
+impl Drop for ErpServer {
+    fn drop(&mut self) {
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+fn tick_key<G: Game>(t: &ErpTarget<'_, G>) -> TickKey {
+    match t.play.as_ref() {
+        Some(pc) => (true, pc.session().head_tick(), pc.session().epoch(), pc.session().is_playing()),
+        None => (false, 0, 0, false),
+    }
+}
+
+/// A `watch.tick` notification.
+fn tick_note<G: Game>(t: &ErpTarget<'_, G>) -> String {
+    let p = match t.play.as_ref() {
+        Some(pc) => {
+            let s = pc.session();
+            json!({
+                "mode": "play",
+                "tick": s.head_tick(),
+                "last_tick": s.last_tick(),
+                "playing": s.is_playing(),
+                "epoch": s.epoch(),
+                "checksum": checksum_text(s.frame().checksum()),
+            })
+        }
+        None => json!({
+            "mode": "edit",
+            "tick": 0,
+            "last_tick": 0,
+            "playing": false,
+            "epoch": 0,
+            "checksum": checksum_text(t.doc.checksum()),
+        }),
+    };
+    notification("watch.tick", p)
+}
+
+fn history_signature(doc: &EditorDoc) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    for e in doc.history() {
+        mix(e.id);
+        mix(u64::from(e.undone));
+    }
+    mix(u64::from(doc.in_tx()));
+    mix(u64::from(doc.is_dirty()));
+    h
+}
+
+fn history_note(doc: &EditorDoc) -> String {
+    let history = doc.history();
+    let last = history.last().map(|e| {
+        json!({"id": e.id, "label": e.label, "origin": e.origin.to_string(), "op_count": e.op_count, "undone": e.undone})
+    });
+    notification(
+        "watch.history",
+        json!({
+            "len": history.len(),
+            "can_undo": doc.can_undo(),
+            "can_redo": doc.can_redo(),
+            "dirty": doc.is_dirty(),
+            "in_tx": doc.in_tx(),
+            "last": last,
+        }),
+    )
+}
+
+fn note_json(n: PlayNote) -> J {
+    match n {
+        PlayNote::Seeked { from, to } => json!({"kind": "seeked", "from": from, "to": to}),
+        PlayNote::Branched { tick, dropped } => json!({"kind": "branched", "tick": tick, "dropped": dropped}),
+        PlayNote::Paused { tick } => json!({"kind": "paused", "tick": tick}),
+        PlayNote::Resumed { tick } => json!({"kind": "resumed", "tick": tick}),
+        PlayNote::DebugRejected(e) => json!({"kind": "debug_rejected", "error": debug_error_name(e)}),
+        PlayNote::SeekRejected { target } => json!({"kind": "seek_rejected", "target": target}),
+    }
+}

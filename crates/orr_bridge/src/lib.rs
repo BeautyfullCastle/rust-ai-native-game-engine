@@ -38,7 +38,7 @@ pub use frame_view::FrameView;
 pub use host::{HostOutcome, LoopbackPair, PlayHost, SimHost};
 pub use inproc::InProc;
 pub use relay_host::{ConnectError, RelayHost, RelayHostOptions, RelayMetrics, RelayStatus, StatusFn};
-pub use snapshot::Snapshot;
+pub use snapshot::{Snapshot, SnapshotParts};
 pub use threaded::{Pacing, Threaded, ThreadedConfig};
 
 pub use orr_session::{
