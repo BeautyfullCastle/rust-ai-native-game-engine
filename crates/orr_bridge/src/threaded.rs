@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwapOption;
 use orr_sim::{Game, PlayerSlot};
 
-use crate::bridge::{Bridge, BridgeConfig, BridgeError};
+use orr_session::{ControlOp, Speed};
+use orr_sim::DebugCommand;
+
+use crate::bridge::{Bridge, BridgeConfig, BridgeError, SimControl};
 use crate::core::{load_snapshot, SimCore, SnapshotSlot, ToSim};
 use crate::event::BridgeEvent;
 use crate::host::SimHost;
@@ -135,6 +138,22 @@ impl<G: Game> Threaded<G> {
         })
     }
 
+    /// Sends a message that counts as one finished step, and under manual
+    /// pacing waits for it (tests need the effect to be visible).
+    fn send_counted(&mut self, msg: ToSim<G>) -> Result<(), BridgeError> {
+        self.to_sim.send(msg).map_err(|_| BridgeError::Disconnected)?;
+        self.steps_sent += 1;
+        if self.pacing == Pacing::Manual {
+            while self.steps_done.load(Ordering::Acquire) < self.steps_sent {
+                if !self.is_alive() {
+                    return Err(BridgeError::Disconnected);
+                }
+                thread::sleep(Duration::from_micros(50));
+            }
+        }
+        Ok(())
+    }
+
     /// Manual pacing: runs `n` ticks and waits for them to finish.
     /// Does nothing under [`Pacing::Realtime`].
     pub fn step(&mut self, n: u32) {
@@ -189,9 +208,15 @@ impl<G: Game> Bridge<G> for Threaded<G> {
 
     fn update(&mut self, elapsed: Duration) {
         if self.pacing == Pacing::Manual {
-            self.acc += elapsed.as_nanos() * u128::from(self.tick_rate);
-            let due = (self.acc / NANOS) as u32;
-            self.acc -= u128::from(due) * NANOS;
+            let timeline = load_snapshot(&self.slot).and_then(|s| s.timeline().cloned());
+            if timeline.as_ref().is_some_and(|t| !t.playing) {
+                self.acc = 0;
+                return;
+            }
+            let speed = u128::from(timeline.map_or(Speed::NORMAL, |t| t.speed).permille());
+            self.acc += elapsed.as_nanos() * u128::from(self.tick_rate) * speed;
+            let due = (self.acc / (NANOS * 1000)) as u32;
+            self.acc -= u128::from(due) * NANOS * 1000;
             self.step(due);
         }
     }
@@ -206,6 +231,16 @@ impl<G: Game> Bridge<G> for Threaded<G> {
 
     fn is_alive(&self) -> bool {
         self.handle.as_ref().is_some_and(|h| !h.is_finished())
+    }
+}
+
+impl<G: Game> SimControl<G> for Threaded<G> {
+    fn control(&mut self, op: ControlOp) -> Result<(), BridgeError> {
+        self.send_counted(ToSim::Control(op))
+    }
+
+    fn debug_command(&mut self, cmd: DebugCommand) -> Result<(), BridgeError> {
+        self.send_counted(ToSim::Debug(cmd))
     }
 }
 
@@ -224,9 +259,10 @@ fn run_manual<G: Game, H: SimHost<G>>(rx: Receiver<ToSim<G>>, mut core: SimCore<
 }
 
 fn run_realtime<G: Game, H: SimHost<G>>(rx: Receiver<ToSim<G>>, mut core: SimCore<G, H>, tick_rate: u32, max_catchup: u32) {
-    let start = Instant::now();
-    let deadline = |k: u64| start + Duration::from_nanos((u128::from(k) * NANOS / u128::from(tick_rate)) as u64);
-    // Tick number k runs at `deadline(k)`, counted from the thread start.
+    let mut start = Instant::now();
+    // Speed in thousandths; a change or a pause restarts the tick count.
+    let mut permille: u32 = 1000;
+    // Tick number k runs at `deadline(k)`, counted from `start`.
     let mut k: u64 = 1;
     loop {
         loop {
@@ -237,6 +273,18 @@ fn run_realtime<G: Game, H: SimHost<G>>(rx: Receiver<ToSim<G>>, mut core: SimCor
             }
         }
         let now = Instant::now();
+        let (wants, speed) = (core.host().wants_tick(), core.host().speed().permille());
+        if !wants || speed != permille {
+            permille = speed;
+            start = now;
+            k = 1;
+            if !wants {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+        }
+        let rate = u128::from(tick_rate) * u128::from(permille);
+        let deadline = |k: u64| start + Duration::from_nanos((u128::from(k) * NANOS * 1000 / rate) as u64);
         let mut ran = 0;
         while deadline(k) <= now && ran < max_catchup {
             core.step();
@@ -245,7 +293,7 @@ fn run_realtime<G: Game, H: SimHost<G>>(rx: Receiver<ToSim<G>>, mut core: SimCor
         }
         if deadline(k) <= now {
             // Far behind: skip the missed ticks instead of running them all.
-            k = ((now - start).as_nanos() * u128::from(tick_rate) / NANOS) as u64 + 1;
+            k = ((now - start).as_nanos() * rate / (NANOS * 1000)) as u64 + 1;
         }
         let wait = deadline(k).saturating_duration_since(Instant::now());
         thread::sleep(wait.min(Duration::from_millis(1)));

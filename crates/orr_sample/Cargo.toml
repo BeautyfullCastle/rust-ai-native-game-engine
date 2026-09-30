@@ -29,3 +29,7 @@ pollster = "1"
 [dev-dependencies]
 orr_server = { path = "../orr_server", features = ["harness"] }
 orr_proto = { path = "../orr_proto" }
+
+[[bench]]
+name = "seek"
+harness = false

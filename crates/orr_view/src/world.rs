@@ -113,6 +113,19 @@ impl<X: Extractor> ViewWorld<X> {
         }
     }
 
+    /// Forgets all tracked state, so the next snapshot is shown as it is,
+    /// with no interpolation or correction from what was shown before. Call
+    /// it after a seek or an edit of the sim state (a timeline jump).
+    pub fn reset(&mut self) {
+        self.tracked.clear();
+        self.head = None;
+        self.alpha_raw = 0.0;
+        self.track.clear();
+        self.playback = 0.0;
+        self.last_seq = None;
+        self.rollbacks_seen = None;
+    }
+
     pub fn config(&self) -> &ViewConfig {
         &self.cfg
     }

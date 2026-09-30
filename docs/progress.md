@@ -23,6 +23,7 @@
 | Relay 모드 (M3) | `orr_proto`(메시지·`Link`/`Endpoint` 추상·결정론 가짜 네트워크), `orr_server`(틱 마감·직전 입력 반복·검증 훅·서버 경유 늦은 참가/재입장·디싱크 판정), 클라 `RelayClient`(입력 지연 자동, ±2% 시계 조절, `.orrd` 디싱크 덤프) | 가짜망 4인 RTT 150ms·손실 2%·3000틱 체크섬 일치, 롤백 22~25/초, 멈춤 45초에 1~6회(합 1~13ms), 지연 4~5틱. 강제 디싱크 30틱 내 감지 |
 | M3 통합 | `orr_relay_net`(orr_net 위 `Link`/`Endpoint`), `orr_server` 실행 파일(QUIC/WS, 자체서명 지문), `RelayHost`(브리지 SimHost), 샘플 `--connect`/`--headless --bot`, `--sim-latency/jitter/loss` | 실제 QUIC 프로세스 분리 4인, RTT 약 160ms·손실 2%·30~60초: 체크섬 일치, 디싱크 0, 롤백 22~25/초, 멈춤 대부분 수십 ms(클라 1개가 1회 약 280ms). 물리 1000바디 창 클라 58.6fps. **M3 완료 기준 충족(수치 기준)** |
 | 전달 개선 (M3 후속) | 280ms 멈춤 원인은 테스트 조절기 시드가 모든 클라에서 같았던 것(손실 동시 발생) → 클라별 시드 + `--sim-seed`. 서버는 확인 응답 전까지 모든 미확인 번들을 매 패킷에 반복, `Confirmed` 압축 인코딩(프로토콜 v2) | 몰린 손실(평균 3연속)에서 최대 멈춤 578→147ms, 누적 24.7→4.9초. 하향 대역폭 동일(약 25KB/s). 실제 QUIC 4인 30초×2: 최대 멈춤 13ms, 디싱크 0 |
+| 시뮬 제어 (M4 1단계 C) | `orr_session::PlaySession`: 재생/일시정지/n틱 전진/배속(0.25~4x, 틱 간격만 변경)/틱 이동(seek)/분기, 링 + 직렬화 키프레임(예산 초과 시 간격 2배), 틱 경계 `DebugCommand`(`orr_sim::debug`, `.orrp` v3에 기록), 리플레이 뷰어 모드. 브리지 `PlayHost`·제어 API | 물리 1000바디 1200틱 후 600틱 뒤로: 키프레임 적중 0.35ms, 최악(+59틱 재시뮬) 43ms, 링 안 0.06ms, 앞으로 600틱 21ms. 기록 포함 틱 0.85ms. 1500틱 `.orrp` 2.7MB. 기존 골든 불변 |
 | CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
 ## 다음
@@ -36,7 +37,7 @@
    - 1단계 진행분은 원격 브랜치에 WIP 커밋으로 있음(빌드 보장 안 됨, `main` `eb1665a` 기준):
      - `wip/m4-a-reflect-yaml` — `orr_reflect`(필드 단위 리플렉션, derive, JSON Schema), Strict YAML 씬 읽기/쓰기(앵커·태그·암묵 변환 금지, GUID 키 정렬, 줄·칸 오류), FP 십진 정확 변환, 씬↔Frame 굽기. 중단 시점: 엄격성 테스트 재작성 중.
      - `wip/m4-b-render-split` — `orr_rhi`/`orr_render`로 렌더러 분리, 캡슐·디버그 선·카메라, 텍스처 렌더(에디터 뷰포트용), GPU 리드백 픽셀 테스트. 중단 시점: 구현 중반.
-     - `wip/m4-c-sim-control` — 재생/일시정지/n틱 전진/배속/틱 이동/분기 재생, 틱 경계 디버그 커맨드(리플레이 기록), 브리지 제어 API, 리플레이 뷰어. 중단 시점: 마지막 clippy·테스트 단계(거의 완료).
+     - `wip/m4-c-sim-control` — **완료·병합** (위 표 "시뮬 제어").
    - 이어가는 법: 각 브랜치를 체크아웃해 `cargo test --workspace --release`로 상태 확인 → 남은 부분 완성 → `main`에 병합. C부터 권장.
    - 규칙: 화면 전체 캡처 금지(GPU 리드백으로 검증), 서브에이전트는 Sonnet/Haiku, 파일은 LF, 골든 체크섬 변경 시 커밋 메시지에 이유.
 

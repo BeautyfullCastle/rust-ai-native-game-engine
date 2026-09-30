@@ -13,6 +13,7 @@
 //!   --tau SECONDS                rollback smoothing time constant (default 0.12, 0 = off)
 //!   --no-vsync                   do not wait for the display (measure raw speed)
 //!   --seconds N                  close after N seconds and print a summary
+//!   --play                       local play session with a timeline (keys below)
 //!   --headless                   no window, no GPU: run the sim as fast as possible
 //!   --ticks N                    headless: stop after N sim steps instead of --seconds
 //! ```
@@ -25,7 +26,10 @@
 //!   --desync-dir DIR  --bot  --connect-timeout SECONDS
 //! ```
 //! Keys: WASD or arrows move your paddle (blue), Q/E turn it, space shoots
-//! balls, Escape quits. The other paddle (orange) is a bot. The window title
+//! balls, Escape quits. With `--play`: P pause or play, `.` step one tick,
+//! `,` back one second, `/` forward one second, `-` and `=` half or double
+//! speed, B branch here (playing again after going back branches too). The
+//! title shows the tick, the recorded range and the checksum. The other paddle (orange) is a bot. The window title
 //! shows fps, sim cost, ticks and rollbacks; a summary prints on exit.
 //! Headless runs default to 8 seconds.
 use std::process::ExitCode;
@@ -36,7 +40,7 @@ use orr_sample::arena_view::Loopback;
 use orr_sample::net_client::{physics_bridge, print_bot_report, print_relay_status, run_physics_bot, NetArgs};
 use orr_sample::physics_app::{print_summary, run_headless, run_window, HeadlessLimit, PhysSummary};
 use orr_sample::physics_game::{PhysConfig, PhysGame, SceneMode};
-use orr_sample::physics_host::{physics_bridge_config, physics_pair, SimMetrics};
+use orr_sample::physics_host::{physics_bridge_config, physics_pair, physics_play_host, SimMetrics};
 use orr_view::{InterpMode, ViewConfig};
 
 fn main() -> ExitCode {
@@ -62,6 +66,7 @@ fn real_main() -> Result<(), String> {
     let mut netargs = NetArgs::default();
     let mut scene = PhysConfig::new(1000, SceneMode::Rain);
     let mut headless = false;
+    let mut play = false;
     let mut ticks: Option<u64> = None;
     let mut opts = Options {
         label: String::new(),
@@ -110,6 +115,7 @@ fn real_main() -> Result<(), String> {
             "--no-vsync" => opts.vsync = false,
             "--seconds" => opts.seconds = Some(parse("--seconds", value("--seconds")?)?),
             "--headless" => headless = true,
+            "--play" => play = true,
             "--ticks" => ticks = Some(parse("--ticks", value("--ticks")?)?),
             other => return Err(format!("unknown option '{other}' (see the header of this file)")),
         }
@@ -147,6 +153,22 @@ fn real_main() -> Result<(), String> {
             None => HeadlessLimit::Seconds(opts.seconds.unwrap_or(8.0)),
         };
         run_headless(scene, net, limit)
+    } else if play {
+        // A local play session with the timeline keys (see the header).
+        opts.label = "play".to_string();
+        let metrics = SimMetrics::new();
+        if threaded {
+            let bridge = Threaded::spawn(
+                move || physics_play_host(scene),
+                physics_bridge_config(metrics.clone()),
+                ThreadedConfig::default(),
+            )
+            .map_err(|e| format!("start sim thread: {e}"))?;
+            run_with(bridge, scene, metrics, opts)?
+        } else {
+            let bridge = InProc::new(physics_play_host(scene), physics_bridge_config(metrics.clone()));
+            run_with(bridge, scene, metrics, opts)?
+        }
     } else if threaded {
         opts.label = "threaded".to_string();
         let metrics = SimMetrics::new();
@@ -168,7 +190,7 @@ fn real_main() -> Result<(), String> {
     Ok(())
 }
 
-fn run_with<B: Bridge<PhysGame>>(
+fn run_with<B: Bridge<PhysGame> + orr_bridge::SimControl<PhysGame>>(
     bridge: B,
     scene: PhysConfig,
     metrics: std::sync::Arc<SimMetrics>,

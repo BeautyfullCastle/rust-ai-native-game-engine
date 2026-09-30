@@ -10,14 +10,18 @@
 //!
 //! Versions: v1 has no keyframe table. v2 appends `count u32` and, per
 //! keyframe, `tick u64, len u32, bytes` after the checksum table inside the
-//! compressed body. The reader accepts both; the writer always writes v2.
+//! compressed body. v3 appends, after the keyframes, `count u32` and, per
+//! debug command, `tick u64, len u32, bytes` (`DebugCommand::encode`). A
+//! debug command of tick `t` is applied at the boundary before tick `t`
+//! runs, in file order. The reader accepts all three; the writer always
+//! writes v3.
 use std::collections::BTreeMap;
 
 use orr_ecs::{Frame, FrameDecodeError};
-use orr_sim::{Game, PlayerSlot, SimCommand, Simulation};
+use orr_sim::{DebugCommand, Game, PlayerSlot, SimCommand, Simulation};
 
 const MAGIC: &[u8; 4] = b"ORRP";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const MIN_FORMAT_VERSION: u32 = 1;
 
 /// `.orrp` file header.
@@ -127,9 +131,9 @@ impl<'a> Reader<'a> {
 
 /// One recorded tick's confirmed inputs, kept in memory while writing so
 /// the previous tick's inputs are available for delta encoding.
-struct RecordedTick<G: Game> {
-    inputs: Vec<G::Input>,
-    commands: Vec<(PlayerSlot, G::Command)>,
+pub(crate) struct RecordedTick<G: Game> {
+    pub(crate) inputs: Vec<G::Input>,
+    pub(crate) commands: Vec<(PlayerSlot, G::Command)>,
 }
 
 /// Records a `.orrp` replay incrementally: call [`ReplayWriter::record_tick`]
@@ -145,6 +149,8 @@ pub struct ReplayWriter<G: Game> {
     keyframe_interval: u64,
     /// Serialized `Frame`s by the frame's tick.
     keyframes: BTreeMap<u64, Vec<u8>>,
+    /// Debug commands by the tick whose boundary they belong to.
+    debug: BTreeMap<u64, Vec<DebugCommand>>,
 }
 
 impl<G: Game> ReplayWriter<G> {
@@ -157,7 +163,78 @@ impl<G: Game> ReplayWriter<G> {
             checksums: Vec::new(),
             keyframe_interval: 0,
             keyframes: BTreeMap::new(),
+            debug: BTreeMap::new(),
         }
+    }
+
+    pub fn header(&self) -> &ReplayHeader {
+        &self.header
+    }
+
+    /// Records a debug command for the boundary before `tick` runs. Commands
+    /// of one tick keep the order they were recorded in.
+    pub fn record_debug(&mut self, tick: u64, cmd: DebugCommand) {
+        self.debug.entry(tick).or_default().push(cmd);
+    }
+
+    pub fn debug_at(&self, tick: u64) -> &[DebugCommand] {
+        self.debug.get(&tick).map_or(&[], |v| v.as_slice())
+    }
+
+    pub(crate) fn tick_data(&self, tick: u64) -> Option<&RecordedTick<G>> {
+        self.ticks.get(&tick)
+    }
+
+    /// The last tick with recorded inputs (0 if none).
+    pub fn last_tick(&self) -> u64 {
+        self.ticks.keys().next_back().copied().unwrap_or(0)
+    }
+
+    /// The recorded checksum of `tick`, if one was taken. Checksums are
+    /// expected in tick order (the last record of a tick wins).
+    pub fn checksum_at(&self, tick: u64) -> Option<u64> {
+        let end = self.checksums.partition_point(|&(t, _)| t <= tick);
+        self.checksums[..end].last().filter(|&&(t, _)| t == tick).map(|&(_, c)| c)
+    }
+
+    /// Recorded `(tick, checksum)` pairs with `from <= tick <= to`, in tick order.
+    pub fn checksums_in(&self, from: u64, to: u64) -> &[(u64, u64)] {
+        let start = self.checksums.partition_point(|&(t, _)| t < from);
+        let end = self.checksums.partition_point(|&(t, _)| t <= to);
+        &self.checksums[start..end.max(start)]
+    }
+
+    /// Serialized keyframe of exactly `tick`.
+    pub fn keyframe(&self, tick: u64) -> Option<&[u8]> {
+        self.keyframes.get(&tick).map(Vec::as_slice)
+    }
+
+    /// Tick of the latest keyframe at or before `tick`.
+    pub fn nearest_keyframe(&self, tick: u64) -> Option<u64> {
+        self.keyframes.range(..=tick).next_back().map(|(&t, _)| t)
+    }
+
+    pub fn keyframe_ticks(&self) -> impl Iterator<Item = u64> + '_ {
+        self.keyframes.keys().copied()
+    }
+
+    /// Bytes held by all keyframes.
+    pub fn keyframe_bytes(&self) -> usize {
+        self.keyframes.values().map(Vec::len).sum()
+    }
+
+    /// Drops every keyframe for which `keep(tick)` is false.
+    pub fn retain_keyframes(&mut self, mut keep: impl FnMut(u64) -> bool) {
+        self.keyframes.retain(|&t, _| keep(t));
+    }
+
+    /// Forgets everything recorded after `tick`: inputs, commands, debug
+    /// commands, checksums and keyframes. This is the "branch" cut.
+    pub fn truncate_after(&mut self, tick: u64) {
+        let _ = self.ticks.split_off(&(tick + 1));
+        let _ = self.keyframes.split_off(&(tick + 1));
+        let _ = self.debug.split_off(&(tick + 1));
+        self.checksums.retain(|&(t, _)| t <= tick);
     }
 
     /// Makes [`maybe_record_keyframe`](Self::maybe_record_keyframe) snapshot
@@ -193,6 +270,12 @@ impl<G: Game> ReplayWriter<G> {
     /// Serializes header + delta-encoded body (lz4-compressed) + checksum
     /// table into the final `.orrp` byte string.
     pub fn finish(self) -> Vec<u8> {
+        self.to_bytes()
+    }
+
+    /// Like [`finish`](Self::finish), but keeps the writer, so a live
+    /// session can save its recording and go on.
+    pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
         write_u32(&mut out, FORMAT_VERSION);
@@ -251,6 +334,19 @@ impl<G: Game> ReplayWriter<G> {
             body.extend_from_slice(bytes);
         }
 
+        let debug_count: usize = self.debug.values().map(Vec::len).sum();
+        write_u32(&mut body, debug_count as u32);
+        for (&tick, cmds) in &self.debug {
+            for cmd in cmds {
+                write_u64(&mut body, tick);
+                let start = body.len();
+                write_u32(&mut body, 0); // placeholder length
+                cmd.encode(&mut body);
+                let len = (body.len() - start - 4) as u32;
+                body[start..start + 4].copy_from_slice(&len.to_le_bytes());
+            }
+        }
+
         let compressed = lz4_flex::block::compress_prepend_size(&body);
         write_u32(&mut out, compressed.len() as u32);
         out.extend_from_slice(&compressed);
@@ -267,6 +363,7 @@ pub struct ReplayReader<G: Game> {
     ticks: BTreeMap<u64, TickData<G>>,
     pub checksums: Vec<(u64, u64)>,
     keyframes: BTreeMap<u64, Vec<u8>>,
+    debug: BTreeMap<u64, Vec<DebugCommand>>,
     cursor: u64,
     first_tick: u64,
     last_tick: u64,
@@ -347,9 +444,20 @@ impl<G: Game> ReplayReader<G> {
             }
         }
 
+        let mut debug: BTreeMap<u64, Vec<DebugCommand>> = BTreeMap::new();
+        if format_version >= 3 {
+            let debug_count = br.u32()?;
+            for _ in 0..debug_count {
+                let tick = br.u64()?;
+                let len = br.u32()? as usize;
+                let cmd = DebugCommand::decode(br.take(len)?).ok_or(ReplayError::BadCommand)?;
+                debug.entry(tick).or_default().push(cmd);
+            }
+        }
+
         let first_tick = ticks.keys().next().copied().unwrap_or(1);
         let last_tick = ticks.keys().next_back().copied().unwrap_or(0);
-        Ok(Self { header, ticks, checksums, keyframes, cursor: first_tick, first_tick, last_tick })
+        Ok(Self { header, ticks, checksums, keyframes, debug, cursor: first_tick, first_tick, last_tick })
     }
 
     pub fn tick_count(&self) -> usize {
@@ -362,6 +470,16 @@ impl<G: Game> ReplayReader<G> {
 
     pub fn tick(&self, tick: u64) -> Option<&TickData<G>> {
         self.ticks.get(&tick)
+    }
+
+    /// The debug commands applied at the boundary before `tick`, in order.
+    pub fn debug_commands(&self, tick: u64) -> &[DebugCommand] {
+        self.debug.get(&tick).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Tick of the earliest recorded input (1 when the file has none).
+    pub fn first_tick(&self) -> u64 {
+        self.first_tick
     }
 
     pub fn keyframe_count(&self) -> usize {
@@ -402,6 +520,20 @@ impl<G: Game> ReplayReader<G> {
             }
         }
         Ok(sim)
+    }
+
+    /// Copies the whole recording into a [`ReplayWriter`], so a session can
+    /// go on from it (replay viewer, branching). Keyframes are kept as is.
+    pub(crate) fn to_writer(&self) -> ReplayWriter<G> {
+        let mut w = ReplayWriter::new(self.header.clone());
+        for (&tick, (inputs, commands)) in &self.ticks {
+            w.record_tick(tick, inputs, commands);
+        }
+        w.checksums = self.checksums.clone();
+        w.checksums.sort_by_key(|&(t, _)| t);
+        w.keyframes = self.keyframes.clone();
+        w.debug = self.debug.clone();
+        w
     }
 
     /// Resets internal playback position to the first recorded tick, for
@@ -494,7 +626,7 @@ pub fn replay_seek_checked<G: Game>(
     reader.seek(config, tick)
 }
 
-fn check_build_hash(header: &ReplayHeader, build_id: u64) -> Result<(), ReplayError> {
+pub(crate) fn check_build_hash(header: &ReplayHeader, build_id: u64) -> Result<(), ReplayError> {
     let expected_hash = orr_sim::build_hash_of(build_id, 0);
     if expected_hash != 0 && header.build_hash != 0 && expected_hash != header.build_hash {
         return Err(ReplayError::BuildHashMismatch { header: header.build_hash, expected: expected_hash });
@@ -507,11 +639,12 @@ fn check_build_hash(header: &ReplayHeader, build_id: u64) -> Result<(), ReplayEr
 fn step_recorded<G: Game>(sim: &mut Simulation<G>, reader: &ReplayReader<G>, tick: u64) -> bool {
     let Some((inputs, commands)) = reader.tick(tick) else { return false };
     let mut tick_inputs = orr_sim::TickInputs::<G::Input, G::Command>::new(tick, inputs.len() as u8);
+    let debug = reader.debug_commands(tick);
     for (i, inp) in inputs.iter().enumerate() {
         tick_inputs.set_input(PlayerSlot(i as u8), *inp);
     }
     tick_inputs.set_commands(commands.clone());
-    let _events = sim.step(&tick_inputs);
+    let _events = sim.step_with_debug(&tick_inputs, debug);
     true
 }
 

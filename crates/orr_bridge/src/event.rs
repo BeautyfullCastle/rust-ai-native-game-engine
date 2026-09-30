@@ -1,5 +1,5 @@
 use orr_session::{EventStatus, RollbackInfo};
-use orr_sim::{EventKey, PlayerSlot};
+use orr_sim::{DebugError, EventKey, PlayerSlot};
 
 /// Session-level notifications (design doc 5.2, "Lifecycle").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +20,20 @@ pub enum Lifecycle {
     Disconnected,
     /// Relay play only: the client changed its input delay (in ticks).
     DelayChanged { delay: u32 },
+    /// Play session only: the head jumped from tick `from` to tick `to`.
+    /// The view must reset interpolation and smoothing (no blend across it).
+    Seeked { from: u64, to: u64 },
+    /// Play session only: the recorded future after `tick` was dropped
+    /// (`dropped` ticks) and recording goes on from `tick`.
+    Branched { tick: u64, dropped: u64 },
+    /// Play session only: the session paused at `tick`.
+    Paused { tick: u64 },
+    /// Play session only: the session started running at `tick`.
+    Resumed { tick: u64 },
+    /// Play session only: a debug command was refused, nothing changed.
+    DebugRejected(DebugError),
+    /// Play session only: a seek target was outside the recorded range.
+    SeekRejected { target: u64 },
 }
 
 /// One notification from the sim to the view.

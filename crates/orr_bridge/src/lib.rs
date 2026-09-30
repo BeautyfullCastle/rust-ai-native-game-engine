@@ -1,7 +1,7 @@
 //! `orr_bridge`: the only path between the simulation and the view layer
 //! (design doc section 5).
 //!
-//! - **View to sim** has two paths only: [`Bridge::set_input`] (one `Input`
+//! - **View to sim** has two game paths only: [`Bridge::set_input`] (one `Input`
 //!   sample per player, sampled once per tick) and [`Bridge::send_command`]
 //!   (one-off `Command`s). Nothing else reaches the simulation.
 //! - **Sim to view** has three read-only channels:
@@ -32,14 +32,16 @@ mod relay_host;
 mod snapshot;
 mod threaded;
 
-pub use bridge::{Bridge, BridgeConfig, BridgeError, StepObserver, StepTiming};
+pub use bridge::{Bridge, BridgeConfig, BridgeError, SimControl, StepObserver, StepTiming};
 pub use event::{BridgeEvent, BridgeStats, Lifecycle};
 pub use frame_view::FrameView;
-pub use host::{LoopbackPair, SimHost};
+pub use host::{HostOutcome, LoopbackPair, PlayHost, SimHost};
 pub use inproc::InProc;
 pub use relay_host::{ConnectError, RelayHost, RelayHostOptions, RelayMetrics, RelayStatus, StatusFn};
 pub use snapshot::Snapshot;
 pub use threaded::{Pacing, Threaded, ThreadedConfig};
 
-pub use orr_session::{EventStatus, RollbackInfo};
-pub use orr_sim::{EventKey, PlayerSlot};
+pub use orr_session::{
+    ControlOp, EventStatus, PlayConfig, PlayMode, PlaySession, RollbackInfo, Speed, Timeline, TIMELINE_CHECKSUM_WINDOW,
+};
+pub use orr_sim::{DebugCommand, DebugError, EventKey, PlayerSlot};

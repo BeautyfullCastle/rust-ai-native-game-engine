@@ -115,6 +115,48 @@ impl Frame {
         self.store::<T>().contains(e)
     }
 
+    // ---- byte-level access (editor / debug commands) ----
+    // These take runtime ids and raw bytes, never panic on bad ids, and
+    // leave the frame unchanged when they refuse.
+
+    /// The raw bytes of component `id` on `e`, if both exist.
+    pub fn component_bytes(&self, id: ComponentId, e: Entity) -> Option<&[u8]> {
+        self.components.get(id.0 as usize)?.bytes_of(e)
+    }
+
+    pub fn component_bytes_mut(&mut self, id: ComponentId, e: Entity) -> Option<&mut [u8]> {
+        self.components.get_mut(id.0 as usize)?.bytes_of_mut(e)
+    }
+
+    /// Inserts or replaces component `id` on the live entity `e` from raw
+    /// bytes. `false` if `id` is unknown, `e` is not alive, or the byte
+    /// length is not the component's size.
+    pub fn insert_component_bytes(&mut self, id: ComponentId, e: Entity, bytes: &[u8]) -> bool {
+        if !self.allocator.exists(e) {
+            return false;
+        }
+        match self.components.get_mut(id.0 as usize) {
+            Some(store) => store.insert_bytes(e, bytes),
+            None => false,
+        }
+    }
+
+    /// Removes component `id` from `e`. `false` if there was nothing to remove.
+    pub fn remove_component_by_id(&mut self, id: ComponentId, e: Entity) -> bool {
+        match self.components.get_mut(id.0 as usize) {
+            Some(store) => store.remove(e),
+            None => false,
+        }
+    }
+
+    pub fn singleton_bytes(&self, id: SingletonId) -> Option<&[u8]> {
+        self.singletons.get(id.0 as usize).map(|s| s.bytes())
+    }
+
+    pub fn singleton_bytes_mut(&mut self, id: SingletonId) -> Option<&mut [u8]> {
+        self.singletons.get_mut(id.0 as usize).map(|s| s.bytes_mut())
+    }
+
     pub fn count<T: Component>(&self) -> u32 {
         self.store::<T>().len()
     }

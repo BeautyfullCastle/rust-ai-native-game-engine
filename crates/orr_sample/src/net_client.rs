@@ -338,6 +338,12 @@ pub fn log_lifecycle(note: &Lifecycle) {
     match note {
         Lifecycle::Desync { tick } => eprintln!("DESYNC at tick {tick}: a dump was written (see --desync-dir)"),
         Lifecycle::Disconnected => eprintln!("DISCONNECTED from the server"),
+        Lifecycle::Seeked { from, to } => println!("seeked: tick {from} -> {to}"),
+        Lifecycle::Branched { tick, dropped } => println!("branched at tick {tick} ({dropped} recorded ticks dropped)"),
+        Lifecycle::Paused { tick } => println!("paused at tick {tick}"),
+        Lifecycle::Resumed { tick } => println!("resumed at tick {tick}"),
+        Lifecycle::DebugRejected(e) => println!("debug command refused: {e}"),
+        Lifecycle::SeekRejected { target } => println!("seek to tick {target} refused (outside the recording)"),
         _ => {}
     }
 }

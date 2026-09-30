@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use orr_bridge::{Bridge, BridgeEvent, InProc, PlayerSlot};
+use orr_bridge::{Bridge, BridgeEvent, ControlOp, InProc, PlayerSlot, SimControl, Speed};
 use orr_view::{RenderItem, ViewWorld};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -104,7 +104,7 @@ struct Gfx {
     renderer: Renderer,
 }
 
-struct App<B: Bridge<PhysGame>> {
+struct App<B: Bridge<PhysGame> + SimControl<PhysGame>> {
     bridge: B,
     view: ViewWorld<PhysExtractor>,
     opts: Options,
@@ -113,6 +113,8 @@ struct App<B: Bridge<PhysGame>> {
     gfx: Option<Gfx>,
     keys: PhysKeys,
     sent_keys: Option<PhysKeys>,
+    /// The last timeline epoch shown (a change means a seek or an edit).
+    epoch: Option<u64>,
     items: Vec<RenderItem>,
     started: Instant,
     last_frame: Instant,
@@ -128,7 +130,28 @@ fn ms(d: Duration) -> f32 {
     d.as_secs_f32() * 1000.0
 }
 
-impl<B: Bridge<PhysGame>> App<B> {
+impl<B: Bridge<PhysGame> + SimControl<PhysGame>> App<B> {
+    /// Timeline keys of a play session (`--play`): P pause or play, `.` step one
+    /// tick, `,` back one second, `/` forward one second, `-` and `=` speed,
+    /// B branch here. Playing again after going back branches by itself.
+    fn timeline_key(&mut self, code: KeyCode) {
+        let Some(tl) = self.bridge.timeline() else { return };
+        let second = u64::from(self.bridge.tick_rate());
+        let op = match code {
+            KeyCode::KeyP => Some(if tl.playing { ControlOp::Pause } else { ControlOp::Play }),
+            KeyCode::Period => Some(ControlOp::Step(1)),
+            KeyCode::Comma => Some(ControlOp::Seek(tl.tick.saturating_sub(second).max(tl.first_tick))),
+            KeyCode::Slash => Some(ControlOp::Seek((tl.tick + second).min(tl.last_tick))),
+            KeyCode::Minus => Some(ControlOp::SetSpeed(Speed::from_permille(tl.speed.permille() / 2))),
+            KeyCode::Equal => Some(ControlOp::SetSpeed(Speed::from_permille(tl.speed.permille() * 2))),
+            KeyCode::KeyB => Some(ControlOp::Branch),
+            _ => None,
+        };
+        if let Some(op) = op {
+            let _ = self.bridge.control(op);
+        }
+    }
+
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let dt = now - self.last_frame;
@@ -143,6 +166,12 @@ impl<B: Bridge<PhysGame>> App<B> {
         }
         self.bridge.update(dt);
         let snapshot = self.bridge.snapshot();
+        // A seek or an edit is a jump: show the new state, do not smooth to it.
+        let epoch = snapshot.as_ref().and_then(|s| s.timeline().map(|t| t.epoch));
+        if epoch != self.epoch {
+            self.epoch = epoch;
+            self.view.reset();
+        }
 
         let t = Instant::now();
         self.view.update(dt.as_secs_f32().min(0.1), snapshot.as_ref());
@@ -174,8 +203,9 @@ impl<B: Bridge<PhysGame>> App<B> {
             if let (Some(gfx), Some(s)) = (&self.gfx, &snapshot) {
                 let stats = s.stats();
                 let net = self.opts.relay.as_ref().map(|m| relay_title(&m.status())).unwrap_or_default();
+                let timeline = s.timeline().map(timeline_title).unwrap_or_default();
                 gfx.window.set_title(&format!(
-                    "Orrery physics [{}] {} bodies | fps {:.0} | sim {:.1}/{:.1} ms | tick {} (verified {}) | rollbacks {} (deepest {}) | stalls {}{net}",
+                    "Orrery physics [{}] {} bodies | fps {:.0} | sim {:.1}/{:.1} ms | tick {} (verified {}) | rollbacks {} (deepest {}) | stalls {}{net}{timeline}",
                     self.opts.label,
                     s.predicted().alive_count(),
                     fps,
@@ -203,6 +233,19 @@ impl<B: Bridge<PhysGame>> App<B> {
     }
 }
 
+/// Window title part for a play session: state, tick and recorded range, speed, checksum.
+fn timeline_title(t: &orr_bridge::Timeline) -> String {
+    format!(
+        " | {} tick {}/{} x{:.2} checksum {:08x} keyframes {}",
+        if t.playing { "PLAY" } else { "PAUSED" },
+        t.tick,
+        t.last_tick,
+        t.speed.permille() as f32 / 1000.0,
+        t.checksum as u32,
+        t.keyframes.len()
+    )
+}
+
 fn fill_from_snapshot(summary: &mut PhysSummary, s: &orr_bridge::Snapshot) {
     summary.sim_tick = s.tick();
     summary.verified_tick = s.verified_tick();
@@ -213,7 +256,7 @@ fn fill_from_snapshot(summary: &mut PhysSummary, s: &orr_bridge::Snapshot) {
     summary.entities = s.predicted().alive_count();
 }
 
-impl<B: Bridge<PhysGame>> ApplicationHandler for App<B> {
+impl<B: Bridge<PhysGame> + SimControl<PhysGame>> ApplicationHandler for App<B> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_some() {
             return;
@@ -264,6 +307,7 @@ impl<B: Bridge<PhysGame>> ApplicationHandler for App<B> {
                         KeyCode::KeyE => self.keys.spin_right = down,
                         KeyCode::Space => self.keys.shoot = down,
                         KeyCode::Escape if down => event_loop.exit(),
+                        _ if down && !event.repeat => self.timeline_key(code),
                         _ => {}
                     }
                 }
@@ -282,7 +326,7 @@ impl<B: Bridge<PhysGame>> ApplicationHandler for App<B> {
 
 /// Opens the window and runs until it closes (or `opts.seconds` pass).
 /// `metrics` must be the one the bridge's sim side writes to.
-pub fn run_window<B: Bridge<PhysGame>>(
+pub fn run_window<B: Bridge<PhysGame> + SimControl<PhysGame>>(
     bridge: B,
     scene: PhysConfig,
     metrics: Arc<SimMetrics>,
@@ -301,6 +345,7 @@ pub fn run_window<B: Bridge<PhysGame>>(
         gfx: None,
         keys: PhysKeys::default(),
         sent_keys: None,
+        epoch: None,
         items: Vec::new(),
         started: now,
         last_frame: now,

@@ -17,6 +17,7 @@ mod dump;
 mod events;
 mod input_source;
 mod join;
+mod play;
 mod relay;
 mod replay;
 mod session;
@@ -30,6 +31,9 @@ pub use relay::{
 pub use events::{EventBatch, EventStatus};
 pub use join::{join_request, JoinAttempts, JoinError, JoinTicket};
 pub use input_source::{InputSource, LocalInputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RemoteInput};
+pub use play::{
+    ControlOp, PlayConfig, PlayError, PlayMode, PlayNote, PlaySession, Speed, Timeline, TIMELINE_CHECKSUM_WINDOW,
+};
 pub use replay::{
     replay_seek_checked, replay_verify, replay_verify_checked, ReplayError, ReplayHeader, ReplayReader, ReplayWriter,
     VerifyReport,
@@ -39,4 +43,4 @@ pub use session::{
     SessionConfig,
 };
 
-pub use orr_sim::{EventKey, Game, PlayerSlot, SimEvent};
+pub use orr_sim::{DebugCommand, DebugError, EventKey, Game, PlayerSlot, SimEvent};

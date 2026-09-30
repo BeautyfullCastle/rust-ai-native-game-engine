@@ -105,6 +105,14 @@ impl<T: Component> SparseSet<T> {
         self.get(e).is_some()
     }
 
+    fn slot_of(&self, e: Entity) -> Option<usize> {
+        let slot = *self.sparse.get(e.index as usize)?;
+        if slot == NONE || self.dense_entities[slot as usize] != e {
+            return None;
+        }
+        Some(slot as usize)
+    }
+
     pub fn len(&self) -> u32 {
         self.data.len() as u32
     }
@@ -152,6 +160,12 @@ pub trait AnyStore: Send + Sync {
     /// rebuilding the sparse index. Every entity must be live in `alloc`
     /// and appear at most once.
     fn read_bytes(&mut self, r: &mut Reader, alloc: &EntityAllocator) -> Result<(), FrameDecodeError>;
+    /// The raw bytes of `e`'s value, if it has one.
+    fn bytes_of(&self, e: Entity) -> Option<&[u8]>;
+    fn bytes_of_mut(&mut self, e: Entity) -> Option<&mut [u8]>;
+    /// Inserts or replaces `e`'s value from exactly `size_of::<T>()` bytes.
+    /// Returns `false` (and changes nothing) on a wrong length.
+    fn insert_bytes(&mut self, e: Entity, bytes: &[u8]) -> bool;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -220,6 +234,25 @@ impl<T: Component> AnyStore for SparseSet<T> {
         }
         *self = set;
         Ok(())
+    }
+
+    fn bytes_of(&self, e: Entity) -> Option<&[u8]> {
+        self.slot_of(e).map(|s| bytemuck::bytes_of(&self.data[s]))
+    }
+
+    fn bytes_of_mut(&mut self, e: Entity) -> Option<&mut [u8]> {
+        let s = self.slot_of(e)?;
+        Some(bytemuck::bytes_of_mut(&mut self.data[s]))
+    }
+
+    fn insert_bytes(&mut self, e: Entity, bytes: &[u8]) -> bool {
+        match bytemuck::try_pod_read_unaligned::<T>(bytes) {
+            Ok(v) => {
+                self.insert(e, v);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
