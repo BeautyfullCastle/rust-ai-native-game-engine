@@ -80,6 +80,8 @@ pub struct ClientReport {
     pub max_prediction_depth: u64,
     pub stall_episodes: u64,
     pub stalled_ms: u64,
+    /// Longest single stall.
+    pub max_stall_ms: u64,
     /// Ticks the server repeated this client's input for.
     pub repeats: u64,
     pub overridden: u64,
@@ -99,7 +101,7 @@ impl ClientReport {
     /// One line for logs and result tables.
     pub fn summary(&self) -> String {
         format!(
-            "slot {} | rtt {:.0} ms | delay {} | rollbacks {} ({:.1}/s) | stall {} eps / {} ms | repeats {} | rate {:+} ppm | verified {} (head {}) | desyncs {}",
+            "slot {} | rtt {:.0} ms | delay {} | rollbacks {} ({:.1}/s) | stall {} eps / {} ms (max {} ms) | repeats {} | rate {:+} ppm | verified {} (head {}) | desyncs {}",
             self.slot.map_or("-".to_string(), |s| s.to_string()),
             self.rtt_ms,
             self.delay,
@@ -107,6 +109,7 @@ impl ClientReport {
             self.rollbacks_per_s,
             self.stall_episodes,
             self.stalled_ms,
+            self.max_stall_ms,
             self.repeats,
             i64::from(self.rate_ppm) - 1_000_000,
             self.verified_tick,
@@ -135,6 +138,7 @@ pub fn report<G: Game, L: Link>(client: &RelayClient<G, L>, play_secs: f64) -> C
         max_prediction_depth: cs.max_prediction_depth,
         stall_episodes: cs.stall_episodes,
         stalled_ms: cs.stalled_us / 1000,
+        max_stall_ms: cs.max_stall_us / 1000,
         repeats: ss.own_repeated,
         overridden: ss.own_overridden,
         hard_resyncs: cs.hard_resyncs,

@@ -38,11 +38,13 @@ pub struct ClientSpec {
     pub want_slot: Option<PlayerSlot>,
     pub token: u64,
     pub build_id: u64,
+    /// Inputs per packet the client repeats (`None` = the client default).
+    pub input_redundancy: Option<u32>,
 }
 
 impl ClientSpec {
     pub fn new(path: PathParams) -> Self {
-        Self { path, clock_ppm: 1_000_000, want_slot: None, token: 0, build_id: 1 }
+        Self { path, clock_ppm: 1_000_000, want_slot: None, token: 0, build_id: 1, input_redundancy: None }
     }
 }
 
@@ -116,6 +118,9 @@ impl<G: Game> Harness<G> {
         let mut cfg = RelayClientConfig::new(self.room, spec.build_id);
         cfg.want_slot = spec.want_slot;
         cfg.token = spec.token;
+        if let Some(r) = spec.input_redundancy {
+            cfg.input_redundancy = r;
+        }
         let dumps = DumpCollector::new();
         let make = self.make_config.clone();
         let client = RelayClient::<G, SimLink>::new(cfg, link, move |w| make(w), dumps.clone());

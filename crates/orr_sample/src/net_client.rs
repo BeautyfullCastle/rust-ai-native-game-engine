@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use orr_bridge::{BridgeConfig, Lifecycle, PlayerSlot, RelayHost, RelayHostOptions, RelayMetrics, RelayStatus, Threaded, ThreadedConfig};
 use orr_relay_net::{
-    connect, drive, parse_fingerprint, ClientReport, ConnectOptions, DirSink, DriveOptions, NetLink, SimConditions, TransportKind,
+    connect, drive, fresh_seed, parse_fingerprint, ClientReport, ConnectOptions, DirSink, DriveOptions, NetLink, SimConditions, TransportKind,
     Trust,
 };
 use orr_session::{RelayClient, RelayClientConfig};
@@ -42,6 +42,8 @@ pub struct NetArgs {
     /// Label in log lines.
     pub name: String,
     pub sim: SimConditions,
+    /// `--sim-seed`. `None` picks a fresh seed per process (printed at connect).
+    pub sim_seed: Option<u64>,
     pub desync_dir: PathBuf,
     /// Headless only: play with a scripted bot.
     pub bot: bool,
@@ -58,7 +60,8 @@ impl Default for NetArgs {
             room: 1,
             slot: None,
             name: "client".to_string(),
-            sim: SimConditions { latency_ms: 0, jitter_ms: 0, loss: 0.0, seed: 0xC0FFEE },
+            sim: SimConditions { latency_ms: 0, jitter_ms: 0, loss: 0.0, seed: 0 },
+            sim_seed: None,
             desync_dir: PathBuf::from("desync"),
             bot: false,
             connect_timeout: Duration::from_secs(60),
@@ -78,6 +81,7 @@ pub const NET_HELP: &str = "\
   --sim-latency MS             add MS of one-way delay in each direction (test the network)
   --sim-jitter MS              add up to MS of random delay
   --sim-loss P                 lose this share (0.02 = 2%) of unreliable messages, each way
+  --sim-seed N                 seed of the simulated loss and jitter (default: new per run, printed)
   --desync-dir DIR             where desync dumps (.orrd) go (default ./desync)
   --bot                        with --headless: play with a scripted bot
   --connect-timeout SECONDS    wait this long for the room to start (default 60)";
@@ -103,6 +107,7 @@ impl NetArgs {
             "--sim-latency" => self.sim.latency_ms = num(arg, next(arg)?)?,
             "--sim-jitter" => self.sim.jitter_ms = num(arg, next(arg)?)?,
             "--sim-loss" => self.sim.loss = num(arg, next(arg)?)?,
+            "--sim-seed" => self.sim_seed = Some(num(arg, next(arg)?)?),
             "--desync-dir" => self.desync_dir = PathBuf::from(next(arg)?),
             "--bot" => self.bot = true,
             "--connect-timeout" => self.connect_timeout = Duration::from_secs_f32(num(arg, next(arg)?)?),
@@ -122,7 +127,12 @@ impl NetArgs {
             }
         };
         let mut o = ConnectOptions::new(addr, self.kind, trust);
-        o.sim = Some(self.sim).filter(SimConditions::is_active);
+        let mut sim = self.sim;
+        if sim.is_active() {
+            sim.seed = self.sim_seed.unwrap_or_else(fresh_seed);
+            println!("{}: network simulation {sim:?} (repeat with --sim-seed {})", self.name, sim.seed);
+        }
+        o.sim = Some(sim).filter(SimConditions::is_active);
         Ok(o)
     }
 
@@ -283,7 +293,7 @@ pub fn print_bot_report(name: &str, r: &ClientReport) {
     println!("rtt            : {:.1} ms", r.rtt_ms);
     println!("input delay    : {} ticks ({} changes)", r.delay, r.delay_changes);
     println!("rollbacks      : {} ({:.2}/s), {} ticks resimulated, deepest prediction {}", r.rollbacks, r.rollbacks_per_s, r.resim_ticks, r.max_prediction_depth);
-    println!("stalls         : {} episodes, {} ms", r.stall_episodes, r.stalled_ms);
+    println!("stalls         : {} episodes, {} ms, longest {} ms", r.stall_episodes, r.stalled_ms, r.max_stall_ms);
     println!("repeated inputs: {} (server repeated this client's input), overridden {}", r.repeats, r.overridden);
     println!("sim rate       : {:+} ppm", i64::from(r.rate_ppm) - 1_000_000);
     println!("ticks          : head {} verified {} over {:.1} s", r.head_tick, r.verified_tick, r.play_secs);

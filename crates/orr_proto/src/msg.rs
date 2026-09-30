@@ -40,10 +40,16 @@
 //! | 9 | `JoinSnapshot` (relayed snapshot, to the joiner) | reliable |
 //! | 10 | `Presence` (a slot got a player or lost it) | reliable |
 //! | 11 | `Bye` | reliable |
+//!
+//! `Confirmed` is compact, because the server repeats unacked bundles in
+//! every packet: the first bundle has a `u64` tick, later ones a one-byte
+//! delta (255 escapes to a full `u64`); a slot's flags byte tells whether
+//! its input equals the same slot's input in the previous bundle of the
+//! message (then the input bytes are left out) and whether commands follow.
 use crate::codec::{Reader, Writer};
 
 /// Protocol version carried by every message.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 const MAGIC: &[u8; 4] = b"ORRN";
 
 /// `Hello::want_slot` value meaning "any free slot".
@@ -54,6 +60,13 @@ pub const NO_SLOT: u8 = 0xFF;
 pub const FLAG_REPEATED: u8 = 1;
 /// `SlotConfirmed::flags`: nobody plays this slot right now.
 pub const FLAG_ABSENT: u8 = 2;
+/// Wire only: the slot has commands (else no command count follows).
+const WIRE_HAS_COMMANDS: u8 = 4;
+/// Wire only: the input equals this slot's input in the previous bundle of
+/// the same message (the input bytes are left out).
+const WIRE_SAME_INPUT: u8 = 8;
+/// Wire only: after a bundle tick delta of this value, a full `u64` tick.
+const TICK_ESCAPE: u8 = 255;
 
 pub const MAX_INPUT_SIZE: u32 = 1024;
 pub const MAX_SLOTS: u8 = 64;
@@ -118,13 +131,30 @@ pub struct Bundle {
     pub slots: Vec<SlotConfirmed>,
 }
 
+fn commands_len(commands: &[Vec<u8>]) -> usize {
+    if commands.is_empty() {
+        0
+    } else {
+        4 + commands.iter().map(|c| 4 + c.len()).sum::<usize>()
+    }
+}
+
 impl Bundle {
-    /// Bytes of this bundle inside a `Confirmed` message.
+    /// Upper bound of this bundle's bytes inside a `Confirmed` message (as
+    /// the first bundle: full tick, every input in full).
     pub fn encoded_len(&self, input_size: u32) -> usize {
-        let mut n = 8usize;
-        for s in &self.slots {
-            n += 1 + input_size as usize + 4;
-            n += s.commands.iter().map(|c| 4 + c.len()).sum::<usize>();
+        8 + self.slots.iter().map(|s| 1 + input_size as usize + commands_len(&s.commands)).sum::<usize>()
+    }
+
+    /// Bytes of this bundle inside a `Confirmed` message that has `prev` as
+    /// the bundle before it: a one-byte tick delta, and inputs left out where
+    /// they equal `prev`'s.
+    pub fn encoded_len_after(&self, prev: &Bundle, input_size: u32) -> usize {
+        let tick = if prev.tick < self.tick && self.tick - prev.tick < u64::from(TICK_ESCAPE) { 1 } else { 9 };
+        let mut n = tick;
+        for (i, s) in self.slots.iter().enumerate() {
+            let same = prev.slots.get(i).is_some_and(|p| p.input == s.input);
+            n += 1 + if same { 0 } else { input_size as usize } + commands_len(&s.commands);
         }
         n
     }
@@ -474,15 +504,38 @@ impl ServerMsg {
                 let slots = bundles.first().map_or(0, |b| b.slots.len());
                 w.u8(slots as u8);
                 w.u32(bundles.len() as u32);
+                let mut prev: Option<&Bundle> = None;
                 for b in bundles {
                     debug_assert_eq!(b.slots.len(), slots);
-                    w.u64(b.tick);
-                    for s in &b.slots {
-                        w.u8(s.flags);
-                        debug_assert_eq!(s.input.len() as u32, *input_size);
-                        w.raw(&s.input);
-                        write_commands(&mut w, &s.commands);
+                    match prev {
+                        None => w.u64(b.tick),
+                        Some(p) if p.tick < b.tick && b.tick - p.tick < u64::from(TICK_ESCAPE) => {
+                            w.u8((b.tick - p.tick) as u8)
+                        }
+                        Some(_) => {
+                            w.u8(TICK_ESCAPE);
+                            w.u64(b.tick);
+                        }
                     }
+                    for (i, s) in b.slots.iter().enumerate() {
+                        debug_assert_eq!(s.input.len() as u32, *input_size);
+                        let same = prev.and_then(|p| p.slots.get(i)).is_some_and(|p| p.input == s.input);
+                        let mut flags = s.flags & (FLAG_REPEATED | FLAG_ABSENT);
+                        if same {
+                            flags |= WIRE_SAME_INPUT;
+                        }
+                        if !s.commands.is_empty() {
+                            flags |= WIRE_HAS_COMMANDS;
+                        }
+                        w.u8(flags);
+                        if !same {
+                            w.raw(&s.input);
+                        }
+                        if !s.commands.is_empty() {
+                            write_commands(&mut w, &s.commands);
+                        }
+                    }
+                    prev = Some(b);
                 }
                 seal(w)
             }
@@ -568,17 +621,36 @@ impl ServerMsg {
                 if slots > MAX_SLOTS {
                     return Err(ProtoError::TooLarge);
                 }
-                let per_bundle = 8 + u64::from(slots) * (5 + u64::from(input_size));
+                let per_bundle = 1 + u64::from(slots);
                 let n = r.count(per_bundle, MAX_BUNDLES)?;
-                let mut bundles = Vec::with_capacity(n as usize);
-                for _ in 0..n {
-                    let tick = r.u64()?;
-                    let mut list = Vec::with_capacity(slots as usize);
-                    for _ in 0..slots {
-                        let flags = r.u8()?;
-                        let input = read_input(&mut r, input_size)?;
-                        let commands = read_commands(&mut r)?;
-                        list.push(SlotConfirmed { input, commands, flags });
+                let mut bundles: Vec<Bundle> = Vec::with_capacity(n as usize);
+                for k in 0..n as usize {
+                    let tick = if k == 0 {
+                        r.u64()?
+                    } else {
+                        let prev_tick = bundles[k - 1].tick;
+                        match r.u8()? {
+                            TICK_ESCAPE => r.u64()?,
+                            0 => return Err(ProtoError::Corrupt("tick delta 0")),
+                            d => prev_tick.checked_add(u64::from(d)).ok_or(ProtoError::Corrupt("tick overflow"))?,
+                        }
+                    };
+                    let mut list: Vec<SlotConfirmed> = Vec::with_capacity(slots as usize);
+                    for i in 0..slots as usize {
+                        let wire = r.u8()?;
+                        if wire & !(FLAG_REPEATED | FLAG_ABSENT | WIRE_HAS_COMMANDS | WIRE_SAME_INPUT) != 0 {
+                            return Err(ProtoError::Corrupt("flags"));
+                        }
+                        let input = if wire & WIRE_SAME_INPUT != 0 {
+                            if k == 0 {
+                                return Err(ProtoError::Corrupt("same input without a previous bundle"));
+                            }
+                            bundles[k - 1].slots[i].input.clone()
+                        } else {
+                            read_input(&mut r, input_size)?
+                        };
+                        let commands = if wire & WIRE_HAS_COMMANDS != 0 { read_commands(&mut r)? } else { Vec::new() };
+                        list.push(SlotConfirmed { input, commands, flags: wire & (FLAG_REPEATED | FLAG_ABSENT) });
                     }
                     bundles.push(Bundle { tick, slots: list });
                 }
@@ -680,6 +752,38 @@ mod tests {
             ServerMsg::Presence { slot: 1, present: false, from_tick: 44 },
             ServerMsg::Bye { code: 2 },
         ]
+    }
+
+    #[test]
+    fn confirmed_compact_encoding_round_trips_and_shrinks() {
+        let b = |tick: u64, a: u8, c: u8, cmds: bool| Bundle {
+            tick,
+            slots: vec![
+                SlotConfirmed { input: vec![a; 4], commands: if cmds { vec![vec![1, 2]] } else { vec![] }, flags: 0 },
+                SlotConfirmed { input: vec![c; 4], commands: vec![], flags: FLAG_ABSENT | FLAG_REPEATED },
+            ],
+        };
+        // Same inputs, changed input, a tick gap, a gap over the delta range, a backwards tick.
+        let bundles = vec![b(10, 1, 2, false), b(11, 1, 2, true), b(12, 3, 2, false), b(15, 3, 9, false), b(400, 3, 9, false), b(7, 3, 9, false)];
+        let msg = ServerMsg::Confirmed { input_size: 4, bundles: bundles.clone() };
+        let bytes = msg.encode();
+        assert_eq!(ServerMsg::decode(&bytes).unwrap(), msg);
+        let full: usize = bundles.iter().map(|x| x.encoded_len(4)).sum();
+        let est = bundles[0].encoded_len(4) + bundles.windows(2).map(|w| w[1].encoded_len_after(&w[0], 4)).sum::<usize>();
+        assert!(est < full);
+        // header: magic 4 + version 4 + kind 1 + input_size 4 + slots 1 + count 4 + checksum 8
+        assert_eq!(bytes.len(), est + 26);
+    }
+
+    #[test]
+    fn confirmed_same_input_on_first_bundle_is_an_error() {
+        let mut w = start(5);
+        w.u32(4);
+        w.u8(1);
+        w.u32(1);
+        w.u64(5);
+        w.u8(WIRE_SAME_INPUT);
+        assert!(ServerMsg::decode(&seal(w)).is_err());
     }
 
     #[test]

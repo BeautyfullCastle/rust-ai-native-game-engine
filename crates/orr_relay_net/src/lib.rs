@@ -23,7 +23,7 @@ mod link;
 mod server_ep;
 
 pub use connect::{
-    connect, format_fingerprint, listen, parse_fingerprint, ConnectOptions, ListenOptions, SimConditions, Tls, TransportKind,
+    connect, format_fingerprint, fresh_seed, listen, parse_fingerprint, ConnectOptions, ListenOptions, SimConditions, Tls, TransportKind,
     Trust,
 };
 pub use driver::{drive, report, ClientReport, DirSink, DriveOptions};

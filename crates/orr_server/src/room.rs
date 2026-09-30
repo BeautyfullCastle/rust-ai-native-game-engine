@@ -65,6 +65,10 @@ pub struct RoomConfig {
     /// client that has not acked it (loss cover), then again after a
     /// resend timeout.
     pub bundle_redundancy: u8,
+    /// After the first `bundle_redundancy` copies, an unacked bundle rides
+    /// in every this-many-th packet until the client acks it (`0` = off:
+    /// wait for the resend timeout of 1.5 round trips instead).
+    pub repeat_gap_ticks: u32,
     /// Round trip assumed for a client before its first ping.
     pub default_rtt_us: u32,
     /// Payload budget of one unreliable message.
@@ -99,6 +103,7 @@ impl RoomConfig {
             retain_ticks: 900,
             sync_interval_ticks: 6,
             bundle_redundancy: 3,
+            repeat_gap_ticks: 1,
             default_rtt_us: 100_000,
             max_unreliable_payload: 1100,
             join_timeout_ticks: 300,
@@ -699,6 +704,7 @@ impl Room {
         let input_size = self.cfg.input_size;
         let budget = self.cfg.max_unreliable_payload as usize - 32;
         let redundancy = self.cfg.bundle_redundancy;
+        let repeat_gap_us = u64::from(self.cfg.repeat_gap_ticks) * 875_000 / u64::from(self.cfg.tick_rate);
         let floor = self.log.keys().next().copied().unwrap_or(self.finalized + 1);
         let mut dropped = Vec::new();
         for i in 0..self.slots.len() {
@@ -716,14 +722,17 @@ impl Room {
             }
             let acked = s.acked;
             s.sent = s.sent.split_off(&(acked + 1));
-            let mut chosen: Vec<Bundle> = Vec::new();
-            let mut used = 0usize;
+            // When the due bundles do not all fit: fresh ones first, then the oldest
+            // (the client needs a gap filled before it can use the ticks above it).
+            let mut due: Vec<(bool, u64, usize)> = Vec::new();
             for (&t, b) in self.log.range(acked + 1..).take_while(|(t, _)| **t <= self.finalized) {
-                let due = match s.sent.get(&t) {
+                let is_due = match s.sent.get(&t) {
                     None => true,
-                    Some(r) => r.count < redundancy || now.saturating_sub(r.last_us) >= timeout,
+                    Some(r) if r.count < redundancy => true,
+                    Some(r) if repeat_gap_us > 0 => now.saturating_sub(r.last_us) >= repeat_gap_us,
+                    Some(r) => now.saturating_sub(r.last_us) >= timeout,
                 };
-                if !due {
+                if !is_due {
                     continue;
                 }
                 let len = b.encoded_len(input_size);
@@ -736,12 +745,31 @@ impl Room {
                     }
                     continue;
                 }
-                if used + len > budget {
-                    break;
-                }
-                used += len;
-                chosen.push(b.clone());
+                let est = t.checked_sub(1).and_then(|p| self.log.get(&p)).map_or(len, |p| b.encoded_len_after(p, input_size));
+                due.push((s.sent.get(&t).is_some_and(|r| r.count >= redundancy), t, est));
             }
+            due.sort_unstable();
+            let mut used = 0usize;
+            let mut ticks: Vec<u64> = Vec::new();
+            for (_, t, len) in due {
+                if used + len <= budget {
+                    used += len;
+                    ticks.push(t);
+                }
+            }
+            // The estimates assume each bundle follows its predecessor tick;
+            // check the exact size and drop the last-chosen until it fits.
+            let chosen: Vec<Bundle> = loop {
+                let mut sorted = ticks.clone();
+                sorted.sort_unstable();
+                let list: Vec<Bundle> = sorted.iter().map(|t| self.log[t].clone()).collect();
+                let exact = list.first().map_or(0, |f| f.encoded_len(input_size))
+                    + list.windows(2).map(|w| w[1].encoded_len_after(&w[0], input_size)).sum::<usize>();
+                if exact <= budget || list.len() <= 1 {
+                    break list;
+                }
+                ticks.pop();
+            };
             if chosen.is_empty() {
                 continue;
             }
