@@ -13,23 +13,26 @@ default-run = "orr_editor"
 workspace = true
 
 [dependencies]
+# The editor is a view: it sees the simulation only through the bridge and ERP.
+# No orr_sim / orr_session / orr_edit / orr_physics here (see tests/deps.rs).
 orr_fp = { path = "../orr_fp" }
 orr_ecs = { path = "../orr_ecs" }
-orr_sim = { path = "../orr_sim" }
-orr_session = { path = "../orr_session" }
-orr_edit = { path = "../orr_edit" }
 orr_reflect = { path = "../orr_reflect", features = ["scene"] }
-orr_physics = { path = "../orr_physics" }
+orr_bridge = { path = "../orr_bridge" }
 orr_rhi = { path = "../orr_rhi" }
 orr_render = { path = "../orr_render" }
 orr_view = { path = "../orr_view" }
+# The game's view plugin: its frame type for the bridge, reflect descriptors and draw mapping.
 orr_sample = { path = "../orr_sample" }
 orr_remote = { path = "../orr_remote" }
+# JSON of ERP (exact decimals: same features as orr_remote).
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "x11", "wayland", "default_fonts"] }
 egui = "0.36"
 egui-wgpu = "0.36"
 png = "0.17"
 
 [dev-dependencies]
-serde_json = "1"
+# Tests only: replay a recording to check it against the live checksum.
+orr_session = { path = "../orr_session" }
 egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }

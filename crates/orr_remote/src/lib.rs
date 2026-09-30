@@ -36,8 +36,18 @@
 //! - [`RemoteBridge`]: an `orr_bridge::Bridge` + `SimControl` over ERP, so
 //!   view code can attach to a sim in another process. The server streams
 //!   frame snapshots (binary, lz4) and the bridge rebuilds `Snapshot`s.
-//! - [`ErpClient`]: a small blocking client (tests, tools).
-//! - [`Host`]: a headless host loop (used by the `orr_remote_host` binary).
+//! - [`ErpClient`]: a client over any [`Transport`]: a blocking WebSocket
+//!   (tests, tools), a WebSocket on a background thread, or an **in-process**
+//!   link to a host thread of the same process ([`link`]). Blocking
+//!   [`call`](ErpClient::call), or non-blocking [`post`](ErpClient::post) +
+//!   [`poll`](ErpClient::poll) for a UI.
+//! - [`Host`]: a host loop (used by the `orr_remote_host` binary);
+//!   [`LocalHost`] runs one on its own thread, panic-safe, for an editor that
+//!   keeps the simulation and the document out of its UI thread.
+//!   [`ErpServer::connector`] hands out in-process connections: requests as
+//!   parsed values, frames as shared `Arc<Frame>` copies (no JSON, no lz4).
+//!   A client named [`USER_CLIENT`] is a person's view: its edits are
+//!   `Origin::User`.
 //!
 //! # Threads and the wall clock
 //!
@@ -56,19 +66,25 @@ mod dispatch;
 mod error;
 mod host;
 pub mod json;
+pub mod link;
+mod local;
 pub mod methods;
 mod net;
 mod proposals;
 mod remote;
+#[cfg(feature = "sample-host")]
+pub mod sample;
 mod server;
 pub mod wire;
 
 pub use activity::{ActivityEntry, ActivityKind, ClientInfo, ValueChange, VerifyDetail, DEFAULT_ACTIVITY_CAPACITY};
-pub use caps::{Auth, Cap, Caps, TokenEntry};
+pub use caps::{origin_of_client, Auth, Cap, Caps, TokenEntry, USER_CLIENT};
 pub use client::{ClientError, ErpClient};
 pub use dispatch::{call_local, ErpTarget, HostLimits};
 pub use error::*;
 pub use host::{Host, Pacer};
+pub use link::{Incoming, LocalConnector, LocalFrame, LocalTransport, PumpedWs, Request, Transport, TxHandle, WsTransport};
+pub use local::LocalHost;
 pub use proposals::{default_build_id, BotFn, GameHooks};
 pub use remote::{RemoteBridge, RemoteConfig, RemoteMetrics};
 pub use server::{ErpServer, PollReport, ServerConfig, ServerError, ServerStats, MAX_PENDING_BYTES};

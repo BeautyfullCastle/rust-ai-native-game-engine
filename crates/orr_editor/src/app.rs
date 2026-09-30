@@ -7,13 +7,13 @@
 use std::path::PathBuf;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Pos2, Rect, RichText, Sense, Ui};
-use orr_edit::Target;
+use orr_bridge::PlayMode;
 use orr_fp::FPVec2;
 use orr_reflect::Value;
-use orr_session::PlayMode;
 
 use crate::editor::{fp_of_f64, Editor, Message, Mode, Owner};
 use crate::inspector::{show_component, InspEvent};
+use crate::model::{EntityRow, Target};
 use crate::viewport::{self, GpuViewport};
 
 /// Button labels (tests click them by these texts).
@@ -24,6 +24,11 @@ pub const LBL_PAUSE: &str = "\u{23F8} Pause";
 pub const LBL_STEP: &str = "\u{23ED} Step";
 /// See [`LBL_PLAY`].
 pub const LBL_STOP: &str = "\u{25A0} Stop";
+
+/// The button that starts a stopped local host again (tests click it by this text).
+pub const LBL_RESTART: &str = "Restart simulation host";
+/// The button that reconnects to a remote host.
+pub const LBL_RECONNECT: &str = "Reconnect";
 
 const BODY: &str = "orr_physics::Body";
 
@@ -86,8 +91,6 @@ pub struct UiState {
     pub viewport_rect: Option<Rect>,
     /// Size of the viewport in pixels last frame.
     pub viewport_px: (u32, u32),
-    /// Diffs of the open proposals (see [`crate::agent_ui::cached_diff`]).
-    pub diffs: crate::agent_ui::DiffCache,
     /// Entities an agent just edited, pulsing in the viewport (see [`Pulse`]).
     pub pulses: Vec<Pulse>,
     body_drag: Option<BodyDrag>,
@@ -156,24 +159,23 @@ impl eframe::App for EditorApp {
         let ctx = ui.ctx().clone();
         self.frames += 1;
 
-        let dt = f64::from(ctx.input(|i| i.unstable_dt));
-        self.editor.poll_erp();
+        // The host simulates and edits on its own; this takes in what it says (never waits for it).
+        self.editor.pump();
         self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {
             self.ui.bottom_tab = BottomTab::Agent;
         }
-        self.editor.advance(dt);
-        if self.editor.erp_status().is_some() {
-            // Keep polling ERP requests while the window is idle.
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        }
-        self.editor.sanitize_selection();
+        // Notifications and frames arrive any time: look again soon, and at once while playing.
+        ctx.request_repaint_after(std::time::Duration::from_millis(40));
         if self.editor.is_playing_mode() && self.editor.timeline().is_some_and(|t| t.playing) {
             ctx.request_repaint();
         }
         self.shortcuts(&ctx);
 
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
+        if self.editor.down().is_some() {
+            egui::Panel::top("down").show(ui, |ui| self.down_banner(ui));
+        }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         // The Agent tab needs more room than the timeline; each has its own remembered height.
         let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 470.0) } else { ("bottom", 120.0) };
@@ -201,8 +203,7 @@ impl EditorApp {
     /// Turns the entities agents just touched into pulses (and drops the expired ones).
     fn start_pulses(&mut self, now: f64) {
         for name in self.editor.feed_mut().take_touched() {
-            let target = orr_remote::json::parse_handle(&name).map(Target::Entity).or_else(|| orr_reflect::Guid::parse(&name).ok().map(Target::Guid));
-            if let Some(target) = target {
+            if let Some(target) = Target::parse(&name) {
                 self.ui.pulses.retain(|p| p.target != target);
                 self.ui.pulses.push(Pulse { target, started: now });
             }
@@ -235,7 +236,7 @@ impl EditorApp {
     }
 
     fn save(&mut self) {
-        if self.editor.path().is_some() {
+        if self.editor.sim().scene_path.is_some() {
             self.editor.save();
         } else {
             self.ui.dialog = Some(Dialog { kind: DialogKind::SaveAs, text: String::new() });
@@ -264,11 +265,11 @@ impl EditorApp {
             });
             ui.menu_button("Edit", |ui| {
                 let editing = self.editor.mode() == Mode::Edit;
-                if ui.add_enabled(editing && self.editor.doc().can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                if ui.add_enabled(editing && self.editor.history().can_undo, egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
                     self.editor.undo();
                     ui.close();
                 }
-                if ui.add_enabled(editing && self.editor.doc().can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+                if ui.add_enabled(editing && self.editor.history().can_redo, egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
                     self.editor.redo();
                     ui.close();
                 }
@@ -295,6 +296,23 @@ impl EditorApp {
             if self.editor.is_dirty() {
                 ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
             }
+        });
+    }
+
+    /// The banner of a host that is gone: why, and the way back.
+    fn down_banner(&mut self, ui: &mut Ui) {
+        let Some(down) = self.editor.down().cloned() else { return };
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(ui.visuals().error_fg_color, RichText::new(&down.reason).strong());
+            let label = if down.local { LBL_RESTART } else { LBL_RECONNECT };
+            if ui.button(label).clicked() {
+                self.editor.restart();
+            }
+            ui.weak(if down.local {
+                "Restart opens the scene file again in a new simulation host: edits that were not saved are lost."
+            } else {
+                "Reconnect attaches to the host again and shows its scene (edits the host kept are still there)."
+            });
         });
     }
 
@@ -338,17 +356,14 @@ impl EditorApp {
         let filter = self.ui.filter.to_lowercase();
         let rows: Vec<(String, Target, String)> = self
             .editor
-            .view()
-            .entities()
-            .into_iter()
-            .filter_map(|info| {
-                let label = Editor::entity_label(&info);
+            .rows()
+            .iter()
+            .filter_map(|row| {
+                let label = row.label();
                 if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
                     return None;
                 }
-                let tip = info.components.join(", ");
-                let target = info.guid.clone().map_or(Target::Entity(info.entity), Target::Guid);
-                Some((label, target, tip))
+                Some((label, row.target(), row.components.join(", ")))
             })
             .collect();
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
@@ -374,63 +389,60 @@ impl EditorApp {
         let mut add: Option<String> = None;
         let mut remove: Option<String> = None;
         let selection = self.editor.selection().cloned();
+        let inspect = self.editor.inspect().cloned();
+        let editor = &self.editor;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let view = self.editor.view();
-            if let Some(t) = &selection {
-                match view.entity(t) {
-                    Ok(info) => {
-                        let key = match &info.guid {
-                            Some(g) => g.to_string(),
-                            None => format!("e{}v{}", info.entity.index, info.entity.version),
-                        };
-                        ui.label(RichText::new(Editor::entity_label(&info)).strong());
-                        ui.weak(&key);
-                        ui.separator();
-                        match view.components(t) {
-                            Ok(comps) => {
-                                for (name, value) in comps {
-                                    let Some(ty) = view.types().get(&name) else { continue };
-                                    let base = egui::Id::new(("inspector", &key, &name));
-                                    egui::CollapsingHeader::new(RichText::new(&name).strong()).id_salt(base).default_open(true).show(ui, |ui| {
-                                        let mut evs = Vec::new();
-                                        show_component(ui, base, ty.desc(), &value, &mut evs);
-                                        events.extend(evs.into_iter().map(|e| (Owner::Component(name.clone()), e)));
-                                        if ui.small_button("Remove component").clicked() {
-                                            remove = Some(name.clone());
-                                        }
-                                    });
-                                }
+            let types = editor.types();
+            match (&selection, &inspect) {
+                (Some(_), Some(ins)) => {
+                    let row = ins.row.as_ref();
+                    let key = ins.target.param();
+                    ui.label(RichText::new(row.map_or_else(|| key.clone(), EntityRow::label)).strong());
+                    ui.weak(&key);
+                    ui.separator();
+                    for (name, value) in &ins.components {
+                        let Some(ty) = types.get(name) else { continue };
+                        let base = egui::Id::new(("inspector", &key, name));
+                        egui::CollapsingHeader::new(RichText::new(name).strong()).id_salt(base).default_open(true).show(ui, |ui| {
+                            let mut evs = Vec::new();
+                            show_component(ui, base, ty.desc(), value, &mut evs);
+                            events.extend(evs.into_iter().map(|e| (Owner::Component(name.clone()), e)));
+                            if ui.small_button("Remove component").clicked() {
+                                remove = Some(name.clone());
                             }
-                            Err(e) => {
-                                ui.colored_label(ui.visuals().error_fg_color, e.to_string());
-                            }
-                        }
-                        let addable: Vec<&str> = view.types().components().map(|t| t.name()).filter(|n| !info.components.iter().any(|c| c == n)).collect();
-                        ui.add_enabled_ui(!addable.is_empty(), |ui| {
-                            egui::ComboBox::from_id_salt("add_component").selected_text("+ Add component").show_ui(ui, |ui| {
-                                for n in addable {
-                                    if ui.selectable_label(false, n).clicked() {
-                                        add = Some(n.to_string());
-                                    }
-                                }
-                            });
                         });
                     }
-                    Err(_) => {
+                    let have: Vec<&str> = row.map(|r| r.components.iter().map(String::as_str).collect()).unwrap_or_default();
+                    let addable: Vec<&str> = types.components().map(|t| t.name()).filter(|n| !have.contains(n) && !ins.components.iter().any(|(c, _)| c == n)).collect();
+                    ui.add_enabled_ui(!addable.is_empty(), |ui| {
+                        egui::ComboBox::from_id_salt("add_component").selected_text("+ Add component").show_ui(ui, |ui| {
+                            for n in addable {
+                                if ui.selectable_label(false, n).clicked() {
+                                    add = Some(n.to_string());
+                                }
+                            }
+                        });
+                    });
+                }
+                (Some(t), None) => {
+                    if editor.row_of(t).is_some() || editor.rows().is_empty() {
+                        ui.weak("loading\u{2026}");
+                    } else {
                         ui.weak("selection no longer exists");
                     }
                 }
-            } else {
-                ui.weak("Select an entity in the hierarchy or click a body in the viewport.");
+                (None, _) => {
+                    ui.weak("Select an entity in the hierarchy or click a body in the viewport.");
+                }
             }
             ui.separator();
             ui.label(RichText::new("Singletons").strong());
-            for (name, value) in view.singletons() {
-                let Some(ty) = view.types().get(&name) else { continue };
-                let base = egui::Id::new(("singleton", &name));
-                egui::CollapsingHeader::new(&name).id_salt(base).default_open(false).show(ui, |ui| {
+            for (name, value) in editor.singletons() {
+                let Some(ty) = types.get(name) else { continue };
+                let base = egui::Id::new(("singleton", name));
+                egui::CollapsingHeader::new(name).id_salt(base).default_open(false).show(ui, |ui| {
                     let mut evs = Vec::new();
-                    show_component(ui, base, ty.desc(), &value, &mut evs);
+                    show_component(ui, base, ty.desc(), value, &mut evs);
                     events.extend(evs.into_iter().map(|e| (Owner::Singleton(name.clone()), e)));
                 });
             }
@@ -476,14 +488,14 @@ impl EditorApp {
         }
 
         // While a proposal is previewed the viewport is read-only (the frame on screen is not the document's).
-        let previewing = self.editor.previewing();
+        let previewing = self.editor.previewing().map(str::to_string);
+        let live = self.editor.down().is_none();
         // Select and move bodies with the primary button.
-        if previewing.is_none() && resp.drag_started_by(PointerButton::Primary) {
+        if live && previewing.is_none() && resp.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
                 let world = self.editor.camera.screen_to_world(to_px(origin), px);
-                let hit = viewport::pick(&self.editor.view(), world);
-                if let Some(target) = hit {
-                    let pos = viewport::body_pos(&self.editor.view(), &target);
+                if let Some(target) = self.editor.pick(world) {
+                    let pos = self.editor.body_pos(&target);
                     self.editor.select(Some(target));
                     if let Some(pos) = pos {
                         self.ui.body_drag = Some(BodyDrag { offset: [pos[0] - world[0], pos[1] - world[1]] });
@@ -504,26 +516,18 @@ impl EditorApp {
         if resp.drag_stopped() && self.ui.body_drag.take().is_some() {
             self.editor.end_edit();
         }
-        if previewing.is_none() && resp.clicked_by(PointerButton::Primary) {
+        if live && previewing.is_none() && resp.clicked_by(PointerButton::Primary) {
             if let Some(at) = resp.interact_pointer_pos() {
                 let world = self.editor.camera.screen_to_world(to_px(at), px);
-                let hit = viewport::pick(&self.editor.view(), world);
+                let hit = self.editor.pick(world);
                 self.editor.select(hit);
             }
         }
 
         // Draw.
-        let mut list = match previewing.and_then(|id| crate::agent_ui::cached_diff(&self.editor, &mut self.ui.diffs, id)) {
-            Some(diff) => {
-                viewport::build_preview_list(&self.editor.viewport_view(), &self.editor.doc().view(), &diff.summary, self.editor.selection(), &self.editor.camera, px)
-            }
-            None => viewport::build_list(&self.editor.view(), self.editor.selection(), &self.editor.camera, px),
-        };
-        if !self.ui.pulses.is_empty() {
-            let now = ui.ctx().input(|i| i.time);
-            let live: Vec<(Target, f32)> = self.ui.pulses.iter().map(|p| (p.target.clone(), (1.0 - (now - p.started) / viewport::PULSE_SECONDS).clamp(0.0, 1.0) as f32)).collect();
-            viewport::add_pulses(&mut list, &self.editor.viewport_view(), &live);
-        }
+        let now = ui.ctx().input(|i| i.time);
+        let pulses: Vec<(Target, f32)> = self.ui.pulses.iter().map(|p| (p.target.clone(), (1.0 - (now - p.started) / viewport::PULSE_SECONDS).clamp(0.0, 1.0) as f32)).collect();
+        let list = self.editor.viewport_list(px, &pulses);
         match &self.render_state {
             Some(rs) => {
                 let gpu = self.gpu.get_or_insert_with(|| GpuViewport::new(rs, px));
@@ -534,6 +538,9 @@ impl EditorApp {
                 ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(10, 10, 16));
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "viewport needs a GPU (wgpu adapter)", egui::FontId::proportional(14.0), Color32::GRAY);
             }
+        }
+        if !live {
+            ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 120));
         }
         let label = match self.editor.timeline() {
             Some(t) => format!("PLAY  tick {}", t.tick),
@@ -636,7 +643,7 @@ impl EditorApp {
     }
 
     fn history(&mut self, ui: &mut Ui) {
-        let history = self.editor.doc().history();
+        let history = self.editor.history().entries.clone();
         if history.is_empty() {
             ui.weak("No edits yet.");
             return;

@@ -136,3 +136,112 @@ impl PhysKeys {
         )
     }
 }
+
+// ---- the view of the scene for tools (the editor viewport) ----
+
+/// The collider outline of a body in its own frame (local to the body pose).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outline {
+    /// A disc around the origin.
+    Circle {
+        /// Radius.
+        radius: f32,
+    },
+    /// A segment `a..b` with a radius.
+    Capsule {
+        /// First end.
+        a: [f32; 2],
+        /// Second end.
+        b: [f32; 2],
+        /// Radius.
+        radius: f32,
+    },
+    /// A convex polygon, counter-clockwise.
+    Polygon(Vec<[f32; 2]>),
+}
+
+fn rot(v: [f32; 2], angle: f32) -> [f32; 2] {
+    let (s, c) = angle.sin_cos();
+    [c * v[0] - s * v[1], s * v[0] + c * v[1]]
+}
+
+impl Outline {
+    /// Is the point (in the body's own frame) inside the shape?
+    pub fn contains(&self, local: [f32; 2]) -> bool {
+        match self {
+            Outline::Circle { radius } => local[0].hypot(local[1]) <= *radius,
+            Outline::Capsule { a, b, radius } => {
+                let (abx, aby) = (b[0] - a[0], b[1] - a[1]);
+                let len2 = abx * abx + aby * aby;
+                let t = if len2 > 0.0 { (((local[0] - a[0]) * abx + (local[1] - a[1]) * aby) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                let (cx, cy) = (a[0] + abx * t, a[1] + aby * t);
+                (local[0] - cx).hypot(local[1] - cy) <= *radius
+            }
+            Outline::Polygon(verts) => {
+                let n = verts.len();
+                (0..n).all(|i| {
+                    let (a, b) = (verts[i], verts[(i + 1) % n]);
+                    (b[0] - a[0]) * (local[1] - a[1]) - (b[1] - a[1]) * (local[0] - a[0]) >= 0.0
+                })
+            }
+        }
+    }
+
+    /// Largest distance of the shape from its origin (a bounding radius).
+    pub fn extent(&self) -> f32 {
+        match self {
+            Outline::Circle { radius } => *radius,
+            Outline::Capsule { a, b, radius } => a.iter().chain(b.iter()).fold(0.0f32, |m, c| m.max(c.abs())) + radius,
+            Outline::Polygon(verts) => verts.iter().map(|v| v[0].hypot(v[1])).fold(0.0f32, f32::max),
+        }
+    }
+}
+
+/// One drawable body of a physics frame: pose, draw style and collider outline.
+#[derive(Clone, Debug)]
+pub struct BodyView {
+    /// The frame entity.
+    pub entity: Entity,
+    /// World position.
+    pub pos: [f32; 2],
+    /// Body angle in radians.
+    pub angle: f32,
+    /// How the renderer draws it (see [`body_look`]).
+    pub style: Style,
+    /// Angle added to `angle` for the renderer (see [`style_of`]).
+    pub turn: f32,
+    /// The collider shape, for outlines and picking.
+    pub outline: Outline,
+}
+
+impl BodyView {
+    /// Is the world point inside the collider?
+    pub fn hit(&self, world: [f32; 2]) -> bool {
+        self.outline.contains(rot([world[0] - self.pos[0], world[1] - self.pos[1]], -self.angle))
+    }
+}
+
+/// Every body with a collider, in the frame's deterministic dense order
+/// (later ones draw on top). This is the game's view mapping for tools that
+/// read a frame through the bridge.
+pub fn body_views(frame: FrameView<'_>) -> Vec<BodyView> {
+    let mut out = Vec::with_capacity(frame.count::<Body>() as usize);
+    for (entity, body) in frame.iter::<Body>() {
+        let Some(collider) = frame.get::<Collider>(entity) else { continue };
+        let tag = frame.get::<PaddleTag>(entity).map(|t| t.slot);
+        let (style, turn) = body_look(body, collider, tag);
+        let p = fp_to_vec2(body.pos);
+        let shape = &collider.shape;
+        let v2 = |v: orr_fp::FPVec2| {
+            let p = fp_to_vec2(v);
+            [p.x, p.y]
+        };
+        let outline = match shape.kind {
+            SHAPE_CIRCLE => Outline::Circle { radius: fp_to_f32(shape.radius) },
+            SHAPE_CAPSULE => Outline::Capsule { a: v2(shape.verts[0]), b: v2(shape.verts[1]), radius: fp_to_f32(shape.radius) },
+            _ => Outline::Polygon(shape.verts[..shape.count as usize].iter().map(|&v| v2(v)).collect()),
+        };
+        out.push(BodyView { entity, pos: [p.x, p.y], angle: fp_to_f32(body.angle), style, turn, outline });
+    }
+    out
+}

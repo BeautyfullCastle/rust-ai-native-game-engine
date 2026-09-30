@@ -1,13 +1,15 @@
 //! The editor window. `cargo run -p orr_editor --release`.
 //!
-//! Flags: see `--help` (`--scene`, `--select`, `--play-ticks`, `--script`,
-//! `--screenshot <png> --frames <n>`, `--erp <addr>` with `--erp-token` or
-//! `--erp-dev`).
+//! The editor is a view: the simulation runs in a host, by default a thread
+//! of this process (connected in-process), with `--connect` in another
+//! process. Flags: see `--help` (`--scene`, `--select`, `--play-ticks`,
+//! `--script`, `--screenshot <png> --frames <n>`, `--erp <addr>` with
+//! `--erp-token` or `--erp-dev`, `--connect <ws://host:port> [--token t]`).
 use std::path::PathBuf;
 
 use orr_editor::cli::{Args, USAGE};
 use orr_editor::editor::{default_scene_path, Editor};
-use orr_editor::{script, EditorApp, ScreenshotJob};
+use orr_editor::{script, EditorApp, HostSpec, ScreenshotJob};
 use orr_remote::{Auth, ServerConfig, TokenEntry};
 
 fn fail(msg: &str) -> ! {
@@ -23,9 +25,33 @@ fn main() {
             std::process::exit(if m == USAGE { 0 } else { 2 });
         }
     };
-    let path: PathBuf = args.scene.clone().unwrap_or_else(default_scene_path);
-    let mut editor = Editor::open(&path).unwrap_or_else(|e| fail(&e));
+    let spec = match &args.connect {
+        Some(url) => HostSpec::remote(url, args.token.as_deref()),
+        None => {
+            let scene: PathBuf = args.scene.clone().unwrap_or_else(default_scene_path);
+            // With --erp the same host thread also listens for agents: they share the window's document.
+            let listen = args.erp.map(|bind| {
+                let auth = if args.erp_dev {
+                    Auth::DevNoAuth
+                } else if args.erp_tokens.is_empty() {
+                    fail("--erp needs --erp-token name:token:caps or --erp-dev");
+                } else {
+                    let tokens = args.erp_tokens.iter().map(|t| TokenEntry::parse(t).unwrap_or_else(|e| fail(&format!("--erp-token: {e}"))));
+                    Auth::Tokens(tokens.collect())
+                };
+                let mut cfg = ServerConfig::new(auth);
+                cfg.bind = bind;
+                cfg
+            });
+            HostSpec::Local { scene, listen, debug_hooks: false }
+        }
+    };
+    let mut editor = Editor::start(&spec).unwrap_or_else(|e| fail(&e));
+    if let (Some(_), Some((url, _))) = (args.erp, editor.erp_status()) {
+        println!("ERP: {url}");
+    }
     if let Some(name) = &args.select {
+        editor.sync();
         if !editor.select_named(name) {
             fail(&format!("--select: no entity named '{name}'"));
         }
@@ -36,22 +62,9 @@ fn main() {
             fail(&e);
         }
     }
-    if let Some(bind) = args.erp {
-        let auth = if args.erp_dev {
-            Auth::DevNoAuth
-        } else if args.erp_tokens.is_empty() {
-            fail("--erp needs --erp-token name:token:caps or --erp-dev");
-        } else {
-            let tokens = args.erp_tokens.iter().map(|t| TokenEntry::parse(t).unwrap_or_else(|e| fail(&format!("--erp-token: {e}"))));
-            Auth::Tokens(tokens.collect())
-        };
-        let mut cfg = ServerConfig::new(auth);
-        cfg.bind = bind;
-        let url = editor.start_erp(cfg).unwrap_or_else(|e| fail(&e));
-        println!("ERP: {url}");
-    }
     if let Some(n) = args.play_ticks {
         editor.step(n);
+        editor.sync();
     }
 
     let options = eframe::NativeOptions {

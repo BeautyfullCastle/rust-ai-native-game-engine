@@ -1,26 +1,40 @@
 #![allow(dead_code)]
+#![allow(clippy::disallowed_types)]
 
 use std::sync::{Mutex, MutexGuard};
 
-use orr_edit::Target;
 use orr_editor::editor::{default_scene_path, Editor};
+use orr_editor::{HostSpec, Target};
 use orr_fp::{FPVec2, FP};
 use orr_reflect::{Guid, Value};
+use orr_remote::json::value_to_json;
 use orr_sample::physics_game::{PhysConfig, PhysGame, SceneMode};
 use orr_session::{ControlOp, PlaySession};
+use serde_json::json;
 
 pub const BODY: &str = "orr_physics::Body";
+pub const COLLIDER: &str = "orr_physics::Collider";
 
+/// An editor on its own host thread, on the demo scene, brought up to date.
 pub fn demo_editor() -> Editor {
-    Editor::open(&default_scene_path()).expect("open the demo scene")
+    let mut ed = Editor::open(&default_scene_path()).expect("open the demo scene");
+    ed.sync();
+    ed
+}
+
+/// An editor whose host thread has the `debug.panic` hook.
+pub fn crashable_editor() -> Editor {
+    let spec = HostSpec::Local { scene: default_scene_path(), listen: None, debug_hooks: true };
+    let mut ed = Editor::start(&spec).expect("start");
+    ed.sync();
+    ed
 }
 
 pub fn guid_named(ed: &Editor, name: &str) -> Guid {
-    ed.view()
-        .entities()
-        .into_iter()
+    ed.rows()
+        .iter()
         .find(|e| e.name.as_deref() == Some(name))
-        .and_then(|e| e.guid)
+        .and_then(|e| e.guid.clone())
         .unwrap_or_else(|| panic!("no entity named {name}"))
 }
 
@@ -36,10 +50,30 @@ pub fn vec2(x: i32, y: i32) -> Value {
     Value::Vec2(FPVec2::new(FP::from_int(x), FP::from_int(y)))
 }
 
-/// Checksums of ticks `from..=to` recorded by the play session.
-pub fn checksums(ed: &Editor, from: u64, to: u64) -> Vec<u64> {
-    let s = ed.play_controller().expect("play mode").session();
-    (from..=to).map(|t| s.checksum_at(t).unwrap_or_else(|| panic!("no checksum for tick {t}"))).collect()
+/// `[x, y]` of a `Vec2` value, in world units (view layer).
+pub fn xy(v: &Value) -> [f32; 2] {
+    let Value::Vec2(p) = v else { panic!("a vec2, got {v:?}") };
+    [orr_view::fp_to_f32(p.x), orr_view::fp_to_f32(p.y)]
+}
+
+/// One field of an entity, read from the host.
+pub fn field(ed: &mut Editor, t: &Target, component: &str, path: &str) -> Value {
+    ed.field_of(t, component, path).unwrap_or_else(|e| panic!("{component}.{path}: {e}"))
+}
+
+/// `fixed` as the JSON ERP takes.
+pub fn fixed_json(n: i32) -> serde_json::Value {
+    value_to_json(&fixed(n))
+}
+
+/// Checksums of ticks `from..=to` recorded by the play session (asked of the host).
+pub fn checksums(ed: &mut Editor, from: u64, to: u64) -> Vec<u64> {
+    (from..=to)
+        .map(|t| {
+            let r = ed.host_call("sim.checksum", json!({"tick": t})).unwrap_or_else(|e| panic!("checksum of tick {t}: {e}"));
+            orr_remote::wire::parse_checksum(&r["checksum"]).expect("checksum")
+        })
+        .collect()
 }
 
 /// Opens a recording as a viewer, seeks to its end and returns `(last tick, checksum there)`.
@@ -76,4 +110,15 @@ pub fn temp_path(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("orr_editor_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir.join(name)
+}
+
+/// The yaml text of the host's scene (what `scene.save` without `write` returns).
+pub fn scene_text(ed: &mut Editor) -> String {
+    ed.host_call("scene.save", json!({})).expect("scene.save")["text"].as_str().expect("text").to_string()
+}
+
+/// The checksum of the host's scene document.
+pub fn doc_checksum(ed: &mut Editor) -> u64 {
+    let r = ed.host_call("sim.state", json!({})).expect("sim.state");
+    orr_remote::wire::parse_checksum(&r["doc_checksum"]).expect("doc_checksum")
 }

@@ -23,8 +23,9 @@
 use std::path::Path;
 
 use orr_fp::{FPVec2, FPVec3, FP};
-use orr_edit::{Op, Origin, ProposalId, Target};
 use orr_reflect::{decimal, Guid, TypeKind, Value};
+use orr_remote::json::value_to_json;
+use serde_json::{json, Value as J};
 
 use crate::editor::{Editor, Owner};
 
@@ -55,22 +56,21 @@ pub fn parse_like(current: &Value, text: &str) -> Result<Value, String> {
     }
 }
 
-fn proposal_id(ed: &Editor, text: &str) -> Result<ProposalId, String> {
+/// The proposal a script command names: `p3`, `3` or `last`.
+fn proposal_id(ed: &Editor, text: &str) -> Result<String, String> {
     if text == "last" {
-        return ed.doc().list_proposals().last().map(|i| i.id).ok_or_else(|| "there are no proposals".to_string());
+        return ed.proposals().last().map(|i| i.id.clone()).ok_or_else(|| "there are no proposals".to_string());
     }
     let n = text.strip_prefix('p').unwrap_or(text);
-    let id = ProposalId(n.parse().map_err(|_| format!("'{text}' is not a proposal id (p3, 3 or last)"))?);
-    ed.doc().proposal_info(id).map(|i| i.id).map_err(|e| e.to_string())
+    let id = format!("p{}", n.parse::<u64>().map_err(|_| format!("'{text}' is not a proposal id (p3, 3 or last)"))?);
+    ed.proposals().iter().find(|i| i.id == id).map(|i| i.id.clone()).ok_or_else(|| format!("unknown proposal {id}"))
 }
 
 fn entity_guid(ed: &Editor, name: &str) -> Result<Guid, String> {
-    ed.doc()
-        .view()
-        .entities()
-        .into_iter()
+    ed.rows()
+        .iter()
         .find(|e| e.name.as_deref() == Some(name) || e.guid.as_ref().is_some_and(|g| g.to_string() == name))
-        .and_then(|e| e.guid)
+        .and_then(|e| e.guid.clone())
         .ok_or_else(|| format!("no entity named '{name}'"))
 }
 
@@ -78,12 +78,28 @@ fn last_error(ed: &Editor) -> String {
     ed.status().map(|m| m.text.clone()).unwrap_or_default()
 }
 
-/// Runs one command line.
+/// Stages ops on a proposal as the agent that made it.
+fn stage(ed: &mut Editor, id: &str, ops: J) -> Result<(), String> {
+    let agent = ed.script_proposal_owner(id).unwrap_or("script").to_string();
+    let c = ed.agent_client(&agent)?;
+    c.call("proposal.apply", json!({"id": id, "ops": ops})).map(|_| ()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Runs one command line. The editor is brought up to date first and after,
+/// so a command sees what the one before did.
 pub fn run_command(ed: &mut Editor, line: &str) -> Result<(), String> {
     let line = line.split('#').next().unwrap_or("").trim();
     if line.is_empty() {
         return Ok(());
     }
+    ed.sync();
+    let r = run_one(ed, line);
+    ed.sync();
+    r
+}
+
+fn run_one(ed: &mut Editor, line: &str) -> Result<(), String> {
     let mut parts = line.split_whitespace();
     let cmd = parts.next().unwrap_or_default();
     let rest: Vec<&str> = parts.collect();
@@ -101,14 +117,12 @@ pub fn run_command(ed: &mut Editor, line: &str) -> Result<(), String> {
             need(3)?;
             let (comp, path) = (rest[0], rest[1]);
             let text = rest[2..].join(" ");
-            let singleton = ed.doc().types().get(comp).is_some_and(|t| t.kind() == TypeKind::Singleton);
-            let (owner, current) = if singleton {
-                (Owner::Singleton(comp.to_string()), ed.view().singleton(comp, path).map_err(|e| e.to_string())?)
-            } else {
-                let t = ed.selection().cloned().ok_or("nothing selected")?;
-                (Owner::Component(comp.to_string()), ed.view().field(&t, comp, path).map_err(|e| e.to_string())?)
-            };
-            let value = parse_like(&current, &text)?;
+            let singleton = ed.types().get(comp).is_some_and(|t| t.kind() == TypeKind::Singleton);
+            let owner = if singleton { Owner::Singleton(comp.to_string()) } else { Owner::Component(comp.to_string()) };
+            if !singleton && ed.selection().is_none() {
+                return Err("nothing selected".to_string());
+            }
+            let value = ed.parse_field_text(comp, path, &text)?;
             let errors_before = ed.log().iter().filter(|m| m.error).count();
             ed.set_field(&owner, path, value);
             if ed.log().iter().filter(|m| m.error).count() > errors_before {
@@ -164,24 +178,26 @@ pub fn run_command(ed: &mut Editor, line: &str) -> Result<(), String> {
             if label.is_empty() {
                 return Err("'propose' needs a label".into());
             }
-            let id = ed.doc_mut().propose(&label, Origin::Agent(agent.to_string())).map_err(|e| e.to_string())?;
+            let c = ed.agent_client(agent)?;
+            let r = c.call("proposal.begin", json!({"label": label})).map_err(|e| e.to_string())?;
+            let id = r["id"].as_str().unwrap_or_default().to_string();
+            ed.note_script_proposal(&id, agent);
             ed.info(format!("proposal {id} \"{label}\" by agent:{agent}"));
         }
         "propose.set" => {
             need(5)?;
             let id = proposal_id(ed, rest[0])?;
             let (guid, comp, path) = (entity_guid(ed, rest[1])?, rest[2], rest[3]);
-            let current = ed.doc().proposal_preview(id).and_then(|v| v.field(&Target::Guid(guid.clone()), comp, path)).map_err(|e| e.to_string())?;
-            let value = parse_like(&current, &rest[4..].join(" "))?;
-            let op = Op::SetField { guid, component: comp.to_string(), path: path.to_string(), value };
-            ed.doc_mut().proposal_apply(id, op).map_err(|e| e.to_string())?;
+            let value = ed.parse_field_text(comp, path, &rest[4..].join(" "))?;
+            let op = json!({"op": "patch", "entity": guid.to_string(), "component": comp, "path": path, "value": value_to_json(&value)});
+            stage(ed, &id, json!([op]))?;
         }
         "propose.rename" => {
             need(3)?;
             let id = proposal_id(ed, rest[0])?;
             let guid = entity_guid(ed, rest[1])?;
-            let op = Op::Rename { guid, name: Some(rest[2..].join(" ")) };
-            ed.doc_mut().proposal_apply(id, op).map_err(|e| e.to_string())?;
+            let op = json!({"op": "rename", "entity": guid.to_string(), "name": rest[2..].join(" ")});
+            stage(ed, &id, json!([op]))?;
         }
         "preview" => {
             need(1)?;

@@ -49,9 +49,11 @@ impl Pacer {
     }
 }
 
-/// A headless host: a document, an optional play session, the ERP server
-/// and a pacer. The editor embeds the server itself; this is what
-/// `orr_remote_host` and the tests run.
+/// A host: a document, an optional play session, the ERP server and a
+/// pacer. It owns everything that simulates or edits. `orr_remote_host` runs
+/// one on its main thread; [`LocalHost`](crate::LocalHost) runs one on a
+/// thread of a program that has a view (the editor), which then talks to it
+/// through an in-process connection.
 pub struct Host<G: Game> {
     /// The scene document (shared undo stack of every client).
     pub doc: EditorDoc,
@@ -75,6 +77,7 @@ impl<G: Game> Host<G> {
         let elapsed = now.duration_since(self.last);
         self.last = now;
         let report = self.server.poll(&mut ErpTarget { doc: &mut self.doc, play: &mut self.play });
+        assert!(!report.crash, "debug.panic: a client asked the host to panic");
         if let Some(pc) = self.play.as_mut() {
             let events = self.pacer.advance(pc.session_mut(), elapsed);
             if !events.is_empty() {
@@ -84,13 +87,18 @@ impl<G: Game> Host<G> {
         report
     }
 
-    /// Runs frames until `stop` is set, sleeping `idle` between frames that had no request
-    /// (a frame with requests runs the next one at once).
+    /// Runs frames until `stop` is set. A frame that had no request waits for
+    /// the next one (at most `idle` while a play session runs by the clock,
+    /// at most ten times that otherwise), so a request is served at once and
+    /// an idle host sleeps. A frame with requests runs the next one at once.
     pub fn run(&mut self, stop: &AtomicBool, idle: Duration) {
         while !stop.load(Ordering::Relaxed) {
             let report = self.frame();
             if report.requests == 0 && !report.more {
-                std::thread::sleep(idle);
+                let ticking = self.play.as_ref().is_some_and(|pc| pc.session().wants_tick());
+                // A frame held back by a rate cap goes out a moment later: do not sleep through it.
+                let wait = if ticking || report.frame_pending { idle } else { idle * 10 };
+                self.server.wait_for_request(wait);
             }
         }
     }

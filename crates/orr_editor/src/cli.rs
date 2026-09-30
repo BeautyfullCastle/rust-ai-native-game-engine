@@ -7,8 +7,19 @@ pub const USAGE: &str = "\
 orr_editor [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
            [--screenshot <out.png> [--frames <n>]] [--size <WxH>]
            [--erp <addr>] [--erp-token <name:token:caps>]... [--erp-dev]
+orr_editor --connect <ws://host:port> [--token <t>] [same flags, but --scene/--erp]
+
+The editor is a view. The simulation and the scene document live in a
+host: by default a thread of this process, started on the scene and
+connected in-process; with --connect, an `orr_remote_host` (or another
+editor's ERP) that is already running.
 
   --scene <file>        scene to open (default scenes/physics_demo.scene.yaml)
+  --connect <url>       attach to a running host instead of starting one: the
+                        editor then shows and edits THAT host's scene and play
+                        session (with --token when it needs one; a dev-mode
+                        host needs none)
+  --token <t>           the token for --connect
   --select <name>       select the entity with this name (or GUID) at start
   --play-ticks <n>      start play and run n ticks (paused) at start
   --script <file>       run editor commands (one per line) at start
@@ -48,11 +59,15 @@ pub struct Args {
     pub erp_tokens: Vec<String>,
     /// `--erp-dev`.
     pub erp_dev: bool,
+    /// `--connect`.
+    pub connect: Option<String>,
+    /// `--token`.
+    pub token: Option<String>,
 }
 
 impl Default for Args {
     fn default() -> Self {
-        Self { scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false }
+        Self { scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -79,9 +94,17 @@ impl Args {
                 "--erp" => out.erp = Some(value("--erp")?.parse().map_err(|e| format!("--erp: {e}"))?),
                 "--erp-token" => out.erp_tokens.push(value("--erp-token")?),
                 "--erp-dev" => out.erp_dev = true,
+                "--connect" => out.connect = Some(value("--connect")?),
+                "--token" => out.token = Some(value("--token")?),
                 "-h" | "--help" => return Err(USAGE.to_string()),
                 other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
             }
+        }
+        if out.connect.is_some() && (out.scene.is_some() || out.erp.is_some()) {
+            return Err("--connect attaches to a host that has its own scene: it cannot be combined with --scene or --erp".to_string());
+        }
+        if out.token.is_some() && out.connect.is_none() {
+            return Err("--token is for --connect (use --erp-token to set tokens for --erp)".to_string());
         }
         Ok(out)
     }
@@ -110,5 +133,13 @@ mod tests {
         assert!(parse("--scene").is_err());
         assert!(parse("--nope").is_err());
         assert!(parse("--size 10").is_err());
+        assert!(parse("--connect ws://h:1 --scene a.yaml").is_err());
+        assert!(parse("--token x").is_err());
+    }
+
+    #[test]
+    fn parses_connect() {
+        let a = parse("--connect ws://127.0.0.1:7790 --token s3 --screenshot /tmp/a.png").unwrap();
+        assert_eq!((a.connect.as_deref(), a.token.as_deref()), (Some("ws://127.0.0.1:7790"), Some("s3")));
     }
 }

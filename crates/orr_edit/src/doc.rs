@@ -60,6 +60,8 @@ pub struct EditorDoc {
     pub(crate) next_guid: u32,
     tx: Option<Tx>,
     pub(crate) proposals: crate::proposal::Proposals,
+    /// Counts every change of the preview frame (see [`EditorDoc::revision`]).
+    revision: u64,
 }
 
 impl EditorDoc {
@@ -111,6 +113,7 @@ impl EditorDoc {
             next_guid,
             tx: None,
             proposals: Default::default(),
+            revision: 0,
         })
     }
 
@@ -132,6 +135,7 @@ impl EditorDoc {
         self.redo.clear();
         self.clean_id = 0;
         self.proposals.clear();
+        self.revision += 1;
         Ok(())
     }
 
@@ -155,6 +159,7 @@ impl EditorDoc {
             next_guid: self.next_guid,
             tx: None,
             proposals: Default::default(),
+            revision: 0,
         })
     }
 
@@ -213,6 +218,13 @@ impl EditorDoc {
     /// GUID to preview-frame entity map.
     pub fn index(&self) -> &SceneIndex {
         &self.index
+    }
+    /// Counts the changes of the preview frame (and its GUID map): it grows
+    /// with every edit, undo, redo, rollback and load that touched the scene.
+    /// A host compares it to know whether the frame it published is stale
+    /// without hashing the frame.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
     /// Checksum of the preview frame.
     pub fn checksum(&self) -> u64 {
@@ -435,6 +447,7 @@ impl EditorDoc {
     /// Brings the preview frame in line with the scene after ops with these
     /// effects: patches single fields and names in place, rebakes otherwise.
     fn sync(&mut self, effects: &[Effect]) -> Result<(), EditError> {
+        self.revision += 1;
         if effects.iter().any(|e| matches!(e, Effect::Structural)) {
             return self.rebake();
         }
@@ -482,6 +495,7 @@ impl EditorDoc {
         let (frame, index) = bake(&self.scene, &self.types, &self.frame_registry, self.seed)?;
         self.frame = frame;
         self.index = index;
+        self.revision += 1;
         Ok(())
     }
 }

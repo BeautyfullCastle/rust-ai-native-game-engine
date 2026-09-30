@@ -45,6 +45,19 @@ pub enum ActivityKind {
 }
 
 impl ActivityKind {
+    /// The kind of a JSON name (see [`name`](Self::name)).
+    pub fn from_name(name: &str) -> Option<ActivityKind> {
+        Some(match name {
+            "edit" => ActivityKind::Edit,
+            "proposal" => ActivityKind::Proposal,
+            "verify" => ActivityKind::Verify,
+            "sim" => ActivityKind::Sim,
+            "read" => ActivityKind::Read,
+            "session" => ActivityKind::Session,
+            _ => return None,
+        })
+    }
+
     /// The name used in JSON.
     pub fn name(self) -> &'static str {
         match self {
@@ -162,7 +175,7 @@ impl ActivityEntry {
             );
         }
         if let Some(d) = &self.diff {
-            o.insert("diff".into(), json!({"text": d.text, "lines": d.summary.lines()}));
+            o.insert("diff".into(), json!({"text": d.text, "lines": d.summary.lines(), "summary": crate::proposals::summary_json(&d.summary)}));
         }
         if let Some(v) = &self.verify {
             let mut r = report_json(&v.report, v.outcome.as_ref(), false);

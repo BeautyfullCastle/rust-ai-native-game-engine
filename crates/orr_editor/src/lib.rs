@@ -5,26 +5,40 @@
 //! inspector or by dragging them in the viewport, press Play, scrub the
 //! timeline back, and play forward again to the same checksums.
 //!
+//! # The editor is a view of a simulation host
+//!
+//! The editor owns no document, no play session and no ERP server. The
+//! simulation and the scene document live in a **host** (`orr_remote::Host`):
+//! a thread of this process (the default) or another process
+//! (`orr_remote_host`, `--connect`). The editor is a client: it speaks ERP
+//! for everything a person does and reads the frames it draws through the
+//! bridge (`orr_bridge`: `Bridge`, `SimControl`, `Snapshot`, here
+//! `orr_remote::RemoteBridge`). A host thread that panics, or a remote host
+//! that goes away, does not take the editor down: it says so and offers
+//! Restart / Reconnect. See [`backend`] and [`editor`].
+//!
 //! # Pieces
 //!
-//! - [`editor`]: [`Editor`], the state machine (no egui). Wraps
-//!   `orr_edit::EditorDoc` (edit mode: undoable scene edits, `Origin::User`)
-//!   and `orr_edit::PlayController` (play mode: recorded debug commands).
+//! - [`editor`]: [`Editor`], the state machine (no egui): caches of host
+//!   answers, actions as ERP calls, and the per-frame [`Editor::pump`].
+//! - [`backend`]: [`HostSpec`], the two channels to the host.
+//! - [`model`]: plain data parsed from ERP answers.
 //! - [`inspector`]: widgets generated from `orr_reflect` descriptors.
 //! - [`viewport`]: the render list of the frame on screen (`orr_render`),
 //!   picking, and the offscreen texture shared with egui on eframe's own
 //!   wgpu device.
 //! - [`agent`] and [`agent_ui`]: the Agent tab, a read-only activity feed of
 //!   what AI agents do through ERP (no approval step; Undo takes a change
-//!   back), plus a view-only preview of the proposals an agent has open.
+//!   back), plus a view-only preview of the proposals an agent has open (the
+//!   staged frame comes from the host as a second frame stream).
 //! - [`app`]: [`EditorApp`], the `eframe::App` with all panels.
 //! - [`cli`] and [`script`]: command line flags (`--scene`, `--screenshot`,
 //!   `--frames`, `--play-ticks`, `--select`, `--script`) for headless checks.
 //!
-//! The editor is `PhysGame` specific (the sample physics game): the play
-//! session type and the viewport shapes come from `orr_sample`. Making it
-//! generic over `Game` is future work. The play session runs on the UI thread
-//! (see [`Editor`]).
+//! The editor is `PhysGame` specific (the sample physics game): the frame
+//! type of the bridge, the reflect descriptors the inspector draws from and
+//! the viewport shapes (the game's view mapping) come from `orr_sample`.
+//! Making it generic over the game is future work.
 //!
 //! This is view layer code: floats and the wall clock are fine here, but every
 //! value that reaches the document goes through exact decimal parsing.
@@ -34,11 +48,15 @@
 pub mod agent;
 pub mod agent_ui;
 pub mod app;
+pub mod backend;
 pub mod cli;
 pub mod editor;
 pub mod inspector;
+pub mod model;
 pub mod script;
 pub mod viewport;
 
 pub use app::{EditorApp, ScreenshotJob};
+pub use backend::HostSpec;
 pub use editor::{Editor, Mode, Owner};
+pub use model::Target;

@@ -1,7 +1,7 @@
 //! Executes ERP methods against the host's model.
 //!
-//! Everything here is synchronous and runs on the host thread (the editor's
-//! UI thread or the headless loop), inside [`crate::ErpServer::poll`].
+//! Everything here is synchronous and runs on the host thread (a
+//! [`crate::LocalHost`] thread or the headless loop), inside [`crate::ErpServer::poll`].
 
 use std::path::PathBuf;
 
@@ -21,8 +21,8 @@ use crate::proposals::{self, GameHooks};
 use crate::wire::{checksum_text, debug_error_name, debug_from_json};
 
 /// The host's model an ERP request runs against. It borrows the host's
-/// state, so the egui editor (which owns them) and the headless binary can
-/// both embed the server. Human edits made on the same `doc` share its undo
+/// state, so any host loop (`Host`, or a test) can embed the server. A
+/// person's edits (client `user`) made on the same `doc` share its undo
 /// stack with agent edits.
 pub struct ErpTarget<'a, G: Game> {
     /// The scene document (edit mode, undo history).
@@ -50,6 +50,12 @@ pub struct HostLimits {
     pub build_id: u64,
     /// The game-specific parts of verification (metrics, scripted players).
     pub game: GameHooks,
+    /// `scene.save` / `scene.load` may name a file (`path`): true for an
+    /// embedding editor, whose person owns the machine; false (default) for
+    /// a headless host, where only the configured scene file is written.
+    pub allow_scene_paths: bool,
+    /// Enables the `debug.panic` test hook (default false).
+    pub debug_hooks: bool,
 }
 
 impl Default for HostLimits {
@@ -62,6 +68,8 @@ impl Default for HostLimits {
             max_verify_ticks: 6000,
             build_id: 0,
             game: GameHooks::default(),
+            allow_scene_paths: false,
+            debug_hooks: false,
         }
     }
 }
@@ -87,6 +95,10 @@ pub(crate) struct Effects {
     pub stopped: Option<StoppedPlay>,
     /// The typed report of a verification this call ran.
     pub verify: Option<std::sync::Arc<crate::activity::VerifyDetail>>,
+    /// The scene file the call set (`scene.save` / `scene.load` with `path`).
+    pub scene_path: Option<PathBuf>,
+    /// The call asked the host thread to panic (`debug.panic`).
+    pub crash: bool,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -172,7 +184,7 @@ pub(crate) fn call<G: Game>(
         _ => return Err(RpcError::params("params must be an object")),
     };
     let p = P(obj);
-    let origin = Origin::Agent(ctx.client.to_string());
+    let origin = crate::caps::origin_of_client(ctx.client);
     match method {
         "rpc.discover" => Ok(proposals::discover_with_engine(t, lim, ctx)),
         "proposal.begin" => proposals::begin(t, &p, origin),
@@ -230,11 +242,22 @@ pub(crate) fn call<G: Game>(
             t.doc.redo()?;
             Ok(json!({"history": history_json(t.doc), "checksum": checksum_text(t.doc.checksum())}))
         }
-        "scene.save" => scene_save(t, lim, &p),
+        "scene.save" => scene_save(t, lim, &p, fx),
+        "debug.panic" => {
+            if !lim.debug_hooks {
+                return Err(RpcError::state("disabled", "debug hooks are off on this host"));
+            }
+            fx.crash = true;
+            Ok(json!({"ok": true}))
+        }
         "scene.load" => {
             require_edit_mode(t, "scene.load")?;
             let text = p.str("text")?;
+            let path = scene_path_param(lim, &p)?;
             t.doc.load_yaml(text)?;
+            if path.is_some() {
+                fx.scene_path = path;
+            }
             Ok(json!({"entities": t.doc.scene().entities.len(), "checksum": checksum_text(t.doc.checksum())}))
         }
         "sim.state" => Ok(state_json(t, lim)),
@@ -701,7 +724,16 @@ fn singleton_patch<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin)
 
 // ---- scene ----
 
-fn scene_save<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) -> Result<J, RpcError> {
+/// The `path` parameter of `scene.save` / `scene.load`, if the host allows one.
+fn scene_path_param(lim: &HostLimits, p: &P<'_>) -> Result<Option<PathBuf>, RpcError> {
+    match p.opt_str("path")? {
+        Some(path) if lim.allow_scene_paths => Ok(Some(PathBuf::from(path))),
+        // A host that does not let clients pick files ignores the parameter (the configured file is used).
+        _ => Ok(None),
+    }
+}
+
+fn scene_save<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>, fx: &mut Effects) -> Result<J, RpcError> {
     let write = p.opt_bool("write")?.unwrap_or(false);
     match p.opt_str("source")?.unwrap_or("doc") {
         "doc" => {}
@@ -718,9 +750,10 @@ fn scene_save<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) ->
     if !write {
         return Ok(json!({"text": t.doc.to_yaml(), "checksum": checksum_text(t.doc.checksum()), "dirty": t.doc.is_dirty()}));
     }
-    let path = lim
-        .scene_path
+    let named = scene_path_param(lim, p)?;
+    let path = named
         .as_ref()
+        .or(lim.scene_path.as_ref())
         .ok_or_else(|| RpcError::state("no_scene_path", "the server was started without a scene file, so it cannot write one"))?;
     if t.doc.in_tx() {
         return Err(RpcError::state("tx_open", "a transaction is open; commit or roll it back before saving"));
@@ -730,6 +763,9 @@ fn scene_save<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) ->
     std::fs::write(&tmp, &text)
         .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| RpcError::new(INTERNAL_ERROR, "io", format!("cannot write {}: {e}", path.display())))?;
+    if named.is_some() {
+        fx.scene_path.clone_from(&named);
+    }
     Ok(json!({
         "text": text,
         "checksum": checksum_text(t.doc.checksum()),
@@ -792,6 +828,7 @@ pub(crate) fn state_json<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits) -> J {
     };
     if let J::Object(m) = &mut o {
         m.insert("entities".into(), json!(view(t).frame().alive_count()));
+        m.insert("scene_path".into(), lim.scene_path.as_ref().map_or(J::Null, |p| json!(p.display().to_string())));
     }
     o
 }

@@ -31,14 +31,13 @@
 //! socket is behind. See `tests/measure.rs` for numbers.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
-use futures_util::{SinkExt, StreamExt};
 use orr_bridge::{
     Bridge, BridgeError, BridgeEvent, BridgeStats, ControlOp, DebugCommand, EventKey, EventStatus, Lifecycle, SimControl, Snapshot,
     SnapshotParts,
@@ -46,12 +45,10 @@ use orr_bridge::{
 use orr_ecs::Frame;
 use orr_sim::{Game, PlayerSlot, SimCommand, Simulation};
 use serde_json::{json, Value as J};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::codec::{hex_decode, hex_encode};
 use crate::error::RpcError;
+use crate::link::{Incoming, PumpedWs, Request, Transport, TxHandle};
 use crate::wire::{debug_error_from_name, debug_to_json, decode_frame_message, timeline_from_json};
 
 /// Settings of a [`RemoteBridge`].
@@ -67,12 +64,16 @@ pub struct RemoteConfig {
     pub max_fps: u32,
     /// How long `connect` waits for the handshake, auth and first state (default 10 s).
     pub connect_timeout: Duration,
+    /// What the frame stream carries: `sim` (default: the play session's frames),
+    /// `view` (the play frame, else the scene's preview frame) or `proposal:p3`
+    /// (see `watch.subscribe`).
+    pub source: String,
 }
 
 impl RemoteConfig {
     /// Defaults for `url`.
     pub fn new(url: &str) -> Self {
-        Self { url: url.to_string(), token: None, local_slot: PlayerSlot(0), max_fps: 60, connect_timeout: Duration::from_secs(10) }
+        Self { url: url.to_string(), token: None, local_slot: PlayerSlot(0), max_fps: 60, connect_timeout: Duration::from_secs(10), source: "sim".to_string() }
     }
 }
 
@@ -101,18 +102,19 @@ pub struct RemoteMetrics {
 struct Shared {
     snapshot: ArcSwapOption<Snapshot>,
     alive: AtomicBool,
+    stop: AtomicBool,
     metrics: Mutex<RemoteMetrics>,
     errors: Mutex<Vec<RpcError>>,
 }
 
-struct Req {
-    method: String,
-    params: J,
-}
+/// Ids of the requests the bridge itself sends (the handshake) are small; the
+/// ones of [`RemoteBridge::request`] start here, so a response can be told apart.
+const FIRE_ID_BASE: u64 = 1 << 32;
 
 /// See the module docs.
 pub struct RemoteBridge<G: Game> {
-    to_net: Option<UnboundedSender<Req>>,
+    tx: Arc<dyn TxHandle>,
+    next_id: AtomicU64,
     events: Receiver<BridgeEvent<G::Event>>,
     shared: Arc<Shared>,
     tick_rate: u32,
@@ -127,7 +129,6 @@ enum Pending {
     Auth,
     Subscribe,
     State,
-    Fire,
 }
 
 struct Info {
@@ -136,15 +137,26 @@ struct Info {
 }
 
 impl<G: Game> RemoteBridge<G> {
-    /// Connects, authenticates, subscribes and waits for the first `sim.state`.
+    /// Connects over WebSocket, authenticates, subscribes and waits for the first `sim.state`.
     pub fn connect(cfg: RemoteConfig) -> Result<Self, String> {
+        let t = PumpedWs::connect(&cfg.url, cfg.connect_timeout).map_err(|e| format!("cannot connect to {}: {e}", cfg.url))?;
+        Self::connect_transport(Box::new(t), cfg)
+    }
+
+    /// Like [`connect`](Self::connect) on a connection that is already
+    /// open, for example an in-process [`LocalTransport`](crate::LocalTransport)
+    /// to a host thread of this process: frames then arrive as shared
+    /// copies, never serialized. `cfg.url` is ignored. The transport must
+    /// offer a [`TxHandle`].
+    pub fn connect_transport(t: Box<dyn Transport>, cfg: RemoteConfig) -> Result<Self, String> {
+        let tx = t.sender().ok_or_else(|| "this transport cannot send from several threads".to_string())?;
         let shared = Arc::new(Shared {
             snapshot: ArcSwapOption::empty(),
             alive: AtomicBool::new(true),
+            stop: AtomicBool::new(false),
             metrics: Mutex::new(RemoteMetrics::default()),
             errors: Mutex::new(Vec::new()),
         });
-        let (to_net, from_bridge) = unbounded_channel::<Req>();
         let (event_tx, events) = channel::<BridgeEvent<G::Event>>();
         let (ready_tx, ready_rx) = channel::<Result<Info, String>>();
         let thread_shared = shared.clone();
@@ -152,25 +164,25 @@ impl<G: Game> RemoteBridge<G> {
         let thread = std::thread::Builder::new()
             .name("orr-remote".to_string())
             .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(format!("runtime: {e}")));
-                        return;
-                    }
-                };
-                rt.block_on(run::<G>(thread_cfg, thread_shared.clone(), from_bridge, event_tx.clone(), ready_tx));
+                run::<G>(t, thread_cfg, &thread_shared, &event_tx, ready_tx);
                 thread_shared.alive.store(false, Ordering::Release);
                 let _ = event_tx.send(BridgeEvent::Lifecycle(Lifecycle::Disconnected));
             })
             .map_err(|e| format!("start thread: {e}"))?;
         let info = match ready_rx.recv_timeout(cfg.connect_timeout) {
             Ok(Ok(info)) => info,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err("timed out connecting to the ERP server".to_string()),
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                return Err(e);
+            }
+            Err(_) => {
+                shared.stop.store(true, Ordering::Release);
+                return Err("timed out connecting to the ERP server".to_string());
+            }
         };
-        let bridge = Self {
-            to_net: Some(to_net),
+        Ok(Self {
+            tx,
+            next_id: AtomicU64::new(FIRE_ID_BASE),
             events,
             shared,
             tick_rate: info.tick_rate,
@@ -178,8 +190,7 @@ impl<G: Game> RemoteBridge<G> {
             local: cfg.local_slot,
             last_input: None,
             thread: Some(thread),
-        };
-        Ok(bridge)
+        })
     }
 
     /// Sends any ERP request without waiting for the answer (for example
@@ -188,11 +199,8 @@ impl<G: Game> RemoteBridge<G> {
         if !self.shared.alive.load(Ordering::Acquire) {
             return Err(BridgeError::Disconnected);
         }
-        self.to_net
-            .as_ref()
-            .ok_or(BridgeError::Disconnected)?
-            .send(Req { method: method.to_string(), params })
-            .map_err(|_| BridgeError::Disconnected)
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.tx.send(Request { id: Some(id), method: method.to_string(), params }).map_err(|_| BridgeError::Disconnected)
     }
 
     /// Errors the server answered to controls, commands and requests since the last call.
@@ -208,7 +216,7 @@ impl<G: Game> RemoteBridge<G> {
 
 impl<G: Game> Drop for RemoteBridge<G> {
     fn drop(&mut self) {
-        self.to_net = None; // ends the thread's request stream, which closes the socket
+        self.shared.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -289,24 +297,17 @@ struct StreamState {
     frames: u64,
 }
 
-async fn run<G: Game>(
+/// How often the connection thread looks at `stop` while nothing arrives.
+const POLL: Duration = Duration::from_millis(50);
+
+fn run<G: Game>(
+    mut t: Box<dyn Transport>,
     cfg: RemoteConfig,
-    shared: Arc<Shared>,
-    mut from_bridge: UnboundedReceiver<Req>,
-    events: Sender<BridgeEvent<G::Event>>,
+    shared: &Shared,
+    events: &Sender<BridgeEvent<G::Event>>,
     ready: Sender<Result<Info, String>>,
 ) {
-    let ws_cfg = WebSocketConfig::default().max_message_size(Some(1 << 30)).max_frame_size(Some(1 << 30));
-    let ws = match tokio_tungstenite::connect_async_with_config(cfg.url.as_str(), Some(ws_cfg), true).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
-            let _ = ready.send(Err(format!("cannot connect to {}: {e}", cfg.url)));
-            return;
-        }
-    };
-    let (mut sink, mut source) = ws.split();
     let registry = Simulation::<G>::build_registry();
-    let mut next_id: u64 = 1;
     let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
     let mut ready = Some(ready);
     let mut state = StreamState { last: None, seq: 0, frames: 0 };
@@ -314,21 +315,19 @@ async fn run<G: Game>(
 
     // Handshake requests, in order (the server answers in order).
     let mut first: Vec<(Pending, &str, J)> = Vec::new();
-    if let Some(t) = &cfg.token {
-        first.push((Pending::Auth, "auth", json!({"token": t})));
+    if let Some(tok) = &cfg.token {
+        first.push((Pending::Auth, "auth", json!({"token": tok})));
     }
     first.push((
         Pending::Subscribe,
         "watch.subscribe",
-        json!({"topics": ["frames", "events", "notes"], "max_fps": cfg.max_fps.max(1)}),
+        json!({"topics": ["frames", "events", "notes"], "max_fps": cfg.max_fps.max(1), "source": cfg.source}),
     ));
     first.push((Pending::State, "sim.state", J::Null));
-    for (kind, method, params) in first {
-        let id = next_id;
-        next_id += 1;
+    for (i, (kind, method, params)) in first.into_iter().enumerate() {
+        let id = i as u64 + 1;
         pending.insert(id, kind);
-        let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        if sink.send(Message::Text(req.to_string().into())).await.is_err() {
+        if t.send(Request { id: Some(id), method: method.to_string(), params }).is_err() {
             if let Some(r) = ready.take() {
                 let _ = r.send(Err("connection closed during the handshake".into()));
             }
@@ -336,65 +335,62 @@ async fn run<G: Game>(
         }
     }
 
-    loop {
-        tokio::select! {
-            req = from_bridge.recv() => {
-                let Some(req) = req else {
-                    let _ = sink.close().await;
-                    return;
-                };
-                let id = next_id;
-                next_id += 1;
-                pending.insert(id, Pending::Fire);
-                let msg = json!({"jsonrpc": "2.0", "id": id, "method": req.method, "params": req.params});
-                if sink.send(Message::Text(msg.to_string().into())).await.is_err() {
-                    return;
+    while !shared.stop.load(Ordering::Acquire) {
+        let msg = match t.recv(POLL) {
+            Ok(Some(m)) => m,
+            Ok(None) => continue,
+            Err(e) => {
+                if let Some(r) = ready.take() {
+                    let _ = r.send(Err(format!("{e}")));
+                }
+                return;
+            }
+        };
+        match msg {
+            Incoming::Text(text) => {
+                let Ok(j) = serde_json::from_str::<J>(&text) else { continue };
+                if let Some(id) = j.get("id").and_then(J::as_u64) {
+                    let error = j.get("error").map(RpcError::from_json);
+                    match (pending.remove(&id), error) {
+                        (Some(Pending::Auth | Pending::Subscribe | Pending::State), Some(e)) => {
+                            if let Some(r) = ready.take() {
+                                let _ = r.send(Err(format!("{e}")));
+                            }
+                            return;
+                        }
+                        (Some(Pending::State), None) => {
+                            let res = j.get("result").cloned().unwrap_or(J::Null);
+                            let tick_rate = res.get("tick_rate").and_then(J::as_u64).unwrap_or(60) as u32;
+                            let players = res.get("player_count").and_then(J::as_u64).unwrap_or(1) as u8;
+                            info = Some(Info { tick_rate, player_count: players });
+                            if let Some(r) = ready.take() {
+                                let _ = events.send(BridgeEvent::Lifecycle(Lifecycle::SessionStarted {
+                                    tick_rate,
+                                    local_slot: cfg.local_slot,
+                                    player_count: players,
+                                }));
+                                let _ = r.send(Ok(Info { tick_rate, player_count: players }));
+                            }
+                        }
+                        (None, Some(e)) => shared.errors.lock().unwrap_or_else(|p| p.into_inner()).push(e),
+                        _ => {}
+                    }
+                } else if let Some(method) = j.get("method").and_then(J::as_str) {
+                    let params = j.get("params").cloned().unwrap_or(J::Null);
+                    on_notification::<G>(method, &params, events);
                 }
             }
-            msg = source.next() => {
-                let Some(Ok(msg)) = msg else { return };
-                match msg {
-                    Message::Text(t) => {
-                        let Ok(j) = serde_json::from_str::<J>(t.as_str()) else { continue };
-                        if let Some(id) = j.get("id").and_then(J::as_u64) {
-                            let kind = pending.remove(&id).unwrap_or(Pending::Fire);
-                            let error = j.get("error").map(RpcError::from_json);
-                            match (kind, error) {
-                                (Pending::Auth | Pending::Subscribe | Pending::State, Some(e)) => {
-                                    if let Some(r) = ready.take() {
-                                        let _ = r.send(Err(format!("{e}")));
-                                    }
-                                    return;
-                                }
-                                (Pending::State, None) => {
-                                    let res = j.get("result").cloned().unwrap_or(J::Null);
-                                    let tick_rate = res.get("tick_rate").and_then(J::as_u64).unwrap_or(60) as u32;
-                                    let players = res.get("player_count").and_then(J::as_u64).unwrap_or(1) as u8;
-                                    info = Some(Info { tick_rate, player_count: players });
-                                    if let Some(r) = ready.take() {
-                                        let _ = events.send(BridgeEvent::Lifecycle(Lifecycle::SessionStarted {
-                                            tick_rate,
-                                            local_slot: cfg.local_slot,
-                                            player_count: players,
-                                        }));
-                                        let _ = r.send(Ok(Info { tick_rate, player_count: players }));
-                                    }
-                                }
-                                (Pending::Fire, Some(e)) => shared.errors.lock().unwrap_or_else(|p| p.into_inner()).push(e),
-                                _ => {}
-                            }
-                        } else if let Some(method) = j.get("method").and_then(J::as_str) {
-                            let params = j.get("params").cloned().unwrap_or(J::Null);
-                            on_notification::<G>(method, &params, &events);
-                        }
-                    }
-                    Message::Binary(b) => {
-                        let tick_rate = info.as_ref().map_or(60, |i| i.tick_rate);
-                        on_frame_message(&b, tick_rate, &registry, &shared, &mut state);
-                    }
-                    Message::Close(_) => return,
-                    _ => {}
-                }
+            Incoming::Wire(b) => {
+                let tick_rate = info.as_ref().map_or(60, |i| i.tick_rate);
+                let started = std::time::Instant::now();
+                let Ok((meta, bytes)) = decode_frame_message(&b) else { continue };
+                let Ok(frame) = Frame::from_bytes(registry.clone(), &bytes) else { continue };
+                let sizes = FrameSizes { message: b.len() as u64, raw: bytes.len() as u64, decode_us: started.elapsed().as_micros() as u64 };
+                on_frame(&meta, Arc::new(frame), tick_rate, shared, &mut state, sizes);
+            }
+            Incoming::Local(lf) => {
+                let tick_rate = info.as_ref().map_or(60, |i| i.tick_rate);
+                on_frame(&lf.meta, lf.frame.clone(), tick_rate, shared, &mut state, FrameSizes::default());
             }
         }
     }
@@ -440,21 +436,18 @@ fn on_notification<G: Game>(method: &str, params: &J, events: &Sender<BridgeEven
     }
 }
 
-fn on_frame_message(
-    msg: &[u8],
-    tick_rate: u32,
-    registry: &Arc<orr_ecs::ComponentRegistry>,
-    shared: &Shared,
-    st: &mut StreamState,
-) {
-    let started = std::time::Instant::now();
-    let Ok((meta, bytes)) = decode_frame_message(msg) else { return };
-    let Ok(frame) = Frame::from_bytes(registry.clone(), &bytes) else { return };
-    let decode_us = started.elapsed().as_micros() as u64;
+/// Sizes and time of one received frame, for [`RemoteMetrics`] (zero for an in-process frame).
+#[derive(Default)]
+struct FrameSizes {
+    message: u64,
+    raw: u64,
+    decode_us: u64,
+}
+
+fn on_frame(meta: &J, frame: Arc<Frame>, tick_rate: u32, shared: &Shared, st: &mut StreamState, sizes: FrameSizes) {
     let tick = meta.get("tick").and_then(J::as_u64).unwrap_or_else(|| frame.tick());
     let epoch = meta.get("epoch").and_then(J::as_u64).unwrap_or(0);
     let timeline = meta.get("timeline").and_then(timeline_from_json);
-    let frame = Arc::new(frame);
     let prev = match &st.last {
         Some((t, e, f)) if *e == epoch && t + 1 == tick => Some(f.clone()),
         _ => None,
@@ -465,7 +458,7 @@ fn on_frame_message(
         seq: st.seq,
         tick,
         verified_tick: timeline.as_ref().map_or(tick, |t| t.verified_tick),
-        tick_rate: meta.get("tick_rate").and_then(J::as_u64).map_or(tick_rate, |r| r as u32),
+        tick_rate: meta.get("tick_rate").and_then(J::as_u64).filter(|r| *r > 0).map_or(tick_rate, |r| r as u32),
         predicted: frame.clone(),
         predicted_prev: prev,
         verified: Some(frame.clone()),
@@ -479,11 +472,11 @@ fn on_frame_message(
     let latency = now_us().saturating_sub(sent);
     let mut m = shared.metrics.lock().unwrap_or_else(|p| p.into_inner());
     m.frames += 1;
-    m.frame_bytes += msg.len() as u64;
-    m.last_frame_bytes = msg.len() as u64;
-    m.last_frame_raw_bytes = bytes.len() as u64;
+    m.frame_bytes += sizes.message;
+    m.last_frame_bytes = sizes.message;
+    m.last_frame_raw_bytes = sizes.raw;
     m.last_latency_us = latency;
     m.max_latency_us = m.max_latency_us.max(latency);
     m.latency_sum_us += latency;
-    m.last_decode_us = decode_us;
+    m.last_decode_us = sizes.decode_us;
 }

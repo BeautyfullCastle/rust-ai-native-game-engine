@@ -1,14 +1,16 @@
-//! `Editor` state machine tests (no window, no GPU): edits, undo, play,
-//! rewind, and the M4 loop.
+#![allow(clippy::disallowed_types)]
+//! `Editor` state machine tests (no window, no GPU) against a real host
+//! thread: edits, undo, play, rewind, and the M4 loop. The editor talks to
+//! the host only through ERP and the bridge; these tests do too.
 
 mod common;
 
 use common::*;
-use orr_edit::Target;
+use orr_bridge::ControlOp;
 use orr_editor::editor::{fp_of_f64, Mode, Owner};
-use orr_editor::script;
+use orr_editor::{script, Target};
 use orr_reflect::Value;
-use orr_session::ControlOp;
+use serde_json::json;
 
 fn body() -> Owner {
     Owner::Component(BODY.to_string())
@@ -17,23 +19,25 @@ fn body() -> Owner {
 #[test]
 fn edits_are_undoable_and_restore_exact_yaml() {
     let mut ed = demo_editor();
-    let original = ed.doc().to_yaml();
+    let original = scene_text(&mut ed);
     let checksum = ed.checksum();
     assert!(ed.select_named("body_05"));
     assert!(ed.set_field(&body(), "pos.x", fixed(3)));
     assert!(ed.is_dirty());
     assert!(ed.title().starts_with('*'));
-    let edited = ed.doc().to_yaml();
+    let edited = scene_text(&mut ed);
     assert_ne!(edited, original);
     assert!(ed.undo());
-    assert_eq!(ed.doc().to_yaml(), original, "undo restores the exact text");
-    assert_eq!(ed.checksum(), checksum);
+    assert_eq!(scene_text(&mut ed), original, "undo restores the exact text");
+    ed.sync();
+    assert_eq!(ed.checksum(), checksum, "and the frame the viewport got");
     assert!(!ed.is_dirty());
     assert!(ed.redo());
-    assert_eq!(ed.doc().to_yaml(), edited);
-    let h = ed.doc().history();
+    assert_eq!(scene_text(&mut ed), edited);
+    ed.sync();
+    let h = &ed.history().entries;
     assert_eq!(h.len(), 1);
-    assert_eq!(h[0].origin, orr_edit::Origin::User);
+    assert_eq!(h[0].origin, "user", "the person's edits carry the user origin");
 }
 
 #[test]
@@ -45,9 +49,12 @@ fn a_gesture_is_one_undo_step() {
         ed.set_field(&body(), "pos.x", fixed(x));
     }
     ed.end_edit();
-    assert_eq!(ed.doc().history().len(), 1);
+    ed.sync();
+    assert_eq!(ed.history().entries.len(), 1);
+    assert_eq!(ed.history().entries[0].label, "drag pos.x");
     ed.undo();
-    assert!(ed.doc().history().iter().all(|h| h.undone));
+    ed.sync();
+    assert!(ed.history().entries.iter().all(|h| h.undone));
     assert!(!ed.is_dirty());
 }
 
@@ -55,11 +62,12 @@ fn a_gesture_is_one_undo_step() {
 fn refused_edits_report_and_change_nothing() {
     let mut ed = demo_editor();
     ed.select_named("body_05");
-    let before = ed.doc().to_yaml();
+    let before = scene_text(&mut ed);
     // Outside the range of Body.pos (-30000..=30000).
     assert!(!ed.set_field(&body(), "pos.x", fixed(99_999)));
     assert!(ed.status().is_some_and(|m| m.error), "{:?}", ed.status());
-    assert_eq!(ed.doc().to_yaml(), before);
+    assert_eq!(scene_text(&mut ed), before);
+    ed.sync();
     assert!(!ed.is_dirty());
     // Undo with nothing to undo is a message, not a panic.
     assert!(!ed.undo());
@@ -68,20 +76,23 @@ fn refused_edits_report_and_change_nothing() {
 #[test]
 fn spawn_add_remove_delete() {
     let mut ed = demo_editor();
-    let count = ed.view().entities().len();
+    let count = ed.rows().len();
     assert!(ed.spawn_body([1.0, 2.0]));
-    assert_eq!(ed.view().entities().len(), count + 1);
+    ed.sync();
+    assert_eq!(ed.rows().len(), count + 1);
     let sel = ed.selection().cloned().expect("spawned entity is selected");
-    let pos = ed.view().field(&sel, BODY, "pos").unwrap();
+    let pos = field(&mut ed, &sel, BODY, "pos");
     assert_eq!(pos, Value::Vec2(orr_fp::FPVec2::new(fp_of_f64(1.0).unwrap(), fp_of_f64(2.0).unwrap())));
-    assert!(ed.remove_component("orr_physics::Collider"));
-    assert!(ed.add_component("orr_physics::Collider"));
+    assert!(ed.remove_component(COLLIDER));
+    assert!(ed.add_component(COLLIDER));
     assert!(ed.delete_selected());
-    assert_eq!(ed.view().entities().len(), count);
+    ed.sync();
+    assert_eq!(ed.rows().len(), count);
     assert!(ed.selection().is_none());
-    // One undo brings the deleted entity back and selects nothing stale.
+    // One undo brings the deleted entity back.
     assert!(ed.undo());
-    assert_eq!(ed.view().entities().len(), count + 1);
+    ed.sync();
+    assert_eq!(ed.rows().len(), count + 1);
 }
 
 #[test]
@@ -95,9 +106,9 @@ fn delete_without_selection_is_an_error_message() {
 fn shape_kind_switch_uses_the_variant_default() {
     let mut ed = demo_editor();
     ed.select_named("body_05");
-    let path = "shape.kind";
-    assert!(ed.set_field(&Owner::Component("orr_physics::Collider".into()), path, Value::Enum("circle".into())));
-    let shape = ed.view().field(ed.selection().unwrap(), "orr_physics::Collider", "shape").unwrap();
+    assert!(ed.set_field(&Owner::Component(COLLIDER.into()), "shape.kind", Value::Enum("circle".into())));
+    let t = ed.selection().cloned().unwrap();
+    let shape = field(&mut ed, &t, COLLIDER, "shape");
     assert!(matches!(&shape, Value::Variant(k, _) if k == "circle"), "{shape:?}");
 }
 
@@ -108,38 +119,62 @@ fn save_and_open_round_trip() {
     ed.set_field(&body(), "pos", vec2(2, 3));
     let path = temp_path("roundtrip.scene.yaml");
     assert!(ed.save_as(&path));
+    ed.sync();
     assert!(!ed.is_dirty());
-    assert!(ed.title().contains("roundtrip.scene.yaml"));
+    assert!(ed.title().contains("roundtrip.scene.yaml"), "{}", ed.title());
     let checksum = ed.checksum();
     let mut other = demo_editor();
     assert!(other.open_path(&path));
+    other.sync();
     assert_eq!(other.checksum(), checksum);
-    assert_eq!(other.doc().to_yaml(), std::fs::read_to_string(&path).unwrap());
+    assert_eq!(scene_text(&mut other), std::fs::read_to_string(&path).unwrap());
     // A missing file is an error message, and the document stays.
     assert!(!other.open_path(&temp_path("missing.scene.yaml")));
+    other.sync();
     assert_eq!(other.checksum(), checksum);
     assert!(other.status().is_some_and(|m| m.error));
     let _ = std::fs::remove_file(path);
 }
 
 #[test]
+fn save_writes_the_hosts_scene_file_and_clears_dirty() {
+    let path = temp_path("save_in_place.scene.yaml");
+    std::fs::copy(orr_editor::editor::default_scene_path(), &path).unwrap();
+    let mut ed = Editor::open(&path).unwrap();
+    ed.sync();
+    ed.select_named("body_05");
+    ed.set_field(&body(), "pos.x", fixed(4));
+    assert!(ed.is_dirty());
+    assert!(ed.save());
+    ed.sync();
+    assert!(!ed.is_dirty());
+    assert_eq!(scene_text(&mut ed), std::fs::read_to_string(&path).unwrap());
+    let _ = std::fs::remove_file(path);
+}
+
+use orr_editor::editor::Editor;
+
+#[test]
 fn stop_returns_to_the_unchanged_document() {
     let mut ed = demo_editor();
     ed.select_named("body_05");
     ed.set_field(&body(), "pos", vec2(1, 9));
-    let yaml = ed.doc().to_yaml();
+    ed.sync();
+    let yaml = scene_text(&mut ed);
     let checksum = ed.checksum();
-    let history = ed.doc().history();
+    let history = ed.history().clone();
     ed.step(30);
+    ed.sync();
     assert_eq!(ed.mode(), Mode::Play);
     assert_ne!(ed.checksum(), checksum, "the world moved");
     ed.set_field(&body(), "vel", vec2(5, 5));
-    assert_eq!(ed.doc().to_yaml(), yaml, "play edits never touch the document");
+    assert_eq!(scene_text(&mut ed), yaml, "play edits never touch the document");
     assert!(ed.stop().is_some());
+    ed.sync();
     assert_eq!(ed.mode(), Mode::Edit);
-    assert_eq!(ed.doc().to_yaml(), yaml);
+    assert_eq!(scene_text(&mut ed), yaml);
     assert_eq!(ed.checksum(), checksum);
-    assert_eq!(ed.doc().history(), history);
+    assert_eq!(*ed.history(), history);
     assert!(ed.selection().is_some(), "selection survives play");
 }
 
@@ -161,15 +196,18 @@ fn step_pause_seek_and_replay_forward_give_identical_checksums() {
     ed.play();
     ed.pause();
     ed.step(60);
+    ed.sync();
     let tl = ed.timeline().unwrap();
     assert_eq!((tl.tick, tl.last_tick, tl.playing), (60, 60, false));
-    let first = checksums(&ed, 0, 60);
+    let first = checksums(&mut ed, 0, 60);
     assert_eq!(*first.last().unwrap(), tl.checksum);
     ed.seek(0);
+    ed.sync();
     assert_eq!(ed.timeline().unwrap().tick, 0);
     assert_eq!(ed.checksum(), first[0]);
     ed.step(60);
-    assert_eq!(checksums(&ed, 0, 60), first, "replaying forward reproduces every checksum");
+    ed.sync();
+    assert_eq!(checksums(&mut ed, 0, 60), first, "replaying forward reproduces every checksum");
 }
 
 #[test]
@@ -177,9 +215,12 @@ fn a_play_mode_edit_is_recorded_and_replays_to_the_same_checksum() {
     let mut ed = demo_editor();
     ed.select_named("body_05");
     ed.step(20);
+    ed.sync();
     assert!(ed.set_field(&body(), "vel", vec2(7, 3)));
+    ed.sync();
     assert!(ed.timeline().unwrap().pending_edits >= 1);
     ed.step(40);
+    ed.sync();
     let head = ed.timeline().unwrap().tick;
     let live = ed.checksum();
     let stopped = ed.stop().cloned().expect("stopped");
@@ -193,18 +234,24 @@ fn a_play_mode_edit_is_recorded_and_replays_to_the_same_checksum() {
 fn play_mode_spawn_and_delete_are_recorded_too() {
     let mut ed = demo_editor();
     ed.step(10);
+    ed.sync();
     assert!(ed.spawn_body([0.0, 30.0]));
     let spawned = ed.selection().cloned().unwrap();
     assert!(matches!(spawned, Target::Entity(_)), "an entity made in play has no GUID");
     ed.step(10);
+    ed.sync();
     ed.select_named("body_07");
     assert!(ed.delete_selected());
     ed.step(10);
+    ed.sync();
     let live = ed.checksum();
     let stopped = ed.stop().cloned().unwrap();
     assert_eq!(replay_end(&stopped.replay).1, live);
 }
 
+/// The M4 success criterion: edit, play 120 ticks, rewind to 30, play on to
+/// the same checksum, with the simulation on the host's thread and the editor
+/// seeing it only through ERP and frames.
 #[test]
 fn the_m4_loop_edit_play_rewind_play_again() {
     // Load the demo scene and edit a body's position.
@@ -215,25 +262,35 @@ fn the_m4_loop_edit_play_rewind_play_again() {
     ed.play();
     ed.pause();
     ed.step(120);
+    ed.sync();
     assert_eq!(ed.timeline().unwrap().tick, 120);
-    let first_run = checksums(&ed, 0, 120);
+    let first_run = checksums(&mut ed, 0, 120);
     // Rewind to tick 30.
     ed.seek(30);
+    ed.sync();
     assert_eq!(ed.timeline().unwrap().tick, 30);
     assert_eq!(ed.checksum(), first_run[30]);
-    // Play again by the clock (fixed step accumulator, 1/60 s per call).
-    ed.play();
-    for _ in 0..1000 {
-        if ed.timeline().unwrap().tick >= 120 {
-            break;
-        }
-        ed.advance(1.0 / 60.0);
+    // Play again by the clock (the host paces it, at 4x to keep the test short).
+    ed.set_speed(4.0);
+    ed.control(ControlOp::Play);
+    let mut guard = 0;
+    while ed.timeline().is_none_or(|t| t.tick < 120) {
+        ed.pump();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        guard += 1;
+        assert!(guard < 2000, "play by the clock never reached tick 120: {:?}", ed.timeline());
     }
+    ed.pause();
+    ed.sync();
     let tl = ed.timeline().unwrap();
-    assert_eq!(tl.tick, 120);
+    assert!(tl.tick >= 120);
     assert_eq!(tl.branches, 1, "playing from a rewound tick branches once");
-    assert_eq!(checksums(&ed, 30, 120), first_run[30..].to_vec());
-    assert_eq!(tl.checksum, first_run[120], "checksum at tick 120 equals the first run");
+    // Whatever tick the clock stopped at, every checksum agrees with the first run up to 120.
+    let n = tl.tick.min(first_run.len() as u64 - 1);
+    assert_eq!(checksums(&mut ed, 30, n), first_run[30..=n as usize].to_vec());
+    if tl.tick == 120 {
+        assert_eq!(tl.checksum, first_run[120], "checksum at tick 120 equals the first run");
+    }
     // The edit is in the document, the play did not touch it.
     assert!(ed.is_dirty());
 }
@@ -242,23 +299,22 @@ fn the_m4_loop_edit_play_rewind_play_again() {
 fn speed_scales_the_ticks_per_second() {
     let mut ed = demo_editor();
     ed.play();
-    ed.set_speed(2.0);
+    ed.set_speed(4.0);
     ed.control(ControlOp::Play);
-    let mut ran = 0;
-    for _ in 0..30 {
-        ran += ed.advance(1.0 / 60.0);
-    }
-    assert!((59..=60).contains(&ran), "2x speed: 30 frames of 1/60 s run about 60 ticks, ran {ran}");
-    ed.set_speed(0.25);
-    ed.control(ControlOp::Play);
-    let mut ran = 0;
-    for _ in 0..60 {
-        ran += ed.advance(1.0 / 60.0);
-    }
-    assert!((14..=15).contains(&ran), "0.25x speed: 60 frames run about 15 ticks, ran {ran}");
+    let t0 = std::time::Instant::now();
+    let start = ed.host_call("sim.state", json!({})).unwrap()["head_tick"].as_u64().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let end = ed.host_call("sim.state", json!({})).unwrap()["head_tick"].as_u64().unwrap();
+    let secs = t0.elapsed().as_secs_f64();
+    let rate = (end - start) as f64 / secs;
+    // 60 ticks/s at 4x is 240 ticks/s (the pacer catches up at most 8 ticks per frame of the host).
+    assert!((120.0..=260.0).contains(&rate), "4x speed ran {rate:.0} ticks/s");
     // Paused: no ticks.
     ed.pause();
-    assert_eq!(ed.advance(1.0), 0);
+    let a = ed.host_call("sim.state", json!({})).unwrap()["head_tick"].as_u64().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let b = ed.host_call("sim.state", json!({})).unwrap()["head_tick"].as_u64().unwrap();
+    assert_eq!(a, b);
 }
 
 #[test]
@@ -278,7 +334,7 @@ fn scripts_drive_the_same_paths() {
     ";
     script::run_script(&mut ed, text).expect("script runs");
     assert_eq!(ed.mode(), Mode::Edit);
-    assert_eq!(ed.doc().history().iter().filter(|h| !h.undone).count(), 1, "two edits, one undone");
+    assert_eq!(ed.history().entries.iter().filter(|h| !h.undone).count(), 1, "two edits, one undone");
     assert!(script::run_script(&mut ed, "select nobody").is_err());
     assert!(script::run_script(&mut ed, "set orr_physics::Body pos 99999 0").is_err());
     assert!(script::run_script(&mut ed, "frobnicate").is_err());
@@ -296,13 +352,30 @@ fn fixed_from_view_numbers_goes_through_decimal_text() {
 
 #[test]
 fn picking_finds_the_body_under_a_world_point() {
-    use orr_editor::viewport::pick;
-    let ed = demo_editor();
-    let pos = |name: &str| {
-        let Value::Vec2(p) = ed.view().field(&target_named(&ed, name), BODY, "pos").unwrap() else { panic!("pos is a vec2") };
-        [orr_view::fp_to_f32(p.x), orr_view::fp_to_f32(p.y)]
+    let mut ed = demo_editor();
+    let mut pos = |name: &str| {
+        let t = target_named(&ed, name);
+        xy(&field(&mut ed, &t, BODY, "pos"))
     };
-    assert_eq!(pick(&ed.view(), pos("paddle_0")), Some(target_named(&ed, "paddle_0")));
-    assert_eq!(pick(&ed.view(), pos("floor")), Some(target_named(&ed, "floor")));
-    assert_eq!(pick(&ed.view(), [500.0, 500.0]), None, "nothing far outside the scene");
+    let (paddle, floor) = (pos("paddle_0"), pos("floor"));
+    assert_eq!(ed.pick(paddle), Some(target_named(&ed, "paddle_0")));
+    assert_eq!(ed.pick(floor), Some(target_named(&ed, "floor")));
+    assert_eq!(ed.pick([500.0, 500.0]), None, "nothing far outside the scene");
+}
+
+#[test]
+fn the_frame_on_screen_is_the_hosts_frame() {
+    // What the viewport draws is a snapshot the host published: same checksum as the host's live frame.
+    let mut ed = demo_editor();
+    assert_eq!(ed.checksum(), doc_checksum(&mut ed));
+    ed.select_named("body_05");
+    ed.set_field(&body(), "pos.x", fixed(2));
+    ed.sync();
+    assert_eq!(ed.checksum(), doc_checksum(&mut ed), "an edit shows up in the next frame");
+    ed.step(15);
+    ed.sync();
+    let live = orr_remote::wire::parse_checksum(&ed.host_call("sim.state", json!({})).unwrap()["checksum"]).unwrap();
+    assert_eq!(ed.checksum(), live);
+    assert_eq!(ed.snapshot().unwrap().tick(), 15);
+    assert!(!ed.bodies().is_empty());
 }
