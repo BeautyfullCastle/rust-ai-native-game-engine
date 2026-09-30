@@ -1,22 +1,24 @@
 //! egui_kittest tests of the Agent tab: real widgets, a real agent (an
-//! `ErpClient` on its own thread against the editor's embedded ERP server),
-//! real clicks. The tab is a read-only activity feed: nothing here approves
-//! anything. No GPU (the viewport shows its notice; the tab does not need it).
+//! `ErpClient` on its own thread against the editor's host), real clicks.
+//! The tab is a read-only activity feed: nothing here approves anything. No
+//! GPU (the viewport shows its notice; the tab does not need it).
+#![allow(clippy::disallowed_types)]
 
 mod common;
 
 use std::sync::mpsc::{channel, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::*;
 use egui::{Key, Modifiers};
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
-use orr_edit::{format_value, Op, Origin, Target};
 use orr_editor::agent_ui::{LBL_PREVIEW, TXT_NO_AGENT, TXT_PASSED};
 use orr_editor::app::BottomTab;
-use orr_editor::EditorApp;
+use orr_editor::editor::Editor;
+use orr_editor::model::format_json;
+use orr_editor::{EditorApp, HostSpec, Target};
 use orr_remote::{Auth, ErpClient, ServerConfig};
 use serde_json::{json, Value as J};
 
@@ -41,19 +43,13 @@ impl Agent {
         Agent { tx: Some(tx), thread: Some(thread) }
     }
 
-    /// Runs one call, stepping the window's frames (which poll ERP) until it answers.
+    /// Runs one call, then lets the window take in what the host says about it.
     fn call(&self, h: &mut Harness<'_, EditorApp>, method: &str, params: J) -> Result<J, String> {
         let (rtx, rrx) = channel();
         self.tx.as_ref().unwrap().send((method.to_string(), params, rtx)).unwrap();
-        for _ in 0..20_000 {
-            h.step();
-            if let Ok(r) = rrx.try_recv() {
-                h.run_steps(2);
-                return r;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        panic!("the agent's {method} never answered");
+        let r = rrx.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("the agent's {method} never answered"));
+        settle(h);
+        r
     }
 
     fn ok(&self, h: &mut Harness<'_, EditorApp>, method: &str, params: J) -> J {
@@ -70,12 +66,21 @@ impl Drop for Agent {
     }
 }
 
-/// A window on the demo scene with ERP (dev mode) running, and an agent connected to it.
+/// Brings the editor up to date with its host and draws a few frames.
+fn settle(h: &mut Harness<'_, EditorApp>) {
+    for _ in 0..2 {
+        h.state_mut().editor.sync();
+        h.run_steps(2);
+    }
+}
+
+/// A window on the demo scene whose host listens (dev mode), and an agent connected to it.
 fn with_agent() -> (Harness<'static, EditorApp>, Agent) {
-    let mut editor = demo_editor();
-    let url = editor.start_erp(ServerConfig::new(Auth::DevNoAuth)).unwrap();
+    let spec = HostSpec::Local { scene: orr_editor::editor::default_scene_path(), listen: Some(ServerConfig::new(Auth::DevNoAuth)), debug_hooks: false };
+    let editor = Editor::start(&spec).expect("start");
+    let url = editor.erp_status().expect("listening").0;
     let mut h = Harness::builder().with_size([1500.0, 900.0]).build_eframe(move |_cc| EditorApp::new(editor, None));
-    h.run_steps(3);
+    settle(&mut h);
     let agent = Agent::connect(&url);
     // The first call makes sure the connection is up.
     agent.ok(&mut h, "rpc.discover", J::Null);
@@ -118,16 +123,20 @@ fn expand(h: &mut Harness<'_, EditorApp>, text: &str) {
 fn an_agent_edit_shows_in_the_feed_and_expands_to_old_and_new() {
     let (mut h, agent) = with_agent();
     let guid = body_guid(&h, "body_05");
-    let before = h.state().editor.view().field(&Target::Guid(orr_reflect::Guid::parse(&guid).unwrap()), BODY, "pos.x").unwrap();
+    let t = Target::Guid(orr_reflect::Guid::parse(&guid).unwrap());
+    let before = match field(&mut h.state_mut().editor, &t, BODY, "pos.x") {
+        orr_reflect::Value::Fixed(f) => orr_reflect::decimal::fp_to_decimal(f),
+        other => panic!("{other:?}"),
+    };
     agent.ok(&mut h, "world.patch", json!({"entity": guid, "component": BODY, "path": "pos.x", "value": "1.5"}));
     open_agent_tab(&mut h);
 
     let summary = format!("world.patch {guid} {BODY}.pos.x = 1.5");
     assert!(shows(&h, &summary), "the feed row");
     assert!(shows(&h, "dev"), "the agent's name is on the row");
-    assert!(!shows(&h, &format!("{} \u{2192}", format_value(&before))), "collapsed: no old -> new yet");
+    assert!(!shows(&h, &format!("{before} \u{2192}")), "collapsed: no old -> new yet");
     expand(&mut h, &summary);
-    assert!(shows(&h, &format_value(&before)), "old value");
+    assert!(shows(&h, &before), "old value");
     assert!(shows(&h, "1.5"), "new value");
     assert!(shows(&h, "\u{2192}"));
     // The status bar names the last action.
@@ -138,7 +147,7 @@ fn an_agent_edit_shows_in_the_feed_and_expands_to_old_and_new() {
 #[test]
 fn proposal_verify_accept_by_the_agent_show_the_diff_and_the_report_and_undo_works() {
     let (mut h, agent) = with_agent();
-    let original = h.state().editor.doc().to_yaml();
+    let original = scene_text(&mut h.state_mut().editor);
     let guid = body_guid(&h, "body_05");
     let id = agent.ok(&mut h, "proposal.begin", json!({"label": "rename+move"}))["id"].as_str().unwrap().to_string();
     agent.ok(
@@ -155,9 +164,9 @@ fn proposal_verify_accept_by_the_agent_show_the_diff_and_the_report_and_undo_wor
     open_agent_tab(&mut h);
 
     // The document changed and the history has the agent's entry.
-    assert!(h.state().editor.doc().list_proposals().is_empty());
-    let last = h.state().editor.doc().history().into_iter().last().unwrap();
-    assert_eq!((last.label.as_str(), last.origin.clone()), ("rename+move", Origin::Agent("dev".into())));
+    assert!(h.state().editor.proposals().is_empty());
+    let last = h.state().editor.history().entries.last().unwrap().clone();
+    assert_eq!((last.label.as_str(), last.origin.as_str()), ("rename+move", "agent:dev"));
 
     // The feed rows.
     assert!(shows(&h, &format!("proposal.begin {id} \"rename+move\"")));
@@ -185,8 +194,8 @@ fn proposal_verify_accept_by_the_agent_show_the_diff_and_the_report_and_undo_wor
     h.run_steps(2);
     assert!(shows(&h, "[agent:dev]"));
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
-    h.run_steps(2);
-    assert_eq!(h.state().editor.doc().to_yaml(), original);
+    settle(&mut h);
+    assert_eq!(scene_text(&mut h.state_mut().editor), original);
 }
 
 #[test]
@@ -199,15 +208,16 @@ fn an_open_proposal_lists_with_a_view_only_preview_toggle() {
     assert!(shows(&h, "Open proposals (1)"));
     assert!(shows(&h, "agent:dev"));
     assert!(shows(&h, "1 op"));
-    let yaml = h.state().editor.doc().to_yaml();
+    let yaml = scene_text(&mut h.state_mut().editor);
 
     assert!(h.state().editor.previewing().is_none());
     h.get_by_label(LBL_PREVIEW).click();
-    h.run_steps(2);
+    settle(&mut h);
     assert!(h.state().editor.previewing().is_some());
-    assert_eq!(h.state().editor.doc().to_yaml(), yaml, "a preview changes nothing");
+    assert!(h.state().editor.preview_bodies().is_some(), "the staged frame reached the editor through the host");
+    assert_eq!(scene_text(&mut h.state_mut().editor), yaml, "a preview changes nothing");
     h.get_by_label(LBL_PREVIEW).click();
-    h.run_steps(2);
+    settle(&mut h);
     assert!(h.state().editor.previewing().is_none());
     for label in ["Accept", "Reject", "Verify"] {
         assert!(h.query_by_label(label).is_none(), "'{label}' must not exist");
@@ -215,9 +225,9 @@ fn an_open_proposal_lists_with_a_view_only_preview_toggle() {
 
     // When the agent takes the proposal back, the section empties and the preview goes.
     h.get_by_label(LBL_PREVIEW).click();
-    h.run_steps(2);
+    settle(&mut h);
     agent.ok(&mut h, "proposal.reject", json!({"id": id}));
-    h.run_steps(3);
+    settle(&mut h);
     assert!(h.state().editor.previewing().is_none());
     assert!(shows(&h, "Open proposals (0)"));
 }
@@ -282,9 +292,9 @@ fn an_agent_edit_pulses_the_touched_entity_in_edit_and_play_mode() {
 
 #[test]
 fn the_header_names_connected_agents_or_says_how_to_connect() {
-    // No ERP at all: the hint has the exact command lines.
+    // No ERP listener at all: the hint has the exact command lines.
     let mut h = harness();
-    h.run();
+    h.run_steps(3);
     open_agent_tab(&mut h);
     assert!(shows(&h, TXT_NO_AGENT));
     assert!(shows(&h, "orr_editor --erp 127.0.0.1:7777 --erp-dev"));
@@ -296,21 +306,28 @@ fn the_header_names_connected_agents_or_says_how_to_connect() {
     open_agent_tab(&mut h);
     assert!(!shows(&h, TXT_NO_AGENT));
     assert!(shows(&h, "read,scene_edit,sim_control,approve"), "dev mode includes approve");
-    let agents = h.state().editor.agents();
-    assert_eq!(agents.len(), 1);
+    let agents = h.state().editor.agents().to_vec();
+    assert_eq!(agents.len(), 1, "the editor's own connections are not agents: {agents:?}");
     assert_eq!(agents[0].name, "dev");
     drop(agent);
     // Gone: the hint returns, with the real address.
-    for _ in 0..200 {
+    wait_no_agents(&mut h);
+    h.run_steps(2);
+    assert!(shows(&h, TXT_NO_AGENT));
+    assert!(shows(&h, "claude mcp add orrery -- orr_mcp --erp ws://127.0.0.1:"));
+}
+
+fn wait_no_agents(h: &mut Harness<'_, EditorApp>) {
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        h.state_mut().editor.sync();
         h.step();
         if h.state().editor.agents().is_empty() {
             break;
         }
-        thread::sleep(Duration::from_millis(5));
+        assert!(Instant::now() < end, "the agent never went away");
+        thread::sleep(Duration::from_millis(10));
     }
-    h.run_steps(2);
-    assert!(shows(&h, TXT_NO_AGENT));
-    assert!(shows(&h, "claude mcp add orrery -- orr_mcp --erp ws://127.0.0.1:"));
 }
 
 #[test]
@@ -325,20 +342,23 @@ fn a_failed_request_is_shown_with_its_error() {
     assert!(shows(&h, "error: "));
 }
 
-/// A proposal staged through the document (the script way) is listed and previewable without any agent.
+/// A proposal staged on the host without any socket agent (the script way) is listed and previewable.
 #[test]
 fn staged_proposals_can_be_previewed_and_nothing_can_approve_them() {
     let mut h = harness();
-    h.run();
-    let guid = guid_named(&h.state().editor, "body_05");
-    let ed = &mut h.state_mut().editor;
-    let id = ed.doc_mut().propose("rename+move", Origin::Agent("claude".into())).unwrap();
-    ed.doc_mut().proposal_apply(id, Op::SetField { guid, component: BODY.into(), path: "pos".into(), value: vec2(2, 30) }).unwrap();
+    h.run_steps(3);
+    let guid = body_guid(&h, "body_05");
+    {
+        let c = h.state_mut().editor.agent_client("claude").unwrap();
+        let id = c.call("proposal.begin", json!({"label": "rename+move"})).unwrap()["id"].as_str().unwrap().to_string();
+        c.call("proposal.apply", json!({"id": id, "ops": [{"op": "patch", "entity": guid, "component": BODY, "path": "pos", "value": [2, 30]}]})).unwrap();
+    }
+    settle(&mut h);
     open_agent_tab(&mut h);
     assert!(shows(&h, "rename+move"));
     assert!(shows(&h, "agent:claude"));
     h.get_by_label(LBL_PREVIEW).click();
-    h.run_steps(2);
+    settle(&mut h);
     assert!(h.state().editor.previewing().is_some());
     assert!(h.query_by_label("Accept").is_none() && h.query_by_label("Reject").is_none() && h.query_by_label("Verify").is_none());
 }
@@ -352,13 +372,7 @@ fn a_cli_style_agent_stays_visible_after_it_disconnects() {
     let g = body_guid(&h, "body_05");
     agent.call(&mut h, "world.patch", json!({"entity": g, "component": BODY, "path": "pos.x", "value": 1})).unwrap();
     drop(agent);
-    for _ in 0..200 {
-        h.step();
-        if h.state().editor.agents().is_empty() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_no_agents(&mut h);
     open_agent_tab(&mut h);
     h.run_steps(2);
     assert!(!shows(&h, TXT_NO_AGENT), "a recently active agent is not 'no agent'");
@@ -368,4 +382,11 @@ fn a_cli_style_agent_stays_visible_after_it_disconnects() {
     h.get_by_label("connections").click();
     h.run_steps(2);
     assert!(shows(&h, "disconnected"));
+}
+
+#[test]
+fn json_values_show_as_short_text() {
+    assert_eq!(format_json(&json!([6, 18.5])), "[6, 18.5]");
+    assert_eq!(format_json(&json!({"kind": "circle", "radius": 0.5})), "{kind: circle, radius: 0.5}");
+    assert_eq!(format_json(&json!("x")), "x");
 }
