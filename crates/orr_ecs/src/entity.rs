@@ -99,6 +99,15 @@ impl EntityAllocator {
         idx < self.versions.len() && self.alive[idx] != 0 && self.versions[idx] == e.version
     }
 
+    /// Every live entity, in ascending index order.
+    pub fn iter_alive(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.alive
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| **a != 0)
+            .map(|(i, _)| Entity { index: i as u32, version: self.versions[i] })
+    }
+
     pub fn copy_from(&mut self, other: &EntityAllocator) {
         self.versions.clone_from(&other.versions);
         self.alive.clone_from(&other.alive);

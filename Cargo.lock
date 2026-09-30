@@ -102,6 +102,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1679,6 +1685,7 @@ dependencies = [
  "criterion",
  "orr_ecs",
  "orr_fp",
+ "orr_reflect",
  "orr_sim",
 ]
 
@@ -1687,6 +1694,27 @@ name = "orr_proto"
 version = "0.0.1"
 dependencies = [
  "xxhash-rust",
+]
+
+[[package]]
+name = "orr_reflect"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_fp",
+ "orr_reflect_derive",
+ "saphyr-parser",
+ "serde_json",
+]
+
+[[package]]
+name = "orr_reflect_derive"
+version = "0.0.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2268,6 +2296,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "saphyr-parser"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7429158804c36e705d9423b7848018e535b3e92d439a763e364ee12670ef473b"
+dependencies = [
+ "arraydeque",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

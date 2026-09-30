@@ -3,6 +3,7 @@
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{Entity, FrameList};
 use orr_fp::{fp, FPVec2, FP};
+use orr_reflect::Reflect;
 
 /// Maximum vertex count of a convex polygon shape.
 pub const MAX_POLY_VERTS: usize = 8;
@@ -214,36 +215,48 @@ impl Shape {
 /// `inv_mass` / `inv_inertia` are ignored (treated as 0) unless
 /// `kind == BODY_DYNAMIC`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Reflect)]
 pub struct Body {
     /// World position of the center of mass.
+    #[reflect(range = "-30000..=30000")]
     pub pos: FPVec2,
     /// Rotation in radians, kept in `(-pi, pi]` by the integrator.
+    #[reflect(range = "-3.1416..=3.1416")]
     pub angle: FP,
     /// Linear velocity.
+    #[reflect(range = "-500..=500")]
     pub vel: FPVec2,
     /// Angular velocity (rad/s).
+    #[reflect(range = "-60..=60")]
     pub omega: FP,
     /// Inverse mass (0 = immovable).
+    #[reflect(range = "0..=1000")]
     pub inv_mass: FP,
     /// Inverse rotational inertia (0 = fixed rotation).
+    #[reflect(range = "0..=100000")]
     pub inv_inertia: FP,
     /// Per-second linear velocity damping (0 = none).
+    #[reflect(range = "0..=100")]
     pub linear_damping: FP,
     /// Per-second angular velocity damping (0 = none).
+    #[reflect(range = "0..=100")]
     pub angular_damping: FP,
     /// [`BODY_STATIC`], [`BODY_DYNAMIC`] or [`BODY_KINEMATIC`].
+    #[reflect(enumeration = "static=0,dynamic=1,kinematic=2")]
     pub kind: u32,
     /// Sleep state of a dynamic body. Bit 31 ([`SLEEP_FLAG`]) is set while
     /// the body sleeps. The low bits count consecutive ticks below the
     /// sleep speed limits, capped at `PhysicsConfig::sleep_ticks`. Use
     /// [`crate::wake`] and [`crate::is_asleep`] instead of touching it.
+    #[reflect(skip)]
     pub sleep: u32,
     /// While a body sleeps: the id of its sleep island (lowest entity
     /// index of the group plus one). Waking one member wakes every body
     /// with the same id. 0 for awake bodies.
+    #[reflect(skip)]
     pub island: u32,
     /// Explicit padding, keep 0.
+    #[reflect(skip)]
     pub _pad: u32,
 }
 
@@ -290,13 +303,16 @@ impl Body {
 
 /// Collision shape and material of one body.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Reflect)]
+#[reflect(default_with = "default_collider")]
 pub struct Collider {
     /// Local shape.
     pub shape: Shape,
     /// Bounciness in `[0, 1]`. Pairs use the larger value.
+    #[reflect(range = "0..=1")]
     pub restitution: FP,
     /// Coulomb friction coefficient. Pairs use the geometric mean.
+    #[reflect(range = "0..=100")]
     pub friction: FP,
     /// Layer bits of this collider.
     pub layer: u32,
@@ -304,9 +320,16 @@ pub struct Collider {
     /// `layer` intersects the other's `mask`.
     pub mask: u32,
     /// [`COLLIDER_SENSOR`] bit.
+    #[reflect(flags = "sensor=1")]
     pub flags: u32,
     /// Explicit padding, keep 0.
+    #[reflect(skip)]
     pub _pad: u32,
+}
+
+/// The collider of a newly added component: a circle of radius 0.5.
+fn default_collider() -> Collider {
+    Collider::new(Shape::circle(fp!(0.5)))
 }
 
 impl Collider {
@@ -352,35 +375,49 @@ impl Collider {
 /// Tunable solver settings. Part of the frame state (checksummed), so all
 /// peers must start from the same values.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Reflect)]
+#[reflect(default)]
 pub struct PhysicsConfig {
     /// Gravity acceleration.
+    #[reflect(range = "-10000..=10000")]
     pub gravity: FPVec2,
     /// Fixed time step in seconds.
+    #[reflect(range = "0.0001..=1")]
     pub dt: FP,
     /// Position error correction factor (Baumgarte), `0.1..0.3`.
+    #[reflect(range = "0..=1")]
     pub baumgarte: FP,
     /// Penetration tolerated without correction.
+    #[reflect(range = "0..=1")]
     pub linear_slop: FP,
     /// Contacts are created up to this distance (speculative margin).
+    #[reflect(range = "0..=1")]
     pub contact_margin: FP,
     /// Closing speed below which restitution is ignored.
+    #[reflect(range = "0..=100")]
     pub restitution_threshold: FP,
     /// Cap on the velocity added by position correction.
+    #[reflect(range = "0..=1000")]
     pub max_correction_speed: FP,
     /// Per-axis speed clamp for dynamic bodies.
+    #[reflect(range = "0..=1000")]
     pub max_linear_speed: FP,
     /// Angular speed clamp for dynamic bodies.
+    #[reflect(range = "0..=1000")]
     pub max_angular_speed: FP,
     /// Sequential impulse iterations per tick.
+    #[reflect(range = "1..=64")]
     pub velocity_iterations: u32,
     /// A group of touching bodies falls asleep after every body in it has
     /// been slower than the two sleep speeds for this many ticks. 0 turns
     /// sleeping off.
+    #[reflect(range = "0..=1000000")]
     pub sleep_ticks: u32,
     /// Sleep limit for the linear speed.
+    #[reflect(range = "0..=100")]
     pub sleep_linear_speed: FP,
     /// Sleep limit for the angular speed (rad/s).
+    #[reflect(range = "0..=100")]
     pub sleep_angular_speed: FP,
 }
 
@@ -456,12 +493,14 @@ pub struct TriggerEvent {
 
 /// Singleton holding the config and the persistent (rollback-safe) caches.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Reflect)]
 pub struct PhysicsState {
     /// Solver settings.
     pub config: PhysicsConfig,
     /// Warm-starting cache handle (`FrameList<ContactCache>`).
+    #[reflect(skip)]
     pub contacts: FrameList<ContactCache>,
     /// Trigger overlap set handle (`FrameList<OverlapPair>`).
+    #[reflect(skip)]
     pub overlaps: FrameList<OverlapPair>,
 }
