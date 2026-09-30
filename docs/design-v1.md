@@ -72,7 +72,7 @@
 | 시뮬 | `orr_physics` | 결정론 고정소수점 물리 (2D 먼저, 3D 다음) |
 | 시뮬 | `orr_nav` | 고정소수점 내비메시/경로탐색 |
 | 세션 | `orr_session` | 틱 클럭, 예측/롤백, 스냅샷 링, 체크섬, 리플레이 기록/재생 |
-| 세션 | `orr_net` | 전송(quinn/QUIC, WebRTC=matchbox, WebSocket), 시간 동기화 |
+| 세션 | `orr_net` | 전송(quinn/QUIC=네이티브, WebTransport=브라우저, WebSocket=UDP 차단 시 대체), 시간 동기화 |
 | 세션 | `orr_server` | 릴레이 서버 바이너리 + 선택적 헤드리스 시뮬 |
 | 브리지 | `orr_bridge` | FrameView, 이벤트 채널, Input/Command 전송, 전송 어댑터 |
 | 뷰 | `orr_view` | EntityView 매핑, 보간, 예측 오차 보정, 이벤트 디스패치 |
@@ -222,6 +222,8 @@ bridge.send_command(BuildTower { cell, kind });
 
 같은 `orr_sim` 바이너리 코드가 클라, 서버, 리플레이, CI에서 그대로 돈다.
 
+브라우저 클라는 릴레이 서버에 WebTransport(HTTP/3 위 QUIC, 데이터그램 + 스트림)로 붙는다. UDP가 막힌 환경에서는 WebSocket으로 대체한다(이때 비신뢰 채널도 TCP라 입력 지연을 더 크게 잡는다). 서버가 항상 가운데 있는 구조라 피어 간 연결용 WebRTC는 쓰지 않는다 (2026-09-30 결정).
+
 ### 6.2 예측 · 롤백 흐름
 
 ```
@@ -348,7 +350,7 @@ entities:
 |---|---|
 | 물리 | **자체 결정론 FP 물리** (Rapier는 시뮬에서 사용 불가) |
 | 내비 | **자체 FP 내비메시/그리드 A\*·플로우필드** (oxidized_navigation은 float라 뷰 전용 참고) |
-| 네트워크 | 자체 세션 + 전송(quinn/QUIC, matchbox/WebRTC, WebSocket). GGRS/fortress-rollback은 설계 참고 |
+| 네트워크 | 자체 세션 + 전송(quinn/QUIC, WebTransport, WebSocket). GGRS/fortress-rollback은 설계 참고 |
 | 애니메이션 | 뷰 전용 (게임플레이에 영향 주는 타이밍은 시뮬에 FP로 따로 둔다) |
 | 오디오/UI/입력 | 뷰 전용: kira, taffy+cosmic-text, 액션 매핑 → Input 구조체로 변환 |
 | 스크립팅 | Luau = 툴/뷰, 시뮬 스크립팅은 v2에서 검토 |
@@ -363,7 +365,7 @@ entities:
 | **M0 기반** | `orr_fp`, `orr_ecs`(Frame 아레나), `orr_sim` 스케줄러, 결정론 lint | 1만 엔티티 틱 < 0.5ms, 스냅샷 memcpy 측정, 5개 플랫폼 체크섬 CI 통과 |
 | **M1 세션** | 스냅샷 링, 롤백, Input/Command, 리플레이 기록/재생, Local/Replay 모드 | 가짜 지연 주입 로컬 2클라이언트에서 롤백 동작, 리플레이 비트 단위 일치 |
 | **M2 브리지·뷰·물리2D** | `orr_bridge`(InProc/Threaded), `orr_view` 보간, 이벤트 3상태, wgpu 렌더 기초, FP 물리 2D | 샘플 게임이 60fps로 돌고 롤백 중 시각적 튐 없음 |
-| **M3 네트워크** | Relay 서버, QUIC/WebRTC, 시간 동기화, 디싱크 감지, 늦은 참가 | 4인 원격 플레이 150ms RTT에서 플레이 가능 |
+| **M3 네트워크** | Relay 서버, QUIC(네이티브) / WebTransport(브라우저) / WebSocket 대체, 시간 동기화, 디싱크 감지, 늦은 참가. WebRTC는 계획하지 않음 — WebTransport가 특정 대상에서 실패할 때만 재검토 | 4인 원격 플레이 150ms RTT에서 플레이 가능 |
 | **M4 에디터 MVP** | ERP + `Remote` 어댑터, egui 에디터, YAML 씬, 타임라인, undo | 씬 편집 → 플레이 → 되감기 루프 |
 | **M5 AI** | MCP 어댑터, 스키마 제공, 리플레이 기반 자동 검증, Agent 패널 | 에이전트가 수정 → 검증 → 수락까지 한 번에 |
 | **M6 확장** | Authoritative 서버, FP 물리 3D, 고급 렌더, 모바일/웹 최적화 | |
@@ -378,6 +380,7 @@ entities:
 - M0 ECS 저장소는 스파스셋으로 구현 (구조 변경이 싸서 재시뮬에 유리). 아키타입 테이블은 벤치 결과를 보고 추가 여부 결정. 현재 1M 엔티티 순회 1.9ms (순수 Vec 1.2ms).
 - 브리지 `Remote` 어댑터의 Frame 델타 스트리밍 대역폭 (큰 월드에서 에디터 연결 시).
 - Quantum의 정확한 기본값(HardTolerance, 예측 한도)은 공개 문서에 없어 자체 튜닝이 필요하다.
+- **WebTransport 브라우저 호환**: Safari(26.4+)는 옛 WebTransport 방식을 써서 일부 Rust `h3` 서버와 연결이 안 되는 사례가 있다(hyperium/h3 #347). Safari는 `serverCertificateHashes`를 지원하지 않아 개발 중에도 정식 CA 인증서가 필요하고, Firefox도 로컬 인증서가 실패할 수 있다. 자체 서명 해시 방식은 ECDSA P-256·유효기간 14일 이하 조건이 있다. 기존 QUIC(`orrery/1`)과 WebTransport(`h3`)가 한 UDP 포트를 같이 쓸 수 있는지 미검증 — 본 구현 전 시험 구현으로 확인한다.
 
 ## 참고 출처 (v1 추가분, v0 출처는 이전 문서 참조)
 
