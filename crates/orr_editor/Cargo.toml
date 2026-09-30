@@ -1,0 +1,33 @@
+[package]
+name = "orr_editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# egui 0.36 needs Rust 1.95.
+rust-version = "1.95"
+publish = false
+description = "egui editor MVP: hierarchy, inspector, viewport, timeline, undo (M4)"
+default-run = "orr_editor"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+orr_session = { path = "../orr_session" }
+orr_edit = { path = "../orr_edit" }
+orr_reflect = { path = "../orr_reflect", features = ["scene"] }
+orr_physics = { path = "../orr_physics" }
+orr_rhi = { path = "../orr_rhi" }
+orr_render = { path = "../orr_render" }
+orr_view = { path = "../orr_view" }
+orr_sample = { path = "../orr_sample" }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "x11", "wayland", "default_fonts"] }
+egui = "0.36"
+egui-wgpu = "0.36"
+png = "0.17"
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }

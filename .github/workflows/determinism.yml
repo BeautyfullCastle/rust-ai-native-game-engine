@@ -50,18 +50,20 @@ jobs:
         # `orr_sample` (wgpu + winit window demo) is excluded: it is view
         # layer, needs no determinism check, and its GPU stack should not
         # be able to break the sim crates' CI. It is built by `sample-build`.
+        # `orr_editor` (egui, needs Rust 1.95+, GUI/GPU stack) is excluded for
+        # the same reason and is built and tested by `sample-build` too.
         #
         # This includes `orr_relay_net` and the relay end-to-end tests of
         # `orr_server` (`tests/net_e2e.rs`): real loopback QUIC/WebSocket with
         # a real-time server loop, a few seconds each.
-        run: cargo test --workspace --release --exclude orr_sample
+        run: cargo test --workspace --release --exclude orr_sample --exclude orr_editor
 
       - name: cargo clippy --workspace --all-targets
         # `-D warnings` only on the crates this task owns (`orr_sim`,
         # `orr_session`, `orr_testgame`, `orr_physics`); other crates may be
         # under concurrent work with their own warning budget.
         run: |
-          cargo clippy --workspace --exclude orr_sample --all-targets
+          cargo clippy --workspace --exclude orr_sample --exclude orr_editor --all-targets
           cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit --all-targets -- -D warnings
 
       - name: cargo build -p orr_sim --features hotpatch
@@ -88,14 +90,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
-      - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render --release
-      - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render --all-targets
+      - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor --release
+      - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor --all-targets
       # GPU readback pixel tests on a software Vulkan adapter (lavapipe), so
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
       - if: runner.os == 'Linux'
         run: cargo test -p orr_render --release --test gpu
+        env:
+          ORR_REQUIRE_GPU: "1"
+      # The editor's GPU tests (viewport pixels read back, the app rendered by
+      # egui_kittest's wgpu renderer) on the same software adapter.
+      - if: runner.os == 'Linux'
+        run: cargo test -p orr_editor --release --test gpu
         env:
           ORR_REQUIRE_GPU: "1"
       # The physics sample's headless benchmark: no window, no GPU. Runs the
