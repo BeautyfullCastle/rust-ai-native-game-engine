@@ -139,7 +139,7 @@ fn fnv(vals: &[i64]) -> u64 {
     h
 }
 
-const GOLDEN: u64 = 0x5319b31fbf612ae0;
+const GOLDEN: u64 = 0x1e80d8a6af9b420d;
 
 /// Pins the new 3D math over a fixed sequence of operations.
 #[test]

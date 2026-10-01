@@ -189,10 +189,17 @@ impl FPQuat {
     /// it at 60 Hz). The result is renormalized.
     #[must_use]
     pub fn integrate_angular(self, omega: FPVec3, dt: FP) -> FPQuat {
-        let h = dt / FP::TWO;
-        let wq = FPQuat::new(omega.x * h, omega.y * h, omega.z * h, FP::ZERO);
-        let d = wq.hamilton_mul(self);
-        FPQuat::new(self.x + d.x, self.y + d.y, self.z + d.z, self.w + d.w).normalize_or_identity()
+        // d = dt/2 * (omega, 0) * q on raw values, rounded to nearest (a
+        // flooring multiply would bias slow rotations towards negative).
+        let (wx, wy, wz) = (omega.x.raw() as i128, omega.y.raw() as i128, omega.z.raw() as i128);
+        let (qx, qy, qz, qw) = (self.x.raw() as i128, self.y.raw() as i128, self.z.raw() as i128, self.w.raw() as i128);
+        let h = dt.raw() as i128;
+        let r = |v: i128| FP::from_raw(((v * h + (1 << 32)) >> 33) as i64);
+        let dx = r(wx * qw + wy * qz - wz * qy);
+        let dy = r(-wx * qz + wy * qw + wz * qx);
+        let dz = r(wx * qy - wy * qx + wz * qw);
+        let dw = r(-wx * qx - wy * qy - wz * qz);
+        FPQuat::new(self.x + dx, self.y + dy, self.z + dz, self.w + dw).normalize_or_identity()
     }
 
     /// Axis (unit) and angle in `[0, pi]` of this unit quaternion. The
