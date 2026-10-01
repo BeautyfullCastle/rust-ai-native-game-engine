@@ -48,6 +48,8 @@ pub(crate) struct ContactPt {
     pub(crate) j1: FP,
     pub(crate) j2: FP,
     pub(crate) rows: [Row; 3],
+    /// Separating speed the restitution asks for (0 for none).
+    pub(crate) rest: FP,
     pub(crate) target: FP,
 }
 
@@ -145,10 +147,10 @@ fn basis(n: FPVec3) -> (FPVec3, FPVec3) {
     (t1, n.cross(t1))
 }
 
-/// Fills the derived fields, warm starts, and updates the velocities in
-/// `vw` with the warm start impulses.
-pub(crate) fn prepare(cons: &mut [Constraint], pool: &mut [ContactPt], bodies: &[BodyInv], vw: &mut [Vw], cfg: &PhysicsConfig) {
-    let inv_dt = fastmath::div(FP::ONE, cfg.dt);
+/// Fills the derived fields of every constraint: lever arms, effective
+/// masses, the friction basis, the restitution speed and the warm-start
+/// impulses projected on the new basis. Velocities are not touched.
+pub(crate) fn prepare(cons: &mut [Constraint], pool: &mut [ContactPt], bodies: &[BodyInv], vw: &[Vw], cfg: &PhysicsConfig) {
     for c in cons.iter_mut() {
         let (a, b) = (c.a as usize, c.b as usize);
         let (ba, bb) = (&bodies[a], &bodies[b]);
@@ -160,7 +162,7 @@ pub(crate) fn prepare(cons: &mut [Constraint], pool: &mut [ContactPt], bodies: &
         c.t1 = t1;
         c.t2 = t2;
         let dirs = [n, t1, t2];
-        let (mut va, mut vb) = (vw[a], vw[b]);
+        let (va, vb) = (vw[a], vw[b]);
         let a_ang = ima > FP::ZERO || va.w != FPVec3::ZERO;
         let b_ang = imb > FP::ZERO || vb.w != FPVec3::ZERO;
         let first = c.first as usize;
@@ -178,34 +180,67 @@ pub(crate) fn prepare(cons: &mut [Constraint], pool: &mut [ContactPt], bodies: &
                 row.mass = if kk > FP::ZERO { fastmath::div(FP::ONE, kk) } else { FP::ZERO };
             }
             let vn0 = rel_vel(&va, &vb, n, &p.rows[0]);
-            let bias = if p.sep >= FP::ZERO {
-                nmul(p.sep, inv_dt)
-            } else {
-                nmul(nmul(cfg.baumgarte, (p.sep + cfg.linear_slop).min(FP::ZERO)), inv_dt).max(-cfg.max_correction_speed)
-            };
-            let mut target = -bias;
-            if p.sep <= FP::ZERO && vn0 < -cfg.restitution_threshold {
-                target = target.max(-nmul(c.restitution, vn0));
-            }
-            p.target = target;
-
-            // Warm start: friction vector projected on the new basis, then
-            // the normal impulse from last tick.
+            p.rest = if p.sep <= FP::ZERO && vn0 < -cfg.restitution_threshold { -nmul(c.restitution, vn0) } else { FP::ZERO };
+            // Friction vector from last tick, projected on the new basis.
             p.j1 = rshift(dot3(p.jt, t1));
             p.j2 = rshift(dot3(p.jt, t2));
-            let (j1, j2, jn) = (p.j1, p.j2, p.jn);
-            if j1 != FP::ZERO {
-                apply(&mut va, &mut vb, t1, ima, imb, &p.rows[1], j1);
+        }
+    }
+}
+
+/// Applies the accumulated impulses of every point to the velocities (the
+/// warm start of one substep).
+pub(crate) fn warm_start(cons: &[Constraint], pool: &[ContactPt], vw: &mut [Vw]) {
+    for c in cons {
+        let (a, b) = (c.a as usize, c.b as usize);
+        let (mut va, mut vb) = (vw[a], vw[b]);
+        let (ima, imb) = (c.ima, c.imb);
+        let first = c.first as usize;
+        for p in &pool[first..first + c.count as usize] {
+            if p.j1 != FP::ZERO {
+                apply(&mut va, &mut vb, c.t1, ima, imb, &p.rows[1], p.j1);
             }
-            if j2 != FP::ZERO {
-                apply(&mut va, &mut vb, t2, ima, imb, &p.rows[2], j2);
+            if p.j2 != FP::ZERO {
+                apply(&mut va, &mut vb, c.t2, ima, imb, &p.rows[2], p.j2);
             }
-            if jn != FP::ZERO {
-                apply(&mut va, &mut vb, n, ima, imb, &p.rows[0], jn);
+            if p.jn != FP::ZERO {
+                apply(&mut va, &mut vb, c.normal, ima, imb, &p.rows[0], p.jn);
             }
         }
         vw[a] = va;
         vw[b] = vb;
+    }
+}
+
+/// Recomputes every point's target normal speed from the current
+/// separation: the separation at the start of the tick plus the relative
+/// displacement of the two anchors since then (`pw`: accumulated position
+/// and rotation vector per body). `h` is the substep length.
+pub(crate) fn update_targets(cons: &[Constraint], pool: &mut [ContactPt], pw: &[Vw], cfg: &PhysicsConfig, h: FP) {
+    let inv_h = fastmath::div(FP::ONE, h);
+    for c in cons {
+        let (pa, pb) = (&pw[c.a as usize], &pw[c.b as usize]);
+        let moved = pa.v != FPVec3::ZERO || pa.w != FPVec3::ZERO || pb.v != FPVec3::ZERO || pb.w != FPVec3::ZERO;
+        let first = c.first as usize;
+        for p in pool[first..first + c.count as usize].iter_mut() {
+            let sep = if moved { p.sep + rel_vel(pa, pb, c.normal, &p.rows[0]) } else { p.sep };
+            let bias = if sep >= FP::ZERO {
+                nmul(sep, inv_h)
+            } else {
+                nmul(nmul(cfg.baumgarte, (sep + cfg.linear_slop).min(FP::ZERO)), inv_h).max(-cfg.max_correction_speed)
+            };
+            p.target = (-bias).max(p.rest);
+        }
+    }
+}
+
+/// Stores the friction impulses as world vectors (the cache format).
+pub(crate) fn store_friction(cons: &[Constraint], pool: &mut [ContactPt]) {
+    for c in cons {
+        let first = c.first as usize;
+        for p in pool[first..first + c.count as usize].iter_mut() {
+            p.jt = scale(c.t1, p.j1) + scale(c.t2, p.j2);
+        }
     }
 }
 
@@ -250,14 +285,6 @@ pub(crate) fn solve(cons: &mut [Constraint], pool: &mut [ContactPt], vw: &mut [V
             }
             vw[a] = va;
             vw[b] = vb;
-        }
-    }
-    // Hand the friction impulses back as world vectors for the cache.
-    for c in cons.iter() {
-        let (t1, t2) = (c.t1, c.t2);
-        let first = c.first as usize;
-        for p in pool[first..first + c.count as usize].iter_mut() {
-            p.jt = scale(t1, p.j1) + scale(t2, p.j2);
         }
     }
 }

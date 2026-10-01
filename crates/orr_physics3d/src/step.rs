@@ -94,6 +94,8 @@ pub struct Scratch {
     pool: Vec<ContactPt>,
     binv: Vec<BodyInv>,
     vw: Vec<Vw>,
+    /// Position and rotation vector accumulated over the substeps.
+    pw: Vec<Vw>,
     /// Per mover: new sleep timer, and the island id if it falls asleep.
     mtimer: Vec<u32>,
     mslept: Vec<u32>,
@@ -479,8 +481,8 @@ impl Scratch {
         true
     }
 
-    /// Gravity, damping and clamps for the movers; world inverse inertia
-    /// for every body.
+    /// Damping and clamps for the movers; world inverse inertia for every
+    /// body. Gravity is added per substep.
     fn integrate_velocities(&mut self, bd: &[Body], cfg: &PhysicsConfig) {
         let n = self.ents.len();
         self.vw.clear();
@@ -495,14 +497,12 @@ impl Scratch {
             }
             self.binv.push(bi);
         }
-        let g = cfg.gravity * cfg.dt;
         let (max_v, max_w) = (cfg.max_linear_speed, cfg.max_angular_speed);
         for &i in &self.movers {
             let i = i as usize;
             let b = &bd[self.bslot[i] as usize];
             let (mut v, mut w) = (b.vel, b.omega);
             if self.flags[i] & F_DYN != 0 {
-                v += g;
                 if b.linear_damping != FP::ZERO {
                     v = v * (FP::ONE - b.linear_damping * cfg.dt).max(FP::ZERO);
                 }
@@ -514,6 +514,40 @@ impl Scratch {
             }
             self.vw[i] = Vw { v, w };
         }
+    }
+
+    /// The substep loop: gravity, targets from the current separations,
+    /// warm start, sequential impulses, then move the (workspace) positions.
+    fn run_substeps(&mut self, cfg: &PhysicsConfig) {
+        let subs = cfg.substeps.max(1);
+        // The substeps add up to exactly `dt`: the first `rem` are one raw
+        // unit longer.
+        let (base, rem) = (cfg.dt.raw() / subs as i64, cfg.dt.raw() % subs as i64);
+        self.pw.clear();
+        self.pw.resize(self.ents.len(), Vw::default());
+        for sub in 0..subs {
+            let h = FP::from_raw(base + i64::from((sub as i64) < rem));
+            let g = cfg.gravity * h;
+            for &i in &self.movers {
+                let i = i as usize;
+                if self.flags[i] & F_DYN != 0 {
+                    self.vw[i].v += g;
+                }
+            }
+            if !self.cons.is_empty() {
+                solver::update_targets(&self.cons, &mut self.pool, &self.pw, cfg, h);
+                solver::warm_start(&self.cons, &self.pool, &mut self.vw);
+                solver::solve(&mut self.cons, &mut self.pool, &mut self.vw, cfg.velocity_iterations);
+            }
+            for &i in &self.movers {
+                let i = i as usize;
+                let (v, w) = (self.vw[i].v, self.vw[i].w);
+                let p = &mut self.pw[i];
+                p.v += FPVec3::new(mul_round(v.x, h), mul_round(v.y, h), mul_round(v.z, h));
+                p.w += FPVec3::new(mul_round(w.x, h), mul_round(w.y, h), mul_round(w.z, h));
+            }
+        }
+        solver::store_friction(&self.cons, &mut self.pool);
     }
 
     /// Keeps a badly over-constrained pile from producing runaway
@@ -731,9 +765,9 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
         // Dynamics.
         sc.integrate_velocities(bd, &cfg);
         probe(Phase::Integrate);
-        solver::prepare(&mut sc.cons, &mut sc.pool, &sc.binv, &mut sc.vw, &cfg);
+        solver::prepare(&mut sc.cons, &mut sc.pool, &sc.binv, &sc.vw, &cfg);
         probe(Phase::Prepare);
-        solver::solve(&mut sc.cons, &mut sc.pool, &mut sc.vw, cfg.velocity_iterations);
+        sc.run_substeps(&cfg);
         sc.clamp_velocities(&cfg);
         probe(Phase::Solve);
         sc.update_sleep(bd, &cfg);
@@ -758,9 +792,9 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
             continue;
         }
         let (v, w) = (sc.vw[i].v, sc.vw[i].w);
-        b.pos += FPVec3::new(mul_round(v.x, cfg.dt), mul_round(v.y, cfg.dt), mul_round(v.z, cfg.dt));
-        if w != FPVec3::ZERO {
-            b.rot = integrate_rot(b.rot, w, cfg.dt);
+        b.pos += sc.pw[i].v;
+        if sc.pw[i].w != FPVec3::ZERO {
+            b.rot = integrate_rot(b.rot, sc.pw[i].w, FP::ONE);
         }
         b.vel = v;
         b.omega = w;

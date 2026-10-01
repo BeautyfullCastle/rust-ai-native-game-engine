@@ -1,38 +1,35 @@
 mod common;
-use common::scenes::*;
-use orr_physics3d::{step_probed, Phase, Scratch};
-use std::time::{Duration, Instant};
+use common::*;
+use orr_fp::{fp, FPVec3, FP};
+use orr_physics3d::{PhysicsConfig, PhysicsState, Scratch};
 
-fn profile(n: i32, warm: u32, measure: u32) {
-    let mut f = bench_pile(n, false);
+fn stack(n: i32, cfg: PhysicsConfig) -> (FP, FP) {
+    let mut f = new_frame();
+    ground(&mut f);
+    let mut es = vec![];
+    for i in 0..n {
+        let y = fp!(0.5) + FP::from_int(i) * fp!(1.002);
+        es.push(spawn_box(&mut f, FPVec3::new(FP::ZERO, y, FP::ZERO), v3!(0.5, 0.5, 0.5)));
+    }
+    f.singleton_mut::<PhysicsState>().config = cfg;
     let mut sc = Scratch::new();
-    for _ in 0..warm {
-        orr_physics3d::step(&mut f, &mut sc);
-    }
-    let mut acc = [Duration::ZERO; 9];
-    let mut total = Duration::ZERO;
-    for _ in 0..measure {
-        let t0 = Instant::now();
-        let mut last = t0;
-        step_probed(&mut f, &mut sc, &mut |p| {
-            let now = Instant::now();
-            acc[p as usize] += now - last;
-            last = now;
-        });
-        total += t0.elapsed();
-    }
-    let names = ["gather", "transforms", "broad", "narrow", "integrate", "prepare", "solve", "sleep", "finish"];
-    let mut line = String::new();
-    for (i, nm) in names.iter().enumerate() {
-        line.push_str(&format!("{nm} {:.0}us  ", acc[i].as_micros() as f64 / measure as f64));
-    }
-    println!("P n={n} total {:.0}us/tick | {line} | {:?}", total.as_micros() as f64 / measure as f64, sc.stats());
-    let _ = Phase::Gather;
+    run(&mut f, &mut sc, 900);
+    let t = body(&f, es[(n - 1) as usize]);
+    (t.pos.x.abs().max(t.pos.z.abs()), t.pos.y)
 }
 
 #[test]
-fn prof() {
-    profile(500, 90, 60);
-    profile(1000, 90, 60);
-    profile(500, 400, 60);
+fn sweep() {
+    for (subs, iters) in [(8, 1), (6, 2), (12, 1), (16, 1), (6, 1), (8, 2)] {
+        let mut line = String::new();
+        for n in [15, 20, 25, 30, 40] {
+            let mut c = PhysicsConfig::default();
+            c.sleep_ticks = 0;
+            c.substeps = subs;
+            c.velocity_iterations = iters;
+            let (l, _y) = stack(n, c);
+            line.push_str(&format!("n{n}:{l} "));
+        }
+        println!("C subs {subs} it {iters}: {line}");
+    }
 }

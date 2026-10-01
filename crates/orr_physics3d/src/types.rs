@@ -279,8 +279,18 @@ pub struct PhysicsConfig {
     pub max_linear_speed: FP,
     /// Per-axis angular speed clamp for dynamic bodies.
     pub max_angular_speed: FP,
-    /// Sequential impulse iterations per tick.
+    /// Sequential impulse iterations per substep.
     pub velocity_iterations: u32,
+    /// Substeps per tick (at least 1). Contacts are found once per tick;
+    /// each substep applies gravity, warm starts, solves and moves the
+    /// bodies by `dt / substeps`, with the contact separations updated from
+    /// the motion so far. Many small substeps with few iterations hold a
+    /// stack much better than one big step with many iterations (the
+    /// default of 8 substeps x 1 iteration holds a 20 box stack; 1 x 8 does
+    /// not hold 12). The substeps add up to exactly `dt`.
+    pub substeps: u32,
+    /// Explicit padding, keep 0.
+    pub _pad: u32,
     /// A group of touching bodies falls asleep after every body in it has
     /// been slower than the two sleep speeds for this many ticks. 0 turns
     /// sleeping off.
@@ -303,7 +313,9 @@ impl Default for PhysicsConfig {
             max_correction_speed: fp!(6),
             max_linear_speed: fp!(500),
             max_angular_speed: fp!(60),
-            velocity_iterations: 8,
+            velocity_iterations: 1,
+            substeps: 8,
+            _pad: 0,
             sleep_ticks: 30,
             sleep_linear_speed: fp!(0.05),
             sleep_angular_speed: fp!(0.05),
