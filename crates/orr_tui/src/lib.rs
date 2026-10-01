@@ -20,6 +20,8 @@ mod render_tests;
 pub mod schema;
 pub mod source;
 pub mod state;
+#[cfg(test)]
+mod state_tests;
 pub mod ui;
 
 #[cfg(feature = "ffi")]

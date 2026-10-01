@@ -31,6 +31,56 @@ pub enum Control {
     Step(u32),
 }
 
+/// Where a network client is in joining a game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NetState {
+    #[default]
+    Connecting,
+    Playing,
+    Disconnected,
+    Failed,
+}
+
+impl NetState {
+    pub fn name(self) -> &'static str {
+        match self {
+            NetState::Connecting => "connecting",
+            NetState::Playing => "playing",
+            NetState::Disconnected => "DISCONNECTED",
+            NetState::Failed => "FAILED",
+        }
+    }
+}
+
+/// What a source that plays on a server knows about its session (the C ABI's `OrrSessionStatus`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetStatus {
+    pub state: NetState,
+    pub slot: u32,
+    pub players: u32,
+    pub rtt_ms: u32,
+    pub input_delay: u32,
+    pub head_tick: u64,
+    pub verified_tick: u64,
+    pub rollbacks: u64,
+    pub resim_ticks: u64,
+    /// The latest rollback resimulated these ticks (0, 0 = none yet).
+    pub last_rollback: (u64, u64),
+    pub desyncs: u64,
+    pub stall_episodes: u64,
+}
+
+impl NetStatus {
+    /// Ticks resimulated by the latest rollback.
+    pub fn last_depth(&self) -> u64 {
+        if self.last_rollback.0 == 0 {
+            0
+        } else {
+            self.last_rollback.1 + 1 - self.last_rollback.0
+        }
+    }
+}
+
 pub trait Source {
     /// The schema text, as received.
     fn schema_text(&self) -> &str;
@@ -41,6 +91,14 @@ pub trait Source {
     fn control(&mut self, c: Control) -> Result<(), String>;
     /// A few words about the connection, for the help line.
     fn describe(&self) -> String;
+    /// The state of the session if this source plays on a server (`None` for a local host).
+    fn net_status(&mut self) -> Option<NetStatus> {
+        None
+    }
+    /// The checksum of the confirmed state at `tick` (a checkpoint tick), if this source knows it.
+    fn confirmed_checksum(&mut self, _tick: u64) -> Option<u64> {
+        None
+    }
 }
 
 /// Bytes of a binary message as a frame or an event batch (anything else is not ours).

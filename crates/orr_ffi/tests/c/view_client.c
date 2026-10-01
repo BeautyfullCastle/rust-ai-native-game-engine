@@ -242,9 +242,26 @@ int main(int argc, char** argv) {
     CHECK(orr_erp_call(h, "not json", answer, sizeof answer, &needed) == ORR_ERR_ARG);
     CHECK(orr_erp_call(h, "{\"method\":\"watch.subscribe\"}", answer, sizeof answer, &needed) == ORR_ERR_ARG);
 
-    /* ---- events: this scene emits none; the queue is empty, not an error ---- */
-    uint8_t ev[256];
-    CHECK(orr_events_poll(h, ev, sizeof ev, &w) == ORR_NO_FRAME);
+    /* ---- events: player 0 shoots during the scenario ("shot", event type 1). A local session has
+     * no rollback, so every event is final: state 1 (verified), never predicted or canceled ---- */
+    {
+        uint8_t ev[8192];
+        int shots = 0;
+        for (;;) {
+            int rc = orr_events_poll(h, ev, sizeof ev, &w);
+            if (rc == ORR_NO_FRAME) break;
+            CHECK(rc == ORR_OK && w >= 16 && memcmp(ev, "OVS1", 4) == 0 && ev[6] == 2);
+            uint32_t n = rd_u32(ev + 8);
+            const uint8_t* r = ev + 16;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t plen = rd_u32(r + 20);
+                CHECK(r[16] == 1); /* verified */
+                if (rd_u16(r + 18) == 1) shots++;
+                r += 24 + ((plen + 7u) & ~7u);
+            }
+        }
+        CHECK(shots > 0);
+    }
 
     /* ---- a seek is a jump: flagged, paused, no blend ---- */
     CHECK(orr_control(h, ORR_CTL_SEEK, 60) == ORR_OK);

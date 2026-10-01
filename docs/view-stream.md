@@ -20,10 +20,15 @@ Four ways to get the same bytes:
 
 | Way | For | Entry point |
 | --- | --- | --- |
-| C ABI | a view in the same process (Unity plugin, Unreal module, GDExtension, console title) | `orr_host_open`, `orr_view_poll` |
+| C ABI | a view in the same process (Unity plugin, Unreal module, GDExtension, console title) | `orr_host_open` (local), `orr_client_open` (multiplayer), `orr_view_poll` |
 | WebSocket | a view in another process, machine or devkit | `watch.subscribe {"topics":["viewstream"]}` |
 | Plain TCP | scripts, tools, anything without a WebSocket library | same call, frames arrive as hex in JSON |
 | Rust | `orr_bridge` users | `ViewStreamSource::pump(&mut bridge)` |
+
+The stream is the same whether the simulation is a local play session or a **multiplayer client**
+that predicts and rolls back: see "Multiplayer (client sessions)" below. Only the C ABI opens a
+client session today; the ERP `viewstream` topic still serves the single-peer play session of an
+`orr_remote` host (no rollback, every event verified).
 
 ## Messages
 
@@ -135,7 +140,9 @@ rollback resimulation. A `verified` or `canceled` record matches the
 `predicted` record with the same key. `predicted` events may be canceled by a
 later rollback (make reactions reversible: sounds, particles); `verified`
 events are final and announced once; `canceled` carries no payload. A
-single-machine play session has no rollback, so its events are all `verified`.
+single-machine play session has no rollback, so its events are all `verified`. A client
+session (below) sends `predicted` first, then `verified` or `canceled` with the same key. The
+physics demo emits a `shot` event (type 1) when a paddle fires.
 
 ## Schema (JSON)
 
@@ -157,7 +164,7 @@ the order below, so even a `strstr` reader can find them. Example (shortened):
                               {"name":"spin","offset":16,"size":4,"type":"i32"},
                               {"name":"buttons","offset":20,"size":4,"bits":{"shoot":1},"type":"flags"}]},
  "command":{"size":4},
- "events":[{"id":0,"name":"trigger","payload_size":12}]}
+ "events":[{"id":0,"name":"trigger","payload_size":12},{"id":1,"name":"shot","payload_size":12}]}
 ```
 
 - `build_id`: hosts with the same build id simulate identically.
@@ -170,6 +177,51 @@ the order below, so even a `strstr` reader can find them. Example (shortened):
   `struct` (`fields`). Unknown types are `opaque`.
 - `command.size`: size of the game's command encoding (0 = none).
 - `kinds`, `events`: the game's vocabulary.
+
+## Multiplayer (client sessions)
+
+A view can play a game on an `orr_server` room through the C ABI: `orr_client_open` joins as a
+relay client (QUIC, or plain WebSocket; the same simulated latency, jitter and loss as the Rust
+samples' `--sim-*` options, for testing), runs the prediction and rollback of `orr_session` on
+the host thread, and feeds this stream from the Rust bridge's snapshots (`ViewStreamSource` over
+`Threaded<PhysGame>`), exactly as `orr_sample --connect` does for its own window. What differs
+from a local host:
+
+- **`rolled_back`** is set on the first frame after a rollback, with `rollback_from..rollback_to`
+  (the ticks that were resimulated, at most the prediction window). `tick` is the predicted head,
+  `verified_tick` the newest tick every player's input is confirmed for; `tick - verified_tick` is
+  the prediction depth. Positions of the resimulated ticks may have changed: blend the correction
+  over about 100 ms (`orr_tui` does: it keeps where each entity was drawn and fades the difference
+  out; positions only).
+- **Events** arrive as `predicted` (the head simulated them from predicted inputs), then, with
+  the same `(tick, system, seq)` key, `verified` (the confirmed inputs produced them) or
+  `canceled` (a rollback found they do not happen). A view starts a sound or particle on
+  `predicted` and takes it back on `canceled`. Events that only exist after a rollback arrive as
+  new `predicted` records. Every `verified` and `canceled` record is preceded by its `predicted`.
+- **Inputs**: `orr_set_input` works for the joined slot only (the server chose it; see the
+  status). Commands go with the next submitted tick. Timeline controls (play, pause, step, seek,
+  speed), `orr_erp_call` and listening sockets belong to a local host and return `ORR_ERR_ARG`.
+- **Session status** is not part of the stream (the binary layout, and so the format version 1,
+  is unchanged): `orr_session_status` fills a struct with the state (`CONNECTING`, `PLAYING`,
+  `DISCONNECTED`, `FAILED`), the joined slot and player count, smoothed round trip time, input
+  delay in ticks, head and verified tick, rollbacks, ticks resimulated, the range of the latest
+  rollback, desyncs reported by the room, stalls and repeated inputs. A rollbacks-per-second or
+  depth readout is computed by the view from it and from the frames. Joining returns at once
+  (`CONNECTING`; the room starts when every player is in), or waits with `ORR_CLIENT_WAIT`; until
+  it plays, polls say `ORR_NO_FRAME` and the schema `ORR_ERR_NOT_READY`. A lost connection turns
+  the state to `DISCONNECTED` (the last frames stay readable); a refused or failed join to
+  `FAILED` (the next view call returns `ORR_ERR_HOST` with the reason in `orr_last_error`).
+- **Agreement**: `orr_confirmed_checksum(h, tick, &found, &sum)` gives the checksum of the
+  confirmed state at a checkpoint tick (a multiple of the room's checksum interval, 30). It is
+  the value the client reports to the server; two peers that agree on a tick have the same
+  state there. A desync turns on `ORR_STATUS_DESYNC`.
+
+`TickInputs` carries per-player flags for the game (`PlayerFlags`): `predicted` (this tick's input
+of that player was not confirmed when the tick was simulated: a repeat of the last confirmed one)
+and `disconnected` (the server confirmed the tick with nobody in the slot). `predicted` is a hint
+for view-side logic only: a rule that depends on it would make peers differ. `disconnected` comes
+from the server's confirmed bundle, so it is the same on every peer, and a prediction that
+assumed the old value triggers a rollback like a wrong input.
 
 ## Driving the simulation
 
@@ -215,7 +267,15 @@ decoder, no simulation crates; `tests/deps.rs` enforces it), reads the stream
 with a tiny WebSocket/TCP client (`--connect ws://host:port [--token t]`) or
 through the C ABI loaded at run time (`--ffi [--lib path]`, calling the
 functions of `orrery.h` through `extern "C"` declarations, feature `ffi`), and
-builds input bytes from the schema's input layout. `--headless --frames N
+builds input bytes from the schema's input layout. `--server HOST:PORT [--fingerprint HEX |
+--insecure] [--sim-latency MS --sim-jitter MS --sim-loss PCT]` joins a multiplayer game
+through the C ABI (`orr_client_open`): the status line shows slot, round trip time, input delay,
+rollbacks per second and the depth of the last one, event counts by state (predicted, verified,
+canceled and the transitions), and a rollback correction fades out over 0.1 s instead of
+snapping. `--headless --server ...` plays a scripted player for `--ticks` and prints
+`RESULT client slot=.. players=.. ticks=.. rolled_back_frames=.. max_depth=.. rtt_ms=.. predicted=..
+verified=.. canceled=.. checkpoint=300 checksum=0x..`; every player of a room prints the same
+`checkpoint=` and `checksum=` parts (the confirmed state at that verified tick). `--headless --frames N
 --dump file` prints `RESULT entities=.. frames=.. fnv=0x..`, the same line the
 C client and the Rust bridge produce for the same scenario.
 
@@ -234,6 +294,7 @@ are the same for every game.
 
 ```c
 OrrHost* h = orr_host_open(NULL /* demo scene */, &cfg);   /* thread + paused session */
+/* or, to play a multiplayer game: OrrClientConfig cc = {sizeof cc, ORR_CLIENT_WAIT, ...}; h = orr_client_open(&cc); */
 size_t n = orr_schema_json(h, NULL, 0);                    /* size query */
 char* schema = malloc(n); orr_schema_json(h, schema, n);   /* kinds, input layout */
 orr_set_input(h, 0, input_bytes, 24);                      /* layout from the schema */
@@ -254,6 +315,9 @@ orr_host_close(h);
 | `orr_set_input(h, player, bytes, len)`, `orr_send_command(...)` | the two view-to-sim writes |
 | `orr_control(h, op, arg)` | `PLAY`, `PAUSE`, `STEP n`, `SEEK tick`, `SPEED permille`, `BRANCH`, `RESTART` |
 | `orr_erp_call(h, request_json, out, cap, &needed)` | the full ERP method set in process (`world.query`, `scene.save`, ...), for a foreign editor |
+| `orr_client_open(cfg)` | play on an `orr_server` room (ABI 2): `OrrClientConfig` has the server address, transport, certificate fingerprint, room, slot, simulated latency/jitter/loss, timeout |
+| `orr_session_status(h, &status)` | `OrrSessionStatus` of either kind of handle (state, slot, RTT, input delay, rollbacks, desyncs, ...) |
+| `orr_confirmed_checksum(h, tick, &found, &sum)` | checksum of the confirmed state at a checkpoint tick (client sessions) |
 
 A host opened with `ORR_HOST_LISTEN` also serves ERP on a loopback port (for out-of-process
 views and tools) **without authentication**: any local process can drive it. Use it for
@@ -286,7 +350,7 @@ full `Frame`s). A `max_fps` below the tick rate cuts the cost proportionally.
 What a Unity, Unreal or Godot view has to do, in order:
 
 1. Load the library (P/Invoke, `FPlatformProcess::GetDllHandle`, GDExtension) and
-   wrap the ten functions above; check `orr_abi_version`.
+   wrap the functions above; check `orr_abi_version` (2 for client sessions).
 2. Read the schema once: entity kinds (to pick a prefab, mesh or material per
    kind) and the input layout (to build the input bytes).
 3. Each render frame: `orr_view_poll_ptr`; if a frame came, diff its ids

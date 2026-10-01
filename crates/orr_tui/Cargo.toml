@@ -34,3 +34,6 @@ orr_sample = { path = "../orr_sample" }
 orr_bridge = { path = "../orr_bridge" }
 orr_session = { path = "../orr_session" }
 orr_viewstream = { path = "../orr_viewstream" }
+# The relay server, in process, for the client mode test (`tests/client.rs`).
+orr_server = { path = "../orr_server" }
+orr_relay_net = { path = "../orr_relay_net" }

@@ -12,6 +12,10 @@ pub struct RemoteInput<G: Game> {
     pub slot: PlayerSlot,
     pub input: G::Input,
     pub commands: Vec<G::Command>,
+    /// The server confirmed this tick with nobody present in the slot (relay
+    /// `FLAG_ABSENT`): the game sees `PlayerFlags::disconnected`. Always
+    /// `false` outside relay sessions.
+    pub disconnected: bool,
 }
 
 /// Where a [`crate::Session`] gets other players' confirmed inputs from.
@@ -163,7 +167,7 @@ impl<G: Game> InputSource<G> for LoopbackEnd<G> {
         while i < link.queue.len() {
             if link.queue[i].deliver_at <= now {
                 let env = link.queue.remove(i).unwrap();
-                out.push(RemoteInput { tick: env.tick, slot: env.slot, input: env.input, commands: env.commands });
+                out.push(RemoteInput { tick: env.tick, slot: env.slot, input: env.input, commands: env.commands, disconnected: false });
             } else {
                 i += 1;
             }

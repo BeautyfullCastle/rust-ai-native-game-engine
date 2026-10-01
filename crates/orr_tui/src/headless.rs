@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use orr_viewstream::{ViewFrame, HEADER_LEN, RECORD_LEN};
 
-use crate::input::{encode, scenario};
+use crate::input::{encode, scenario, Controls};
 use crate::render::render;
 use crate::schema::ViewSchema;
-use crate::source::{Control, Incoming, Source};
+use crate::source::{Control, Incoming, NetState, Source};
 use crate::state::ViewState;
 
 pub struct HeadlessOpts {
@@ -101,4 +101,136 @@ pub fn run(src: &mut dyn Source, opts: &HeadlessOpts) -> Result<Summary, String>
         std::fs::write(path, dump).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(Summary { entities, frames: opts.frames, fnv: hash })
+}
+
+// ---- client mode: playing on a server through the C ABI ----
+
+/// Options of [`run_client`].
+pub struct ClientOpts {
+    /// Play at least this many ticks (every tick sets the scripted input of the joined slot).
+    pub ticks: u64,
+    /// The verified tick whose confirmed checksum is printed (a checkpoint tick: a multiple of
+    /// the room's checksum interval, 30 by default).
+    pub check_tick: u64,
+}
+
+impl Default for ClientOpts {
+    fn default() -> Self {
+        ClientOpts { ticks: 480, check_tick: 300 }
+    }
+}
+
+/// The last line of a headless client run. The `checkpoint` and `checksum` parts are the
+/// confirmed state at a fixed verified tick: every player of a room prints the same ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientSummary {
+    pub slot: u32,
+    pub players: u32,
+    pub ticks: u64,
+    pub rolled_back_frames: u64,
+    pub max_depth: u64,
+    pub rtt_ms: u32,
+    pub predicted: u64,
+    pub verified: u64,
+    pub canceled: u64,
+    pub checkpoint: u64,
+    pub checksum: u64,
+}
+
+impl std::fmt::Display for ClientSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RESULT client slot={} players={} ticks={} rolled_back_frames={} max_depth={} rtt_ms={} predicted={} verified={} canceled={} {}",
+            self.slot,
+            self.players,
+            self.ticks,
+            self.rolled_back_frames,
+            self.max_depth,
+            self.rtt_ms,
+            self.predicted,
+            self.verified,
+            self.canceled,
+            self.agreed_part()
+        )
+    }
+}
+
+impl ClientSummary {
+    /// The part every player of the room must agree on.
+    pub fn agreed_part(&self) -> String {
+        format!("checkpoint={} checksum=0x{:016x}", self.checkpoint, self.checksum)
+    }
+}
+
+/// Plays a scripted scenario on a server. Every new frame sets the input of the joined slot from
+/// the schema layout. Runs until `ticks` were played and the confirmed state at `check_tick` is
+/// known (waits for progress, not for a fixed time: it fails when no frame arrives for 30 s).
+pub fn run_client(src: &mut dyn Source, opts: &ClientOpts) -> Result<ClientSummary, String> {
+    let schema = ViewSchema::parse(src.schema_text())?;
+    let mut state = ViewState::new(schema.clone(), Instant::now());
+    let mut status = src.net_status().ok_or("this source is not a network client")?;
+    let mut last_input_tick = None;
+    let mut last_progress = Instant::now();
+    let mut last_status = Instant::now();
+    loop {
+        let now = Instant::now();
+        match src.recv(Duration::from_millis(5))? {
+            Some(Incoming::Error(e)) => return Err(e),
+            Some(msg) => {
+                let is_frame = matches!(msg, Incoming::Frame(_));
+                state.ingest(&msg, now);
+                if is_frame {
+                    last_progress = now;
+                    if let Some(f) = &state.frame {
+                        if last_input_tick != Some(f.tick) {
+                            last_input_tick = Some(f.tick);
+                            src.set_input(status.slot as u8, &encode(&schema, &scenario_for(status.slot, f.tick)))?;
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+        if last_status.elapsed() >= Duration::from_millis(20) {
+            last_status = Instant::now();
+            status = src.net_status().ok_or("lost the session status")?;
+            state.set_net(status, now);
+            if matches!(status.state, NetState::Disconnected | NetState::Failed) {
+                return Err(format!("the session ended: {}", status.state.name()));
+            }
+        }
+        if now.duration_since(last_progress) > Duration::from_secs(30) {
+            return Err(format!("no frame for 30 s (head tick {}, verified {})", status.head_tick, status.verified_tick));
+        }
+        let played = state.frame.as_ref().map_or(0, |f| f.tick);
+        if played >= opts.ticks && status.verified_tick >= opts.check_tick {
+            if let Some(checksum) = src.confirmed_checksum(opts.check_tick) {
+                // Events that are still on their way count too: drain what is queued.
+                while let Some(msg) = src.recv(Duration::from_millis(1))? {
+                    state.ingest(&msg, Instant::now());
+                }
+                let [predicted, verified, canceled] = state.event_counts;
+                return Ok(ClientSummary {
+                    slot: status.slot,
+                    players: status.players,
+                    ticks: played,
+                    rolled_back_frames: state.rolled_back_frames,
+                    max_depth: state.max_rollback_depth,
+                    rtt_ms: status.rtt_ms,
+                    predicted,
+                    verified,
+                    canceled,
+                    checkpoint: opts.check_tick,
+                    checksum,
+                });
+            }
+        }
+    }
+}
+
+/// The scripted player of the client run: the scenario of the local headless run, with the joined
+/// slot as the player and the tick of the frame, so every client moves differently.
+fn scenario_for(slot: u32, tick: u64) -> Controls {
+    scenario(slot, u32::try_from(tick).unwrap_or(u32::MAX))
 }

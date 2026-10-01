@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use orr_bridge::{BridgeConfig, Lifecycle, PlayerSlot, RelayHost, RelayHostOptions, RelayMetrics, RelayStatus, Threaded, ThreadedConfig};
+use orr_bridge::{
+    BridgeConfig, Lifecycle, PlayerSlot, RelayHost, RelayHostOptions, RelayMetrics, RelayStatus, StatusFn, Threaded, ThreadedConfig,
+};
 use orr_relay_net::{
     connect, drive, fresh_seed, parse_fingerprint, ClientReport, ConnectOptions, DirSink, DriveOptions, NetLink, SimConditions, TransportKind,
     Trust,
@@ -48,6 +50,8 @@ pub struct NetArgs {
     /// Headless only: play with a scripted bot.
     pub bot: bool,
     pub connect_timeout: Duration,
+    /// Print no status lines (a library host such as `orr_ffi` must not write to the process's output).
+    pub quiet: bool,
 }
 
 impl Default for NetArgs {
@@ -65,6 +69,7 @@ impl Default for NetArgs {
             desync_dir: PathBuf::from("desync"),
             bot: false,
             connect_timeout: Duration::from_secs(60),
+            quiet: false,
         }
     }
 }
@@ -130,7 +135,9 @@ impl NetArgs {
         let mut sim = self.sim;
         if sim.is_active() {
             sim.seed = self.sim_seed.unwrap_or_else(fresh_seed);
-            println!("{}: network simulation {sim:?} (repeat with --sim-seed {})", self.name, sim.seed);
+            if !self.quiet {
+                println!("{}: network simulation {sim:?} (repeat with --sim-seed {})", self.name, sim.seed);
+            }
         }
         o.sim = Some(sim).filter(SimConditions::is_active);
         Ok(o)
@@ -151,7 +158,7 @@ impl NetArgs {
         let tag = self.name.clone();
         RelayHostOptions {
             connect_timeout: self.connect_timeout,
-            on_status: Some(Box::new(move |s| eprintln!("[{tag}] {s}"))),
+            on_status: (!self.quiet).then(|| Box::new(move |s: &str| eprintln!("[{tag}] {s}")) as StatusFn),
             commands_from_input: None,
             metrics: Some(metrics),
         }

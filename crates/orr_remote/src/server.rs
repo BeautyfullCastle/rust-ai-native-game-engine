@@ -591,7 +591,7 @@ impl ErpServer {
         if fx.crash {
             self.crash = true;
         }
-        if !fx.events.is_empty() && self.conns.values().any(|c| c.subs.events) {
+        if !fx.events.is_empty() && self.conns.values().any(|c| c.subs.events || c.subs.viewstream.is_some()) {
             self.events_out.append(&mut fx.events);
         }
         if result.is_err() {

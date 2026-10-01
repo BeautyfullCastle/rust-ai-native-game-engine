@@ -68,6 +68,13 @@ fn the_whole_dependency_tree_has_no_simulation_crate() {
     }
 }
 
+/// Whether `code` names the crate `name` itself. A longer identifier that starts with it is not the
+/// crate: the C ABI function `orr_session_status` is not a use of `orr_session`.
+fn names_crate(code: &str, name: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    code.match_indices(name).any(|(at, _)| name.ends_with("::") || !code[at + name.len()..].chars().next().is_some_and(ident))
+}
+
 #[test]
 fn the_sources_do_not_name_simulation_crates() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -85,7 +92,7 @@ fn the_sources_do_not_name_simulation_crates() {
                 continue;
             }
             for forbidden in ["orr_ecs", "orr_sim", "orr_session", "orr_physics", "orr_bridge", "orr_view::", "orr_sample", "orr_ffi::", "orr_remote", "orr_testgame"] {
-                assert!(!code.contains(forbidden), "{}:{} names {forbidden}: {line}", path.display(), i + 1);
+                assert!(!names_crate(code, forbidden), "{}:{} names {forbidden}: {line}", path.display(), i + 1);
             }
         }
         checked += 1;

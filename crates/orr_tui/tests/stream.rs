@@ -129,14 +129,13 @@ mod ffi {
     /// `cargo test` does not build the cdylib of `orr_ffi`: build it (same profile and target dir).
     fn ensure_lib() -> PathBuf {
         let lib = profile_dir().join(orr_tui::ffi::lib_file_name());
-        if !lib.exists() {
-            let mut cmd = Command::new(env!("CARGO"));
-            cmd.args(["build", "-p", "orr_ffi", "--lib"]);
-            if profile_dir().file_name().is_some_and(|n| n == "release") {
-                cmd.arg("--release");
-            }
-            assert!(cmd.status().unwrap().success(), "cargo build -p orr_ffi failed");
+        // Always build: a no-op when current, and a library left by an earlier run never hides a change.
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.args(["build", "-p", "orr_ffi", "--lib"]);
+        if profile_dir().file_name().is_some_and(|n| n == "release") {
+            cmd.arg("--release");
         }
+        assert!(cmd.status().unwrap().success(), "cargo build -p orr_ffi failed");
         assert!(lib.exists(), "{} was not built", lib.display());
         lib
     }
