@@ -5,8 +5,11 @@ use std::sync::Arc;
 use orr_rhi::{Acquire, Rhi, TextureDesc, TextureFormat, TextureUsage, Wgpu, WgpuOptions, WindowHandle};
 
 use crate::camera::Camera;
+use crate::camera3d::Camera3D;
 use crate::list::RenderList;
+use crate::list3d::RenderList3D;
 use crate::renderer::Renderer;
+use crate::renderer3d::{Renderer3D, Settings3D};
 
 /// An offscreen color texture. For the editor viewport: draw into it with
 /// [`OffscreenTarget::render`], then show [`OffscreenTarget::sample_view`]
@@ -39,6 +42,7 @@ impl<B: Rhi> OffscreenTarget<B> {
             height,
             format,
             usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_SRC,
+            sample_count: 1,
             view_formats: &view_formats,
         });
         let render_view = rhi.create_texture_view(&texture, None);
@@ -92,6 +96,11 @@ impl<B: Rhi> OffscreenTarget<B> {
 
     /// Draws `list` into the texture.
     pub fn render(&self, renderer: &mut Renderer<B>, list: &RenderList, camera: &Camera) {
+        renderer.draw(&self.render_view, self.size, list, camera);
+    }
+
+    /// Draws a 3D `list` into the texture (multisampled, resolved into it).
+    pub fn render3d(&self, renderer: &mut Renderer3D<B>, list: &RenderList3D, camera: &Camera3D) {
         renderer.draw(&self.render_view, self.size, list, camera);
     }
 
@@ -154,5 +163,57 @@ impl WindowRenderer<Wgpu> {
     pub fn new<W: WindowHandle>(window: Arc<W>, size: (u32, u32), vsync: bool) -> Result<Self, String> {
         let (rhi, surface) = Wgpu::for_window(window, size, vsync, WgpuOptions { allow_software_fallback: false, ..Default::default() })?;
         Ok(Self::from_parts(rhi, surface, size))
+    }
+}
+
+/// A window surface and the 3D renderer that draws to it.
+pub struct WindowRenderer3D<B: Rhi> {
+    pub renderer: Renderer3D<B>,
+    surface: B::Surface,
+    size: (u32, u32),
+}
+
+impl<B: Rhi> WindowRenderer3D<B> {
+    pub fn from_parts(rhi: B, surface: B::Surface, size: (u32, u32), settings: Settings3D) -> Self {
+        let format = rhi.surface_format(&surface);
+        Self {
+            renderer: Renderer3D::with_settings(rhi, format, settings),
+            surface,
+            size: (size.0.max(1), size.1.max(1)),
+        }
+    }
+
+    pub fn adapter_name(&self) -> String {
+        self.renderer.rhi().adapter_name()
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.size = (width, height);
+        self.renderer.rhi().resize_surface(&mut self.surface, width, height);
+    }
+
+    /// Draws and presents. Returns `false` if the frame was skipped.
+    pub fn render(&mut self, list: &RenderList3D, camera: &Camera3D) -> bool {
+        let rhi = self.renderer.rhi().clone();
+        let Acquire::Frame(frame) = rhi.acquire_frame(&mut self.surface) else { return false };
+        self.renderer.draw(rhi.frame_view(&frame), self.size, list, camera);
+        rhi.present(frame);
+        true
+    }
+}
+
+impl WindowRenderer3D<Wgpu> {
+    /// Creates the GPU state for `window`.
+    pub fn new<W: WindowHandle>(window: Arc<W>, size: (u32, u32), vsync: bool, settings: Settings3D) -> Result<Self, String> {
+        let (rhi, surface) =
+            Wgpu::for_window(window, size, vsync, WgpuOptions { allow_software_fallback: false, ..Default::default() })?;
+        Ok(Self::from_parts(rhi, surface, size, settings))
     }
 }

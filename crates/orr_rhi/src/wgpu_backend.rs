@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use crate::{
-    Acquire, Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, PipelineDesc, Rhi, TextureDesc,
-    TextureFormat, TextureUsage, Topology, VertexFormat, VertexStep, WindowHandle,
+    Acquire, Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, Compare, Cull, DepthAttachment,
+    PipelineDesc, Rhi, SamplerDesc, TextureDesc, TextureFormat, TextureUsage, Topology, VertexFormat, VertexStep,
+    WindowHandle,
 };
 
 /// How to pick the adapter.
@@ -52,6 +53,7 @@ fn to_wgpu_format(f: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
         TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
         TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+        TextureFormat::Depth32Float => wgpu::TextureFormat::Depth32Float,
     }
 }
 
@@ -82,6 +84,7 @@ fn buffer_usages(u: BufferUsage) -> wgpu::BufferUsages {
         (BufferUsage::UNIFORM, wgpu::BufferUsages::UNIFORM),
         (BufferUsage::COPY_SRC, wgpu::BufferUsages::COPY_SRC),
         (BufferUsage::COPY_DST, wgpu::BufferUsages::COPY_DST),
+        (BufferUsage::INDEX, wgpu::BufferUsages::INDEX),
     ] {
         if u.contains(flag) {
             r |= w;
@@ -227,6 +230,7 @@ impl Rhi for Wgpu {
     type Shader = wgpu::ShaderModule;
     type Pipeline = wgpu::RenderPipeline;
     type BindGroup = wgpu::BindGroup;
+    type Sampler = wgpu::Sampler;
     type Encoder = wgpu::CommandEncoder;
     type Surface = WgpuSurface;
     type Frame = WgpuFrame;
@@ -254,7 +258,7 @@ impl Rhi for Wgpu {
             label: Some(desc.label),
             size: wgpu::Extent3d { width: desc.width.max(1), height: desc.height.max(1), depth_or_array_layers: 1 },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: desc.sample_count.max(1),
             dimension: wgpu::TextureDimension::D2,
             format: to_wgpu_format(desc.format),
             usage: texture_usages(desc.usage),
@@ -264,6 +268,25 @@ impl Rhi for Wgpu {
 
     fn create_texture_view(&self, texture: &wgpu::Texture, format: Option<TextureFormat>) -> wgpu::TextureView {
         texture.create_view(&wgpu::TextureViewDescriptor { format: format.map(to_wgpu_format), ..Default::default() })
+    }
+
+    fn create_sampler(&self, desc: &SamplerDesc) -> wgpu::Sampler {
+        let filter = if desc.linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
+        self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("orr sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: filter,
+            min_filter: filter,
+            compare: desc.compare.then_some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        })
+    }
+
+    fn sample_count_supported(&self, format: TextureFormat, samples: u32) -> bool {
+        samples == 1
+            || self.adapter.get_texture_format_features(to_wgpu_format(format)).flags.sample_count_supported(samples)
     }
 
     fn create_shader(&self, label: &str, wgsl: &str) -> wgpu::ShaderModule {
@@ -308,6 +331,23 @@ impl Rhi for Wgpu {
             Blend::Opaque => None,
             Blend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
         };
+        let targets: Vec<Option<wgpu::ColorTargetState>> = desc
+            .color_format
+            .map(|f| wgpu::ColorTargetState { format: to_wgpu_format(f), blend, write_mask: wgpu::ColorWrites::ALL })
+            .into_iter()
+            .map(Some)
+            .collect();
+        let depth_stencil = desc.depth.map(|d| wgpu::DepthStencilState {
+            format: to_wgpu_format(d.format),
+            depth_write_enabled: Some(d.write),
+            depth_compare: Some(match d.compare {
+                Compare::Less => wgpu::CompareFunction::Less,
+                Compare::LessEqual => wgpu::CompareFunction::LessEqual,
+                Compare::Always => wgpu::CompareFunction::Always,
+            }),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState { constant: d.bias, slope_scale: d.slope_bias, clamp: 0.0 },
+        });
         self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(desc.label),
             layout: None,
@@ -317,25 +357,26 @@ impl Rhi for Wgpu {
                 compilation_options: Default::default(),
                 buffers: &buffers,
             },
-            fragment: Some(wgpu::FragmentState {
+            fragment: desc.color_format.map(|_| wgpu::FragmentState {
                 module: desc.shader,
                 entry_point: Some(desc.fs_entry),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: to_wgpu_format(desc.color_format),
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &targets,
             }),
             primitive: wgpu::PrimitiveState {
                 topology: match desc.topology {
                     Topology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
                     Topology::LineList => wgpu::PrimitiveTopology::LineList,
                 },
+                cull_mode: match desc.cull {
+                    Cull::None => None,
+                    Cull::Back => Some(wgpu::Face::Back),
+                    Cull::Front => Some(wgpu::Face::Front),
+                },
                 ..Default::default()
             },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            depth_stencil,
+            multisample: wgpu::MultisampleState { count: desc.samples.max(1), mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
         })
@@ -349,6 +390,12 @@ impl Rhi for Wgpu {
                 Binding::Uniform { binding, buffer } => {
                     wgpu::BindGroupEntry { binding: *binding, resource: buffer.as_entire_binding() }
                 }
+                Binding::Texture { binding, view } => {
+                    wgpu::BindGroupEntry { binding: *binding, resource: wgpu::BindingResource::TextureView(view) }
+                }
+                Binding::Sampler { binding, sampler } => {
+                    wgpu::BindGroupEntry { binding: *binding, resource: wgpu::BindingResource::Sampler(sampler) }
+                }
             })
             .collect();
         self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &entries })
@@ -358,26 +405,44 @@ impl Rhi for Wgpu {
         self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
     }
 
-    fn encode_render_pass(
+    fn encode_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         label: &str,
-        color: &ColorAttachment<Self>,
+        color: Option<&ColorAttachment<Self>>,
+        depth: Option<&DepthAttachment<Self>>,
         commands: &[Command<Self>],
     ) {
-        let load = match color.clear {
-            Some([r, g, b, a]) => wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
-            None => wgpu::LoadOp::Load,
-        };
+        let color_attachment = color.map(|c| {
+            let load = match c.clear {
+                Some([r, g, b, a]) => wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
+                None => wgpu::LoadOp::Load,
+            };
+            // With a resolve target the multisampled contents are not needed afterwards.
+            let store = if c.resolve.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store };
+            wgpu::RenderPassColorAttachment {
+                view: c.view,
+                depth_slice: None,
+                resolve_target: c.resolve,
+                ops: wgpu::Operations { load, store },
+            }
+        });
+        let color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = color_attachment.into_iter().map(Some).collect();
+        let depth_attachment = depth.map(|d| wgpu::RenderPassDepthStencilAttachment {
+            view: d.view,
+            depth_ops: Some(wgpu::Operations {
+                load: match d.clear {
+                    Some(v) => wgpu::LoadOp::Clear(v),
+                    None => wgpu::LoadOp::Load,
+                },
+                store: if d.store { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard },
+            }),
+            stencil_ops: None,
+        });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: color.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
-            })],
-            depth_stencil_attachment: None,
+            color_attachments: color_attachments.as_slice(),
+            depth_stencil_attachment: depth_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
@@ -387,7 +452,11 @@ impl Rhi for Wgpu {
                 Command::SetPipeline(p) => pass.set_pipeline(p),
                 Command::SetBindGroup(i, g) => pass.set_bind_group(*i, *g, &[]),
                 Command::SetVertexBuffer(i, b) => pass.set_vertex_buffer(*i, b.slice(..)),
+                Command::SetIndexBuffer(b) => pass.set_index_buffer(b.slice(..), wgpu::IndexFormat::Uint32),
                 Command::Draw { vertices, instances } => pass.draw(vertices.clone(), instances.clone()),
+                Command::DrawIndexed { indices, base_vertex, instances } => {
+                    pass.draw_indexed(indices.clone(), *base_vertex, instances.clone())
+                }
             }
         }
     }
