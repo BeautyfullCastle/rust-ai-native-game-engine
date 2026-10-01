@@ -28,13 +28,27 @@
 //!   custom game:   --input-size BYTES  --build-id N (or --any-build)  --config-hex HEX
 //!                  (these also override the presets)
 //!
+//!   --authoritative          authoritative rooms (design 6.1): the server also runs the game's sim on the
+//!                            confirmed inputs, referees client checksums (a client with a wrong checksum
+//!                            gets a correction snapshot; one that keeps diverging is kicked), serves late
+//!                            joiners itself and audits the game state for cheating. Needs a game the
+//!                            server knows (--game arena). Relay stays the default. See docs/authoritative.md.
+//!   --ai-slot N              (authoritative, repeatable) slot N is played by the server's AI bot, no client
+//!                            can take it; its input rides in the confirmed bundles like a human's
+//!   --dump-dir DIR           (authoritative) where the server's .orrd desync dumps go (default ./orr_dumps)
+//!   --kick-after N           (authoritative) kick a client on its Nth wrong checksum within --kick-window
+//!                            (default 3; 0 = never)   --kick-window SECS  (default 60)
+//!   --violation-limit N      (authoritative) kick a client after N cheat-check violations (default 5; 0 = log only)
+//!
 //!   --stats-secs N           print room statistics every N seconds (default 5, 0 = off)
 //!   --sim-latency MS --sim-jitter MS --sim-loss P  --sim-seed N   add network conditions on the server side
 //!   --run-seconds N          stop by itself (same graceful path as Ctrl+C) after N seconds
 //! ```
 //!
-//! The server does not simulate: it collects inputs, confirms each tick at
-//! its deadline, and relays. What the players must agree on (build hash,
+//! By default the server does not simulate: it collects inputs, confirms each
+//! tick at its deadline, and relays. With `--authoritative` it also runs the
+//! game's simulation on the confirmed inputs (one tick behind the confirm
+//! point) and acts as the checksum referee. What the players must agree on (build hash,
 //! input size, seed, game configuration) is the room config it hands out in
 //! `Welcome`. Ctrl+C stops it gracefully.
 // The core takes its time from the caller; only this shell reads a clock.
@@ -49,7 +63,7 @@ use std::time::{Duration, Instant};
 use orr_relay_net::{format_fingerprint, listen, ListenOptions, SimConditions, Tls, TransportKind};
 use orr_server::presets::{self, Game, PhysicsScene};
 use orr_server::serve::run_wall_clock;
-use orr_server::{RelayServer, ServerNote};
+use orr_server::{AuthoritativeConfig, DirDumps, RelayServer, ServerNote};
 
 struct Args {
     bind: std::net::SocketAddr,
@@ -76,7 +90,15 @@ struct Args {
     stats_secs: u64,
     run_seconds: Option<f64>,
     sim: SimConditions,
+    authoritative: bool,
+    ai_slots: Vec<u8>,
+    dump_dir: std::path::PathBuf,
+    kick_after: u32,
+    kick_window: u32,
+    violation_limit: u32,
 }
+
+const HELP: &str = include_str!("help.txt");
 
 fn parse<T: std::str::FromStr>(name: &str, v: String) -> Result<T, String>
 where
@@ -119,6 +141,12 @@ fn parse_args() -> Result<Args, String> {
         stats_secs: 5,
         run_seconds: None,
         sim: SimConditions { latency_ms: 0, jitter_ms: 0, loss: 0.0, seed: 0x5EED },
+        authoritative: false,
+        ai_slots: Vec::new(),
+        dump_dir: "orr_dumps".into(),
+        kick_after: 3,
+        kick_window: 60,
+        violation_limit: 5,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -161,7 +189,13 @@ fn parse_args() -> Result<Args, String> {
             "--sim-jitter" => a.sim.jitter_ms = parse("--sim-jitter", value("--sim-jitter")?)?,
             "--sim-seed" => a.sim.seed = parse("--sim-seed", value("--sim-seed")?)?,
             "--sim-loss" => a.sim.loss = parse("--sim-loss", value("--sim-loss")?)?,
-            "-h" | "--help" => return Err("see the header of crates/orr_server/src/main.rs for the options".into()),
+            "--authoritative" => a.authoritative = true,
+            "--ai-slot" => a.ai_slots.push(parse("--ai-slot", value("--ai-slot")?)?),
+            "--dump-dir" => a.dump_dir = value("--dump-dir")?.into(),
+            "--kick-after" => a.kick_after = parse("--kick-after", value("--kick-after")?)?,
+            "--kick-window" => a.kick_window = parse("--kick-window", value("--kick-window")?)?,
+            "--violation-limit" => a.violation_limit = parse("--violation-limit", value("--violation-limit")?)?,
+            "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown option '{other}' (--help)")),
         }
     }
@@ -173,6 +207,19 @@ fn parse_args() -> Result<Args, String> {
     }
     if a.players == 0 || a.rooms == 0 {
         return Err("--players and --rooms must be at least 1".into());
+    }
+    if !a.authoritative && !a.ai_slots.is_empty() {
+        return Err("--ai-slot needs --authoritative (only the server can play a slot)".into());
+    }
+    if a.authoritative {
+        if a.game != Game::Arena {
+            return Err("--authoritative needs a game the server can simulate: only `--game arena` is built in \
+                        (a game of your own embeds orr_server and calls RelayServer::create_authoritative_room)"
+                .into());
+        }
+        if a.ai_slots.iter().any(|&s| s >= a.players) || a.ai_slots.len() >= usize::from(a.players) {
+            return Err("--ai-slot must be a slot below --players, and at least one slot must stay free for a player".into());
+        }
     }
     Ok(a)
 }
@@ -194,6 +241,10 @@ fn run() -> Result<(), String> {
     let mut room_cfg = presets::room_config(a.game, a.players, a.tick_rate, a.seed, a.scene);
     room_cfg.checksum_interval = a.checksum_interval;
     room_cfg.min_players_to_start = a.min_players.unwrap_or(a.players).clamp(1, a.players);
+    if a.authoritative {
+        // The server's own slots never have a client.
+        room_cfg.min_players_to_start = room_cfg.min_players_to_start.min(a.players - a.ai_slots.len() as u8).max(1);
+    }
     if let Some(n) = a.input_size {
         room_cfg.input_size = n;
         room_cfg.default_input = vec![0; n as usize];
@@ -235,9 +286,26 @@ fn run() -> Result<(), String> {
     }
 
     let mut server = RelayServer::new(endpoint, a.seed ^ 0x0BAD_5EED_0BAD_5EED);
+    if a.authoritative {
+        server.set_dump_sink(DirDumps(a.dump_dir.clone()));
+        println!("{} authoritative rooms: server dumps go to {}", stamp(start), a.dump_dir.display());
+    }
     for i in 0..a.rooms {
         let id = a.room + i;
-        server.create_room(id, room_cfg.clone());
+        if a.authoritative {
+            let mut cfg = room_cfg.clone();
+            cfg.min_players_to_start = cfg.min_players_to_start.min(a.players - a.ai_slots.len() as u8).max(1);
+            let auth = AuthoritativeConfig {
+                server_slots: a.ai_slots.clone(),
+                kick_after_corrections: a.kick_after,
+                kick_window_secs: a.kick_window,
+                violation_limit: a.violation_limit,
+            };
+            let sim = presets::arena_sim(a.players, a.tick_rate, a.seed, presets::ARENA_BUILD_ID, &a.ai_slots);
+            server.create_authoritative_room(id, cfg, auth, Box::new(sim));
+        } else {
+            server.create_room(id, room_cfg.clone());
+        }
         println!(
             "{} room {id}: game {:?}, {} players (starts at {}), {} Hz, input {} B, build hash {:#x}, seed {:#x}, config {} B",
             stamp(start),
@@ -304,6 +372,15 @@ fn run() -> Result<(), String> {
                         log.present.len()
                     );
                 }
+                ServerNote::Correction { room, slot, from_tick, tick, bytes } => {
+                    println!("{} room {room}: slot {slot} was wrong at tick {from_tick}, sent the server frame of tick {tick} ({bytes} B)", stamp(start));
+                }
+                ServerNote::Kicked { room, slot, code, reason } => {
+                    println!("{} room {room}: KICKED slot {slot} (code {code}): {reason}", stamp(start));
+                }
+                ServerNote::Violation { room, slot, tick, reason } => {
+                    println!("{} room {room}: slot {slot} violated a rule at tick {tick}: {reason}", stamp(start));
+                }
                 ServerNote::Desync { room, tick, finalized, reports } => {
                     println!("{} room {room}: DESYNC at tick {tick} (found at {finalized}), checksums by slot {reports:x?}", stamp(start));
                 }
@@ -323,12 +400,17 @@ fn run() -> Result<(), String> {
                     let d_rep: Vec<u64> = repeated.iter().zip(&log.last_repeated).map(|(n, o)| n - o).collect();
                     let d_late: Vec<u64> = late.iter().zip(&log.last_late).map(|(n, o)| n - o).collect();
                     println!(
-                        "{} room {id}: {} tick {} | clients {} | repeated inputs by slot {repeated:?} (+{d_rep:?}) | late inputs {late:?} (+{d_late:?}) | desyncs {}",
+                        "{} room {id}: {} tick {} | clients {} | repeated inputs by slot {repeated:?} (+{d_rep:?}) | late inputs {late:?} (+{d_late:?}) | desyncs {}{}",
                         stamp(start),
                         if server.is_running(id) { "running" } else { "waiting" },
                         st.finalized,
                         log.present.len(),
-                        st.desyncs
+                        st.desyncs,
+                        if a.authoritative {
+                            format!(" | corrections {} kicks {} violations {} server snapshots {}", st.corrections, st.kicks, st.violations, st.server_snapshots)
+                        } else {
+                            String::new()
+                        }
                     );
                     log.last_repeated = repeated;
                     log.last_late = late;
@@ -350,6 +432,10 @@ fn run() -> Result<(), String> {
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.is_empty() => {
+            print!("{HELP}");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE

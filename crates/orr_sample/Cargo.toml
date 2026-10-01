@@ -31,6 +31,7 @@ winit = "0.30"
 orr_server = { path = "../orr_server", features = ["harness"] }
 orr_proto = { path = "../orr_proto" }
 orr_edit = { path = "../orr_edit" }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 
 [[bench]]
 name = "seek"

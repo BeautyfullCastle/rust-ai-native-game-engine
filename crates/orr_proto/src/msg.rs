@@ -39,7 +39,18 @@
 //! | 8 | `SnapshotRequest` (to a donor client) | reliable |
 //! | 9 | `JoinSnapshot` (relayed snapshot, to the joiner) | reliable |
 //! | 10 | `Presence` (a slot got a player or lost it) | reliable |
-//! | 11 | `Bye` | reliable |
+//! | 11 | `Bye` (code: see `BYE_*`) | reliable |
+//! | 12 | `Correction` (authoritative mode: server snapshot for a diverged client; v3) | reliable |
+//!
+//! # Versions
+//!
+//! A message carries the lowest protocol version that can express it, so
+//! relay-mode traffic is byte-identical to version 2 and old and new peers
+//! interoperate there. Version 3 adds the authoritative mode: `Welcome`
+//! with a trailing `flags` byte (only written when a flag is set) and
+//! `Correction`. A decoder accepts `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION`;
+//! a version-2 client cannot join an authoritative room (it fails to decode
+//! the version-3 `Welcome`).
 //!
 //! `Confirmed` is compact, because the server repeats unacked bundles in
 //! every packet: the first bundle has a `u64` tick, later ones a one-byte
@@ -48,12 +59,31 @@
 //! message (then the input bytes are left out) and whether commands follow.
 use crate::codec::{Reader, Writer};
 
-/// Protocol version carried by every message.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Newest protocol version (adds the authoritative mode, see the module docs).
+pub const PROTOCOL_VERSION: u32 = 3;
+/// Oldest version a decoder still accepts (the relay-only protocol).
+pub const MIN_PROTOCOL_VERSION: u32 = 2;
+/// First version that has `Welcome::flags` and `ServerMsg::Correction`.
+const V_AUTHORITATIVE: u32 = 3;
 const MAGIC: &[u8; 4] = b"ORRN";
 
 /// `Hello::want_slot` value meaning "any free slot".
 pub const NO_SLOT: u8 = 0xFF;
+
+/// Slot number the server uses for itself in `Desync` reports and `.orrd`
+/// dumps (its own checksum, in authoritative mode).
+pub const SERVER_SLOT: u8 = 0xFF;
+
+/// `Welcome::flags`: the room is authoritative (the server simulates, judges
+/// checksums and sends `Correction`s).
+pub const WELCOME_AUTHORITATIVE: u8 = 1;
+
+/// `Bye` code: the client fell further behind than the server keeps bundles.
+pub const BYE_BEHIND: u8 = 1;
+/// `Bye` code: kicked for diverging again and again after corrections.
+pub const BYE_KICKED_DESYNC: u8 = 2;
+/// `Bye` code: kicked for violating the authoritative checks (cheating).
+pub const BYE_KICKED_CHEAT: u8 = 3;
 
 /// `SlotConfirmed::flags`: the server did not receive this slot's input for
 /// the tick in time and filled it with the slot's previous input.
@@ -70,8 +100,11 @@ const TICK_ESCAPE: u8 = 255;
 
 pub const MAX_INPUT_SIZE: u32 = 1024;
 pub const MAX_SLOTS: u8 = 64;
-const MAX_COMMANDS: u32 = 64;
-const MAX_COMMAND_LEN: u32 = 4096;
+/// Most commands one slot can submit per tick, and the largest encoded command.
+pub const MAX_COMMANDS_PER_SLOT: usize = 64;
+pub const MAX_COMMAND_BYTES: usize = 4096;
+const MAX_COMMANDS: u32 = MAX_COMMANDS_PER_SLOT as u32;
+const MAX_COMMAND_LEN: u32 = MAX_COMMAND_BYTES as u32;
 const MAX_ENTRIES: u32 = 256;
 const MAX_BUNDLES: u32 = 65_536;
 const MAX_CONFIG_LEN: u32 = 1 << 20;
@@ -194,6 +227,15 @@ pub struct Welcome {
     pub finalized_tick: u64,
     /// Opaque game/room configuration for the client's `Game::Config`.
     pub config: Vec<u8>,
+    /// `WELCOME_*` bits. Nonzero needs protocol version 3 on the wire.
+    pub flags: u8,
+}
+
+impl Welcome {
+    /// Whether the room is in authoritative mode.
+    pub fn authoritative(&self) -> bool {
+        self.flags & WELCOME_AUTHORITATIVE != 0
+    }
 }
 
 /// Why a `Hello` was refused.
@@ -295,6 +337,11 @@ pub enum ServerMsg {
     JoinSnapshot { tick: u64, checksum: u64, data: Vec<u8> },
     Presence { slot: u8, present: bool, from_tick: u64 },
     Bye { code: u8 },
+    /// Authoritative mode: the client's checksum at `from_tick` differed from
+    /// the server's. `data` is the server's frame at `tick` (lz4, the same
+    /// format as `JoinSnapshot`), `checksum` its checksum. The client
+    /// restores it and goes on with the confirmed bundles after `tick`.
+    Correction { from_tick: u64, tick: u64, checksum: u64, data: Vec<u8> },
 }
 
 fn seal(mut w: Writer) -> Vec<u8> {
@@ -303,7 +350,7 @@ fn seal(mut w: Writer) -> Vec<u8> {
     w.out
 }
 
-fn open(bytes: &[u8]) -> Result<(u8, Reader<'_>), ProtoError> {
+fn open(bytes: &[u8]) -> Result<(u8, u32, Reader<'_>), ProtoError> {
     let Some(split) = bytes.len().checked_sub(8) else { return Err(ProtoError::Truncated) };
     let (body, tail) = bytes.split_at(split);
     let mut r = Reader::new(body);
@@ -311,20 +358,25 @@ fn open(bytes: &[u8]) -> Result<(u8, Reader<'_>), ProtoError> {
         return Err(ProtoError::BadMagic);
     }
     let version = r.u32()?;
-    if version != PROTOCOL_VERSION {
+    if !(MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version) {
         return Err(ProtoError::UnsupportedVersion(version));
     }
     if u64::from_le_bytes(tail.try_into().unwrap()) != xxhash_rust::xxh3::xxh3_64(body) {
         return Err(ProtoError::BadChecksum);
     }
     let kind = r.u8()?;
-    Ok((kind, r))
+    Ok((kind, version, r))
 }
 
+/// Starts a version-2 message (everything the relay protocol had).
 fn start(kind: u8) -> Writer {
+    start_v(kind, MIN_PROTOCOL_VERSION)
+}
+
+fn start_v(kind: u8, version: u32) -> Writer {
     let mut w = Writer::new();
     w.raw(MAGIC);
-    w.u32(PROTOCOL_VERSION);
+    w.u32(version);
     w.u8(kind);
     w
 }
@@ -415,7 +467,7 @@ impl ClientMsg {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
-        let (kind, mut r) = open(bytes)?;
+        let (kind, _version, mut r) = open(bytes)?;
         let msg = match kind {
             1 => ClientMsg::Hello(Hello {
                 build_hash: r.u64()?,
@@ -461,7 +513,7 @@ impl ServerMsg {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             ServerMsg::Welcome(m) => {
-                let mut w = start(1);
+                let mut w = start_v(1, if m.flags != 0 { V_AUTHORITATIVE } else { MIN_PROTOCOL_VERSION });
                 w.u64(m.room);
                 w.u8(m.slot);
                 w.u8(m.player_count);
@@ -476,6 +528,9 @@ impl ServerMsg {
                 w.u64(m.server_time_us);
                 w.u64(m.finalized_tick);
                 w.bytes(&m.config);
+                if m.flags != 0 {
+                    w.u8(m.flags);
+                }
                 seal(w)
             }
             ServerMsg::Reject(reason) => {
@@ -583,11 +638,19 @@ impl ServerMsg {
                 w.u8(*code);
                 seal(w)
             }
+            ServerMsg::Correction { from_tick, tick, checksum, data } => {
+                let mut w = start_v(12, V_AUTHORITATIVE);
+                w.u64(*from_tick);
+                w.u64(*tick);
+                w.u64(*checksum);
+                w.bytes(data);
+                seal(w)
+            }
         }
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
-        let (kind, mut r) = open(bytes)?;
+        let (kind, version, mut r) = open(bytes)?;
         let msg = match kind {
             1 => ServerMsg::Welcome(Welcome {
                 room: r.u64()?,
@@ -604,6 +667,7 @@ impl ServerMsg {
                 server_time_us: r.u64()?,
                 finalized_tick: r.u64()?,
                 config: r.bytes(MAX_CONFIG_LEN)?,
+                flags: if version >= V_AUTHORITATIVE { r.u8()? } else { 0 },
             }),
             2 => ServerMsg::Reject(RejectReason::read(&mut r)?),
             3 => ServerMsg::Start { t0_us: r.u64()?, server_time_us: r.u64()? },
@@ -677,6 +741,12 @@ impl ServerMsg {
             9 => ServerMsg::JoinSnapshot { tick: r.u64()?, checksum: r.u64()?, data: r.bytes(MAX_SNAPSHOT_LEN)? },
             10 => ServerMsg::Presence { slot: r.u8()?, present: r.u8()? != 0, from_tick: r.u64()? },
             11 => ServerMsg::Bye { code: r.u8()? },
+            12 if version >= V_AUTHORITATIVE => ServerMsg::Correction {
+                from_tick: r.u64()?,
+                tick: r.u64()?,
+                checksum: r.u64()?,
+                data: r.bytes(MAX_SNAPSHOT_LEN)?,
+            },
             k => return Err(ProtoError::UnknownKind(k)),
         };
         r.finish()?;
@@ -733,6 +803,24 @@ mod tests {
                 server_time_us: 2000,
                 finalized_tick: 12,
                 config: vec![1, 2, 3],
+                flags: 0,
+            }),
+            ServerMsg::Welcome(Welcome {
+                room: 1,
+                slot: 2,
+                player_count: 4,
+                tick_rate: 60,
+                seed: 5,
+                build_hash: 6,
+                input_size: 4,
+                checksum_interval: 30,
+                token: 77,
+                running: false,
+                t0_us: 0,
+                server_time_us: 2000,
+                finalized_tick: 0,
+                config: vec![],
+                flags: WELCOME_AUTHORITATIVE,
             }),
             ServerMsg::Reject(RejectReason::BuildHashMismatch { server: 1, client: 2 }),
             ServerMsg::Start { t0_us: 5, server_time_us: 6 },
@@ -751,7 +839,42 @@ mod tests {
             ServerMsg::JoinSnapshot { tick: 90, checksum: 8, data: vec![1; 50] },
             ServerMsg::Presence { slot: 1, present: false, from_tick: 44 },
             ServerMsg::Bye { code: 2 },
+            ServerMsg::Correction { from_tick: 60, tick: 91, checksum: 0xABCD, data: vec![7; 40] },
         ]
+    }
+
+    fn version_of(bytes: &[u8]) -> u32 {
+        u32::from_le_bytes(bytes[4..8].try_into().unwrap())
+    }
+
+    #[test]
+    fn relay_messages_stay_version_2_and_authoritative_ones_are_version_3() {
+        for m in all_client() {
+            assert_eq!(version_of(&m.encode()), 2, "{m:?}");
+        }
+        for m in all_server() {
+            let v = version_of(&m.encode());
+            let v3 = matches!(&m, ServerMsg::Correction { .. }) || matches!(&m, ServerMsg::Welcome(w) if w.flags != 0);
+            assert_eq!(v, if v3 { 3 } else { 2 }, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn a_future_version_and_a_correction_in_a_version_2_message_are_refused() {
+        let mut bytes = ServerMsg::Bye { code: 1 }.encode();
+        bytes[4..8].copy_from_slice(&(PROTOCOL_VERSION + 1).to_le_bytes());
+        // The header checksum no longer matches, so re-seal.
+        let n = bytes.len() - 8;
+        let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
+        bytes[n..].copy_from_slice(&sum.to_le_bytes());
+        assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::UnsupportedVersion(PROTOCOL_VERSION + 1)));
+
+        let mut bytes = ServerMsg::Correction { from_tick: 1, tick: 2, checksum: 3, data: vec![] }.encode();
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+        let n = bytes.len() - 8;
+        let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
+        bytes[n..].copy_from_slice(&sum.to_le_bytes());
+        assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::UnknownKind(12)));
     }
 
     #[test]

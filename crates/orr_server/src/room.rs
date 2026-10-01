@@ -1,6 +1,8 @@
 //! One room: player slots, the tick clock, input collection, tick
 //! finalization, confirmed-tick delivery, time-sync feedback, checksum
-//! comparison and late join.
+//! comparison and late join. A room can be *authoritative* (see
+//! `authoritative` and `AuthoritativeConfig`): then it also runs the game's
+//! simulation on the confirmed bundles.
 //!
 //! # Tick finalize rule
 //!
@@ -21,12 +23,42 @@
 //! `TimeSync`); the sender learns the truth from the bundle.
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::collections::VecDeque;
+
 use orr_proto::{
     Bundle, Channel, ConnId, Endpoint, Hello, InputEntry, RejectReason, ServerMsg, SlotConfirmed, TimeSync, Welcome,
-    FLAG_ABSENT, FLAG_REPEATED, NO_SLOT,
+    BYE_KICKED_CHEAT, BYE_KICKED_DESYNC, FLAG_ABSENT, FLAG_REPEATED, NO_SLOT, SERVER_SLOT, WELCOME_AUTHORITATIVE,
 };
+use orr_session::DesyncDump;
 
+use crate::authoritative::{DumpWriter, ServerSim, Violation};
 use crate::validate::{InputCtx, InputValidator, Verdict};
+
+/// How long a kicked connection is kept open so the `Bye` can arrive
+/// (microseconds).
+const KICK_GRACE_US: u64 = 2_000_000;
+
+/// Authoritative-mode settings of a room (see the crate docs).
+#[derive(Clone, Debug)]
+pub struct AuthoritativeConfig {
+    /// Slots the server plays itself (AI players, scripted events). Nobody
+    /// can join them; their input and commands come from
+    /// [`ServerSim::drive`]. The room starts without them.
+    pub server_slots: Vec<u8>,
+    /// A client whose checksum is wrong this many times within
+    /// `kick_window_secs` is kicked on the last one (`0` = never kick).
+    pub kick_after_corrections: u32,
+    pub kick_window_secs: u32,
+    /// A client with this many audit violations (or a `Verdict::Kick`) is
+    /// kicked (`0` = violations are only logged).
+    pub violation_limit: u32,
+}
+
+impl Default for AuthoritativeConfig {
+    fn default() -> Self {
+        Self { server_slots: Vec::new(), kick_after_corrections: 3, kick_window_secs: 60, violation_limit: 5 }
+    }
+}
 
 /// What a slot's input is while nobody plays it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -131,6 +163,15 @@ pub enum ServerNote {
     JoinFailed { room: u64, joiner: u8, reason: RejectReason },
     BadMessage { conn: ConnId },
     RoomClosed { room: u64 },
+    /// Authoritative mode: the server sent `slot` its frame of `tick`
+    /// (`bytes` compressed) because its checksum at `from_tick` was wrong.
+    Correction { room: u64, slot: u8, from_tick: u64, tick: u64, bytes: u32 },
+    /// Authoritative mode: a late joiner got the server's own snapshot.
+    ServerSnapshot { room: u64, joiner: u8, tick: u64, bytes: u32 },
+    /// Authoritative mode: an input or a tick broke a rule of the game.
+    Violation { room: u64, slot: u8, tick: u64, reason: String },
+    /// A player was removed (`orr_proto::BYE_KICKED_*`).
+    Kicked { room: u64, slot: u8, code: u8, reason: String },
 }
 
 /// Per-slot counters.
@@ -154,12 +195,22 @@ pub struct RoomStats {
     pub slots: Vec<SlotStats>,
     pub desyncs: u64,
     pub snapshots_relayed: u64,
+    /// Authoritative mode: corrections sent, kicks, violations, snapshots
+    /// the server made itself, ticks the server simulated.
+    pub corrections: u64,
+    pub kicks: u64,
+    pub violations: u64,
+    pub server_snapshots: u64,
+    pub server_ticks: u64,
 }
 
 pub(crate) struct Out<'a, E: Endpoint> {
     pub ep: &'a mut E,
     pub notes: &'a mut Vec<ServerNote>,
     pub now_us: u64,
+    /// Connections to close at a time (microseconds).
+    pub closing: &'a mut BTreeMap<ConnId, u64>,
+    pub dumps: &'a mut dyn DumpWriter,
 }
 
 impl<E: Endpoint> Out<'_, E> {
@@ -216,6 +267,8 @@ impl Window {
 
 struct Slot {
     player: Option<Player>,
+    /// Authoritative mode: the server plays this slot.
+    server_owned: bool,
     /// `(token, until finalized tick)`: the slot is kept for a returning
     /// player.
     reserved: Option<(u64, u64)>,
@@ -255,6 +308,46 @@ pub(crate) struct Room {
     last_sync_tick: u64,
     desyncs: u64,
     snapshots_relayed: u64,
+    auth: Option<Auth>,
+    pending_violations: Vec<(u64, Violation)>,
+}
+
+struct AnchorRec {
+    tick: u64,
+    checksum: u64,
+    frame: Vec<u8>,
+}
+
+#[derive(Default)]
+struct AuthSlot {
+    /// Reports for ticks up to this one came from a timeline the server
+    /// already corrected.
+    corrected_through: u64,
+    /// Server ticks of the recent corrections, for the kick rule.
+    correction_ticks: VecDeque<u64>,
+    violations: u32,
+}
+
+/// Authoritative-mode state of a room.
+struct Auth {
+    cfg: AuthoritativeConfig,
+    sim: Box<dyn ServerSim>,
+    /// The server's checksum at each checkpoint tick still judged.
+    checks: BTreeMap<u64, u64>,
+    /// Frames at the last checkpoints, for dumps.
+    anchors: VecDeque<AnchorRec>,
+    slots: Vec<AuthSlot>,
+    corrections: u64,
+    kicks: u64,
+    violations: u64,
+    server_snapshots: u64,
+    server_ticks: u64,
+    /// Every checkpoint checksum of the server (when the room records all).
+    history: Vec<(u64, u64)>,
+}
+
+fn compress(bytes: &[u8]) -> Vec<u8> {
+    lz4_flex::block::compress_prepend_size(bytes)
 }
 
 fn require_same_build_hash(a: u64, b: u64) -> bool {
@@ -269,6 +362,7 @@ impl Room {
         let slots = (0..cfg.player_count)
             .map(|_| Slot {
                 player: None,
+                server_owned: false,
                 reserved: None,
                 last_input: cfg.default_input.clone(),
                 pending: BTreeMap::new(),
@@ -297,7 +391,43 @@ impl Room {
             last_sync_tick: 0,
             desyncs: 0,
             snapshots_relayed: 0,
+            auth: None,
+            pending_violations: Vec::new(),
         }
+    }
+
+    /// An authoritative room: besides relaying, the server simulates `sim`
+    /// on the confirmed bundles. Panics when `sim` does not fit `cfg`.
+    pub fn new_authoritative(id: u64, mut cfg: RoomConfig, auth: AuthoritativeConfig, sim: Box<dyn ServerSim>) -> Self {
+        assert_eq!(sim.input_size(), cfg.input_size, "the sim's input size must equal the room's");
+        assert_eq!(sim.player_count(), cfg.player_count, "the sim's player count must equal the room's");
+        assert_eq!(sim.tick(), 0, "the server sim starts at tick 0");
+        let mut server_slots = auth.server_slots.clone();
+        server_slots.sort_unstable();
+        server_slots.dedup();
+        assert!(server_slots.iter().all(|&s| s < cfg.player_count), "server slot out of range");
+        let humans = cfg.player_count - server_slots.len() as u8;
+        assert!(humans > 0, "an authoritative room needs at least one player slot");
+        cfg.min_players_to_start = cfg.min_players_to_start.clamp(1, humans);
+        let n = usize::from(cfg.player_count);
+        let mut room = Self::new(id, cfg);
+        for &s in &server_slots {
+            room.slots[usize::from(s)].server_owned = true;
+        }
+        room.auth = Some(Auth {
+            cfg: AuthoritativeConfig { server_slots, ..auth },
+            sim,
+            checks: BTreeMap::new(),
+            anchors: VecDeque::new(),
+            slots: (0..n).map(|_| AuthSlot::default()).collect(),
+            corrections: 0,
+            kicks: 0,
+            violations: 0,
+            server_snapshots: 0,
+            server_ticks: 0,
+            history: Vec::new(),
+        });
+        room
     }
 
     pub fn stats(&self) -> RoomStats {
@@ -306,11 +436,22 @@ impl Room {
             slots: self.slots.iter().map(|s| s.stats).collect(),
             desyncs: self.desyncs,
             snapshots_relayed: self.snapshots_relayed,
+            corrections: self.auth.as_ref().map_or(0, |a| a.corrections),
+            kicks: self.auth.as_ref().map_or(0, |a| a.kicks),
+            violations: self.auth.as_ref().map_or(0, |a| a.violations),
+            server_snapshots: self.auth.as_ref().map_or(0, |a| a.server_snapshots),
+            server_ticks: self.auth.as_ref().map_or(0, |a| a.server_ticks),
         }
     }
 
     pub fn recorded(&self) -> &[Bundle] {
         &self.recorded
+    }
+
+    /// The server's own checksum at every checkpoint tick so far (needs
+    /// `record_all` and an authoritative room).
+    pub fn server_checksums(&self) -> &[(u64, u64)] {
+        self.auth.as_ref().map_or(&[], |a| &a.history)
     }
 
     pub fn finalized(&self) -> u64 {
@@ -366,13 +507,13 @@ impl Room {
                 return Err(RejectReason::BadRequest);
             }
             let s = &self.slots[i];
-            if s.player.is_some() || live_reservation(s) {
+            if s.player.is_some() || live_reservation(s) || s.server_owned {
                 return Err(RejectReason::SlotTaken);
             }
             return Ok((h.want_slot, new_token, None));
         }
         for (i, s) in self.slots.iter().enumerate() {
-            if s.player.is_none() && !live_reservation(s) {
+            if s.player.is_none() && !live_reservation(s) && !s.server_owned {
                 return Ok((i as u8, new_token, None));
             }
         }
@@ -423,6 +564,7 @@ impl Room {
             server_time_us: out.now_us,
             finalized_tick: self.finalized,
             config: self.cfg.config_blob.clone(),
+            flags: if self.auth.is_some() { WELCOME_AUTHORITATIVE } else { 0 },
         };
         out.send(conn, Channel::Reliable, &ServerMsg::Welcome(welcome));
         if self.running {
@@ -565,6 +707,7 @@ impl Room {
             return;
         }
         s.acked = s.acked.max(ack_tick.min(finalized));
+        let mut kick_for: Option<u64> = None;
         for e in entries {
             if e.tick == 0 || e.tick > max_tick || e.input.len() as u32 != self.cfg.input_size {
                 continue;
@@ -588,12 +731,23 @@ impl Room {
                     s.pending.insert(e.tick, (e.input, Vec::new()));
                 }
                 Verdict::Reject => s.stats.rejected_by_validator += 1,
+                Verdict::Kick => {
+                    s.stats.rejected_by_validator += 1;
+                    kick_for.get_or_insert(e.tick);
+                }
             }
+        }
+        if let Some(tick) = kick_for {
+            self.record_violation(out, slot, tick, "input refused by the validator".to_string(), true);
         }
     }
 
     pub fn checksum<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, tick: u64, checksum: u64) {
         if !self.running || tick > self.finalized {
+            return;
+        }
+        if self.auth.is_some() {
+            self.auth_checksum(out, slot, tick, checksum);
             return;
         }
         let reports = self.checksums.entry(tick).or_default();
@@ -621,6 +775,7 @@ impl Room {
             any = true;
         }
         if any {
+            self.process_violations(out);
             self.send_confirmed(out);
             self.send_time_sync(out);
             self.prune();
@@ -642,8 +797,29 @@ impl Room {
     fn finalize_next(&mut self) {
         let tick = self.finalized + 1;
         let policy = self.cfg.vacant_policy;
+        let mut driven = match self.auth.as_mut() {
+            Some(a) => a.sim.drive(tick, &a.cfg.server_slots),
+            None => Vec::new(),
+        };
         let mut slots = Vec::with_capacity(self.slots.len());
-        for s in &mut self.slots {
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            if s.server_owned {
+                let at = driven.iter().position(|(slot, _, _)| usize::from(*slot) == i);
+                let (input, mut commands) = match at {
+                    Some(at) => {
+                        let (_, input, commands) = driven.swap_remove(at);
+                        (input, commands)
+                    }
+                    None => (Vec::new(), Vec::new()),
+                };
+                let input = if input.len() as u32 == self.cfg.input_size { input } else { self.cfg.default_input.clone() };
+                commands.truncate(orr_proto::msg::MAX_COMMANDS_PER_SLOT);
+                commands.retain(|c| c.len() <= orr_proto::msg::MAX_COMMAND_BYTES);
+                s.stats.delivered += 1;
+                s.last_input = input.clone();
+                slots.push(SlotConfirmed { input, commands, flags: 0 });
+                continue;
+            }
             let playing = s.player.as_ref().is_some_and(|p| p.phase == Phase::Playing);
             let got = if playing { s.pending.remove(&tick) } else { None };
             let (input, commands, flags) = match got {
@@ -670,6 +846,23 @@ impl Room {
             slots.push(SlotConfirmed { input, commands, flags });
         }
         let bundle = Bundle { tick, slots };
+        if let Some(a) = self.auth.as_mut() {
+            for v in a.sim.step(&bundle) {
+                self.pending_violations.push((tick, v));
+            }
+            a.server_ticks += 1;
+            if tick % u64::from(self.cfg.checksum_interval.max(1)) == 0 {
+                let checksum = a.sim.checksum();
+                a.checks.insert(tick, checksum);
+                if self.cfg.record_all {
+                    a.history.push((tick, checksum));
+                }
+                a.anchors.push_back(AnchorRec { tick, checksum, frame: a.sim.frame_bytes() });
+                while a.anchors.len() > 3 {
+                    a.anchors.pop_front();
+                }
+            }
+        }
         if self.cfg.record_all {
             self.recorded.push(bundle.clone());
         }
@@ -686,6 +879,9 @@ impl Room {
         let keep = finalized.saturating_sub(u64::from(self.cfg.checksum_interval) * 16);
         self.checksums = self.checksums.split_off(&keep);
         self.notified = self.notified.split_off(&keep);
+        if let Some(a) = self.auth.as_mut() {
+            a.checks = a.checks.split_off(&keep);
+        }
         // Never prune while a join is being arranged: its snapshot may be
         // older than the usual window.
         if self.join.is_none() {
@@ -822,6 +1018,17 @@ impl Room {
 
     /// Starts the next join if none is running: asks a donor for a snapshot.
     fn pump_join<E: Endpoint>(&mut self, out: &mut Out<'_, E>) {
+        if self.auth.is_some() {
+            // Authoritative: the server's own frame, no donor needed.
+            while let Some(joiner) = self
+                .slots
+                .iter()
+                .position(|s| s.player.as_ref().is_some_and(|p| p.phase == Phase::AwaitSnapshot))
+            {
+                self.join_from_server(out, joiner as u8);
+            }
+            return;
+        }
         if self.join.is_some() {
             return;
         }
@@ -943,4 +1150,151 @@ impl Room {
 fn tick_us(tick: u64, tick_rate: u32) -> u64 {
     let n = u128::from(tick) * 1_000_000 + u128::from(tick_rate) - 1;
     (n / u128::from(tick_rate)) as u64
+}
+
+// ---- authoritative mode ---------------------------------------------------
+
+impl Room {
+    /// A late joiner or rejoiner gets the server's frame at the last
+    /// finalized tick. No backlog: every later bundle follows through the
+    /// normal confirmed stream.
+    fn join_from_server<E: Endpoint>(&mut self, out: &mut Out<'_, E>, joiner: u8) {
+        let finalized = self.finalized;
+        let Some(a) = self.auth.as_mut() else { return };
+        debug_assert_eq!(a.sim.tick(), finalized);
+        let (tick, checksum, data) = (a.sim.tick(), a.sim.checksum(), compress(&a.sim.frame_bytes()));
+        let bytes = data.len() as u32;
+        a.server_snapshots += 1;
+        let s = &mut self.slots[usize::from(joiner)];
+        let Some(p) = s.player.as_mut() else { return };
+        p.phase = Phase::CatchUp;
+        let conn = p.conn;
+        s.acked = finalized;
+        s.sent.clear();
+        out.send(conn, Channel::Reliable, &ServerMsg::JoinSnapshot { tick, checksum, data });
+        out.notes.push(ServerNote::ServerSnapshot { room: self.id, joiner, tick, bytes });
+        out.notes.push(ServerNote::SnapshotRelayed { room: self.id, donor: SERVER_SLOT, joiner, tick, backlog_ticks: 0 });
+        self.snapshots_relayed += 1;
+    }
+
+    /// Judges a client's checksum against the server's own. The server is
+    /// the truth, so a mismatch names the client as the diverged one.
+    fn auth_checksum<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, tick: u64, checksum: u64) {
+        let finalized = self.finalized;
+        let window = u64::from(self.cfg.tick_rate) * u64::from(self.auth.as_ref().map_or(0, |a| a.cfg.kick_window_secs));
+        let Some(a) = self.auth.as_mut() else { return };
+        let Some(&server_cs) = a.checks.get(&tick) else { return };
+        let Some(st) = a.slots.get_mut(usize::from(slot)) else { return };
+        if tick <= st.corrected_through || checksum == server_cs {
+            return;
+        }
+        // Diverged.
+        let kick_n = a.cfg.kick_after_corrections;
+        st.correction_ticks.push_back(finalized);
+        while st.correction_ticks.front().is_some_and(|&t| t + window < finalized) {
+            st.correction_ticks.pop_front();
+        }
+        let kick = kick_n > 0 && st.correction_ticks.len() as u32 >= kick_n;
+        st.corrected_through = finalized;
+        let recent = st.correction_ticks.len();
+        self.desyncs += 1;
+        let reports = vec![(slot, checksum), (SERVER_SLOT, server_cs)];
+        out.notes.push(ServerNote::Desync { room: self.id, tick, finalized, reports: reports.clone() });
+        self.write_server_dump(out, slot, tick, &reports, server_cs);
+        let Some(conn) = self.slots[usize::from(slot)].player.as_ref().map(|p| p.conn) else { return };
+        if kick {
+            let reason = format!("diverged {recent} times within {} s (last at tick {tick})", self.auth.as_ref().map_or(0, |a| a.cfg.kick_window_secs));
+            self.kick(out, slot, BYE_KICKED_DESYNC, reason);
+            return;
+        }
+        out.send(conn, Channel::Reliable, &ServerMsg::Desync { tick, reports });
+        let Some(a) = self.auth.as_mut() else { return };
+        let (to_tick, to_checksum, data) = (a.sim.tick(), a.sim.checksum(), compress(&a.sim.frame_bytes()));
+        a.corrections += 1;
+        let bytes = data.len() as u32;
+        out.send(conn, Channel::Reliable, &ServerMsg::Correction { from_tick: tick, tick: to_tick, checksum: to_checksum, data });
+        out.notes.push(ServerNote::Correction { room: self.id, slot, from_tick: tick, tick: to_tick, bytes });
+    }
+
+    /// Writes the server's `.orrd` for a mismatch: its last checkpoint frame
+    /// before `tick` and the confirmed bundles since. `local_slot` is
+    /// `SERVER_SLOT`, `reports` hold the client's and the server's checksums.
+    fn write_server_dump<E: Endpoint>(
+        &self,
+        out: &mut Out<'_, E>,
+        slot: u8,
+        tick: u64,
+        reports: &[(u8, u64)],
+        server_cs: u64,
+    ) {
+        let Some(a) = self.auth.as_ref() else { return };
+        let anchor = a.anchors.iter().rev().find(|r| r.tick < tick);
+        let (anchor_tick, anchor_checksum, anchor_frame) = match anchor {
+            Some(r) => (r.tick, r.checksum, r.frame.clone()),
+            None => (0, 0, Vec::new()),
+        };
+        let mut ticks = Vec::new();
+        for (expect, (&t, b)) in (anchor_tick + 1..).zip(self.log.range(anchor_tick + 1..)) {
+            if t != expect {
+                break;
+            }
+            ticks.push(b.clone());
+        }
+        let dump = DesyncDump {
+            build_hash: a.sim.build_hash(),
+            seed: self.cfg.seed,
+            tick_rate: self.cfg.tick_rate,
+            player_count: self.cfg.player_count,
+            input_size: self.cfg.input_size,
+            checksum_interval: self.cfg.checksum_interval,
+            local_slot: SERVER_SLOT,
+            desync_tick: tick,
+            local_checksum: server_cs,
+            reports: reports.to_vec(),
+            anchor_tick,
+            anchor_checksum,
+            anchor_frame,
+            ticks,
+        };
+        out.dumps.write_dump(&format!("server_desync_tick{tick}_slot{slot}.orrd"), dump.to_bytes());
+    }
+
+    fn process_violations<E: Endpoint>(&mut self, out: &mut Out<'_, E>) {
+        for (tick, v) in std::mem::take(&mut self.pending_violations) {
+            self.record_violation(out, v.slot, tick, v.reason, false);
+        }
+    }
+
+    /// Logs a rule violation of `slot`; kicks when forced or when the slot
+    /// reached the violation limit.
+    fn record_violation<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, tick: u64, reason: String, force: bool) {
+        let Some(a) = self.auth.as_mut() else { return };
+        let Some(st) = a.slots.get_mut(usize::from(slot)) else { return };
+        let s = &self.slots[usize::from(slot)];
+        if s.server_owned || s.player.is_none() {
+            return;
+        }
+        st.violations += 1;
+        a.violations += 1;
+        let n = st.violations;
+        out.notes.push(ServerNote::Violation { room: self.id, slot, tick, reason: reason.clone() });
+        let limit = a.cfg.violation_limit;
+        if force || (limit > 0 && n >= limit) {
+            self.kick(out, slot, BYE_KICKED_CHEAT, format!("{n} violations, last at tick {tick}: {reason}"));
+        }
+    }
+
+    /// Removes the player of `slot` with a `Bye` carrying `code`. The slot is
+    /// not reserved for it.
+    fn kick<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, code: u8, reason: String) {
+        let Some(conn) = self.slots[usize::from(slot)].player.as_ref().map(|p| p.conn) else { return };
+        out.send(conn, Channel::Reliable, &ServerMsg::Bye { code });
+        out.closing.insert(conn, out.now_us + KICK_GRACE_US);
+        out.notes.push(ServerNote::Kicked { room: self.id, slot, code, reason });
+        if let Some(a) = self.auth.as_mut() {
+            a.kicks += 1;
+        }
+        self.vacate(out, slot, true);
+        self.slots[usize::from(slot)].reserved = None;
+    }
 }

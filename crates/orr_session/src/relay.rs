@@ -203,21 +203,7 @@ impl<G: Game, L: Link> RelaySource<G, L> {
             self.stats.duplicate_bundles += 1;
             return;
         }
-        let mut decoded = Vec::with_capacity(b.slots.len());
-        for (i, sc) in b.slots.iter().enumerate() {
-            let Ok(input) = bytemuck::try_pod_read_unaligned::<G::Input>(&sc.input) else {
-                self.stats.decode_errors += 1;
-                return;
-            };
-            let mut commands = Vec::with_capacity(sc.commands.len());
-            for raw in &sc.commands {
-                match <G::Command as SimCommand>::decode(raw) {
-                    Some(c) => commands.push(c),
-                    None => self.stats.bad_commands += 1,
-                }
-            }
-            decoded.push(RemoteInput { tick: b.tick, slot: PlayerSlot(i as u8), input, commands, disconnected: sc.flags & FLAG_ABSENT != 0 });
-        }
+        let Some(decoded) = self.decode_slots(&b) else { return };
         let own = &b.slots[self.slot as usize];
         if own.flags & FLAG_REPEATED != 0 {
             self.stats.own_repeated += 1;
@@ -232,6 +218,48 @@ impl<G: Game, L: Link> RelaySource<G, L> {
         self.inbox.extend(decoded);
         self.log.insert(b.tick, b);
         self.advance_ack();
+    }
+
+    /// Turns a bundle into per-slot remote inputs; `None` (counted) when an
+    /// input does not fit the game's input type.
+    fn decode_slots(&mut self, b: &Bundle) -> Option<Vec<RemoteInput<G>>> {
+        let mut decoded = Vec::with_capacity(b.slots.len());
+        for (i, sc) in b.slots.iter().enumerate() {
+            let Ok(input) = bytemuck::try_pod_read_unaligned::<G::Input>(&sc.input) else {
+                self.stats.decode_errors += 1;
+                return None;
+            };
+            let mut commands = Vec::with_capacity(sc.commands.len());
+            for raw in &sc.commands {
+                match <G::Command as SimCommand>::decode(raw) {
+                    Some(c) => commands.push(c),
+                    None => self.stats.bad_commands += 1,
+                }
+            }
+            decoded.push(RemoteInput { tick: b.tick, slot: PlayerSlot(i as u8), input, commands, disconnected: sc.flags & FLAG_ABSENT != 0 });
+        }
+        Some(decoded)
+    }
+
+    /// Hands the session the logged bundles of `from + 1..=ack` again, after
+    /// it went back to tick `from` (a server correction that arrived after
+    /// newer bundles). Returns false when the log does not reach back that
+    /// far (the caller must not go back then).
+    fn refeed_after(&mut self, from: u64) -> bool {
+        if from >= self.ack {
+            return true;
+        }
+        let covered = (from + 1..=self.ack).all(|t| self.log.contains_key(&t));
+        if !covered {
+            return false;
+        }
+        let bundles: Vec<Bundle> = self.log.range(from + 1..=self.ack).map(|(_, b)| b.clone()).collect();
+        for b in bundles {
+            if let Some(decoded) = self.decode_slots(&b) {
+                self.inbox.extend(decoded);
+            }
+        }
+        true
     }
 
     /// Sends the newest unconfirmed inputs (with the ack of the bundles).
@@ -382,6 +410,12 @@ pub enum ClientEvent {
     Desync { tick: u64, dump_name: String },
     DelayChanged { delay: u32 },
     HardResync { error_us: i64 },
+    /// Authoritative mode: the server found this client's checksum at
+    /// `from_tick` wrong and the client restored the server's frame of
+    /// `tick`.
+    Corrected { from_tick: u64, tick: u64 },
+    /// The server removed this client (`orr_proto::BYE_KICKED_*`).
+    Kicked { code: u8 },
 }
 
 /// Counters of a client.
@@ -407,6 +441,10 @@ pub struct ClientStats {
     pub dumps_written: u64,
     pub snapshots_served: u64,
     pub pongs: u64,
+    /// Server corrections applied (authoritative mode).
+    pub corrections: u64,
+    /// Corrections ignored because the bundle log could not cover them.
+    pub corrections_ignored: u64,
 }
 
 /// What one [`RelayClient::update`] produced.
@@ -445,6 +483,9 @@ pub struct RelayClient<G: Game, L: Link> {
     welcome: Option<Welcome>,
     events: Vec<ClientEvent>,
     pending_snapshot: Option<PendingSnapshot>,
+    /// Event batches a correction produced, for the next `update`.
+    correction_events: Vec<EventBatch<G::Event>>,
+    kicked: Option<u8>,
 
     now_us: u64,
     offset_us: i64,
@@ -495,6 +536,8 @@ impl<G: Game, L: Link> RelayClient<G, L> {
             welcome: None,
             events: Vec::new(),
             pending_snapshot: None,
+            correction_events: Vec::new(),
+            kicked: None,
             now_us: 0,
             offset_us: 0,
             samples: VecDeque::new(),
@@ -563,6 +606,12 @@ impl<G: Game, L: Link> RelayClient<G, L> {
         self.srtt_us
     }
 
+    /// The `Bye` code if the server removed this client for misbehaving
+    /// (`orr_proto::BYE_KICKED_DESYNC`, `BYE_KICKED_CHEAT`).
+    pub fn kicked(&self) -> Option<u8> {
+        self.kicked
+    }
+
     pub fn drain_events(&mut self) -> Vec<ClientEvent> {
         std::mem::take(&mut self.events)
     }
@@ -618,6 +667,7 @@ impl<G: Game, L: Link> RelayClient<G, L> {
         while let Some(msg) = self.src_mut().others.pop_front() {
             self.handle(msg);
         }
+        up.events.append(&mut self.correction_events);
         let (connected, disconnected) = {
             let s = self.src_mut();
             (std::mem::take(&mut s.connected), s.disconnected)
@@ -704,7 +754,18 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                     self.events.push(ClientEvent::Started);
                 }
             }
-            ServerMsg::Bye { .. } => self.state = ClientState::Disconnected,
+            ServerMsg::Correction { from_tick, tick, checksum, data } => {
+                if self.state == ClientState::Playing {
+                    self.on_correction(from_tick, tick, checksum, &data);
+                }
+            }
+            ServerMsg::Bye { code } => {
+                if code >= orr_proto::BYE_KICKED_DESYNC {
+                    self.kicked = Some(code);
+                    self.events.push(ClientEvent::Kicked { code });
+                }
+                self.state = ClientState::Disconnected;
+            }
             ServerMsg::Confirmed { .. } => {}
         }
     }
@@ -1049,6 +1110,35 @@ impl<G: Game, L: Link> RelayClient<G, L> {
         self.dumps.write_dump(&name, dump.to_bytes());
         self.stats.dumps_written += 1;
         self.events.push(ClientEvent::Desync { tick, dump_name: name });
+    }
+
+    /// Authoritative mode: restores the server's frame (see
+    /// [`Session::restore_confirmed`]) and replays the bundles it lags
+    /// behind.
+    fn on_correction(&mut self, from_tick: u64, tick: u64, checksum: u64, data: &[u8]) {
+        let frame_bytes = match crate::wire::decompress_bounded(data) {
+            Ok(b) => b,
+            Err(e) => return self.fail(format!("correction: {e}")),
+        };
+        let Some(session) = self.session.as_mut() else { return };
+        if tick < session.verified_tick() && !session.source_mut().refeed_after(tick) {
+            // Too old to go back to; the next checkpoint gets judged again.
+            self.stats.corrections_ignored += 1;
+            return;
+        }
+        match session.restore_confirmed(tick, checksum, &frame_bytes, from_tick) {
+            Ok(batch) => {
+                if !batch.is_empty() {
+                    self.correction_events.push(batch);
+                }
+                let len = session.checksums().len();
+                self.reported = self.reported.min(len);
+                self.base_anchor = Some(Anchor { tick, checksum, frame_bytes });
+                self.stats.corrections += 1;
+                self.events.push(ClientEvent::Corrected { from_tick, tick });
+            }
+            Err(e) => self.fail(format!("correction: {e}")),
+        }
     }
 
     fn serve_snapshot(&mut self, request_id: u32) {

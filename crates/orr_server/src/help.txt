@@ -1,0 +1,42 @@
+orr_server [options]
+  --bind ADDR              listen address (default 0.0.0.0:4433)
+  --transport quic|ws      (default quic; ws is plain, put TLS in a reverse proxy)
+  --tls-cert FILE --tls-key FILE   PEM certificate chain and key (QUIC).
+                           Without them a self-signed development certificate is made
+                           and its SHA-256 fingerprint is printed for `--trust-fingerprint`.
+  --tls-name NAME          extra name for the self-signed certificate (repeatable)
+  --webtransport           QUIC only: the same UDP port also answers browsers over WebTransport
+                           (ALPN h3). A generated certificate is then ECDSA P-256 valid 13 days,
+                           the form `serverCertificateHashes` accepts (Chrome, Firefox); Safari needs
+                           a CA-signed certificate (--tls-cert/--tls-key). See docs/webtransport-trial.md.
+  --ws-bind ADDR           also accept plain WebSocket clients on this TCP address (browser fallback)
+  --wss-bind ADDR          also accept wss:// WebSocket clients on this TCP address, with the QUIC certificate
+                           (browsers on an https:// page; give --tls-cert/--tls-key a CA-signed certificate)
+
+  --game arena|physics|custom   what the rooms play (default arena)
+  --players N              slots per room (default 4)
+  --min-players N          the room starts when this many are ready (default: players)
+  --tick-rate HZ           (default 60)
+  --seed N                 sim seed the clients get (default a fixed sample seed)
+  --room ID                first room id (default 1)   --rooms N   number of rooms (default 1)
+  --checksum-interval N    clients report a checksum every N verified ticks (default 30)
+
+  physics game:  --bodies N (1000)  --mode rain|pile|mixer  --spawn-rate R  --max-entities N
+  custom game:   --input-size BYTES  --build-id N (or --any-build)  --config-hex HEX
+                 (these also override the presets)
+
+  --authoritative          authoritative rooms (design 6.1): the server also runs the game's sim on the
+                           confirmed inputs, referees client checksums (a client with a wrong checksum
+                           gets a correction snapshot; one that keeps diverging is kicked), serves late
+                           joiners itself and audits the game state for cheating. Needs a game the
+                           server knows (--game arena). Relay stays the default. See docs/authoritative.md.
+  --ai-slot N              (authoritative, repeatable) slot N is played by the server's AI bot, no client
+                           can take it; its input rides in the confirmed bundles like a human's
+  --dump-dir DIR           (authoritative) where the server's .orrd desync dumps go (default ./orr_dumps)
+  --kick-after N           (authoritative) kick a client on its Nth wrong checksum within --kick-window
+                           (default 3; 0 = never)   --kick-window SECS  (default 60)
+  --violation-limit N      (authoritative) kick a client after N cheat-check violations (default 5; 0 = log only)
+
+  --stats-secs N           print room statistics every N seconds (default 5, 0 = off)
+  --sim-latency MS --sim-jitter MS --sim-loss P  --sim-seed N   add network conditions on the server side
+  --run-seconds N          stop by itself (same graceful path as Ctrl+C) after N seconds
