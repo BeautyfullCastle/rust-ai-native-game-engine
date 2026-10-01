@@ -368,3 +368,50 @@ impl SubAssign for FPVec3 {
         *self = *self - rhs;
     }
 }
+
+impl FPVec3 {
+    /// Component-wise absolute value.
+    #[inline]
+    #[must_use]
+    pub fn abs(self) -> FPVec3 {
+        FPVec3::new(self.x.abs(), self.y.abs(), self.z.abs())
+    }
+
+    /// Component `i` (0 = x, 1 = y, anything else = z).
+    #[inline]
+    #[must_use]
+    pub fn get(self, i: usize) -> FP {
+        match i {
+            0 => self.x,
+            1 => self.y,
+            _ => self.z,
+        }
+    }
+
+    /// Set component `i` (0 = x, 1 = y, anything else = z).
+    #[inline]
+    pub fn set(&mut self, i: usize, v: FP) {
+        match i {
+            0 => self.x = v,
+            1 => self.y = v,
+            _ => self.z = v,
+        }
+    }
+
+    /// Two unit vectors that, with the unit vector `self`, form a
+    /// right-handed orthonormal basis `(self, t1, t2)`. Deterministic;
+    /// the choice switches where the largest component of `self` changes.
+    #[must_use]
+    pub fn orthonormal_basis(self) -> (FPVec3, FPVec3) {
+        let t1 = if self.x.abs() >= self.y.abs() && self.x.abs() >= self.z.abs() {
+            FPVec3::new(-self.y, self.x, FP::ZERO)
+        } else if self.y.abs() >= self.z.abs() {
+            FPVec3::new(FP::ZERO, -self.z, self.y)
+        } else {
+            FPVec3::new(self.z, FP::ZERO, -self.x)
+        };
+        let t1 = t1.normalize_or_zero();
+        let t2 = self.cross(t1);
+        (t1, t2)
+    }
+}

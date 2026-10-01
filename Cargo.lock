@@ -3022,6 +3022,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_physics3d"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "criterion",
+ "orr_ecs",
+ "orr_fp",
+ "orr_session",
+ "orr_sim",
+]
+
+[[package]]
 name = "orr_proto"
 version = "0.0.1"
 dependencies = [

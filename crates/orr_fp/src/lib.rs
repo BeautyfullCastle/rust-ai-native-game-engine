@@ -88,6 +88,7 @@
 
 mod fp;
 mod fp32;
+mod mat3;
 mod parse;
 mod quat;
 mod rng;
@@ -100,6 +101,7 @@ pub mod float_interop;
 
 pub use fp::{ParseError, FP};
 pub use fp32::FP32;
+pub use mat3::FPMat3;
 pub use quat::FPQuat;
 pub use rng::FrameRng;
 pub use vec::{FPVec2, FPVec3};

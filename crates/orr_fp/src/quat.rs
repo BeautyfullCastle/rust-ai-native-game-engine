@@ -162,3 +162,62 @@ impl Mul for FPQuat {
         FPQuat::hamilton_mul(self, rhs)
     }
 }
+
+impl FPQuat {
+    /// Rotate a vector by the inverse of this (unit) quaternion.
+    #[must_use]
+    pub fn inverse_rotate_vec3(self, v: FPVec3) -> FPVec3 {
+        self.conjugate().rotate_vec3(v)
+    }
+
+    /// Normalize, or return the identity for a (numerically) zero
+    /// quaternion instead of panicking.
+    #[must_use]
+    pub fn normalize_or_identity(self) -> FPQuat {
+        let len = self.length_sq().sqrt();
+        if len.raw() == 0 {
+            FPQuat::IDENTITY
+        } else {
+            FPQuat::new(self.x / len, self.y / len, self.z / len, self.w / len)
+        }
+    }
+
+    /// Advance the orientation by the angular velocity `omega` (world
+    /// frame, radians per second) over `dt` seconds, with the first-order
+    /// update `q' = normalize(q + dt/2 * (omega, 0) * q)`. Deterministic
+    /// and cheap; accurate for small `omega * dt` (the physics step uses
+    /// it at 60 Hz). The result is renormalized.
+    #[must_use]
+    pub fn integrate_angular(self, omega: FPVec3, dt: FP) -> FPQuat {
+        // d = dt/2 * (omega, 0) * q on raw values, rounded to nearest (a
+        // flooring multiply would bias slow rotations towards negative).
+        let (wx, wy, wz) = (omega.x.raw() as i128, omega.y.raw() as i128, omega.z.raw() as i128);
+        let (qx, qy, qz, qw) = (self.x.raw() as i128, self.y.raw() as i128, self.z.raw() as i128, self.w.raw() as i128);
+        let h = dt.raw() as i128;
+        let r = |v: i128| FP::from_raw(((v * h + (1 << 32)) >> 33) as i64);
+        let dx = r(wx * qw + wy * qz - wz * qy);
+        let dy = r(-wx * qz + wy * qw + wz * qx);
+        let dz = r(wx * qy - wy * qx + wz * qw);
+        let dw = r(-wx * qx - wy * qy - wz * qz);
+        FPQuat::new(self.x + dx, self.y + dy, self.z + dz, self.w + dw).normalize_or_identity()
+    }
+
+    /// Axis (unit) and angle in `[0, pi]` of this unit quaternion. The
+    /// identity gives `(X, 0)`.
+    #[must_use]
+    pub fn to_axis_angle(self) -> (FPVec3, FP) {
+        let q = if self.w.raw() < 0 { FPQuat::new(-self.x, -self.y, -self.z, -self.w) } else { self };
+        let v = FPVec3::new(q.x, q.y, q.z);
+        let s = v.length();
+        if s.raw() == 0 {
+            return (FPVec3::X, FP::ZERO);
+        }
+        (v / s, s.atan2(q.w) * FP::TWO)
+    }
+
+    /// The rotation matrix of this unit quaternion.
+    #[must_use]
+    pub fn to_mat3(self) -> crate::mat3::FPMat3 {
+        crate::mat3::FPMat3::from_quat(self)
+    }
+}

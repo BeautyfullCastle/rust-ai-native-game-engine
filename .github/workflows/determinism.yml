@@ -72,11 +72,11 @@ jobs:
 
       - name: cargo clippy --workspace --all-targets
         # `-D warnings` only on the crates this task owns (`orr_sim`,
-        # `orr_session`, `orr_testgame`, `orr_physics`); other crates may be
+        # `orr_session`, `orr_testgame`, `orr_physics`, `orr_physics3d`); other crates may be
         # under concurrent work with their own warning budget.
         run: |
           cargo clippy --workspace --exclude orr_sample --exclude orr_editor --all-targets
-          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream -p orr_tui -p orr_net -p orr_web --all-targets -- -D warnings
+          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream -p orr_tui -p orr_net -p orr_web --all-targets -- -D warnings
 
       - name: cargo build -p orr_sim --features hotpatch
         # Desktop-only, off-by-default hot-patch hook (design doc decision
@@ -141,7 +141,7 @@ jobs:
         run: curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version v25.0.0
       - run: echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
 
-      - name: cargo test (orr_fp, orr_ecs, orr_session, orr_physics golden tests) on wasm32-wasip1
+      - name: cargo test (orr_fp, orr_ecs, orr_session, orr_physics, orr_physics3d golden tests) on wasm32-wasip1
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
         # `orr_sim`/`orr_testgame` are exercised transitively through
@@ -154,6 +154,7 @@ jobs:
           cargo test --release --target wasm32-wasip1 -p orr_ecs
           cargo test --release --target wasm32-wasip1 -p orr_session --test arena -- golden
           cargo test --release --target wasm32-wasip1 -p orr_physics --test physics -- golden
+          cargo test --release --target wasm32-wasip1 -p orr_physics3d --test golden -- golden
 
   wasm32-browser:
     # The browser client (`orr_web`, wasm-bindgen glue) and the sim crates it
@@ -175,7 +176,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo build (sim crates + orr_web) for wasm32-unknown-unknown
-        run: cargo build --release --target wasm32-unknown-unknown -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_web
+        run: cargo build --release --target wasm32-unknown-unknown -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_web
 
       - name: cargo clippy -p orr_web for wasm32-unknown-unknown
         run: cargo clippy --target wasm32-unknown-unknown -p orr_web --all-targets -- -D warnings
@@ -190,7 +191,8 @@ jobs:
           echo "Each 'native' matrix leg independently asserts the same"
           echo "hardcoded golden checksums (see crates/orr_session/tests/arena.rs,"
           echo "crates/orr_fp/tests/determinism_golden.rs and"
-          echo "crates/orr_physics/tests/physics.rs). A leg failing"
+          echo "crates/orr_physics/tests/physics.rs and"
+          echo "crates/orr_physics3d/tests/golden.rs). A leg failing"
           echo "that assertion is exactly a cross-platform determinism failure,"
           echo "so requiring every matrix leg to pass *is* the cross-platform"
           echo "checksum comparison; this job just gives that fact a clear,"
