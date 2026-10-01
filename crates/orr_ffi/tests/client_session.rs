@@ -388,7 +388,9 @@ fn two_c_abi_clients_and_a_rust_client_play_with_prediction_and_rollback() {
     drop(rust);
     let room = server.finish();
     assert_eq!(room.desyncs, 0, "the server found different checksums");
-    assert!(room.finalized >= TICKS, "the room confirmed {} ticks", room.finalized);
+    // The wait above stops once every peer has verified TICKS - 20; that is what
+    // the server is known to have confirmed.
+    assert!(room.finalized >= TICKS - 20, "the room confirmed {} ticks", room.finalized);
     let _ = PlayerSlot(0);
     let _ = SHOOT;
 }
