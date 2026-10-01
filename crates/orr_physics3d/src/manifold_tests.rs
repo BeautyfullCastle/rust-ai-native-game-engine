@@ -230,3 +230,81 @@ fn box_box_ids_are_stable_for_a_tiny_rotation() {
         assert_eq!(got, ids, "ids changed for k={k}");
     }
 }
+
+#[test]
+fn fast_rotation_integration_matches_the_library_function() {
+    use crate::step::integrate_rot;
+    use orr_fp::FrameRng;
+    let mut rng = FrameRng::new(77);
+    let mut q = FPQuat::from_axis_angle(FPVec3::new(fp!(0.6), fp!(0), fp!(0.8)), fp!(0.3));
+    for _ in 0..2000 {
+        let w = FPVec3::new(rng.range_fp(fp!(-9), fp!(9)), rng.range_fp(fp!(-9), fp!(9)), rng.range_fp(fp!(-9), fp!(9)));
+        let dt = FP::from_ratio(1, 60);
+        let (a, b) = (integrate_rot(q, w, dt), q.integrate_angular(w, dt));
+        assert_eq!(a, b);
+        q = a;
+    }
+}
+
+#[test]
+fn closest_point_of_segment_and_box_matches_brute_force() {
+    use crate::geom::closest_seg_seg;
+    use orr_fp::FrameRng;
+    let mut rng = FrameRng::new(5);
+    let mut checked = 0;
+    for _ in 0..4000 {
+        let h = FPVec3::new(rng.range_fp(fp!(0.2), fp!(1.5)), rng.range_fp(fp!(0.2), fp!(1.5)), rng.range_fp(fp!(0.2), fp!(1.5)));
+        let mut rp = |s: i32| FPVec3::new(rng.range_fp(fp!(-4), fp!(4)) * s, rng.range_fp(fp!(-4), fp!(4)), rng.range_fp(fp!(-4), fp!(4)));
+        let (p0, p1) = (rp(1), rp(1));
+        let d = p1 - p0;
+        // Skip segments that touch the box (handled by the SAT path).
+        let (mut lo, mut hi) = (FP::ZERO, FP::ONE);
+        let mut touching = true;
+        for j in 0..3 {
+            let (pj, dj, hj) = (p0.get(j), d.get(j), h.get(j));
+            if dj.raw() == 0 {
+                if pj.abs() > hj {
+                    touching = false;
+                }
+            } else {
+                let (mut a, mut b) = ((-hj - pj) / dj, (hj - pj) / dj);
+                if a > b {
+                    core::mem::swap(&mut a, &mut b);
+                }
+                lo = lo.max(a);
+                hi = hi.min(b);
+            }
+        }
+        if touching && lo <= hi {
+            continue;
+        }
+        // Brute force: end points and the 12 edges.
+        let clamp = |p: FPVec3| FPVec3::new(p.x.clamp(-h.x, h.x), p.y.clamp(-h.y, h.y), p.z.clamp(-h.z, h.z));
+        let mut best = FP::MAX;
+        for p in [p0, p1] {
+            best = best.min((p - clamp(p)).length_sq());
+        }
+        for axis in 0..3 {
+            let (j, k) = ((axis + 1) % 3, (axis + 2) % 3);
+            for sj in [-1i32, 1] {
+                for sk in [-1i32, 1] {
+                    let mut e0 = FPVec3::ZERO;
+                    e0.set(j, h.get(j) * sj);
+                    e0.set(k, h.get(k) * sk);
+                    let mut e1 = e0;
+                    e0.set(axis, -h.get(axis));
+                    e1.set(axis, h.get(axis));
+                    let (s, t) = closest_seg_seg(p0, p1, e0, e1);
+                    let (a, b) = (p0 + d * s, e0 + (e1 - e0) * t);
+                    best = best.min((a - b).length_sq());
+                }
+            }
+        }
+        let (_, qb, qs, d2) = crate::collide::seg_box_closest(p0, d, h);
+        let got = FP::from_raw((d2 >> 16) as i64);
+        assert!((got - best).abs() <= fp!(0.002) + best / 200, "closest {got} vs brute {best} for {p0:?} {p1:?} {h:?}");
+        assert!((qs - qb).length_sq() - got < fp!(0.002));
+        checked += 1;
+    }
+    assert!(checked > 1000, "only {checked} disjoint cases");
+}

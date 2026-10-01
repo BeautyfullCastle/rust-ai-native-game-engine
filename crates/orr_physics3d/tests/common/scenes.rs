@@ -117,3 +117,55 @@ pub fn mixed_pile(n: i32) -> Frame {
     }
     f
 }
+
+/// `n` mixed bodies (a third each: spheres, boxes, capsules) dropped in a
+/// grid into a walled arena that grows with `n`. Four layers deep, so they
+/// pile up and rest on each other: the benchmark scene.
+pub fn bench_pile(n: i32, sleeping: bool) -> Frame {
+    let mut cfg = PhysicsConfig::default();
+    if !sleeping {
+        cfg.sleep_ticks = 0;
+    }
+    let mut f = new_frame_with(cfg);
+    // Columns per side so that n bodies fit in 4 layers.
+    let mut side = 4;
+    while side * side * 4 < n {
+        side += 1;
+    }
+    let cell = fp!(1.3);
+    let half = cell * side / 2 + FP::ONE;
+    spawn_body(
+        &mut f,
+        Body::new_static(v3!(0, -0.5, 0)),
+        Collider::new(Shape::cuboid(half + FP::ONE, FP::HALF, half + FP::ONE)).with_friction(fp!(0.6)),
+    );
+    for (sx, sz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let pos = FPVec3::new((half + FP::HALF) * sx, fp!(10), (half + FP::HALF) * sz);
+        let (hx, hz) = if sx != 0 { (FP::HALF, half + FP::ONE) } else { (half + FP::ONE, FP::HALF) };
+        spawn_body(&mut f, Body::new_static(pos), Collider::new(Shape::cuboid(hx, fp!(10), hz)));
+    }
+    let mut rng = FrameRng::new(99);
+    for i in 0..n {
+        let (cx, cz, layer) = (i % side, (i / side) % side, i / (side * side));
+        let x = (FP::from_int(cx) - FP::from_int(side - 1) * FP::HALF) * cell + rng.range_fp(fp!(-0.1), fp!(0.1));
+        let z = (FP::from_int(cz) - FP::from_int(side - 1) * FP::HALF) * cell + rng.range_fp(fp!(-0.1), fp!(0.1));
+        let y = fp!(0.7) + FP::from_int(layer) * fp!(1.2);
+        let pos = FPVec3::new(x, y, z);
+        let axis = FPVec3::new(rng.range_fp(fp!(-1), fp!(1)), rng.range_fp(fp!(0.2), fp!(1)), rng.range_fp(fp!(-1), fp!(1))).normalize_or_zero();
+        let rot = FPQuat::from_axis_angle(axis, rng.range_fp(fp!(-3), fp!(3)));
+        match i % 3 {
+            0 => {
+                spawn_sphere(&mut f, pos, rng.range_fp(fp!(0.3), fp!(0.45)));
+            }
+            1 => {
+                let h = rng.range_fp(fp!(0.3), fp!(0.45));
+                let s = Shape::cuboid(h, h, h);
+                spawn_body(&mut f, Body::new_dynamic(pos, &s, FP::ONE).with_rotation(rot), Collider::new(s));
+            }
+            _ => {
+                spawn_capsule(&mut f, pos, rng.range_fp(fp!(0.2), fp!(0.4)), rng.range_fp(fp!(0.2), fp!(0.3)), rot);
+            }
+        }
+    }
+    f
+}

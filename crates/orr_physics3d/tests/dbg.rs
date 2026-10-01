@@ -1,19 +1,38 @@
 mod common;
-use common::*;
-use orr_fp::{fp, FP};
-use orr_physics3d::{spawn_body, Body, Collider, Scratch, Shape};
+use common::scenes::*;
+use orr_physics3d::{step_probed, Phase, Scratch};
+use std::time::{Duration, Instant};
+
+fn profile(n: i32, warm: u32, measure: u32) {
+    let mut f = bench_pile(n, false);
+    let mut sc = Scratch::new();
+    for _ in 0..warm {
+        orr_physics3d::step(&mut f, &mut sc);
+    }
+    let mut acc = [Duration::ZERO; 9];
+    let mut total = Duration::ZERO;
+    for _ in 0..measure {
+        let t0 = Instant::now();
+        let mut last = t0;
+        step_probed(&mut f, &mut sc, &mut |p| {
+            let now = Instant::now();
+            acc[p as usize] += now - last;
+            last = now;
+        });
+        total += t0.elapsed();
+    }
+    let names = ["gather", "transforms", "broad", "narrow", "integrate", "prepare", "solve", "sleep", "finish"];
+    let mut line = String::new();
+    for (i, nm) in names.iter().enumerate() {
+        line.push_str(&format!("{nm} {:.0}us  ", acc[i].as_micros() as f64 / measure as f64));
+    }
+    println!("P n={n} total {:.0}us/tick | {line} | {:?}", total.as_micros() as f64 / measure as f64, sc.stats());
+    let _ = Phase::Gather;
+}
 
 #[test]
-fn sphere_edge() {
-    let mut f = new_frame();
-    ground(&mut f);
-    spawn_body(&mut f, Body::new_static(v3!(0, 0.5, 0)), Collider::new(Shape::cuboid(fp!(1), fp!(0.5), fp!(1))));
-    let s = spawn_sphere(&mut f, v3!(1.02, 1.6, 0), fp!(0.3));
-    let mut sc = Scratch::new();
-    for t in 0..12 {
-        run(&mut f, &mut sc, 10);
-        let b = body(&f, s);
-        println!("t{} pos {:?} v {:?} w {:?} sleep {:#x} {:?}", t, b.pos, b.vel, b.omega, b.sleep, sc.stats());
-    }
-    let _ = FP::ONE;
+fn prof() {
+    profile(500, 90, 60);
+    profile(1000, 90, 60);
+    profile(500, 400, 60);
 }

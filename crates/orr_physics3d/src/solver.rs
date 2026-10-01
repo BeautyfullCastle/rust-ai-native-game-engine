@@ -10,7 +10,7 @@
 
 use orr_fp::{FPMat3, FPVec3, FP};
 
-use crate::fastmath::{self, nmul};
+use crate::fastmath::{self, nmul, rshift, unit};
 use crate::types::PhysicsConfig;
 
 /// Linear and angular velocity of one body during the solve.
@@ -61,7 +61,8 @@ pub(crate) struct Constraint {
     pub normal: FPVec3,
     pub friction: FP,
     pub restitution: FP,
-    pub pts: [ContactPt; 4],
+    /// Index of the first point in the shared point pool.
+    pub first: u32,
     // Derived by `prepare`.
     pub(crate) t1: FPVec3,
     pub(crate) t2: FPVec3,
@@ -89,20 +90,27 @@ fn dot3(a: FPVec3, b: FPVec3) -> i64 {
 fn rel_vel(va: &Vw, vb: &Vw, d: FPVec3, row: &Row) -> FP {
     let dv = vb.v - va.v;
     let s = dot3(dv, d).wrapping_add(dot3(vb.w, row.rbd)).wrapping_sub(dot3(va.w, row.rad));
-    FP::from_raw(s >> 16)
+    rshift(s)
 }
 
+/// Applies the impulse `lam` along `d` to both bodies. A side with zero
+/// inverse mass (static, kinematic) is skipped.
 #[inline(always)]
 fn apply(va: &mut Vw, vb: &mut Vw, d: FPVec3, ima: FP, imb: FP, row: &Row, lam: FP) {
-    let (sa, sb) = (nmul(ima, lam), nmul(imb, lam));
-    va.v.x -= nmul(d.x, sa);
-    va.v.y -= nmul(d.y, sa);
-    va.v.z -= nmul(d.z, sa);
-    vb.v.x += nmul(d.x, sb);
-    vb.v.y += nmul(d.y, sb);
-    vb.v.z += nmul(d.z, sb);
-    va.w -= scale(row.wad, lam);
-    vb.w += scale(row.wbd, lam);
+    if ima != FP::ZERO {
+        let sa = nmul(ima, lam);
+        va.v.x -= nmul(d.x, sa);
+        va.v.y -= nmul(d.y, sa);
+        va.v.z -= nmul(d.z, sa);
+        va.w -= scale(row.wad, lam);
+    }
+    if imb != FP::ZERO {
+        let sb = nmul(imb, lam);
+        vb.v.x += nmul(d.x, sb);
+        vb.v.y += nmul(d.y, sb);
+        vb.v.z += nmul(d.z, sb);
+        vb.w += scale(row.wbd, lam);
+    }
 }
 
 #[inline(always)]
@@ -118,15 +126,28 @@ fn cross(a: FPVec3, b: FPVec3) -> FPVec3 {
 #[inline(always)]
 fn mat_vec(m: &FPMat3, v: FPVec3) -> FPVec3 {
     FPVec3::new(
-        FP::from_raw(dot3(m.r0, v) >> 16),
-        FP::from_raw(dot3(m.r1, v) >> 16),
-        FP::from_raw(dot3(m.r2, v) >> 16),
+        rshift(dot3(m.r0, v)),
+        rshift(dot3(m.r1, v)),
+        rshift(dot3(m.r2, v)),
     )
+}
+
+/// Same bits as `FPVec3::orthonormal_basis`, with the faster square root.
+fn basis(n: FPVec3) -> (FPVec3, FPVec3) {
+    let t1 = if n.x.abs() >= n.y.abs() && n.x.abs() >= n.z.abs() {
+        FPVec3::new(-n.y, n.x, FP::ZERO)
+    } else if n.y.abs() >= n.z.abs() {
+        FPVec3::new(FP::ZERO, -n.z, n.y)
+    } else {
+        FPVec3::new(n.z, FP::ZERO, -n.x)
+    };
+    let t1 = unit(t1);
+    (t1, n.cross(t1))
 }
 
 /// Fills the derived fields, warm starts, and updates the velocities in
 /// `vw` with the warm start impulses.
-pub(crate) fn prepare(cons: &mut [Constraint], bodies: &[BodyInv], vw: &mut [Vw], cfg: &PhysicsConfig) {
+pub(crate) fn prepare(cons: &mut [Constraint], pool: &mut [ContactPt], bodies: &[BodyInv], vw: &mut [Vw], cfg: &PhysicsConfig) {
     let inv_dt = fastmath::div(FP::ONE, cfg.dt);
     for c in cons.iter_mut() {
         let (a, b) = (c.a as usize, c.b as usize);
@@ -135,21 +156,25 @@ pub(crate) fn prepare(cons: &mut [Constraint], bodies: &[BodyInv], vw: &mut [Vw]
         c.ima = ima;
         c.imb = imb;
         let n = c.normal;
-        let (t1, t2) = n.orthonormal_basis();
+        let (t1, t2) = basis(n);
         c.t1 = t1;
         c.t2 = t2;
         let dirs = [n, t1, t2];
         let (mut va, mut vb) = (vw[a], vw[b]);
-        for k in 0..c.count as usize {
-            let p = &mut c.pts[k];
+        let a_ang = ima > FP::ZERO || va.w != FPVec3::ZERO;
+        let b_ang = imb > FP::ZERO || vb.w != FPVec3::ZERO;
+        let first = c.first as usize;
+        for p in pool[first..first + c.count as usize].iter_mut() {
             let ra = p.point - ba.pos;
             let rb = p.point - bb.pos;
             for (row, &d) in p.rows.iter_mut().zip(&dirs) {
-                row.rad = cross(ra, d);
-                row.rbd = cross(rb, d);
-                row.wad = mat_vec(&ba.inv_inertia, row.rad);
-                row.wbd = mat_vec(&bb.inv_inertia, row.rbd);
-                let kk = ima + imb + FP::from_raw((dot3(row.wad, row.rad) + dot3(row.wbd, row.rbd)) >> 16);
+                // A body that neither has inertia nor spins takes no part
+                // in the angular terms (static ground: half the work).
+                row.rad = if a_ang { cross(ra, d) } else { FPVec3::ZERO };
+                row.rbd = if b_ang { cross(rb, d) } else { FPVec3::ZERO };
+                row.wad = if ima > FP::ZERO { mat_vec(&ba.inv_inertia, row.rad) } else { FPVec3::ZERO };
+                row.wbd = if imb > FP::ZERO { mat_vec(&bb.inv_inertia, row.rbd) } else { FPVec3::ZERO };
+                let kk = ima + imb + rshift(dot3(row.wad, row.rad).wrapping_add(dot3(row.wbd, row.rbd)));
                 row.mass = if kk > FP::ZERO { fastmath::div(FP::ONE, kk) } else { FP::ZERO };
             }
             let vn0 = rel_vel(&va, &vb, n, &p.rows[0]);
@@ -166,8 +191,8 @@ pub(crate) fn prepare(cons: &mut [Constraint], bodies: &[BodyInv], vw: &mut [Vw]
 
             // Warm start: friction vector projected on the new basis, then
             // the normal impulse from last tick.
-            p.j1 = FP::from_raw(dot3(p.jt, t1) >> 16);
-            p.j2 = FP::from_raw(dot3(p.jt, t2) >> 16);
+            p.j1 = rshift(dot3(p.jt, t1));
+            p.j2 = rshift(dot3(p.jt, t2));
             let (j1, j2, jn) = (p.j1, p.j2, p.jn);
             if j1 != FP::ZERO {
                 apply(&mut va, &mut vb, t1, ima, imb, &p.rows[1], j1);
@@ -187,7 +212,7 @@ pub(crate) fn prepare(cons: &mut [Constraint], bodies: &[BodyInv], vw: &mut [Vw]
 /// Runs `iterations` sweeps over all constraints (friction, then normal).
 /// Odd sweeps walk the constraints backwards, which spreads the
 /// information through a stack in both directions.
-pub(crate) fn solve(cons: &mut [Constraint], vw: &mut [Vw], iterations: u32) {
+pub(crate) fn solve(cons: &mut [Constraint], pool: &mut [ContactPt], vw: &mut [Vw], iterations: u32) {
     let n = cons.len();
     for it in 0..iterations {
         for k in 0..n {
@@ -196,22 +221,27 @@ pub(crate) fn solve(cons: &mut [Constraint], vw: &mut [Vw], iterations: u32) {
             let (mut va, mut vb) = (vw[a], vw[b]);
             let (ima, imb) = (c.ima, c.imb);
             let (nrm, t1, t2) = (c.normal, c.t1, c.t2);
-            let count = c.count as usize;
+            let first = c.first as usize;
             let friction = c.friction;
-            for p in c.pts[..count].iter_mut() {
+            let pts = &mut pool[first..first + c.count as usize];
+            for p in pts.iter_mut() {
                 let max_f = nmul(friction, p.jn);
-                let vt = rel_vel(&va, &vb, t1, &p.rows[1]);
-                let new1 = (p.j1 - nmul(p.rows[1].mass, vt)).clamp(-max_f, max_f);
-                let lam = new1 - p.j1;
+                if max_f == FP::ZERO && p.j1 == FP::ZERO && p.j2 == FP::ZERO {
+                    continue;
+                }
+                // Both tangent rows read the same velocities: they are
+                // nearly decoupled, and this halves the dependency chain.
+                let vt1 = rel_vel(&va, &vb, t1, &p.rows[1]);
+                let vt2 = rel_vel(&va, &vb, t2, &p.rows[2]);
+                let new1 = (p.j1 - nmul(p.rows[1].mass, vt1)).clamp(-max_f, max_f);
+                let new2 = (p.j2 - nmul(p.rows[2].mass, vt2)).clamp(-max_f, max_f);
+                let (lam1, lam2) = (new1 - p.j1, new2 - p.j2);
                 p.j1 = new1;
-                apply(&mut va, &mut vb, t1, ima, imb, &p.rows[1], lam);
-                let vt = rel_vel(&va, &vb, t2, &p.rows[2]);
-                let new2 = (p.j2 - nmul(p.rows[2].mass, vt)).clamp(-max_f, max_f);
-                let lam = new2 - p.j2;
                 p.j2 = new2;
-                apply(&mut va, &mut vb, t2, ima, imb, &p.rows[2], lam);
+                apply(&mut va, &mut vb, t1, ima, imb, &p.rows[1], lam1);
+                apply(&mut va, &mut vb, t2, ima, imb, &p.rows[2], lam2);
             }
-            for p in c.pts[..count].iter_mut() {
+            for p in pts.iter_mut() {
                 let vn = rel_vel(&va, &vb, nrm, &p.rows[0]);
                 let new_jn = (p.jn + nmul(p.rows[0].mass, p.target - vn)).max(FP::ZERO);
                 let lam = new_jn - p.jn;
@@ -223,9 +253,10 @@ pub(crate) fn solve(cons: &mut [Constraint], vw: &mut [Vw], iterations: u32) {
         }
     }
     // Hand the friction impulses back as world vectors for the cache.
-    for c in cons.iter_mut() {
+    for c in cons.iter() {
         let (t1, t2) = (c.t1, c.t2);
-        for p in c.pts[..c.count as usize].iter_mut() {
+        let first = c.first as usize;
+        for p in pool[first..first + c.count as usize].iter_mut() {
             p.jt = scale(t1, p.j1) + scale(t2, p.j2);
         }
     }

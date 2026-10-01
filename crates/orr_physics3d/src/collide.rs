@@ -11,6 +11,7 @@
 
 use orr_fp::{fp, FPVec3, FP};
 
+use crate::fastmath::{div, length, sqrt, unit, vdiv};
 use crate::geom::{any_perpendicular, closest_seg_seg, dotr, ratio_q16, segment_of, Xf};
 use crate::types::{Shape, SHAPE_BOX};
 
@@ -100,11 +101,11 @@ fn seg_seg(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
     if dist2 > lim * lim {
         return m;
     }
-    let dist = dist2.sqrt();
+    let dist = sqrt(dist2);
     let n = if dist.raw() >= 16 {
-        delta / dist
+        vdiv(delta, dist)
     } else {
-        let c = d1.cross(d2).normalize_or_zero();
+        let c = unit(d1.cross(d2));
         if c != FPVec3::ZERO {
             c
         } else if d1 != FPVec3::ZERO {
@@ -119,8 +120,8 @@ fn seg_seg(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
     // the two axes into two contact points so they rest without rocking.
     let (la, le, lb) = (dotr(d1, d1), dotr(d2, d2), dotr(d1, d2));
     if la > 1 << 10 && le > 1 << 10 && lb * lb * 10_000 >= 9604 * la * le {
-        let l1 = d1.length();
-        let u = d1 / l1;
+        let l1 = length(d1);
+        let u = vdiv(d1, l1);
         let xp = (p2 - p1).dot(u);
         let xq = (q2 - p1).dot(u);
         let lo = xp.min(xq).max(FP::ZERO);
@@ -179,6 +180,68 @@ fn clamp_to_box(p: FPVec3, h: FPVec3) -> FPVec3 {
     FPVec3::new(p.x.clamp(-h.x, h.x), p.y.clamp(-h.y, h.y), p.z.clamp(-h.z, h.z))
 }
 
+/// Exact closest pair of the segment `p0 + t d` (`t` in `[0, 1]`) and the
+/// box `|x_j| <= h_j`, for a segment that does not touch the box.
+///
+/// The distance is a convex, piecewise quadratic function of `t`; its
+/// pieces end where a coordinate of the segment crosses a face plane of
+/// the box (at most 6 breakpoints). Each piece is minimized in closed form.
+/// Returns the parameter, the box point, the segment point and the squared
+/// distance in raw Q32 units.
+pub(crate) fn seg_box_closest(p0: FPVec3, d: FPVec3, h: FPVec3) -> (FP, FPVec3, FPVec3, i128) {
+    let mut ts = [0i64; 8];
+    let mut n = 1; // ts[0] = 0
+    for j in 0..3 {
+        let (pj, dj, hj) = (p0.get(j).raw(), d.get(j).raw(), h.get(j).raw());
+        if dj != 0 {
+            for edge in [-hj, hj] {
+                let t = ratio_q16((edge - pj) as i128, dj as i128);
+                if t > 0 && t < 65536 {
+                    // Insertion keeps the breakpoints sorted.
+                    let mut i = n;
+                    while i > 1 && ts[i - 1] > t {
+                        ts[i] = ts[i - 1];
+                        i -= 1;
+                    }
+                    ts[i] = t;
+                    n += 1;
+                }
+            }
+        }
+    }
+    ts[n] = 65536;
+    let mut best = (FP::ZERO, FPVec3::ZERO, FPVec3::ZERO, i128::MAX);
+    for k in 0..n {
+        let (ta, tb) = (ts[k], ts[k + 1]);
+        let tm = (ta + tb) >> 1;
+        // Which faces each coordinate is outside of in this piece.
+        let (mut a, mut bn) = (0i128, 0i128);
+        for j in 0..3 {
+            let (pj, dj, hj) = (p0.get(j).raw() as i128, d.get(j).raw() as i128, h.get(j).raw() as i128);
+            let mid = pj + ((dj * tm as i128) >> 16);
+            let c = if mid > hj {
+                hj
+            } else if mid < -hj {
+                -hj
+            } else {
+                continue;
+            };
+            a += dj * dj;
+            bn += (pj - c) * dj;
+        }
+        let t = if a > 0 { ratio_q16(-bn, a).clamp(ta, tb) } else { ta };
+        let tf = FP::from_raw(t);
+        let qs = p0 + d * tf;
+        let qb = clamp_to_box(qs, h);
+        let e = qs - qb;
+        let d2 = dotr(e, e);
+        if d2 < best.3 {
+            best = (tf, qb, qs, d2);
+        }
+    }
+    best
+}
+
 fn seg_box(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
     let (w0, w1) = segment_of(a, xa);
     let r = a.radius;
@@ -198,42 +261,19 @@ fn seg_box(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
     }
 
     // Local normal pointing from the box to the segment.
-    let mut tmid = FP::HALF;
+    let tmid: FP;
     let mut closest: Option<(FPVec3, FPVec3)> = None; // (box point, segment point)
     if let Some((t0, t1)) = clip_axes(p0, d, h, &[0, 1, 2]) {
         tmid = (t0 + t1) * FP::HALF;
     } else {
-        // Disjoint: the closest pair involves a segment end point or one of
-        // the 12 box edges.
-        let mut best = FP::MAX;
-        let mut consider = |qb: FPVec3, qs: FPVec3, t: FP, best: &mut FP, tmid: &mut FP| {
-            let d2 = (qs - qb).length_sq();
-            if d2 < *best {
-                *best = d2;
-                *tmid = t;
-                closest = Some((qb, qs));
-            }
-        };
-        consider(clamp_to_box(p0, h), p0, FP::ZERO, &mut best, &mut tmid);
-        consider(clamp_to_box(p1, h), p1, FP::ONE, &mut best, &mut tmid);
-        for axis in 0..3 {
-            let (j, k) = ((axis + 1) % 3, (axis + 2) % 3);
-            for sj in [-1i32, 1] {
-                for sk in [-1i32, 1] {
-                    let mut e0 = FPVec3::ZERO;
-                    e0.set(j, h.get(j) * sj);
-                    e0.set(k, h.get(k) * sk);
-                    let mut e1 = e0;
-                    e0.set(axis, -h.get(axis));
-                    e1.set(axis, h.get(axis));
-                    let (s, t) = closest_seg_seg(p0, p1, e0, e1);
-                    consider(e0 + (e1 - e0) * t, p0 + d * s, s, &mut best, &mut tmid);
-                }
-            }
-        }
-        if best > lim * lim {
+        // Disjoint: exact closest pair of the segment and the box.
+        let (t, qb, qs, d2) = seg_box_closest(p0, d, h);
+        let lr = lim.raw() as i128;
+        if d2 > lr * lr {
             return m;
         }
+        tmid = t;
+        closest = Some((qb, qs));
     }
 
     let n_world_sign = FP::MINUS_ONE; // manifold normal = -(box to segment)
@@ -270,9 +310,9 @@ fn seg_box(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
 
     if let Some((qb, qs)) = closest {
         let delta = qs - qb;
-        let dist = delta.length();
+        let dist = length(delta);
         if dist.raw() >= 16 {
-            let nl = delta / dist;
+            let nl = vdiv(delta, dist);
             // Face aligned: use the exact face normal and a clipped overlap.
             let (mut ai, mut av) = (0usize, nl.x.abs());
             for j in 1..3 {
@@ -310,18 +350,18 @@ fn seg_box(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
         }
     }
     // Axes perpendicular to the segment and a box axis (edge contacts).
-    let dl = d.length();
+    let dl = length(d);
     let mut cross_best: Option<(FP, FPVec3)> = None;
     if dl > fp!(0.01) {
         for i in 0..3 {
             let mut e = FPVec3::ZERO;
             e.set(i, FP::ONE);
             let c = e.cross(d);
-            let cl = c.length();
+            let cl = length(c);
             if cl <= dl / 10 {
                 continue;
             }
-            let ax = c / cl;
+            let ax = vdiv(c, cl);
             let ha = ax.abs().dot(h);
             let s0 = p0.dot(ax);
             let plus = ha + r - s0;
@@ -371,7 +411,7 @@ fn clip_poly(poly: &Poly, c: FPVec3, w: FPVec3, h: FP) -> Poly {
             out.n += 1;
         }
         if ((dc < FP::ZERO && dn > FP::ZERO) || (dc > FP::ZERO && dn < FP::ZERO)) && out.n < 8 {
-            let t = dc / (dc - dn);
+            let t = div(dc, dc - dn);
             out.p[out.n] = cur + (nxt - cur) * t;
             out.n += 1;
         }
@@ -456,7 +496,7 @@ fn face_points(m: &mut Manifold, xx: &Xf, hx: FPVec3, xy: &Xf, hy: FPVec3, nref:
     for &(p, _) in &cand[..nc] {
         cen += p;
     }
-    cen = cen / FP::from_int(nc as i32);
+    cen = vdiv(cen, FP::from_int(nc as i32));
     for &(p, s) in &cand[..nc] {
         let rel = p - cen;
         let q = match (rel.dot(a1) >= FP::ZERO, rel.dot(a2) >= FP::ZERO) {
@@ -527,7 +567,7 @@ fn box_box(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
             let ra_ = ha.get(i1) * ar[i2][j] + ha.get(i2) * ar[i1][j];
             let rb_ = hb.get(j1) * ar[i][j2] + hb.get(j2) * ar[i][j1];
             let proj = (t.get(i2) * r[i1][j] - t.get(i1) * r[i2][j]).abs();
-            let s = (proj - (ra_ + rb_)) / len2.sqrt();
+            let s = div(proj - (ra_ + rb_), sqrt(len2));
             if s > margin {
                 return m;
             }
@@ -544,7 +584,7 @@ fn box_box(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
 
     if use_edge {
         let (i, j) = axis_e;
-        let mut n = xa.axis(i).cross(xb.axis(j)).normalize_or_zero();
+        let mut n = unit(xa.axis(i).cross(xb.axis(j)));
         if n.dot(tw) < FP::ZERO {
             n = -n;
         }
@@ -589,7 +629,7 @@ fn box_box(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
     if m.count == 0 && axis_e.0 != usize::MAX {
         // Clipped away entirely: fall back to the edge pair.
         let (i, j) = axis_e;
-        let mut n = xa.axis(i).cross(xb.axis(j)).normalize_or_zero();
+        let mut n = unit(xa.axis(i).cross(xb.axis(j)));
         if n.dot(tw) < FP::ZERO {
             n = -n;
         }

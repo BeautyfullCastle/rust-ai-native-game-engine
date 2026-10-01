@@ -11,10 +11,10 @@
 //! the step write the results back, for the bodies that moved.
 
 use orr_ecs::{Component, Entity, Frame, FrameList};
-use orr_fp::{FPMat3, FPVec3, FP};
+use orr_fp::{FPMat3, FPQuat, FPVec3, FP};
 
 use crate::collide::collide;
-use crate::fastmath::mul_round;
+use crate::fastmath::{div, length, mul_round, sqrt};
 use crate::geom::Xf;
 use crate::solver::{self, BodyInv, Constraint, ContactPt, Vw};
 use crate::types::{
@@ -85,10 +85,13 @@ pub struct Scratch {
     wake_ids: Vec<u32>,
     wake_single: Vec<u32>,
     xfs: Vec<Xf>,
+    /// Bounding sphere radius per body.
+    brad: Vec<FP>,
     sorted: Vec<SweepBox>,
-    order: Vec<SweepBox>,
+    keys: Vec<(i64, u32)>,
     pairs: Vec<u64>,
     cons: Vec<Constraint>,
+    pool: Vec<ContactPt>,
     binv: Vec<BodyInv>,
     vw: Vec<Vw>,
     /// Per mover: new sleep timer, and the island id if it falls asleep.
@@ -299,6 +302,7 @@ impl Scratch {
     fn build_transforms(&mut self, bd: &[Body], cd: &[Collider], margin: FP) {
         let n = self.ents.len();
         self.xfs.clear();
+        self.brad.clear();
         self.sorted.clear();
         for i in 0..n {
             let b = &bd[self.bslot[i] as usize];
@@ -326,6 +330,11 @@ impl Scratch {
                 flags: (((f & F_DYN != 0) as u32) << 1) | (((f & F_ACTIVE != 0) as u32) << 2),
             });
             self.xfs.push(xf);
+            self.brad.push(match sh.kind {
+                SHAPE_SPHERE => sh.radius,
+                SHAPE_BOX => length(sh.half),
+                _ => sh.half.y + sh.radius,
+            });
         }
     }
 
@@ -353,16 +362,18 @@ impl Scratch {
         }
         let ax = best.0;
         let (ay, az) = ((ax + 1) % 3, (ax + 2) % 3);
-        // Sorting a copy keeps `sorted` in body order for the next phases.
-        self.order.clear();
-        self.order.extend_from_slice(&self.sorted);
-        self.order.sort_unstable_by_key(|b| (b.min[ax], b.idx));
+        self.keys.clear();
+        for b in &self.sorted {
+            self.keys.push((b.min[ax], b.idx));
+        }
+        self.keys.sort_unstable();
         for oi in 0..n {
-            let a = self.order[oi];
-            for b in &self.order[oi + 1..] {
-                if b.min[ax] > a.max[ax] {
+            let a = self.sorted[self.keys[oi].1 as usize];
+            for &(kmin, bi) in &self.keys[oi + 1..] {
+                if kmin > a.max[ax] {
                     break;
                 }
+                let b = &self.sorted[bi as usize];
                 let f = a.flags | b.flags;
                 if (f & 6) == 6
                     && b.min[ay] <= a.max[ay]
@@ -386,9 +397,14 @@ impl Scratch {
 
     fn narrow_phase(&mut self, cd: &[Collider], old_cache: &[ContactCache], margin: FP) {
         self.cons.clear();
+        self.pool.clear();
         let mut ci = 0usize;
         for &key in &self.pairs {
             let (lo, hi) = ((key >> 32) as usize, (key & 0xffff_ffff) as usize);
+            let reach = self.brad[lo] + self.brad[hi] + margin;
+            if (self.xfs[hi].p - self.xfs[lo].p).length_sq() > reach * reach {
+                continue;
+            }
             let (ca, cb) = (&cd[self.cslot[lo] as usize], &cd[self.cslot[hi] as usize]);
             let (mut m, flip) = if ca.shape.kind <= cb.shape.kind {
                 (collide(&ca.shape, &self.xfs[lo], &cb.shape, &self.xfs[hi], margin), false)
@@ -401,19 +417,21 @@ impl Scratch {
             if flip {
                 m.normal = -m.normal;
             }
-            let mut con = Constraint {
+            let con = Constraint {
                 a: lo as u32,
                 b: hi as u32,
                 normal: m.normal,
                 friction: mix_friction(ca.friction, cb.friction),
                 restitution: ca.restitution.max(cb.restitution),
                 count: m.count as u32,
+                first: self.pool.len() as u32,
                 ..Constraint::default()
             };
             for k in 0..m.count {
                 let mp = m.pts[k];
-                con.pts[k] = ContactPt { point: mp.point, sep: mp.sep, id: mp.id, ..ContactPt::default() };
+                self.pool.push(ContactPt { point: mp.point, sep: mp.sep, id: mp.id, ..ContactPt::default() });
             }
+            let first = con.first as usize;
             // Warm start: `old_cache` and the pairs are both sorted by
             // (entity a, entity b, id), so one forward walk finds every
             // entry.
@@ -423,13 +441,13 @@ impl Scratch {
             }
             let mut cj = ci;
             for k in 0..con.count as usize {
-                let id = con.pts[k].id;
+                let id = self.pool[first + k].id;
                 while cj < old_cache.len() && (old_cache[cj].a, old_cache[cj].b) == (ea, eb) && old_cache[cj].id < id {
                     cj += 1;
                 }
                 if cj < old_cache.len() && (old_cache[cj].a, old_cache[cj].b, old_cache[cj].id) == (ea, eb, id) {
-                    con.pts[k].jn = old_cache[cj].normal_impulse;
-                    con.pts[k].jt = old_cache[cj].tangent_impulse;
+                    self.pool[first + k].jn = old_cache[cj].normal_impulse;
+                    self.pool[first + k].jt = old_cache[cj].tangent_impulse;
                 }
             }
             self.cons.push(con);
@@ -596,11 +614,30 @@ impl Scratch {
                 self.new_cache.push(self.carried[ci]);
                 ci += 1;
             }
-            for p in &c.pts[..c.count as usize] {
+            for p in &self.pool[c.first as usize..(c.first + c.count) as usize] {
                 self.new_cache.push(ContactCache { a: ea, b: eb, id: p.id, _pad: 0, normal_impulse: p.jn, tangent_impulse: p.jt });
             }
         }
         self.new_cache.extend_from_slice(&self.carried[ci..]);
+    }
+}
+
+/// Same bits as `FPQuat::integrate_angular`, with the faster square root
+/// and division of [`crate::fastmath`] (checked equal by a test).
+pub(crate) fn integrate_rot(q: FPQuat, omega: FPVec3, dt: FP) -> FPQuat {
+    let (wx, wy, wz) = (omega.x.raw() as i128, omega.y.raw() as i128, omega.z.raw() as i128);
+    let (qx, qy, qz, qw) = (q.x.raw() as i128, q.y.raw() as i128, q.z.raw() as i128, q.w.raw() as i128);
+    let h = dt.raw() as i128;
+    let r = |v: i128| FP::from_raw(((v * h + (1 << 32)) >> 33) as i64);
+    let x = q.x + r(wx * qw + wy * qz - wz * qy);
+    let y = q.y + r(-wx * qz + wy * qw + wz * qx);
+    let z = q.z + r(wx * qy - wy * qx + wz * qw);
+    let w = q.w + r(-wx * qx - wy * qy - wz * qz);
+    let len = sqrt(x * x + y * y + z * z + w * w);
+    if len.raw() == 0 {
+        FPQuat::IDENTITY
+    } else {
+        FPQuat::new(div(x, len), div(y, len), div(z, len), div(w, len))
     }
 }
 
@@ -694,9 +731,9 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
         // Dynamics.
         sc.integrate_velocities(bd, &cfg);
         probe(Phase::Integrate);
-        solver::prepare(&mut sc.cons, &sc.binv, &mut sc.vw, &cfg);
+        solver::prepare(&mut sc.cons, &mut sc.pool, &sc.binv, &mut sc.vw, &cfg);
         probe(Phase::Prepare);
-        solver::solve(&mut sc.cons, &mut sc.vw, cfg.velocity_iterations);
+        solver::solve(&mut sc.cons, &mut sc.pool, &mut sc.vw, cfg.velocity_iterations);
         sc.clamp_velocities(&cfg);
         probe(Phase::Solve);
         sc.update_sleep(bd, &cfg);
@@ -723,7 +760,7 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
         let (v, w) = (sc.vw[i].v, sc.vw[i].w);
         b.pos += FPVec3::new(mul_round(v.x, cfg.dt), mul_round(v.y, cfg.dt), mul_round(v.z, cfg.dt));
         if w != FPVec3::ZERO {
-            b.rot = b.rot.integrate_angular(w, cfg.dt);
+            b.rot = integrate_rot(b.rot, w, cfg.dt);
         }
         b.vel = v;
         b.omega = w;
