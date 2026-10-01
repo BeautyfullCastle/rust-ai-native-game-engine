@@ -185,8 +185,8 @@ int main(int argc, char** argv) {
     }
     CHECK(w >= HEADER_LEN);
     size_t first_size = w;
-    uint8_t small[16];
-    CHECK(orr_view_poll(h, small, sizeof small, &w) == ORR_ERR_BUFFER && w == first_size);
+    uint8_t short_buf[16]; /* not `small`: windows.h defines it as a macro */
+    CHECK(orr_view_poll(h, short_buf, sizeof short_buf, &w) == ORR_ERR_BUFFER && w == first_size);
     uint8_t* copy = (uint8_t*)malloc(first_size);
     CHECK(orr_view_poll(h, copy, first_size, &w) == ORR_OK && w == first_size);
     CHECK(memcmp(copy, "OVS1", 4) == 0 && rd_u16(copy + 4) == 1 && copy[6] == 1);

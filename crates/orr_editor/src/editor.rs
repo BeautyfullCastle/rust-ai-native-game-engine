@@ -946,14 +946,18 @@ impl Editor {
             // The host answers in order: this returns after every request sent so far.
             let Ok(state) = self.call("sim.state", J::Null) else { return };
             self.apply_state(&state);
-            // The frame the host publishes for that state.
+            // The frame the host publishes for that state. The checksum alone is
+            // not enough: right after a pause the tick and checksum are the same
+            // as the last frame that was still marked playing.
             if !self.sim.playing {
                 let want = self.sim.checksum;
                 let end = Instant::now() + Duration::from_secs(3);
                 while Instant::now() < end {
                     self.drain_bridge();
                     self.refresh_snapshot();
-                    if self.down.is_some() || self.checksum == want {
+                    let timeline_matches = self.sim.mode != Mode::Play
+                        || self.timeline().is_some_and(|t| !t.playing && t.tick == self.sim.head_tick);
+                    if self.down.is_some() || (self.checksum == want && timeline_matches) {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(1));
