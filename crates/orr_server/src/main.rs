@@ -8,6 +8,13 @@
 //!                            Without them a self-signed development certificate is made
 //!                            and its SHA-256 fingerprint is printed for `--trust-fingerprint`.
 //!   --tls-name NAME          extra name for the self-signed certificate (repeatable)
+//!   --webtransport           QUIC only: the same UDP port also answers browsers over WebTransport
+//!                            (ALPN h3). A generated certificate is then ECDSA P-256 valid 13 days,
+//!                            the form `serverCertificateHashes` accepts (Chrome, Firefox); Safari needs
+//!                            a CA-signed certificate (--tls-cert/--tls-key). See docs/webtransport-trial.md.
+//!   --ws-bind ADDR           also accept plain WebSocket clients on this TCP address (browser fallback)
+//!   --wss-bind ADDR          also accept wss:// WebSocket clients on this TCP address, with the QUIC certificate
+//!                            (browsers on an https:// page; give --tls-cert/--tls-key a CA-signed certificate)
 //!
 //!   --game arena|physics|custom   what the rooms play (default arena)
 //!   --players N              slots per room (default 4)
@@ -50,6 +57,9 @@ struct Args {
     tls_cert: Option<std::path::PathBuf>,
     tls_key: Option<std::path::PathBuf>,
     tls_names: Vec<String>,
+    webtransport: bool,
+    ws_bind: Option<std::net::SocketAddr>,
+    wss_bind: Option<std::net::SocketAddr>,
     game: Game,
     players: u8,
     min_players: Option<u8>,
@@ -90,6 +100,9 @@ fn parse_args() -> Result<Args, String> {
         tls_cert: None,
         tls_key: None,
         tls_names: Vec::new(),
+        webtransport: false,
+        ws_bind: None,
+        wss_bind: None,
         game: Game::Arena,
         players: 4,
         min_players: None,
@@ -116,6 +129,9 @@ fn parse_args() -> Result<Args, String> {
             "--tls-cert" => a.tls_cert = Some(value("--tls-cert")?.into()),
             "--tls-key" => a.tls_key = Some(value("--tls-key")?.into()),
             "--tls-name" => a.tls_names.push(value("--tls-name")?),
+            "--webtransport" => a.webtransport = true,
+            "--wss-bind" => a.wss_bind = Some(parse("--wss-bind", value("--wss-bind")?)?),
+            "--ws-bind" => a.ws_bind = Some(parse("--ws-bind", value("--ws-bind")?)?),
             "--game" => a.game = parse("--game", value("--game")?)?,
             "--players" => a.players = parse("--players", value("--players")?)?,
             "--min-players" => a.min_players = Some(parse("--min-players", value("--min-players")?)?),
@@ -151,6 +167,9 @@ fn parse_args() -> Result<Args, String> {
     }
     if a.tls_cert.is_some() != a.tls_key.is_some() {
         return Err("--tls-cert and --tls-key go together".into());
+    }
+    if (a.webtransport || a.wss_bind.is_some() || a.ws_bind.is_some()) && a.kind != TransportKind::Quic {
+        return Err("--webtransport, --ws-bind and --wss-bind need --transport quic (they add listeners to the QUIC server)".into());
     }
     if a.players == 0 || a.rooms == 0 {
         return Err("--players and --rooms must be at least 1".into());
@@ -194,10 +213,15 @@ fn run() -> Result<(), String> {
         (Some(c), Some(k)) => Tls::Pem { cert_chain: c.clone(), private_key: k.clone() },
         _ => Tls::SelfSigned { extra_names: a.tls_names.clone() },
     };
+    lo.webtransport = a.webtransport;
+    lo.ws_bind = a.ws_bind;
+    lo.wss_bind = a.wss_bind;
     lo.sim = Some(a.sim).filter(SimConditions::is_active);
     let endpoint = listen(&lo)?;
     let addr = endpoint.local_addr();
     let fingerprint = endpoint.cert_sha256();
+    let ws_addr = endpoint.ws_addr();
+    let wss_addr = endpoint.wss_addr();
 
     let start = Instant::now();
     println!("{} orr_server listening on {addr} ({})", stamp(start), if a.kind == TransportKind::Quic { "quic" } else { "ws" });
@@ -226,6 +250,15 @@ fn run() -> Result<(), String> {
             room_cfg.seed,
             room_cfg.config_blob.len()
         );
+    }
+    if a.webtransport {
+        println!("{} WebTransport (ALPN h3) shares UDP port {}", stamp(start), addr.port());
+    }
+    if let Some(ws) = ws_addr {
+        println!("{} WebSocket listener on {ws}", stamp(start));
+    }
+    if let Some(wss) = wss_addr {
+        println!("{} secure WebSocket (wss://) listener on {wss}", stamp(start));
     }
     if let Some(fp) = fingerprint {
         println!(

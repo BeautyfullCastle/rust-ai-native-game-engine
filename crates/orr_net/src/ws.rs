@@ -3,13 +3,14 @@
 
 use crate::endpoint::{ConnShared, Link, Out, Shared};
 use crate::stats::StatsCell;
-use crate::{Channel, ConnId, DisconnectReason, Event, NetError, PROTOCOL, TAG_RELIABLE, TAG_UNRELIABLE};
+use crate::{Channel, ConnId, DisconnectReason, Event, NetError, PROTOCOL, PROTOCOL_BROWSER, TAG_RELIABLE, TAG_UNRELIABLE};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
@@ -55,7 +56,12 @@ fn ws_config(max_message: usize) -> WebSocketConfig {
         .max_frame_size(Some(max_message + 1))
 }
 
-pub(crate) async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
+pub(crate) async fn accept_loop(
+    listener: TcpListener,
+    shared: Arc<Shared>,
+    mut shutdown: watch::Receiver<bool>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+) {
     loop {
         tokio::select! {
             res = listener.accept() => {
@@ -64,7 +70,7 @@ pub(crate) async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, mut 
                     continue; // dropping the socket refuses the connection
                 }
                 shared.pending.fetch_add(1, Relaxed);
-                tokio::spawn(server_conn(shared.clone(), stream, peer));
+                tokio::spawn(server_conn(shared.clone(), stream, peer, tls.clone()));
             }
             _ = shutdown.changed() => break,
         }
@@ -73,35 +79,53 @@ pub(crate) async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, mut 
 
 #[allow(clippy::result_large_err)] // signature fixed by the tungstenite callback trait
 fn check_protocol(req: &Request, mut resp: Response) -> Result<Response, ErrorResponse> {
-    let ok = req
+    // `orrery/1` for native clients; browsers cannot offer it (a sub-protocol
+    // is an HTTP token and `/` is not a token character), so they use `orrery.1`.
+    let offered = req
         .headers()
         .get_all("sec-websocket-protocol")
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
-        .any(|p| p.trim() == PROTOCOL);
-    if !ok {
-        let mut e = ErrorResponse::new(Some("expected sub-protocol orrery/1".to_string()));
+        .map(str::trim)
+        .find(|p| *p == PROTOCOL || *p == PROTOCOL_BROWSER);
+    let Some(chosen) = offered else {
+        let mut e = ErrorResponse::new(Some("expected sub-protocol orrery/1 (browsers: orrery.1)".to_string()));
         *e.status_mut() = http::StatusCode::BAD_REQUEST;
         return Err(e);
-    }
+    };
     resp.headers_mut()
-        .insert("sec-websocket-protocol", http::HeaderValue::from_static(PROTOCOL));
+        .insert("sec-websocket-protocol", http::HeaderValue::from_static(if chosen == PROTOCOL { PROTOCOL } else { PROTOCOL_BROWSER }));
     Ok(resp)
 }
 
-async fn server_conn(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr) {
+async fn server_conn(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr, tls: Option<tokio_rustls::TlsAcceptor>) {
     let _ = stream.set_nodelay(true);
     let cfg = ws_config(shared.cfg.max_message_size);
-    let ws = timeout(
-        shared.cfg.connect_timeout,
-        tokio_tungstenite::accept_hdr_async_with_config(stream, check_protocol, Some(cfg)),
-    )
+    let accepted = timeout(shared.cfg.connect_timeout, async {
+        match tls {
+            Some(acceptor) => {
+                let tls_stream = acceptor.accept(stream).await.ok()?;
+                tokio_tungstenite::accept_hdr_async_with_config(tls_stream, check_protocol, Some(cfg)).await.ok().map(Either::Right)
+            }
+            None => {
+                tokio_tungstenite::accept_hdr_async_with_config(stream, check_protocol, Some(cfg)).await.ok().map(Either::Left)
+            }
+        }
+    })
     .await;
     shared.pending.fetch_sub(1, Relaxed);
-    let Ok(Ok(ws)) = ws else { return };
     let id = shared.alloc_id();
-    run(shared, id, ws, Some(peer)).await;
+    match accepted {
+        Ok(Some(Either::Left(ws))) => run(shared, id, ws, Some(peer)).await,
+        Ok(Some(Either::Right(ws))) => run(shared, id, ws, Some(peer)).await,
+        _ => {}
+    }
+}
+
+enum Either<A, B> {
+    Left(A),
+    Right(B),
 }
 
 pub(crate) async fn client_conn(shared: Arc<Shared>, id: ConnId, target: Target) {
@@ -164,7 +188,10 @@ fn map_err(e: WsError) -> DisconnectReason {
     }
 }
 
-async fn run(shared: Arc<Shared>, id: ConnId, ws: WebSocketStream<TcpStream>, peer: Option<SocketAddr>) {
+async fn run<S>(shared: Arc<Shared>, id: ConnId, ws: WebSocketStream<S>, peer: Option<SocketAddr>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let max = shared.cfg.max_message_size;
     let (cs, rx) = shared.register(id, Link::Ws, max, false);
     shared.emit(Event::Connected { conn: id, peer }).await;
@@ -172,13 +199,16 @@ async fn run(shared: Arc<Shared>, id: ConnId, ws: WebSocketStream<TcpStream>, pe
     shared.finish(id, reason).await;
 }
 
-async fn drive(
+async fn drive<S>(
     shared: &Shared,
     id: ConnId,
     cs: &ConnShared,
     mut rx: mpsc::UnboundedReceiver<Out>,
-    ws: WebSocketStream<TcpStream>,
-) -> DisconnectReason {
+    ws: WebSocketStream<S>,
+) -> DisconnectReason
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let cfg = &shared.cfg;
     let st = &cs.stats;
     let (mut sink, mut stream) = ws.split();

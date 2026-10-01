@@ -17,6 +17,8 @@ pub struct NetEndpoint {
     t: Box<dyn Transport + Send>,
     local_addr: SocketAddr,
     cert_sha256: Option<[u8; 32]>,
+    ws_addr: Option<SocketAddr>,
+    wss_addr: Option<SocketAddr>,
     to_proto: BTreeMap<NetConnId, u32>,
     to_net: BTreeMap<u32, NetConnId>,
     next: u32,
@@ -31,6 +33,8 @@ impl NetEndpoint {
             t,
             local_addr,
             cert_sha256,
+            ws_addr: None,
+            wss_addr: None,
             to_proto: BTreeMap::new(),
             to_net: BTreeMap::new(),
             next: 1,
@@ -47,6 +51,21 @@ impl NetEndpoint {
     /// SHA-256 of the self-signed certificate (QUIC with a generated certificate only).
     pub fn cert_sha256(&self) -> Option<[u8; 32]> {
         self.cert_sha256
+    }
+
+    pub(crate) fn set_ws_addr(&mut self, ws: Option<SocketAddr>, wss: Option<SocketAddr>) {
+        self.ws_addr = ws;
+        self.wss_addr = wss;
+    }
+
+    /// Address of the additional `wss://` listener, when `ListenOptions::wss_bind` was set.
+    pub fn wss_addr(&self) -> Option<SocketAddr> {
+        self.wss_addr
+    }
+
+    /// Address of the additional WebSocket listener, when `ListenOptions::ws_bind` was set.
+    pub fn ws_addr(&self) -> Option<SocketAddr> {
+        self.ws_addr
     }
 
     /// Connections refused because the `u32` id space was exhausted.
