@@ -26,9 +26,10 @@ Four ways to get the same bytes:
 | Rust | `orr_bridge` users | `ViewStreamSource::pump(&mut bridge)` |
 
 The stream is the same whether the simulation is a local play session or a **multiplayer client**
-that predicts and rolls back: see "Multiplayer (client sessions)" below. Only the C ABI opens a
-client session today; the ERP `viewstream` topic still serves the single-peer play session of an
-`orr_remote` host (no rollback, every event verified).
+that predicts and rolls back: see "Multiplayer (client sessions)" below. The C ABI
+(`orr_client_open`) and a headless ERP host in client mode (`orr_remote_host --join`) open client
+sessions; the ERP `viewstream` topic of a normal `orr_remote` host serves its single-peer play
+session (no rollback, every event verified).
 
 ## Messages
 
@@ -215,6 +216,36 @@ from a local host:
   confirmed state at a checkpoint tick (a multiple of the room's checksum interval, 30). It is
   the value the client reports to the server; two peers that agree on a tick have the same
   state there. A desync turns on `ORR_STATUS_DESYNC`.
+
+### Client mode of the ERP host (`orr_remote_host --join`)
+
+The same client session, out of process. `orr_remote_host --join HOST:PORT [--fingerprint HEX |
+--insecure] [--ws] [--room N] [--slot N] [--sim-latency MS] [--sim-jitter MS] [--sim-loss P]
+[--sim-seed N] [--connect-timeout S]` makes the host a relay client instead of a play-session
+owner (the code is shared with the C ABI: `orr_sample::relay_view::RelayView`, so the bytes are
+the same). It starts serving ERP once the room has started. Over the ERP socket (WebSocket or
+plain TCP):
+
+- `watch.subscribe {"topics":["viewstream"]}` streams the client's frames (with `rolled_back` and
+  the range) and events (`predicted`, then `verified` or `canceled`), exactly as above. `max_fps`
+  caps the frames per subscriber (a frame built while throttled is replaced by a newer one, so use
+  a high cap, like 1000, when every rollback flag must be seen); event batches are never held
+  back. `activity` also works; other topics answer `not_in_client_mode`.
+- `session.status` (and `sim.state`, which answers the same in client mode) returns
+  `{mode:"client", state, playing, slot, player_count, rtt_ms, input_delay, desyncs, head_tick,
+  verified_tick, rollbacks, resim_ticks, last_rollback_from, last_rollback_to, stall_episodes,
+  stalled_ms, repeats, confirmed:{tick, checksum}}`, the fields of `orr_session_status`.
+- `sim.checksum {tick?}` returns the confirmed checksum of a checkpoint tick (default the newest),
+  like `orr_confirmed_checksum`.
+- `sim.input {player, input}` and `sim.command {player, command}` work for the joined slot only
+  (another slot is `invalid params`).
+- Scene edit, proposal, history, `sim.start/stop/play/pause/step/seek/speed` and the like are
+  refused with `not_in_client_mode`; `rpc.discover` and `activity.list` work.
+
+`orr_tui --connect ws://host:port` detects such a host (`sim.state` says `mode: "client"`), does
+not try to start a session, polls `session.status` for the status line (slot, RTT, delay,
+rollbacks) and smooths rollbacks from the frame flags like in `--server` mode. With `--headless
+--ticks N --check-tick T` it prints the same `RESULT client ... checkpoint=T checksum=0x..` line.
 
 `TickInputs` carries per-player flags for the game (`PlayerFlags`): `predicted` (this tick's input
 of that player was not confirmed when the tick was simulated: a repeat of the last confirmed one)

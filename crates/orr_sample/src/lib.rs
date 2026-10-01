@@ -20,3 +20,4 @@ pub mod physics_game;
 pub mod physics_host;
 pub mod physics_stream;
 pub mod physics_view;
+pub mod relay_view;

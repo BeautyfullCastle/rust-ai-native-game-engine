@@ -143,6 +143,44 @@ pub struct SocketSource {
     next_id: u64,
     queue: VecDeque<Incoming>,
     target: String,
+    /// Set when the host is a relay client (`orr_remote_host --join`): its `session.status`.
+    client: Option<ClientLink>,
+}
+
+/// The status of a host in client mode, polled with `session.status` (an asked-for status is
+/// answered by `handle_text`; at most one call is on its way).
+struct ClientLink {
+    status: NetStatus,
+    /// The id of the `session.status` call that has not been answered yet.
+    pending: Option<u64>,
+    asked: Instant,
+}
+
+/// How often a socket source asks a client-mode host for its status.
+const STATUS_EVERY: Duration = Duration::from_millis(40);
+
+/// The `session.status` result of a host in client mode as a [`NetStatus`].
+fn net_status_of(r: &J) -> NetStatus {
+    let n = |k: &str| r[k].as_u64().unwrap_or(0);
+    NetStatus {
+        state: match r["state"].as_str() {
+            Some("playing") => NetState::Playing,
+            Some("disconnected") => NetState::Disconnected,
+            Some("failed") => NetState::Failed,
+            _ => NetState::Connecting,
+        },
+        slot: n("slot") as u32,
+        players: n("player_count") as u32,
+        rtt_ms: n("rtt_ms") as u32,
+        input_delay: n("input_delay") as u32,
+        head_tick: n("head_tick"),
+        verified_tick: n("verified_tick"),
+        rollbacks: n("rollbacks"),
+        resim_ticks: n("resim_ticks"),
+        last_rollback: (n("last_rollback_from"), n("last_rollback_to")),
+        desyncs: n("desyncs"),
+        stall_episodes: n("stall_episodes"),
+    }
 }
 
 fn rpc_error(msg: &J) -> Option<String> {
@@ -178,14 +216,18 @@ impl SocketSource {
         } else {
             Wire::Tcp { reader: BufReader::new(stream), partial: Vec::new() }
         };
-        let mut s = SocketSource { wire, schema: String::new(), next_id: 1, queue: VecDeque::new(), target: url.to_string() };
+        let mut s = SocketSource { wire, schema: String::new(), next_id: 1, queue: VecDeque::new(), target: url.to_string(), client: None };
         if let Some(t) = token {
             s.call_wait("auth", json!({"token": t}))?;
         }
         if let Session::Ensure { run } = session {
             let state = s.call_wait("sim.state", json!({}))?;
-            if state["mode"] != "play" {
-                s.call_wait("sim.start", json!({"run": run}))?;            }
+            if state["mode"] == "client" {
+                // A host that plays on a relay server (`orr_remote_host --join`): there is no session to start.
+                s.client = Some(ClientLink { status: net_status_of(&state), pending: None, asked: Instant::now() });
+            } else if state["mode"] != "play" {
+                s.call_wait("sim.start", json!({"run": run}))?;
+            }
         }
         s.call_wait("watch.subscribe", json!({"topics": ["viewstream"], "max_fps": max_fps, "source": "sim"}))?;
         // The schema is the first thing after the response (it may already have been read).
@@ -276,7 +318,17 @@ impl SocketSource {
     }
 
     /// Handles a text message that is not the answer to a call being waited for.
-    fn handle_text(&mut self, msg: &J) {        match msg.get("method").and_then(J::as_str) {
+    fn handle_text(&mut self, msg: &J) {
+        if let Some(c) = self.client.as_mut() {
+            if c.pending.is_some() && msg.get("id").and_then(J::as_u64) == c.pending {
+                c.pending = None;
+                if let Some(r) = msg.get("result") {
+                    c.status = net_status_of(r);
+                }
+                return;
+            }
+        }
+        match msg.get("method").and_then(J::as_str) {
             Some("watch.viewstream.schema") => self.schema = msg["params"].to_string(),
             Some("watch.viewstream") => {
                 // Plain TCP: the frame as hex in JSON.
@@ -328,6 +380,27 @@ impl Source for SocketSource {
     }
 
     fn describe(&self) -> String {
-        format!("socket {}", self.target)
+        match &self.client {
+            Some(_) => format!("socket {} (client of a relay server)", self.target),
+            None => format!("socket {}", self.target),
+        }
+    }
+
+    fn net_status(&mut self) -> Option<NetStatus> {
+        let due = self.client.as_ref().is_some_and(|c| c.pending.is_none() && c.asked.elapsed() >= STATUS_EVERY);
+        if due {
+            let id = self.send_call("session.status", json!({})).ok();
+            if let Some(c) = self.client.as_mut() {
+                c.pending = id;
+                c.asked = Instant::now();
+            }
+        }
+        self.client.as_ref().map(|c| c.status)
+    }
+
+    fn confirmed_checksum(&mut self, tick: u64) -> Option<u64> {
+        self.client.as_ref()?;
+        let r = self.call_wait("sim.checksum", json!({"tick": tick})).ok()?;
+        u64::from_str_radix(r["checksum"].as_str()?.strip_prefix("0x")?, 16).ok()
     }
 }

@@ -9,7 +9,20 @@
 //! ```text
 //! orr_remote_host [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]
 //!                 [--seed N] [--players N] [--tick-rate N] [--max-step N] [--build-id N]
+//!                 [--join HOST:PORT [--fingerprint HEX | --insecure] [--ws] [--room N] [--slot N]
+//!                  [--sim-latency MS] [--sim-jitter MS] [--sim-loss P] [--sim-seed N] [--connect-timeout S]]
 //! ```
+//!
+//! # Client mode (`--join`)
+//!
+//! Instead of a play session of its own the host is a relay CLIENT of an `orr_server --game physics`
+//! room: it predicts, rolls back and reconciles like the C ABI's `orr_client_open` (the same
+//! session code), and its `viewstream` topic streams the frames and events of that session. ERP
+//! methods: `sim.state` / `session.status` (state, slot, RTT, delay, rollbacks, confirmed
+//! checksum), `sim.checksum` (confirmed checksum of a checkpoint tick), `sim.input` and
+//! `sim.command` (the joined slot only), `watch.subscribe` of `viewstream` and `activity`,
+//! `activity.list`, `rpc.discover`. Scene edit, proposal and timeline methods answer
+//! `not_in_client_mode`. The host starts serving ERP once the room has started.
 //!
 //! Capabilities: `read`, `scene_edit`, `sim_control`, `approve` (comma
 //! separated) or `all`. `approve` is what accepts an agent's proposal into
@@ -26,13 +39,23 @@ use std::time::Duration;
 
 use orr_edit::EditorDoc;
 use orr_reflect::TypeRegistry;
+use orr_relay_net::{parse_fingerprint, TransportKind};
+use orr_remote::sample::join_phys_client;
 use orr_remote::{default_build_id, Auth, ErpServer, GameHooks, Host, ServerConfig, TokenEntry, ViewStreamHook};
+use orr_sample::net_client::NetArgs;
 use orr_sample::physics_game::{bot_input, register_reflect, PhysGame, PhysMetrics};
 use orr_sample::physics_stream::phys_stream_source;
 use orr_sim::{PlayerSlot, Simulation};
 
 const USAGE: &str = "usage: orr_remote_host [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]\n\
                      \x20                       [--seed N] [--players N] [--tick-rate N] [--max-step N] [--build-id N]\n\
+                     \x20                       [--join HOST:PORT [--fingerprint HEX | --insecure] [--ws] [--room N] [--slot N]\n\
+                     \x20                        [--sim-latency MS] [--sim-jitter MS] [--sim-loss P] [--sim-seed N] [--connect-timeout S]]\n\
+                     --join: be a relay CLIENT of `orr_server --game physics` instead of hosting a play session. The ERP viewstream\n\
+                     \x20       topic then streams the client session (rollbacks, predicted/verified/canceled events); `session.status` gives\n\
+                     \x20       slot, RTT, delay, rollbacks, confirmed checksum; `sim.input`/`sim.command` act for the joined slot; scene edit\n\
+                     \x20       and timeline methods are not available. QUIC needs --fingerprint HEX (the server prints it) or --insecure\n\
+                     \x20       (development only); --ws uses WebSocket; --sim-* simulate latency/jitter/loss of this client's network.\n\
                      caps: read, scene_edit, sim_control, approve (comma separated) or all\n\
                      default scene: scenes/physics_demo.scene.yaml, default bind: 127.0.0.1:7777";
 
@@ -46,6 +69,8 @@ struct Args {
     tick_rate: u32,
     max_step: u32,
     build_id: Option<u64>,
+    /// Client mode: the options of the relay client (`connect` is the server address).
+    join: NetArgs,
 }
 
 fn default_scene() -> PathBuf {
@@ -67,6 +92,7 @@ fn parse_args() -> Result<Args, String> {
         tick_rate: 60,
         max_step: 20_000,
         build_id: None,
+        join: NetArgs { name: "host".to_string(), quiet: true, ..NetArgs::default() },
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -81,6 +107,19 @@ fn parse_args() -> Result<Args, String> {
             "--tick-rate" => a.tick_rate = value("--tick-rate")?.parse().map_err(|e| format!("--tick-rate: {e}"))?,
             "--max-step" => a.max_step = value("--max-step")?.parse().map_err(|e| format!("--max-step: {e}"))?,
             "--build-id" => a.build_id = Some(value("--build-id")?.parse().map_err(|e| format!("--build-id: {e}"))?),
+            "--join" => a.join.connect = Some(value("--join")?),
+            "--fingerprint" => a.join.fingerprint = Some(parse_fingerprint(&value("--fingerprint")?).map_err(|e| format!("--fingerprint: {e}"))?),
+            "--insecure" => a.join.insecure_dev = true,
+            "--ws" => a.join.kind = TransportKind::Ws,
+            "--room" => a.join.room = value("--room")?.parse().map_err(|e| format!("--room: {e}"))?,
+            "--slot" => a.join.slot = Some(value("--slot")?.parse().map_err(|e| format!("--slot: {e}"))?),
+            "--sim-latency" => a.join.sim.latency_ms = value("--sim-latency")?.parse().map_err(|e| format!("--sim-latency: {e}"))?,
+            "--sim-jitter" => a.join.sim.jitter_ms = value("--sim-jitter")?.parse().map_err(|e| format!("--sim-jitter: {e}"))?,
+            "--sim-loss" => a.join.sim.loss = value("--sim-loss")?.parse().map_err(|e| format!("--sim-loss: {e}"))?,
+            "--sim-seed" => a.join.sim_seed = Some(value("--sim-seed")?.parse().map_err(|e| format!("--sim-seed: {e}"))?),
+            "--connect-timeout" => {
+                a.join.connect_timeout = Duration::from_secs_f32(value("--connect-timeout")?.parse().map_err(|e| format!("--connect-timeout: {e}"))?)
+            }
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown flag '{other}'")),
         }
@@ -90,6 +129,12 @@ fn parse_args() -> Result<Args, String> {
     }
     if !a.dev && a.tokens.is_empty() {
         return Err("no --token given: pass at least one --token name:token:caps, or --dev-no-auth for local development".into());
+    }
+    if a.join.connect.is_none() {
+        let client_only = a.join.fingerprint.is_some() || a.join.insecure_dev || a.join.kind != TransportKind::Quic || a.join.slot.is_some() || a.join.sim.is_active();
+        if client_only {
+            return Err("--fingerprint, --insecure, --ws, --slot and --sim-* belong to client mode: add --join HOST:PORT".into());
+        }
     }
     Ok(a)
 }
@@ -105,8 +150,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let client_mode = args.join.connect.is_some();
     let text = match std::fs::read_to_string(&args.scene) {
         Ok(t) => t,
+        // A client has no scene of its own (the document only exists to keep the host's type complete).
+        Err(_) if client_mode => String::from("schema: orr.scene/1\nentities: {}\n"),
         Err(e) => {
             eprintln!("error: cannot read scene {}: {e}", args.scene.display());
             return ExitCode::FAILURE;
@@ -136,6 +184,15 @@ fn main() -> ExitCode {
         .with_bot(|seed, tick, slot| bot_input(seed, tick, PlayerSlot(slot)));
     // The `viewstream` topic (docs/view-stream.md): views that are not Rust, like `orr_tui`, read this.
     cfg.limits.view_stream = Some(ViewStreamHook::new(phys_stream_source(cfg.limits.build_id, args.players)));
+    if client_mode {
+        let room = args.join.room;
+        println!("orr_remote_host: joining room {room} on {} ...", args.join.connect.as_deref().unwrap_or(""));
+        if let Err(e) = join_phys_client(&mut cfg.limits, args.join.clone()) {
+            eprintln!("error: joining the server failed: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("orr_remote_host: joined room {room}: client mode ({} players, {} Hz); ERP view stream is the client session", cfg.limits.player_count, cfg.limits.tick_rate);
+    }
     let server = match ErpServer::start(cfg) {
         Ok(s) => s,
         Err(e) => {

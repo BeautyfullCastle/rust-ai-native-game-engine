@@ -226,6 +226,8 @@ pub struct ErpServer {
     frame_cache: Vec<(FrameKey, BuiltFrame)>,
     /// What the last view stream frame was built from (kind, epoch or document revision), to flag a jump.
     vs_last: Option<(u8, u64)>,
+    /// Client mode: the newest frame message of the session and its sequence number.
+    client_frame: Option<(u64, Arc<Vec<u8>>)>,
     stats: ServerStats,
     started: Instant,
     activity: VecDeque<ActivityEntry>,
@@ -298,6 +300,7 @@ impl ErpServer {
             last_play: None,
             frame_cache: Vec::new(),
             vs_last: None,
+            client_frame: None,
             stats: ServerStats::default(),
             started: Instant::now(),
             activity: VecDeque::new(),
@@ -311,6 +314,12 @@ impl ErpServer {
     /// `sim.stop` are remembered without this call.
     pub fn note_stopped_play(&mut self, stopped: StoppedPlay) {
         self.last_play = Some(stopped);
+    }
+
+    /// Whether the host is a relay client (see [`HostLimits::client_session`]): its frames come from
+    /// that session and it has work to do every frame.
+    pub fn is_client_mode(&self) -> bool {
+        self.cfg.limits.client_session.is_some()
     }
 
     /// The address the server listens on (with the real port); `0.0.0.0:0`
@@ -537,6 +546,8 @@ impl ErpServer {
             authorize(method, caps, false, params).and_then(|_| activity::list_params(params)).map(|_| self.activity_list(params))
         } else if method.starts_with("watch.") {
             self.watch(target, conn, caps, method, params)
+        } else if let (Some(hook), true) = (self.cfg.limits.client_session.clone(), method != "rpc.discover") {
+            authorize(method, caps, false, params).and_then(|_| crate::client_mode::call(&hook, method, params))
         } else {
             let limits = self.cfg.limits.clone();
             let ctx = CallCtx {
@@ -647,6 +658,15 @@ impl ErpServer {
             Some(v) => v.as_u64().filter(|n| *n >= 1).ok_or_else(|| RpcError::params("'max_fps' must be a positive integer"))?.min(1000),
         };
         let source = frame_source(params)?;
+        let client_mode = self.cfg.limits.client_session.clone();
+        if let (Some(_), "watch.subscribe") = (&client_mode, method) {
+            if let Some(t) = topics.iter().find(|t| !matches!(t.as_str(), "viewstream" | "activity")) {
+                return Err(RpcError::state(
+                    "not_in_client_mode",
+                    format!("topic '{t}' is not available in client mode (this host is a relay client): use viewstream or activity, and session.status for the status"),
+                ));
+            }
+        }
         let Some(c) = self.conns.get_mut(&conn) else { return Err(RpcError::new(INTERNAL_ERROR, "gone", "connection is gone")) };
         let mut initial: Vec<String> = Vec::new();
         if method == "watch.subscribe" {
@@ -680,6 +700,15 @@ impl ErpServer {
                             return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
                         }
                         c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source });
+                    }
+                    "viewstream" if client_mode.is_some() => {
+                        let Some(schema) = client_mode.as_ref().and_then(|h| h.lock().schema()) else {
+                            return Err(RpcError::state("not_ready", "the client is still joining the room (no schema yet)"));
+                        };
+                        // Frames wait for their subscriber's rate cap but are never skipped from the host's side:
+                        // events are sent at once, the newest frame goes out as soon as the cap allows.
+                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source });
+                        initial.push(notification("watch.viewstream.schema", schema.to_json()));
                     }
                     "viewstream" => {
                         let Some(hook) = self.cfg.limits.view_stream.as_ref() else {
@@ -786,6 +815,12 @@ impl ErpServer {
                 }
             }
         }
+        // client mode: the session's frames and events are the view stream
+        if self.cfg.limits.client_session.is_some() {
+            self.events_out.clear();
+            self.publish_client_stream(now);
+            return;
+        }
         // sim events
         self.publish_stream_events();
         if !self.events_out.is_empty() {
@@ -814,6 +849,46 @@ impl ErpServer {
         }
         self.publish_frames(target, now);
         self.publish_viewstream(target, now);
+    }
+
+    /// Client mode: pumps the session and sends its event batch to every view stream subscriber at
+    /// once, and its newest frame to those whose rate cap allows it.
+    fn publish_client_stream(&mut self, now: Instant) {
+        let Some(hook) = self.cfg.limits.client_session.clone() else { return };
+        if !self.conns.values().any(|c| c.subs.viewstream.is_some()) {
+            return;
+        }
+        let out = hook.lock().pump();
+        if let Some(events) = out.events {
+            let bytes = Arc::new(events);
+            for c in self.conns.values().filter(|c| c.subs.viewstream.is_some()) {
+                send_stream(c, &bytes);
+            }
+        }
+        if let Some(frame) = out.frame {
+            let seq = self.client_frame.as_ref().map_or(1, |(s, _)| s + 1);
+            self.client_frame = Some((seq, Arc::new(frame)));
+        }
+        let Some((seq, bytes)) = self.client_frame.clone() else { return };
+        let key: FrameKey = (4, seq, 0, 0);
+        for c in self.conns.values_mut() {
+            let Some(f) = c.subs.viewstream.as_mut() else { continue };
+            if f.last_key == Some(key) {
+                continue;
+            }
+            if f.last_sent.is_some_and(|t| now.duration_since(t) < f.min_interval) {
+                self.frame_pending = true;
+                continue;
+            }
+            if c.tx.pending() > MAX_PENDING_BYTES {
+                self.stats.frames_skipped += 1;
+                continue;
+            }
+            f.last_sent = Some(now);
+            f.last_key = Some(key);
+            send_stream(c, &bytes);
+            self.stats.frames_sent += 1;
+        }
     }
 
     /// Sends the sim events of the last ticks to the view stream subscribers,
