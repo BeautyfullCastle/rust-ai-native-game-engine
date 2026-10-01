@@ -26,8 +26,9 @@ use std::time::Duration;
 
 use orr_edit::EditorDoc;
 use orr_reflect::TypeRegistry;
-use orr_remote::{default_build_id, Auth, ErpServer, GameHooks, Host, ServerConfig, TokenEntry};
+use orr_remote::{default_build_id, Auth, ErpServer, GameHooks, Host, ServerConfig, TokenEntry, ViewStreamHook};
 use orr_sample::physics_game::{bot_input, register_reflect, PhysGame, PhysMetrics};
+use orr_sample::physics_stream::phys_stream_source;
 use orr_sim::{PlayerSlot, Simulation};
 
 const USAGE: &str = "usage: orr_remote_host [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]\n\
@@ -133,6 +134,8 @@ fn main() -> ExitCode {
     cfg.limits.game = GameHooks::new("PhysGame")
         .with_metrics(PhysMetrics)
         .with_bot(|seed, tick, slot| bot_input(seed, tick, PlayerSlot(slot)));
+    // The `viewstream` topic (docs/view-stream.md): views that are not Rust, like `orr_tui`, read this.
+    cfg.limits.view_stream = Some(ViewStreamHook::new(phys_stream_source(cfg.limits.build_id, args.players)));
     let server = match ErpServer::start(cfg) {
         Ok(s) => s,
         Err(e) => {

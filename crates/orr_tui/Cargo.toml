@@ -1,0 +1,36 @@
+[package]
+name = "orr_tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Orrery terminal viewer: shows a simulation from its view stream alone (decision 12, step 4: proof that the view can be replaced)"
+
+[lints]
+workspace = true
+
+[features]
+default = ["ffi"]
+# `--ffi`: load the `orr_ffi` shared library at run time (dlopen through `libloading`) and call the
+# C functions of `include/orrery.h`, exactly like a C/C#/C++ host. Off = socket only.
+ffi = ["dep:libloading"]
+
+# The rule (tests/deps.rs): nothing of the simulation, the session, the physics, the bridge or a
+# game. The view stream format is all this viewer knows about Orrery.
+[dependencies]
+# `default-features = false`: only `format` (the decoder), none of the producer side.
+orr_viewstream = { path = "../orr_viewstream", default-features = false }
+serde_json = "1"
+# A tiny blocking WebSocket client: no TLS, no async runtime.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+crossterm = "0.29"
+libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+# Test hosts only (an in-process ERP host with the physics demo, the Rust bridge for the reference result).
+orr_remote = { path = "../orr_remote" }
+orr_sample = { path = "../orr_sample" }
+orr_bridge = { path = "../orr_bridge" }
+orr_session = { path = "../orr_session" }
+orr_viewstream = { path = "../orr_viewstream" }
