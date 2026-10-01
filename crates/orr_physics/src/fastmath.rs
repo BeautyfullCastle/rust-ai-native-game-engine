@@ -10,6 +10,13 @@ use orr_fp::{FPVec2, FP};
 /// widening multiply only runs on the rare overflow path.
 #[inline(always)]
 pub(crate) fn mul(a: FP, b: FP) -> FP {
+    // wasm lowers `checked_mul` on `i64` to a 128-bit software multiply, and `FP`'s own
+    // operator already tests for narrow operands there.
+    #[cfg(target_arch = "wasm32")]
+    {
+        a * b
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     match a.raw().checked_mul(b.raw()) {
         Some(p) => FP::from_raw(p >> 16),
         None => a * b,

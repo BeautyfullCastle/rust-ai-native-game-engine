@@ -2,4 +2,5 @@
 .claude/settings.local.json
 .claude/worktrees/
 /crates/orr_web/web/pkg
+/crates/orr_wasm_bench/web/pkg
 __pycache__/

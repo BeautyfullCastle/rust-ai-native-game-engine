@@ -32,6 +32,54 @@ pub enum ParseError {
     Overflow,
 }
 
+/// The reference multiply: exact `i128` product, floor-shifted right by 16, truncated to `i64`.
+#[inline(always)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) const fn mul_raw_wide(a: i64, b: i64) -> i64 {
+    (((a as i128) * (b as i128)) >> FRAC_BITS) as i64
+}
+
+/// `mul_raw_wide` from `i64` multiplies only (bit-identical, including the
+/// wrap-around when the result does not fit `i64`).
+///
+/// With `a = ah * 2^32 + al` and `b = bh * 2^32 + bl` (`ah`, `bh` signed, `al`, `bl`
+/// unsigned 32-bit halves) the product is `ah*bh * 2^64 + (ah*bl + al*bh) * 2^32 + al*bl`.
+/// Every term but the last is a multiple of `2^16`, so the floor-shift distributes and
+/// only the low 64 bits of each shifted term are needed.
+#[inline(always)]
+pub(crate) const fn mul_raw_split(a: i64, b: i64) -> i64 {
+    let (al, ah) = (a as u32 as u64, a >> 32);
+    let (bl, bh) = (b as u32 as u64, b >> 32);
+    let ll = al * bl;
+    let mid = (al as i64).wrapping_mul(bh).wrapping_add(ah.wrapping_mul(bl as i64));
+    let hh = ah.wrapping_mul(bh);
+    ((ll >> FRAC_BITS) as i64).wrapping_add(mid << (32 - FRAC_BITS)).wrapping_add(hh << (64 - FRAC_BITS))
+}
+
+/// The wasm multiply: operands that fit 32 bits (almost all game values:
+/// +-32768 world units) multiply in one `i64` operation.
+#[inline(always)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) const fn mul_raw_wasm(a: i64, b: i64) -> i64 {
+    if a == a as i32 as i64 && b == b as i32 as i64 {
+        (a * b) >> FRAC_BITS
+    } else {
+        mul_raw_split(a, b)
+    }
+}
+
+/// `(a << 16) / b` truncating towards zero, `b != 0`. When `|a| < 2^47` the
+/// numerator fits `i64` and one `i64` division gives the same bits as the
+/// `i128` one (the quotient cannot overflow, `b = -1` included).
+#[inline(always)]
+pub(crate) const fn div_raw(a: i64, b: i64) -> i64 {
+    if a.unsigned_abs() < 1u64 << 47 {
+        (a << FRAC_BITS) / b
+    } else {
+        (((a as i128) << FRAC_BITS) / (b as i128)) as i64
+    }
+}
+
 impl FP {
     /// The raw scale factor, `2^16`.
     pub const SCALE: i64 = SCALE;
@@ -235,8 +283,16 @@ impl FP {
     #[inline]
     #[must_use]
     pub const fn mul(self, rhs: FP) -> FP {
-        let product = (self.0 as i128) * (rhs.0 as i128);
-        FP((product >> FRAC_BITS) as i64)
+        #[cfg(target_arch = "wasm32")]
+        {
+            // wasm has no widening multiply: an `i128` product is a call to a
+            // software routine. Same bits, built from `i64` multiplies.
+            FP(mul_raw_wasm(self.0, rhs.0))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            FP(mul_raw_wide(self.0, rhs.0))
+        }
     }
 
     /// Fast multiplication using only `i64` intermediate math (no `i128`
@@ -258,8 +314,7 @@ impl FP {
     #[must_use]
     pub const fn div(self, rhs: FP) -> FP {
         assert!(rhs.0 != 0, "FP division by zero");
-        let numerator = (self.0 as i128) << FRAC_BITS;
-        FP((numerator / (rhs.0 as i128)) as i64)
+        FP(div_raw(self.0, rhs.0))
     }
 
     /// Multiply by a plain integer.
@@ -486,5 +541,70 @@ impl DivAssign<i32> for FP {
     #[inline]
     fn div_assign(&mut self, rhs: i32) {
         *self = *self / rhs;
+    }
+}
+
+#[cfg(test)]
+mod fast_path_tests {
+    use super::*;
+    use crate::FrameRng;
+
+    fn edge_values() -> Vec<i64> {
+        let mut v = vec![0i64, 1, -1, 2, -2, 65_535, 65_536, -65_536, i64::MAX, i64::MIN, i64::MIN + 1, i64::MAX - 1];
+        for k in 1..63 {
+            for d in -2..=2i64 {
+                v.push((1i64 << k) + d);
+                v.push(-(1i64 << k) + d);
+            }
+        }
+        v.extend([i32::MAX as i64, i32::MIN as i64, i32::MAX as i64 + 1, i32::MIN as i64 - 1, (1 << 47) - 1, 1 << 47]);
+        v
+    }
+
+    fn random_values(seed: u64, n: usize) -> Vec<i64> {
+        let mut rng = FrameRng::new(seed);
+        (0..n)
+            .map(|_| {
+                let bits = rng.next_u32() % 64;
+                let raw = (((rng.next_u32() as u64) << 32) | rng.next_u32() as u64) >> (63 - bits.min(63));
+                if rng.next_u32() & 1 == 0 {
+                    raw as i64
+                } else {
+                    (raw as i64).wrapping_neg()
+                }
+            })
+            .collect()
+    }
+
+    /// The wasm multiply is compiled on every target so native runs test it too.
+    #[test]
+    fn narrow_multiplies_match_the_i128_reference() {
+        let edges = edge_values();
+        for &a in &edges {
+            for &b in &edges {
+                assert_eq!(mul_raw_split(a, b), mul_raw_wide(a, b), "split {a} * {b}");
+                assert_eq!(mul_raw_wasm(a, b), mul_raw_wide(a, b), "wasm {a} * {b}");
+            }
+        }
+        for w in random_values(5, 600_000).chunks(2) {
+            assert_eq!(mul_raw_split(w[0], w[1]), mul_raw_wide(w[0], w[1]), "split {} * {}", w[0], w[1]);
+            assert_eq!(mul_raw_wasm(w[0], w[1]), mul_raw_wide(w[0], w[1]), "wasm {} * {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn div_fast_path_matches_the_i128_reference() {
+        let reference = |a: i64, b: i64| (((a as i128) << FRAC_BITS) / (b as i128)) as i64;
+        let edges = edge_values();
+        for &a in &edges {
+            for &b in edges.iter().filter(|&&b| b != 0) {
+                assert_eq!(div_raw(a, b), reference(a, b), "{a} / {b}");
+            }
+        }
+        for w in random_values(6, 600_000).chunks(2) {
+            if w[1] != 0 {
+                assert_eq!(div_raw(w[0], w[1]), reference(w[0], w[1]), "{} / {}", w[0], w[1]);
+            }
+        }
     }
 }

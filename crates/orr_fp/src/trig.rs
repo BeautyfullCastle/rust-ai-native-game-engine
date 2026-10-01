@@ -298,6 +298,77 @@ fn isqrt_u128(n: u128) -> u128 {
     res
 }
 
+/// `floor(sqrt(raw * 65536))` for `raw >= 0`: bit-identical to the plain `u128` digit loop
+/// ([`isqrt_u128`]), but values below `2^48` (4096 units: nearly all of them) use the
+/// 64-bit table + Newton path, which is several times faster on every target and needs
+/// no 128-bit arithmetic at all.
+#[inline]
+pub(crate) fn sqrt_raw(raw: i64) -> i64 {
+    if raw < 1i64 << 48 {
+        isqrt_u64((raw as u64) << 16) as i64
+    } else {
+        isqrt_u128((raw as u128) << 16) as i64
+    }
+}
+
+/// Upper bounds of `sqrt(m)` for normalized `m` in `[2^62, 2^64)`, indexed by
+/// `(m >> 55) - 128`. Each entry covers a bucket of relative width 2^-7, so its
+/// relative error is below 2^-8.
+static SQRT_TABLE: [u64; 384] = build_sqrt_table();
+
+const fn isqrt_const(n: u128) -> u128 {
+    let mut x = n;
+    let mut y = x.div_ceil(2);
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+const fn build_sqrt_table() -> [u64; 384] {
+    let mut t = [0u64; 384];
+    let mut i = 0;
+    while i < 384 {
+        let hi = ((i as u128) + 128 + 1) << 55;
+        let mut r = isqrt_const(hi);
+        if r * r < hi {
+            r += 1;
+        }
+        t[i] = r as u64;
+        i += 1;
+    }
+    t
+}
+
+/// Exact `floor(sqrt(n))` for `u64`: a table guess that is an upper bound, two Newton
+/// steps from above (they never drop below the root), and a correction loop that settles
+/// the last unit.
+#[inline]
+fn isqrt_u64(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    // Normalize by an even shift so the square root shifts by whole bits.
+    let lz = n.leading_zeros() & !1;
+    let m = n << lz;
+    let half = lz / 2;
+    let x0 = SQRT_TABLE[(m >> 55) as usize - 128];
+    // Ceil-shift keeps the guess an upper bound of sqrt(n).
+    let mut x = (x0 + ((1u64 << half) - 1)) >> half;
+    x = (x + n / x) >> 1;
+    x = (x + n / x) >> 1;
+    // Roots are below 2^32, so a square is exact in `u64` (a root at or above 2^32 squares
+    // beyond every `n`).
+    while x >= 1 << 32 || x * x > n {
+        x -= 1;
+    }
+    while x + 1 < 1 << 32 && (x + 1) * (x + 1) <= n {
+        x += 1;
+    }
+    x
+}
+
 impl FP {
     /// Reduce `self` (radians) into `(-pi, pi]`.
     #[must_use]
@@ -523,8 +594,7 @@ impl FP {
             debug_assert!(false, "FP::sqrt: negative input ({self})");
             return FP::ZERO;
         }
-        let widened = (self.0 as u128) << 16;
-        FP(isqrt_u128(widened) as i64)
+        FP(sqrt_raw(self.0))
     }
 
     /// `1 / sqrt(self)`. Panics if `self <= 0` (via the internal division

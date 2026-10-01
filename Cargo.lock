@@ -3252,6 +3252,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_wasm_bench"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_fp",
+ "orr_games",
+ "orr_sim",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "orr_web"
 version = "0.0.1"
 dependencies = [
