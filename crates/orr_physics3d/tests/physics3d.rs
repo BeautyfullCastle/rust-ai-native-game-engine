@@ -240,9 +240,7 @@ fn energy_does_not_grow_in_a_bouncing_pile() {
 
 #[test]
 fn free_spin_keeps_its_rate_and_kinetic_energy() {
-    let mut cfg = PhysicsConfig::default();
-    cfg.gravity = FPVec3::ZERO;
-    cfg.sleep_ticks = 0;
+    let cfg = PhysicsConfig { gravity: FPVec3::ZERO, sleep_ticks: 0, ..PhysicsConfig::default() };
     let mut f = new_frame_with(cfg);
     let s = Shape::cuboid(fp!(0.5), fp!(0.5), fp!(0.5));
     let e = spawn_body(&mut f, Body::new_dynamic(FPVec3::ZERO, &s, FP::ONE).with_omega(v3!(0, 3, 0)), Collider::new(s));
@@ -258,8 +256,7 @@ fn free_spin_keeps_its_rate_and_kinetic_energy() {
 
 #[test]
 fn impulse_off_center_produces_spin_and_motion() {
-    let mut cfg = PhysicsConfig::default();
-    cfg.gravity = FPVec3::ZERO;
+    let cfg = PhysicsConfig { gravity: FPVec3::ZERO, ..PhysicsConfig::default() };
     let mut f = new_frame_with(cfg);
     let s = Shape::cuboid(fp!(0.5), fp!(0.5), fp!(0.5));
     let e = spawn_body(&mut f, Body::new_dynamic(FPVec3::ZERO, &s, FP::ONE), Collider::new(s));
@@ -504,4 +501,77 @@ fn sphere_cast_is_exact_for_sphere_box_and_capsule_targets() {
     let h = sphere_cast(&mut f, v3!(0, 0, 0), FPVec3::Z, fp!(100), fp!(0.5), filter).unwrap();
     assert_eq!(h.entity, sp);
     assert!((h.distance - fp!(8.5)).abs() < fp!(0.01));
+}
+
+#[test]
+fn kinematic_spin_rotates_by_omega_times_time() {
+    let mut f = new_frame();
+    let mut plate = Body::new_kinematic(v3!(0, 1, 0));
+    plate.omega = v3!(0, 2, 0);
+    let e = spawn_body(&mut f, plate, Collider::new(Shape::cuboid(fp!(2), fp!(0.1), fp!(2))));
+    let _ = settle(&mut f, 60);
+    let b = body(&f, e);
+    let (axis, angle) = b.rot.to_axis_angle();
+    assert!((angle - fp!(2)).abs() < fp!(0.03), "angle {angle}");
+    assert!(axis.y > fp!(0.99));
+    assert!((b.pos.y - FP::ONE).abs() < fp!(0.001));
+}
+
+/// Every ordered pair of shape kinds, dropped at a few offsets and
+/// orientations: nothing explodes, nothing sinks through the floor, and
+/// everything ends up slow near the floor or on the obstacle.
+#[test]
+fn every_shape_pair_survives_a_drop_onto_each_other() {
+    let kinds = [0u32, 1, 2];
+    let make = |kind: u32| match kind {
+        0 => Shape::sphere(fp!(0.4)),
+        1 => Shape::capsule(fp!(0.5), fp!(0.25)),
+        _ => Shape::cuboid(fp!(0.4), fp!(0.3), fp!(0.5)),
+    };
+    let mut seed = 1u64;
+    for &under in &kinds {
+        for &over in &kinds {
+            for trial in 0..4 {
+                let mut f = new_frame();
+                ground(&mut f);
+                let mut rng = orr_fp::FrameRng::new(seed);
+                seed += 1;
+                let rot = |rng: &mut orr_fp::FrameRng| {
+                    let axis = FPVec3::new(rng.range_fp(fp!(-1), fp!(1)), rng.range_fp(fp!(0.1), fp!(1)), rng.range_fp(fp!(-1), fp!(1))).normalize_or_zero();
+                    FPQuat::from_axis_angle(axis, rng.range_fp(fp!(-3), fp!(3)))
+                };
+                let s_under = make(under);
+                let r_under = rot(&mut rng);
+                // The lower body is dynamic too; the upper one lands on it.
+                let low = spawn_body(
+                    &mut f,
+                    Body::new_dynamic(v3!(0, 0.8, 0), &s_under, FP::ONE).with_rotation(r_under),
+                    Collider::new(s_under).with_friction(fp!(0.6)),
+                );
+                let s_over = make(over);
+                let r_over = rot(&mut rng);
+                let off = FPVec3::new(rng.range_fp(fp!(-0.3), fp!(0.3)), FP::ZERO, rng.range_fp(fp!(-0.3), fp!(0.3)));
+                let high = spawn_body(
+                    &mut f,
+                    Body::new_dynamic(v3!(0, 2.2, 0) + off, &s_over, FP::ONE).with_rotation(r_over),
+                    Collider::new(s_over).with_friction(fp!(0.6)),
+                );
+                let mut sc = Scratch::new();
+                for t in 0..600 {
+                    orr_physics3d::step(&mut f, &mut sc);
+                    for e in [low, high] {
+                        let b = body(&f, e);
+                        assert!(b.pos.y > fp!(0.1) && b.pos.length() < fp!(30), "pair {under}/{over} trial {trial} tick {t}: body at {:?}", b.pos);
+                        assert!(b.vel.length() < fp!(25), "pair {under}/{over} trial {trial} tick {t}: speed {}", b.vel.length());
+                    }
+                }
+                for e in [low, high] {
+                    let b = body(&f, e);
+                    assert!(b.pos.y < fp!(2.5), "pair {under}/{over} trial {trial}: ended at {:?}", b.pos);
+                    // Spheres and capsules may still roll (there is no rolling resistance).
+                    assert!(b.vel.length() < fp!(6), "pair {under}/{over} trial {trial}: still moving {}", b.vel.length());
+                }
+            }
+        }
+    }
 }

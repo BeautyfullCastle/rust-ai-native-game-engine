@@ -13,11 +13,11 @@ use orr_physics3d::{apply_impulse, Body, Scratch, BODY_DYNAMIC};
 
 /// Pinned checksums. Update only for an intended behavior change, and say
 /// why in the commit message.
-const STACK_GOLDEN: u64 = 0;
-const PYRAMID_GOLDEN: u64 = 0;
-const RAIN_GOLDEN: u64 = 0;
-const RAMP_GOLDEN: u64 = 0;
-const MIXED_GOLDEN: u64 = 0;
+const STACK_GOLDEN: u64 = 0x21eb449802e96d0f;
+const PYRAMID_GOLDEN: u64 = 0x28f6e5ce7d1c811e;
+const RAIN_GOLDEN: u64 = 0xa509c0497431ac58;
+const RAMP_GOLDEN: u64 = 0x2a04b439faf52168;
+const MIXED_GOLDEN: u64 = 0x02692d01c7d15ab6;
 
 fn sane(f: &mut Frame, limit: FP) {
     for (_, (b,)) in f.query::<(&Body,)>().filter(|(_, (b,))| b.kind == BODY_DYNAMIC) {
@@ -147,7 +147,7 @@ fn golden_serialize_roundtrip() {
 }
 
 #[test]
-fn spawn_and_despawn_order_does_not_change_the_result_of_the_same_bodies() {
+fn golden_spawn_despawn_rollback() {
     // The same set of bodies spawned with a despawned hole in the entity
     // table in one run must still agree with itself after a rollback.
     let mut f = mixed_pile(40);

@@ -9,18 +9,14 @@ use orr_fp::{fp, FPVec3, FP};
 use orr_physics3d::{Body, PhysicsConfig, Scratch, BODY_DYNAMIC};
 
 fn no_sleep() -> PhysicsConfig {
-    let mut c = PhysicsConfig::default();
-    c.sleep_ticks = 0;
-    c
+    PhysicsConfig { sleep_ticks: 0, ..PhysicsConfig::default() }
 }
 
 #[test]
 fn ten_box_stack_stays_standing_for_600_ticks_without_sleeping() {
     let (mut f, es) = box_stack(10);
     // Same scene, but sleeping off so the solver has to hold it up.
-    let mut cfg = no_sleep();
-    cfg.velocity_iterations = PhysicsConfig::default().velocity_iterations;
-    f.singleton_mut::<orr_physics3d::PhysicsState>().config = cfg;
+    f.singleton_mut::<orr_physics3d::PhysicsState>().config = no_sleep();
     let mut sc = Scratch::new();
     let (mut max_xz, mut max_speed, mut min_y_err, mut max_y_err) = (FP::ZERO, FP::ZERO, FP::ZERO, FP::ZERO);
     for t in 0..600 {
@@ -56,6 +52,7 @@ fn twenty_box_stack_with_sleeping_stays_standing() {
     println!("stack20 after 900 ticks: top at {:?}, asleep {}", top.pos, sc.stats().asleep);
     assert!(top.pos.x.abs() < fp!(0.1) && top.pos.z.abs() < fp!(0.1));
     assert!(top.pos.y > fp!(19.0));
+    assert_eq!(sc.stats().asleep, 20, "the stack should have fallen asleep");
 }
 
 #[test]

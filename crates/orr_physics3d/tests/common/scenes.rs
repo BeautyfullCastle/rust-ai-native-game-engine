@@ -155,15 +155,73 @@ pub fn bench_pile(n: i32, sleeping: bool) -> Frame {
         let rot = FPQuat::from_axis_angle(axis, rng.range_fp(fp!(-3), fp!(3)));
         match i % 3 {
             0 => {
-                spawn_sphere(&mut f, pos, rng.range_fp(fp!(0.3), fp!(0.45)));
+                let e = spawn_sphere(&mut f, pos, rng.range_fp(fp!(0.3), fp!(0.45)));
+                let b = f.get_mut::<Body>(e).unwrap();
+                b.linear_damping = fp!(0.05);
+                b.angular_damping = fp!(0.5);
             }
             1 => {
                 let h = rng.range_fp(fp!(0.3), fp!(0.45));
                 let s = Shape::cuboid(h, h, h);
-                spawn_body(&mut f, Body::new_dynamic(pos, &s, FP::ONE).with_rotation(rot), Collider::new(s));
+                spawn_body(&mut f, Body::new_dynamic(pos, &s, FP::ONE).with_rotation(rot).with_damping(fp!(0.05), fp!(0.5)), Collider::new(s));
             }
             _ => {
-                spawn_capsule(&mut f, pos, rng.range_fp(fp!(0.2), fp!(0.4)), rng.range_fp(fp!(0.2), fp!(0.3)), rot);
+                let e = spawn_capsule(&mut f, pos, rng.range_fp(fp!(0.2), fp!(0.4)), rng.range_fp(fp!(0.2), fp!(0.3)), rot);
+                let b = f.get_mut::<Body>(e).unwrap();
+                b.linear_damping = fp!(0.05);
+                b.angular_damping = fp!(0.5);
+            }
+        }
+    }
+    f
+}
+
+/// `n` mixed bodies scattered as small separate groups (single spheres,
+/// boxes, lying capsules and two-box stacks) on a large floor, dropped from
+/// a small height. They settle and fall asleep group by group: the typical
+/// game case.
+pub fn bench_field(n: i32, sleeping: bool) -> Frame {
+    let mut cfg = PhysicsConfig::default();
+    if !sleeping {
+        cfg.sleep_ticks = 0;
+    }
+    let mut f = new_frame_with(cfg);
+    let mut side = 4;
+    while side * side < n {
+        side += 1;
+    }
+    let cell = fp!(2.4);
+    let half = cell * side / 2 + fp!(2);
+    spawn_body(
+        &mut f,
+        Body::new_static(v3!(0, -0.5, 0)),
+        Collider::new(Shape::cuboid(half, FP::HALF, half)).with_friction(fp!(0.6)),
+    );
+    let mut rng = FrameRng::new(1234);
+    let lie = FPQuat::from_axis_angle(FPVec3::Z, FP::HALF_PI);
+    let (mut count, mut i) = (0, 0);
+    while count < n {
+        let (cx, cz) = (i % side, i / side);
+        i += 1;
+        let x = (FP::from_int(cx) - FP::from_int(side - 1) * FP::HALF) * cell + rng.range_fp(fp!(-0.15), fp!(0.15));
+        let z = (FP::from_int(cz) - FP::from_int(side - 1) * FP::HALF) * cell + rng.range_fp(fp!(-0.15), fp!(0.15));
+        match i % 4 {
+            0 => {
+                spawn_sphere(&mut f, FPVec3::new(x, fp!(0.6), z), fp!(0.4));
+                count += 1;
+            }
+            1 => {
+                spawn_box(&mut f, FPVec3::new(x, fp!(0.6), z), v3!(0.45, 0.45, 0.45));
+                count += 1;
+            }
+            2 => {
+                spawn_capsule(&mut f, FPVec3::new(x, fp!(0.5), z), fp!(0.5), fp!(0.3), lie);
+                count += 1;
+            }
+            _ => {
+                spawn_box(&mut f, FPVec3::new(x, fp!(0.5), z), v3!(0.45, 0.45, 0.45));
+                spawn_box(&mut f, FPVec3::new(x, fp!(1.45), z), v3!(0.4, 0.4, 0.4));
+                count += 2;
             }
         }
     }

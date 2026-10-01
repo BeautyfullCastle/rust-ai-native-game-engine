@@ -20,12 +20,12 @@ impl Xf {
     }
     /// World point to body-local coordinates.
     #[inline]
-    pub fn to_local(&self, w: FPVec3) -> FPVec3 {
+    pub fn to_local(self, w: FPVec3) -> FPVec3 {
         self.r.tmul_vec(w - self.p)
     }
     /// Body-local point to world coordinates.
     #[inline]
-    pub fn to_world(&self, l: FPVec3) -> FPVec3 {
+    pub fn to_world(self, l: FPVec3) -> FPVec3 {
         self.p + self.r.mul_vec(l)
     }
 }

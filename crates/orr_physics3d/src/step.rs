@@ -739,6 +739,17 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
             sc.wake_orphans(old_cache, bd);
         }
         probe(Phase::Gather);
+        if sc.movers.is_empty() {
+            // Nothing moves: no contacts to solve, no state to change. The
+            // cache of the sleeping pairs stays as it is.
+            sc.cons.clear();
+            sc.pool.clear();
+            sc.pairs.clear();
+            sc.mslept.clear();
+            sc.asleep_end = sc.flags.iter().filter(|&&f| f & F_ASLEEP != 0).count() as u32;
+            probe(Phase::Finish);
+            return;
+        }
         sc.build_transforms(bd, cd, cfg.contact_margin);
         probe(Phase::Transforms);
 

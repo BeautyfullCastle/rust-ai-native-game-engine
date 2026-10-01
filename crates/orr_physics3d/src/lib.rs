@@ -51,14 +51,22 @@
 //!
 //!    A contact between a moving body and a sleeping one wakes the
 //!    sleeper's island, and steps 2 and 3 run again (at most 3 times).
-//! 4. Semi-implicit Euler for velocities, warm start, a fixed count of
-//!    sequential impulse iterations (friction along two tangents, then
-//!    normal; the sweep direction alternates), Baumgarte position
-//!    correction with slop, speculative contacts and restitution above a
-//!    closing speed.
+//! 4. Dynamics, in `PhysicsConfig::substeps` substeps of `dt / substeps`
+//!    (default 8) with `velocity_iterations` sequential impulse sweeps
+//!    each (default 1). Contacts are found once per tick; the lever arms
+//!    and effective masses are prepared once. Every substep adds gravity,
+//!    recomputes each point's separation from the motion of the two bodies
+//!    so far, warm starts with the accumulated impulses, runs the sweep
+//!    (friction along two tangents, then normal; the sweep direction
+//!    alternates) and moves the bodies by the substep. Penetration is
+//!    corrected with Baumgarte and slop, approach of separated points is
+//!    limited to the gap (speculative contacts), restitution applies above
+//!    a closing speed. Substeps instead of iterations is what keeps a stack
+//!    up: 8 x 1 holds a 20 box stack, 1 x 8 does not hold 12.
 //! 5. Sleep timers and islands (union-find over contacts between dynamic
-//!    bodies), then integrate positions and orientations of the moving
-//!    bodies, write back, store the contact cache.
+//!    bodies), then write back the positions and orientations of the
+//!    moving bodies and store the contact cache. When no body moves the
+//!    step returns right after step 1.
 //!
 //! Contact points carry feature ids (clip vertex or edge, reference face)
 //! that stay the same while the same features touch, so the cache keeps
@@ -84,7 +92,8 @@
 //! # Numeric ranges (Q48.16)
 //!
 //! `FP` operators multiply through `i128`; the solver rows multiply in
-//! `i64` (checked in debug builds). Keep these limits:
+//! `i64`, rounded to nearest (checked in debug builds; flooring there
+//! feeds energy into a resting stack). Keep these limits:
 //!
 //! - body positions `|x|, |y|, |z| <= 30_000` units,
 //! - shape sizes `0.05 ..= 1_000`; mass between `0.01` and `10_000`
@@ -109,6 +118,7 @@
 #![deny(clippy::disallowed_types)]
 #![deny(clippy::float_arithmetic)]
 #![warn(missing_docs)]
+#![allow(clippy::needless_range_loop)]
 
 mod collide;
 mod fastmath;
