@@ -209,6 +209,16 @@ on plain TCP, same port (`orr_remote_host`, or an `orr_ffi` host opened with
 handshake (TCP, hex) that decodes frames; the test suite runs it against a host
 and checks it reads the same records as the Rust decoder.
 
+`crates/orr_tui` (`orr_tui`) is a terminal view that uses nothing but this
+document: it depends on `orr_viewstream` without its `producer` feature (the
+decoder, no simulation crates; `tests/deps.rs` enforces it), reads the stream
+with a tiny WebSocket/TCP client (`--connect ws://host:port [--token t]`) or
+through the C ABI loaded at run time (`--ffi [--lib path]`, calling the
+functions of `orrery.h` through `extern "C"` declarations, feature `ffi`), and
+builds input bytes from the schema's input layout. `--headless --frames N
+--dump file` prints `RESULT entities=.. frames=.. fnv=0x..`, the same line the
+C client and the Rust bridge produce for the same scenario.
+
 The hosts of the same tick share one encoded message, so two subscribers get
 byte-identical frames (including `seq`).
 

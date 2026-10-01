@@ -18,12 +18,18 @@
 //!   `orr_bridge::Bridge`; [`StreamProducer`] serves hosts that hold frames
 //!   directly (the ERP server's `viewstream` topic, the C ABI of `orr_ffi`).
 //!
+//! Only [`format`] is needed to read a stream. The rest (`schema`, `source`) is the
+//! producer and sits behind the `producer` feature (on by default); a reader that must
+//! not link the simulation, like `orr_tui`, turns default features off.
+//!
 //! The view layer, not the sim, owns floats: this is a view-boundary crate.
 #![allow(clippy::float_arithmetic)]
 #![allow(clippy::disallowed_types)]
 
 pub mod format;
+#[cfg(feature = "producer")]
 pub mod schema;
+#[cfg(feature = "producer")]
 pub mod source;
 
 pub use format::{
@@ -31,5 +37,7 @@ pub use format::{
     FLAG_DISCONTINUITY, FLAG_PAUSED, FLAG_ROLLED_BACK, HEADER_LEN, MAGIC, MODE_NONE, MODE_PREDICTION, MODE_SNAPSHOT, MSG_EVENTS,
     MSG_FRAME, RECORD_LEN, SHAPE_CAPSULE, SHAPE_CIRCLE, SHAPE_QUAD, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED, VERSION,
 };
+#[cfg(feature = "producer")]
 pub use schema::{input_layout_of, EventDef, InputLayout, KindDef, PropDef, PropType, Schema};
+#[cfg(feature = "producer")]
 pub use source::{entity_id, FrameEncoder, FrameMeta, NoKinds, Pumped, StreamKinds, StreamProducer, ViewStreamSource};

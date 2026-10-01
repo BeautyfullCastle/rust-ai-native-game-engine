@@ -10,12 +10,19 @@ description = "Orrery view stream: a language-neutral, versioned binary format f
 [lints]
 workspace = true
 
+[features]
+# `producer` (default): the host side, `Schema` and the extractor-driven sources. It needs the
+# simulation crates. A pure *reader* (a terminal view, a foreign-engine bridge written in Rust)
+# uses `default-features = false` and gets only `format`, with no dependencies at all.
+default = ["producer"]
+producer = ["dep:orr_bridge", "dep:orr_view", "dep:orr_ecs", "dep:orr_sim", "dep:orr_reflect", "dep:serde_json", "dep:bytemuck"]
+
 [dependencies]
-orr_bridge = { path = "../orr_bridge" }
-orr_view = { path = "../orr_view" }
-orr_ecs = { path = "../orr_ecs" }
-orr_sim = { path = "../orr_sim" }
-orr_reflect = { path = "../orr_reflect", default-features = false }
-bytemuck = "1"
+orr_bridge = { path = "../orr_bridge", optional = true }
+orr_view = { path = "../orr_view", optional = true }
+orr_ecs = { path = "../orr_ecs", optional = true }
+orr_sim = { path = "../orr_sim", optional = true }
+orr_reflect = { path = "../orr_reflect", default-features = false, optional = true }
+bytemuck = { version = "1", optional = true }
 # Keys stay in the order the schema is written in (foreign readers may scan for them).
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order"], optional = true }
