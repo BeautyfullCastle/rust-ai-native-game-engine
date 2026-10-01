@@ -236,7 +236,7 @@ a trusted certificate is mandatory.
 |---|---|
 | WebTransport backend, ALPN dispatch | `crates/orr_net/src/wt.rs`, `quic.rs` (`server_conn`), `endpoint.rs` (`listen_quic_with`, `add_ws_listener`, `add_wss_listener`), `tls.rs` (`Identity`, `SelfSignedWebTransport`) |
 | Relay glue | `crates/orr_relay_net/src/connect.rs` (`ListenOptions::{webtransport, ws_bind, wss_bind}`), `orr_server` flags `--webtransport --ws-bind --wss-bind` |
-| Browser client | `crates/orr_web` (`WebLink`, the bot, the report, `js/transport.js`, `web/index.html`), `tools/build_web.sh` |
+| Browser client | `crates/orr_web` (`WebLink`, the bots, the report, the draw lists, `js/transport.js`, `web/worker.js`, `web/index.html`), `crates/orr_web_gpu` (the GPU view), `tools/build_web.sh` |
 | Trial tools | `crates/orr_net/examples/wt_echo.rs`, `tools/webtransport/{trial.html,trial.cjs,lib.cjs,browser_e2e.cjs}` |
 | Tests | `crates/orr_net/tests/webtransport.rs`, `ws_malformed.rs`, `crates/orr_server/tests/browser_e2e.rs`, unit tests in `orr_web` |
 | CI | `.github/workflows/determinism.yml`: job `wasm32-browser` builds the sim crates and `orr_web` for `wasm32-unknown-unknown` and runs clippy `-D warnings` on `orr_web`; `orr_net` and `orr_web` join the `-D warnings` clippy line |
@@ -258,17 +258,50 @@ format, and the Rust side only sees `LinkPort` events.
 
 * Firefox and Safari are untested (section 7). The biggest unknown is the draft
   that `h3-webtransport` speaks versus Safari 26.4 and Firefox.
-* The sim loop runs on `setInterval(…, 2)` in the page; a background tab throttles
-  timers to 1 Hz. Move the client into a Web Worker (WebTransport is available
-  there) before shipping.
+* ~~The sim loop runs on `setInterval(…, 2)` in the page~~ Done (M6 step 4): see section 10. The relay client,
+  the simulation and the transport run in a module Web Worker (`web/worker.js`).
 * The page needs the certificate hash and server address from the URL. A small
   config endpoint (or the matchmaking service) should hand them out; the hash
   changes every restart of a dev server and every 13 days.
-* Rendering is a minimal canvas of the arena; there is no audio/input mapping beyond
-  arrow keys and space, and the physics game has no browser view yet (the wasm
-  client is the arena test game; `PhysGame` lives in `orr_sample`, which depends
-  on the GPU stack).
+* ~~The physics game has no browser view~~ Done (M6 step 4): `PhysGame` moved to the sim-only crate `orr_games` and
+  runs in the browser, drawn on a 2D canvas, WebGL2 or WebGPU (section 10). Still missing: audio, touch input, an
+  input mapping beyond arrow keys, Q/E and space, a camera for the 3D yard (`Yard3D` builds for wasm but has no
+  browser view; the 3D shader has not been run through a browser's WGSL validator).
 * `h3`/`h3-webtransport` are 0.x. Watch hyperium/h3 for the newer WebTransport
   draft, and keep the `wtransport` interop test as the early warning.
 * Native WebTransport and `wss://` *clients* are not implemented (only servers and
   the browser); native clients keep using QUIC `orrery/1`.
+
+## 10. M6 step 4: Web Worker, PhysGame and the GPU view
+
+* **Web Worker.** `crates/orr_web/web/worker.js` owns the `WebClient`/`PhysClient`, its timer
+  (`setInterval(step, 2)`, which a worker is not throttled on in a background tab the way a page is) and the
+  transport (`js/transport.js` is imported by the wasm package, so it runs in the worker; WebTransport and
+  WebSocket are available in dedicated workers). Why the transport is in the worker and not behind
+  `postMessage`: network bytes then never touch the main thread, a janky page cannot delay inputs or acks, and
+  the page needs only input events (in) and draw lists plus a report every 250 ms (out; `Int32Array`s are
+  transferred, not copied). The page keeps `window.orr` as a view of the cached report for the end-to-end test.
+  Headless Chromium has no hidden-tab state to test the throttling directly; the reasoning is the browsers'
+  documented timer policy.
+* **PhysGame in the browser.** `orr_web::PhysClient` (scene from the room's config blob, `bot_input` or keys) and an
+  integer draw list (`render_phys`: shape, class, x, y, angle, size, speed). `browser_e2e` plays it against a
+  native client over WebTransport and over WebSocket: 600 ticks, 20 of 20 checkpoints equal, 0 desyncs, rollbacks
+  in the browser.
+* **GPU view.** A separate package `crates/orr_web_gpu` (2.6 MB, loaded on demand) draws the same draw lists with
+  `orr_render`'s 2D renderer through `orr_rhi::Wgpu::for_canvas` (async adapter and device creation, wgpu's
+  WebGPU backend when the browser has an adapter, its WebGL2 backend otherwise, downlevel limits on GL). The page
+  chooses WebGPU, then WebGL2, then a plain 2D canvas, or what `?render=2d|webgl|webgpu` asks for. 3D (`Renderer3D`)
+  is not in the browser yet; the 2D renderer is what PhysGame needs, and the 3D path adds depth, MSAA resolve and
+  a shadow pass that need their own browser testing.
+* **Found by running in a browser:** the 2D shader called `fwidth` inside a branch on the shape kind. Native
+  validators accept that, Chrome's WGSL validator (Tint) rejects it ("must only be called from uniform control
+  flow"). The derivatives moved to the top of the function (`crates/orr_render/src/shader2d.wgsl`); the native GPU
+  readback tests are unchanged.
+* **Headless Chromium flags.** WebGL2 works without flags (SwiftShader). WebGPU needs
+  `--enable-unsafe-webgpu --enable-unsafe-swiftshader --use-webgpu-adapter=swiftshader --enable-features=Vulkan --use-vulkan=swiftshader --use-angle=swiftshader`
+  (the e2e test passes them). Without a WebGPU adapter the page falls back to WebGL2 by itself (`auto`).
+* **Build.** `tools/build_web.sh` (profile `web`, optional `wasm-opt`, optional `WEB_SIMD=1`, `WEB_GPU=0` to skip
+  the GPU package). Numbers and sizes: `docs/wasm-bench.md`.
+* **Run the end-to-end test** (all views, both games):
+  `ORR_REQUIRE_BROWSER=1 cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1`.
+  `ORR_REQUIRE_WEBGPU=1` makes a Chromium without WebGPU a failure instead of a skipped view check.

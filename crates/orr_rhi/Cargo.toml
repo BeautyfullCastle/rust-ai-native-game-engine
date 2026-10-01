@@ -13,3 +13,7 @@ workspace = true
 wgpu = "30"
 pollster = "1"
 raw-window-handle = "0.6"
+
+# Browser: WebGPU is in wgpu's default features; add the WebGL2 fallback for browsers without it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30", features = ["webgl"] }

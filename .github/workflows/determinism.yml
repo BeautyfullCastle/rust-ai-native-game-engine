@@ -52,6 +52,11 @@ jobs:
         # be able to break the sim crates' CI. It is built by `sample-build`.
         # `orr_editor` (egui, needs Rust 1.95+, GUI/GPU stack) is excluded for
         # the same reason and is built and tested by `sample-build` too.
+        # `orr_web_gpu` (the browser's wgpu view) is excluded likewise (`sample-build`).
+        #
+        # `orr_games` (PhysGame, Yard3D: the sample games without any view code) and
+        # `orr_wasm_bench` (pinned checksums of the FP/ECS/physics workloads) are in it: their
+        # golden tests are the cross-platform checks of the wasm/narrow fast paths.
         #
         # This includes `orr_relay_net` and the relay end-to-end tests of
         # `orr_server` (`tests/net_e2e.rs`): real loopback QUIC/WebSocket with
@@ -62,7 +67,7 @@ jobs:
         # it to the built cdylib and compares its output with the Rust bridge.
         # Linux must have a compiler (required); elsewhere the test skips with a
         # message if the runner has none.
-        run: cargo test --workspace --release --exclude orr_sample --exclude orr_editor
+        run: cargo test --workspace --release --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu
         env:
           ORR_REQUIRE_C_COMPILER: ${{ runner.os == 'Linux' && '1' || '0' }}
 
@@ -75,8 +80,8 @@ jobs:
         # `orr_session`, `orr_testgame`, `orr_physics`, `orr_physics3d`); other crates may be
         # under concurrent work with their own warning budget.
         run: |
-          cargo clippy --workspace --exclude orr_sample --exclude orr_editor --all-targets
-          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream -p orr_tui -p orr_net -p orr_web --all-targets -- -D warnings
+          cargo clippy --workspace --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu --all-targets
+          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream -p orr_tui -p orr_net -p orr_web -p orr_games -p orr_wasm_bench --all-targets -- -D warnings
 
       - name: cargo build -p orr_sim --features hotpatch
         # Desktop-only, off-by-default hot-patch hook (design doc decision
@@ -102,8 +107,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
-      - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor --release
-      - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor --all-targets
+      - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release
+      - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --all-targets
       # GPU readback pixel tests on a software Vulkan adapter (lavapipe), so
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
@@ -131,6 +136,9 @@ jobs:
         run: sudo apt-get install -y -q xvfb libxkbcommon-x11-0
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
+      # The mobile / weak-GPU preset (no MSAA, 512 texel shadow map, 12-segment meshes) on the same adapter.
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --low --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d_low.png"
 
   wasm32:
     name: wasm32-wasip1 (wasmtime)
@@ -164,6 +172,24 @@ jobs:
           cargo test --release --target wasm32-wasip1 -p orr_session --test arena -- golden
           cargo test --release --target wasm32-wasip1 -p orr_physics --test physics -- golden
           cargo test --release --target wasm32-wasip1 -p orr_physics3d --test golden -- golden
+          cargo test --release --target wasm32-wasip1 -p orr_games --test golden
+          cargo test --release --target wasm32-wasip1 -p orr_wasm_bench --test checksums
+
+      - name: the same with wasm simd128 (the opt-in WEB_SIMD=1 build) must give the same bits
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+          RUSTFLAGS: -C target-feature=+simd128
+        run: |
+          cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_fp
+          cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_ecs
+          cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_games --test golden
+          cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_wasm_bench --test checksums
+
+      - name: wasm bench report (wasmtime; informational, never fails the build)
+        continue-on-error: true
+        run: |
+          cargo build --release --target wasm32-wasip1 -p orr_wasm_bench --bin bench_runner
+          wasmtime run target/wasm32-wasip1/release/bench_runner.wasm --ms 150
 
   wasm32-browser:
     # The browser client (`orr_web`, wasm-bindgen glue) and the sim crates it
@@ -185,10 +211,68 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo build (sim crates + orr_web) for wasm32-unknown-unknown
-        run: cargo build --release --target wasm32-unknown-unknown -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_web
+        run: cargo build --release --target wasm32-unknown-unknown -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_games -p orr_web -p orr_web_gpu -p orr_wasm_bench
 
-      - name: cargo clippy -p orr_web for wasm32-unknown-unknown
-        run: cargo clippy --target wasm32-unknown-unknown -p orr_web --all-targets -- -D warnings
+      - name: cargo clippy (orr_web, orr_web_gpu, orr_games, orr_wasm_bench) for wasm32-unknown-unknown
+        run: cargo clippy --target wasm32-unknown-unknown -p orr_web -p orr_web_gpu -p orr_games -p orr_wasm_bench --all-targets -- -D warnings
+
+      - name: web profile build and size report (informational, never fails the build)
+        continue-on-error: true
+        run: |
+          cargo build --profile web --target wasm32-unknown-unknown -p orr_web -p orr_web_gpu
+          for f in orr_web orr_web_gpu; do
+            raw=$(stat -c %s "target/wasm32-unknown-unknown/web/$f.wasm")
+            gz=$(gzip -9 -c "target/wasm32-unknown-unknown/web/$f.wasm" | wc -c)
+            echo "$f.wasm (web profile, before wasm-bindgen/wasm-opt): $raw bytes, gzip $gz"
+          done
+
+  android-arm64:
+    # Android ARM64 (design doc 3.2): the sim crates are built for aarch64-linux-android and their
+    # golden tests are run as that target's own binaries (statically linked bionic, NDK clang as the
+    # linker) under qemu-user, so the bits are those of real aarch64 code. A device or emulator image
+    # is not needed for determinism; docs/mobile.md says what a real device run adds.
+    name: aarch64-linux-android (NDK + qemu-user)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (aarch64-linux-android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install qemu-user
+        run: sudo apt-get update -q && sudo apt-get install -y -q qemu-user
+
+      - name: cargo build (sim crates + games) for aarch64-linux-android
+        # Library builds need no linker, so this also works without an NDK.
+        run: cargo build --release --target aarch64-linux-android -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_games --lib
+
+      - name: golden tests on aarch64-linux-android under qemu-aarch64
+        # The runner image has the NDK (ANDROID_NDK_LATEST_HOME); `crt-static` makes the test binaries
+        # runnable by qemu-user without Android's dynamic linker. Doc tests are not cross-run.
+        # `--test-threads=1`: a multi-threaded test harness in a static bionic binary under qemu-user
+        # segfaults about one run in three (thread start-up in the emulator, not our code; the same binaries
+        # passed 12 of 12 runs single-threaded).
+        env:
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_RUNNER: qemu-aarch64
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
+          export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$BIN/llvm-ar"
+          cargo test --release --target aarch64-linux-android -p orr_fp --tests -- --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_ecs --tests -- --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_session --test arena -- golden --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_physics --test physics -- golden --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_physics3d --test golden -- golden --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_games --test golden -- --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_wasm_bench --test checksums -- --test-threads=1
 
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
@@ -201,7 +285,8 @@ jobs:
           echo "hardcoded golden checksums (see crates/orr_session/tests/arena.rs,"
           echo "crates/orr_fp/tests/determinism_golden.rs and"
           echo "crates/orr_physics/tests/physics.rs and"
-          echo "crates/orr_physics3d/tests/golden.rs). A leg failing"
+          echo "crates/orr_physics3d/tests/golden.rs, crates/orr_games/tests/golden.rs"
+          echo "and crates/orr_wasm_bench/tests/checksums.rs). A leg failing"
           echo "that assertion is exactly a cross-platform determinism failure,"
           echo "so requiring every matrix leg to pass *is* the cross-platform"
           echo "checksum comparison; this job just gives that fact a clear,"

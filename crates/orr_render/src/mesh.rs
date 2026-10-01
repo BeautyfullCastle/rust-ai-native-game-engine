@@ -45,9 +45,13 @@ pub struct Mesh {
     pub indices: Vec<u32>,
 }
 
-/// Longitude segments of the round meshes and latitude rings per hemisphere.
-const SEGMENTS: u32 = 32;
-const RINGS: u32 = 12;
+/// Longitude segments of the round meshes at the default detail; the latitude rings per hemisphere
+/// follow as `segments * 3 / 8` (12 at 32 segments).
+pub const DEFAULT_SEGMENTS: u32 = 32;
+
+fn rings_for(segments: u32) -> u32 {
+    (segments * 3 / 8).max(2)
+}
 
 /// Builds a surface of revolution from rings of `(polar angle, cap)`.
 fn revolve(rings: &[(f32, f32)], segments: u32) -> Mesh {
@@ -75,16 +79,25 @@ fn revolve(rings: &[(f32, f32)], segments: u32) -> Mesh {
 }
 
 pub fn sphere() -> Mesh {
-    let n = RINGS * 2;
+    sphere_with(DEFAULT_SEGMENTS)
+}
+
+pub fn sphere_with(segments: u32) -> Mesh {
+    let n = rings_for(segments) * 2;
     let rings: Vec<(f32, f32)> = (0..=n).map(|i| (std::f32::consts::PI * i as f32 / n as f32, 0.0)).collect();
-    revolve(&rings, SEGMENTS)
+    revolve(&rings, segments)
 }
 
 pub fn capsule() -> Mesh {
+    capsule_with(DEFAULT_SEGMENTS)
+}
+
+pub fn capsule_with(segments: u32) -> Mesh {
+    let r = rings_for(segments);
     let half = std::f32::consts::FRAC_PI_2;
-    let mut rings: Vec<(f32, f32)> = (0..=RINGS).map(|i| (half * i as f32 / RINGS as f32, 1.0)).collect();
-    rings.extend((0..=RINGS).map(|i| (half + half * i as f32 / RINGS as f32, -1.0)));
-    revolve(&rings, SEGMENTS)
+    let mut rings: Vec<(f32, f32)> = (0..=r).map(|i| (half * i as f32 / r as f32, 1.0)).collect();
+    rings.extend((0..=r).map(|i| (half + half * i as f32 / r as f32, -1.0)));
+    revolve(&rings, segments)
 }
 
 pub fn cuboid() -> Mesh {
@@ -138,12 +151,23 @@ pub struct MeshSet {
 }
 
 impl MeshSet {
+    /// The meshes at the default detail ([`DEFAULT_SEGMENTS`]).
     pub fn build() -> Self {
+        Self::build_with(DEFAULT_SEGMENTS)
+    }
+
+    /// The meshes with `segments` longitude segments on spheres and capsules (3 to 64).
+    pub fn build_with(segments: u32) -> Self {
+        let segments = segments.clamp(3, 64);
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut ranges: [(std::ops::Range<u32>, i32); 4] = std::array::from_fn(|_| (0..0, 0));
         for kind in MeshKind::ALL {
-            let m = build(kind);
+            let m = match kind {
+                MeshKind::Sphere => sphere_with(segments),
+                MeshKind::Capsule => capsule_with(segments),
+                other => build(other),
+            };
             let base = vertices.len() as i32;
             let first = indices.len() as u32;
             vertices.extend_from_slice(&m.vertices);
@@ -208,6 +232,23 @@ mod tests {
             assert!(v.cap == 1.0 || v.cap == -1.0);
             // The upper half has y >= 0 and the lower y <= 0 before the offset.
             assert!(v.pos[1] * v.cap >= -1e-5, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn fewer_segments_make_a_smaller_mesh_set_with_valid_indices() {
+        let (high, low) = (MeshSet::build(), MeshSet::build_with(12));
+        assert!(low.indices.len() * 3 < high.indices.len(), "{} vs {}", low.indices.len(), high.indices.len());
+        for s in [&high, &low, &MeshSet::build_with(1), &MeshSet::build_with(500)] {
+            assert_eq!(s.ranges[3].0.end as usize, s.indices.len());
+            for (r, base) in &s.ranges {
+                for &i in &s.indices[r.start as usize..r.end as usize] {
+                    assert!((i as i32 + base) < s.vertices.len() as i32);
+                }
+            }
+        }
+        for v in &sphere_with(12).vertices {
+            assert!((dot(v.pos, v.pos).sqrt() - 1.0).abs() < 1e-4);
         }
     }
 

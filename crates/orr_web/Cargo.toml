@@ -18,6 +18,9 @@ orr_session = { path = "../orr_session" }
 orr_sim = { path = "../orr_sim" }
 orr_fp = { path = "../orr_fp" }
 orr_testgame = { path = "../orr_testgame" }
+orr_games = { path = "../orr_games" }
+orr_physics = { path = "../orr_physics" }
+orr_ecs = { path = "../orr_ecs" }
 
 # Browser glue. Only built for wasm32, so native `cargo test --workspace` does not compile it.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

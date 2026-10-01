@@ -16,6 +16,7 @@ orr_view = { path = "../orr_view" }
 orr_viewstream = { path = "../orr_viewstream" }
 orr_render = { path = "../orr_render" }
 orr_testgame = { path = "../orr_testgame" }
+orr_games = { path = "../orr_games" }
 orr_session = { path = "../orr_session" }
 orr_sim = { path = "../orr_sim" }
 orr_ecs = { path = "../orr_ecs" }

@@ -7,18 +7,22 @@
 <style>
   :root { color-scheme: light dark; }
   body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; }
-  canvas { display: block; width: min(100%, 520px); aspect-ratio: 1; border: 1px solid #888; background: #101418; }
+  canvas { display: block; width: min(100%, 640px); aspect-ratio: 1; border: 1px solid #888; background: #101418; touch-action: none; }
   pre { white-space: pre-wrap; max-width: 60rem; }
   #conn input { width: 22rem; max-width: 100%; }
   .hint { opacity: .7 }
+  canvas[hidden] { display: none; }
 </style>
 </head>
 <body>
 <h1>Orrery web client</h1>
-<p>The same deterministic simulation as the native clients (wasm), joined to a relay room over WebTransport or WebSocket.
-Arrow keys move, space fires (add <code>&amp;bot=1</code> to let the scripted bot play).</p>
+<p>The same deterministic simulation as the native clients (wasm, in a Web Worker), joined to a relay room over WebTransport or WebSocket,
+drawn with <code>orr_render</code> on WebGPU (WebGL2 fallback) or, without either, on a 2D canvas (<code>&amp;render=2d</code> forces it).
+Arrow keys move, space fires (arena); in the physics game the arrows move the paddle, Q/E spin it and space shoots.
+Add <code>&amp;bot=1</code> to let the scripted bot play.</p>
 <form id="conn">
   <p>
+    <label>game <select id="game"><option value="arena">arena</option><option value="phys">physics</option></select></label>
     <label>WebTransport <input id="wt" placeholder="host:udp-port"></label>
     <label>cert sha-256 <input id="hash" placeholder="hex (dev cert); empty with a CA cert / Safari"></label>
   </p>
@@ -26,28 +30,56 @@ Arrow keys move, space fires (add <code>&amp;bot=1</code> to let the scripted bo
     <label>WebSocket <input id="ws" placeholder="host:tcp-port or wss://host:port/"></label>
     <label>mode <select id="mode"><option>auto</option><option>webtransport</option><option>websocket</option></select></label>
     <label>room <input id="room" size="3" value="1"></label>
-    <label>build id <input id="build" size="14" placeholder="default: sample"></label>
+    <label>build id <input id="build" size="14" placeholder="default: the game's"></label>
     <button>Join</button>
   </p>
 </form>
-<canvas id="c" width="520" height="520"></canvas>
+<canvas id="c" width="640" height="640"></canvas>
+<canvas id="g" width="640" height="640" hidden></canvas>
 <pre id="status">not connected</pre>
 <script type="module">
-import init, { WebClient } from "./pkg/orr_web.js";
-
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
-for (const k of ["wt", "hash", "ws", "mode", "room", "build"]) if (q.has(k)) $(k).value = q.get(k);
+for (const k of ["game", "wt", "hash", "ws", "mode", "room", "build"]) if (q.has(k)) $(k).value = q.get(k);
 
 const COLORS = ["#4ea1ff", "#ff6b6b", "#5fd48a", "#ffd24e", "#c58bff", "#ff9d4e", "#4edcd8", "#e8e8e8"];
-let client = null, bot = q.get("bot") === "1", loop = null;
+const PADDLES = ["#40a0ff", "#ff8c33", "#66e666", "#f266bf"];
+const BASE = [[64, 217, 191], [242, 184, 71], [217, 107, 230]]; // circle, box, capsule (dynamic bodies)
+let worker = null, game = "arena", bot = q.get("bot") === "1";
+let last = { data: new Int32Array(0), box: null };
+let report = null, transportError = "", oversize = 0, simStats = null, error = "";
 const keys = new Set();
+// The GPU view (orr_render on wgpu: WebGPU, or WebGL2): a separate wasm package, loaded on demand.
+// render = auto | webgpu | webgl | 2d.  Any failure falls back to the 2D canvas.
+const wantRender = q.get("render") || "auto";
+let gpu = null, renderer = { kind: "2d", adapter: "", error: "", requested: wantRender };
 
-async function join() {
-  await init();
-  if (client) { try { client.close(); } catch (_) {} clearInterval(loop); }
+async function startGpu() {
+  if (wantRender === "2d") return;
+  try {
+    const m = await import("./pkg_gpu/orr_web_gpu.js");
+    await m.default();
+    const view = await m.create_gpu_view($("g"), wantRender);
+    gpu = view;
+    renderer = { kind: view.backend() === "Gl" ? "webgl" : "webgpu", backend: view.backend(), adapter: view.adapter(), error: "", requested: wantRender };
+    $("c").hidden = true; $("g").hidden = false;
+  } catch (e) {
+    renderer = { kind: "2d", adapter: "", error: String((e && e.message) || e), requested: wantRender };
+    console.log("[gpu view unavailable, drawing on a 2D canvas]", renderer.error);
+  }
+}
+const gpuReady = startGpu();
+window.orrGpu = { ready: gpuReady, renderer: () => renderer, view: () => gpu };
+
+// Frame timing on the page (the draw itself, and the time between animation frames).
+const frame = { intervals: [], draws: [], prev: 0, count: 0 };
+
+function join() {
+  if (worker) worker.terminate();
+  game = $("game").value;
   const wt = $("wt").value.trim(), ws = $("ws").value.trim();
   const opts = {
+    game,
     mode: $("mode").value,
     wtUrl: wt ? `https://${wt}/` : "",
     certHash: $("hash").value.trim().toLowerCase(),
@@ -57,30 +89,108 @@ async function join() {
   };
   if ($("build").value.trim()) opts.build_id = Number($("build").value);
   if (q.get("slot")) opts.want_slot = parseInt(q.get("slot"), 10);
-  client = new WebClient(opts);
-  // Sim loop. A background tab throttles timers; a Worker would not be throttled.
-  loop = setInterval(() => client.tick(Math.floor(performance.now() * 1000)), 2);
-  window.orr = { client, report: () => JSON.parse(client.report()), transport: () => client.transport() };
+  if (q.get("seed")) opts.bot_seed = parseInt(q.get("seed"), 10);
+  last = { data: new Int32Array(0), box: null };
+  report = null; error = "";
+  worker = new Worker("./worker.js", { type: "module" });
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === "frame") { last = { data: m.data, box: m.box || null }; }
+    else if (m.type === "report") { report = JSON.parse(m.report); transportError = m.transportError; oversize = m.oversize; simStats = m.sim; }
+    else if (m.type === "error") { error = m.message; console.log("[worker error]", m.message); }
+  };
+  worker.onerror = (e) => { error = String(e.message || e); console.log("[worker error]", error); };
+  worker.postMessage({ type: "start", opts });
+  window.orr = {
+    report: () => report,
+    transportError: () => transportError,
+    oversize: () => oversize,
+    simStats: () => simStats,
+    frameStats: () => frameStats(),
+    error: () => error,
+    leave: () => worker.postMessage({ type: "leave" }),
+    inWorker: true,
+    renderer: () => renderer,
+    gpuReady: () => gpuReady,
+  };
   window.orrStarted = true;
 }
 
-function draw() {
-  const cv = $("c"), g = cv.getContext("2d");
-  g.fillStyle = "#101418"; g.fillRect(0, 0, cv.width, cv.height);
-  if (client) {
-    const d = client.render(), half = 2000, s = cv.width / (2 * half);
-    for (let i = 0; i < d.length; i += 4) {
-      const [kind, slot, x, y] = [d[i], d[i + 1], d[i + 2], d[i + 3]];
-      g.fillStyle = COLORS[slot % COLORS.length];
-      const px = (x + half) * s, py = (half - y) * s;
-      g.beginPath(); g.arc(px, py, kind === 0 ? 9 : 3, 0, 7); g.fill();
+function pct(a, p) { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : 0; }
+function frameStats() {
+  const i = frame.intervals, d = frame.draws;
+  const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  return {
+    frames: frame.count, interval_mean: mean(i), interval_p50: pct(i, 0.5), interval_p95: pct(i, 0.95), interval_max: Math.max(0, ...i),
+    draw_mean: mean(d), draw_p50: pct(d, 0.5), draw_p95: pct(d, 0.95), draw_max: Math.max(0, ...d),
+  };
+}
+
+function drawArena(g, cv) {
+  const d = last.data, half = 2000, s = cv.width / (2 * half);
+  for (let i = 0; i < d.length; i += 4) {
+    const kind = d[i], slot = d[i + 1], x = d[i + 2], y = d[i + 3];
+    g.fillStyle = COLORS[slot % COLORS.length];
+    g.beginPath(); g.arc((x + half) * s, (half - y) * s, kind === 0 ? 9 : 3, 0, 7); g.fill();
+  }
+}
+
+// Physics: records of 8 ints (shape, class, x, y, angle, size, half_y in 1/256 units, speed in 1/32 units/s).
+function drawPhys(g, cv) {
+  const box = last.box;
+  if (!box || box.length < 2) return;
+  const [halfW, height] = box, span = Math.max(halfW, height / 2) * 2 * 1.06, s = cv.width / span;
+  const ox = cv.width / 2, oy = cv.height / 2 + (height / 2) * s;
+  g.fillStyle = "#121220";
+  g.fillRect(ox - halfW * s, oy - height * s, 2 * halfW * s, height * s);
+  const d = last.data;
+  for (let i = 0; i + 7 < d.length; i += 8) {
+    const shape = d[i], cls = d[i + 1], x = d[i + 2] / 256, y = d[i + 3] / 256, size = d[i + 5] / 256, hy = d[i + 6] / 256, speed = d[i + 7];
+    if (cls === 0) {
+      const base = BASE[shape], k = 0.4 + 0.6 * Math.min(1, speed / 256);
+      g.fillStyle = `rgb(${base[0] * k | 0},${base[1] * k | 0},${base[2] * k | 0})`;
+    } else if (cls === 1) g.fillStyle = "#5c6178";
+    else if (cls === 2) g.fillStyle = "#b86bdb";
+    else g.fillStyle = PADDLES[(cls - 3) % PADDLES.length];
+    // The angle arrives as 1/256 rad.
+    const a = d[i + 4] / 256;
+    g.setTransform(1, 0, 0, 1, ox + x * s, oy - y * s);
+    g.rotate(-a);
+    if (shape === 0) { g.beginPath(); g.arc(0, 0, size * s, 0, 7); g.fill(); }
+    else if (shape === 1) g.fillRect(-size * s, -hy * s, 2 * size * s, 2 * hy * s);
+    else {
+      const r = hy * s, l = size * s;
+      g.beginPath(); g.arc(-l, 0, r, Math.PI / 2, Math.PI * 1.5); g.arc(l, 0, r, -Math.PI / 2, Math.PI / 2); g.closePath(); g.fill();
     }
-    const r = JSON.parse(client.report());
+    g.setTransform(1, 0, 0, 1, 0, 0);
+  }
+}
+
+function draw(now) {
+  if (frame.prev) { frame.intervals.push(now - frame.prev); if (frame.intervals.length > 1200) frame.intervals.shift(); }
+  frame.prev = now;
+  const t0 = performance.now();
+  if (gpu) {
+    if (worker) { if (game === "phys") gpu.draw_phys(last.data, last.box || new Int32Array(0)); else gpu.draw_arena(last.data); }
+  } else {
+    const cv = $("c"), g = cv.getContext("2d");
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.fillStyle = "#101418"; g.fillRect(0, 0, cv.width, cv.height);
+    if (worker) (game === "phys" ? drawPhys : drawArena)(g, cv);
+  }
+  frame.draws.push(performance.now() - t0); if (frame.draws.length > 1200) frame.draws.shift();
+  frame.count++;
+  const r = report;
+  if (r) {
+    const fs = frameStats(), sim = simStats;
     $("status").textContent =
-      `${r.state} via ${r.transport || "..."}${client.transport_error() ? " (" + client.transport_error() + ")" : ""}\n` +
+      `${r.state} via ${r.transport || "..."}${transportError ? " (" + transportError + ")" : ""}${error ? "\nERROR " + error : ""}\n` +
       `slot ${r.slot} | rtt ${(r.rtt_us / 1000).toFixed(1)} ms | delay ${r.delay} | rollbacks ${r.rollbacks} | ` +
       `head ${r.head_tick} verified ${r.verified_tick} | desyncs ${r.desyncs}\n` +
-      `last checksum ${r.checksums.length ? r.checksums[r.checksums.length - 1].join(" = ") : "-"}`;
+      `last checksum ${r.checksums.length ? r.checksums[r.checksums.length - 1].join(" = ") : "-"}\n` +
+      `view ${renderer.kind}${renderer.adapter ? " (" + renderer.adapter + ")" : ""}${renderer.error ? " [" + renderer.error + "]" : ""} | ` +
+      `frame ${fs.interval_mean.toFixed(1)} ms (p95 ${fs.interval_p95.toFixed(1)}), draw ${fs.draw_mean.toFixed(2)} ms` +
+      (sim ? ` | sim worker: ${sim.mean.toFixed(2)} ms/call (p95 ${sim.p95.toFixed(2)}, max ${sim.max.toFixed(1)})` : "");
   }
   requestAnimationFrame(draw);
 }
@@ -88,10 +198,15 @@ function draw() {
 addEventListener("keydown", (e) => { keys.add(e.code); sendInput(); if (e.code === "Space") e.preventDefault(); });
 addEventListener("keyup", (e) => { keys.delete(e.code); sendInput(); });
 function sendInput() {
-  if (!client || bot) return;
+  if (!worker || bot) return;
   const ax = (keys.has("ArrowRight") ? 1 : 0) - (keys.has("ArrowLeft") ? 1 : 0);
   const ay = (keys.has("ArrowUp") ? 1 : 0) - (keys.has("ArrowDown") ? 1 : 0);
-  client.set_input(ax, ay, keys.has("Space"));
+  if (game === "phys") {
+    const spin = (keys.has("KeyE") ? 1 : 0) - (keys.has("KeyQ") ? 1 : 0);
+    worker.postMessage({ type: "input", args: [ax, ay, spin, keys.has("Space")] });
+  } else {
+    worker.postMessage({ type: "input", args: [ax, ay, keys.has("Space")] });
+  }
 }
 
 $("conn").addEventListener("submit", (e) => { e.preventDefault(); join(); });

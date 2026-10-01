@@ -3,11 +3,14 @@
 
 use orr_proto::Link;
 use orr_session::{ClientState, RelayClient};
+use orr_sim::Game;
 use orr_testgame::{Arena, Bullet, PlayerTag, Position};
 
 /// Build id of the arena sample; the server room's build hash is
 /// `build_hash_of(ARENA_BUILD_ID, 0)` (`orr_server --game arena`).
 pub const ARENA_BUILD_ID: u64 = 0x0A2E_4A00_0001;
+/// Build id of the physics sample (`orr_server --game physics`).
+pub const PHYSICS_BUILD_ID: u64 = 0x0A2E_4A00_0002;
 
 fn state_name(s: &ClientState) -> String {
     match s {
@@ -34,7 +37,7 @@ fn json_str(s: &str) -> String {
 
 /// The client's numbers as one JSON object. `checksums` are the verified
 /// `[tick, "hex"]` pairs (hex strings: 64-bit values do not survive JSON numbers).
-pub fn client_report_json<L: Link>(client: &RelayClient<Arena, L>, transport: &str) -> String {
+pub fn client_report_json<G: Game, L: Link>(client: &RelayClient<G, L>, transport: &str) -> String {
     let (cs, ss) = (client.stats(), client.source_stats());
     let session = client.session();
     let sums: Vec<String> =

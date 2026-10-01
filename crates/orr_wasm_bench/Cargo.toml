@@ -1,0 +1,28 @@
+[package]
+name = "orr_wasm_bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Cross-target micro/macro bench harness for the sim core (native, wasm32-wasip1 under wasmtime, wasm32-unknown-unknown in a browser)"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+orr_games = { path = "../orr_games" }
+bytemuck = { version = "1", features = ["derive"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = "0.2"
+
+[[bin]]
+name = "bench_runner"
+path = "src/bin/bench_runner.rs"

@@ -18,3 +18,20 @@ lto = "thin"
 
 [profile.bench]
 inherits = "release"
+
+# Browser build (tools/build_web.sh): speed first, no debug info, one codegen unit and fat LTO
+# so the sim's i64 hot paths inline across crates, `panic = "abort"` (wasm cannot unwind anyway;
+# this drops the unwind tables of the std glue).
+[profile.web]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 0
+strip = "debuginfo"
+
+# Same, optimized for size (`opt-level = "s"`): for slow links; see docs/wasm-bench.md for the speed cost.
+[profile.web-small]
+inherits = "web"
+opt-level = "s"

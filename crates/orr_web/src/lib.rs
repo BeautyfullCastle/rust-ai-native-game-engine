@@ -1,6 +1,7 @@
 //! `orr_web`: the Orrery browser client.
 //!
-//! It runs the same deterministic simulation (`orr_testgame::Arena`) and the
+//! It runs the same deterministic simulations (`orr_testgame::Arena` and the
+//! physics sample `orr_games::physics_game::PhysGame`) and the
 //! same `orr_session::RelayClient` (prediction, rollback, input-delay control,
 //! desync checks) as the native clients, compiled to `wasm32-unknown-unknown`.
 //! Only the transport is different:
@@ -22,11 +23,13 @@
 
 mod bot;
 mod link;
+mod phys;
 mod report;
 
 pub use bot::arena_bot_input;
 pub use link::{LinkPort, WebLink};
-pub use report::{client_report_json, render_arena, ARENA_BUILD_ID};
+pub use phys::{render_phys, scene_box, DRAW_CAPSULE, DRAW_CIRCLE, DRAW_QUAD, PHYS_STRIDE};
+pub use report::{client_report_json, render_arena, ARENA_BUILD_ID, PHYSICS_BUILD_ID};
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;

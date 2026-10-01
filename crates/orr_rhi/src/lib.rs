@@ -19,6 +19,8 @@ pub mod wgpu_backend;
 use std::ops::Range;
 
 pub use wgpu_backend::{Wgpu, WgpuOptions};
+#[cfg(target_arch = "wasm32")]
+pub use wgpu_backend::WebBackend;
 
 /// What a window must offer so a surface can be made from it.
 pub trait WindowHandle:

@@ -28,7 +28,7 @@ fn gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
 }
 
 const BLACK: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
-const SETTINGS: Settings3D = Settings3D { msaa: 4, shadow_map_size: 1024 };
+const SETTINGS: Settings3D = Settings3D { msaa: 4, shadow_map_size: 1024, mesh_segments: 32 };
 
 /// Renders into an sRGB RGBA8 target (stored bytes are sRGB encoded).
 fn render_with(gpu: &Wgpu, size: (u32, u32), settings: Settings3D, list: &RenderList3D, cam: &Camera3D) -> (Vec<u8>, u32) {
@@ -231,6 +231,25 @@ fn an_unsupported_sample_count_falls_back() {
     let (img, samples) = render_with(&gpu, (64, 64), Settings3D { msaa: 16, ..SETTINGS }, &list, &cam);
     assert!(matches!(samples, 1 | 2 | 4 | 8), "{samples}");
     assert!(px(&img, 64, 32, 32)[0] > 200);
+}
+
+/// The mobile preset renders the same scene: one sample, coarser spheres, nearly the same picture.
+#[test]
+fn low_preset_draws_the_same_scene() {
+    let Some((_g, gpu)) = gpu() else { return };
+    let mut list = RenderList3D::new();
+    list.lighting = unlit();
+    list.sphere([0.0; 3], IDENTITY_ROT, 1.0, &Material::new([1.0, 0.2, 0.1]).glow(1.0));
+    list.sphere([1.8, 0.0, 0.0], IDENTITY_ROT, 0.6, &Material::new([0.1, 0.9, 0.2]).glow(1.0));
+    let cam = Camera3D::perspective([0.0, 0.0, 6.0], [0.0; 3], 40.0);
+    let (high, _) = render_with(&gpu, (96, 96), SETTINGS, &list, &cam);
+    let (low, samples) = render_with(&gpu, (96, 96), Settings3D::LOW, &list, &cam);
+    assert_eq!(samples, 1, "the low preset has no MSAA");
+    assert!(px(&low, 96, 48, 48)[0] > 200, "the sphere is drawn");
+    // Coverage differs by a few edge pixels only (a 12-segment sphere is inside the 32-segment one).
+    let lit = |img: &[u8]| img.chunks_exact(4).filter(|p| p[0] > 100 || p[1] > 100).count();
+    let (h, l) = (lit(&high) as i64, lit(&low) as i64);
+    assert!(h > 300 && (h - l).abs() * 10 < h, "coverage {h} vs {l}");
 }
 
 fn grid_color(i: u32, j: u32) -> [f32; 3] {
