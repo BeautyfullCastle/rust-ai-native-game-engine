@@ -254,6 +254,9 @@ jobs:
       - name: golden tests on aarch64-linux-android under qemu-aarch64
         # The runner image has the NDK (ANDROID_NDK_LATEST_HOME); `crt-static` makes the test binaries
         # runnable by qemu-user without Android's dynamic linker. Doc tests are not cross-run.
+        # `--test-threads=1`: a multi-threaded test harness in a static bionic binary under qemu-user
+        # segfaults about one run in three (thread start-up in the emulator, not our code; the same binaries
+        # passed 12 of 12 runs single-threaded).
         env:
           CARGO_TARGET_AARCH64_LINUX_ANDROID_RUNNER: qemu-aarch64
           CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: -C target-feature=+crt-static
@@ -263,13 +266,13 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
           export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
           export AR_aarch64_linux_android="$BIN/llvm-ar"
-          cargo test --release --target aarch64-linux-android -p orr_fp --tests
-          cargo test --release --target aarch64-linux-android -p orr_ecs --tests
-          cargo test --release --target aarch64-linux-android -p orr_session --test arena -- golden
-          cargo test --release --target aarch64-linux-android -p orr_physics --test physics -- golden
-          cargo test --release --target aarch64-linux-android -p orr_physics3d --test golden -- golden
-          cargo test --release --target aarch64-linux-android -p orr_games --test golden
-          cargo test --release --target aarch64-linux-android -p orr_wasm_bench --test checksums
+          cargo test --release --target aarch64-linux-android -p orr_fp --tests -- --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_ecs --tests -- --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_session --test arena -- golden --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_physics --test physics -- golden --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_physics3d --test golden -- golden --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_games --test golden -- --test-threads=1
+          cargo test --release --target aarch64-linux-android -p orr_wasm_bench --test checksums -- --test-threads=1
 
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison

@@ -23,13 +23,17 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK/aarch64-linux-android24-cl
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUNNER=qemu-aarch64
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C target-feature=+crt-static"
 export CC_aarch64_linux_android=$NDK/aarch64-linux-android24-clang AR_aarch64_linux_android=$NDK/llvm-ar
-cargo test --release --target aarch64-linux-android -p orr_fp --tests
-cargo test --release --target aarch64-linux-android -p orr_session --test arena -- golden
-cargo test --release --target aarch64-linux-android -p orr_physics --test physics -- golden
-cargo test --release --target aarch64-linux-android -p orr_physics3d --test golden -- golden
-cargo test --release --target aarch64-linux-android -p orr_games --test golden
-cargo test --release --target aarch64-linux-android -p orr_wasm_bench --test checksums
+cargo test --release --target aarch64-linux-android -p orr_fp --tests -- --test-threads=1
+cargo test --release --target aarch64-linux-android -p orr_session --test arena -- golden --test-threads=1
+cargo test --release --target aarch64-linux-android -p orr_physics --test physics -- golden --test-threads=1
+cargo test --release --target aarch64-linux-android -p orr_physics3d --test golden -- golden --test-threads=1
+cargo test --release --target aarch64-linux-android -p orr_games --test golden -- --test-threads=1
+cargo test --release --target aarch64-linux-android -p orr_wasm_bench --test checksums -- --test-threads=1
 ```
+
+`--test-threads=1` matters: with the default multi-threaded harness a static bionic binary under qemu-user
+segfaulted in about one run in three (13 of 40 runs of `orr_ecs`'s `core` test), and never in 12 single-threaded
+runs. It is the emulator's thread start-up, not the code under test.
 
 `+crt-static` links bionic statically so qemu-user can run the binary without Android's dynamic linker; the
 instructions executed are those of the `aarch64-linux-android` target. Doc tests are not cross-run. In this
