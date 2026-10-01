@@ -104,6 +104,22 @@ impl<B: Rhi> OffscreenTarget<B> {
         renderer.draw(&self.render_view, self.size, list, camera);
     }
 
+    /// Draws a 3D `list`, then a 2D `overlay` (screen space text and gizmos, see
+    /// [`crate::text`]) on top of it with `overlay_renderer`, which keeps the 3D picture.
+    pub fn render3d_overlay(
+        &self,
+        renderer: &mut Renderer3D<B>,
+        list: &RenderList3D,
+        camera: &Camera3D,
+        overlay_renderer: &mut Renderer<B>,
+        overlay: &RenderList,
+    ) {
+        renderer.draw(&self.render_view, self.size, list, camera);
+        let clear = overlay_renderer.clear.take();
+        overlay_renderer.draw(&self.render_view, self.size, overlay, &crate::text::pixel_camera(self.size));
+        overlay_renderer.clear = clear;
+    }
+
     /// Waits for the GPU and reads the pixels back as tightly packed RGBA8
     /// (stored bytes, so sRGB targets return encoded values), top row first.
     pub fn read_rgba8(&self) -> Vec<u8> {
@@ -169,6 +185,8 @@ impl WindowRenderer<Wgpu> {
 /// A window surface and the 3D renderer that draws to it.
 pub struct WindowRenderer3D<B: Rhi> {
     pub renderer: Renderer3D<B>,
+    /// Draws the 2D overlay of [`WindowRenderer3D::render_with_overlay`] over the 3D picture.
+    overlay: Renderer<B>,
     surface: B::Surface,
     size: (u32, u32),
 }
@@ -176,7 +194,10 @@ pub struct WindowRenderer3D<B: Rhi> {
 impl<B: Rhi> WindowRenderer3D<B> {
     pub fn from_parts(rhi: B, surface: B::Surface, size: (u32, u32), settings: Settings3D) -> Self {
         let format = rhi.surface_format(&surface);
+        let mut overlay = Renderer::new(rhi.clone(), format);
+        overlay.clear = None;
         Self {
+            overlay,
             renderer: Renderer3D::with_settings(rhi, format, settings),
             surface,
             size: (size.0.max(1), size.1.max(1)),
@@ -201,11 +222,47 @@ impl<B: Rhi> WindowRenderer3D<B> {
 
     /// Draws and presents. Returns `false` if the frame was skipped.
     pub fn render(&mut self, list: &RenderList3D, camera: &Camera3D) -> bool {
+        self.render_with_overlay(list, camera, &RenderList::new())
+    }
+
+    /// Draws the 3D `list`, then the 2D `overlay` in pixels (see [`crate::text`]), and presents.
+    pub fn render_with_overlay(&mut self, list: &RenderList3D, camera: &Camera3D, overlay: &RenderList) -> bool {
+        self.render_capture(list, camera, overlay, false).0
+    }
+
+    /// Like [`render_with_overlay`](Self::render_with_overlay), and with `capture` also
+    /// reads the presented frame back: `(presented, Some((width, height, RGBA8 bytes)))`
+    /// of the real framebuffer (stored encoding, so sRGB surfaces give encoded values).
+    /// The pixels are `None` when the frame was skipped or the surface cannot be
+    /// copied from.
+    pub fn render_capture(
+        &mut self,
+        list: &RenderList3D,
+        camera: &Camera3D,
+        overlay: &RenderList,
+        capture: bool,
+    ) -> (bool, Option<(u32, u32, Vec<u8>)>) {
         let rhi = self.renderer.rhi().clone();
-        let Acquire::Frame(frame) = rhi.acquire_frame(&mut self.surface) else { return false };
-        self.renderer.draw(rhi.frame_view(&frame), self.size, list, camera);
+        let Acquire::Frame(frame) = rhi.acquire_frame(&mut self.surface) else { return (false, None) };
+        let view = rhi.frame_view(&frame);
+        self.renderer.draw(view, self.size, list, camera);
+        if !overlay.is_empty() {
+            self.overlay.draw(view, self.size, overlay, &crate::text::pixel_camera(self.size));
+        }
+        let shot = if capture {
+            rhi.read_frame(&frame).map(|mut bytes| {
+                if rhi.surface_format(&self.surface).is_bgra() {
+                    for px in bytes.chunks_exact_mut(4) {
+                        px.swap(0, 2);
+                    }
+                }
+                (self.size.0, self.size.1, bytes)
+            })
+        } else {
+            None
+        };
         rhi.present(frame);
-        true
+        (true, shot)
     }
 }
 

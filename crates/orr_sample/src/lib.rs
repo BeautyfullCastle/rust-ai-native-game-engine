@@ -21,3 +21,7 @@ pub mod physics_host;
 pub mod physics_stream;
 pub mod physics_view;
 pub mod relay_view;
+pub mod yard3d_app;
+pub mod yard3d_game;
+pub mod yard3d_host;
+pub mod yard3d_view;

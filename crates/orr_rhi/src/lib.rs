@@ -397,6 +397,11 @@ pub trait Rhi: Clone + 'static {
     fn surface_format(&self, surface: &Self::Surface) -> TextureFormat;
     fn resize_surface(&self, surface: &mut Self::Surface, width: u32, height: u32);
     fn acquire_frame(&self, surface: &mut Self::Surface) -> Acquire<Self::Frame>;
+    /// Reads back the pixels of an acquired frame (call after the frame was
+    /// drawn and submitted, before [`Rhi::present`]): tightly packed rows,
+    /// top row first, texel bytes as stored (see [`Rhi::surface_format`]).
+    /// `None` when the surface cannot be copied from.
+    fn read_frame(&self, frame: &Self::Frame) -> Option<Vec<u8>>;
     fn frame_view<'a>(&self, frame: &'a Self::Frame) -> &'a Self::TextureView;
     fn present(&self, frame: Self::Frame);
 }

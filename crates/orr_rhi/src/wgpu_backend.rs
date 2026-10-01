@@ -39,12 +39,15 @@ pub struct WgpuSurface {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     format: TextureFormat,
+    /// The surface textures can be copied from (screenshots).
+    can_copy: bool,
 }
 
 /// One acquired surface frame.
 pub struct WgpuFrame {
     texture: wgpu::SurfaceTexture,
     view: wgpu::TextureView,
+    can_copy: bool,
 }
 
 fn to_wgpu_format(f: TextureFormat) -> wgpu::TextureFormat {
@@ -184,7 +187,12 @@ impl Wgpu {
         let mut config = surface
             .get_default_config(&self.adapter, size.0.max(1), size.1.max(1))
             .ok_or("surface not supported by the adapter")?;
-        let modes = surface.get_capabilities(&self.adapter).present_modes;
+        let caps = surface.get_capabilities(&self.adapter);
+        let can_copy = caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
+        if can_copy {
+            config.usage |= wgpu::TextureUsages::COPY_SRC;
+        }
+        let modes = caps.present_modes;
         config.present_mode = if vsync {
             wgpu::PresentMode::Fifo
         } else if modes.contains(&wgpu::PresentMode::Immediate) {
@@ -194,7 +202,7 @@ impl Wgpu {
         };
         let format = from_wgpu_format(config.format).ok_or_else(|| format!("unsupported surface format {:?}", config.format))?;
         surface.configure(&self.device, &config);
-        Ok(WgpuSurface { surface, config, format })
+        Ok(WgpuSurface { surface, config, format, can_copy })
     }
 
     /// Wraps a device that someone else created (for example eframe's
@@ -538,11 +546,15 @@ impl Rhi for Wgpu {
             Cst::Timeout | Cst::Occluded | Cst::Validation => return Acquire::Skip,
         };
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Acquire::Frame(WgpuFrame { texture, view })
+        Acquire::Frame(WgpuFrame { texture, view, can_copy: surface.can_copy })
     }
 
     fn frame_view<'a>(&self, frame: &'a WgpuFrame) -> &'a wgpu::TextureView {
         &frame.view
+    }
+
+    fn read_frame(&self, frame: &WgpuFrame) -> Option<Vec<u8>> {
+        frame.can_copy.then(|| self.read_texture(&frame.texture.texture))
     }
 
     fn present(&self, frame: WgpuFrame) {

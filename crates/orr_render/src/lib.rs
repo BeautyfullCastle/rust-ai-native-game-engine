@@ -33,6 +33,7 @@ pub mod mesh;
 pub mod renderer;
 pub mod renderer3d;
 pub mod targets;
+pub mod text;
 
 pub use camera::Camera;
 pub use camera3d::{Camera3D, OrbitCamera, Projection};
