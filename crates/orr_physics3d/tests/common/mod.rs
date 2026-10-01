@@ -13,6 +13,8 @@ macro_rules! v3 {
     };
 }
 
+pub mod scenes;
+
 pub fn new_frame() -> Frame {
     new_frame_with(PhysicsConfig::default())
 }

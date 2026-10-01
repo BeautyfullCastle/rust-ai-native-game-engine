@@ -281,7 +281,9 @@ fn seg_box(a: &Shape, xa: &Xf, b: &Shape, xb: &Xf, margin: FP) -> Manifold {
                     av = nl.get(j).abs();
                 }
             }
-            if av >= fp!(0.98) {
+            // Only when part of the segment is really over the face; a
+            // segment beyond the edge gets the true (tilted) normal.
+            if av >= fp!(0.98) && clip_axes(p0, d, h, &[(ai + 1) % 3, (ai + 2) % 3]).is_some() {
                 emit_face(&mut m, ai, nl.get(ai) < FP::ZERO, tmid);
                 m.finish();
                 return m;
@@ -425,6 +427,9 @@ fn face_points(m: &mut Manifold, xx: &Xf, hx: FPVec3, xy: &Xf, hy: FPVec3, nref:
     // face frame, so they stay the same when the clipped polygon changes
     // shape slightly (a stack that is a hair off axis clips to an octagon
     // whose vertex identities flicker, its four corners do not).
+    if nc == 0 {
+        return;
+    }
     let base = 1024 * refcode;
     if nc > 4 {
         // Four points: the extreme one in each diagonal direction.

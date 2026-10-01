@@ -119,7 +119,7 @@ mod solver;
 mod step;
 mod system;
 #[cfg(test)]
-mod tests_dbg;
+mod manifold_tests;
 mod types;
 
 pub use query::{raycast, sphere_cast, QueryFilter, RayHit};
