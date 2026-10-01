@@ -6,18 +6,28 @@
 
 /// First four bytes of every binary view-stream message.
 pub const MAGIC: [u8; 4] = *b"OVS1";
-/// Format version (the `u16` after the magic). A reader refuses a larger one.
+/// Format version 1 (the `u16` after the magic): 2D frames and event batches.
+/// Their bytes never change; they are written with this version.
 pub const VERSION: u16 = 1;
+/// Format version 2 adds the 3D frame ([`MSG_FRAME3D`]), which is written with this
+/// version. Version 1 messages are unchanged.
+pub const VERSION_3D: u16 = 2;
+/// The newest version this reader knows. A reader refuses a larger one.
+pub const MAX_VERSION: u16 = VERSION_3D;
 
 /// Message type of a [`ViewFrame`].
 pub const MSG_FRAME: u8 = 1;
 /// Message type of an [`EventBatch`].
 pub const MSG_EVENTS: u8 = 2;
+/// Message type of a [`ViewFrame3`] (format version 2).
+pub const MSG_FRAME3D: u8 = 3;
 
 /// Size of a frame message header, in bytes.
 pub const HEADER_LEN: usize = 56;
 /// Size of one entity record, in bytes.
 pub const RECORD_LEN: usize = 48;
+/// Size of one 3D entity record, in bytes.
+pub const RECORD3D_LEN: usize = 88;
 /// Size of an event batch header, in bytes.
 pub const EVENT_BATCH_HEADER_LEN: usize = 16;
 /// Size of an event record without its payload, in bytes.
@@ -37,6 +47,18 @@ pub const SHAPE_CIRCLE: u8 = 0;
 pub const SHAPE_QUAD: u8 = 1;
 /// A segment along local x grown by a radius: `size` is the half length, `half_y` the radius.
 pub const SHAPE_CAPSULE: u8 = 2;
+
+/// 3D shape code: a sphere, `size[0]` is the radius.
+pub const SHAPE3_SPHERE: u8 = 0;
+/// A box: `size` is the half extents along the local axes.
+pub const SHAPE3_BOX: u8 = 1;
+/// A segment along local y grown by a radius: `size[0]` is the radius, `size[1]` the half length.
+pub const SHAPE3_CAPSULE: u8 = 2;
+/// A horizontal rectangle (local xz, normal local y): `size[0]` is the half x, `size[2]` the half z.
+pub const SHAPE3_PLANE: u8 = 3;
+
+/// 3D style flag: draw a checker pattern (ground planes).
+pub const STYLE_CHECKER: u8 = 1;
 
 /// Interpolation mode code: blend the last two predicted ticks.
 pub const MODE_PREDICTION: u8 = 0;
@@ -71,7 +93,7 @@ impl core::fmt::Display for DecodeError {
         match self {
             DecodeError::Truncated => f.write_str("view stream message is truncated"),
             DecodeError::BadMagic => f.write_str("not a view stream message (bad magic)"),
-            DecodeError::UnsupportedVersion(v) => write!(f, "view stream version {v} is newer than this reader ({VERSION})"),
+            DecodeError::UnsupportedVersion(v) => write!(f, "view stream version {v} is newer than this reader ({MAX_VERSION})"),
             DecodeError::WrongType(t) => write!(f, "unexpected view stream message type {t}"),
         }
     }
@@ -215,6 +237,168 @@ impl ViewFrame {
     }
 }
 
+/// A 3D pose: position and orientation as a unit quaternion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pose3 {
+    /// `[x, y, z]`, world units, y up, right handed.
+    pub pos: [f32; 3],
+    /// Unit quaternion `[x, y, z, w]`.
+    pub rot: [f32; 4],
+}
+
+impl Pose3 {
+    /// The pose at the origin with no rotation.
+    pub const IDENTITY: Pose3 = Pose3 { pos: [0.0; 3], rot: [0.0, 0.0, 0.0, 1.0] };
+}
+
+/// One 3D entity as a view draws it: identity, look, and its pose at the
+/// previous and the current tick. The consumer interpolates with its own
+/// `alpha`: position linearly, rotation by slerp (shortest arc).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EntityRecord3 {
+    /// Stable identity: `entity index | version << 32`.
+    pub id: u64,
+    /// Game-defined kind (see the schema's `kinds`).
+    pub kind: u16,
+    /// `SHAPE3_*`.
+    pub shape: u8,
+    /// `MODE_*`.
+    pub mode: u8,
+    /// Shape size, see the `SHAPE3_*` codes (unused components are 0).
+    pub size: [f32; 3],
+    /// Color, 8 bits per channel (linear RGB, straight alpha).
+    pub rgba: [u8; 4],
+    /// Roughness, `0..=255` for `0.0..=1.0`.
+    pub roughness: u8,
+    /// Metallic, `0..=255` for `0.0..=1.0`.
+    pub metallic: u8,
+    /// `STYLE_*` bits.
+    pub style_flags: u8,
+    /// Pose at the previous tick.
+    pub prev: Pose3,
+    /// Pose at the current tick.
+    pub cur: Pose3,
+}
+
+/// One published tick of a 3D game (format version 2, message type 3). Same
+/// header and meaning as [`ViewFrame`]; the records are 88 bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewFrame3 {
+    /// `FLAG_*` bits.
+    pub flags: u8,
+    /// The predicted head tick these records show.
+    pub tick: u64,
+    /// The newest fully confirmed tick.
+    pub verified_tick: u64,
+    /// Counts up by one per frame the producer built.
+    pub seq: u64,
+    /// `(from_tick, to_tick)` of the rollback, when `FLAG_ROLLED_BACK` is set.
+    pub rollback: Option<(u64, u64)>,
+    /// The entities.
+    pub entities: Vec<EntityRecord3>,
+    /// Custom properties, as in [`ViewFrame::props`].
+    pub props: Vec<u8>,
+}
+
+impl ViewFrame3 {
+    /// True if `flag` is set.
+    pub fn has(&self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+
+    /// The property bytes of each entity (see [`ViewFrame::props_by_entity`]).
+    pub fn props_by_entity(&self, words_of_kind: impl Fn(u16) -> usize) -> Option<Vec<&[u8]>> {
+        let mut out = Vec::with_capacity(self.entities.len());
+        let mut at = 0usize;
+        for e in &self.entities {
+            let n = words_of_kind(e.kind) * 4;
+            out.push(self.props.get(at..at + n)?);
+            at += n;
+        }
+        (at == self.props.len()).then_some(out)
+    }
+
+    /// The bytes of the message (see `docs/view-stream.md`).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HEADER_LEN + self.entities.len() * RECORD3D_LEN + self.props.len());
+        self.encode_into(&mut out);
+        out
+    }
+
+    /// Like [`encode`](Self::encode), into `out` (cleared first).
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        out.clear();
+        out.extend_from_slice(&MAGIC);
+        out.extend_from_slice(&VERSION_3D.to_le_bytes());
+        out.push(MSG_FRAME3D);
+        let flags = if self.rollback.is_some() { self.flags | FLAG_ROLLED_BACK } else { self.flags };
+        out.push(flags);
+        out.extend_from_slice(&self.tick.to_le_bytes());
+        out.extend_from_slice(&self.verified_tick.to_le_bytes());
+        out.extend_from_slice(&self.seq.to_le_bytes());
+        let (from, to) = self.rollback.unwrap_or((0, 0));
+        out.extend_from_slice(&from.to_le_bytes());
+        out.extend_from_slice(&to.to_le_bytes());
+        out.extend_from_slice(&(self.entities.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(self.props.len() as u32).to_le_bytes());
+        for e in &self.entities {
+            out.extend_from_slice(&e.id.to_le_bytes());
+            out.extend_from_slice(&e.kind.to_le_bytes());
+            out.push(e.shape);
+            out.push(e.mode);
+            for v in e.size {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&e.rgba);
+            out.push(e.roughness);
+            out.push(e.metallic);
+            out.push(e.style_flags);
+            out.push(0);
+            for p in [&e.prev, &e.cur] {
+                for v in p.pos.iter().chain(p.rot.iter()) {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+        out.extend_from_slice(&self.props);
+    }
+
+    /// Reads a 3D frame message.
+    pub fn decode(bytes: &[u8]) -> Result<ViewFrame3, DecodeError> {
+        let mut r = Reader::new(bytes);
+        let (msg_type, flags) = r.preamble()?;
+        if msg_type != MSG_FRAME3D {
+            return Err(DecodeError::WrongType(msg_type));
+        }
+        let tick = r.u64()?;
+        let verified_tick = r.u64()?;
+        let seq = r.u64()?;
+        let (from, to) = (r.u64()?, r.u64()?);
+        let count = r.u32()? as usize;
+        let props_len = r.u32()? as usize;
+        let body = count.checked_mul(RECORD3D_LEN).ok_or(DecodeError::Truncated)?;
+        if r.left() < body.saturating_add(props_len) {
+            return Err(DecodeError::Truncated);
+        }
+        let mut entities = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = r.u64()?;
+            let kind = r.u16()?;
+            let (shape, mode) = (r.u8()?, r.u8()?);
+            let size = [r.f32()?, r.f32()?, r.f32()?];
+            let rgba = [r.u8()?, r.u8()?, r.u8()?, r.u8()?];
+            let (roughness, metallic, style_flags) = (r.u8()?, r.u8()?, r.u8()?);
+            r.u8()?;
+            let prev = Pose3 { pos: [r.f32()?, r.f32()?, r.f32()?], rot: [r.f32()?, r.f32()?, r.f32()?, r.f32()?] };
+            let cur = Pose3 { pos: [r.f32()?, r.f32()?, r.f32()?], rot: [r.f32()?, r.f32()?, r.f32()?, r.f32()?] };
+            entities.push(EntityRecord3 { id, kind, shape, mode, size, rgba, roughness, metallic, style_flags, prev, cur });
+        }
+        let props = r.take(props_len)?.to_vec();
+        let rollback = (flags & FLAG_ROLLED_BACK != 0).then_some((from, to));
+        Ok(ViewFrame3 { flags, tick, verified_tick, seq, rollback, entities, props })
+    }
+}
+
 /// One sim event as a view hears of it: which event (the deterministic key),
 /// in which state, and its game-defined payload bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,7 +531,7 @@ impl<'a> Reader<'a> {
             return Err(DecodeError::BadMagic);
         }
         let version = self.u16()?;
-        if version > VERSION {
+        if version > MAX_VERSION {
             return Err(DecodeError::UnsupportedVersion(version));
         }
         Ok((self.u8()?, self.u8()?))

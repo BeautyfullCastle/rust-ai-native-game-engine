@@ -51,6 +51,7 @@ impl StreamKinds for PhysKinds {
 pub fn phys_schema(build_id: u64, player_count: u8, tick_rate: u32) -> Schema {
     Schema {
         game: "PhysGame".to_string(),
+        dimensions: 2,
         build_id,
         tick_rate,
         player_count,
