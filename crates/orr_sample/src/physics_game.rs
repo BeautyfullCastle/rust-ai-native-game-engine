@@ -166,7 +166,13 @@ impl SimCommand for NoCommand {
     }
 }
 
-/// A trigger overlap started or ended (unused by the scenes so far).
+/// `PhysEvent::kind` of a shot (a paddle fired a ball): `a` is the slot, `b` the tick.
+/// Trigger events carry `orr_physics::TRIGGER_ENTER` / `TRIGGER_EXIT` (small numbers).
+pub const EVENT_SHOT: u32 = 100;
+
+/// A sim event: a trigger overlap started or ended (unused by the scenes so far), or a
+/// shot (`EVENT_SHOT`). Events are not part of the frame, so they never change a checksum;
+/// a predicted shot is canceled when the confirmed input of the paddle's player did not shoot.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable)]
 pub struct PhysEvent {
@@ -388,7 +394,7 @@ impl System<PhysGame> for PaddleSystem {
         let player_count = u32::from(ctx.inputs.player_count());
         let limit_x = scene.half_w - PADDLE_HALF.0 - FP::ONE;
         let (min_y, max_y) = (fp!(2), scene.height * 2);
-        let mut shots: Vec<FPVec2> = Vec::new();
+        let mut shots: Vec<(u32, FPVec2)> = Vec::new();
         for (_, (tag, body)) in ctx.frame.query::<(&PaddleTag, &mut Body)>() {
             if tag.slot >= player_count {
                 continue;
@@ -406,13 +412,14 @@ impl System<PhysGame> for PaddleSystem {
             body.vel = v2(ax, ay) * PADDLE_SPEED;
             body.omega = PADDLE_SPIN * input.spin.clamp(-1, 1);
             if input.buttons & SHOOT != 0 && ctx.tick % 3 == u64::from(tag.slot) {
-                shots.push(body.pos + v2(FP::ZERO, PADDLE_HALF.1 + fp!(1.2)));
+                shots.push((tag.slot, body.pos + v2(FP::ZERO, PADDLE_HALF.1 + fp!(1.2))));
             }
         }
-        for pos in shots {
+        for (slot, pos) in shots {
             if ctx.frame.alive_count() >= scene.max_entities {
                 break;
             }
+            ctx.emit(PhysEvent { kind: EVENT_SHOT, a: slot, b: ctx.tick as u32 });
             let shape = Shape::circle(fp!(0.4));
             let body = Body::new_dynamic(pos, &shape, FP::ONE).with_velocity(v2(FP::ZERO, fp!(15)));
             spawn_body(ctx.frame, body, Collider::new(shape).with_restitution(fp!(0.2)));

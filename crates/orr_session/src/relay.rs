@@ -30,7 +30,7 @@ use std::rc::Rc;
 
 use orr_proto::{
     Bundle, Channel, ClientMsg, Hello, InputEntry, Link, LinkEvent, RejectReason, ServerMsg, TimeSync, Welcome,
-    FLAG_REPEATED, NO_SLOT,
+    FLAG_ABSENT, FLAG_REPEATED, NO_SLOT,
 };
 use orr_sim::{Game, PlayerSlot, SimCommand};
 
@@ -216,7 +216,7 @@ impl<G: Game, L: Link> RelaySource<G, L> {
                     None => self.stats.bad_commands += 1,
                 }
             }
-            decoded.push(RemoteInput { tick: b.tick, slot: PlayerSlot(i as u8), input, commands });
+            decoded.push(RemoteInput { tick: b.tick, slot: PlayerSlot(i as u8), input, commands, disconnected: sc.flags & FLAG_ABSENT != 0 });
         }
         let own = &b.slots[self.slot as usize];
         if own.flags & FLAG_REPEATED != 0 {
@@ -389,7 +389,7 @@ pub enum ClientEvent {
 pub struct ClientStats {
     /// Ticks simulated (predicted) by `step`, resimulation not counted.
     pub steps: u64,
-    /// Ticks resimulated by rollbacks (only those of steps that advanced).
+    /// Ticks resimulated by rollbacks (those found when taking in confirmed inputs and those of steps).
     pub resim_ticks: u64,
     /// Times the prediction limit stopped the simulation, counted once per
     /// stretch of consecutive updates.
@@ -934,6 +934,9 @@ impl<G: Game, L: Link> RelayClient<G, L> {
         let (batch, rb) = session.poll_confirmed();
         if !batch.is_empty() {
             up.events.push(batch);
+        }
+        if let Some(r) = rb {
+            self.stats.resim_ticks += u64::from(r.resim_count);
         }
         up.rollbacks.extend(rb);
         let mut stalled = false;

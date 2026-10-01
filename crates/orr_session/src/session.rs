@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Bound;
 
 use orr_ecs::{Frame, FrameRing};
-use orr_sim::{EventKey, Game, PlayerSlot, SimCommand, SimEvent, Simulation, TickInputs};
+use orr_sim::{EventKey, Game, PlayerFlags, PlayerSlot, SimCommand, SimEvent, Simulation, TickInputs};
 
 use crate::events::{EventBatch, EventStatus};
 use crate::input_source::{InputSource, RemoteInput};
@@ -259,6 +259,11 @@ pub struct Session<G: Game, S: InputSource<G>> {
     confirmed_input: BTreeMap<u64, BTreeMap<PlayerSlot, G::Input>>,
     confirmed_commands: BTreeMap<u64, BTreeMap<PlayerSlot, Vec<G::Command>>>,
     last_input: Vec<G::Input>,
+    /// Relay: per slot, whether the newest confirmed tick had nobody in it
+    /// (what a predicted tick assumes for `PlayerFlags::disconnected`).
+    last_disconnected: Vec<bool>,
+    /// Relay: `(tick, slot)` the server confirmed as vacant, until verified.
+    confirmed_absent: BTreeSet<(u64, u8)>,
     next_send_tick: u64,
     /// Events currently "live" as `Predicted` (announced, not yet verified
     /// or canceled), keyed by their `EventKey` with the payload bytes they
@@ -306,6 +311,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         let mut ring = FrameRing::new(cfg.max_prediction + 2, sim.registry().clone());
         ring.store(sim.frame());
         let last_input = vec![G::Input::default(); cfg.player_count as usize];
+        let cfg_players = cfg.player_count as usize;
 
         // Bootstrap ticks `1..=input_delay` never get a real local/remote
         // send (the first real send targets `1 + input_delay`), so without
@@ -336,6 +342,8 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             confirmed_input,
             confirmed_commands: BTreeMap::new(),
             last_input,
+            last_disconnected: vec![false; cfg_players],
+            confirmed_absent: BTreeSet::new(),
             next_send_tick,
             announced: BTreeMap::new(),
             checksums: Vec::new(),
@@ -728,6 +736,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                     slot: *slot,
                     input: *input,
                     commands: commands.clone(),
+                    disconnected: false,
                 })
             })
             .collect()
@@ -805,14 +814,19 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             let ps = PlayerSlot(slot);
             if let Some(v) = confirmed.and_then(|m| m.get(&ps)) {
                 ti.set_input(ps, *v);
+                if self.confirmed_absent.contains(&(tick, slot)) {
+                    ti.set_flags(ps, PlayerFlags { predicted: false, disconnected: true });
+                }
             } else if self.cfg.relay && ps == self.cfg.local_slot {
                 // Relay: the own input is a prediction until the bundle.
                 let own = self.local_pending.get(&tick).map(|p| p.0).unwrap_or(self.last_input[slot as usize]);
                 ti.set_input(ps, own);
+                ti.set_flags(ps, PlayerFlags { predicted: true, disconnected: false });
                 predicted[slot as usize] = true;
                 local_predicted = true;
             } else {
                 ti.set_input(ps, self.last_input[slot as usize]);
+                ti.set_flags(ps, PlayerFlags { predicted: true, disconnected: self.last_disconnected[slot as usize] });
                 predicted[slot as usize] = true;
             }
         }
@@ -844,6 +858,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         for (slot, was_predicted) in predicted.iter().enumerate() {
             if !was_predicted {
                 self.last_input[slot] = *inputs.input(PlayerSlot(slot as u8));
+                self.last_disconnected[slot] = inputs.flags(PlayerSlot(slot as u8)).disconnected;
             }
         }
         let cmds = if self.cfg.relay {
@@ -874,6 +889,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 continue;
             }
             if *rec.inputs.input(slot) != val {
+                return true;
+            }
+            if rec.inputs.flags(slot).disconnected != self.confirmed_absent.contains(&(tick, slot.0)) {
                 return true;
             }
             let used = rec.cmds.iter().filter(|(s, _)| *s == slot).map(|(_, b)| b);
@@ -981,6 +999,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             self.verified_tick = t;
             self.confirmed_input.remove(&t);
             self.confirmed_commands.remove(&t);
+            if !self.confirmed_absent.is_empty() {
+                self.confirmed_absent.retain(|&(tick, _)| tick > t);
+            }
 
             if self.verified_tick % self.cfg.checksum_interval as u64 == 0 {
                 if let Some(f) = self.ring.get(self.verified_tick) {
@@ -1098,6 +1119,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 continue;
             }
             self.confirmed_input.entry(remote.tick).or_default().insert(remote.slot, remote.input);
+            if remote.disconnected {
+                self.confirmed_absent.insert((remote.tick, remote.slot.0));
+            }
             if !remote.commands.is_empty() {
                 self.confirmed_commands.entry(remote.tick).or_default().insert(remote.slot, remote.commands);
             }

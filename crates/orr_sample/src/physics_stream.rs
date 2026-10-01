@@ -11,7 +11,7 @@ use orr_physics::{Body, BODY_DYNAMIC, BODY_KINEMATIC};
 use orr_view::{fp_to_vec2, Extracted, InterpMode};
 use orr_viewstream::{input_layout_of, EventDef, KindDef, PropType, Schema, StreamKinds, ViewStreamSource};
 
-use crate::physics_game::{NoCommand, PaddleTag, PhysEvent, PhysInput, TICK_RATE};
+use crate::physics_game::{NoCommand, PaddleTag, PhysEvent, PhysInput, EVENT_SHOT, TICK_RATE};
 use crate::physics_view::PhysExtractor;
 
 /// Entity kind: a wall or an obstacle that never moves.
@@ -62,7 +62,21 @@ pub fn phys_schema(build_id: u64, player_count: u8, tick_rate: u32) -> Schema {
         ],
         input: input_layout_of::<PhysInput>(),
         command_size: std::mem::size_of::<NoCommand>(),
-        events: vec![EventDef { id: 0, name: "trigger".to_string(), payload_size: std::mem::size_of::<PhysEvent>() }],
+        events: vec![
+            EventDef { id: 0, name: "trigger".to_string(), payload_size: std::mem::size_of::<PhysEvent>() },
+            EventDef { id: EVENT_TYPE_SHOT, name: "shot".to_string(), payload_size: std::mem::size_of::<PhysEvent>() },
+        ],
+    }
+}
+
+/// Event type id of a shot in the schema's `events` (the payload is a `PhysEvent`).
+pub const EVENT_TYPE_SHOT: u16 = 1;
+
+/// The schema's event type of a `PhysEvent` payload: 1 (`shot`) for `EVENT_SHOT`, else 0 (`trigger`).
+pub fn phys_event_type(payload: &[u8]) -> u16 {
+    match bytemuck::try_pod_read_unaligned::<PhysEvent>(payload) {
+        Ok(e) if e.kind == EVENT_SHOT => EVENT_TYPE_SHOT,
+        _ => 0,
     }
 }
 
@@ -70,5 +84,18 @@ pub fn phys_schema(build_id: u64, player_count: u8, tick_rate: u32) -> Schema {
 /// predicted (one simulation, no remote peers).
 pub fn phys_stream_source(build_id: u64, player_count: u8) -> ViewStreamSource<PhysExtractor, PhysKinds> {
     let extractor = PhysExtractor { remote_mode: InterpMode::Prediction, local_slot: 0 };
-    ViewStreamSource::new(extractor, PhysKinds, phys_schema(build_id, player_count, TICK_RATE))
+    ViewStreamSource::new(extractor, PhysKinds, phys_schema(build_id, player_count, TICK_RATE)).with_event_type(phys_event_type)
+}
+
+/// A view stream source for a relay client that plays `local_slot` of a room with `player_count`
+/// players at `tick_rate`: the other paddles are snapshot-interpolated (they are confirmed remote
+/// players, predicted from repeated input), the own one is predicted.
+pub fn phys_client_stream_source(
+    build_id: u64,
+    player_count: u8,
+    tick_rate: u32,
+    local_slot: u8,
+) -> ViewStreamSource<PhysExtractor, PhysKinds> {
+    let extractor = PhysExtractor { remote_mode: InterpMode::Snapshot, local_slot };
+    ViewStreamSource::new(extractor, PhysKinds, phys_schema(build_id, player_count, tick_rate)).with_event_type(phys_event_type)
 }

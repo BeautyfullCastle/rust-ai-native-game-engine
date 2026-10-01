@@ -11,7 +11,6 @@
 #![allow(clippy::disallowed_types)] // tests wait on the wall clock
 
 use std::ffi::{CStr, CString};
-use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -23,97 +22,11 @@ use orr_session::PlaySession;
 use orr_viewstream::{ViewFrame, HEADER_LEN, RECORD_LEN};
 use serde_json::json;
 
+mod common;
+
+use common::{compile_c, ensure_lib, skip_or_fail};
+
 const DEMO_SCENE: &str = include_str!("../../../scenes/physics_demo.scene.yaml");
-
-fn crate_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-/// `target/<profile>`, found from this test binary (`target/<profile>/deps/<test>`).
-fn profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    exe.parent().and_then(Path::parent).unwrap().to_path_buf()
-}
-
-struct Lib {
-    /// What to pass to the linker.
-    link_arg: PathBuf,
-    /// The directory the loader must find the shared library in at run time.
-    dir: PathBuf,
-}
-
-fn find_lib() -> Option<Lib> {
-    let dir = profile_dir();
-    let (file, link) = if cfg!(windows) {
-        ("orr_ffi.dll", "orr_ffi.dll.lib")
-    } else if cfg!(target_os = "macos") {
-        ("liborr_ffi.dylib", "liborr_ffi.dylib")
-    } else {
-        ("liborr_ffi.so", "liborr_ffi.so")
-    };
-    (dir.join(file).exists() && dir.join(link).exists()).then(|| Lib { link_arg: dir.join(link), dir })
-}
-
-/// `cargo test` builds the rlib of this crate, not its cdylib: build it (same
-/// profile, same target directory) if it is not there yet.
-fn ensure_lib() -> Option<Lib> {
-    if let Some(lib) = find_lib() {
-        return Some(lib);
-    }
-    let mut cmd = Command::new(env!("CARGO"));
-    cmd.args(["build", "-p", "orr_ffi", "--lib"]);
-    if profile_dir().file_name().is_some_and(|n| n == "release") {
-        cmd.arg("--release");
-    }
-    let status = cmd.status().ok()?;
-    status.success().then(find_lib).flatten()
-}
-
-fn compile_c_client(out_dir: &Path, lib: &Lib) -> Result<PathBuf, String> {
-    let target = env!("ORR_FFI_TARGET");
-    let mut build = cc::Build::new();
-    build.target(target).host(target).opt_level(1).debug(false).cargo_metadata(false).cargo_warnings(false).out_dir(out_dir);
-    let tool = build.try_get_compiler().map_err(|e| format!("no C compiler: {e}"))?;
-    let exe = out_dir.join(if cfg!(windows) { "view_client.exe" } else { "view_client" });
-    let src = crate_dir().join("tests/c/view_client.c");
-    let include = crate_dir().join("include");
-    let mut cmd = tool.to_command();
-    if tool.is_like_msvc() {
-        cmd.arg("/nologo")
-            .arg("/DORR_FFI_DLL_IMPORT")
-            .arg(format!("/I{}", include.display()))
-            .arg(&src)
-            .arg(format!("/Fe{}", exe.display()))
-            .arg(format!("/Fo{}\\", out_dir.display()))
-            .arg("/link")
-            .arg(&lib.link_arg);
-    } else {
-        cmd.arg("-std=c99")
-            .arg("-Wall")
-            .arg("-Wextra")
-            .arg("-Werror")
-            .arg(format!("-I{}", include.display()))
-            .arg(&src)
-            .arg("-o")
-            .arg(&exe)
-            .arg(&lib.link_arg);
-        if !cfg!(windows) {
-            cmd.arg(format!("-Wl,-rpath,{}", lib.dir.display()));
-        }
-    }
-    let out = cmd.output().map_err(|e| format!("cannot run the C compiler: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("the C compiler failed:\n{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
-    }
-    Ok(exe)
-}
-
-fn skip_or_fail(why: &str) {
-    if std::env::var("ORR_REQUIRE_C_COMPILER").is_ok_and(|v| v == "1") {
-        panic!("{why}");
-    }
-    eprintln!("SKIPPED: {why} (set ORR_REQUIRE_C_COMPILER=1 to make this an error)");
-}
 
 // ---- the scenario, as the C program plays it ----
 
@@ -160,7 +73,7 @@ fn c_program_sees_what_the_rust_bridge_sees() {
     };
     let dir = std::env::temp_dir().join(format!("orr_ffi_c_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let exe = match compile_c_client(&dir, &lib) {
+    let exe = match compile_c(&dir, &lib, "view_client") {
         Ok(e) => e,
         Err(why) if why.starts_with("no C compiler") || why.starts_with("cannot run the C compiler") => return skip_or_fail(&why),
         Err(why) => panic!("{why}"),

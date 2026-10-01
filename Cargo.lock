@@ -2701,13 +2701,17 @@ dependencies = [
 name = "orr_ffi"
 version = "0.0.1"
 dependencies = [
+ "bytemuck",
  "cc",
  "orr_bridge",
  "orr_edit",
+ "orr_relay_net",
  "orr_remote",
  "orr_sample",
+ "orr_server",
  "orr_session",
  "orr_sim",
+ "orr_view",
  "orr_viewstream",
  "serde_json",
 ]
@@ -2924,8 +2928,10 @@ dependencies = [
  "crossterm",
  "libloading",
  "orr_bridge",
+ "orr_relay_net",
  "orr_remote",
  "orr_sample",
+ "orr_server",
  "orr_session",
  "orr_viewstream",
  "serde_json",

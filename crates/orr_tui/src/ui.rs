@@ -82,8 +82,9 @@ fn draw(out: &mut BufWriter<Stdout>, state: &mut ViewState, help: &str, now: Ins
     let (tw, th) = (tw as usize, th as usize);
     let events_h = if th >= 20 { 4 } else if th >= 12 { 2 } else { 0 };
     let grid_h = th.saturating_sub(2 + events_h).max(1);
-    if let (Some(f), Some(cam)) = (&state.frame, &state.camera) {
-        let grid = render(f, &state.schema, cam, state.alpha(now), tw, grid_h, true);
+    // The newest frame, with the correction of a rollback still fading out (about 0.1 s).
+    if let (Some(f), Some(cam)) = (state.display_frame(now), &state.camera) {
+        let grid = render(&f, &state.schema, cam, state.alpha(now), tw, grid_h, true);
         let mut last = None;
         for y in 0..grid.h {
             queue!(out, MoveTo(0, y as u16))?;
@@ -128,6 +129,12 @@ fn draw(out: &mut BufWriter<Stdout>, state: &mut ViewState, help: &str, now: Ins
 pub fn run(src: &mut dyn Source, opts: &UiOpts) -> Result<(), String> {
     let schema = ViewSchema::parse(src.schema_text())?;
     let mut state = ViewState::new(schema.clone(), Instant::now());
+    // A network client plays the slot it joined (the server chose it); a local host the one asked for.
+    let mut player = opts.player;
+    if let Some(net) = src.net_status() {
+        player = net.slot as u8;
+        state.set_net(net, Instant::now());
+    }
     if opts.autoplay {
         src.control(Control::Play)?;
     }
@@ -138,10 +145,11 @@ pub fn run(src: &mut dyn Source, opts: &UiOpts) -> Result<(), String> {
     let help = format!(
         "{} player {} | arrows/a/d move, z/c spin, f fire | space/p play-pause, s step, r refit, q quit",
         src.describe(),
-        opts.player
+        player
     );
     let frame_dt = Duration::from_micros(1_000_000 / u64::from(opts.fps.clamp(1, 60)));
     let (mut held, mut last_sent) = (Held::default(), None::<Controls>);
+    let mut last_status = Instant::now();
     loop {
         let deadline = Instant::now() + frame_dt;
         loop {
@@ -156,9 +164,15 @@ pub fn run(src: &mut dyn Source, opts: &UiOpts) -> Result<(), String> {
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                     KeyCode::Char(' ' | 'p') => {
                         let paused = state.frame.as_ref().is_some_and(|f| f.has(FLAG_PAUSED));
-                        src.control(if paused { Control::Play } else { Control::Pause })?;
+                        if let Err(e) = src.control(if paused { Control::Play } else { Control::Pause }) {
+                            state.notice = Some(e);
+                        }
                     }
-                    KeyCode::Char('s') => src.control(Control::Step(1))?,
+                    KeyCode::Char('s') => {
+                        if let Err(e) = src.control(Control::Step(1)) {
+                            state.notice = Some(e);
+                        }
+                    }
                     KeyCode::Char('r') => state.camera = state.frame.as_ref().map(Camera::fit),
                     other => {
                         held.press(other, now);
@@ -167,15 +181,32 @@ pub fn run(src: &mut dyn Source, opts: &UiOpts) -> Result<(), String> {
             }
             let controls = held.controls(now);
             if last_sent != Some(controls) {
-                src.set_input(opts.player, &encode(&schema, &controls))?;
-                last_sent = Some(controls);
+                match src.set_input(player, &encode(&schema, &controls)) {
+                    Ok(()) => last_sent = Some(controls),
+                    // A dropped connection must not close the viewer: say so and keep showing the game.
+                    Err(e) if src.net_status().is_some() => state.notice = Some(e),
+                    Err(e) => return Err(e),
+                }
+            }
+            if last_status.elapsed() >= Duration::from_millis(100) {
+                last_status = Instant::now();
+                if let Some(net) = src.net_status() {
+                    state.set_net(net, now);
+                }
             }
             let left = deadline.saturating_duration_since(now);
             if left.is_zero() {
                 break;
             }
-            if let Some(msg) = src.recv(left.min(Duration::from_millis(4)))? {
-                state.ingest(&msg, Instant::now());
+            match src.recv(left.min(Duration::from_millis(4))) {
+                Ok(Some(msg)) => state.ingest(&msg, Instant::now()),
+                Ok(None) => {}
+                // After a join failure or a lost connection a client keeps its last picture and says why.
+                Err(e) if state.net.is_some() => {
+                    state.notice = Some(e);
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+                Err(e) => return Err(e),
             }
         }
         draw(&mut out, &mut state, &help, Instant::now()).map_err(|e| e.to_string())?;

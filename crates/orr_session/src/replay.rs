@@ -558,7 +558,7 @@ impl<G: Game> crate::InputSource<G> for ReplayReader<G> {
                 let slot = PlayerSlot(slot as u8);
                 let my_commands: Vec<G::Command> =
                     commands.iter().filter(|(s, _)| *s == slot).map(|(_, c)| c.clone()).collect();
-                out.push(crate::RemoteInput { tick: self.cursor, slot, input: *input, commands: my_commands });
+                out.push(crate::RemoteInput { tick: self.cursor, slot, input: *input, commands: my_commands, disconnected: false });
             }
         }
         self.cursor += 1;

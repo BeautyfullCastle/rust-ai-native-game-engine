@@ -26,6 +26,17 @@
 //! `sim.step`, ...), so anything the editor can do is also available through
 //! [`orr_erp_call`].
 //!
+//! # Client sessions
+//!
+//! [`orr_client_open`] opens a handle that plays on an `orr_server` room instead of hosting a
+//! simulation: it joins as a relay client (QUIC or WebSocket, with the optional simulated network
+//! conditions of the sample programs), predicts, rolls back, and publishes the same view stream
+//! with the rollback flag and range and with events as predicted, verified or canceled
+//! (`client.rs`). `orr_view_poll`, `orr_events_poll`, `orr_set_input` and `orr_schema_json` work
+//! as before (inputs for the joined slot only); timeline control, commands from the timeline and
+//! ERP calls belong to a local host and are refused. [`orr_session_status`] reports the
+//! connection (joining, slot, round trip time, input delay, rollbacks, desync, disconnect).
+//!
 //! # Rules of the ABI
 //!
 //! - Every function returns a code (`ORR_OK` = 0, `ORR_NO_FRAME` = 1, negative
@@ -45,6 +56,8 @@
 //!   that handle or until close.
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::disallowed_types)]
+// A view-boundary crate (like `orr_view`): the simulated loss of a client is a fraction.
+#![allow(clippy::float_arithmetic)]
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -54,6 +67,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+
+mod client;
 
 use orr_remote::{Auth, Caps, ClientError, ErpClient, LocalHost, ServerConfig};
 use orr_viewstream::{message_type, MSG_EVENTS, MSG_FRAME};
@@ -75,6 +90,8 @@ pub const ORR_ERR_HOST: c_int = -4;
 pub const ORR_ERR_RPC: c_int = -5;
 /// A panic was caught inside the library (a bug); the handle may be unusable.
 pub const ORR_ERR_PANIC: c_int = -6;
+/// A client handle is still joining the room (poll `orr_session_status` until it is playing).
+pub const ORR_ERR_NOT_READY: c_int = -7;
 
 /// `orr_control` ops.
 pub const ORR_CTL_PLAY: c_int = 0;
@@ -96,8 +113,36 @@ pub const ORR_HOST_LISTEN: u32 = 1;
 /// `OrrHostConfig::flags`: start running by the wall clock (default: paused, step by calls).
 pub const ORR_HOST_RUN: u32 = 2;
 
+/// `OrrClientConfig::flags`: `orr_client_open` returns only when the room has started (or failed).
+pub const ORR_CLIENT_WAIT: u32 = 1;
+/// `OrrClientConfig::flags`: QUIC accepts any server certificate (development only).
+pub const ORR_CLIENT_INSECURE: u32 = 2;
+
+/// `OrrClientConfig::transport`: QUIC (needs `fingerprint` or `ORR_CLIENT_INSECURE`).
+pub const ORR_TRANSPORT_QUIC: u32 = 0;
+/// `OrrClientConfig::transport`: WebSocket (plain; `fingerprint` is unused).
+pub const ORR_TRANSPORT_WS: u32 = 1;
+
+/// `OrrSessionStatus::mode`: a local host (`orr_host_open`).
+pub const ORR_MODE_LOCAL: u32 = 0;
+/// `OrrSessionStatus::mode`: a client of a relay server (`orr_client_open`).
+pub const ORR_MODE_CLIENT: u32 = 1;
+
+/// `OrrSessionStatus::state`: joining (connecting, handshake, waiting for the other players).
+pub const ORR_STATE_CONNECTING: u32 = 0;
+/// `OrrSessionStatus::state`: playing.
+pub const ORR_STATE_PLAYING: u32 = 1;
+/// `OrrSessionStatus::state`: the connection to the server is gone.
+pub const ORR_STATE_DISCONNECTED: u32 = 2;
+/// `OrrSessionStatus::state`: joining failed (the server refused, or it was not reachable).
+pub const ORR_STATE_FAILED: u32 = 3;
+
+/// `OrrSessionStatus::flags`: a desync was detected (the server's room found different checksums).
+pub const ORR_STATUS_DESYNC: u32 = 1;
+
 /// Version of this C ABI (bumped when a function changes incompatibly).
-pub const ORR_ABI_VERSION: u32 = 1;
+/// 2: client sessions (`orr_client_open`, `orr_session_status`, `ORR_ERR_NOT_READY`).
+pub const ORR_ABI_VERSION: u32 = 2;
 
 /// Settings of [`orr_host_open`]. Zero the struct, then set `struct_size`.
 #[repr(C)]
@@ -109,6 +154,79 @@ pub struct OrrHostConfig {
     pub flags: u32,
     /// With `ORR_HOST_LISTEN`: the port (0 = any free port; see `orr_host_url`).
     pub listen_port: u32,
+}
+
+/// Settings of [`orr_client_open`]. Zero the struct, then set `struct_size` and `server`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct OrrClientConfig {
+    /// `sizeof(OrrClientConfig)` as the caller knows it.
+    pub struct_size: u32,
+    /// `ORR_CLIENT_*` bits.
+    pub flags: u32,
+    /// `ORR_TRANSPORT_*`.
+    pub transport: u32,
+    /// The slot to ask for; negative = any free slot.
+    pub slot: i32,
+    /// Room id (0 = room 1, the default room of `orr_server`).
+    pub room: u64,
+    /// Seed of the simulated loss and jitter (0 = a fresh seed per client).
+    pub sim_seed: u64,
+    /// Simulated one-way delay added in each direction, milliseconds (0 = none).
+    pub sim_latency_ms: u32,
+    /// Simulated random extra delay, up to this many milliseconds.
+    pub sim_jitter_ms: u32,
+    /// Simulated loss of unreliable messages in each direction, in thousandths (20 = 2 %).
+    pub sim_loss_permille: u32,
+    /// How long to wait for the handshake and for the room to start (0 = 60 s).
+    pub connect_timeout_ms: u32,
+    /// `host:port` of the server (UTF-8, required).
+    pub server: *const c_char,
+    /// QUIC: the server certificate's SHA-256 as hex (the server prints it); null = none.
+    pub fingerprint: *const c_char,
+    /// Where desync dumps (`.orrd`) go; null = a folder in the system temp directory.
+    pub desync_dir: *const c_char,
+}
+
+/// What [`orr_session_status`] fills. Zero the struct and set `struct_size`; fields the
+/// library does not know (an older library) stay zero, fields the caller does not know are not written.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OrrSessionStatus {
+    /// `sizeof(OrrSessionStatus)` as the caller knows it. On return: the bytes written.
+    pub struct_size: u32,
+    /// `ORR_MODE_*`.
+    pub mode: u32,
+    /// `ORR_STATE_*`.
+    pub state: u32,
+    /// `ORR_STATUS_*` bits.
+    pub flags: u32,
+    /// The joined slot (client), else 0.
+    pub slot: u32,
+    /// Players of the session.
+    pub player_count: u32,
+    /// Smoothed round trip time to the server, milliseconds (client).
+    pub rtt_ms: u32,
+    /// Input delay in ticks the client currently uses (client).
+    pub input_delay: u32,
+    /// Predicted head tick.
+    pub head_tick: u64,
+    /// Newest fully confirmed tick.
+    pub verified_tick: u64,
+    /// Rollbacks so far.
+    pub rollbacks: u64,
+    /// Ticks resimulated by all rollbacks together.
+    pub resim_ticks: u64,
+    /// The latest rollback resimulated `last_rollback_from..=last_rollback_to` (0, 0 = none yet).
+    pub last_rollback_from: u64,
+    pub last_rollback_to: u64,
+    /// Desyncs the server's room reported.
+    pub desyncs: u64,
+    /// Episodes of waiting because the prediction limit was reached, and their total time in ms.
+    pub stall_episodes: u64,
+    pub stalled_ms: u64,
+    /// Ticks the server confirmed with a repeated input of this client (it was late).
+    pub repeated_inputs: u64,
 }
 
 const DEMO_SCENE: &str = include_str!("../../../scenes/physics_demo.scene.yaml");
@@ -160,15 +278,25 @@ fn guard(f: impl FnOnce() -> Result<c_int, Fail>) -> c_int {
     }
 }
 
-struct Inner {
+/// A host of our own and the connection to it.
+struct Local {
     // Field order is drop order: the connection goes before the host thread.
     client: ErpClient,
     host: LocalHost,
-    schema_json: String,
     url: Option<String>,
+    run_on_start: bool,
+}
+
+enum Backend {
+    Local(Box<Local>),
+    Client(Box<client::Client>),
+}
+
+struct Inner {
+    backend: Backend,
+    schema_json: String,
     input_size: usize,
     player_count: u8,
-    run_on_start: bool,
     /// The newest frame not read yet (a newer one replaces it).
     latest: Option<Vec<u8>>,
     /// The frame handed out by `orr_view_poll_ptr`.
@@ -184,35 +312,59 @@ pub struct OrrHost {
 impl Inner {
     /// Moves everything that arrived into the frame slot and the event queue.
     fn pump(&mut self) -> Result<(), Fail> {
-        if !self.host.is_running() {
-            let why = self.host.stopped_reason(Duration::from_millis(50)).unwrap_or_default();
-            return fail(ORR_ERR_HOST, format!("the host thread has stopped: {why}"));
-        }
-        let alive = self.client.poll();
-        while let Some(bytes) = self.client.frames.pop_front() {
-            match message_type(&bytes) {
-                Ok(MSG_FRAME) => self.latest = Some(bytes),
-                Ok(MSG_EVENTS) => {
-                    if self.events.len() >= MAX_QUEUED_EVENT_BATCHES {
-                        self.events.pop_front();
-                    }
-                    self.events.push_back(bytes);
+        match &mut self.backend {
+            Backend::Local(l) => {
+                if !l.host.is_running() {
+                    let why = l.host.stopped_reason(Duration::from_millis(50)).unwrap_or_default();
+                    return fail(ORR_ERR_HOST, format!("the host thread has stopped: {why}"));
                 }
-                _ => {}
+                let alive = l.client.poll();
+                while let Some(bytes) = l.client.frames.pop_front() {
+                    match message_type(&bytes) {
+                        Ok(MSG_FRAME) => self.latest = Some(bytes),
+                        Ok(MSG_EVENTS) => {
+                            if self.events.len() >= MAX_QUEUED_EVENT_BATCHES {
+                                self.events.pop_front();
+                            }
+                            self.events.push_back(bytes);
+                        }
+                        _ => {}
+                    }
+                }
+                // Notifications (watch.*) are not needed here.
+                l.client.notifications.clear();
+                l.client.local_frames.clear();
+                match alive {
+                    Ok(_) => Ok(()),
+                    Err(e) => fail(ORR_ERR_HOST, format!("the host is gone: {e}")),
+                }
+            }
+            Backend::Client(c) => {
+                if let Some(ready) = c.poll_join() {
+                    self.schema_json = ready.schema_json;
+                    self.input_size = ready.input_size;
+                    self.player_count = ready.player_count;
+                }
+                if let Some(why) = c.failure() {
+                    return fail(ORR_ERR_HOST, format!("joining the server failed: {why}"));
+                }
+                c.pump(&mut self.latest, &mut self.events, MAX_QUEUED_EVENT_BATCHES);
+                Ok(())
             }
         }
-        // Notifications (watch.*) are not needed here.
-        self.client.notifications.clear();
-        self.client.local_frames.clear();
-        match alive {
-            Ok(_) => Ok(()),
-            Err(e) => fail(ORR_ERR_HOST, format!("the host is gone: {e}")),
+    }
+
+    /// The local host, or an error for a client session.
+    fn local(&mut self) -> Result<&mut Local, Fail> {
+        match &mut self.backend {
+            Backend::Local(l) => Ok(l),
+            Backend::Client(_) => fail(ORR_ERR_ARG, "not available in a client session (it plays on a server; see orr_client_open)"),
         }
     }
 
     fn call(&mut self, method: &str, params: J) -> Result<J, Fail> {
         self.pump()?;
-        let r = self.client.call(method, params);
+        let r = self.local()?.client.call(method, params);
         let out = match r {
             Ok(v) => Ok(v),
             Err(ClientError::Rpc(e)) => fail(ORR_ERR_RPC, format!("{method}: {e}")),
@@ -224,7 +376,7 @@ impl Inner {
     }
 
     fn start_session(&mut self) -> Result<(), Fail> {
-        let params = json!({"run": self.run_on_start});
+        let params = json!({"run": self.local()?.run_on_start});
         self.call("sim.start", params)?;
         Ok(())
     }
@@ -295,13 +447,10 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     let mut client = ErpClient::with_transport(Box::new(transport));
     client.call_timeout = CALL_TIMEOUT;
     let mut inner = Inner {
-        client,
-        host,
+        backend: Backend::Local(Box::new(Local { client, host, url, run_on_start: flags & ORR_HOST_RUN != 0 })),
         schema_json: String::new(),
-        url,
         input_size: 0,
         player_count: 0,
-        run_on_start: flags & ORR_HOST_RUN != 0,
         latest: None,
         held: Vec::new(),
         events: VecDeque::new(),
@@ -309,12 +458,13 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     inner.start_session()?;
     // Up to 1000 frames a second: the caller paces itself by polling.
     // (Not through `Inner::call`: it would discard the schema notification that comes with the response.)
-    match inner.client.call("watch.subscribe", json!({"topics": ["viewstream"], "max_fps": 1000, "source": "sim"})) {
+    let local = inner.local()?;
+    match local.client.call("watch.subscribe", json!({"topics": ["viewstream"], "max_fps": 1000, "source": "sim"})) {
         Ok(_) => {}
         Err(ClientError::Rpc(e)) => return fail(ORR_ERR_RPC, format!("watch.subscribe: {e}")),
         Err(e) => return fail(ORR_ERR_HOST, format!("watch.subscribe: {e}")),
     }
-    let schema = inner
+    let schema = local
         .client
         .wait_notification("watch.viewstream.schema", Duration::from_secs(10))
         .map_err(|e| Fail { code: ORR_ERR_HOST, msg: e.to_string() })?
@@ -324,6 +474,87 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     inner.player_count = schema.get("player_count").and_then(J::as_u64).unwrap_or(0) as u8;
     inner.schema_json = schema.to_string();
     inner.pump()?;
+    Ok(OrrHost { inner: Mutex::new(inner) })
+}
+
+fn text_arg(p: *const c_char, what: &str) -> Result<Option<String>, Fail> {
+    if p.is_null() {
+        return Ok(None);
+    }
+    let s = unsafe { CStr::from_ptr(p) }.to_str().map_err(|_| Fail { code: ORR_ERR_ARG, msg: format!("{what} is not UTF-8") })?;
+    Ok(Some(s.to_string()))
+}
+
+fn open_client(cfg: *const OrrClientConfig) -> Result<OrrHost, Fail> {
+    let c = unsafe { cfg.as_ref() }.ok_or(Fail { code: ORR_ERR_NULL, msg: "client config is null".into() })?;
+    if (c.struct_size as usize) < std::mem::size_of::<OrrClientConfig>() {
+        return fail(ORR_ERR_ARG, "OrrClientConfig.struct_size is too small (set it to sizeof(OrrClientConfig))");
+    }
+    let server = text_arg(c.server, "server")?.ok_or(Fail { code: ORR_ERR_ARG, msg: "OrrClientConfig.server is required (host:port)".into() })?;
+    let kind = match c.transport {
+        ORR_TRANSPORT_QUIC => orr_relay_net::TransportKind::Quic,
+        ORR_TRANSPORT_WS => orr_relay_net::TransportKind::Ws,
+        other => return fail(ORR_ERR_ARG, format!("unknown transport {other}")),
+    };
+    if c.sim_loss_permille > 1000 {
+        return fail(ORR_ERR_ARG, "sim_loss_permille must be 0..=1000");
+    }
+    let mut args = orr_sample::net_client::NetArgs {
+        connect: Some(server),
+        kind,
+        insecure_dev: c.flags & ORR_CLIENT_INSECURE != 0,
+        room: if c.room == 0 { 1 } else { c.room },
+        slot: u8::try_from(c.slot).ok(),
+        name: CLIENT_NAME.to_string(),
+        sim_seed: (c.sim_seed != 0).then_some(c.sim_seed),
+        quiet: true,
+        ..orr_sample::net_client::NetArgs::default()
+    };
+    if c.slot > i32::from(u8::MAX) {
+        return fail(ORR_ERR_ARG, "slot must be below 256 (or negative for any)");
+    }
+    if let Some(fp) = text_arg(c.fingerprint, "fingerprint")? {
+        args.fingerprint = Some(orr_relay_net::parse_fingerprint(&fp).map_err(|e| Fail { code: ORR_ERR_ARG, msg: format!("fingerprint: {e}") })?);
+    }
+    args.sim = orr_relay_net::SimConditions {
+        latency_ms: u64::from(c.sim_latency_ms),
+        jitter_ms: u64::from(c.sim_jitter_ms),
+        loss: c.sim_loss_permille as f32 / 1000.0,
+        seed: 0,
+    };
+    args.desync_dir = match text_arg(c.desync_dir, "desync_dir")? {
+        Some(d) => PathBuf::from(d),
+        None => std::env::temp_dir().join("orr_desync"),
+    };
+    if c.connect_timeout_ms != 0 {
+        args.connect_timeout = Duration::from_millis(u64::from(c.connect_timeout_ms));
+    }
+    let wait = c.flags & ORR_CLIENT_WAIT != 0;
+    let timeout = args.connect_timeout + client::WAIT_SLACK;
+    let client = client::Client::start(args).map_err(|e| Fail { code: ORR_ERR_HOST, msg: e })?;
+    let mut inner = Inner {
+        backend: Backend::Client(Box::new(client)),
+        schema_json: String::new(),
+        input_size: 0,
+        player_count: 0,
+        latest: None,
+        held: Vec::new(),
+        events: VecDeque::new(),
+    };
+    if wait {
+        let end = std::time::Instant::now() + timeout;
+        loop {
+            inner.pump()?;
+            let Backend::Client(c) = &inner.backend else { unreachable!() };
+            if !c.is_joining() {
+                break;
+            }
+            if std::time::Instant::now() > end {
+                return fail(ORR_ERR_HOST, "timed out waiting for the room to start");
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
     Ok(OrrHost { inner: Mutex::new(inner) })
 }
 
@@ -355,6 +586,98 @@ pub unsafe extern "C" fn orr_host_open(scene_path: *const c_char, cfg: *const Or
     out
 }
 
+/// Opens a handle that plays on a relay server (`orr_server --game physics`) as a client:
+/// predicts, rolls back, and publishes the same view stream and events as a local host, with the
+/// rollback flag and range and events as predicted, verified or canceled. Returns at once (the
+/// handle is `ORR_STATE_CONNECTING`; see `orr_session_status`) unless `ORR_CLIENT_WAIT` is set,
+/// which waits until the room has started. Returns null on failure (see `orr_last_error`).
+#[no_mangle]
+pub unsafe extern "C" fn orr_client_open(cfg: *const OrrClientConfig) -> *mut OrrHost {
+    let mut out: *mut OrrHost = std::ptr::null_mut();
+    guard(|| {
+        out = Box::into_raw(Box::new(open_client(cfg)?));
+        Ok(ORR_OK)
+    });
+    out
+}
+
+/// Fills `*out` with the state of the session: mode, joining state, slot, round trip time,
+/// input delay, rollbacks and their depth, desyncs, stalls (see `OrrSessionStatus`). Works on
+/// both kinds of handle (a local host reports `ORR_MODE_LOCAL`, playing, and the newest frame's ticks).
+#[no_mangle]
+pub unsafe extern "C" fn orr_session_status(host: *mut OrrHost, out: *mut OrrSessionStatus) -> c_int {
+    guard(|| {
+        let h = host_ref(host)?;
+        let out = out.as_mut().ok_or(Fail { code: ORR_ERR_NULL, msg: "out is null".into() })?;
+        let known = out.struct_size as usize;
+        if known < std::mem::size_of::<u32>() {
+            return fail(ORR_ERR_ARG, "OrrSessionStatus.struct_size is not set");
+        }
+        let mut inner = lock(h);
+        let _ = inner.pump();
+        let mut s = OrrSessionStatus { struct_size: std::mem::size_of::<OrrSessionStatus>() as u32, ..OrrSessionStatus::default() };
+        match &inner.backend {
+            Backend::Local(l) => {
+                s.mode = ORR_MODE_LOCAL;
+                s.state = if l.host.is_running() { ORR_STATE_PLAYING } else { ORR_STATE_DISCONNECTED };
+                s.player_count = u32::from(inner.player_count);
+            }
+            Backend::Client(c) => {
+                let st = c.status();
+                s.mode = ORR_MODE_CLIENT;
+                s.state = st.state;
+                s.flags = if st.desyncs > 0 { ORR_STATUS_DESYNC } else { 0 };
+                s.slot = st.slot;
+                s.player_count = st.player_count;
+                s.rtt_ms = st.rtt_ms;
+                s.input_delay = st.input_delay;
+                s.head_tick = st.head_tick;
+                s.verified_tick = st.verified_tick;
+                s.rollbacks = st.rollbacks;
+                s.resim_ticks = st.resim_ticks;
+                s.last_rollback_from = st.last_rollback_from;
+                s.last_rollback_to = st.last_rollback_to;
+                s.desyncs = st.desyncs;
+                s.stall_episodes = st.stall_episodes;
+                s.stalled_ms = st.stalled_ms;
+                s.repeated_inputs = st.repeats;
+            }
+        }
+        let n = known.min(std::mem::size_of::<OrrSessionStatus>());
+        // Copy the part both sides know; the caller's struct_size reports how much that was.
+        std::ptr::copy_nonoverlapping(std::ptr::addr_of!(s).cast::<u8>(), (out as *mut OrrSessionStatus).cast::<u8>(), n);
+        out.struct_size = n as u32;
+        Ok(ORR_OK)
+    })
+}
+
+/// The checksum of the confirmed (verified) state of a client session at `tick`, the one the
+/// client also reports to the server (every `checksum_interval` ticks, 30 by default: ticks that
+/// are multiples of it). Two peers that agree on a tick have the same state there: a view, a test or
+/// a replay uploader can compare them. `tick` 0 asks for the newest checkpoint. On `ORR_OK`,
+/// `*found_tick` and `*checksum` are set; `ORR_NO_FRAME` if that tick is not confirmed yet (or
+/// is no checkpoint tick); `ORR_ERR_ARG` on a local host.
+#[no_mangle]
+pub unsafe extern "C" fn orr_confirmed_checksum(host: *mut OrrHost, tick: u64, found_tick: *mut u64, checksum: *mut u64) -> c_int {
+    guard(|| {
+        let h = host_ref(host)?;
+        let found_tick = found_tick.as_mut().ok_or(Fail { code: ORR_ERR_NULL, msg: "found_tick is null".into() })?;
+        let checksum = checksum.as_mut().ok_or(Fail { code: ORR_ERR_NULL, msg: "checksum is null".into() })?;
+        let inner = lock(h);
+        match &inner.backend {
+            Backend::Client(c) => match c.confirmed_checksum(tick) {
+                Some((t, sum)) => {
+                    *found_tick = t;
+                    *checksum = sum;
+                    Ok(ORR_OK)
+                }
+                None => Ok(ORR_NO_FRAME),
+            },
+            Backend::Local(_) => fail(ORR_ERR_ARG, "orr_confirmed_checksum is for client sessions (a local host has no confirmation to wait for)"),
+        }
+    })
+}
+
 /// Stops the host thread and frees the handle. Null is ignored.
 #[no_mangle]
 pub unsafe extern "C" fn orr_host_close(host: *mut OrrHost) {
@@ -375,7 +698,11 @@ pub unsafe extern "C" fn orr_schema_json(host: *mut OrrHost, buf: *mut c_char, c
     let mut needed = 0;
     guard(|| {
         let h = host_ref(host)?;
-        let inner = lock(h);
+        let mut inner = lock(h);
+        let _ = inner.pump();
+        if inner.schema_json.is_empty() {
+            return fail(ORR_ERR_NOT_READY, "the schema is not known yet (the client is still joining the room)");
+        }
         needed = write_text(buf, cap, &inner.schema_json)?;
         Ok(ORR_OK)
     });
@@ -391,8 +718,10 @@ pub unsafe extern "C" fn orr_host_url(host: *mut OrrHost, buf: *mut c_char, cap:
     guard(|| {
         let h = host_ref(host)?;
         let inner = lock(h);
-        if let Some(url) = &inner.url {
-            needed = write_text(buf, cap, url)?;
+        if let Backend::Local(l) = &inner.backend {
+            if let Some(url) = &l.url {
+                needed = write_text(buf, cap, url)?;
+            }
         }
         Ok(ORR_OK)
     });
@@ -477,6 +806,12 @@ pub unsafe extern "C" fn orr_set_input(host: *mut OrrHost, player: u8, bytes: *c
             return fail(ORR_ERR_NULL, "input bytes are null");
         }
         let mut inner = lock(h);
+        if let Backend::Client(_) = inner.backend {
+            let _ = inner.pump();
+            let Backend::Client(c) = &mut inner.backend else { unreachable!() };
+            c.set_input(player, std::slice::from_raw_parts(bytes, len)).map_err(|(code, msg)| Fail { code, msg })?;
+            return Ok(ORR_OK);
+        }
         if len != inner.input_size {
             return fail(ORR_ERR_ARG, format!("input must be {} bytes (the schema's input.size), got {len}", inner.input_size));
         }
@@ -498,6 +833,12 @@ pub unsafe extern "C" fn orr_send_command(host: *mut OrrHost, player: u8, bytes:
             return fail(ORR_ERR_NULL, "command bytes are null");
         }
         let mut inner = lock(h);
+        if let Backend::Client(_) = inner.backend {
+            let _ = inner.pump();
+            let Backend::Client(c) = &mut inner.backend else { unreachable!() };
+            c.send_command(player, std::slice::from_raw_parts(bytes, len)).map_err(|(code, msg)| Fail { code, msg })?;
+            return Ok(ORR_OK);
+        }
         if player >= inner.player_count {
             return fail(ORR_ERR_ARG, format!("player {player} does not exist (the session has {})", inner.player_count));
         }
@@ -576,7 +917,7 @@ pub unsafe extern "C" fn orr_erp_call(host: *mut OrrHost, request_json: *const c
         let params = req.get("params").cloned().unwrap_or(J::Null);
         let mut inner = lock(h);
         inner.pump()?;
-        let (answer, code) = match inner.client.call(&method, params) {
+        let (answer, code) = match inner.local()?.client.call(&method, params) {
             Ok(v) => (json!({"result": v}), ORR_OK),
             Err(ClientError::Rpc(e)) => (json!({"error": e.to_json()}), ORR_ERR_RPC),
             Err(e) => return fail(ORR_ERR_HOST, format!("{method}: {e}")),

@@ -16,7 +16,7 @@
 //! `Instant` is fine here: this crate is not a sim crate.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use orr_ecs::Frame;
@@ -44,7 +44,12 @@ pub struct RelayMetrics {
     head: AtomicU64,
     verified: AtomicU64,
     connected: AtomicU64,
+    /// Confirmed checkpoints `(tick, frame checksum)` of the session, oldest first (capped).
+    checksums: Mutex<Vec<(u64, u64)>>,
 }
+
+/// Checkpoints [`RelayMetrics`] keeps (the oldest are dropped above this).
+const MAX_CHECKSUMS: usize = 4096;
 
 /// A copy of [`RelayMetrics`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -71,6 +76,18 @@ pub struct RelayStatus {
 impl RelayMetrics {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// The frame checksum of the confirmed (verified) state at `tick`, if the session recorded one
+    /// (every `checksum_interval` verified ticks, the same ones it reports to the server).
+    pub fn checksum_at(&self, tick: u64) -> Option<u64> {
+        let all = self.checksums.lock().unwrap_or_else(PoisonError::into_inner);
+        all.binary_search_by_key(&tick, |(t, _)| *t).ok().map(|i| all[i].1)
+    }
+
+    /// The newest confirmed checkpoint `(tick, checksum)`.
+    pub fn last_checksum(&self) -> Option<(u64, u64)> {
+        self.checksums.lock().unwrap_or_else(PoisonError::into_inner).last().copied()
     }
 
     pub fn status(&self) -> RelayStatus {
@@ -154,6 +171,8 @@ pub struct RelayHost<G: Game, L: Link> {
     players: u8,
     seen_stalled_us: u64,
     reported_disconnect: bool,
+    /// How many of the session's checkpoints are in the metrics already.
+    checksums_seen: usize,
 }
 
 impl<G: Game, L: Link> RelayHost<G, L> {
@@ -187,7 +206,7 @@ impl<G: Game, L: Link> RelayHost<G, L> {
         }
         let w = client.welcome().expect("playing implies welcomed");
         let (tick_rate, slot, players) = (w.tick_rate, PlayerSlot(w.slot), w.player_count);
-        let host = Self {
+        let mut host = Self {
             client,
             start,
             input: G::Input::default(),
@@ -200,6 +219,7 @@ impl<G: Game, L: Link> RelayHost<G, L> {
             players,
             seen_stalled_us: 0,
             reported_disconnect: false,
+            checksums_seen: 0,
         };
         host.publish_metrics();
         Ok(host)
@@ -217,7 +237,7 @@ impl<G: Game, L: Link> RelayHost<G, L> {
         self.client.session().expect("a playing client has a session")
     }
 
-    fn publish_metrics(&self) {
+    fn publish_metrics(&mut self) {
         let m = &self.metrics;
         let (cs, ss) = (self.client.stats(), self.client.source_stats());
         m.srtt_us.store(self.client.srtt_us(), Relaxed);
@@ -234,6 +254,16 @@ impl<G: Game, L: Link> RelayHost<G, L> {
             m.rollbacks.store(s.rollback_count(), Relaxed);
             m.head.store(s.head_tick(), Relaxed);
             m.verified.store(s.verified_tick(), Relaxed);
+            let checkpoints = s.checksums();
+            if checkpoints.len() > self.checksums_seen {
+                let mut all = m.checksums.lock().unwrap_or_else(PoisonError::into_inner);
+                all.extend_from_slice(&checkpoints[self.checksums_seen..]);
+                if all.len() > MAX_CHECKSUMS {
+                    let excess = all.len() - MAX_CHECKSUMS;
+                    all.drain(..excess);
+                }
+                self.checksums_seen = checkpoints.len();
+            }
         }
         m.connected.store(u64::from(*self.client.state() == ClientState::Playing), Relaxed);
     }
