@@ -18,15 +18,24 @@ conditioner = []
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 bytes = "1"
 webpki-roots = "1"
 sha2 = "0.11"
+# WebTransport server (HTTP/3 on the same quinn endpoint as the `orrery/1` QUIC backend).
+h3 = "0.0.8"
+h3-quinn = { version = "0.0.10", features = ["datagram"] }
+h3-webtransport = "0.1.2"
+h3-datagram = "0.0.2"
+http = "1"
+time = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 orr_net = { path = ".", features = ["conditioner"] }
+wtransport = "0.7"
 
 
 [[example]]

@@ -76,7 +76,7 @@ jobs:
         # under concurrent work with their own warning budget.
         run: |
           cargo clippy --workspace --exclude orr_sample --exclude orr_editor --all-targets
-          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream -p orr_tui --all-targets -- -D warnings
+          cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream -p orr_tui -p orr_net -p orr_web --all-targets -- -D warnings
 
       - name: cargo build -p orr_sim --features hotpatch
         # Desktop-only, off-by-default hot-patch hook (design doc decision
@@ -154,6 +154,31 @@ jobs:
           cargo test --release --target wasm32-wasip1 -p orr_ecs
           cargo test --release --target wasm32-wasip1 -p orr_session --test arena -- golden
           cargo test --release --target wasm32-wasip1 -p orr_physics --test physics -- golden
+
+  wasm32-browser:
+    # The browser client (`orr_web`, wasm-bindgen glue) and the sim crates it
+    # runs must build for the browser target. Build only: the browser proof
+    # (`crates/orr_server/tests/browser_e2e.rs`, headless Chromium through
+    # Playwright) needs Node, a browser and wasm-bindgen-cli, so it is run by
+    # hand (docs/webtransport-trial.md) and not here.
+    name: wasm32-unknown-unknown (browser client build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (wasm32-unknown-unknown target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build (sim crates + orr_web) for wasm32-unknown-unknown
+        run: cargo build --release --target wasm32-unknown-unknown -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_web
+
+      - name: cargo clippy -p orr_web for wasm32-unknown-unknown
+        run: cargo clippy --target wasm32-unknown-unknown -p orr_web --all-targets -- -D warnings
 
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison

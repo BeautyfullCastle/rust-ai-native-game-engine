@@ -35,13 +35,28 @@ pub(crate) async fn accept_loop(ep: quinn::Endpoint, shared: Arc<Shared>, mut sh
     }
 }
 
+enum Accepted {
+    Quic(quinn::Connection, SendStream, RecvStream),
+    Wt(quinn::Connection, Box<crate::wt::Accepted>),
+}
+
 async fn server_conn(shared: Arc<Shared>, incoming: quinn::Incoming) {
     let setup = timeout(shared.cfg.connect_timeout, async {
         let conn = incoming.await.ok()?;
+        // ALPN dispatch: `h3` is a WebTransport browser, `orrery/1` a native client.
+        if shared.webtransport && crate::wt::is_h3(&conn) {
+            return match crate::wt::accept(&shared, conn.clone()).await {
+                Some(acc) => Some(Accepted::Wt(conn, Box::new(acc))),
+                None => {
+                    conn.close(VarInt::from_u32(CLOSE_PROTOCOL), b"bad webtransport session");
+                    None
+                }
+            };
+        }
         let (send, mut recv) = conn.accept_bi().await.ok()?;
         // The client writes the hello right after opening the stream.
         match read_frame(&mut recv, shared.cfg.max_message_size).await {
-            Ok((TAG_HELLO, p)) if p == HELLO_PAYLOAD => Some((conn, send, recv)),
+            Ok((TAG_HELLO, p)) if p == HELLO_PAYLOAD => Some(Accepted::Quic(conn, send, recv)),
             _ => {
                 conn.close(VarInt::from_u32(CLOSE_PROTOCOL), b"bad hello");
                 None
@@ -50,7 +65,11 @@ async fn server_conn(shared: Arc<Shared>, incoming: quinn::Incoming) {
     })
     .await;
     shared.pending.fetch_sub(1, Relaxed);
-    let Ok(Some((conn, send, recv))) = setup else { return };
+    let (conn, send, recv) = match setup {
+        Ok(Some(Accepted::Quic(conn, send, recv))) => (conn, send, recv),
+        Ok(Some(Accepted::Wt(conn, acc))) => return crate::wt::server_conn(shared, conn, *acc).await,
+        _ => return,
+    };
     let id = shared.alloc_id();
     let peer = conn.remote_address();
     let (cs, rx) = register(&shared, id, &conn);
@@ -288,12 +307,13 @@ async fn writer(
                     return DisconnectReason::LocalClose;
                 }
             },
-            _ = tick.tick() => update_stats(cs, conn),
+            _ = tick.tick() => update_stats(cs, conn, 0),
         }
     }
 }
 
-fn update_stats(cs: &ConnShared, conn: &quinn::Connection) {
+/// `overhead`: bytes the datagram framing of the application protocol adds (WebTransport).
+pub(crate) fn update_stats(cs: &ConnShared, conn: &quinn::Connection, overhead: usize) {
     let st = &cs.stats;
     st.set_rtt(conn.rtt());
     let s = conn.stats();
@@ -307,7 +327,7 @@ fn update_stats(cs: &ConnShared, conn: &quinn::Connection) {
     }
     match conn.max_datagram_size() {
         Some(m) => {
-            st.max_unreliable.store(m, Relaxed);
+            st.max_unreliable.store(m.saturating_sub(overhead), Relaxed);
             st.native_datagrams.store(true, Relaxed);
         }
         None => st.native_datagrams.store(false, Relaxed),

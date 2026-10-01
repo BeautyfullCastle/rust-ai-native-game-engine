@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orrery web client</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; }
+  canvas { display: block; width: min(100%, 520px); aspect-ratio: 1; border: 1px solid #888; background: #101418; }
+  pre { white-space: pre-wrap; max-width: 60rem; }
+  #conn input { width: 22rem; max-width: 100%; }
+  .hint { opacity: .7 }
+</style>
+</head>
+<body>
+<h1>Orrery web client</h1>
+<p>The same deterministic simulation as the native clients (wasm), joined to a relay room over WebTransport or WebSocket.
+Arrow keys move, space fires (add <code>&amp;bot=1</code> to let the scripted bot play).</p>
+<form id="conn">
+  <p>
+    <label>WebTransport <input id="wt" placeholder="host:udp-port"></label>
+    <label>cert sha-256 <input id="hash" placeholder="hex (dev cert); empty with a CA cert / Safari"></label>
+  </p>
+  <p>
+    <label>WebSocket <input id="ws" placeholder="host:tcp-port or wss://host:port/"></label>
+    <label>mode <select id="mode"><option>auto</option><option>webtransport</option><option>websocket</option></select></label>
+    <label>room <input id="room" size="3" value="1"></label>
+    <label>build id <input id="build" size="14" placeholder="default: sample"></label>
+    <button>Join</button>
+  </p>
+</form>
+<canvas id="c" width="520" height="520"></canvas>
+<pre id="status">not connected</pre>
+<script type="module">
+import init, { WebClient } from "./pkg/orr_web.js";
+
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+for (const k of ["wt", "hash", "ws", "mode", "room", "build"]) if (q.has(k)) $(k).value = q.get(k);
+
+const COLORS = ["#4ea1ff", "#ff6b6b", "#5fd48a", "#ffd24e", "#c58bff", "#ff9d4e", "#4edcd8", "#e8e8e8"];
+let client = null, bot = q.get("bot") === "1", loop = null;
+const keys = new Set();
+
+async function join() {
+  await init();
+  if (client) { try { client.close(); } catch (_) {} clearInterval(loop); }
+  const wt = $("wt").value.trim(), ws = $("ws").value.trim();
+  const opts = {
+    mode: $("mode").value,
+    wtUrl: wt ? `https://${wt}/` : "",
+    certHash: $("hash").value.trim().toLowerCase(),
+    wsUrl: /^wss?:/.test(ws) ? ws : ws ? `ws://${ws}/` : "",
+    room: parseInt($("room").value, 10) || 1,
+    bot,
+  };
+  if ($("build").value.trim()) opts.build_id = Number($("build").value);
+  if (q.get("slot")) opts.want_slot = parseInt(q.get("slot"), 10);
+  client = new WebClient(opts);
+  // Sim loop. A background tab throttles timers; a Worker would not be throttled.
+  loop = setInterval(() => client.tick(Math.floor(performance.now() * 1000)), 2);
+  window.orr = { client, report: () => JSON.parse(client.report()), transport: () => client.transport() };
+  window.orrStarted = true;
+}
+
+function draw() {
+  const cv = $("c"), g = cv.getContext("2d");
+  g.fillStyle = "#101418"; g.fillRect(0, 0, cv.width, cv.height);
+  if (client) {
+    const d = client.render(), half = 2000, s = cv.width / (2 * half);
+    for (let i = 0; i < d.length; i += 4) {
+      const [kind, slot, x, y] = [d[i], d[i + 1], d[i + 2], d[i + 3]];
+      g.fillStyle = COLORS[slot % COLORS.length];
+      const px = (x + half) * s, py = (half - y) * s;
+      g.beginPath(); g.arc(px, py, kind === 0 ? 9 : 3, 0, 7); g.fill();
+    }
+    const r = JSON.parse(client.report());
+    $("status").textContent =
+      `${r.state} via ${r.transport || "..."}${client.transport_error() ? " (" + client.transport_error() + ")" : ""}\n` +
+      `slot ${r.slot} | rtt ${(r.rtt_us / 1000).toFixed(1)} ms | delay ${r.delay} | rollbacks ${r.rollbacks} | ` +
+      `head ${r.head_tick} verified ${r.verified_tick} | desyncs ${r.desyncs}\n` +
+      `last checksum ${r.checksums.length ? r.checksums[r.checksums.length - 1].join(" = ") : "-"}`;
+  }
+  requestAnimationFrame(draw);
+}
+
+addEventListener("keydown", (e) => { keys.add(e.code); sendInput(); if (e.code === "Space") e.preventDefault(); });
+addEventListener("keyup", (e) => { keys.delete(e.code); sendInput(); });
+function sendInput() {
+  if (!client || bot) return;
+  const ax = (keys.has("ArrowRight") ? 1 : 0) - (keys.has("ArrowLeft") ? 1 : 0);
+  const ay = (keys.has("ArrowUp") ? 1 : 0) - (keys.has("ArrowDown") ? 1 : 0);
+  client.set_input(ax, ay, keys.has("Space"));
+}
+
+$("conn").addEventListener("submit", (e) => { e.preventDefault(); join(); });
+requestAnimationFrame(draw);
+if (q.get("auto") === "1") join();
+</script>
+</body>
+</html>

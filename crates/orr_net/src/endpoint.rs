@@ -36,7 +36,16 @@ pub trait Transport {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Link {
     Quic,
+    /// WebTransport (HTTP/3 on QUIC): datagrams as the unreliable channel.
+    Wt,
     Ws,
+}
+
+impl Link {
+    /// True when the link carries native datagrams (when the peer allows them).
+    fn datagram_capable(self) -> bool {
+        matches!(self, Link::Quic | Link::Wt)
+    }
 }
 
 pub(crate) enum Out {
@@ -66,6 +75,8 @@ pub(crate) struct Shared {
     pub shutdown: watch::Sender<bool>,
     /// Handshakes in progress (server), counted against `max_connections`.
     pub pending: std::sync::atomic::AtomicUsize,
+    /// Server: this endpoint answers WebTransport (ALPN `h3`) on its QUIC port.
+    pub webtransport: bool,
 }
 
 impl Shared {
@@ -122,12 +133,13 @@ pub struct Endpoint {
     runtime: Option<Runtime>,
     local_addr: SocketAddr,
     server_cert: Option<Vec<u8>>,
+    identity: Option<tls::Identity>,
     client_conn: Option<ConnId>,
     quic: Option<quinn::Endpoint>,
 }
 
 impl Endpoint {
-    fn new(cfg: NetConfig) -> Result<(Endpoint, watch::Receiver<bool>), NetError> {
+    fn new(cfg: NetConfig, webtransport: bool) -> Result<(Endpoint, watch::Receiver<bool>), NetError> {
         let runtime = Builder::new_multi_thread()
             .worker_threads(cfg.worker_threads.max(1))
             .thread_name("orr_net")
@@ -143,6 +155,7 @@ impl Endpoint {
             events: events_tx,
             shutdown: shutdown_tx,
             pending: std::sync::atomic::AtomicUsize::new(0),
+            webtransport,
         });
         let ep = Endpoint {
             shared,
@@ -150,6 +163,7 @@ impl Endpoint {
             runtime: Some(runtime),
             local_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             server_cert: None,
+            identity: None,
             client_conn: None,
             quic: None,
         };
@@ -166,8 +180,22 @@ impl Endpoint {
         tls: QuicServerTls,
         cfg: NetConfig,
     ) -> Result<Endpoint, NetError> {
-        let (mut ep, shutdown) = Endpoint::new(cfg)?;
-        let (server_cfg, cert) = tls::build_quic_server_config(&tls, &ep.shared.cfg)?;
+        Endpoint::listen_quic_with(bind, tls, cfg, false)
+    }
+
+    /// Like [`Endpoint::listen_quic`]; with `webtransport` the same UDP port also
+    /// answers browsers over WebTransport (ALPN `h3`, see the crate docs).
+    pub fn listen_quic_with(
+        bind: SocketAddr,
+        tls: QuicServerTls,
+        cfg: NetConfig,
+        webtransport: bool,
+    ) -> Result<Endpoint, NetError> {
+        let (mut ep, shutdown) = Endpoint::new(cfg, webtransport)?;
+        let identity = tls::Identity::load(&tls)?;
+        let server_cfg = tls::build_quic_server_config(&identity, &ep.shared.cfg, webtransport)?;
+        let cert = identity.generated.clone();
+        ep.identity = Some(identity);
         let handle = ep.handle();
         let _guard = handle.enter();
         let qep = quinn::Endpoint::server(server_cfg, bind).map_err(NetError::new)?;
@@ -180,14 +208,44 @@ impl Endpoint {
 
     /// Starts a plain (non-TLS) WebSocket server. For `wss://`, terminate TLS in a reverse proxy.
     pub fn listen_ws(bind: SocketAddr, cfg: NetConfig) -> Result<Endpoint, NetError> {
-        let (mut ep, shutdown) = Endpoint::new(cfg)?;
+        let (mut ep, shutdown) = Endpoint::new(cfg, false)?;
         let handle = ep.handle();
         let listener = handle
             .block_on(tokio::net::TcpListener::bind(bind))
             .map_err(NetError::new)?;
         ep.local_addr = listener.local_addr().map_err(NetError::new)?;
-        handle.spawn(crate::ws::accept_loop(listener, ep.shared.clone(), shutdown));
+        handle.spawn(crate::ws::accept_loop(listener, ep.shared.clone(), shutdown, None));
         Ok(ep)
+    }
+
+    /// Also accepts plain WebSocket connections on `bind`, on this endpoint, so one
+    /// server serves QUIC, WebTransport and WebSocket clients through one event
+    /// queue. Returns the bound address. Server endpoints only.
+    pub fn add_ws_listener(&mut self, bind: SocketAddr) -> Result<SocketAddr, NetError> {
+        let handle = self.handle();
+        let listener = handle
+            .block_on(tokio::net::TcpListener::bind(bind))
+            .map_err(NetError::new)?;
+        let addr = listener.local_addr().map_err(NetError::new)?;
+        handle.spawn(crate::ws::accept_loop(listener, self.shared.clone(), self.shared.shutdown.subscribe(), None));
+        Ok(addr)
+    }
+
+    /// Like [`Endpoint::add_ws_listener`], but `wss://`: TLS with the certificate
+    /// of this QUIC server (the generated one, or the PEM files). Browsers on an
+    /// `https://` page need this (no mixed content), and for a self-signed
+    /// certificate they must trust it. Only on endpoints made by
+    /// [`Endpoint::listen_quic_with`].
+    pub fn add_wss_listener(&mut self, bind: SocketAddr) -> Result<SocketAddr, NetError> {
+        let id = self.identity.as_ref().ok_or_else(|| NetError("wss needs a QUIC server endpoint (it shares its certificate)".into()))?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(id.wss_config()?);
+        let handle = self.handle();
+        let listener = handle
+            .block_on(tokio::net::TcpListener::bind(bind))
+            .map_err(NetError::new)?;
+        let addr = listener.local_addr().map_err(NetError::new)?;
+        handle.spawn(crate::ws::accept_loop(listener, self.shared.clone(), self.shared.shutdown.subscribe(), Some(acceptor)));
+        Ok(addr)
     }
 
     /// Starts connecting over QUIC. Returns at once. The result arrives as
@@ -199,7 +257,7 @@ impl Endpoint {
         trust: QuicTrust,
         cfg: NetConfig,
     ) -> Result<Endpoint, NetError> {
-        let (mut ep, _shutdown) = Endpoint::new(cfg)?;
+        let (mut ep, _shutdown) = Endpoint::new(cfg, false)?;
         let client_cfg = tls::build_quic_client_config(&trust, &ep.shared.cfg)?;
         let handle = ep.handle();
         let _guard = handle.enter();
@@ -216,7 +274,7 @@ impl Endpoint {
 
     /// Starts connecting over WebSocket to `ws://host:port/path`. Returns at once.
     pub fn connect_ws(url: &str, cfg: NetConfig) -> Result<Endpoint, NetError> {
-        let (mut ep, _shutdown) = Endpoint::new(cfg)?;
+        let (mut ep, _shutdown) = Endpoint::new(cfg, false)?;
         let target = crate::ws::parse_target(url)?;
         let id = ep.shared.alloc_id();
         ep.client_conn = Some(id);
@@ -293,7 +351,7 @@ impl Endpoint {
         match channel {
             Channel::Reliable => self.push_stream(&cs, TAG_RELIABLE, bytes),
             Channel::Unreliable => {
-                if cs.link == Link::Quic && st.native_datagrams.load(Relaxed) {
+                if cs.link.datagram_capable() && st.native_datagrams.load(Relaxed) {
                     let max = st.max_unreliable.load(Relaxed);
                     if bytes.len() > max {
                         return Err(SendError::TooLarge { max });
@@ -301,7 +359,7 @@ impl Endpoint {
                     cs.tx
                         .send(Out::Datagram(Bytes::copy_from_slice(bytes)))
                         .map_err(|_| SendError::UnknownConnection)
-                } else if cs.link == Link::Quic && !cfg.datagram_fallback {
+                } else if cs.link.datagram_capable() && !cfg.datagram_fallback {
                     Err(SendError::DatagramsUnsupported)
                 } else if cs.link == Link::Ws && queued > cfg.unreliable_backlog_limit {
                     StatsCell::add(&st.unreliable_dropped, 1);

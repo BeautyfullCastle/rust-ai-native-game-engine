@@ -151,17 +151,37 @@ pub struct ListenOptions {
     pub tls: Tls,
     pub sim: Option<SimConditions>,
     pub net: NetConfig,
+    /// QUIC only: the same UDP port also answers browsers over WebTransport
+    /// (ALPN `h3`). A generated certificate is then a short-lived P-256 one
+    /// that `serverCertificateHashes` accepts.
+    pub webtransport: bool,
+    /// Also accept plain WebSocket clients (browsers without WebTransport, or
+    /// where UDP is blocked) on this TCP address, in the same server.
+    pub ws_bind: Option<SocketAddr>,
+    /// Also accept `wss://` WebSocket clients on this TCP address, with the same
+    /// certificate as QUIC (`Tls::Pem` for browsers on an `https://` page).
+    pub wss_bind: Option<SocketAddr>,
 }
 
 impl ListenOptions {
     pub fn new(bind: SocketAddr, kind: TransportKind) -> Self {
-        Self { bind, kind, tls: Tls::SelfSigned { extra_names: Vec::new() }, sim: None, net: NetConfig::default() }
+        Self {
+            bind,
+            kind,
+            tls: Tls::SelfSigned { extra_names: Vec::new() },
+            sim: None,
+            net: NetConfig::default(),
+            webtransport: false,
+            ws_bind: None,
+            wss_bind: None,
+        }
     }
 }
 
 /// Starts a server endpoint.
 pub fn listen(opts: &ListenOptions) -> Result<NetEndpoint, String> {
-    let ep = match opts.kind {
+    let mut ws_addr = None;
+    let mut ep = match opts.kind {
         TransportKind::Quic => {
             let tls = match &opts.tls {
                 Tls::SelfSigned { extra_names } => {
@@ -171,19 +191,32 @@ pub fn listen(opts: &ListenOptions) -> Result<NetEndpoint, String> {
                     }
                     names.extend(extra_names.iter().cloned());
                     names.dedup();
-                    QuicServerTls::SelfSigned { names }
+                    if opts.webtransport {
+                        QuicServerTls::SelfSignedWebTransport { names }
+                    } else {
+                        QuicServerTls::SelfSigned { names }
+                    }
                 }
                 Tls::Pem { cert_chain, private_key } => {
                     QuicServerTls::PemFiles { cert_chain: cert_chain.clone(), private_key: private_key.clone() }
                 }
             };
-            Endpoint::listen_quic(opts.bind, tls, opts.net.clone())
+            Endpoint::listen_quic_with(opts.bind, tls, opts.net.clone(), opts.webtransport)
         }
         TransportKind::Ws => Endpoint::listen_ws(opts.bind, opts.net.clone()),
     }
     .map_err(|e| format!("listen on {}: {e}", opts.bind))?;
+    if let Some(bind) = opts.ws_bind {
+        ws_addr = Some(ep.add_ws_listener(bind).map_err(|e| format!("listen (WebSocket) on {bind}: {e}"))?);
+    }
+    let mut wss_addr = None;
+    if let Some(bind) = opts.wss_bind {
+        wss_addr = Some(ep.add_wss_listener(bind).map_err(|e| format!("listen (secure WebSocket) on {bind}: {e}"))?);
+    }
     let (addr, fp) = (ep.local_addr(), ep.server_cert_sha256());
-    Ok(NetEndpoint::new(condition(ep, opts.sim), addr, fp))
+    let mut out = NetEndpoint::new(condition(ep, opts.sim), addr, fp);
+    out.set_ws_addr(ws_addr, wss_addr);
+    Ok(out)
 }
 
 /// Parses a SHA-256 fingerprint: 64 hex digits, colons and spaces allowed.

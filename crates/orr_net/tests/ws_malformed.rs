@@ -87,6 +87,18 @@ fn missing_subprotocol_refused() {
     assert!(s.ep.connections().len() <= 1);
 }
 
+/// Browsers cannot offer `orrery/1` (`/` is not a token character), so they offer `orrery.1`.
+#[test]
+fn browser_subprotocol_accepted_and_echoed() {
+    let mut s = server(Backend::Ws, cfg());
+    let rt = rt();
+    let mut raw = rt.block_on(raw_connect(s.addr, Some("orrery.1"))).expect("orrery.1 accepted");
+    let id = expect_connected(&mut s.ep);
+    rt.block_on(async { raw.send(Message::Binary(vec![0u8, 9, 8, 7].into())).await.unwrap() });
+    let (conn, channel, bytes) = expect_message(&mut s.ep);
+    assert_eq!((conn, channel, bytes.as_slice()), (id, Channel::Reliable, &[9u8, 8, 7][..]));
+}
+
 #[test]
 fn non_websocket_garbage_does_not_panic() {
     use std::io::Write;

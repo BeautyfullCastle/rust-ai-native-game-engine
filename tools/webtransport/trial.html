@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orrery WebTransport trial</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; margin: 16px; max-width: 46rem; }
+  label { display: block; margin: .5rem 0 .1rem; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: .35rem; font: inherit; }
+  button { margin: .6rem .4rem 0 0; padding: .45rem .9rem; font: inherit; }
+  pre { background: #f3f3f3; padding: .6rem; overflow-x: auto; white-space: pre-wrap; }
+  @media (prefers-color-scheme: dark) { body { background: #151515; color: #ddd; } pre { background: #222; } input { background: #222; color: #ddd; } }
+</style>
+</head>
+<body>
+<h1>Orrery WebTransport trial</h1>
+<p>Talks to <code>wt_echo</code> (<code>cargo run -p orr_net --release --example wt_echo</code>) and measures round trips of a
+WebTransport bidirectional stream (reliable channel), WebTransport datagrams (unreliable channel) and a WebSocket
+(fallback). Query parameters pre-fill the form: <code>?host=&amp;port=&amp;wsport=&amp;hash=&amp;n=&amp;auto=1</code>.</p>
+<label for="host">Server host</label><input id="host" value="127.0.0.1">
+<label for="port">UDP port (WebTransport, https://host:port/)</label><input id="port" inputmode="numeric">
+<label for="wsport">TCP port (WebSocket)</label><input id="wsport" inputmode="numeric">
+<label for="hash">Certificate SHA-256 hex (serverCertificateHashes; empty = normal CA validation, required for Safari)</label>
+<input id="hash">
+<label for="n">Pings per channel</label><input id="n" value="200" inputmode="numeric">
+<div><button id="runwt">Run WebTransport</button><button id="runws">Run WebSocket</button><button id="runall">Run both</button></div>
+<h2>Result</h2>
+<pre id="out">idle</pre>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+for (const k of ["host", "port", "wsport", "hash", "n"]) if (q.has(k)) $(k).value = q.get(k);
+
+const HELLO = new Uint8Array([0x4f, 0x52, 0x52, 0x4e, 0x01]); // "ORRN\x01"
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function stats(rtts, sent) {
+  const s = rtts.slice().sort((a, b) => a - b);
+  const p = (f) => (s.length ? +s[Math.min(s.length - 1, Math.floor(f * (s.length - 1)))].toFixed(2) : null);
+  return { sent, received: s.length, lost: sent - s.length, min_ms: p(0), p50_ms: p(0.5), p95_ms: p(0.95), max_ms: p(1) };
+}
+
+function frame(tag, payload) {
+  const b = new Uint8Array(5 + payload.length);
+  new DataView(b.buffer).setUint32(0, payload.length + 1, true);
+  b[4] = tag;
+  b.set(payload, 5);
+  return b;
+}
+
+function pingPayload(seq) {
+  const b = new Uint8Array(16);
+  const dv = new DataView(b.buffer);
+  dv.setUint32(0, seq, true);
+  dv.setFloat64(8, performance.now(), true);
+  return b;
+}
+
+async function runWebTransport(host, port, hash, n) {
+  const res = { api: typeof WebTransport !== "undefined", connected: false };
+  if (!res.api) { res.error = "WebTransport is not defined in this browser"; return res; }
+  const opts = {};
+  if (hash) {
+    const bytes = new Uint8Array(hash.match(/../g).map((h) => parseInt(h, 16)));
+    opts.serverCertificateHashes = [{ algorithm: "sha-256", value: bytes }];
+  }
+  const t0 = performance.now();
+  let wt;
+  try {
+    wt = new WebTransport(`https://${host}:${port}/`, opts);
+    await wt.ready;
+  } catch (e) {
+    res.error = String(e && e.message || e);
+    return res;
+  }
+  res.connected = true;
+  res.connect_ms = +(performance.now() - t0).toFixed(2);
+  res.max_datagram_size = wt.datagrams.maxDatagramSize;
+  try {
+    // Reliable channel: one bidirectional stream, hello first, then framed pings.
+    const bidi = await wt.createBidirectionalStream();
+    const w = bidi.writable.getWriter();
+    await w.write(frame(2, HELLO));
+    const reader = bidi.readable.getReader();
+    let buf = new Uint8Array(0);
+    const readFrame = async () => {
+      for (;;) {
+        if (buf.length >= 5) {
+          const len = new DataView(buf.buffer, buf.byteOffset).getUint32(0, true);
+          if (buf.length >= 4 + len) {
+            const f = buf.slice(4, 4 + len);
+            buf = buf.slice(4 + len);
+            return f;
+          }
+        }
+        const { value, done } = await reader.read();
+        if (done) throw new Error("stream closed");
+        const nb = new Uint8Array(buf.length + value.length);
+        nb.set(buf); nb.set(value, buf.length);
+        buf = nb;
+      }
+    };
+    const srtt = [];
+    for (let i = 0; i < n; i++) {
+      await w.write(frame(0, pingPayload(i)));
+      const f = await Promise.race([readFrame(), sleep(2000).then(() => { throw new Error("stream echo timeout"); })]);
+      const sent = new DataView(f.buffer, f.byteOffset + 1 + 8).getFloat64(0, true);
+      srtt.push(performance.now() - sent);
+      await sleep(2);
+    }
+    res.stream = stats(srtt, n);
+
+    // Unreliable channel: datagrams.
+    const dw = wt.datagrams.writable.getWriter();
+    const dr = wt.datagrams.readable.getReader();
+    const drtt = [];
+    const seen = new Set();
+    let reading = true;
+    (async () => {
+      while (reading) {
+        const { value, done } = await dr.read();
+        if (done) break;
+        const dv = new DataView(value.buffer, value.byteOffset);
+        const seq = dv.getUint32(0, true);
+        if (!seen.has(seq)) { seen.add(seq); drtt.push(performance.now() - dv.getFloat64(8, true)); }
+      }
+    })().catch(() => {});
+    for (let i = 0; i < n; i++) { await dw.write(pingPayload(i)); await sleep(5); }
+    await sleep(500);
+    reading = false;
+    res.datagram = stats(drtt, n);
+    try { dr.cancel(); } catch (_) {}
+    wt.close({ closeCode: 0, reason: "done" });
+  } catch (e) {
+    res.error = String(e && e.message || e);
+  }
+  return res;
+}
+
+async function runWebSocket(host, port, n) {
+  const res = { api: typeof WebSocket !== "undefined", connected: false };
+  const t0 = performance.now();
+  return await new Promise((resolve) => {
+    let ws;
+    try { ws = new WebSocket(`ws://${host}:${port}/`, "orrery.1"); } catch (e) { res.error = String(e); return resolve(res); }
+    ws.binaryType = "arraybuffer";
+    const rtts = [];
+    let sent = 0;
+    const fail = (m) => { res.error = m; resolve(res); };
+    const timer = setTimeout(() => fail("timeout"), 20000);
+    ws.onerror = () => fail("websocket error");
+    ws.onopen = () => {
+      res.connected = true;
+      res.connect_ms = +(performance.now() - t0).toFixed(2);
+      const next = () => {
+        if (sent >= n) { res.stream = stats(rtts, n); clearTimeout(timer); ws.close(); return resolve(res); }
+        const p = pingPayload(sent++);
+        const b = new Uint8Array(1 + p.length); b[0] = 0; b.set(p, 1);
+        ws.send(b);
+      };
+      ws.onmessage = (ev) => {
+        const b = new Uint8Array(ev.data);
+        const sentAt = new DataView(b.buffer, 1 + 8).getFloat64(0, true);
+        rtts.push(performance.now() - sentAt);
+        setTimeout(next, 2);
+      };
+      next();
+    };
+  });
+}
+
+async function run(which) {
+  const host = $("host").value.trim(), n = parseInt($("n").value, 10) || 100;
+  const out = { ua: navigator.userAgent, secure_context: window.isSecureContext };
+  $("out").textContent = "running...";
+  if (which !== "ws") out.webtransport = await runWebTransport(host, $("port").value.trim(), $("hash").value.trim().toLowerCase(), n);
+  if (which !== "wt") out.websocket = await runWebSocket(host, $("wsport").value.trim(), n);
+  $("out").textContent = JSON.stringify(out, null, 2);
+  window.trialResult = out;
+  return out;
+}
+window.runTrial = run;
+$("runwt").onclick = () => run("wt");
+$("runws").onclick = () => run("ws");
+$("runall").onclick = () => run("all");
+if (q.get("auto")) run(q.get("auto") === "1" ? "all" : q.get("auto"));
+</script>
+</body>
+</html>
