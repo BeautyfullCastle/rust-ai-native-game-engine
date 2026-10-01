@@ -171,7 +171,9 @@ fn wss_listener_uses_the_quic_certificate() {
     let (mut server, _addr, _fp, der) = wt_server();
     let wss = server.add_wss_listener(loopback()).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    rt.block_on(async {
+    // Keep the client socket open until the server has read the message: closing it
+    // right after the send can reset the connection first (seen on Windows).
+    let ws = rt.block_on(async {
         let mut roots = rustls::RootCertStore::empty();
         roots.add(CertificateDer::from(der)).unwrap();
         let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -188,9 +190,12 @@ fn wss_listener_uses_the_quic_certificate() {
         req.headers_mut().insert("Sec-WebSocket-Protocol", "orrery.1".parse().unwrap());
         let (mut ws, _) = tokio_tungstenite::client_async(req, tls).await.expect("websocket handshake over TLS");
         ws.send(Message::Binary(vec![0u8, 4, 5, 6].into())).await.unwrap();
+        ws
     });
     match wait_for(&mut server, WAIT, |e| matches!(e, Event::Message { .. })) {
         Some(Event::Message { channel: Channel::Reliable, bytes, .. }) => assert_eq!(bytes, [4, 5, 6]),
         other => panic!("{other:?}"),
     }
+    drop(ws);
+    drop(rt);
 }
