@@ -12,7 +12,7 @@ use orr_proto::{Bundle, Welcome};
 use orr_session::{ClientState, DumpCollector, RelayClient, RelayClientConfig};
 use orr_sim::{Game, PlayerSlot, SimCommand, Simulation, TickInputs};
 
-use crate::{AcceptAll, InputValidator, RelayServer, RoomConfig};
+use crate::{AcceptAll, AuthoritativeConfig, InputValidator, RelayServer, RoomConfig, ServerSim, SharedDumps};
 
 thread_local! {
     static CURRENT_CLIENT: Cell<usize> = const { Cell::new(usize::MAX) };
@@ -68,6 +68,8 @@ pub struct Harness<G: Game> {
     pub net: SimNet,
     pub server: RelayServer<SimEndpoint, Box<dyn InputValidator>>,
     pub clients: Vec<HarnessClient<G>>,
+    /// The `.orrd` dumps the server wrote (authoritative rooms).
+    pub server_dumps: SharedDumps,
     pub now_us: u64,
     pub room: u64,
     /// Length of one harness step.
@@ -94,14 +96,57 @@ impl<G: Game> Harness<G> {
         make_config: impl Fn(&Welcome) -> G::Config + 'static,
         validator: Box<dyn InputValidator>,
     ) -> Self {
+        Self::build(seed, room_cfg, None, script, make_config, validator)
+    }
+
+    /// An authoritative room: the server also simulates `sim` (see
+    /// `RelayServer::create_authoritative_room`).
+    pub fn authoritative(
+        seed: u64,
+        room_cfg: RoomConfig,
+        auth: AuthoritativeConfig,
+        sim: Box<dyn ServerSim>,
+        script: Script<G>,
+        make_config: impl Fn(&Welcome) -> G::Config + 'static,
+    ) -> Self {
+        Self::with_authoritative_validator(seed, room_cfg, auth, sim, script, make_config, Box::new(AcceptAll))
+    }
+
+    /// Authoritative, with an input validator as well.
+    pub fn with_authoritative_validator(
+        seed: u64,
+        room_cfg: RoomConfig,
+        auth: AuthoritativeConfig,
+        sim: Box<dyn ServerSim>,
+        script: Script<G>,
+        make_config: impl Fn(&Welcome) -> G::Config + 'static,
+        validator: Box<dyn InputValidator>,
+    ) -> Self {
+        Self::build(seed, room_cfg, Some((auth, sim)), script, make_config, validator)
+    }
+
+    fn build(
+        seed: u64,
+        room_cfg: RoomConfig,
+        auth: Option<(AuthoritativeConfig, Box<dyn ServerSim>)>,
+        script: Script<G>,
+        make_config: impl Fn(&Welcome) -> G::Config + 'static,
+        validator: Box<dyn InputValidator>,
+    ) -> Self {
         let net = SimNet::new(seed);
         let mut server = RelayServer::with_validator(net.endpoint(), validator, seed ^ 0x51ED);
+        let server_dumps = SharedDumps::new();
+        server.set_dump_sink(server_dumps.clone());
         let room = 1;
-        server.create_room(room, room_cfg);
+        match auth {
+            Some((a, sim)) => server.create_authoritative_room(room, room_cfg, a, sim),
+            None => server.create_room(room, room_cfg),
+        }
         Self {
             net,
             server,
             clients: Vec::new(),
+            server_dumps,
             now_us: 0,
             room,
             step_us: 1000,

@@ -88,6 +88,10 @@ pub struct ClientReport {
     pub hard_resyncs: u32,
     pub desyncs: u64,
     pub dumps: u64,
+    /// Server corrections applied (authoritative rooms).
+    pub corrections: u64,
+    /// The `Bye` code if the server kicked this client.
+    pub kicked: Option<u8>,
     pub decode_errors: u64,
     pub head_tick: u64,
     pub verified_tick: u64,
@@ -144,6 +148,8 @@ pub fn report<G: Game, L: Link>(client: &RelayClient<G, L>, play_secs: f64) -> C
         hard_resyncs: cs.hard_resyncs,
         desyncs: cs.desyncs,
         dumps: cs.dumps_written,
+        corrections: cs.corrections,
+        kicked: client.kicked(),
         decode_errors: ss.decode_errors,
         head_tick: session.map_or(0, |s| s.head_tick()),
         verified_tick: session.map_or(0, |s| s.verified_tick()),

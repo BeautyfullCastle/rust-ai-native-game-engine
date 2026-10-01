@@ -4,7 +4,8 @@ use orr_proto::{
     Bundle, Channel, ClientMsg, ConnId, Endpoint, ProtoError, RejectReason, ServerEvent, ServerMsg, PROTOCOL_VERSION,
 };
 
-use crate::room::{Out, Room, RoomConfig, RoomStats, ServerNote};
+use crate::authoritative::{DumpWriter, NoDumps, ServerSim};
+use crate::room::{AuthoritativeConfig, Out, Room, RoomConfig, RoomStats, ServerNote};
 use crate::validate::{AcceptAll, InputValidator};
 
 /// How long a rejected connection is kept open so the reject message can
@@ -14,6 +15,7 @@ const REJECT_GRACE_US: u64 = 2_000_000;
 struct ConnInfo {
     room: Option<u64>,
 }
+
 
 /// The relay server core: rooms of players on top of an [`Endpoint`].
 ///
@@ -31,6 +33,7 @@ pub struct RelayServer<E: Endpoint, V: InputValidator = AcceptAll> {
     notes: Vec<ServerNote>,
     token_state: u64,
     bad_messages: u64,
+    dumps: Box<dyn DumpWriter>,
 }
 
 impl<E: Endpoint> RelayServer<E, AcceptAll> {
@@ -53,12 +56,26 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
             notes: Vec::new(),
             token_state: token_seed,
             bad_messages: 0,
+            dumps: Box::new(NoDumps),
         }
+    }
+
+    /// Where the server's own `.orrd` desync dumps (authoritative rooms) go.
+    /// Without a sink they are dropped.
+    pub fn set_dump_sink(&mut self, sink: impl DumpWriter + 'static) {
+        self.dumps = Box::new(sink);
     }
 
     /// Creates a room. Clients name it by `id` in their `Hello`.
     pub fn create_room(&mut self, id: u64, cfg: RoomConfig) {
         self.rooms.insert(id, Room::new(id, cfg));
+    }
+
+    /// Creates an authoritative room (see the crate docs): the server also
+    /// runs `sim` on the confirmed bundles, referees the clients' checksums
+    /// and serves snapshots itself. Panics when `sim` does not fit `cfg`.
+    pub fn create_authoritative_room(&mut self, id: u64, cfg: RoomConfig, auth: AuthoritativeConfig, sim: Box<dyn ServerSim>) {
+        self.rooms.insert(id, Room::new_authoritative(id, cfg, auth, sim));
     }
 
     pub fn close_room(&mut self, id: u64) {
@@ -99,6 +116,12 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
         self.rooms.get(&id).map_or(&[], Room::recorded)
     }
 
+    /// The server's own checksum at every checkpoint tick of an authoritative
+    /// room (needs `record_all`).
+    pub fn server_checksums(&self, id: u64) -> &[(u64, u64)] {
+        self.rooms.get(&id).map_or(&[], Room::server_checksums)
+    }
+
     /// Messages that failed to decode (or came from the wrong state).
     pub fn bad_messages(&self) -> u64 {
         self.bad_messages
@@ -122,7 +145,7 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
         }
         let mut closed = Vec::new();
         for (&id, room) in &mut self.rooms {
-            let mut out = Out { ep: &mut self.endpoint, notes: &mut self.notes, now_us };
+            let mut out = Out { ep: &mut self.endpoint, notes: &mut self.notes, now_us, closing: &mut self.closing, dumps: &mut *self.dumps };
             room.advance(&mut out);
             if room.should_close() {
                 closed.push(id);
@@ -148,7 +171,7 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
                 let Some(info) = self.conns.remove(&conn) else { return };
                 if let Some(room) = info.room.and_then(|r| self.rooms.get_mut(&r)) {
                     if let Some(slot) = room.slot_of(conn) {
-                        let mut out = Out { ep: &mut self.endpoint, notes: &mut self.notes, now_us };
+                        let mut out = Out { ep: &mut self.endpoint, notes: &mut self.notes, now_us, closing: &mut self.closing, dumps: &mut *self.dumps };
                         room.vacate(&mut out, slot, true);
                     }
                 }
@@ -186,7 +209,7 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
                 let _ = room;
                 let token = self.next_token();
                 let room = self.rooms.get_mut(&h.room).unwrap();
-                let mut out = Out { ep: &mut self.endpoint, notes: &mut self.notes, now_us };
+                let mut out = Out { ep: &mut self.endpoint, notes: &mut self.notes, now_us, closing: &mut self.closing, dumps: &mut *self.dumps };
                 match room.hello(&mut out, conn, &h, token) {
                     Ok((_slot, stale)) => {
                         if let Some(info) = self.conns.get_mut(&conn) {
@@ -205,10 +228,13 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
             (msg, Some(room_id)) => {
                 let Some(room) = self.rooms.get_mut(&room_id) else { return };
                 let Some(slot) = room.slot_of(conn) else {
-                    self.bad_messages += 1;
+                    // A kicked or leaving client's last packets are not an error.
+                    if !self.closing.contains_key(&conn) {
+                        self.bad_messages += 1;
+                    }
                     return;
                 };
-                let mut out = Out { ep: &mut self.endpoint, notes: &mut self.notes, now_us };
+                let mut out = Out { ep: &mut self.endpoint, notes: &mut self.notes, now_us, closing: &mut self.closing, dumps: &mut *self.dumps };
                 match msg {
                     ClientMsg::Hello(_) => unreachable!("handled above"),
                     ClientMsg::Input { slot: claimed, ack_tick, entries, .. } => {

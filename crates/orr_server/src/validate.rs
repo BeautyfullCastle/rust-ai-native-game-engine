@@ -1,7 +1,9 @@
 //! The Relay + Validate hook: the server checks every input before it can
 //! become part of a confirmed tick. The server does not simulate, so the
 //! check only sees bytes (input range, rate, command legality is up to the
-//! game's implementation of [`InputValidator`]).
+//! game's implementation of [`InputValidator`]). In an authoritative room the
+//! server also checks the *state* after each tick (see
+//! `GameSim::with_audit`).
 
 /// What the server knows about one submitted input.
 pub struct InputCtx<'a> {
@@ -26,6 +28,10 @@ pub enum Verdict {
     DropCommands,
     /// Treat the input as if it never arrived (the tick is repeated).
     Reject,
+    /// Like `Reject`, and remove the player: the input cannot come from an
+    /// honest client. Only authoritative rooms act on it (`Reject` in a
+    /// relay room).
+    Kick,
 }
 
 /// Input range, rate and command legality checks.

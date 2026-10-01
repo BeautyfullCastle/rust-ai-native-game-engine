@@ -449,6 +449,57 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         Ok(Self::from_sim(sim, cfg, source, tick + 1))
     }
 
+    /// Authoritative mode: replaces this session's state with the server's
+    /// frame of confirmed tick `tick` (`frame_bytes` is `Frame::to_bytes`,
+    /// already decompressed; `checksum` its checksum), the correction of a
+    /// client the server found diverged.
+    ///
+    /// The session continues from `tick` as its verified tick, as a late
+    /// joiner does, except that it keeps the confirmed inputs it already
+    /// holds above `tick` and its own pending local inputs. Everything
+    /// simulated before is dropped (the predicted ticks, the frame ring, the
+    /// anchors). Checksums recorded for ticks `>= bad_from` came from the
+    /// diverged state and are dropped too. Events announced as `Predicted`
+    /// and not yet verified are canceled in the returned batch.
+    ///
+    /// `tick` may be older than the current verified tick (the reliable
+    /// correction can lag the unreliable bundles); the caller must then feed
+    /// the confirmed bundles of `tick + 1..` again.
+    pub fn restore_confirmed(
+        &mut self,
+        tick: u64,
+        checksum: u64,
+        frame_bytes: &[u8],
+        bad_from: u64,
+    ) -> Result<EventBatch<G::Event>, JoinError> {
+        let frame = Frame::from_bytes(self.sim.registry().clone(), frame_bytes).map_err(JoinError::BadSnapshot)?;
+        if frame.tick() != tick {
+            return Err(JoinError::SnapshotMismatch { expected: tick, actual: frame.tick() });
+        }
+        if frame.checksum() != checksum {
+            return Err(JoinError::SnapshotMismatch { expected: checksum, actual: frame.checksum() });
+        }
+        self.sim.restore(&frame);
+        self.ring = FrameRing::new(self.cfg.max_prediction + 2, self.sim.registry().clone());
+        self.ring.store(self.sim.frame());
+        self.verified_tick = tick;
+        self.history.clear();
+        self.confirmed_input = self.confirmed_input.split_off(&(tick + 1));
+        self.confirmed_commands = self.confirmed_commands.split_off(&(tick + 1));
+        self.confirmed_absent.retain(|&(t, _)| t > tick);
+        self.local_pending = self.local_pending.split_off(&(tick + 1));
+        let mut batch = EventBatch::new();
+        for (key, _) in std::mem::take(&mut self.announced) {
+            batch.push(key, EventStatus::Canceled);
+        }
+        self.checksums.retain(|&(t, _)| t < bad_from);
+        self.anchors.clear();
+        if self.cfg.keep_anchors > 0 {
+            self.anchors.push_back(Anchor { tick, checksum, frame_bytes: frame_bytes.to_vec() });
+        }
+        Ok(batch)
+    }
+
     /// Answers a joiner's [`join_request`] with a snapshot message for
     /// [`from_join_snapshot`](Self::from_join_snapshot). Only the peer that
     /// lists the slot in `SessionConfig::vacant_slots` can serve it.

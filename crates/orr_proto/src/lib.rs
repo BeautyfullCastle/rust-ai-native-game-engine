@@ -20,6 +20,7 @@ pub mod netsim;
 
 pub use msg::{
     Bundle, ClientMsg, Hello, InputEntry, ProtoError, RejectReason, ServerMsg, SlotConfirmed, TimeSync, Welcome,
-    FLAG_ABSENT, FLAG_REPEATED, NO_SLOT, PROTOCOL_VERSION,
+    BYE_BEHIND, BYE_KICKED_CHEAT, BYE_KICKED_DESYNC, FLAG_ABSENT, FLAG_REPEATED, MIN_PROTOCOL_VERSION, NO_SLOT,
+    PROTOCOL_VERSION, SERVER_SLOT, WELCOME_AUTHORITATIVE,
 };
 pub use net::{Channel, ConnId, Endpoint, Link, LinkEvent, ServerEvent, UNRELIABLE_MTU};

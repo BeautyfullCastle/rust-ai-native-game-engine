@@ -13,24 +13,24 @@ workspace = true
 default = ["net"]
 net = ["dep:orr_relay_net", "dep:ctrlc"]
 # Test harness (`orr_server::harness`): server + clients on a simulated
-# network. Pulls in the session and sim crates; off for the plain server.
-harness = ["dep:orr_session", "dep:bytemuck"]
+# network; off for the plain server.
+harness = []
 
 [dependencies]
 orr_proto = { path = "../orr_proto" }
-orr_session = { path = "../orr_session", optional = true }
+orr_session = { path = "../orr_session" }
 orr_sim = { path = "../orr_sim" }
+orr_ecs = { path = "../orr_ecs" }
+orr_fp = { path = "../orr_fp" }
+orr_testgame = { path = "../orr_testgame" }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 orr_relay_net = { path = "../orr_relay_net", optional = true }
 ctrlc = { version = "3", optional = true }
-bytemuck = { version = "1", optional = true }
+bytemuck = "1"
 
 [dev-dependencies]
 # Turns the harness on for this crate's own tests.
 orr_server = { path = ".", features = ["harness"] }
-orr_fp = { path = "../orr_fp" }
-orr_ecs = { path = "../orr_ecs" }
-orr_session = { path = "../orr_session" }
-orr_testgame = { path = "../orr_testgame" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [[bin]]
