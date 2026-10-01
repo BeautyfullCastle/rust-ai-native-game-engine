@@ -95,7 +95,8 @@ impl<G: Game> Host<G> {
         while !stop.load(Ordering::Relaxed) {
             let report = self.frame();
             if report.requests == 0 && !report.more {
-                let ticking = self.play.as_ref().is_some_and(|pc| pc.session().wants_tick());
+                // A relay client has a session to pump every frame (its frames come from the network).
+                let ticking = self.server.is_client_mode() || self.play.as_ref().is_some_and(|pc| pc.session().wants_tick());
                 // A frame held back by a rate cap goes out a moment later: do not sleep through it.
                 let wait = if ticking || report.frame_pending { idle } else { idle * 10 };
                 self.server.wait_for_request(wait);

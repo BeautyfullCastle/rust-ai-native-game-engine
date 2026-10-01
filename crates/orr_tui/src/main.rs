@@ -1,7 +1,9 @@
 //! `orr_tui`: a terminal view of an Orrery simulation, from its view stream alone.
 //!
 //! ```text
-//! orr_tui --connect ws://127.0.0.1:7777 [--token T]      over ERP (WebSocket; tcp://host:port also works)
+//! orr_tui --connect ws://127.0.0.1:7777 [--token T]      over ERP (WebSocket; tcp://host:port also works);
+//!         [--headless [--ticks N] [--check-tick T]]      a host in client mode (`orr_remote_host --join`) shows its
+//!                                                        slot, RTT, delay and rollbacks; headless prints `RESULT client ...`
 //! orr_tui --ffi [--lib PATH] [--scene PATH]              through the C ABI of liborr_ffi, loaded at run time
 //!         [--player N] [--fps N]
 //!         [--headless [--frames N] [--dump FILE] [--size WxH]]
@@ -25,6 +27,8 @@ const USAGE: &str = "usage: orr_tui (--connect URL [--token T] | --ffi [--lib PA
                      \x20      orr_tui --server HOST:PORT [--lib PATH] [--fingerprint HEX | --insecure] [--ws] [--room N] [--slot N]\n\
                      \x20               [--sim-latency MS] [--sim-jitter MS] [--sim-loss PCT] [--sim-seed N] [--connect-timeout S]\n\
                      \x20               [--headless [--ticks N] [--check-tick T]]   (play on a relay server through the C ABI)\n\
+                     \x20      --connect also works against `orr_remote_host --join` (a host that plays on a relay server): the status line\n\
+                     \x20      shows slot, RTT, delay and rollbacks; --headless then prints `RESULT client ...` like --server\n\
                      keys: arrows/a/d move, z/c spin, f fire, space/p play-pause, s step, r refit camera, q quit\n\
                      --headless plays a scripted scenario (every player, one step per frame), writes the ASCII\n\
                      grid of each frame to --dump and prints `RESULT entities=.. frames=.. fnv=0x..`;\n\
@@ -145,7 +149,8 @@ fn open(a: &Args) -> Result<(Box<dyn Source>, bool), String> {
 fn run() -> Result<(), String> {
     let a = parse_args()?;
     let (mut src, own_host) = open(&a)?;
-    if a.headless && a.server.is_some() {
+    // A client of a relay server: through the C ABI (`--server`) or a host in client mode (`--connect`).
+    if a.headless && (a.server.is_some() || src.net_status().is_some()) {
         let opts = headless::ClientOpts { ticks: a.ticks, check_tick: a.check_tick };
         let summary = headless::run_client(src.as_mut(), &opts)?;
         println!("{summary}");

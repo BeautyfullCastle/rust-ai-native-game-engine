@@ -60,6 +60,10 @@ pub struct HostLimits {
     /// The game's view stream producer (the `viewstream` topic of
     /// `watch.subscribe`); `None` = the host has no view stream.
     pub view_stream: Option<ViewStreamHook>,
+    /// Client mode: the host is a relay client (`orr_remote_host --join`) and plays on a server; its
+    /// view stream, `sim.state`/`session.status`, `sim.input` and `sim.command` come from that
+    /// session and every method that needs a document or a local simulation is refused.
+    pub client_session: Option<crate::client_mode::ClientSessionHook>,
 }
 
 impl Default for HostLimits {
@@ -75,6 +79,7 @@ impl Default for HostLimits {
             allow_scene_paths: false,
             debug_hooks: false,
             view_stream: None,
+            client_session: None,
         }
     }
 }
@@ -287,6 +292,7 @@ pub(crate) fn call<G: Game>(
                 Err(e) => Err(RpcError::new(DEBUG_REFUSED, "debug_refused", e.to_string()).with("error", json!(debug_error_name(e)))),
             }
         }
+        "session.status" => Err(RpcError::state("not_a_client", "this host is not a relay client (session.status is for hosts started with --join); see sim.state")),
         "sim.input" => sim_input(t, &p),
         "sim.command" => sim_command(t, &p),
         // `watch.*` is handled by the server, which owns the subscriptions.

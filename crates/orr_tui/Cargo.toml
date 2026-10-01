@@ -37,3 +37,5 @@ orr_viewstream = { path = "../orr_viewstream" }
 # The relay server, in process, for the client mode test (`tests/client.rs`).
 orr_server = { path = "../orr_server" }
 orr_relay_net = { path = "../orr_relay_net" }
+orr_edit = { path = "../orr_edit" }
+orr_sim = { path = "../orr_sim" }

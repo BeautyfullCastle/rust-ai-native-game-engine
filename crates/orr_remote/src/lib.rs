@@ -61,6 +61,7 @@
 mod activity;
 mod caps;
 mod client;
+mod client_mode;
 pub mod codec;
 mod dispatch;
 mod error;
@@ -81,6 +82,7 @@ pub mod wire;
 pub use activity::{ActivityEntry, ActivityKind, ClientInfo, ValueChange, VerifyDetail, DEFAULT_ACTIVITY_CAPACITY};
 pub use caps::{origin_of_client, Auth, Cap, Caps, TokenEntry, USER_CLIENT};
 pub use client::{ClientError, ErpClient};
+pub use client_mode::{ClientPump, ClientSession, ClientSessionHook, SessionError, SessionErrorKind};
 pub use dispatch::{call_local, ErpTarget, HostLimits};
 pub use error::*;
 pub use host::{Host, Pacer};
