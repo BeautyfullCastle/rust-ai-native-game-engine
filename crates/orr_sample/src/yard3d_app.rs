@@ -47,6 +47,8 @@ pub struct YardOptions {
     /// Requested MSAA samples (the renderer falls back to what the adapter has).
     pub msaa: u32,
     pub shadow_map: u32,
+    /// Longitude segments of the sphere and capsule meshes.
+    pub mesh_segments: u32,
     pub shadows: bool,
     /// Start with the debug lines (boxes and velocity arrows) on.
     pub debug: bool,
@@ -64,10 +66,21 @@ impl Default for YardOptions {
             size: (1280, 720),
             msaa: 4,
             shadow_map: 2048,
+            mesh_segments: orr_render::DEFAULT_SEGMENTS,
             shadows: true,
             debug: false,
             view: crate::yard3d_view::yard_view_config(),
         }
+    }
+}
+
+impl YardOptions {
+    /// The mobile / weak-GPU preset (`--low`): see [`Settings3D::LOW`].
+    pub fn low(&mut self) {
+        let low = Settings3D::LOW;
+        self.msaa = low.msaa;
+        self.shadow_map = low.shadow_map_size;
+        self.mesh_segments = low.mesh_segments;
     }
 }
 
@@ -393,12 +406,15 @@ impl<B: Bridge<Yard3D>> ApplicationHandler for App<B> {
             }
         };
         let size = window.inner_size();
-        let settings = Settings3D { msaa: self.opts.msaa, shadow_map_size: self.opts.shadow_map };
+        let settings = Settings3D { msaa: self.opts.msaa, shadow_map_size: self.opts.shadow_map, mesh_segments: self.opts.mesh_segments };
         match WindowRenderer3D::new(window.clone(), (size.width, size.height), self.opts.vsync, settings) {
             Ok(renderer) => {
                 self.summary.adapter = renderer.adapter_name();
                 self.msaa_used = renderer.renderer.samples();
-                println!("adapter: {} (msaa {}x, shadow map {})", self.summary.adapter, self.msaa_used, self.opts.shadow_map);
+                println!(
+                    "adapter: {} (msaa {}x, shadow map {}, mesh segments {})",
+                    self.summary.adapter, self.msaa_used, self.opts.shadow_map, self.opts.mesh_segments
+                );
                 self.gfx = Some(Gfx { window, renderer });
                 self.started = Instant::now();
                 self.last_frame = self.started;

@@ -9,6 +9,9 @@
 //!   --latency TICKS              one-way loopback latency of the 2 peers (default 6)
 //!   --jitter TICKS               loopback jitter (default 2)
 //!   --tau SECONDS                rollback smoothing time constant (default 0.12, 0 = off)
+//!   --low                        mobile / weak-GPU preset: no MSAA, 512 texel shadow map, 12-segment
+//!                                round meshes (later flags such as --msaa override single values)
+//!   --mesh-segments N            longitude segments of spheres and capsules (default 32)
 //!   --msaa N                     MSAA samples, 1 2 4 8 (default 4, falls back to what the adapter has)
 //!   --shadow-map N               shadow map size in texels (default 2048)
 //!   --no-shadows                 start with shadow mapping off (H toggles)
@@ -82,6 +85,8 @@ fn real_main() -> Result<(), String> {
             "--latency" => net.latency_ticks = parse("--latency", value("--latency")?)?,
             "--jitter" => net.jitter_ticks = parse("--jitter", value("--jitter")?)?,
             "--tau" => opts.view.correction_tau = parse("--tau", value("--tau")?)?,
+            "--low" => opts.low(),
+            "--mesh-segments" => opts.mesh_segments = parse("--mesh-segments", value("--mesh-segments")?)?,
             "--msaa" => opts.msaa = parse("--msaa", value("--msaa")?)?,
             "--shadow-map" => opts.shadow_map = parse("--shadow-map", value("--shadow-map")?)?,
             "--no-shadows" => opts.shadows = false,

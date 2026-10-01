@@ -57,12 +57,20 @@ pub struct Settings3D {
     pub msaa: u32,
     /// Side of the square shadow map in texels.
     pub shadow_map_size: u32,
+    /// Longitude segments of the sphere and capsule meshes (3 to 64; the latitude rings follow).
+    pub mesh_segments: u32,
 }
 
 impl Default for Settings3D {
     fn default() -> Self {
-        Self { msaa: 4, shadow_map_size: 2048 }
+        Self { msaa: 4, shadow_map_size: 2048, mesh_segments: crate::mesh::DEFAULT_SEGMENTS }
     }
+}
+
+impl Settings3D {
+    /// The mobile / weak-GPU preset: no MSAA (the biggest saving on tile and software renderers),
+    /// a 512 texel shadow map and 12-segment round meshes (a sphere is 192 triangles instead of 1,536).
+    pub const LOW: Settings3D = Settings3D { msaa: 1, shadow_map_size: 512, mesh_segments: 12 };
 }
 
 #[repr(C)]
@@ -264,7 +272,7 @@ impl<B: Rhi> Renderer3D<B> {
         let shadow_bind = rhi.create_bind_group(&shadow_pipeline, 0, &[Binding::Uniform { binding: 0, buffer: &shadow_globals }]);
         let line_bind = rhi.create_bind_group(&line_pipeline, 0, &[Binding::Uniform { binding: 0, buffer: &globals }]);
 
-        let meshes = MeshSet::build();
+        let meshes = MeshSet::build_with(settings.mesh_segments);
         let mesh_vertices = rhi.create_buffer(&BufferDesc {
             label: "mesh vertices",
             size: (meshes.vertices.len() * std::mem::size_of::<Vertex3>()) as u64,
