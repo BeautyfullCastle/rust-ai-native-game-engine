@@ -1,6 +1,8 @@
 //! The view stream format: round trips, the pinned bytes of a tiny frame, and
 //! what a reader does with damaged messages.
 
+#![allow(clippy::float_arithmetic)] // a view-boundary test: poses are floats
+
 use orr_viewstream::*;
 
 fn sample_frame() -> ViewFrame {

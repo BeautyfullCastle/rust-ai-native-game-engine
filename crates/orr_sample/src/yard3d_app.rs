@@ -66,7 +66,7 @@ impl Default for YardOptions {
             shadow_map: 2048,
             shadows: true,
             debug: false,
-            view: ViewConfig::default(),
+            view: crate::yard3d_view::yard_view_config(),
         }
     }
 }
@@ -215,7 +215,10 @@ impl<B: Bridge<Yard3D>> App<B> {
         self.opts.frames.is_some()
     }
 
-    fn build_overlay(&mut self, size: (u32, u32), tick: u64, verified: u64, bodies: u32, rollbacks: u64, depth: u32, stalls: u64) {
+    fn build_overlay(&mut self, size: (u32, u32), s: &orr_bridge::Snapshot) {
+        let (tick, verified, bodies) = (s.tick(), s.verified_tick(), s.predicted().alive_count());
+        let stats = s.stats();
+        let (rollbacks, depth, stalls) = (stats.rollbacks, stats.max_rollback_depth, stats.stalls);
         let h = size.1 as f32;
         let scale = if size.0 >= 1100 { 2.0 } else { 1.0 };
         let pad = 8.0 * scale;
@@ -302,8 +305,7 @@ impl<B: Bridge<Yard3D>> App<B> {
         }
         self.overlay.clear();
         if let Some(s) = &snapshot {
-            let stats = s.stats();
-            self.build_overlay(viewport, s.tick(), s.verified_tick(), s.predicted().alive_count(), stats.rollbacks, stats.max_rollback_depth, stats.stalls);
+            self.build_overlay(viewport, s);
         }
 
         self.frame_count += 1;
@@ -531,7 +533,7 @@ pub enum HeadlessLimit {
 pub fn run_headless(scene: YardConfig, net: Loopback, limit: HeadlessLimit) -> YardSummary {
     let metrics = SimMetrics::new();
     let mut bridge = InProc::new(yard_pair(scene, net, metrics.clone()), yard_bridge_config(metrics.clone()));
-    let mut view = ViewWorld3::new(YardExtractor, ViewConfig::default());
+    let mut view = ViewWorld3::new(YardExtractor, crate::yard3d_view::yard_view_config());
     let (mut items, mut list) = (Vec::<RenderItem3>::new(), RenderList3D::new());
     let (mut view_ms, mut list_ms) = (Vec::new(), Vec::new());
     let started = Instant::now();

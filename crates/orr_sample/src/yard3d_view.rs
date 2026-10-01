@@ -112,6 +112,13 @@ pub fn yard_lighting() -> Lighting {
     }
 }
 
+/// View settings for the yard: a correction longer than a few units cannot be a physical
+/// rollback correction (bodies move a few units in a prediction window), it is a different
+/// body that got the same entity index after a mispredicted spawn, so it is shown at once.
+pub fn yard_view_config() -> orr_view::ViewConfig {
+    orr_view::ViewConfig { snap_distance: 8.0, ..orr_view::ViewConfig::default() }
+}
+
 /// The orbit camera that frames the yard.
 pub fn yard_camera() -> OrbitCamera {
     OrbitCamera::new([0.0, 1.0, 0.0], 0.55, 0.64, 40.0)

@@ -109,16 +109,6 @@ impl Quat {
         Quat::new(-self.x, -self.y, -self.z, self.w)
     }
 
-    /// `self * rhs`: apply `rhs` first, then `self`.
-    pub fn mul(self, r: Quat) -> Quat {
-        Quat::new(
-            self.w * r.x + self.x * r.w + self.y * r.z - self.z * r.y,
-            self.w * r.y - self.x * r.z + self.y * r.w + self.z * r.x,
-            self.w * r.z + self.x * r.y - self.y * r.x + self.z * r.w,
-            self.w * r.w - self.x * r.x - self.y * r.y - self.z * r.z,
-        )
-    }
-
     /// Unit length again; the identity for a (near) zero quaternion.
     pub fn normalize(self) -> Quat {
         let l = self.dot(self).sqrt();
@@ -174,6 +164,19 @@ impl Quat {
             self.w * wa + b.w * wb,
         )
         .normalize()
+    }
+}
+
+/// `a * b`: apply `b` first, then `a`.
+impl Mul<Quat> for Quat {
+    type Output = Quat;
+    fn mul(self, r: Quat) -> Quat {
+        Quat::new(
+            self.w * r.x + self.x * r.w + self.y * r.z - self.z * r.y,
+            self.w * r.y - self.x * r.z + self.y * r.w + self.z * r.x,
+            self.w * r.z + self.x * r.y - self.y * r.x + self.z * r.w,
+            self.w * r.w - self.x * r.x - self.y * r.y - self.z * r.z,
+        )
     }
 }
 
@@ -252,7 +255,7 @@ mod tests {
         let b = Quat::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), 0.9);
         let v = Vec3::new(0.3, -1.0, 2.0);
         let direct = a.rotate(b.rotate(v));
-        let composed = a.mul(b).rotate(v);
+        let composed = (a * b).rotate(v);
         assert!((direct - composed).length() < 1e-5);
     }
 }

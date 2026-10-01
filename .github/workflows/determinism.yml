@@ -109,7 +109,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
       - if: runner.os == 'Linux'
-        run: cargo test -p orr_render --release --test gpu
+        run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:
           ORR_REQUIRE_GPU: "1"
       # The editor's GPU tests (viewport pixels read back, the app rendered by
@@ -122,6 +122,15 @@ jobs:
       # physics game through the bridge with rollbacks (the checksum tests
       # are in `crates/orr_sample/tests/physics_e2e.rs`, run above).
       - run: cargo run -p orr_sample --release --bin physics -- --headless --bodies 300 --ticks 300
+      # The 3D sample (orr_physics3d yard): headless sim plus the view's CPU work
+      # (extraction, slerp interpolation, instance lists), no window, no GPU.
+      - run: cargo run -p orr_sample --release --bin physics3d -- --headless --bodies 300 --ticks 300
+      # The 3D sample in a real (virtual X11) window on lavapipe: renders a fixed
+      # number of frames and reads the presented frame back as a PNG.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y -q xvfb
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
 
   wasm32:
     name: wasm32-wasip1 (wasmtime)

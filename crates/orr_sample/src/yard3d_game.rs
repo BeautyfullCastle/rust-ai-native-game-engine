@@ -98,6 +98,9 @@ pub struct Scene {
     pub rain_interval: u32,
     pub max_entities: u32,
     pub _pad: u32,
+    /// Seed of the rain: each drop is a pure function of `(rain_seed, tick, index)`, so a
+    /// player's spawn never moves the rain of other ticks.
+    pub rain_seed: u64,
 }
 
 pub struct Yard3D;
@@ -159,7 +162,7 @@ fn build_scene(frame: &mut Frame, cfg: &YardConfig) {
         r if r >= TICK_RATE => (r / TICK_RATE, 1),
         r => (1, TICK_RATE / r),
     };
-    frame.set_singleton(Scene { rain_batch, rain_interval, max_entities: cfg.max_entities, _pad: 0 });
+    frame.set_singleton(Scene { rain_batch, rain_interval, max_entities: cfg.max_entities, _pad: 0, rain_seed: cfg.layout_seed ^ 0x7A1D });
 
     // Floor (top at y = 0) and four low walls.
     let half = FP::from_int(YARD_HALF);
@@ -291,9 +294,9 @@ impl System<Yard3D> for RainSystem {
             if ctx.frame.alive_count() >= scene.max_entities {
                 return;
             }
-            let rng = ctx.rng();
+            let mut rng = FrameRng::with_stream(scene.rain_seed ^ ctx.tick, u64::from(i));
             let pos = v3(rng.range_fp(-lim, lim), fp!(20) + fp!(1.4) * i as i32, rng.range_fp(-lim, lim));
-            let (body, collider) = random_body(rng, pos);
+            let (body, collider) = random_body(&mut rng, pos);
             spawn_body(ctx.frame, body.with_velocity(v3(FP::ZERO, -FP::TWO, FP::ZERO)), collider);
         }
     }

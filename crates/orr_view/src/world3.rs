@@ -173,7 +173,7 @@ impl<X: Extractor3> ViewWorld3<X> {
                             t.offset = offset;
                             // Shown before: old_off * was. Shown after: new_off * is. Equal when
                             // new_off = old_off * was * is^-1.
-                            t.rot_offset = old.rot_offset.mul(was.rot).mul(is.rot.conjugate()).normalize();
+                            t.rot_offset = (old.rot_offset * was.rot * is.rot.conjugate()).normalize();
                         }
                     }
                     t
@@ -255,7 +255,7 @@ impl<X: Extractor3> ViewWorld3<X> {
                 InterpMode::None => t.cur,
                 _ => t.prev.lerp(t.cur, alpha),
             };
-            let transform = Transform3 { pos: base.pos + t.offset, rot: t.rot_offset.mul(base.rot) };
+            let transform = Transform3 { pos: base.pos + t.offset, rot: t.rot_offset * base.rot };
             out.push(RenderItem3 { entity, transform, style: t.style });
         }
         self.snapshot_items(out);
