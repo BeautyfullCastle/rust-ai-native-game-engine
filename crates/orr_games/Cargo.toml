@@ -1,0 +1,20 @@
+[package]
+name = "orr_games"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Orrery sim-only sample games (PhysGame 2D physics, Yard3D 3D physics): no GPU, no window, no threads, so they build for wasm32 and Android"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_sim = { path = "../orr_sim" }
+orr_ecs = { path = "../orr_ecs" }
+orr_fp = { path = "../orr_fp" }
+orr_physics = { path = "../orr_physics" }
+orr_physics3d = { path = "../orr_physics3d" }
+orr_reflect = { path = "../orr_reflect", default-features = false }
+bytemuck = { version = "1", features = ["derive"] }
