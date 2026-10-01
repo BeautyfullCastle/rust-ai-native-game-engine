@@ -3173,6 +3173,7 @@ dependencies = [
  "orr_session",
  "orr_sim",
  "orr_testgame",
+ "png 0.18.1",
 ]
 
 [[package]]
@@ -3278,6 +3279,18 @@ dependencies = [
  "orr_sim",
  "orr_testgame",
  "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "orr_web_gpu"
+version = "0.0.1"
+dependencies = [
+ "orr_render",
+ "orr_rhi",
+ "orr_web",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

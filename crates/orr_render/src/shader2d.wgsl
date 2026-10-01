@@ -76,10 +76,20 @@ fn vs_shape(in: ShapeIn) -> ShapeOut {
 
 @fragment
 fn fs_shape(in: ShapeOut) -> @location(0) vec4<f32> {
+    // Screen-space derivatives must be taken in uniform control flow (browser WGSL validators
+    // reject them inside a branch on `in.shape`), so both edge widths are computed up front.
+    let d_circle = length(in.local);
+    let edge_circle = max(fwidth(d_circle), 0.0001);
+    // Capsule: signed distance to the axis segment, minus the radius (world units).
+    let half_len = in.params.x;
+    let radius = in.params.y;
+    let p = in.local * in.extent;
+    let q = vec2<f32>(p.x - clamp(p.x, -half_len, half_len), p.y);
+    let d_capsule = length(q) - radius;
+    let edge_capsule = max(fwidth(d_capsule), 0.00001);
+
     if (in.shape == 0u) {
-        let d = length(in.local);
-        let edge = max(fwidth(d), 0.0001);
-        let coverage = 1.0 - smoothstep(1.0 - edge, 1.0, d);
+        let coverage = 1.0 - smoothstep(1.0 - edge_circle, 1.0, d_circle);
         if (coverage <= 0.0) {
             discard;
         }
@@ -89,14 +99,7 @@ fn fs_shape(in: ShapeOut) -> @location(0) vec4<f32> {
         return vec4<f32>(rgb, in.color.a * coverage);
     }
     if (in.shape == 2u) {
-        // Signed distance to the axis segment, minus the radius (world units).
-        let half_len = in.params.x;
-        let radius = in.params.y;
-        let p = in.local * in.extent;
-        let q = vec2<f32>(p.x - clamp(p.x, -half_len, half_len), p.y);
-        let d = length(q) - radius;
-        let edge = max(fwidth(d), 0.00001);
-        let coverage = clamp(0.5 - d / edge, 0.0, 1.0);
+        let coverage = clamp(0.5 - d_capsule / edge_capsule, 0.0, 1.0);
         if (coverage <= 0.0) {
             discard;
         }

@@ -48,6 +48,23 @@ const ROOM: u64 = 1;
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const TICKS: u64 = 600;
 
+/// What the page draws with (`render=` of the page) and the Chromium flags that view needs.
+#[derive(Clone, Copy)]
+struct View {
+    render: &'static str,
+    flags: &'static str,
+}
+
+/// The 2D canvas.
+const CANVAS_2D: View = View { render: "2d", flags: "" };
+/// `orr_render` on WebGL2 (SwiftShader in headless Chromium).
+const WEBGL2: View = View { render: "webgl", flags: "" };
+/// `orr_render` on WebGPU: headless Chromium needs these flags and runs it on SwiftShader.
+const WEBGPU: View = View {
+    render: "webgpu",
+    flags: "--enable-unsafe-webgpu --enable-unsafe-swiftshader --use-webgpu-adapter=swiftshader --enable-features=Vulkan --use-vulkan=swiftshader --use-angle=swiftshader",
+};
+
 /// The game both clients play.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TestGame {
@@ -98,6 +115,10 @@ fn parse_browser(stdout: &str) -> Browser {
 }
 
 struct Run {
+    /// The view the page ended up with: `2d`, `webgl` or `webgpu`.
+    view_kind: String,
+    /// Pixels of the canvas screenshot that are clearly colored (bodies, not background).
+    colored_pixels: usize,
     browser: Browser,
     native: ClientReport,
     desyncs_on_server: u64,
@@ -106,7 +127,7 @@ struct Run {
 /// Starts a 2-player room on real sockets (QUIC, optionally WebTransport on the
 /// same port, plus WebSocket), joins it with a native bot and the browser.
 /// `mode` is the browser's transport mode. Returns `None` when the browser part is skipped.
-fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool) -> Option<Run> {
+fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) -> Option<Run> {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut lo = ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Quic);
     lo.webtransport = webtransport;
@@ -175,13 +196,15 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool) -> Option<Run>
     // The browser, through Node + Playwright.
     // wss: the page connects to wss://127.0.0.1 and Chromium is told to accept the
     // server's self-signed certificate (a real deployment uses a CA certificate).
-    let (ws_target, flags) = match wss_addr {
+    let (ws_target, wss_flag) = match wss_addr {
         Some(a) => (format!("wss://127.0.0.1:{}/", a.port()), "--ignore-certificate-errors"),
         None => (ws_addr.port().to_string(), ""),
     };
+    let flags = format!("{wss_flag} {}", view.flags);
+    let shot = std::env::temp_dir().join(format!("orr_browser_e2e_{}_{}.png", std::process::id(), view.render));
     let mut cmd = Command::new("node");
-    if !flags.is_empty() {
-        cmd.env("CHROMIUM_FLAGS", flags);
+    if !flags.trim().is_empty() {
+        cmd.env("CHROMIUM_FLAGS", flags.trim());
     }
     if game == TestGame::Arena {
         cmd.env("BUILD", "1");
@@ -193,6 +216,8 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool) -> Option<Run>
         .env("WS", ws_target)
         .env("HASH", format_fingerprint(&fp))
         .env("MODE", mode)
+        .env("RENDER", view.render)
+        .env("SCREENSHOT", &shot)
         .env("ROOM", ROOM.to_string())
         .env("TICKS", TICKS.to_string())
         .output();
@@ -216,7 +241,47 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool) -> Option<Run>
         return None;
     }
     assert!(out.status.success(), "browser client failed ({:?}):\n{stdout}", out.status);
-    Some(Run { browser: parse_browser(&stdout), native, desyncs_on_server: room.desyncs })
+    let view_kind = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("RENDERER "))
+        .and_then(|l| l.split(' ').find_map(|p| p.strip_prefix("kind=")))
+        .unwrap_or("\"?\"")
+        .trim_matches('"')
+        .to_string();
+    let colored_pixels = colored_pixels(&shot);
+    let _ = std::fs::remove_file(&shot);
+    Some(Run { view_kind, colored_pixels, browser: parse_browser(&stdout), native, desyncs_on_server: room.desyncs })
+}
+
+/// Pixels of a PNG whose channels differ by more than 60 (the bodies are saturated colors on a dark
+/// background; the HUD of the page is not in the canvas).
+fn colored_pixels(path: &std::path::Path) -> usize {
+    let Ok(file) = std::fs::File::open(path) else { return 0 };
+    let mut reader = match png::Decoder::new(std::io::BufReader::new(file)).read_info() {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    let mut buf = vec![0; reader.output_buffer_size().unwrap_or(0)];
+    let Ok(info) = reader.next_frame(&mut buf) else { return 0 };
+    let ch = info.color_type.samples();
+    buf[..info.buffer_size()]
+        .chunks_exact(ch)
+        .filter(|p| {
+            let rgb = &p[..3.min(ch)];
+            rgb.iter().max().copied().unwrap_or(0) as i32 - rgb.iter().min().copied().unwrap_or(0) as i32 > 60
+        })
+        .count()
+}
+
+/// The page used `kind` (`2d`, `webgl`, `webgpu`) and really drew colored bodies into its canvas.
+fn check_view(run: &Run, kind: &str) {
+    eprintln!("view: {} ({} colored pixels in the canvas)", run.view_kind, run.colored_pixels);
+    if kind == "webgpu" && run.view_kind != "webgpu" && std::env::var("ORR_REQUIRE_WEBGPU").is_err() {
+        eprintln!("SKIP view check: this Chromium has no WebGPU adapter (set ORR_REQUIRE_WEBGPU=1 to fail instead)");
+        return;
+    }
+    assert_eq!(run.view_kind, kind, "the page's view");
+    assert!(run.colored_pixels >= 200, "the {kind} view drew only {} colored pixels", run.colored_pixels);
 }
 
 fn check(run: &Run, transport: &str) {
@@ -261,8 +326,9 @@ fn check(run: &Run, transport: &str) {
 
 #[test]
 fn browser_joins_over_webtransport() {
-    if let Some(r) = run(TestGame::Arena, true, "webtransport", false) {
+    if let Some(r) = run(TestGame::Arena, true, "webtransport", false, CANVAS_2D) {
         check(&r, "webtransport");
+        check_view(&r, "2d");
     }
 }
 
@@ -270,15 +336,16 @@ fn browser_joins_over_webtransport() {
 /// `auto` mode, fails to connect over WebTransport and falls back to WebSocket.
 #[test]
 fn browser_falls_back_to_websocket() {
-    if let Some(r) = run(TestGame::Arena, false, "auto", false) {
+    if let Some(r) = run(TestGame::Arena, false, "auto", false, WEBGL2) {
         check(&r, "websocket");
+        check_view(&r, "webgl");
     }
 }
 
 /// `wss://` (TLS on the WebSocket, the certificate of the QUIC server).
 #[test]
 fn browser_joins_over_secure_websocket() {
-    if let Some(r) = run(TestGame::Arena, false, "websocket", true) {
+    if let Some(r) = run(TestGame::Arena, false, "websocket", true, CANVAS_2D) {
         check(&r, "websocket");
     }
 }
@@ -286,15 +353,26 @@ fn browser_joins_over_secure_websocket() {
 /// The physics sample (`PhysGame`, 300 bodies) in the browser, in the Web Worker, against a native client.
 #[test]
 fn browser_plays_the_physics_game_over_webtransport() {
-    if let Some(r) = run(TestGame::Phys, true, "webtransport", false) {
+    if let Some(r) = run(TestGame::Phys, true, "webtransport", false, WEBGL2) {
         check(&r, "webtransport");
+        check_view(&r, "webgl");
     }
 }
 
 /// Same over the WebSocket fallback.
 #[test]
 fn browser_plays_the_physics_game_over_websocket() {
-    if let Some(r) = run(TestGame::Phys, false, "websocket", false) {
+    if let Some(r) = run(TestGame::Phys, false, "websocket", false, CANVAS_2D) {
         check(&r, "websocket");
+        check_view(&r, "2d");
+    }
+}
+
+/// The same physics game drawn with `orr_render` on WebGPU (SwiftShader in headless Chromium).
+#[test]
+fn browser_plays_the_physics_game_drawn_on_webgpu() {
+    if let Some(r) = run(TestGame::Phys, true, "webtransport", false, WEBGPU) {
+        check(&r, "webtransport");
+        check_view(&r, "webgpu");
     }
 }

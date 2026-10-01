@@ -150,31 +150,45 @@ impl Wgpu {
         compatible: Option<&wgpu::Surface<'static>>,
         opts: WgpuOptions,
     ) -> Result<Self, String> {
+        pollster::block_on(Self::from_instance_async(instance, compatible, opts))
+    }
+
+    async fn from_instance_async(
+        instance: wgpu::Instance,
+        compatible: Option<&wgpu::Surface<'static>>,
+        opts: WgpuOptions,
+    ) -> Result<Self, String> {
         let power = if opts.high_performance {
             wgpu::PowerPreference::HighPerformance
         } else {
             wgpu::PowerPreference::LowPower
         };
         let request = |fallback: bool| {
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: power,
                 compatible_surface: compatible,
                 force_fallback_adapter: fallback,
                 ..Default::default()
-            }))
+            })
         };
         let adapter = if opts.force_software {
-            request(true)
+            request(true).await
         } else {
-            match request(false) {
+            match request(false).await {
                 Ok(a) => Ok(a),
-                Err(e) if opts.allow_software_fallback => request(true).map_err(|_| e),
+                Err(e) if opts.allow_software_fallback => request(true).await.map_err(|_| e),
                 Err(e) => Err(e),
             }
         }
         .map_err(|e| format!("request_adapter: {e}"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-            .map_err(|e| format!("request_device: {e}"))?;
+        #[allow(unused_mut)]
+        let mut desc = wgpu::DeviceDescriptor::default();
+        // WebGL2 has no compute shaders, storage buffers or large limits: ask for what it can do.
+        #[cfg(target_arch = "wasm32")]
+        if adapter.get_info().backend == wgpu::Backend::Gl {
+            desc.required_limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        }
+        let (device, queue) = adapter.request_device(&desc).await.map_err(|e| format!("request_device: {e}"))?;
         Ok(Self { instance, adapter, device, queue })
     }
 
@@ -228,6 +242,53 @@ impl Wgpu {
     /// True when the adapter is a software rasterizer (WARP, llvmpipe).
     pub fn is_software(&self) -> bool {
         self.adapter.get_info().device_type == wgpu::DeviceType::Cpu
+    }
+}
+
+/// Which browser graphics API [`Wgpu::for_canvas`] may use.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WebBackend {
+    /// WebGPU when the browser has a working adapter, WebGL2 otherwise.
+    #[default]
+    Auto,
+    /// WebGPU only.
+    WebGpu,
+    /// WebGL2 only.
+    WebGl,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Wgpu {
+    /// A device and a surface for a canvas element (browser). The device is created asynchronously,
+    /// so this cannot block the page; `size` is the canvas size in pixels.
+    pub async fn for_canvas(
+        canvas: wgpu::web_sys::HtmlCanvasElement,
+        size: (u32, u32),
+        backend: WebBackend,
+    ) -> Result<(Self, WgpuSurface), String> {
+        let backends = match backend {
+            WebBackend::Auto => wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+            WebBackend::WebGpu => wgpu::Backends::BROWSER_WEBGPU,
+            WebBackend::WebGl => wgpu::Backends::GL,
+        };
+        let desc = wgpu::InstanceDescriptor { backends, ..wgpu::InstanceDescriptor::new_without_display_handle() };
+        let instance = if backend == WebBackend::Auto {
+            wgpu::util::new_instance_with_webgpu_detection(desc).await
+        } else {
+            wgpu::Instance::new(desc)
+        };
+        let surface =
+            instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas)).map_err(|e| format!("create_surface: {e}"))?;
+        let opts = WgpuOptions { allow_software_fallback: false, ..WgpuOptions::default() };
+        let wgpu = Self::from_instance_async(instance, Some(&surface), opts).await?;
+        let surface = wgpu.configure_new_surface(surface, size, true)?;
+        Ok((wgpu, surface))
+    }
+
+    /// The graphics API in use, as wgpu names the backend (`BrowserWebGpu`, `Gl`).
+    pub fn backend_name(&self) -> String {
+        format!("{:?}", self.adapter.get_info().backend)
     }
 }
 

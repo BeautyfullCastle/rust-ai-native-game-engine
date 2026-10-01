@@ -1,0 +1,28 @@
+[package]
+name = "orr_web_gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Orrery browser view: draws the browser client's draw lists with orr_render on wgpu (WebGPU, WebGL2 fallback) into a canvas"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+orr_render = { path = "../orr_render" }
+orr_rhi = { path = "../orr_rhi" }
+
+# Browser glue. Only built for wasm32, so native `cargo test --workspace` does not compile it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+
+[dev-dependencies]
+# The draw list layout is defined by orr_web; a test keeps the two in step.
+orr_web = { path = "../orr_web" }
