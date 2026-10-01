@@ -3166,6 +3166,7 @@ dependencies = [
  "lz4_flex",
  "orr_ecs",
  "orr_fp",
+ "orr_games",
  "orr_proto",
  "orr_relay_net",
  "orr_server",
@@ -3268,7 +3269,10 @@ name = "orr_web"
 version = "0.0.1"
 dependencies = [
  "js-sys",
+ "orr_ecs",
  "orr_fp",
+ "orr_games",
+ "orr_physics",
  "orr_proto",
  "orr_session",
  "orr_sim",

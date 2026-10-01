@@ -32,6 +32,8 @@ bytemuck = "1"
 # Turns the harness on for this crate's own tests.
 orr_server = { path = ".", features = ["harness"] }
 bytemuck = { version = "1", features = ["derive"] }
+# Sim-only sample games (no GPU stack): the browser end-to-end test plays PhysGame.
+orr_games = { path = "../orr_games" }
 
 [[bin]]
 name = "orr_server"

@@ -37,6 +37,9 @@ use orr_relay_net::{
 use orr_server::serve::run_wall_clock;
 use orr_server::RelayServer;
 use orr_session::{ClientState, DumpCollector, RelayClient, RelayClientConfig};
+use orr_games::physics_game::{bot_input, NoCommand, PhysConfig, PhysGame};
+use orr_server::presets::{room_config, Game as PresetGame, PhysicsScene, PHYSICS_BUILD_ID};
+use orr_sim::PlayerSlot;
 use orr_testgame::{Arena, ArenaConfig};
 
 const ROOM: u64 = 1;
@@ -44,6 +47,13 @@ const ROOM: u64 = 1;
 /// One browser run at a time: each starts a Chromium and plays in real time.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const TICKS: u64 = 600;
+
+/// The game both clients play.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TestGame {
+    Arena,
+    Phys,
+}
 
 fn require() -> bool {
     std::env::var("ORR_REQUIRE_BROWSER").is_ok_and(|v| v == "1")
@@ -96,7 +106,7 @@ struct Run {
 /// Starts a 2-player room on real sockets (QUIC, optionally WebTransport on the
 /// same port, plus WebSocket), joins it with a native bot and the browser.
 /// `mode` is the browser's transport mode. Returns `None` when the browser part is skipped.
-fn run(webtransport: bool, mode: &str, wss: bool) -> Option<Run> {
+fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool) -> Option<Run> {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut lo = ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Quic);
     lo.webtransport = webtransport;
@@ -108,7 +118,18 @@ fn run(webtransport: bool, mode: &str, wss: bool) -> Option<Run> {
     let (addr, ws_addr, fp) = (ep.local_addr(), ep.ws_addr().expect("ws listener"), ep.cert_sha256().expect("self-signed"));
     let wss_addr = ep.wss_addr();
     let mut server = RelayServer::new(ep, 7);
-    server.create_room(ROOM, arena_room(2));
+    server.create_room(
+        ROOM,
+        match game {
+            TestGame::Arena => arena_room(2),
+            // 300 bodies that keep moving (rotating bars), so both clients mispredict and roll back with
+            // physics in the resimulation.
+            TestGame::Phys => {
+                let scene = PhysicsScene { bodies: 300, mode: 2, ..PhysicsScene::default() };
+                room_config(PresetGame::Physics, 2, 60, 0x5EED_0A2E, scene)
+            }
+        },
+    );
     let stop_server = Arc::new(AtomicBool::new(false));
     let flag = stop_server.clone();
     let server_thread = thread::spawn(move || {
@@ -123,16 +144,31 @@ fn run(webtransport: bool, mode: &str, wss: bool) -> Option<Run> {
         thread::spawn(move || {
             let opts = ConnectOptions::new(addr.to_string(), TransportKind::Quic, Trust::Fingerprint(fp));
             let link = connect(&opts).expect("connect");
-            let cfg = RelayClientConfig::new(ROOM, 1);
-            let mut client: RelayClient<Arena, _> =
-                RelayClient::new(cfg, link, |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new());
             let opts = DriveOptions {
                 connect_timeout: Duration::from_secs(60),
                 stop: Some(stop),
                 tag: "native".into(),
                 ..DriveOptions::default()
             };
-            drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &opts)
+            match game {
+                TestGame::Arena => {
+                    let cfg = RelayClientConfig::new(ROOM, 1);
+                    let mut client: RelayClient<Arena, _> =
+                        RelayClient::new(cfg, link, |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new());
+                    drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &opts)
+                }
+                TestGame::Phys => {
+                    let cfg = RelayClientConfig::new(ROOM, PHYSICS_BUILD_ID);
+                    let mut client: RelayClient<PhysGame, _> = RelayClient::new(
+                        cfg,
+                        link,
+                        |w| PhysConfig::from_blob(&w.config, w.player_count).expect("physics scene"),
+                        DumpCollector::new(),
+                    );
+                    // The same scripted player as the browser's bot (`PhysClient`, seed 1234).
+                    drive(&mut client, &mut |slot, tick| (bot_input(1234, tick, PlayerSlot(slot)), Vec::<NoCommand>::new()), &opts)
+                }
+            }
         })
     };
 
@@ -147,14 +183,17 @@ fn run(webtransport: bool, mode: &str, wss: bool) -> Option<Run> {
     if !flags.is_empty() {
         cmd.env("CHROMIUM_FLAGS", flags);
     }
+    if game == TestGame::Arena {
+        cmd.env("BUILD", "1");
+    }
     let out = cmd
         .arg(repo_root().join("tools/webtransport/browser_e2e.cjs"))
+        .env("GAME", if game == TestGame::Arena { "arena" } else { "phys" })
         .env("UDP", addr.port().to_string())
         .env("WS", ws_target)
         .env("HASH", format_fingerprint(&fp))
         .env("MODE", mode)
         .env("ROOM", ROOM.to_string())
-        .env("BUILD", "1")
         .env("TICKS", TICKS.to_string())
         .output();
     stop_native.store(true, Ordering::Relaxed);
@@ -222,7 +261,7 @@ fn check(run: &Run, transport: &str) {
 
 #[test]
 fn browser_joins_over_webtransport() {
-    if let Some(r) = run(true, "webtransport", false) {
+    if let Some(r) = run(TestGame::Arena, true, "webtransport", false) {
         check(&r, "webtransport");
     }
 }
@@ -231,7 +270,7 @@ fn browser_joins_over_webtransport() {
 /// `auto` mode, fails to connect over WebTransport and falls back to WebSocket.
 #[test]
 fn browser_falls_back_to_websocket() {
-    if let Some(r) = run(false, "auto", false) {
+    if let Some(r) = run(TestGame::Arena, false, "auto", false) {
         check(&r, "websocket");
     }
 }
@@ -239,7 +278,23 @@ fn browser_falls_back_to_websocket() {
 /// `wss://` (TLS on the WebSocket, the certificate of the QUIC server).
 #[test]
 fn browser_joins_over_secure_websocket() {
-    if let Some(r) = run(false, "websocket", true) {
+    if let Some(r) = run(TestGame::Arena, false, "websocket", true) {
+        check(&r, "websocket");
+    }
+}
+
+/// The physics sample (`PhysGame`, 300 bodies) in the browser, in the Web Worker, against a native client.
+#[test]
+fn browser_plays_the_physics_game_over_webtransport() {
+    if let Some(r) = run(TestGame::Phys, true, "webtransport", false) {
+        check(&r, "webtransport");
+    }
+}
+
+/// Same over the WebSocket fallback.
+#[test]
+fn browser_plays_the_physics_game_over_websocket() {
+    if let Some(r) = run(TestGame::Phys, false, "websocket", false) {
         check(&r, "websocket");
     }
 }
