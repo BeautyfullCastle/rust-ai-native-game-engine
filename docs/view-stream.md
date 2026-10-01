@@ -10,7 +10,10 @@ carries the extractor's output as bytes: one fixed-size record per drawable
 entity with its transform at the previous and the current tick. The view
 interpolates with its own clock.
 
-- Format version: **1**. Everything is **little-endian**. Floats are IEEE 754 binary32.
+- Format version: **1** for 2D games, **2** adds the 3D frame (message type 3, below). Version 1
+  messages are unchanged byte for byte; a version 1 reader refuses version 2 messages
+  ("unsupported version") instead of misreading them. Everything is **little-endian**. Floats
+  are IEEE 754 binary32.
 - Crates: `orr_viewstream` (format, schema, producer), `orr_ffi` (C ABI,
   `crates/orr_ffi/include/orrery.h`), `orr_remote` (the `viewstream` topic).
 - This is a view-boundary format: the sim stays integer-only. The conversion
@@ -36,17 +39,18 @@ session (no rollback, every event verified).
 | Message | Encoding | When |
 | --- | --- | --- |
 | `Schema` | JSON text | once per connection, before the first frame |
-| `ViewFrame` | binary, type 1 | per published tick |
-| `EventBatch` | binary, type 2 | events since the last batch |
+| `ViewFrame` | binary, type 1 | per published tick of a 2D game |
+| `EventBatch` | binary, type 2 | events since the last batch (2D and 3D) |
+| `ViewFrame3` | binary, type 3 (format version 2) | per published tick of a 3D game |
 
 ### Binary preamble (every binary message)
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 4 | magic `"OVS1"` (`4F 56 53 31`) |
-| 4 | 2 | version (`u16`, 1). A reader refuses a larger one. |
-| 6 | 1 | message type (1 = ViewFrame, 2 = EventBatch) |
-| 7 | 1 | flags (ViewFrame) / 0 (EventBatch) |
+| 4 | 2 | version (`u16`): 1 for types 1 and 2, 2 for type 3. A reader refuses a version it does not know. |
+| 6 | 1 | message type (1 = ViewFrame, 2 = EventBatch, 3 = ViewFrame3) |
+| 7 | 1 | flags (ViewFrame, ViewFrame3) / 0 (EventBatch) |
 
 ### ViewFrame (type 1)
 
@@ -116,6 +120,55 @@ index is a despawn plus a spawn, never a teleport. After a `discontinuity`
 frame (seek, new session), diff against the new frame only. After a
 `rolled_back` frame, diff as usual: entities the rollback removed despawn,
 entities it created spawn.
+
+### ViewFrame3 (type 3, format version 2)
+
+For 3D games (`orr_physics3d`, anything with positions in 3 dimensions). The **header is the
+ViewFrame header** (56 bytes, same fields, flags and meaning; only the version is 2 and the type
+is 3). Then `entity_count` records of **88 bytes**, then `props_bytes` bytes of properties, as for
+2D. Total size = `56 + 88 * entity_count + props_bytes`. Spawn, despawn, discontinuity and
+rollback handling are exactly the ones described for 2D.
+
+#### 3D entity record (88 bytes)
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 8 | `id` (`u64`): `entity index \| version << 32` |
+| 8 | 2 | `kind` (`u16`): game-defined, see the schema's `kinds` |
+| 10 | 1 | `shape`: 0 sphere, 1 box, 2 capsule, 3 plane |
+| 11 | 1 | `mode`: interpolation mode, 0 prediction, 1 snapshot, 2 none (as in 2D) |
+| 12 | 12 | `size`: 3 x `f32`, see below |
+| 24 | 4 | `rgba` (4 x `u8`), linear RGB, straight alpha |
+| 28 | 1 | `roughness` (`u8`, 255 = 1.0) |
+| 29 | 1 | `metallic` (`u8`, 255 = 1.0) |
+| 30 | 1 | `style_flags`: bit 0 = checker pattern (for ground planes) |
+| 31 | 1 | reserved, 0 |
+| 32 | 28 | `prev`: position x, y, z (3 x `f32`) then orientation quaternion x, y, z, w (4 x `f32`) at tick `tick - 1` as the sim knows it now |
+| 60 | 28 | `cur`: the same at tick `tick` |
+
+World units are the game's, **right handed, y up**. The quaternion is a unit quaternion
+`x*i + y*j + z*k + w` that rotates local to world. The view computes
+`pos = prev + (cur - prev) * alpha` and `rot = slerp(prev, cur, alpha)` along the **shortest arc**
+(negate one quaternion when their dot product is negative; `q` and `-q` are the same rotation),
+exactly like `orr_view`'s `Transform3::lerp`. Rollback smoothing works like 2D with a position
+offset plus a correction quaternion (`rot_offset * rot`, decayed with `slerp(identity, rot_offset, keep)`).
+
+| Shape | `size[0]` | `size[1]` | `size[2]` |
+| --- | --- | --- | --- |
+| sphere | radius | 0 | 0 |
+| box | half extent along local x | half y | half z |
+| capsule | radius | half length of the segment (local y axis) | 0 |
+| plane | half extent x | 0 | half extent z (a horizontal rectangle in the entity's local xz plane, normal local +y) |
+
+A capsule is the segment from `(0, -size[1], 0)` to `(0, size[1], 0)` in local space, grown by the
+radius. The `kind` and the properties work as in 2D. The schema of a 3D game has `"version": 2`
+and a `frame3d` object (`record_len` 88, `message_type` 3, the shape names and style flags) in
+place of `frame`. Events use the same `EventBatch` (version 1) as 2D games.
+
+Golden bytes (a capsule with a checker style, `orr_viewstream/tests/format.rs`
+`golden_bytes_of_a_tiny_frame3`) pin the layout. `tools/viewstream_client.py` decodes it
+(`decode_frame3`, or `decode_message` for either kind). The producer is
+`orr_viewstream::ViewStreamSource3` with an `orr_view::Extractor3`.
 
 ### EventBatch (type 2)
 
@@ -370,6 +423,7 @@ Measured (`cargo test -p orr_sample --release --test viewstream -- --nocapture b
 | --- | ---: | ---: | ---: |
 | physics demo at start | 49 | 2 576 (56 header + 49 x 48 + 168 properties) | 155 KB/s |
 | 1000 bodies + walls and paddles | 1 010 | 52 544 | 3.1 MB/s |
+| 3D: 1000 bodies | 1 000 | 88 056 (56 header + 1000 x 88) | 5.3 MB/s |
 
 Records are fixed-size and uncompressed. Not done yet, because the demo does
 not need it: skipping static entities that did not change (a keyframe plus
@@ -393,5 +447,7 @@ What a Unity, Unreal or Godot view has to do, in order:
    `orr_set_input`.
 5. Drain `orr_events_poll` for sounds and effects; treat `predicted` as
    reversible and `verified` as final.
-6. Shapes are 2D primitives; a 3D engine maps them to its own meshes from the
-   `kind`. Games with richer visuals add properties to their kinds.
+6. 2D shapes are circle, quad and capsule. A 3D game streams `ViewFrame3` (sphere, box, capsule,
+   plane with position and quaternion): map them to the engine's meshes (or use `kind` to pick a
+   prefab), draw with the engine's own lighting and slerp the rotation. Games with richer
+   visuals add properties to their kinds.

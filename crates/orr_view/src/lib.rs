@@ -11,6 +11,13 @@
 //! - keys entities by `(index, version)`, so a reused entity index is a new
 //!   entity and never interpolates from the old one.
 //!
+//! # 3D
+//!
+//! [`ViewWorld3`] is the same model for 3D poses ([`Transform3`]: position and
+//! unit quaternion). Interpolation is lerp for the position and slerp for the
+//! orientation; the rollback error offset is a vector plus a correction
+//! quaternion that decays along the arc. The game supplies an [`Extractor3`].
+//!
 //! There is no GPU code here: [`ViewWorld::render_items`] returns plain data
 //! for a renderer.
 //!
@@ -30,9 +37,15 @@
 #![allow(clippy::disallowed_types)]
 
 mod extract;
+mod extract3;
 mod math;
+mod math3;
 mod world;
+mod world3;
 
 pub use extract::{fp_to_f32, fp_to_vec2, Extracted, Extractor, InterpMode, Shape, Style};
 pub use math::{lerp_angle, Transform2, Vec2};
+pub use extract3::{fp_to_quat, fp_to_transform3, fp_to_vec3, Extracted3, Extractor3, Shape3, Style3};
+pub use math3::{Quat, Transform3, Vec3};
 pub use world::{RenderItem, ViewConfig, ViewLifecycle, ViewWorld};
+pub use world3::{RenderItem3, ViewWorld3};

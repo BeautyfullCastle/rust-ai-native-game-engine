@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use orr_rhi::{
-    Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, PipelineDesc, Rhi, TextureFormat, Topology,
+    Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, PipelineDesc, Rhi, TextureFormat,
     VertexAttr, VertexFormat, VertexLayout, VertexStep,
 };
 
@@ -24,15 +24,15 @@ struct Globals {
 }
 
 /// Instance buffer that grows (never shrinks) to fit a frame's data.
-struct Growing<B: Rhi> {
-    buffer: B::Buffer,
+pub(crate) struct Growing<B: Rhi> {
+    pub(crate) buffer: B::Buffer,
     capacity: usize,
     item_size: usize,
     label: &'static str,
 }
 
 impl<B: Rhi> Growing<B> {
-    fn new(rhi: &B, label: &'static str, item_size: usize) -> Self {
+    pub(crate) fn new(rhi: &B, label: &'static str, item_size: usize) -> Self {
         Self { buffer: Self::make(rhi, label, INITIAL_INSTANCES * item_size), capacity: INITIAL_INSTANCES, item_size, label }
     }
 
@@ -40,11 +40,16 @@ impl<B: Rhi> Growing<B> {
         rhi.create_buffer(&BufferDesc { label, size: bytes as u64, usage: BufferUsage::VERTEX | BufferUsage::COPY_DST })
     }
 
-    fn upload(&mut self, rhi: &B, count: usize, bytes: &[u8]) {
+    /// Makes room for `count` items (contents are lost when it grows).
+    pub(crate) fn reserve(&mut self, rhi: &B, count: usize) {
         if count > self.capacity {
             self.capacity = count.next_power_of_two();
             self.buffer = Self::make(rhi, self.label, self.capacity * self.item_size);
         }
+    }
+
+    fn upload(&mut self, rhi: &B, count: usize, bytes: &[u8]) {
+        self.reserve(rhi, count);
         rhi.write_buffer(&self.buffer, 0, bytes);
     }
 }
@@ -89,16 +94,7 @@ impl<B: Rhi> Renderer<B> {
             usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
         });
         let make_pipeline = |label: &str, vs: &str, fs: &str, layout: VertexLayout| {
-            rhi.create_pipeline(&PipelineDesc::<B> {
-                label,
-                shader: &shader,
-                vs_entry: vs,
-                fs_entry: fs,
-                vertex_buffers: &[layout],
-                color_format: format,
-                blend: Blend::Alpha,
-                topology: Topology::TriangleList,
-            })
+            rhi.create_pipeline(&PipelineDesc::<B>::color(label, &shader, (vs, fs), &[layout], format, Blend::Alpha))
         };
         let shape_pipeline = make_pipeline(
             "2d shapes",
@@ -179,7 +175,7 @@ impl<B: Rhi> Renderer<B> {
             commands.push(Command::Draw { vertices: 0..6, instances: 0..list.lines.len() as u32 });
         }
         let mut encoder = rhi.create_encoder("2d frame");
-        rhi.encode_render_pass(&mut encoder, "2d", &ColorAttachment { view, clear: self.clear }, &commands);
+        rhi.encode_render_pass(&mut encoder, "2d", &ColorAttachment { view, clear: self.clear, resolve: None }, &commands);
         rhi.submit(encoder);
     }
 }

@@ -20,10 +20,13 @@ orr_session = { path = "../orr_session" }
 orr_sim = { path = "../orr_sim" }
 orr_ecs = { path = "../orr_ecs" }
 orr_physics = { path = "../orr_physics" }
+orr_physics3d = { path = "../orr_physics3d" }
 orr_reflect = { path = "../orr_reflect", default-features = false }
 orr_relay_net = { path = "../orr_relay_net" }
 orr_fp = { path = "../orr_fp", features = ["float-interop"] }
 bytemuck = { version = "1", features = ["derive"] }
+# Screenshots of the 3D sample (view layer only).
+png = "0.18"
 # Window (view layer only): winit 0.30 (raw-window-handle 0.6, same as wgpu 30).
 winit = "0.30"
 

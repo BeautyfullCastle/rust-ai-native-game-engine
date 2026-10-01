@@ -1,6 +1,8 @@
 //! The view stream format: round trips, the pinned bytes of a tiny frame, and
 //! what a reader does with damaged messages.
 
+#![allow(clippy::float_arithmetic)] // a view-boundary test: poses are floats
+
 use orr_viewstream::*;
 
 fn sample_frame() -> ViewFrame {
@@ -126,8 +128,8 @@ fn damaged_messages_are_refused_not_trusted() {
     bad[0] = b'X';
     assert_eq!(ViewFrame::decode(&bad), Err(DecodeError::BadMagic));
     let mut newer = bytes.clone();
-    newer[4..6].copy_from_slice(&(VERSION + 1).to_le_bytes());
-    assert_eq!(ViewFrame::decode(&newer), Err(DecodeError::UnsupportedVersion(VERSION + 1)));
+    newer[4..6].copy_from_slice(&(MAX_VERSION + 1).to_le_bytes());
+    assert_eq!(ViewFrame::decode(&newer), Err(DecodeError::UnsupportedVersion(MAX_VERSION + 1)));
     // An entity count that promises more than the message holds.
     let mut huge = bytes;
     huge[48..52].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -143,4 +145,162 @@ fn entity_ids_keep_index_and_version() {
 #[test]
 fn color_quantization_rounds_and_clamps() {
     assert_eq!([color_to_u8(0.0), color_to_u8(1.0), color_to_u8(0.5), color_to_u8(-1.0), color_to_u8(9.0)], [0, 255, 128, 0, 255]);
+}
+
+// ---- format version 2: the 3D frame ----
+
+fn sample_frame3() -> ViewFrame3 {
+    let q = |a: f32| [0.0, (a * 0.5).sin(), 0.0, (a * 0.5).cos()];
+    ViewFrame3 {
+        flags: FLAG_PAUSED,
+        tick: 7,
+        verified_tick: 5,
+        seq: 3,
+        rollback: Some((4, 6)),
+        entities: vec![
+            EntityRecord3 {
+                id: 0x0000_0002_0000_0001,
+                kind: 3,
+                shape: SHAPE3_BOX,
+                mode: MODE_NONE,
+                size: [5.0, 0.5, 2.5],
+                rgba: [255, 128, 0, 255],
+                roughness: 200,
+                metallic: 10,
+                style_flags: STYLE_CHECKER,
+                prev: Pose3 { pos: [1.0, 2.0, 3.0], rot: q(0.25) },
+                cur: Pose3 { pos: [1.5, 2.5, -3.0], rot: q(-0.25) },
+            },
+            EntityRecord3 {
+                id: 9,
+                kind: 1,
+                shape: SHAPE3_SPHERE,
+                mode: MODE_PREDICTION,
+                size: [0.5, 0.0, 0.0],
+                rgba: [1, 2, 3, 4],
+                roughness: 0,
+                metallic: 255,
+                style_flags: 0,
+                prev: Pose3::IDENTITY,
+                cur: Pose3 { pos: [0.0, -1.0, 3.0], rot: [0.0, 0.0, 0.0, 1.0] },
+            },
+        ],
+        props: [7u32.to_le_bytes(), 1.5f32.to_bits().to_le_bytes()].concat(),
+    }
+}
+
+#[test]
+fn frame3_round_trip() {
+    let f = sample_frame3();
+    let bytes = f.encode();
+    assert_eq!(bytes.len(), HEADER_LEN + 2 * RECORD3D_LEN + 8);
+    assert_eq!(RECORD3D_LEN, 88);
+    let back = ViewFrame3::decode(&bytes).unwrap();
+    assert_eq!(back, ViewFrame3 { flags: FLAG_PAUSED | FLAG_ROLLED_BACK, ..f.clone() });
+    assert!(back.has(FLAG_ROLLED_BACK) && back.has(FLAG_PAUSED));
+    let props = back.props_by_entity(|k| usize::from(k == 3 || k == 1)).unwrap();
+    assert_eq!(props[0], 7u32.to_le_bytes());
+    assert!(back.props_by_entity(|_| 0).is_none());
+    assert_eq!(message_type(&bytes), Ok(MSG_FRAME3D));
+    // The version field says 2, so a version 1 reader refuses the message.
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), VERSION_3D);
+}
+
+#[test]
+fn frame3_and_frame2_are_not_mixed_up() {
+    let b3 = sample_frame3().encode();
+    let b2 = sample_frame().encode();
+    assert_eq!(ViewFrame::decode(&b3), Err(DecodeError::WrongType(MSG_FRAME3D)));
+    assert_eq!(ViewFrame3::decode(&b2), Err(DecodeError::WrongType(MSG_FRAME)));
+    assert_eq!(EventBatch::decode(&b3), Err(DecodeError::WrongType(MSG_FRAME3D)));
+    // 2D messages keep the version 1 they always had.
+    assert_eq!(u16::from_le_bytes([b2[4], b2[5]]), VERSION);
+    assert_eq!(VERSION, 1);
+}
+
+/// Pins the 3D format: if this changes, the version must change too.
+#[test]
+fn golden_bytes_of_a_tiny_frame3() {
+    let f = ViewFrame3 {
+        flags: FLAG_DISCONTINUITY,
+        tick: 1,
+        verified_tick: 1,
+        seq: 2,
+        rollback: None,
+        entities: vec![EntityRecord3 {
+            id: 0x0000_0001_0000_0002,
+            kind: 1,
+            shape: SHAPE3_CAPSULE,
+            mode: MODE_PREDICTION,
+            size: [0.5, 1.0, 0.0],
+            rgba: [0x11, 0x22, 0x33, 0xff],
+            roughness: 0x80,
+            metallic: 0,
+            style_flags: STYLE_CHECKER,
+            prev: Pose3 { pos: [1.0, 0.0, 0.0], rot: [0.0, 0.0, 0.0, 1.0] },
+            cur: Pose3 { pos: [2.0, -1.0, 0.5], rot: [0.0, 1.0, 0.0, 0.0] },
+        }],
+        props: vec![],
+    };
+    let expected = concat!(
+        // header: magic "OVS1", version 2, type 3, flags 2
+        "4f565331", "0200", "03", "02",
+        // tick 1, verified 1, seq 2, rollback from 0 to 0
+        "0100000000000000", "0100000000000000", "0200000000000000", "0000000000000000", "0000000000000000",
+        // entity count 1, props bytes 0
+        "01000000", "00000000",
+        // record: id (index 2, version 1), kind 1, shape 2 (capsule), mode 0
+        "0200000001000000", "0100", "02", "00",
+        // size (radius 0.5, half length 1.0, 0), rgba
+        "0000003f", "0000803f", "00000000", "112233ff",
+        // roughness 0x80, metallic 0, style flags 1 (checker), reserved 0
+        "80", "00", "01", "00",
+        // prev: pos (1, 0, 0), rot (0, 0, 0, 1)
+        "0000803f", "00000000", "00000000", "00000000", "00000000", "00000000", "0000803f",
+        // cur: pos (2, -1, 0.5), rot (0, 1, 0, 0)
+        "00000040", "000080bf", "0000003f", "00000000", "0000803f", "00000000", "00000000",
+    );
+    let bytes = f.encode();
+    assert_eq!(hex(&bytes), expected);
+    assert_eq!(bytes.len(), HEADER_LEN + RECORD3D_LEN);
+    assert_eq!(ViewFrame3::decode(&bytes).unwrap(), f);
+}
+
+#[test]
+fn damaged_frame3_messages_are_refused() {
+    let bytes = sample_frame3().encode();
+    for cut in [0, 3, 10, HEADER_LEN - 1, HEADER_LEN + 10, bytes.len() - 1] {
+        assert_eq!(ViewFrame3::decode(&bytes[..cut]), Err(DecodeError::Truncated), "cut at {cut}");
+    }
+    let mut newer = bytes.clone();
+    newer[4..6].copy_from_slice(&(MAX_VERSION + 1).to_le_bytes());
+    assert_eq!(ViewFrame3::decode(&newer), Err(DecodeError::UnsupportedVersion(MAX_VERSION + 1)));
+    let mut huge = bytes;
+    huge[48..52].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(ViewFrame3::decode(&huge), Err(DecodeError::Truncated));
+}
+
+#[test]
+fn schema_json_of_a_3d_game_names_the_frame3_layout() {
+    let mut schema = Schema {
+        game: "Yard".into(),
+        dimensions: 3,
+        build_id: 1,
+        tick_rate: 60,
+        player_count: 2,
+        kinds: vec![KindDef::new(0, "static")],
+        input: InputLayout { size: 4, fields: vec![] },
+        command_size: 0,
+        events: vec![],
+    };
+    let j = schema.to_json();
+    assert_eq!(j["version"], 2);
+    assert_eq!(j["frame3d"]["record_len"], 88);
+    assert_eq!(j["frame3d"]["message_type"], 3);
+    assert!(j.get("frame").is_none());
+    schema.dimensions = 2;
+    let j = schema.to_json();
+    assert_eq!(j["version"], 1, "2D schemas keep version 1");
+    assert_eq!(j["frame"]["record_len"], 48);
+    assert!(j.get("frame3d").is_none());
 }

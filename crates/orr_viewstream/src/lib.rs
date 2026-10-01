@@ -10,6 +10,8 @@
 //!   the previous and the current tick, look, kind, custom properties) and an
 //!   [`EventBatch`] (sim events with the 3 states predicted, verified and
 //!   canceled and their deterministic key). Byte layouts: `docs/view-stream.md`.
+//!   Format version 2 adds the 3D frame, a [`ViewFrame3`] (position, quaternion,
+//!   shape sizes and material per entity); version 1 messages are unchanged.
 //! - [`Schema`]: the JSON message that says once per connection what the game
 //!   is: its entity kinds, the byte layout of its input, its event types.
 //! - [`source`]: the producer. It runs the game's `orr_view::Extractor` on the
@@ -33,11 +35,16 @@ pub mod schema;
 pub mod source;
 
 pub use format::{
-    color_to_u8, message_type, DecodeError, EntityRecord, EventBatch, EventRecord, ViewFrame, EVENT_BATCH_HEADER_LEN, EVENT_HEAD_LEN,
-    FLAG_DISCONTINUITY, FLAG_PAUSED, FLAG_ROLLED_BACK, HEADER_LEN, MAGIC, MODE_NONE, MODE_PREDICTION, MODE_SNAPSHOT, MSG_EVENTS,
-    MSG_FRAME, RECORD_LEN, SHAPE_CAPSULE, SHAPE_CIRCLE, SHAPE_QUAD, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED, VERSION,
+    color_to_u8, message_type, DecodeError, EntityRecord, EntityRecord3, EventBatch, EventRecord, Pose3, ViewFrame, ViewFrame3,
+    EVENT_BATCH_HEADER_LEN, EVENT_HEAD_LEN, FLAG_DISCONTINUITY, FLAG_PAUSED, FLAG_ROLLED_BACK, HEADER_LEN, MAGIC, MAX_VERSION,
+    MODE_NONE, MODE_PREDICTION, MODE_SNAPSHOT, MSG_EVENTS, MSG_FRAME, MSG_FRAME3D, RECORD3D_LEN, RECORD_LEN, SHAPE3_BOX,
+    SHAPE3_CAPSULE, SHAPE3_PLANE, SHAPE3_SPHERE, SHAPE_CAPSULE, SHAPE_CIRCLE, SHAPE_QUAD, STATE_CANCELED, STATE_PREDICTED,
+    STATE_VERIFIED, STYLE_CHECKER, VERSION, VERSION_3D,
 };
 #[cfg(feature = "producer")]
 pub use schema::{input_layout_of, EventDef, InputLayout, KindDef, PropDef, PropType, Schema};
 #[cfg(feature = "producer")]
-pub use source::{entity_id, FrameEncoder, FrameMeta, NoKinds, Pumped, StreamKinds, StreamProducer, ViewStreamSource};
+pub use source::{
+    entity_id, FrameEncoder, FrameEncoder3, FrameMeta, NoKinds, NoKinds3, Pumped, Pumped3, StreamKinds, StreamKinds3, StreamProducer,
+    ViewStreamSource, ViewStreamSource3,
+};

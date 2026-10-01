@@ -5,7 +5,7 @@
 use orr_reflect::{IntKind, Kind, Reflect, TypeDesc};
 use serde_json::{json, Map, Value as J};
 
-use crate::format::{HEADER_LEN, RECORD_LEN, VERSION};
+use crate::format::{HEADER_LEN, RECORD3D_LEN, RECORD_LEN, VERSION, VERSION_3D};
 
 /// The type of one custom property word (always 4 bytes, little-endian).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +152,9 @@ fn field_json(name: &str, offset: usize, ty: &TypeDesc, doc: &str) -> J {
 pub struct Schema {
     /// Name of the game.
     pub game: String,
+    /// 2 for a game that streams [`ViewFrame`](crate::ViewFrame)s (format version 1), 3 for
+    /// [`ViewFrame3`](crate::ViewFrame3)s (format version 2).
+    pub dimensions: u8,
     /// Build id of the simulation (two hosts of the same build id simulate identically).
     pub build_id: u64,
     /// Sim ticks per second.
@@ -176,6 +179,9 @@ impl Schema {
 
     /// The schema as a JSON value.
     pub fn to_json(&self) -> J {
+        if self.dimensions == 3 {
+            return self.to_json_3d();
+        }
         json!({
             "format": "orrery.viewstream",
             "version": VERSION,
@@ -192,6 +198,39 @@ impl Schema {
                 "record_len": RECORD_LEN,
                 "shapes": ["circle", "quad", "capsule"],
                 "interp_modes": ["prediction", "snapshot", "none"],
+                "flags": {"rolled_back": 1, "discontinuity": 2, "paused": 4},
+            },
+            "kinds": self.kinds.iter().map(|k| json!({
+                "id": k.id,
+                "name": k.name,
+                "props": k.props.iter().map(|p| json!({"name": p.name, "type": p.ty.name()})).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "input": {"size": self.input.size, "fields": self.input.fields},
+            "command": {"size": self.command_size},
+            "events": self.events.iter().map(|e| json!({"id": e.id, "name": e.name, "payload_size": e.payload_size})).collect::<Vec<_>>(),
+        })
+    }
+
+    /// The 3D flavor: format version 2, a `frame3d` object instead of `frame`.
+    fn to_json_3d(&self) -> J {
+        json!({
+            "format": "orrery.viewstream",
+            "version": VERSION_3D,
+            "game": self.game,
+            "build_id": format!("0x{:016x}", self.build_id),
+            "tick_rate": self.tick_rate,
+            "player_count": self.player_count,
+            "endian": "little",
+            "world": {"units": "game units, y up, right handed", "rotation": "unit quaternion x, y, z, w"},
+            "fixed_point": {"type": "q48.16", "raw": "i64", "frac_bits": 16, "note": "input fields of type `fixed` hold value * 65536"},
+            "frame3d": {
+                "magic": "OVS1",
+                "message_type": 3,
+                "header_len": HEADER_LEN,
+                "record_len": RECORD3D_LEN,
+                "shapes": ["sphere", "box", "capsule", "plane"],
+                "interp_modes": ["prediction", "snapshot", "none"],
+                "style_flags": {"checker": 1},
                 "flags": {"rolled_back": 1, "discontinuity": 2, "paused": 4},
             },
             "kinds": self.kinds.iter().map(|k| json!({

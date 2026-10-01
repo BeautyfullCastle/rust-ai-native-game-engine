@@ -28,6 +28,10 @@ RECORD_LEN = 48
 FLAG_ROLLED_BACK, FLAG_DISCONTINUITY, FLAG_PAUSED = 1, 2, 4
 SHAPES = ["circle", "quad", "capsule"]
 MODES = ["prediction", "snapshot", "none"]
+# Format version 2: the 3D frame (message type 3), 88 byte records.
+RECORD3D_LEN = 88
+SHAPES3 = ["sphere", "box", "capsule", "plane"]
+STYLE_CHECKER = 1
 
 
 def fnv1a64(data, h=0xCBF29CE484222325):
@@ -77,6 +81,62 @@ def decode_frame(b):
     }
 
 
+def decode_frame3(b):
+    """Decodes a 3D ViewFrame (format version 2, message type 3) into a dict.
+
+    Entity `prev` and `cur` are 7-tuples: x, y, z position then the x, y, z, w quaternion.
+    """
+    magic, version, msg_type, flags = struct.unpack_from("<4sHBB", b, 0)
+    if magic != MAGIC or version > 2 or msg_type != 3:
+        raise ValueError("not a version 2 3D view frame")
+    tick, verified, seq, rb_from, rb_to, count, props_len = struct.unpack_from("<QQQQQII", b, 8)
+    if len(b) != HEADER_LEN + count * RECORD3D_LEN + props_len:
+        raise ValueError("frame size does not match its header")
+    entities = []
+    for i in range(count):
+        v = struct.unpack_from("<QHBB3f4B4B7f7f", b, HEADER_LEN + i * RECORD3D_LEN)
+        eid, kind, shape, mode = v[0:4]
+        entities.append(
+            {
+                "id": eid,
+                "index": eid & 0xFFFFFFFF,
+                "version": eid >> 32,
+                "kind": kind,
+                "shape": SHAPES3[shape],
+                "mode": MODES[mode],
+                "size": v[4:7],
+                "rgba": v[7:11],
+                "roughness": v[11],
+                "metallic": v[12],
+                "checker": bool(v[13] & STYLE_CHECKER),
+                "prev": v[15:22],
+                "cur": v[22:29],
+            }
+        )
+    return {
+        "dimensions": 3,
+        "tick": tick,
+        "verified_tick": verified,
+        "seq": seq,
+        "flags": flags,
+        "rollback": (rb_from, rb_to) if flags & FLAG_ROLLED_BACK else None,
+        "entities": entities,
+        "records": b[HEADER_LEN : HEADER_LEN + count * RECORD3D_LEN],
+        "props": b[HEADER_LEN + count * RECORD3D_LEN :],
+    }
+
+
+def decode_message(b):
+    """Decodes a frame message of either dimension; None for other message types."""
+    if len(b) < 8:
+        raise ValueError("message too short")
+    if b[6] == 1:
+        return decode_frame(b)
+    if b[6] == 3:
+        return decode_frame3(b)
+    return None
+
+
 class Erp:
     """Newline-delimited JSON-RPC 2.0 over TCP."""
 
@@ -108,8 +168,9 @@ class Erp:
             p = msg["params"]
             assert p["encoding"] == "hex"
             data = bytes.fromhex(p["data"])
-            if data[6] == 1:  # ViewFrame; type 2 is an event batch
-                self.frames.append(decode_frame(data))
+            frame = decode_message(data)  # type 2 is an event batch: None
+            if frame is not None:
+                self.frames.append(frame)
 
     def call(self, method, params=None, timeout=30.0):
         rid = self.next_id
@@ -177,8 +238,12 @@ def main():
     if last is None:
         return
     for e in last["entities"][: args.show]:
-        print("  id %016x kind %d %s at (%.3f, %.3f) was (%.3f, %.3f)" % (
-            e["id"], e["kind"], e["shape"], e["cur"][0], e["cur"][1], e["prev"][0], e["prev"][1]))
+        if last.get("dimensions") == 3:
+            print("  id %016x kind %d %s at (%.3f, %.3f, %.3f) was (%.3f, %.3f, %.3f)" % (
+                e["id"], e["kind"], e["shape"], *e["cur"][:3], *e["prev"][:3]))
+        else:
+            print("  id %016x kind %d %s at (%.3f, %.3f) was (%.3f, %.3f)" % (
+                e["id"], e["kind"], e["shape"], e["cur"][0], e["cur"][1], e["prev"][0], e["prev"][1]))
     print(json.dumps({
         "tick": last["tick"],
         "entities": len(last["entities"]),
