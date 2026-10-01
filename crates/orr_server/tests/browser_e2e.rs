@@ -4,6 +4,12 @@
 //! of verified ticks must agree at every checkpoint, no desync, and the browser
 //! must have rolled back (so prediction and rollback ran in wasm).
 //!
+//! The client runs in a Web Worker (`web/worker.js`) and plays the arena or `PhysGame`
+//! (300 bodies); the page draws it on a 2D canvas, with `orr_render` on WebGL2, or on
+//! WebGPU (`orr_web_gpu`, needs the GPU package from `tools/build_web.sh`), and the test
+//! counts the colored pixels of the canvas screenshot. It prints the page's frame times
+//! and the worker's sim times.
+//!
 //! Needs Node.js with Playwright (`NODE_PATH` or a global install; a Chromium in
 //! `PLAYWRIGHT_BROWSERS_PATH`, or `CHROMIUM=/path/to/chrome`) and the wasm package:
 //!
@@ -276,6 +282,10 @@ fn colored_pixels(path: &std::path::Path) -> usize {
 /// The page used `kind` (`2d`, `webgl`, `webgpu`) and really drew colored bodies into its canvas.
 fn check_view(run: &Run, kind: &str) {
     eprintln!("view: {} ({} colored pixels in the canvas)", run.view_kind, run.colored_pixels);
+    if kind != "2d" && !repo_root().join("crates/orr_web/web/pkg_gpu/orr_web_gpu.js").exists() && !require() {
+        eprintln!("SKIP view check: the GPU view package is not built (tools/build_web.sh without WEB_GPU=0)");
+        return;
+    }
     if kind == "webgpu" && run.view_kind != "webgpu" && std::env::var("ORR_REQUIRE_WEBGPU").is_err() {
         eprintln!("SKIP view check: this Chromium has no WebGPU adapter (set ORR_REQUIRE_WEBGPU=1 to fail instead)");
         return;
