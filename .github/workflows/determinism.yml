@@ -128,7 +128,7 @@ jobs:
       # The 3D sample in a real (virtual X11) window on lavapipe: renders a fixed
       # number of frames and reads the presented frame back as a PNG.
       - if: runner.os == 'Linux'
-        run: sudo apt-get install -y -q xvfb
+        run: sudo apt-get install -y -q xvfb libxkbcommon-x11-0
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
 

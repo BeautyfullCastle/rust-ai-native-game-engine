@@ -293,8 +293,17 @@ impl Rhi for Wgpu {
     }
 
     fn sample_count_supported(&self, format: TextureFormat, samples: u32) -> bool {
-        samples == 1
-            || self.adapter.get_texture_format_features(to_wgpu_format(format)).flags.sample_count_supported(samples)
+        // Adapter-specific counts are only usable when the device enabled
+        // TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES; otherwise only the
+        // WebGPU-guaranteed counts (1 and 4) pass validation.
+        let format = to_wgpu_format(format);
+        let features = self.device.features();
+        let flags = if features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+            self.adapter.get_texture_format_features(format).flags
+        } else {
+            format.guaranteed_format_features(features).flags
+        };
+        samples == 1 || flags.sample_count_supported(samples)
     }
 
     fn create_shader(&self, label: &str, wgsl: &str) -> wgpu::ShaderModule {
