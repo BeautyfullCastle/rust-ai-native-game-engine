@@ -6,8 +6,11 @@ use wasm_bindgen::prelude::*;
 
 use crate::cases;
 
+/// The prepared case: runs `n` iterations and returns a checksum.
+type Prepared = Box<dyn FnMut(u64) -> u64>;
+
 thread_local! {
-    static CURRENT: RefCell<Option<Box<dyn FnMut(u64) -> u64>>> = const { RefCell::new(None) };
+    static CURRENT: RefCell<Option<Prepared>> = const { RefCell::new(None) };
 }
 
 #[wasm_bindgen]
