@@ -239,12 +239,20 @@ People at the editor make proposals too; you see each other's.",
         name: "accept_proposal",
         group: "propose",
         title: "Accept proposal",
-        description: "Apply a proposal to the scene as ONE undoable history entry (recorded as made by whoever proposed it). Only after verify_proposal passed. \
+        description: "Apply a proposal to the scene as ONE undoable history entry (recorded as made by whoever proposed it). Only after verify_proposal passed. Pass its `verified_state` to refuse any intervening scene or proposal changes. Omitting it is manual acceptance of the current proposal. \
 If the scene changed meanwhile so that an op no longer applies you get a conflict and nothing changes. This needs the `approve` capability; if the host withheld it, ask the person to accept in the editor. \
 Not possible while a play session runs. Example: {\"proposal_id\":\"p1\"}.",
         read_only: false,
         needs: "approve",
-        schema: || obj(json!({"proposal_id": {"type": "string", "description": "e.g. p1"}}), &["proposal_id"]),
+        schema: || obj(json!({
+            "proposal_id": {"type": "string", "description": "e.g. p1"},
+            "verified_state": {"type": "object", "description": "copy unchanged from verify_proposal to reject intervening edits", "properties": {
+                "document_id": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$"},
+                "id": {"type": "string"},
+                "document_revision": {"type": "integer", "minimum": 0},
+                "proposal_revision": {"type": "integer", "minimum": 0}
+            }, "required": ["document_id", "id", "document_revision", "proposal_revision"], "additionalProperties": false}
+        }), &["proposal_id"]),
     },
     ToolDef {
         name: "reject_proposal",
@@ -572,7 +580,12 @@ fn list_proposals(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
 fn accept_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     let id = a.str("proposal_id")?;
     let before = b.call("proposal.list", J::Null).ok();
-    let r = b.call("proposal.accept", json!({"id": id}))?;
+    // Args::raw treats null as absent for ordinary optional arguments.
+    // A supplied but invalid guard must never select manual acceptance.
+    let r = match a.0.get("verified_state") {
+        Some(state) => b.call("proposal.accept_verified", json!({"id": id, "verified_state": state}))?,
+        None => b.call("proposal.accept", json!({"id": id}))?,
+    };
     let info = before.as_ref().and_then(|l| l["proposals"].as_array()).and_then(|l| l.iter().find(|p| s(&p["id"]) == id));
     let who = info.map(|p| format!(" \"{}\" by {}", s(&p["label"]), s(&p["origin"]))).unwrap_or_default();
     let text = match r["history_id"].as_u64() {

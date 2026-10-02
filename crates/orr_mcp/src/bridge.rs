@@ -133,6 +133,10 @@ pub fn rpc_fail_styled(e: &orr_remote::RpcError, style: Style) -> Fail {
             " This token lacks the capability; ask the person running the host for a token with it (for `orr accept`: they can accept in the editor).",
         ),
         "proposal_conflict" => " The scene changed since the proposal was made and one op no longer applies. Nothing was changed; reject it and propose again against the current scene.",
+        "stale_verification" => pick(
+            " Nothing was accepted. Run verify_proposal again and pass its new verified_state to accept_proposal.",
+            " Nothing was accepted. Verify the current proposal again before accepting it.",
+        ),
         "unknown_proposal" => pick(" It may have been accepted, rejected or dropped; see list_proposals.", " It may have been accepted, rejected or dropped; see `orr proposals`."),
         "sim_running" => pick(" A play session is running; stop it first (sim_run action=stop).", " A play session is running; stop it first (`orr sim stop`)."),
         "no_last_play" => pick(

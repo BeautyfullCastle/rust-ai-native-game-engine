@@ -34,6 +34,14 @@ that predicts and rolls back: see "Multiplayer (client sessions)" below. The C A
 sessions; the ERP `viewstream` topic of a normal `orr_remote` host serves its single-peer play
 session (no rollback, every event verified).
 
+## Snapshot/checksum compatibility
+
+The ORRF simulation snapshot version is independent of this view-stream format. The
+ORRF v2 checksum change does not alter OVS1 record layouts or the C ABI version, but
+simulation checksums returned by client sessions change and old/new simulation builds
+must not share a room. See [Frame and replay compatibility](frame-compatibility.md) for
+old snapshots, replay keyframes, build IDs, and upgrade requirements.
+
 ## Messages
 
 | Message | Encoding | When |

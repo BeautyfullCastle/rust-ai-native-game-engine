@@ -204,8 +204,9 @@ section 5; the printed hash is then `null`). For the real game:
    failed: API missing, certificate refused, or session handshake refused.
 6. Then run the real client: build `tools/build_web.sh`, serve
    `crates\orr_web\web`, start `orr_server --webtransport --ws-bind ...`, open
-   `index.html?auto=1&bot=1&wt=127.0.0.1:4433&hash=<hash>&ws=127.0.0.1:4434&mode=webtransport&build=<id>`
-   (build id: `--game arena` rooms use `0x0A2E4A000001`, the default of the page),
+   `index.html?auto=1&bot=1&wt=127.0.0.1:4433&hash=<hash>&ws=127.0.0.1:4434&mode=webtransport`
+   (omit `build` to use the arena default shared with `--game arena`; built-in IDs now
+   include the ORRF format via `orr_sim::frame_build_id`, see [compatibility](frame-compatibility.md)),
    watch `desyncs 0` and the checksum line against a native `orr_sample --headless --bot --connect`.
 
 **Safari (Mac, then iPhone/iPad):** Safari has no `serverCertificateHashes`, so

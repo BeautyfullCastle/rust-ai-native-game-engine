@@ -3153,6 +3153,7 @@ dependencies = [
  "orr_testgame",
  "orr_view",
  "orr_viewstream",
+ "orr_web",
  "png 0.18.1",
  "winit",
 ]

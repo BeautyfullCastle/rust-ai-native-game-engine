@@ -276,18 +276,35 @@ jobs:
 
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
-    needs: [native]
+    # Every checksum-producing target must finish, including non-native runners.
+    needs: [native, wasm32, android-arm64]
+    # Without always(), a failed/skipped dependency skips this required check.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: All native jobs passed with identical golden-checksum assertions
+      - name: Require every golden-checksum runner to pass
+        shell: bash
+        env:
+          NATIVE_RESULT: ${{ needs.native.result }}
+          WASM32_RESULT: ${{ needs.wasm32.result }}
+          ANDROID_ARM64_RESULT: ${{ needs['android-arm64'].result }}
         run: |
-          echo "Each 'native' matrix leg independently asserts the same"
-          echo "hardcoded golden checksums (see crates/orr_session/tests/arena.rs,"
-          echo "crates/orr_fp/tests/determinism_golden.rs and"
-          echo "crates/orr_physics/tests/physics.rs and"
-          echo "crates/orr_physics3d/tests/golden.rs, crates/orr_games/tests/golden.rs"
-          echo "and crates/orr_wasm_bench/tests/checksums.rs). A leg failing"
-          echo "that assertion is exactly a cross-platform determinism failure,"
-          echo "so requiring every matrix leg to pass *is* the cross-platform"
-          echo "checksum comparison; this job just gives that fact a clear,"
-          echo "single required-status-check name for branch protection."
+          failed=0
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT; do
+            result="${!result_var}"
+            echo "$result_var=$result"
+            if [[ "$result" != "success" ]]; then
+              echo "::error::$result_var must be success, got '$result'"
+              failed=1
+            fi
+          done
+          if [[ "$failed" != "0" ]]; then
+            exit 1
+          fi
+
+          echo "All native matrix legs, wasm32-wasip1 (including SIMD), and"
+          echo "aarch64-linux-android passed their pinned golden-checksum assertions."
+          echo "The targets assert the same constants in orr_fp, orr_session,"
+          echo "orr_physics, orr_physics3d, orr_games, and orr_wasm_bench tests."
+          echo "No checksum artifacts are exchanged: each target independently"
+          echo "matches those shared expected values, so every runner must pass."

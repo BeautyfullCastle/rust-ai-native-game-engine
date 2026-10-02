@@ -61,7 +61,7 @@ pub use doc::EditorDoc;
 pub use error::EditError;
 pub use op::{Applied, HistoryEntry, Op, Origin};
 pub use play::{PlayController, StoppedPlay};
-pub use proposal::{Accepted, ProposalDiff, ProposalId, ProposalInfo};
+pub use proposal::{Accepted, ProposalDiff, ProposalId, ProposalInfo, ProposalState};
 pub use query::{EntityInfo, Target, View};
 pub use verify::{
     verify_frames, ChecksumSample, MetricComparison, MetricStats, RecordingCheck, ReflectMetrics, VerifyInputs, VerifyOptions,

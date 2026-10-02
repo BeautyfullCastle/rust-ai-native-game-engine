@@ -325,3 +325,126 @@ fn verify_600_ticks_of_the_demo_scene_is_fast() {
         assert!(par_time.as_millis() < 1000, "{par_time:?}");
     }
 }
+
+#[test]
+fn verified_accept_refuses_document_changes_then_accepts_a_new_verification() {
+    let mut doc = demo_doc();
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let expected = doc.proposal_state(id).unwrap();
+    let report = verify(&doc, id, &scripted(1));
+    let other = guid_named(&doc, "body_06");
+    doc.apply(set(&other, BODY, "pos", vec2(2, 14)), Origin::User).unwrap();
+    assert!(doc.proposal_check(id).is_ok(), "the ops still apply: ordinary conflict detection is insufficient");
+    let unchanged = state(&doc);
+    let history = doc.history();
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    assert_eq!(state(&doc), unchanged);
+    assert_eq!(doc.history(), history);
+    assert!(doc.proposal_info(id).is_ok(), "a stale verification leaves the proposal open");
+
+    let fresh = doc.proposal_state(id).unwrap();
+    let report2 = verify(&doc, id, &scripted(1));
+    assert_ne!(report.candidate_start_checksum, report2.candidate_start_checksum);
+    let accepted = doc.accept_if_unchanged(id, fresh).unwrap();
+    assert_eq!(doc.checksum(), report2.candidate_start_checksum);
+    assert!(accepted.history_id.is_some());
+    doc.undo().unwrap();
+    assert_eq!(state(&doc), unchanged, "the guarded acceptance is one undo entry");
+}
+
+#[test]
+fn verified_accept_refuses_proposal_mutation_and_cross_proposal_state() {
+    let mut doc = demo_doc();
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let expected = doc.proposal_state(id).unwrap();
+    let report = verify(&doc, id, &scripted(1));
+    let body = guid_named(&doc, "body_05");
+    doc.proposal_apply(id, set(&body, BODY, "pos", vec2(0, -30))).unwrap();
+    let unchanged = state(&doc);
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    assert_eq!(state(&doc), unchanged);
+    assert_ne!(report.candidate_start_checksum, doc.proposal_preview(id).unwrap().checksum());
+    assert!(doc.history().is_empty());
+
+    let other = propose_move(&mut doc, "body_05", vec2(0, 12));
+    assert_eq!(doc.proposal_state(other).unwrap().proposal_revision, expected.proposal_revision);
+    assert_eq!(doc.accept_if_unchanged(other, expected), Err(EditError::StaleVerification { proposal: other.0 }));
+    assert!(doc.proposal_info(other).is_ok());
+}
+
+#[test]
+fn verified_accept_invalidates_after_undo_redo_and_rollback_even_when_values_return() {
+    let mut doc = demo_doc();
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let other = guid_named(&doc, "body_06");
+    let expected = doc.proposal_state(id).unwrap();
+    let initial = state(&doc);
+    doc.apply(set(&other, BODY, "pos", vec2(2, 14)), Origin::User).unwrap();
+    doc.undo().unwrap();
+    assert_eq!(state(&doc), initial);
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+
+    let expected = doc.proposal_state(id).unwrap();
+    doc.redo().unwrap();
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    let expected = doc.proposal_state(id).unwrap();
+    let before = state(&doc);
+    doc.begin_tx("temporary", Origin::User).unwrap();
+    doc.apply(set(&other, BODY, "pos", vec2(3, 15)), Origin::User).unwrap();
+    doc.rollback_tx().unwrap();
+    assert_eq!(state(&doc), before);
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+}
+
+#[test]
+fn verified_accept_preserves_noops_but_conservatively_invalidates_failed_batch_rollback() {
+    let mut doc = demo_doc();
+    let body = guid_named(&doc, "body_05");
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let expected = doc.proposal_state(id).unwrap();
+    assert!(!doc.proposal_apply(id, set(&body, BODY, "pos", vec2(0, 12))).unwrap().changed);
+    assert_eq!(doc.proposal_state(id).unwrap(), expected);
+    doc.save_yaml();
+    assert_eq!(doc.proposal_state(id).unwrap(), expected, "saving does not change verification inputs");
+    // An invalid first op rolls an empty transaction back. This deliberately
+    // invalidates the staged revision even though no values changed.
+    let preview = doc.proposal_preview(id).unwrap().checksum();
+    assert!(doc.proposal_apply_all(id, vec![set(&body, BODY, "no_such_field", fixed(1))]).is_err());
+    assert_eq!(doc.proposal_preview(id).unwrap().checksum(), preview);
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    let fresh = doc.proposal_state(id).unwrap();
+    verify(&doc, id, &scripted(1));
+    doc.accept_if_unchanged(id, fresh).unwrap();
+}
+
+#[test]
+fn manual_accept_keeps_its_explicit_rebase_semantics() {
+    let mut doc = demo_doc();
+    let body = guid_named(&doc, "body_05");
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let expected = doc.proposal_state(id).unwrap();
+    verify(&doc, id, &scripted(1));
+    doc.apply(set(&body, BODY, "pos", vec2(3, 15)), Origin::User).unwrap();
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    doc.accept(id).unwrap();
+    assert_eq!(doc.view().field(&orr_edit::Target::Guid(body), BODY, "pos").unwrap(), vec2(0, 12));
+}
+
+#[test]
+fn verification_states_cannot_be_reused_on_another_document_with_matching_counters() {
+    let mut doc = demo_doc();
+    let mut other = demo_doc();
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let other_id = propose_move(&mut other, "body_05", vec2(0, -30));
+    let expected = doc.proposal_state(id).unwrap();
+    let other_state = other.proposal_state(other_id).unwrap();
+    assert_eq!(expected.id, other_state.id);
+    assert_eq!(expected.document_revision, other_state.document_revision);
+    assert_eq!(expected.proposal_revision, other_state.proposal_revision);
+    assert_ne!(expected.document_id, other_state.document_id);
+    let before = state(&other);
+    assert_eq!(other.accept_if_unchanged(other_id, expected), Err(EditError::StaleVerification { proposal: other_id.0 }));
+    assert_eq!(state(&other), before);
+    assert!(other.history().is_empty());
+    assert!(other.proposal_info(other_id).is_ok());
+}

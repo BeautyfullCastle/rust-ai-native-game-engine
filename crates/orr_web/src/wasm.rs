@@ -88,17 +88,27 @@ impl Wire {
     }
 }
 
-fn client_config(opts: &JsValue, default_build: u64) -> RelayClientConfig {
+fn client_config(opts: &JsValue, default_build: u64) -> Result<RelayClientConfig, JsValue> {
     let room = num(opts, "room").unwrap_or(1.0) as u64;
-    let build_id = num(opts, "build_id").map_or(default_build, |b| b as u64);
+    let value = js_sys::Reflect::get(opts, &JsValue::from_str("build_id"))?;
+    let build_id = if value.is_undefined() || value.is_null() {
+        default_build
+    } else if let Some(text) = value.as_string() {
+        crate::build_id::parse_build_id(&text).map_err(JsValue::from_str)?
+    } else if let Some(number) = value.as_f64() {
+        crate::build_id::numeric_build_id(number).map_err(JsValue::from_str)?
+    } else {
+        return Err(JsValue::from_str("build_id must be a decimal/hex u64 string or a nonnegative safe integer number"));
+    };
     let mut cfg = RelayClientConfig::new(room, build_id);
     cfg.want_slot = num(opts, "want_slot").map(|s| PlayerSlot(s as u8));
-    cfg
+    Ok(cfg)
 }
 
 /// A relay client for the arena in the browser.
 ///
-/// `opts` (a plain object): `room`, `build_id` (default the sample's),
+/// `opts` (a plain object): `room`, `build_id` (default the sample's; an exact
+/// decimal/hex u64 string or a nonnegative safe integer Number),
 /// `want_slot`, `bot` (play the scripted bot), plus what `js/transport.js`
 /// reads: `mode`, `wtUrl`, `certHash`, `wsUrl`.
 #[wasm_bindgen]
@@ -114,11 +124,11 @@ pub struct WebClient {
 #[wasm_bindgen]
 impl WebClient {
     #[wasm_bindgen(constructor)]
-    pub fn new(opts: &JsValue) -> WebClient {
-        let cfg = client_config(opts, ARENA_BUILD_ID);
+    pub fn new(opts: &JsValue) -> Result<WebClient, JsValue> {
+        let cfg = client_config(opts, ARENA_BUILD_ID)?;
         let (link, wire) = Wire::new(opts);
         let client = RelayClient::new(cfg, link, |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new());
-        WebClient { client, wire, bot: flag(opts, "bot"), ax: 0, ay: 0, fire: false }
+        Ok(WebClient { client, wire, bot: flag(opts, "bot"), ax: 0, ay: 0, fire: false })
     }
 
     /// One step of the client at `now_us` (microseconds, any monotonic clock).
@@ -198,8 +208,8 @@ pub struct PhysClient {
 #[wasm_bindgen]
 impl PhysClient {
     #[wasm_bindgen(constructor)]
-    pub fn new(opts: &JsValue) -> PhysClient {
-        let cfg = client_config(opts, PHYSICS_BUILD_ID);
+    pub fn new(opts: &JsValue) -> Result<PhysClient, JsValue> {
+        let cfg = client_config(opts, PHYSICS_BUILD_ID)?;
         let (link, wire) = Wire::new(opts);
         let scene: Rc<Cell<Option<PhysConfig>>> = Rc::default();
         let sink = scene.clone();
@@ -214,14 +224,14 @@ impl PhysClient {
             },
             DumpCollector::new(),
         );
-        PhysClient {
+        Ok(PhysClient {
             client,
             wire,
             scene,
             bot: flag(opts, "bot"),
             bot_seed: num(opts, "bot_seed").map_or(1234, |s| s as u64),
             input: PhysInput::default(),
-        }
+        })
     }
 
     /// One step of the client at `now_us` (microseconds, any monotonic clock).

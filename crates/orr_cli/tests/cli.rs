@@ -313,7 +313,7 @@ fn activity_shows_the_previous_commands() {
     host.orr(&["apply", "nudge", "set", "body_06", "Body.angle=1", "--idle", "30"]);
     let a = host.orr(&["activity"]);
     assert_eq!(a.code, 0, "{}", a.err);
-    for want in ["claude", "world.patch e_0000000e", "(was [-12.90433,19.97954])", "proposal.begin", "proposal.verify p1", "proposal.accept p1"] {
+    for want in ["claude", "world.patch e_0000000e", "(was [-12.90433,19.97954])", "proposal.begin", "proposal.verify p1", "proposal.accept_verified p1"] {
         assert!(a.out.contains(want), "activity has {want}: {}", a.out);
     }
     assert!(!a.out.contains("session"), "connect lines are hidden by default: {}", a.out);

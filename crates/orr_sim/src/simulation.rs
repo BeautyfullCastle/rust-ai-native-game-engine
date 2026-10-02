@@ -44,13 +44,34 @@ pub struct Simulation<G: Game> {
 /// Not a general-purpose hash — just a cheap, portable way to make the two
 /// inputs collide as rarely as a 64-bit space allows, with no external
 /// hashing dependency needed in this crate.
-fn mix64(mut x: u64) -> u64 {
+const fn mix64(mut x: u64) -> u64 {
     x ^= x >> 30;
     x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x ^= x >> 27;
     x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^= x >> 31;
     x
+}
+
+/// Binds a game's build identity to the engine's frame/checksum format.
+///
+/// Built-in clients and hosts use this for their build ids, so changing
+/// [`orr_ecs::FRAME_FORMAT_VERSION`] also changes their handshake and replay
+/// identities. Callers supplying their own ids can opt in here, or must
+/// change those ids themselves when incompatible engine/game changes occur.
+/// This does not identify game-code changes: `game_build_id` still must.
+///
+/// Zero preserves the explicit "not tracking a build id" wildcard. A
+/// nonzero input always produces a nonzero identity, even if the mix is zero.
+pub const fn frame_build_id(game_build_id: u64) -> u64 {
+    if game_build_id == 0 {
+        return 0;
+    }
+    // "ORRF" plus the sole frame/checksum format version, using only
+    // fixed-width integer operations on every target (including wasm32).
+    let format_id = 0x4f52_5246_0000_0000 | orr_ecs::FRAME_FORMAT_VERSION as u64;
+    let id = mix64(game_build_id ^ mix64(format_id));
+    if id == 0 { 1 } else { id }
 }
 
 /// Computes the `build_hash` a `Simulation` with this `build_id` and
@@ -256,5 +277,36 @@ impl<G: Game> Simulation<G> {
         }
 
         events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_hash_of, frame_build_id, mix64};
+
+    #[test]
+    fn frame_build_ids_are_format_bound_and_nonzero() {
+        const ARENA: u64 = frame_build_id(0x0A2E_4A00_0001);
+        const PHYSICS: u64 = frame_build_id(0x0A2E_4A00_0002);
+        assert_ne!(ARENA, PHYSICS);
+        for (raw, versioned) in [(0x0A2E_4A00_0001, ARENA), (0x0A2E_4A00_0002, PHYSICS)] {
+            assert_ne!(versioned, 0);
+            assert_ne!(versioned, raw);
+            assert_ne!(build_hash_of(versioned, 0), build_hash_of(raw, 0));
+            let old_format_id = 0x4f52_5246_0000_0000 | u64::from(orr_ecs::FRAME_FORMAT_VERSION - 1);
+            assert_ne!(versioned, mix64(raw ^ mix64(old_format_id)));
+        }
+        // The one nonzero input that would otherwise mix to zero must
+        // never turn build checking off by accident.
+        let zero_mix_input = mix64(0x4f52_5246_0000_0000 | u64::from(orr_ecs::FRAME_FORMAT_VERSION));
+        assert_ne!(zero_mix_input, 0);
+        assert_ne!(frame_build_id(zero_mix_input), 0);
+    }
+
+    #[test]
+    fn zero_build_identity_remains_explicitly_untracked() {
+        assert_eq!(frame_build_id(0), 0);
+        assert_eq!(build_hash_of(frame_build_id(0), 0), 0);
+        assert_eq!(build_hash_of(frame_build_id(0), 99), 0);
     }
 }

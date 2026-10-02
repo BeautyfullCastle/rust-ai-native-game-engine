@@ -112,7 +112,7 @@ fn an_agent_modifies_verifies_and_accepts_in_one_flow() {
     assert_eq!(erp.call("scene.save", json!({})).unwrap()["text"].as_str().unwrap(), original, "verifying changes nothing");
 
     // -- accept
-    let accepted = m.call_tool("accept_proposal", json!({"proposal_id": "p1"}));
+    let accepted = m.call_tool("accept_proposal", json!({"proposal_id": "p1", "verified_state": report["verified_state"]}));
     assert_eq!(accepted["isError"], false, "{accepted}");
     let at = McpChild::text(&accepted);
     assert!(at.contains("Accepted p1 \"lift body_05\" by agent:claude"), "{at}");
@@ -432,4 +432,27 @@ fn the_token_can_come_from_the_environment() {
     let lines: Vec<J> = String::from_utf8(out.stdout).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[1]["result"]["isError"], false, "{}", lines[1]);
+}
+
+#[test]
+fn guarded_accept_forwards_verification_state_and_never_falls_back_to_manual_accept() {
+    let host = TestHost::start();
+    let mut m = McpChild::against(&host, "claude-tok", &[]);
+    m.initialize();
+    let body = guid_from_overview(&mut m, "body_05");
+    m.call_tool("propose_changes", json!({"label": "lift", "ops": [{"op": "patch", "entity": body, "component": BODY, "path": "pos", "value": [0, 12]}]}));
+    let report = m.call_tool("verify_proposal", json!({"proposal_id": "p1", "inputs": {"kind": "idle", "ticks": 1}, "checks": ["lost_bodies.max == 0"]}));
+    assert_eq!(structured(&report)["passed"], true);
+    let mut erp = host.erp("claude-tok");
+    erp.call("world.rename", json!({"entity": body, "name": "changed"})).unwrap();
+    let before = erp.call("scene.save", json!({})).unwrap()["text"].clone();
+    let refused = m.call_tool("accept_proposal", json!({"proposal_id": "p1", "verified_state": structured(&report)["verified_state"]}));
+    assert_eq!(refused["isError"], true);
+    assert!(McpChild::text(&refused).contains("stale_verification"));
+    assert_eq!(erp.call("scene.save", json!({})).unwrap()["text"], before);
+    assert_eq!(erp.call("proposal.list", J::Null).unwrap()["proposals"].as_array().unwrap().len(), 1);
+    let null_state = m.call_tool("accept_proposal", json!({"proposal_id": "p1", "verified_state": null}));
+    assert_eq!(null_state["isError"], true, "an explicitly invalid state must not select manual acceptance");
+    let manual = m.call_tool("accept_proposal", json!({"proposal_id": "p1"}));
+    assert_eq!(manual["isError"], false, "explicit manual acceptance keeps its existing rebase semantics");
 }

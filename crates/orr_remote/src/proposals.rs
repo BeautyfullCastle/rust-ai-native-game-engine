@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use orr_ecs::Frame;
 use orr_edit::{
-    Check, CheckOutcome, EditorDoc, MetricValue, Metrics, Op, Origin, ProposalId, ProposalSummary, ReflectMetrics, Target, VerifyInputs,
+    Check, CheckOutcome, EditorDoc, MetricValue, Metrics, Op, Origin, ProposalId, ProposalState, ProposalSummary, ReflectMetrics, Target, VerifyInputs,
     VerifyOptions, VerifyReport, View,
 };
 use orr_reflect::{Guid, Value};
@@ -71,11 +71,12 @@ impl core::fmt::Debug for GameHooks {
 }
 
 /// A stable build id for a host binary of this version running `game`
-/// (FNV-1a 64 of `orr_remote_host/<version>/<game>`), for hosts that have no
-/// build system id of their own.
+/// (FNV-1a 64 of `orr_remote_host/<version>/<game>`, bound to the frame/checksum
+/// format by [`orr_sim::frame_build_id`]), for hosts without a build system id.
 pub fn default_build_id(game: &str) -> u64 {
     let text = format!("orr_remote_host/{}/{game}", env!("CARGO_PKG_VERSION"));
-    text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+    let game_build_id = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    orr_sim::frame_build_id(game_build_id)
 }
 
 /// `ReflectMetrics` plus the game's metrics.
@@ -421,9 +422,25 @@ pub(crate) fn preview<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, Rpc
     Ok(out)
 }
 
-pub(crate) fn accept<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
+pub(crate) fn accept<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, verified: bool) -> Result<J, RpcError> {
     let id = proposal_id(p)?;
-    let a = t.doc.accept(id)?;
+    let a = if verified {
+        let state = p.req_raw("verified_state")?.as_object().ok_or_else(|| RpcError::params("'verified_state' must be the object returned by proposal.verify"))?;
+        let state = P(state);
+        let document_id = state.str("document_id")?;
+        if document_id.len() != 32 || !document_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(RpcError::params("'verified_state.document_id' must be 32 hexadecimal digits"));
+        }
+        let expected = ProposalState {
+            document_id: u128::from_str_radix(document_id, 16).map_err(|_| RpcError::params("invalid 'verified_state.document_id'"))?,
+            id: proposal_id(&state)?,
+            document_revision: state.req_u64("document_revision")?,
+            proposal_revision: state.req_u64("proposal_revision")?,
+        };
+        t.doc.accept_if_unchanged(id, expected)?
+    } else {
+        t.doc.accept(id)?
+    };
     Ok(json!({"history_id": a.history_id, "applied": a.applied.len(), "checksum": checksum_text(t.doc.checksum())}))
 }
 
@@ -581,6 +598,15 @@ pub(crate) fn verify<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits, ctx: &Call
     out["inputs"] = described.clone();
     if let Some(id) = id {
         out["proposal"] = json!(id.to_string());
+        // Verification and this capture share one immutable document borrow:
+        // no scene or proposal edit can interleave between them.
+        let state = t.doc.proposal_state(id)?;
+        out["verified_state"] = json!({
+            "document_id": format!("{:032x}", state.document_id),
+            "id": state.id.to_string(),
+            "document_revision": state.document_revision,
+            "proposal_revision": state.proposal_revision,
+        });
     }
     fx.verify = Some(std::sync::Arc::new(VerifyDetail { proposal: id.map(|i| i.to_string()), inputs: described, report, outcome }));
     Ok(out)

@@ -76,6 +76,12 @@ pub enum EditError {
         /// Why it failed against the current document.
         cause: Box<EditError>,
     },
+    /// The base document or proposal changed after verification. Nothing
+    /// was accepted; a new verification is needed.
+    StaleVerification {
+        /// The proposal whose verification is stale.
+        proposal: u64,
+    },
     /// A verification run could not be set up (bad replay, mismatched
     /// frames, no ticks) or a check rule could not be parsed.
     Verify(String),
@@ -105,6 +111,9 @@ impl fmt::Display for EditError {
             EditError::UnknownProposal(id) => write!(f, "unknown proposal {id}"),
             EditError::ProposalConflict { proposal, op_index, cause } => {
                 write!(f, "proposal {proposal} conflicts with the document: op {op_index} no longer applies: {cause}")
+            }
+            EditError::StaleVerification { proposal } => {
+                write!(f, "proposal {proposal} or the document changed since verification; verify again before accepting")
             }
             EditError::Verify(m) => write!(f, "verify: {m}"),
         }

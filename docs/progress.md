@@ -1,9 +1,32 @@
 # Orrery 진행 현황
 
-최종 갱신: 2026-09-30 (M5 완료) · 설계: `docs/design-v1.md`
+최종 갱신: 2026-10-02 (M6 현황 대조·안정화 패치 로컬 검증 완료) · 설계: `docs/design-v1.md`
 코드: https://github.com/BeautyfullCastle/rust-ai-native-game-engine (`main`)
 
-## 완료
+## 현재 안정화 패치 상태 (2026-10-02)
+
+- **교차 플랫폼 완료 게이트: 구현·로컬 검사 통과, 원격 CI 미실행.** `cross_platform_checksum_compare`가 `native`·`wasm32`·`android-arm64`에 의존하며 `always()`로 실행 후 세 결과가 모두 `success`인지 검사한다. `tools/test_determinism_workflow.py` 로컬 5개 테스트 그룹(결과 조합 216개 포함) 통과를 확인했다. 이 결과는 GitHub Actions 스케줄러나 Rust 플랫폼 테스트의 통과를 대신하지 않는다.
+- **검증 후 수락 경쟁 조건: 집중 72개 및 네이티브 workspace 통과.** `ProposalState`(문서 인스턴스 id·문서/제안 revision), `accept_if_unchanged`, ERP `proposal.accept_verified`를 추가하고 CLI `apply`가 검증 결과의 `verified_state`로만 자동 수락하도록 연결했다. 오래된 호스트에서는 수동 수락으로 대체하지 않고 제안을 열린 상태로 남긴다. 기존 수동 `proposal.accept`는 유지한다. 검증 결과: `orr_edit` verify 16개, 실제 소켓 ERP proposals 13개, MCP integration 10개·생성 가이드 4개, CLI unit 9개·integration 20개로 총 72개 통과(신규 회귀 16개). 요청한 검사 결과가 명시적 true가 아니거나 검증 상태가 없으면 CLI 자동 수락을 거부하며, MCP의 명시적 null 상태는 오류다. 가이드는 생성 명령으로 빌드 id pin만 갱신했으며 수기 수정하지 않았다. 네이티브 전체 workspace에서도 통과했다. 전체/strict CI clippy와 wasm 골든 기본·SIMD slice는 통과했다. 전체 플랫폼 실행과 실제 브라우저 e2e는 별도다.
+- **Frame 체크섬 누락: ORRF v2 네이티브 전체 및 wasm 기본·SIMD 골든 slice 통과.** v1에서 빠진 컬렉션 경계·리스트 free 순서 등을 포함해 `Frame::checksum()`을 직렬화 바이트의 체크섬으로 맞췄다. 스냅샷 버전이 2로 바뀌며 v1은 거부한다. 집중 검증에서 최신 Cargo 빌드 라이브러리를 사용한 4개 통합 테스트 suite의 36개 테스트(신규 회귀 9개·갱신 골든 포함)가 통과했고, 앞선 Cargo doctest 1개도 통과했다. `core.rs` 기대값은 의도적인 체크섬 변경으로 `14364510420768418636`→`2074994390429319065`이며 이유를 소스에 기록했다. 이후 7개 테스트 파일의 Frame 기반 기대값 21개(ECS 1개+downstream 20개)를 관측된 새 값으로 이전했다. 원시 FP·캡슐 쿼리 기대값과 테스트 workload/assertion 로직은 바꾸지 않았다. 이전한 21개 기대값은 네이티브 전체 workspace와 기본 wasm 재검증에서 모두 일치했다. `.orrp` 내부 스냅샷, 기존 골든, 서로 다른 버전 피어에 영향이 있으므로 [Frame/리플레이 호환성](frame-compatibility.md)을 먼저 확인한다.
+- **기본 빌드 id 호환 경계: 구현·네이티브 workspace 검증 통과.** `orr_ecs::FRAME_FORMAT_VERSION`과 `orr_sim::frame_build_id`로 native/browser/server의 arena·physics 및 ERP 기본 id를 ORRF 버전에 묶었다. 명시적 custom id는 호출자가 helper를 사용하거나 직접 변경해야 하며, 0은 기존 추적 안 함 wildcard다. 브라우저 custom build id는 십진/0x 문자열을 손실 없이 전달·파싱하고, 안전한 정수 범위를 벗어난 JS Number는 연결 전에 거부하도록 수정했다. 서로 다른 버전 Hello의 양방향 거부·현재 버전 일치·u64 경계를 포함한 신규 9개 검사(remote 1·sample 3·sim 2·web parser 3)가 네이티브 workspace에서 통과했다. 실제 브라우저 연결 검증과는 구분한다.
+
+독립적인 구/신 ECS 라이브러리 비교에서 엔티티 재사용·동일 크기 컴포넌트·singleton·해제 리스트·ZST를 포함한 128프레임의 스키마/상태 payload 바이트가 동일했고, ORRF 버전 4바이트와 체크섬 trailer 8바이트만 달랐다. 전체 게임/플랫폼 동등성 검증을 대체하지는 않는다.
+
+체크섬 paired 벤치(최적화 빌드, 각 10만 회·3쌍 중앙값): 1000엔티티/리스트 없음 2778→2648ns(−4.7%, 측정 잡음 범위), 리스트 있음 3681→4055ns(+10.2%, +374ns); 1만 엔티티/리스트 없음 26569→26566ns(거의 동일), 리스트 있음 27080→27775ns(+2.6%). 전체 틱 비용 재측정 결과는 아니다.
+
+**네이티브 최종 검증:** `cargo test --workspace --release --no-fail-fast -j5`를 `ORR_REQUIRE_GPU=1`(lavapipe)·`ORR_REQUIRE_C_COMPILER=1`·`RUST_TEST_THREADS=1`로 실행해 exit 0. 하네스 집계는 **847 passed / 0 failed / 4 ignored**이며 GPU 리드백·에디터·C FFI 필수 검사도 통과했다. 실제 실행 841개와 자체 SKIP 6개를 합친 수치다. 브라우저 e2e 함수 6개는 `crates/orr_web/web/pkg` 생성물이 없어 자체 SKIP 뒤 성공 반환했다. 따라서 실제 브라우저 실행 6개가 통과했다고 해석하면 안 된다(`ORR_REQUIRE_BROWSER=1`이면 이 누락을 실패로 처리).
+
+**clippy:** `--workspace --all-targets` exit 0, CI의 엄격한 20개 패키지 `-D warnings` 검사도 exit 0. 전체 workspace 검사에는 변경 전부터 있던 `orr_editor/src/agent_ui.rs:382`의 불필요한 `&name_of` borrow 경고 1개가 남아 있으므로 “전체 경고 0”은 아니다.
+
+**wasm 실제 실행:** Wasmtime 25.0.0에서 wasm32-wasip1 기본 **120 passed / 0 failed / 4 ignored**, 설정된 SIMD slice **96 passed / 0 failed / 4 ignored**. reflection bake fixture도 양쪽에 추가 실행했고, 이전한 Frame 골든 21개 전부가 네이티브·기본 wasm에서 일치했다. 신규 체크섬 회귀 9개(최대 u32 ZST 포함)는 기본·SIMD 모두 통과했다. SIMD 결과는 설정된 slice 범위이며 전체 workspace 실행은 아니다.
+
+**추가 확인:** `wasm32-unknown-unknown` 브라우저 타깃 release 빌드·strict clippy 통과, 네이티브 hotpatch 기능 빌드 통과. 2D/3D 헤드리스 샘플 각각 300바디·300틱 실행 성공, stall 0, 엔티티 수 339/443 유지. 검증 도구체인은 Rust 1.99.0이며 로컬 워크플로 5그룹/216조합 및 `git diff --check`도 통과했다.
+
+**이번에 실행하지 않은 범위:** Windows·macOS·ARM/Android, 하드웨어 GPU, 실제 브라우저 e2e, Xvfb의 보이는 창 smoke, 원격 GitHub Actions. 소프트웨어 GPU 리드백과 C FFI는 위 네이티브 실행에서 필수 모드로 확인했으므로 이 미실행 목록과 구분한다.
+
+## 구현 완료 기록
+
+M0~M6의 구현 마일스톤 기록이다. 아래 성능·플랫폼 통과 수치는 각 구현 시점의 측정이며, 2026-10-02 문서 대조만으로 다시 검증한 수치가 아니다. 플랫폼 실기기 확인과 제품화·안정화 과제는 아래에 따로 적는다. M6는 설계 §10에 정량 완료 조건이 없으므로, 모든 확장 기능·플랫폼이 완성되었다는 뜻으로 읽지 않는다. **표의 Frame 기반 골든 값과 “골든 불변”은 ORRF v1 시절의 이력이다. ORRF v2의 현재 기대값은 위 재검증을 거쳐 테스트 소스에 고정했으며, FP 연산만의 골든과는 구분한다.**
 
 | 크레이트 | 내용 | 수치 |
 |---|---|---|
@@ -11,7 +34,7 @@
 | `orr_ecs` | Frame(스파스셋, Pod 컴포넌트), 결정론 엔티티 할당, 쿼리 1~4개 + Without, Commands, 싱글톤, FrameList, FrameRing, xxh3 체크섬 | 1M 순회 1.9ms (순수 Vec 1.2ms), 10만 스냅샷 0.66ms, 체크섬 0.48ms. 골든 `14364510420768418636` |
 | `orr_sim` | Game/System/SimContext, TickInputs, 이벤트 키, 핫패치 간접 호출(`hotpatch` 기능, subsecond 연결), 빌드 해시 | |
 | `orr_session` | 예측/롤백, stall, 이벤트 3상태 조정, 체크섬 비교, `.orrp` 리플레이(lz4) + 빌드 해시 검사 | 1만 엔티티 틱 180µs, 8틱 재시뮬 787µs. 리플레이 약 19B/틱(2인) |
-| `orr_ecs` 직렬화 | `Frame::to_bytes`/`from_bytes` (ORRF v1, LE, u32 길이, 체크섬 검증, 잘못된 입력은 Err). `.orrp` v2 키프레임 + `seek` | 직렬화/역직렬화 1만 179/136µs, 10만 3.5/3.1ms. 키프레임 50틱 간격 시 400틱 2인 리플레이 7.5KB→10.6KB |
+| `orr_ecs` 직렬화 | `Frame::to_bytes`/`from_bytes` (현재 ORRF v2, LE, u32 길이, 체크섬 검증, 잘못된 입력은 Err; v1 호환 단절은 위 패치 상태 참고). `.orrp` v2 키프레임 + `seek` | 직렬화/역직렬화 1만 179/136µs, 10만 3.5/3.1ms. 키프레임 50틱 간격 시 400틱 2인 리플레이 7.5KB→10.6KB |
 | 늦은 참가 | 확정 틱(`verified_tick`) Frame 스냅샷 + lz4, 빌드 해시·설정·체크섬 검증. 빈 슬롯은 호스트가 기본 입력으로 채움. 기존 피어는 `authored_since`로 입력 재전송. `.orrp` 파서: 신뢰할 수 없는 개수·lz4 크기·틱 경계 검사 | 3번째 피어가 150틱에 참가, 600라운드까지 체크섬 일치(롤백 1028회) |
 | 참가 복구 | 기존 피어가 `ORRB` 알림으로 보유 입력 구간을 알림 → 참가자가 빈틈을 시간 없이 판정(`InputGap`). 시도 번호로 재요청·새 스냅샷, 참가 중 입력 보관(hold), `max_join_attempts`(기본 3), `mark_slot_vacant`로 재입장 | 느린 전송(80라운드, 보관 4틱)도 재시도 없이 수렴. 누락→재요청, 재입장 모두 체크섬 일치 |
 | `orr_testgame` | arena 테스트 게임, 루프백 네트워크 2클라 2000틱 테스트 | 골든 `0x13cdc3c810d65459` |
@@ -41,18 +64,51 @@
 | ERP 호스트 클라이언트 모드 | 공통 `orr_sample::relay_view::RelayView`(Relay 클라 + Threaded 브리지 + ViewStreamSource)를 `orr_ffi`와 `orr_remote`가 공유. `orr_remote_host --join 서버` → ERP `viewstream`이 클라이언트 브리지 프레임(롤백 표시·범위, 예측/확정/취소 이벤트)을 소켓으로 전송. `session.status`, `sim.checksum`, 자기 슬롯 `sim.input`; 편집·타임라인은 `not_in_client_mode`. `orr_tui --connect` 클라이언트 모드 지원 | `--join` 호스트 2 + Rust 클라 1, WS·지연·손실 2%: 확정 체크섬 19지점 일치, 디싱크 0, 롤백 프레임 약 85(최대 8틱) |
 | 브라우저 클라 (WebTransport) | 시험 구현 결과 `docs/webtransport-trial.md`: h3 + h3-webtransport + h3-quinn, 기존 QUIC `orrery/1`과 `h3`가 **UDP 포트 하나 공유**(ALPN 분기), 개발용 ECDSA P-256 13일 자체서명 + SHA-256(`serverCertificateHashes`), Safari용 PEM 옵션, `ws://`·`wss://`. `orr_server --webtransport --ws-bind --wss-bind`. `orr_web`(wasm32-unknown-unknown): 브라우저에서 같은 RelayClient + Arena 시뮬, WebTransport → WebSocket 대체. Firefox/Safari 체크리스트는 문서 7절 | 헤드리스 Chromium + 네이티브 봇 약 600틱: 체크포인트 20/20 일치, 디싱크 0, 브라우저 롤백 약 137회(WT·WS·wss 모두). 로컬 왕복 중앙값 WT 0.9ms, WS 0.7ms |
 | 권위 서버 (M6 ①) | 방 단위 선택(`orr_server --authoritative [--ai-slot N]`). 서버가 확정 입력으로 `Simulation<G>`을 헤드리스 실행 → 클라 체크섬을 서버 값과 비교(투표 없음), 불일치 클라에만 교정 스냅샷(`Correction`, lz4) → `Session::restore_confirmed`, `.orrd` 덤프, 반복 디싱크(60초 3회)·치트(감사 훅) 추방. 늦은 참가는 서버 스냅샷. 서버 AI 슬롯. 프로토콜 v3(Relay 트래픽은 v2와 바이트 동일). `docs/authoritative.md` | 서버 비용: 물리 1000바디 약 1ms/틱(예산 6%), arena 2.4µs. 강제 디싱크: 체크포인트 4틱 뒤 감지, 교정 104B, 이후 일치(QUIC 포함) |
-| 3D 물리 (M6 ②) | `orr_fp` 3D 수학(FPMat3, 쿼터니언 적분, 골든 `0x1e80d8a6af9b420d`). `orr_physics3d`(2D와 별도 크레이트, 2D 불변): 구·캡슐·박스 6쌍(정확한 선분 최근접점, 박스 15축 SAT + 4점 클리핑), sort-and-sweep, 순차 임펄스 서브스텝 8회·warm start·마찰 2방향·반발, 슬립 아일랜드, raycast·구 캐스트, 상태 전부 Frame. 롤백·리플레이·2인 세션 테스트 | 골든 5개(stack10 `0x21eb449802e96d0f`, pyramid5 `0x28f6e5ce7d1c811e`, rain75 `0xa509c0497431ac58`, ramp6 `0x2a04b439faf52168`, mixed120 `0x02692d01c7d15ab6`), wasm32 동일. 10단 600틱 밀림 0.012, 25단까지. 1000바디 깨어 있음 약 4.5ms/틱(목표 4ms 약간 초과), 잠듦 22µs, 500바디 1.9ms. 없음: 볼록 다각형·조인트·CCD·센서·3D 뷰 |
+| 3D 물리 (M6 ②) | `orr_fp` 3D 수학(FPMat3, 쿼터니언 적분, 골든 `0x1e80d8a6af9b420d`). `orr_physics3d`(2D와 별도 크레이트, 2D 불변): 구·캡슐·박스 6쌍(정확한 선분 최근접점, 박스 15축 SAT + 4점 클리핑), sort-and-sweep, 순차 임펄스 서브스텝 8회·warm start·마찰 2방향·반발, 슬립 아일랜드, raycast·구 캐스트, 상태 전부 Frame. 롤백·리플레이·2인 세션 테스트 | 골든 5개(stack10 `0x21eb449802e96d0f`, pyramid5 `0x28f6e5ce7d1c811e`, rain75 `0xa509c0497431ac58`, ramp6 `0x2a04b439faf52168`, mixed120 `0x02692d01c7d15ab6`), wasm32 동일. 10단 600틱 밀림 0.012, 25단까지. 1000바디 깨어 있음 약 4.5ms/틱(목표 4ms 약간 초과), 잠듦 22µs, 500바디 1.9ms. 없음: 볼록 다각형·조인트·CCD·센서. 3D 뷰는 다음 행에서 구현 |
 | 3D 렌더·뷰 (M6 ③) | `orr_render::Renderer3D`: 원근/직교 + 궤도 카메라, 깊이, MSAA 4x(폴백), 구·박스·캡슐·바닥 인스턴싱, 금속도/거칠기 Blinn-Phong, 반구 앰비언트, 방향광 2048² PCF 그림자(텍셀 스냅), ACES 선택, sRGB, 3D 디버그 선, 5x7 텍스트. `orr_view` 3D(slerp, 롤백 오차 감쇠). 뷰 스트림 v2 `ViewFrame3`(88B 레코드, 2D v1 바이트 불변). `orr_sample --bin physics3d`(2인 롤백, 궤도 카메라, 발사·생성). 스크린샷 `docs/img/physics3d.png` | GPU 리드백 11개(조명·그림자·가림·MSAA·1만 인스턴스·투영). CPU 인스턴스 생성 0.075ms/1076개. lavapipe 1000바디 그림자+MSAA 481ms(소프트웨어). 없음: 캐스케이드·LOD·접촉 표시, 3D 스트림의 ERP·C ABI·orr_tui 연결, 하드웨어 GPU·Windows 확인 |
 | 모바일·웹 최적화 (M6 ④) | 렌더 없는 샘플 게임을 `orr_games`로 분리(골든 5개, 이동 전후 동일). 크로스 타깃 벤치 `orr_wasm_bench`(12케이스, 체크섬 고정) + `tools/wasm_bench.sh`. wasm32 FP 빠른 경로(mul i64, div |a|<2^47, sqrt 표+뉴턴), 결과 비트 동일. 브라우저: 시뮬·전송을 Web Worker로, `PhysClient`(PhysGame), 뷰는 WebGPU→WebGL2→2D 캔버스(`orr_web_gpu`, `Wgpu::for_canvas`), 2D 셰이더 `fwidth` 분기 밖으로. `web`/`web-small` 프로필 + wasm-opt. Android aarch64(NDK r27c, qemu로 골든). `Settings3D::LOW`·`physics3d --low`. CI: android-arm64 잡, wasm simd128 골든 반복, 웹 크기 보고. `docs/wasm-bench.md`, `docs/mobile.md` | wasm(Chromium) fp_mul 4.10→1.80ns, fp_div 10.6→3.18, fp_sqrt 160→7.4, 물리 2D 1000바디 1262→883µs/틱, 3D 4627→4069µs. 웹 번들(PhysGame 포함) -O3 594KB, gzip 209KB. 브라우저 e2e 6개(WT/WS/WSS, WebGL2, WebGPU) 체크포인트 20/20 일치. lavapipe 1000바디 `--low` 291→55ms. 없음: 브라우저 3D, Firefox·Safari, 터치·오디오, 실기기 Android, iOS(문서만), ECS wasm 3~5배 느림 |
 | CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
-## 다음
+## 완료 목록과 대조해 정리한 항목 (2026-10-02)
 
-1. (P2P 한정, Relay 모드에서는 해결됨) 참가 후속: `join_backlog_peers` 기본값 0이면 빈틈 검사 없음(참가자가 피어 수를 스스로 알 방법 필요). 자리 비우기 시 피어마다 떠난 플레이어 입력을 받은 범위가 다르면 채우지 않음(조정자 필요). 스냅샷 전 도착한 알림은 호출자가 버퍼링. 폐기된 시도의 링크 정리. Relay 서버 연동. 조작된 리플레이 입력이 debug 빌드에서 FP 오버플로 패닉
-2. 물리: 목표 엔티티 수는 1,000바디로 확정(설계 §3.4) — 1000바디는 예산 충족, 3000바디 이상 롤백 초과는 보장 대상 아님. 20단 박스 스택 붕괴(솔버 한계), 캡슐 4단 스택 축 방향 0.16 밀림, 컨트롤러 움직이는 발판 미지원. 샘플에 캡슐 렌더링 없음. CCD, 조인트. 쿼리가 `&mut Frame`을 요구. `Body` 96B로 변경되어 이전 물리 리플레이 호환 안 됨
-3. M2 마무리: 화면 텍스트, 이벤트 채널 상한, 낮은 fps에서 롤백 보정 정확도. `sample-build` CI 리눅스 확인
-4. M3 후속: (`TickInputs` 플래그·`resim_ticks`는 2026-10-01 해결) 창 클라가 방 시작 후에야 열림, 서버 속도 제한. 브라우저 클라 WebTransport·`wss://` 구현(2026-10-01, 위 표) — 남은 것: Firefox/Safari 실기기 확인, (물리 데모 브라우저·Web Worker 이전은 M6 ④에서 해결) 네이티브 WT/wss 클라 없음, h3 계열 0.x 고정
-5. **M4 에디터 MVP — 완료 (2026-09-30)**. 완료 기준(씬 편집 → 플레이 → 되감기 루프) 충족: 에디터 창과 ERP 에이전트 양쪽에서 테스트. 남은 것: 에디터가 `PhysGame` 전용(`Game` 제네릭화), 시뮬이 UI 스레드에서 돎(Threaded 호스트로), 계층 트리·기즈모·박스 선택·네이티브 파일 대화상자·도킹 없음, 플레이 중 편집 undo 없음(되감기로 대체), ERP 프레임 델타 없음·편집 모드 프레임 스트림 없음, MCP 어댑터 미구현, Windows 실제 GPU에서 에디터 확인 필요. 규칙: 화면 전체 캡처 금지(앱 자기 프레임버퍼·GPU 리드백만), 서브에이전트는 Sonnet/Haiku, 파일은 LF.
-6. **M5 AI — 완료 (2026-09-30)**. 완료 기준(에이전트가 수정 → 검증 → 수락까지 한 번에) 충족: MCP 자식 프로세스 테스트 + 에디터 내장 ERP 테스트 + 리눅스 실제 창 확인. 남은 것: 실제 LLM(Claude Code)으로 `orr_mcp` 사용 시험(Windows에서), 사람과 제안이 같은 필드를 바꾸면 제안 값이 이김(경고 없음), 제안 안 편집 하나만 빼기 없음, `proposal.verify`가 호스트 스레드를 막음(취소 없음, 최대 6000틱), 제안 소유자 구분 없음, 검증 스크린샷(`view.screenshot`) 없음, 리플레이 디버그 커맨드가 엔티티 번호 변경에 취약. 부하 민감 테스트: `orr_server` `disconnect_and_rejoin_over_quic`, `orr_net` `max_connections_enforced::quic` — 실시간 기반이라 CPU를 여러 빌드가 나눠 쓸 때 실패한 적 있음(단독 6/6 통과), 진행량 기준으로 바꾸는 것이 과제. 주의: sccache는 여러 작업 폴더를 오가면 `env!("CARGO_MANIFEST_DIR")`가 박힌 산출물을 재사용해 오류를 낸 적이 있어 끔.
-7. **뷰 교체 가능성 (결정 12) — 완료 (2026-10-01)**. ① 에디터를 브리지 뒤로 ② 언어 중립 뷰 스트림 + `orr_ffi`(C ABI) + 소켓 전송 ③ 터미널 뷰어 `orr_tui`와 C 테스트 프로그램으로 증명 — 모두 완료. 남은 것: C ABI 멀티플레이는 완료(위 표), ERP 소켓·헤드리스 호스트 클라이언트 모드 완료(위 표), C 헤더 수기 관리, Windows/mac에서 C 테스트·FFI는 CI 첫 실행, `orr_tui` 롤백 보정 스무딩·wss 없음.
-8. **M6 — 완료 (2026-10-01)**. ① 권위 서버 ② 3D 물리 ③ 3D 렌더·뷰 ④ 모바일·웹 최적화(위 표). 남은 것: 브라우저 3D(`Renderer3D` WGSL 브라우저 검증), Firefox/Safari, 터치·오디오, Android 실기기 속도, iOS 빌드(macOS 필요), wasm ECS 순회 3~5배 느림(simd128은 기본 꺼짐), CI에 wasm-opt 없음, qemu aarch64에서 다중 스레드 테스트 하네스가 가끔 segfault(단일 스레드로 실행). 부하 민감 테스트에 `orr_ffi` `c_client error_paths_return_codes_not_crashes` 추가(부하 시 107초, 단독 통과).
+다음 항목은 예전 미완료 목록에 남아 있었지만 코드와 위 구현 기록에서 이미 해결되어 삭제했다. 테스트 파일의 존재는 확인했으나 이번 문서 대조에서 해당 테스트를 새로 통과시켰다는 뜻은 아니다.
+
+- MCP 어댑터: `crates/orr_mcp` 및 `tests/agents_md.rs`·M5 통합 테스트가 있다. `docs/AGENTS.md`는 생성물이며 직접 수정하지 않는다.
+- 에디터 시뮬을 UI 스레드에서 분리: `orr_remote::LocalHost`와 `orr_editor/src/backend.rs`의 ERP/`RemoteBridge` 경로가 구현되어 있다. `orr_editor/tests/deps.rs`는 직접 시뮬 의존을 검사한다. 다만 `PhysGame` 전용 뷰 및 `orr_sample` 의존은 남았다.
+- 편집 모드 프레임 스트림: `orr_remote/src/server.rs`의 `source: view` 경로는 플레이 세션이 없어도 `doc.frame()`을 보낸다. Frame 델타 최적화는 별도 미완료 항목이다.
+- 2D 샘플 캡슐 렌더링: `orr_sample/src/physics_view.rs`의 `Shape::Capsule`, `orr_render/src/list.rs`의 캡슐 렌더가 있다.
+- TUI 롤백 보정: `orr_tui/src/state.rs`에 100ms 스무딩, `state_tests.rs`에 회귀 테스트가 있다. `wss://` 지원은 여전히 없다.
+- `TickInputs` 플래그·`resim_ticks`, C ABI 멀티플레이, ERP 클라이언트 모드, WebTransport·WSS, 브라우저 물리 데모·Web Worker 이전은 위 구현 기록대로 완료했다.
+- `sample-build`는 Linux/Windows 테스트, Linux lavapipe GPU 리드백·Xvfb 실행을 CI에 정의했다. 과거의 “CI 리눅스 확인”은 구현 누락이 아니라 **현재 커밋에서 해당 잡 통과 확인**으로 다룬다.
+
+## 우선순위가 있는 후속 작업
+
+P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 보강, P3 = 별도 설계가 필요한 확장. 정적 코드 대조로 확인한 위험과 미구현 기능을 구분한다. 아래 검증은 앞으로의 완료 조건이며 통과 기록이 아니다.
+
+### P1. 검증·수락의 일관성과 품질 게이트
+
+1. **검증한 후보와 수락한 후보의 일치: 집중 72개·네이티브 workspace 통과.** 검증은 현재 문서에 제안 ops를 적용한 후보를 사용하며, 이제 `verified_state`를 반환한다. `proposal.accept_verified`는 문서 인스턴스 id·문서/제안 revision을 비교한 뒤 같은 배타적 문서 접근 안에서 수락한다. CLI `apply`는 새 경로만 사용하고, MCP도 `verified_state`를 전달하면 같은 보호를 받는다. 이 값은 동시 수정 방지용이며 검사 통과의 인증서는 아니다. 완료 조건: 검증 후 문서/제안 수정·undo/redo·rename 시 무변경 오류, 변경이 없으면 수락·undo 정상, 검증 실패/이전 호스트에서 자동 수락 금지. 기존 수동 수락과 같은 필드 “제안 값 우선” 정책은 그대로이며 별도 충돌 경고 과제로 남긴다.
+2. **교차 플랫폼 CI 완료 게이트: 로컬 검사 완료, 원격 실행 대기.** native·wasm32·Android 의존 및 모든 결과의 명시적 성공 검사로 수정했다. 실패·취소·skip·누락 결과를 거부하는 로컬 5그룹/216조합 검사는 통과했다(`tools/test_determinism_workflow.py`). GitHub Actions에서 최종 커밋의 각 골든 잡과 집계 잡까지 확인해야 원격 CI 완료다. 일부 크레이트나 로컬 워크플로 검사 성공을 전체 통과로 쓰지 않는다.
+3. **부하 민감 통합 테스트.** `orr_server::disconnect_and_rejoin_over_quic`, `orr_net::max_connections_enforced::quic`, `orr_ffi::error_paths_return_codes_not_crashes`의 과거 부하 시 실패/지연을 재현한다. 실시간 대기 자체를 없애기보다는 연결·확정 틱·정리 완료 등 관측 가능한 진행 조건을 기다리고, 안전한 최종 시간제한과 실패 진단을 둔다. 완료 조건: 단독/병렬 빌드 부하에서 반복 통과, 무한 대기 없음. 과거 수치: 앞의 두 테스트 단독 6/6 통과, FFI 부하 시 107초·단독 통과. sccache는 `CARGO_MANIFEST_DIR`가 다른 작업 폴더 산출물을 재사용한 사례가 있어 기존 주의 유지.
+4. **느린 뷰·과도한 요청의 자원 상한.** `orr_bridge/src/threaded.rs`의 Input/Command/Event 채널은 명시적으로 unbounded이며 InProc 이벤트 채널도 상한이 없다. 입력은 최신값 병합, 커맨드·이벤트는 순서/취소 의미를 보존하는 상한·backpressure 정책이 필요하다. ERP는 이미 요청 수·연결 큐 바이트 제한이 있으므로 “모든 네트워크 큐가 무제한”으로 일반화하지 않는다. 완료 조건: 뷰가 이벤트를 소비하지 않거나 입력을 빠르게 보내도 메모리가 무한 증가하지 않으며, 정상 롤백 이벤트와 종료는 유지.
+5. **검증 요청 격리.** `proposal.verify`/`verify.self`는 호스트 스레드에서 최대 6000틱을 동기 실행한다(`orr_remote/src/proposals.rs`, `server.rs`). 읽기 권한의 검증도 다른 클라이언트 요청·플레이를 지연시킬 수 있다. 복사한 Frame으로 비동기 작업, 취소/동시 실행 상한과 revision 확인을 추가한다. 조작된 리플레이 입력의 debug FP 오버플로 패닉도 오류 응답·호스트 생존 회귀 테스트 대상으로 둔다. 원시 입력의 유효 범위 검증과 연산 오버플로 정책을 구분하고 골든을 임의로 바꾸지 않는다.
+6. **Frame 체크섬 상태 완전성: ORRF v2 네이티브 workspace·21개 골든 및 wasm 기본/SIMD slice 통과.** 스키마·컬렉션 길이·리스트 free 순서를 해시에 포함하며 직렬화 body와 같은 바이트를 같은 순서로 해시한다. ZST 리스트 길이 복원도 수정했다. 완료 조건: `xxh3_64(to_bytes()[..len-8]) == checksum()`, 상태 경계·free 순서 차이 구별, clone/restore 뒤 다음 할당 동일, v1의 명시적 거부, 의도적인 새 골든 고정 후 전체 회귀·교차 플랫폼 검증, 변경 전후 벤치. 기존 파일 변환기나 구버전 네트워크 상호운용은 구현했다고 주장하지 않는다.
+
+### P2. 지원 범위·통합·측정 보강
+
+- **에디터/AI:** `PhysGame` 전용 연결·그리기를 게임별 어댑터로 분리; 같은 필드 충돌 경고, 제안 소유자·수정 이력/정책, 제안 중 개별 편집 제거, `view.screenshot` 기반 검증, 실제 LLM을 통한 CLI/MCP 사용 시험(Windows 포함). 플레이 중 편집 undo는 현재 되감기로 대체한다. 리플레이 디버그 커맨드의 엔티티 번호/타입 id는 씬 구조 변경에 취약하므로 안정 GUID 매핑을 검토한다.
+- **브리지/외부 엔진:** ERP 전체 Frame 델타·압축 최적화(현재 1000바디 약 113KB/틱, 뷰 스트림 약 52KB/틱); 3D `ViewFrame3`를 ERP·C ABI·TUI 경로에 연결; C 헤더 자동 생성 또는 ABI 일치 검사; Windows/macOS C·FFI 실행 및 실제 GPU 확인; TUI `wss://`. 3D 포맷·렌더 자체의 부재와 통합 미완료를 구분한다.
+- **네트워크:** 창 클라이언트가 방 시작 뒤에야 열리는 시작 UX, 서버 요청/입력 속도 제한, 네이티브 WT/WSS 클라이언트, h3 0.x 의존 업데이트/호환 검사. 기본 host/Relay id에는 이번 패치로 ORRF 버전이 포함된다(위 상태 참고). 같은 ORRF 버전 안의 실제 게임 코드 변경까지 자동 식별하지는 않으므로 배포 빌드 id 주입·검증은 여전히 필요하며 custom id의 변경 책임은 호출자에게 있다. P2P 전용 참가 보완은 아래 별도 항목이며 Relay에서 해결된 문제를 다시 구현하지 않는다.
+- **브라우저/모바일:** CI 브라우저 잡은 빌드·clippy만 수행하므로 기존 Chromium e2e를 자동화하고 Web Worker, WT/WS/WSS, WebGPU/WebGL2 경로를 실행 검증한다. Firefox/Safari 실기기, 브라우저 3D WGSL, 터치·오디오, Android 실제 기기의 속도·수명주기·뷰 셸, iOS 빌드/시뮬레이터(macOS/Xcode 필요)는 미검증/미이식이다. qemu Android 골든 통과는 실기기 성능 검증이 아니다. wasm-opt가 없는 CI 크기 보고는 최종 배포 번들 크기로 취급하지 않는다. qemu aarch64 테스트는 다중 스레드 하네스 불안정으로 단일 스레드 실행 유지.
+- **성능·물리 품질:** 2D 목표 1000바디는 기존 예산 충족 기록이 있으나 3000바디 이상은 보장 대상 밖이다. 20단 박스 스택·캡슐 4단 축 방향 0.16 밀림, 움직이는 발판, 낮은 FPS 롤백 보정을 재현/측정한다. 3D 1000바디 약 4.5ms/틱은 기록된 4ms 목표를 넘고 8틱 재시뮬이면 약 36ms이므로, 설계 §3.4의 약 1ms/틱 롤백 예산과 3D 지원 목표를 명시적으로 조정하거나 최적화한다. wasm ECS 3~5배 지연은 배치/메모리 레이아웃을 변경 전후 같은 벤치로 비교한다. simd128은 기본 꺼짐.
+- **설계 계약과 구현 간 차이:** 설계 §2의 `no_std + alloc` 조건은 `orr_ecs`/`orr_sim`의 현재 `std` 의존과 일치하지 않는다. 지원 범위를 확정하고 feature/빌드 검사 또는 설계 문구를 정리한다. clippy의 `float_arithmetic`과 `HashMap`/벽시계 금지 검사는 있으나 `clippy.toml`은 f32/f64 타입 자체를 금지하지 않으므로, POD 상태에 float 타입이 들어오지 못하는 검사도 필요하다. 에디터는 이미 자체 `Cargo.toml`에 `rust-version = "1.95"`를 명시하므로 workspace 기본 1.85와의 차이를 미수정 결함으로 취급하지 않는다.
+
+### P3. 명시적 보류·확장 범위
+
+- **P2P 참가 경로 한정:** `join_backlog_peers = 0`이면 빈틈 검사 없음(피어 수 발견 필요); 자리 비우기 시 피어별 보유 입력 범위 차이 조정, 스냅샷 전 알림 버퍼링, 폐기된 시도 링크 정리. Relay는 별도 구현으로 이 문제를 해결했다.
+- **물리 확장:** 2D/3D 조인트·CCD, 3D 볼록 다각형·센서, 쿼리 API의 `&mut Frame` 요구 정리. `Body` 96B 변경 전 물리 리플레이와의 호환/마이그레이션 정책. 기존 골든/이진 포맷에 영향을 주는 작업은 별도 설계·버전 계획부터 한다.
+- **편집·렌더 도구:** 계층 트리, 기즈모, 박스 선택, 네이티브 파일 대화상자, 도킹; 2D 화면 텍스트 보강; 3D 캐스케이드 그림자·LOD·접촉 표시. 현재 3D 렌더러에는 5x7 텍스트가 있다.
+- **장기 설계 항목:** 내비메시/경로탐색, 에셋 DB·쿠커·스트리밍, 독립 audio/UI/input 시스템, 렌더 그래프·Forward+, 병렬 스케줄러, ECS 관계/변경 감지·차분 스냅샷은 설계 방향이다. 현재 M0~M6 완료 기록만으로 이 기능들의 구현까지 주장하지 않는다. 아키타입 저장소는 설계 §11대로 벤치 결과에 따라 채택 여부 결정.
+- **권위 서버 비목표:** 관전자, 부정 입력의 소급 서버 롤백, 서버 lag compensation은 `docs/authoritative.md`에서 범위 밖으로 정의한다. 별도 요구 없이 결함으로 취급하지 않는다.
+
+작업 규칙: 화면 전체 캡처 금지(앱 자기 프레임버퍼·GPU 리드백만), 기존 골든 체크섬은 의도적 변경 없이는 유지, 성능 변경은 전후 수치를 함께 기록, 파일은 LF. 프로젝트의 서브에이전트 모델 지침은 `CLAUDE.md`를 따른다.

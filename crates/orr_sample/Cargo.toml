@@ -32,6 +32,8 @@ png = "0.18"
 winit = "0.30"
 
 [dev-dependencies]
+# Compile-check browser and native sample identities together.
+orr_web = { path = "../orr_web" }
 orr_server = { path = "../orr_server", features = ["harness"] }
 orr_proto = { path = "../orr_proto" }
 orr_edit = { path = "../orr_edit" }

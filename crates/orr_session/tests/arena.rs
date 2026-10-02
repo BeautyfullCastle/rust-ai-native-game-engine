@@ -212,7 +212,9 @@ fn replay_round_trip_and_verify() {
 /// networking) scripted run must always produce this exact checksum. If
 /// this test fails after a legitimate engine change, the constant below
 /// must be updated deliberately (and the reason recorded), not silently.
-const GOLDEN_CHECKSUM_1000: u64 = 0x13cdc3c810d65459;
+// ORRF v2 hashes the complete frame body; this is an intentional checksum
+// migration, not a change to Arena's scripted run. See docs/frame-compatibility.md.
+const GOLDEN_CHECKSUM_1000: u64 = 0xb41f0d35815cd605;
 
 #[test]
 fn golden_1000_tick_checksum() {

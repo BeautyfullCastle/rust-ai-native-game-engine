@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! "ORRS" | version u8 (=1) | 3 reserved bytes | meta_len u32 LE | meta (JSON, UTF-8) | payload
-//! payload = lz4 block with a u32 LE size prefix of Frame::to_bytes() (ORRF v1, checksummed)
+//! payload = lz4 block with a u32 LE size prefix of Frame::to_bytes() (ORRF v2, checksummed)
 //! meta = { tick, epoch, tick_rate, player_count, sent_at_us, timeline: {...} }
 //! ```
 //!

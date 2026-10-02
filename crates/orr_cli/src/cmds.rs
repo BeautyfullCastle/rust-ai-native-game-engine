@@ -648,7 +648,21 @@ fn apply(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
         ctx.emit(&text, &result);
         return Err(CliErr::Checks);
     }
-    match ctx.call("proposal.accept", json!({"id": id})) {
+    if !checks.is_empty() && result["verify"]["checks"]["passed"] != true {
+        out(text.trim_end());
+        return Err(CliErr::Erp(format!(
+            "The host did not confirm that the requested checks passed; cannot safely auto-accept. Proposal {id} is still open."
+        )));
+    }
+    // Never fall back to manual accept: an older host may ignore new params
+    // on an existing method, so guarded acceptance has its own RPC method.
+    let Some(verified_state) = result["verify"].get("verified_state").filter(|s| s.is_object()) else {
+        out(text.trim_end());
+        return Err(CliErr::Erp(format!(
+            "The host did not return a verification state; cannot safely auto-accept. Proposal {id} is still open. Update the host and verify again."
+        )));
+    };
+    match ctx.call("proposal.accept_verified", json!({"id": id, "verified_state": verified_state})) {
         Ok(r) => {
             result["accepted"] = json!(true);
             result["outcome"] = json!("accepted");
@@ -899,4 +913,123 @@ fn agents_md(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
         out_raw(&text);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use orr_mcp::{Bridge, ErpCall};
+    use orr_remote::{ClientError, RpcError, CONFLICT, METHOD_NOT_FOUND};
+
+    struct ApplyHost {
+        report: J,
+        accept_error: Option<RpcError>,
+        calls: Rc<RefCell<Vec<(String, J)>>>,
+    }
+
+    impl ErpCall for ApplyHost {
+        fn call(&mut self, method: &str, params: J) -> Result<J, ClientError> {
+            self.calls.borrow_mut().push((method.to_string(), params.clone()));
+            match method {
+                "rpc.discover" => Ok(json!({"engine": {"metrics": []}})),
+                "proposal.begin" => Ok(json!({"id": "p1"})),
+                "proposal.apply" => Ok(json!({"spawned": []})),
+                "proposal.get" => Ok(json!({"label": "test", "op_count": 1, "summary": {"lines": []}})),
+                "proposal.verify" => Ok(self.report.clone()),
+                "proposal.accept_verified" => {
+                    assert_eq!(params, json!({"id": "p1", "verified_state": self.report["verified_state"]}));
+                    match self.accept_error.clone() {
+                        Some(e) => Err(ClientError::Rpc(e)),
+                        None => Ok(json!({"history_id": 1, "applied": 1, "checksum": "0x0000000000000001"})),
+                    }
+                }
+                "proposal.reject" => Ok(json!({"ok": true})),
+                _ => panic!("unexpected request {method}: must never fall back to manual accept"),
+            }
+        }
+    }
+
+    fn run_apply(report: J, accept_error: Option<RpcError>) -> (Result<(), CliErr>, Vec<(String, J)>) {
+        run_apply_command(report, accept_error, &["test", "spawn", "--check", "entities >= 0", "--idle", "1"])
+    }
+
+    fn run_apply_command(report: J, accept_error: Option<RpcError>, args: &[&str]) -> (Result<(), CliErr>, Vec<(String, J)>) {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut host = Some(ApplyHost { report, accept_error, calls: calls.clone() });
+        let bridge = Bridge::new("test", Box::new(move || Ok(Box::new(host.take().unwrap()) as Box<dyn ErpCall>)));
+        let mut ctx = Ctx { bridge, json: false, url: "test".into(), token: None };
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let result = apply(&mut ctx, &args);
+        let calls = calls.borrow().clone();
+        (result, calls)
+    }
+
+    fn passing_report() -> J {
+        json!({"checks": {"passed": true, "results": []}, "verified_state": {"document_id": "1234567890abcdef1234567890abcdef", "id": "p1", "document_revision": 3, "proposal_revision": 2}})
+    }
+
+    #[test]
+    fn apply_sends_the_exact_verification_state_to_guarded_accept() {
+        let (result, calls) = run_apply(passing_report(), None);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.last().unwrap().0, "proposal.accept_verified");
+    }
+
+    #[test]
+    fn apply_preserves_explicit_no_checks_behavior_when_game_has_no_default_metric() {
+        let mut report = passing_report();
+        report["checks"] = J::Null;
+        let (result, calls) = run_apply_command(report, None, &["test", "spawn", "--idle", "1"]);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.last().unwrap().0, "proposal.accept_verified");
+    }
+
+    #[test]
+    fn apply_never_accepts_failed_checks_even_with_a_verification_state() {
+        let mut report = passing_report();
+        report["checks"]["passed"] = json!(false);
+        let (result, calls) = run_apply(report, None);
+        assert!(matches!(result, Err(CliErr::Checks)));
+        assert_eq!(calls.last().unwrap().0, "proposal.reject");
+        assert!(!calls.iter().any(|(method, _)| method.starts_with("proposal.accept")));
+    }
+
+    #[test]
+    fn apply_fails_closed_if_an_older_host_omits_the_verification_state() {
+        let mut report = passing_report();
+        report.as_object_mut().unwrap().remove("verified_state");
+        let (result, calls) = run_apply(report, None);
+        assert!(matches!(result, Err(CliErr::Erp(ref e)) if e.contains("cannot safely auto-accept")));
+        assert_eq!(calls.last().unwrap().0, "proposal.verify");
+    }
+
+    #[test]
+    fn apply_requires_an_explicit_passing_verdict_for_requested_checks() {
+        for verdict in [None, Some(J::Null), Some(json!("true"))] {
+            let mut report = passing_report();
+            if let Some(verdict) = verdict {
+                report["checks"]["passed"] = verdict;
+            } else {
+                report.as_object_mut().unwrap().remove("checks");
+            }
+            let (result, calls) = run_apply(report, None);
+            assert!(matches!(result, Err(CliErr::Erp(ref e)) if e.contains("did not confirm") && e.contains("still open")));
+            assert_eq!(calls.last().unwrap().0, "proposal.verify");
+        }
+    }
+
+    #[test]
+    fn apply_does_not_retry_manual_accept_after_stale_state_or_unsupported_method() {
+        for error in [
+            RpcError::new(CONFLICT, "stale_verification", "scene or proposal changed"),
+            RpcError::new(METHOD_NOT_FOUND, "method_not_found", "unsupported guarded acceptance"),
+        ] {
+            let (result, calls) = run_apply(passing_report(), Some(error));
+            assert!(matches!(result, Err(CliErr::Erp(ref e)) if e.contains("not accepted") && e.contains("still open")));
+            assert_eq!(calls.last().unwrap().0, "proposal.accept_verified");
+            assert_eq!(calls.iter().filter(|(method, _)| method.starts_with("proposal.accept")).count(), 1);
+        }
+    }
 }

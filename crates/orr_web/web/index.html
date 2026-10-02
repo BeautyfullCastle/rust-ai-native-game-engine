@@ -87,7 +87,8 @@ function join() {
     room: parseInt($("room").value, 10) || 1,
     bot,
   };
-  if ($("build").value.trim()) opts.build_id = Number($("build").value);
+  // Keep all 64 bits; the wasm boundary validates decimal/hex text.
+  if ($("build").value.trim()) opts.build_id = $("build").value.trim();
   if (q.get("slot")) opts.want_slot = parseInt(q.get("slot"), 10);
   if (q.get("seed")) opts.bot_seed = parseInt(q.get("seed"), 10);
   last = { data: new Int32Array(0), box: null };

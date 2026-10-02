@@ -204,9 +204,9 @@ pub(crate) fn call<G: Game>(
         "proposal.preview" => proposals::preview(t, &p),
         "proposal.verify" => proposals::verify(t, lim, ctx, fx, &p, true),
         "verify.self" => proposals::verify(t, lim, ctx, fx, &p, false),
-        "proposal.accept" => {
-            require_edit_mode(t, "proposal.accept")?;
-            proposals::accept(t, &p)
+        "proposal.accept" | "proposal.accept_verified" => {
+            require_edit_mode(t, method)?;
+            proposals::accept(t, &p, method == "proposal.accept_verified")
         }
         "proposal.reject" => proposals::reject(t, &p),
         "registry.schema" => registry_schema(t, &p),

@@ -1165,7 +1165,7 @@ impl Drop for ErpServer {
 fn proposals_may_change(method: &str) -> bool {
     matches!(
         method,
-        "proposal.begin" | "proposal.apply" | "proposal.accept" | "proposal.reject" | "scene.load" | "tx.commit" | "tx.rollback" | "history.undo" | "history.redo"
+        "proposal.begin" | "proposal.apply" | "proposal.accept" | "proposal.accept_verified" | "proposal.reject" | "scene.load" | "tx.commit" | "tx.rollback" | "history.undo" | "history.redo"
     ) || (method.starts_with("world.") && !matches!(method, "world.query" | "world.get" | "world.singleton.get"))
 }
 
