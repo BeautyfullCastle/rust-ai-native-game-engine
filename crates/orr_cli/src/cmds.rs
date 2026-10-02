@@ -216,8 +216,13 @@ fn get(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
 }
 
 fn schema(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
-    let p = parse(args, &[("--types", false)], false)?;
-    let o = if p.has("--types") {
+    let p = parse(args, &[("--types", false), ("--input", false)], false)?;
+    if p.pos.len() > 1 || (!p.pos.is_empty() && (p.has("--types") || p.has("--input"))) || (p.has("--types") && p.has("--input")) {
+        return Err(CliErr::Usage("schema accepts one type, --types, or --input (choose one)".into()));
+    }
+    let o = if p.has("--input") {
+        ctx.tool("get_schema", json!({"input": true}))?
+    } else if p.has("--types") {
         ctx.tool("get_schema", json!({"list_types": true}))?
     } else {
         let mut a = json!({});
@@ -744,13 +749,21 @@ fn permille(t: &str) -> Result<u64, CliErr> {
 }
 
 fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
-    let p = parse(args, &[("--players", true)], false)?;
+    let p = parse(args, &[("--players", true), ("--player", true), ("--replay-out", true)], false)?;
     let Some(action) = p.pos.first().map(String::as_str) else {
-        return Err(CliErr::Usage("sim needs an action: start, stop, play, pause, step, seek, speed, state".into()));
+        return Err(CliErr::Usage("sim needs an action: start, stop, input, play, pause, step, seek, speed, state".into()));
     };
+    for (flag, allowed) in [("--players", "start"), ("--player", "input"), ("--replay-out", "stop")] {
+        if p.get(flag).is_some() && action != allowed {
+            return Err(CliErr::Usage(format!("{flag} is only valid with sim {allowed}")));
+        }
+    }
     let arg = p.pos.get(1).map(String::as_str);
     if p.pos.len() > 2 {
         return Err(CliErr::Usage(format!("unexpected argument '{}'", p.pos[2])));
+    }
+    if arg.is_some() && matches!(action, "state" | "play" | "pause" | "start" | "stop") {
+        return Err(CliErr::Usage(format!("sim {action} takes no positional argument")));
     }
     let num = |what: &str| -> Result<u64, CliErr> {
         arg.ok_or_else(|| CliErr::Usage(format!("sim {action} needs {what}")))?.parse().map_err(|_| CliErr::Usage(format!("sim {action}: {what} must be a non-negative integer")))
@@ -774,6 +787,15 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
             ctx.tool("sim_run", json!({"action": "step", "n": n}))?
         }
         "seek" => ctx.tool("sim_run", json!({"action": "seek", "tick": num("a tick")?}))?,
+        "input" => {
+            let player = p.num("--player")?.ok_or_else(|| CliErr::Usage("sim input needs --player <slot>".into()))?;
+            let value: J = serde_json::from_str(arg.ok_or_else(|| CliErr::Usage("sim input needs a JSON input object".into()))?)
+                .map_err(|e| CliErr::Usage(format!("sim input needs a valid JSON input object: {e}")))?;
+            if !value.is_object() {
+                return Err(CliErr::Usage("sim input needs a JSON input object; discover it with `orr schema --input`".into()));
+            }
+            ctx.tool("sim_input", json!({"player": player, "value": value}))?
+        }
         "speed" => {
             let x = arg.ok_or_else(|| CliErr::Usage("sim speed needs a factor like 0.5 or 2".into()))?;
             let pm = permille(x)?;
@@ -782,18 +804,38 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
             tools::Out { text: format!("{}Speed {}.{:03}x.\n", report::state_text(&r), shown / 1000, shown % 1000), structured: r }
         }
         "stop" => {
-            let r = ctx.call("sim.stop", json!({}))?;
-            let text = format!(
+            let replay_out = p.get("--replay-out");
+            if replay_out == Some("") {
+                return Err(CliErr::Usage("--replay-out needs a non-empty local path".into()));
+            }
+            let mut r = ctx.call("sim.stop", if replay_out.is_some() { json!({"include_replay": true}) } else { json!({}) })?;
+            let mut text = format!(
                 "Play stopped at tick {}, checksum {}. The recording ({} bytes) is kept: `orr verify --last-play` replays it.\n",
                 r["tick"],
                 s(&r["checksum"]),
                 r["replay_bytes"]
             );
+            if let Some(path) = replay_out {
+                save_replay(&mut r, path)?;
+                text.push_str(&format!("Replay written locally to {path}.\n"));
+            }
             tools::Out { text, structured: r }
         }
-        other => return Err(CliErr::Usage(format!("unknown sim action '{other}' (start, stop, play, pause, step, seek, speed, state)"))),
+        other => return Err(CliErr::Usage(format!("unknown sim action '{other}' (start, stop, input, play, pause, step, seek, speed, state)"))),
     };
     ctx.emit(&o.text, &o.structured);
+    Ok(())
+}
+
+/// The destination belongs to this CLI process, never to the remote host.
+fn save_replay(result: &mut J, path: &str) -> Result<(), CliErr> {
+    let bytes = result["replay"].as_str().and_then(orr_remote::codec::b64_decode)
+        .ok_or_else(|| CliErr::Erp("play stopped, but the host returned no valid base64 replay; no local file was written".into()))?;
+    std::fs::write(path, bytes).map_err(|e| CliErr::Erp(format!("play stopped, but could not write local replay '{path}': {e}; the host recording is still available with `orr verify --last-play`")))?;
+    if let Some(object) = result.as_object_mut() {
+        object.remove("replay");
+        object.insert("local_replay_path".into(), json!(path));
+    }
     Ok(())
 }
 
@@ -1031,5 +1073,112 @@ mod tests {
             assert_eq!(calls.last().unwrap().0, "proposal.accept_verified");
             assert_eq!(calls.iter().filter(|(method, _)| method.starts_with("proposal.accept")).count(), 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use orr_mcp::{Bridge, ErpCall};
+    use orr_remote::ClientError;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Calls = Rc<RefCell<Vec<(String, J)>>>;
+
+    struct Fake {
+        calls: Calls,
+        result: J,
+    }
+
+    impl ErpCall for Fake {
+        fn call(&mut self, method: &str, params: J) -> Result<J, ClientError> {
+            self.calls.borrow_mut().push((method.to_string(), params));
+            Ok(self.result.clone())
+        }
+    }
+
+    fn context(result: J) -> (Ctx, Calls) {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let log = calls.clone();
+        let bridge = Bridge::new("fake", Box::new(move || Ok(Box::new(Fake { calls: log.clone(), result: result.clone() }))));
+        (Ctx { bridge, json: true, url: "fake".into(), token: None }, calls)
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn input_forwards_game_generic_exact_decimal_json() {
+        let (mut ctx, calls) = context(json!({"ok": true}));
+        let value = r#"{"throttle":0.1234567890123456789012345,"actions":["jump"]}"#;
+        sim(&mut ctx, &args(&["input", "--player", "3", value])).unwrap();
+        let log = calls.borrow();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].0, "sim.input_value");
+        assert_eq!(log[0].1["player"], 3);
+        assert_eq!(log[0].1["value"].to_string(), value, "no rounding through f64");
+    }
+
+    #[test]
+    fn input_schema_is_discovered_without_type_resolution() {
+        let descriptor = json!({"schema": {"type": "object", "properties": {"throttle": {"type": "number"}}}, "value_format": "exact decimals"});
+        let (mut ctx, calls) = context(descriptor);
+        schema(&mut ctx, &args(&["--input"])).unwrap();
+        assert_eq!(calls.borrow().as_slice(), &[("registry.input".into(), J::Null)]);
+    }
+
+    #[test]
+    fn malformed_input_and_mixed_options_fail_before_connecting() {
+        for values in [
+            vec!["input", "{}"],
+            vec!["input", "--player", "0"],
+            vec!["input", "--player", "-1", "{}"],
+            vec!["input", "--player", "0.5", "{}"],
+            vec!["input", "--player", "18446744073709551616", "{}"],
+            vec!["input", "--player", "0", "not-json"],
+            vec!["input", "--player", "0", "[]"],
+            vec!["input", "--player", "0", "null"],
+            vec!["input", "--player", "0", "{}", "extra"],
+            vec!["step", "--player", "0"],
+            vec!["input", "--players", "2", "--player", "0", "{}"],
+            vec!["input", "--player", "0", "{}", "--replay-out", "out.orrp"],
+            vec!["stop", "--replay-out", ""],
+        ] {
+            let (mut ctx, calls) = context(J::Null);
+            assert!(matches!(sim(&mut ctx, &args(&values)), Err(CliErr::Usage(_))), "{values:?}");
+            assert!(calls.borrow().is_empty(), "bad syntax cannot contact or mutate the host");
+        }
+        for values in [vec!["--input", "--types"], vec!["--input", "Body"], vec!["Body", "Collider"]] {
+            let (mut ctx, calls) = context(J::Null);
+            assert!(matches!(schema(&mut ctx, &args(&values)), Err(CliErr::Usage(_))), "{values:?}");
+            assert!(calls.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn stop_requests_replay_bytes_and_writes_the_exact_local_path() {
+        let dir = std::env::temp_dir().join(format!("orr-cli-export-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chosen name.orrp");
+        let bytes = [0, 255, 1, 128, 12];
+        let (mut ctx, calls) = context(json!({"tick": 2, "checksum": "0x0000000000000001", "replay_bytes": bytes.len(), "replay": orr_remote::codec::b64_encode(&bytes)}));
+        sim(&mut ctx, &args(&["stop", "--replay-out", path.to_str().unwrap()])).unwrap();
+        assert_eq!(calls.borrow().as_slice(), &[("sim.stop".into(), json!({"include_replay": true}))]);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_replay_data_never_truncates_the_destination() {
+        let path = std::env::temp_dir().join(format!("orr-cli-invalid-export-{}.orrp", std::process::id()));
+        std::fs::write(&path, b"keep").unwrap();
+        for result in [json!({}), json!({"replay": "not base64"}), json!({"replay": 42})] {
+            let mut result = result;
+            assert!(matches!(save_replay(&mut result, path.to_str().unwrap()), Err(CliErr::Erp(_))));
+            assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

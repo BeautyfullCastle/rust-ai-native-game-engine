@@ -45,6 +45,8 @@ pub fn generate(bridge: &mut Bridge, groups: ToolGroups) -> Result<String, Fail>
 /// Renders the guide from the three ERP results (no I/O).
 pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String {
     let engine = &discover["engine"];
+    let arena = engine["game"] == "Arena";
+    let input = engine.get("input").filter(|value| value["schema"].is_object());
     let fingerprint = fnv1a(&serde_json::to_string(schema).unwrap_or_default());
     let mut o = String::new();
     let mut line = |t: &str| {
@@ -73,7 +75,11 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("");
     line("Orrery is a deterministic, rollback-capable ECS game engine. A **scene** is a set of **entities** (each with a stable GUID such as `e_00000005` and an optional display name) that carry **components**, plus **singletons** (one value per type). The simulation uses fixed-point arithmetic only, so the same scene and the same inputs always produce the same checksums on every machine. That is what makes verification by replay exact.");
     line("");
-    line("You work with the `orr` command line, a thin client of a running host (the editor, or the headless `orr_remote_host`) over ERP. Your edits go through the same document as a person's: they share one undo history, and each entry says who made it (`agent:<your client name>`). A person watching the editor sees what you do in its Agent tab; there is no approval step, so finish the job yourself: check your change with `orr apply` and undo what turns out wrong.");
+    if arena {
+        line("You work with the `orr` command line, a thin client of the headless Arena host (`orr_remote_host --game arena`) over ERP. Your edits go through the host's scene document: they share one undo history, and each entry says who made it (`agent:<your client name>`). Inspect changes with `orr activity` and `orr history`; check your change with `orr apply` and undo what turns out wrong.");
+    } else {
+        line("You work with the `orr` command line, a thin client of a running host (the editor, or the headless `orr_remote_host`) over ERP. Your edits go through the same document as a person's: they share one undo history, and each entry says who made it (`agent:<your client name>`). A person watching the editor sees what you do in its Agent tab; there is no approval step, so finish the job yourself: check your change with `orr apply` and undo what turns out wrong.");
+    }
     line("");
 
     line("## Setup");
@@ -81,9 +87,14 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("Start a host (once), then use `orr` from any shell:");
     line("");
     line("```sh");
-    line("orr_editor --erp 127.0.0.1:7777 --erp-dev          # the editor, with an ERP endpoint (no token: local development)");
-    line("orr_remote_host --dev-no-auth                        # or headless, same address");
-    line("orr_remote_host --token claude:s3cret:all             # a host that needs a token (name:token:capabilities)");
+    if arena {
+        line("orr_remote_host --game arena --dev-no-auth           # headless Arena (no token: local development)");
+        line("orr_remote_host --game arena --token claude:s3cret:all # Arena with a token (name:token:capabilities)");
+    } else {
+        line("orr_editor --erp 127.0.0.1:7777 --erp-dev          # the editor, with an ERP endpoint (no token: local development)");
+        line("orr_remote_host --dev-no-auth                        # or headless, same address");
+        line("orr_remote_host --token claude:s3cret:all             # a host that needs a token (name:token:capabilities)");
+    }
     line("orr status                                            # is it there? game, mode, tick, checksum, proposals");
     line("```");
     line("");
@@ -96,8 +107,13 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("## The workflow");
     line("");
     line("1. **Look first.** `orr status`; `orr scene` (entities, GUIDs, component types; `--filter <text>`, `--has <Type>`, `--components` for values); `orr get <entity> [Component.path]` (an entity is a GUID or an exact display name); `orr schema --types` and `orr schema <type>` for fields, ranges and docs. Never guess a GUID or a field name.");
-    line("2. **Small edits: `orr set`.** `orr set body_05 Body.pos=[6,18] Body.angle=0.5` changes the scene at once; all assignments of one command are one undo entry. Also `orr spawn`, `orr despawn`, `orr rename`, `orr add`, `orr remove`.");
-    line("3. **Anything non-trivial: `orr apply`.** `orr apply \"lift hero\" set hero Body.pos=[6,18] --check \"lost_bodies.max == 0\"` stages the change on a private copy, replays the scene without and with it on the same inputs, judges your `--check` rules and accepts the change only if all pass. On a failed check it rejects the change, prints the report and exits 4 with the scene untouched (`--keep` leaves the proposal open to fix). This is the recommended way to change a scene.");
+    if arena {
+        line("2. **Small edits: `orr set`.** `orr set hero Position.pos=[-300,0]` changes a discovered entity named hero at once; all assignments of one command are one undo entry. Also `orr spawn`, `orr despawn`, `orr rename`, `orr add`, `orr remove`.");
+        line("3. **Anything non-trivial: `orr apply`.** `orr apply \"move hero\" set hero Position.pos=[-300,0] --idle 20 --check \"out_of_bounds.max == 0\"` stages the change on a private copy, replays the scene without and with it on the same inputs, judges your `--check` rules and accepts the change only if all pass. On a failed check it rejects the change, prints the report and exits 4 with the scene untouched (`--keep` leaves the proposal open to fix). This is the recommended way to change a scene.");
+    } else {
+        line("2. **Small edits: `orr set`.** `orr set body_05 Body.pos=[6,18] Body.angle=0.5` changes the scene at once; all assignments of one command are one undo entry. Also `orr spawn`, `orr despawn`, `orr rename`, `orr add`, `orr remove`.");
+        line("3. **Anything non-trivial: `orr apply`.** `orr apply \"lift hero\" set hero Body.pos=[6,18] --check \"lost_bodies.max == 0\"` stages the change on a private copy, replays the scene without and with it on the same inputs, judges your `--check` rules and accepts the change only if all pass. On a failed check it rejects the change, prints the report and exits 4 with the scene untouched (`--keep` leaves the proposal open to fix). This is the recommended way to change a scene.");
+    }
     line("4. **Step by step, when you need to look between the steps:** `orr propose <label> <ops...>` (nothing changes; prints the diff), `orr verify <pN> --check ...`, then `orr accept <pN>` or `orr reject <pN>`. `orr proposals` and `orr diff <pN>` show what is open; a person may make proposals too.");
     line("5. **Watch and undo.** `orr activity` (or `orr activity -f` to follow live) shows what every client did, with old and new values. `orr history` lists the undo history; `orr undo` takes the last entry back exactly, whoever made it; `orr redo` repeats it.");
     line("");
@@ -112,6 +128,9 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("| `orr scene [--components] [--filter t] [--has Type]` | entities and singletons | `read` |");
     line("| `orr get <entity> [Component[.path]]` | values in the scene format (`@Scene` reads a singleton) | `read` |");
     line("| `orr schema [type] \\| --types` | the value schema of the game's types | `read` |");
+    if input.is_some() {
+        line("| `orr schema --input` | the structured player-input schema and exact value format | `read` |");
+    }
     line("| `orr set <entity> Comp.path=value ...` | direct edit, one undo entry | `scene_edit` |");
     line("| `orr spawn [--name n] [Comp=json ...]`, `despawn`, `rename`, `add`, `remove` | direct edits | `scene_edit` |");
     line("| `orr apply <label> <ops...> --check <rule>` | propose, verify, accept if all checks pass (else reject, exit 4) | `scene_edit`, `approve` |");
@@ -120,6 +139,10 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("| `orr accept <pN>` / `orr reject <pN>` / `orr proposals` / `orr diff <pN>` | decide and inspect proposals | `approve` / `scene_edit` / `read` |");
     line("| `orr history [-n N]`, `orr undo`, `orr redo` | the undo history | `read`, `scene_edit` |");
     line("| `orr sim start\\|stop\\|play\\|pause\\|step [N]\\|seek <tick>\\|speed <x>\\|state` | a play session (a copy: the scene document is untouched) | `sim_control` |");
+    if input.is_some() {
+        line("| `orr sim input --player <slot> '<json>'` | set a player's structured input for subsequent ticks | `sim_control` |");
+        line("| `orr sim stop --replay-out <path>` | stop and write the recording to the exact local CLI path | `sim_control` |");
+    }
     line("| `orr activity [--since seq] [--reads] [-f]` | the activity feed of the host | `read` |");
     line("| `orr save [--write]` | scene YAML to stdout, or write the host's scene file | `read` / `scene_edit` |");
     line("| `orr agents-md` | this guide, generated from the host | `read` |");
@@ -133,18 +156,34 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("spawn [--name n] [Comp=<json>...]");
     line("```");
     line("");
-    line("Or a JSON list of op objects from `--ops-file ops.json`, or from stdin with `-`: `{\"op\":\"patch\",\"entity\":\"e_00000005\",\"component\":\"orr_physics::Body\",\"path\":\"pos\",\"value\":[0,12.5]}` (also `insert`, `remove`, `spawn`, `despawn`, `rename`, `singleton.patch`). Example: `orr propose \"lift hero\" set hero Body.pos=[6,18] rename body_05 hero`.");
+    if arena {
+        line("Or a JSON list of op objects from `--ops-file ops.json`, or from stdin with `-`: `{\"op\":\"patch\",\"entity\":\"e_00000005\",\"component\":\"Position\",\"path\":\"pos\",\"value\":[-300,0]}` (also `insert`, `remove`, `spawn`, `despawn`, `rename`, `singleton.patch`). Example: `orr propose \"move hero\" set hero Position.pos=[-300,0]`.");
+    } else {
+        line("Or a JSON list of op objects from `--ops-file ops.json`, or from stdin with `-`: `{\"op\":\"patch\",\"entity\":\"e_00000005\",\"component\":\"orr_physics::Body\",\"path\":\"pos\",\"value\":[0,12.5]}` (also `insert`, `remove`, `spawn`, `despawn`, `rename`, `singleton.patch`). Example: `orr propose \"lift hero\" set hero Body.pos=[6,18] rename body_05 hero`.");
+    }
     line("");
-    line("An entity is a GUID or an exact display name (an ambiguous name is an error that lists the matches: use a GUID). A component may be written by its short name when that is unambiguous (`Body.pos` for `orr_physics::Body.pos`); an ambiguous short name is an error that lists the candidates.");
+    if arena {
+        line("An entity is a GUID or an exact display name (an ambiguous name is an error that lists the matches: use a GUID). Use registered component names such as `Position` and `PlayerTag`; the default Arena authoring scene is empty, so discover or create entities before editing them.");
+    } else {
+        line("An entity is a GUID or an exact display name (an ambiguous name is an error that lists the matches: use a GUID). A component may be written by its short name when that is unambiguous (`Body.pos` for `orr_physics::Body.pos`); an ambiguous short name is an error that lists the candidates.");
+    }
     line("");
 
     line("## Value format");
     line("");
     line(s(&discover["value_format"]));
     line("");
-    line("On the command line a value is parsed as JSON when it is JSON, else as a bare decimal (`.5`, `+3`) or string: `pos=[6,18]`, `angle=0.5`, `orr_physics::Body.kind=dynamic`, `target=null`, `mask=\"7\"` (quote to force a string). Quote arguments that contain spaces or brackets for your shell.");
+    if arena {
+        line("On the command line a scene value is parsed as JSON when it is JSON, else as a bare decimal (`.5`, `+3`) or string: `Position.pos=[-300,0]`, `PlayerTag.slot=0`. Structured player input must be a JSON object: axes are exact numbers and buttons are flag names such as `[\"fire\"]`. Quote arguments that contain spaces or brackets for your shell.");
+    } else {
+        line("On the command line a value is parsed as JSON when it is JSON, else as a bare decimal (`.5`, `+3`) or string: `pos=[6,18]`, `angle=0.5`, `orr_physics::Body.kind=dynamic`, `target=null`, `mask=\"7\"` (quote to force a string). Quote arguments that contain spaces or brackets for your shell.");
+    }
     line("");
-    line("Examples: a vector `[0, 12.5]`; a fixed-point number `-0.5` (write it as a plain decimal, never in quotes); an enum `dynamic`; an entity reference `e_00000005` or `null`; a tagged value `{ \"kind\": \"circle\", \"radius\": 0.5 }`. Numbers come back exact: `0.1` is stored as `0.1000061` (1/65536 steps), and a checksum is a string `0x` followed by 16 hex digits.");
+    if arena {
+        line("Examples: a position vector `[-300, 0]`; an input axis `-0.5`; input buttons `[\"fire\"]` or `[]` for neutral. Numbers come back exact: `0.1` is stored as `0.1000061` (1/65536 steps), and a checksum is a string `0x` followed by 16 hex digits.");
+    } else {
+        line("Examples: a vector `[0, 12.5]`; a fixed-point number `-0.5` (write it as a plain decimal, never in quotes); an enum `dynamic`; an entity reference `e_00000005` or `null`; a tagged value `{ \"kind\": \"circle\", \"radius\": 0.5 }`. Numbers come back exact: `0.1` is stored as `0.1000061` (1/65536 steps), and a checksum is a string `0x` followed by 16 hex digits.");
+    }
     line("");
 
     line("## Types of this game");
@@ -170,15 +209,41 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
         }
     }
 
+    if let Some(input) = input {
+        line("## Structured player input");
+        line("");
+        line("This host exposes structured player input. Read `orr schema --input` (MCP: `get_schema` with `{\"input\":true}`) before choosing fields and values. The CLI and MCP forward exact decimal JSON without a float conversion; field validation belongs to the host.");
+        line("");
+        line("Start paused with `orr sim start`, then `orr sim input --player 0 '<complete JSON input object>'`, then `orr sim step N`. Setting input does not advance a tick. Input stays held until replaced; send the schema's neutral value to release it. MCP uses `sim_run` to start/step and `sim_input` with `{\"player\":0,\"value\":{...}}` to set input.");
+        line("");
+        line("Input schema:");
+        line("```json");
+        line(&serde_json::to_string_pretty(&input["schema"]).unwrap_or_default());
+        line("```");
+        line(s(&input["value_format"]));
+        line("");
+        line("`orr sim stop --replay-out session.orrp` requests the recording bytes and writes them locally where the CLI runs, overwriting that exact path. The host does not save the file. Check it with `orr verify --replay session.orrp --check recording_matches`; `orr verify --last-play --check recording_matches` also uses the host's retained recording.");
+        line("");
+    }
+
     line("## Verification");
     line("");
     line("`orr verify` (and `orr apply`) run both scenes for a number of ticks on **inputs**:");
     line("");
     line("| inputs | meaning |");
     line("|---|---|");
-    line("| `--bot 300 [--seed 1] [--players 2]` | scripted players (deterministic; another seed, another play). The default. |");
-    line("| `--idle 300` | no player input |");
-    line("| `--last-play` | the recording of the last play session stopped in this host (a person's play in the editor, or `orr sim`) |");
+    if engine["verify"]["bot_available"] == true {
+        line("| `--bot 300 [--seed 1] [--players 2]` | scripted players (deterministic; another seed, another play). The default. |");
+        line("| `--idle 300` | no player input |");
+    } else {
+        line("| `--bot N` | unavailable in this host; explicitly requesting bot inputs is an error |");
+        line("| `--idle 300` | no player input; the CLI default when no input source is supplied |");
+    }
+    if arena {
+        line("| `--last-play` | the recording of the last play session stopped in this host (`orr sim` or MCP `sim_run`) |");
+    } else {
+        line("| `--last-play` | the recording of the last play session stopped in this host (a person's play in the editor, or `orr sim`) |");
+    }
     line("| `--replay file.orrp` | a recording file |");
     line("");
     let v = &engine["verify"];
@@ -201,9 +266,17 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("- `<metric>.<stat> <cmp> <number>`: `stat` is `start` (before the first tick), `final` (after the last; the default), `min`, `max` (over the sampled ticks) or `delta` (candidate final minus base final). `cmp` is `<`, `<=`, `==`, `!=`, `>=` or `>`. A metric of the candidate run unless prefixed `base:`.");
     line("- `no_divergence`: checksums equal at every tick. `no_divergence_before <tick>`. `recording_matches`: the scene reproduces the recording's checksums (`--last-play` or `--replay`).");
     line("");
-    line("Examples: `lost_bodies.max == 0`, `mean_height >= 2.5`, `base:dynamic_bodies.start == 40`, `kinetic_energy.delta <= 10`, `entities.final == 49`.");
+    if arena {
+        line("Examples: `out_of_bounds.max == 0`, `players.final == 2`, `bullets.max <= 1`, `score_0.final == 1`, `score_1.final == 0`. Choose thresholds for the scene and recording you actually tested.");
+    } else {
+        line("Examples: `lost_bodies.max == 0`, `mean_height >= 2.5`, `base:dynamic_bodies.start == 40`, `kinetic_energy.delta <= 10`, `entities.final == 49`.");
+    }
     line("");
-    line("`orr verify` without a proposal runs the scene alone: baseline numbers to choose sensible thresholds from. `orr apply` without `--check` uses `lost_bodies.max == 0` if the game reports that metric, else judges nothing.");
+    if arena {
+        line("`orr verify` without a proposal runs the scene alone: baseline numbers to choose sensible thresholds from. In Arena, `orr apply` without `--check` adds no implicit metric check; supply checks explicitly.");
+    } else {
+        line("`orr verify` without a proposal runs the scene alone: baseline numbers to choose sensible thresholds from. `orr apply` without `--check` uses `lost_bodies.max == 0` if the game reports that metric, else judges nothing.");
+    }
     line("");
     line("### Metrics");
     line("");
@@ -250,7 +323,11 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("| `approve` | accept a proposal into the scene (`orr accept`, and the last step of `orr apply`) |");
     line("| `sim_control` | start, step, seek and stop a play session |");
     line("");
-    line("If your token lacks `approve`, `orr apply` stops after a passing verification and leaves the proposal open for a person to accept in the editor.");
+    if arena {
+        line("If your token lacks `approve`, `orr apply` stops after a passing verification and leaves the proposal open for a client with `approve` to accept using `orr accept` or MCP `accept_proposal`.");
+    } else {
+        line("If your token lacks `approve`, `orr apply` stops after a passing verification and leaves the proposal open for a person to accept in the editor.");
+    }
     line("");
 
     line("## Conventions and pitfalls");
@@ -274,7 +351,11 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
         line(&format!("| `{}` | {} | `{}` | {} |", t.name, t.group, t.needs, first_sentence(t.description).replace('|', "\\|")));
     }
     line("");
-    line("Resources: `orrery://scene` (the scene as YAML), `orrery://schema` (JSON Schema), `orrery://agents` (this guide). A tool that fails returns `isError: true` with the engine's message. Ids are strings: proposals `p1`, entities `e_...`. The MCP workflow is `scene_overview`, `get_entity`, `get_schema`, then `propose_changes`, `verify_proposal` with `checks`, `accept_proposal` (needs `approve`), `undo`; `sim_run` drives a play session. Verification inputs are JSON there: `{\"kind\":\"bot\",\"ticks\":300,\"seed\":1}`, `{\"kind\":\"idle\",\"ticks\":300}`, `{\"kind\":\"last_play\"}`, `{\"kind\":\"replay\",\"base64\":\"...\"}`.");
+    if engine["verify"]["bot_available"] == true {
+        line("Resources: `orrery://scene` (the scene as YAML), `orrery://schema` (JSON Schema), `orrery://agents` (this guide). A tool that fails returns `isError: true` with the engine's message. Ids are strings: proposals `p1`, entities `e_...`. The MCP workflow is `scene_overview`, `get_entity`, `get_schema`, then `propose_changes`, `verify_proposal` with `checks`, `accept_proposal` (needs `approve`), `undo`; `sim_run` drives a play session. Verification inputs are JSON there: `{\"kind\":\"bot\",\"ticks\":300,\"seed\":1}`, `{\"kind\":\"idle\",\"ticks\":300}`, `{\"kind\":\"last_play\"}`, `{\"kind\":\"replay\",\"base64\":\"...\"}`.");
+    } else {
+        line("Resources: `orrery://scene` (the scene as YAML), `orrery://schema` (JSON Schema), `orrery://agents` (this guide). A tool that fails returns `isError: true` with the engine's message. Ids are strings: proposals `p1`, entities `e_...`. The MCP workflow is `scene_overview`, `get_entity`, `get_schema`, then `propose_changes`, `verify_proposal` with `checks`, `accept_proposal` (needs `approve`), `undo`; `sim_run` drives a play session. This host has no bot verification: always pass explicit MCP inputs such as `{\"kind\":\"idle\",\"ticks\":300}`, `{\"kind\":\"last_play\"}`, or `{\"kind\":\"replay\",\"base64\":\"...\"}`; omitting inputs defaults to bot in the MCP tool and is refused here.");
+    }
     o
 }
 

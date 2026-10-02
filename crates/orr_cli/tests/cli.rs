@@ -443,6 +443,12 @@ fn bad_usage_is_exit_2() {
         vec!["verify", "--bot"],
         vec!["sim"],
         vec!["sim", "warp"],
+        vec!["sim", "input", "{}"],
+        vec!["sim", "input", "--player", "0", "[]"],
+        vec!["sim", "input", "--player", "-1", "{}"],
+        vec!["sim", "stop", "--replay-out"],
+        vec!["schema", "--input", "--types"],
+        vec!["schema", "--input", "Body"],
         vec!["history", "-n", "x"],
         vec!["--timeout", "soon", "status"],
     ] {
@@ -553,4 +559,66 @@ fn sim_step_starts_a_session_when_none_runs() {
     let state = host.orr(&["sim", "state", "--json"]).json();
     assert_eq!(state["mode"], "play");
     assert_eq!(state["head_tick"], 45);
+}
+
+#[test]
+fn sim_stop_exports_a_local_replay_that_verifies_and_preserves_the_document() {
+    let host = TestHost::start();
+    let before = host.yaml();
+    let dir = std::env::temp_dir().join(format!("orr-cli-export-integration-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Relative paths resolve against the CLI's working directory, not the host's.
+    let filename = "chosen recording.orrp";
+    assert_eq!(host.orr(&["sim", "start"]).code, 0);
+    assert_eq!(host.orr(&["sim", "step", "12"]).code, 0);
+    let stopped = finish(command(&host.url, Some("claude-tok"), &["sim", "stop", "--replay-out", filename, "--json"]).current_dir(&dir).output().unwrap());
+    assert_eq!(stopped.code, 0, "{}", stopped.err);
+    let result = stopped.json();
+    assert_eq!(result["local_replay_path"], filename);
+    assert!(result.get("replay").is_none(), "export does not print a second copy of the recording");
+    let path = dir.join(filename);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes.len() as u64, result["replay_bytes"].as_u64().unwrap());
+    let verified = host.orr(&["verify", "--replay", path.to_str().unwrap(), "--check", "recording_matches", "--json"]);
+    assert_eq!(verified.code, 0, "{}", verified.err);
+    assert_eq!(verified.json()["checks"]["passed"], true);
+    assert_eq!(host.yaml(), before);
+    assert!(host.history().is_empty());
+
+    assert_eq!(host.orr(&["sim", "start"]).code, 0);
+    assert_eq!(host.orr(&["sim", "step", "1"]).code, 0);
+    let text = host.orr(&["sim", "stop", "--replay-out", path.to_str().unwrap()]);
+    assert_eq!(text.code, 0, "{}", text.err);
+    assert!(text.out.contains(&format!("Replay written locally to {}", path.display())), "{}", text.out);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_local_replay_write_failure_reports_that_play_has_already_stopped() {
+    let host = TestHost::start();
+    let dir = std::env::temp_dir().join(format!("orr-cli-missing-parent-{}", std::process::id()));
+    assert!(!dir.exists());
+    assert_eq!(host.orr(&["sim", "step", "2"]).code, 0);
+    let result = host.orr(&["sim", "stop", "--replay-out", dir.join("file.orrp").to_str().unwrap()]);
+    assert_eq!(result.code, 1);
+    assert!(result.err.contains("play stopped") && result.err.contains("could not write local replay") && result.err.contains("--last-play"), "{}", result.err);
+    assert_eq!(host.orr(&["sim", "state", "--json"]).json()["mode"], "edit");
+    assert_eq!(host.orr(&["verify", "--last-play", "--check", "recording_matches"]).code, 0);
+}
+
+#[test]
+fn physics_host_reports_structured_input_unavailable_without_mutating_the_scene() {
+    let host = TestHost::start();
+    let before = host.yaml();
+    let schema = host.orr(&["schema", "--input"]);
+    assert_eq!(schema.code, 1);
+    assert!(schema.err.contains("input"), "{}", schema.err);
+    assert_eq!(host.orr(&["sim", "start"]).code, 0);
+    let input = host.orr(&["sim", "input", "--player", "0", "{\"throttle\":1}"]);
+    assert_eq!(input.code, 1);
+    assert!(input.err.contains("input"), "{}", input.err);
+    assert_eq!(host.orr(&["sim", "state", "--json"]).json()["head_tick"], 0);
+    assert_eq!(host.orr(&["sim", "stop"]).code, 0);
+    assert_eq!(host.yaml(), before);
+    assert!(host.history().is_empty());
 }

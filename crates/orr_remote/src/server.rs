@@ -435,6 +435,7 @@ pub struct ErpServer {
     next_seq: u64,
     verify_task: Option<VerifyTask>,
     next_verify_serial: u64,
+    structured_input: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl ErpServer {
@@ -519,7 +520,25 @@ impl ErpServer {
             next_seq: 1,
             verify_task: None,
             next_verify_serial: 1,
+            structured_input: None,
         })
+    }
+
+    /// Enables reflected held input for one game through `registry.input` and
+    /// `sim.input_value`. This is opt-in: raw `sim.input` remains unchanged.
+    /// Derivation is installed only when ERP starts that game's local session.
+    /// Existing bridge sessions must keep their own command derivation.
+    /// `max_players` must be 1..=16 and is enforced by `sim.start`.
+    pub fn set_structured_input<G: Game>(
+        &mut self,
+        name: &'static str,
+        max_players: u8,
+        commands: impl Fn(orr_sim::PlayerSlot, &G::Input) -> Vec<G::Command> + Send + Sync + 'static,
+    ) where
+        G::Input: orr_reflect::Reflect,
+    {
+        assert!((1..=16).contains(&max_players), "structured input player limit must be 1..=16");
+        self.structured_input = Some(Box::new(crate::input::StructuredInput::<G>::new(name, max_players, commands)));
     }
 
     /// Tells the server about a play session the host stopped itself (for
@@ -901,7 +920,8 @@ impl ErpServer {
                 tx_check: Some((conn, self.tx_owner.map(|(c, _)| c))),
             };
             match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                call(target, &limits, &ctx, &mut fx, method, params)
+                let input = self.structured_input.as_ref().and_then(|a| a.downcast_ref::<crate::input::StructuredInput<G>>());
+                call(target, &limits, input, &ctx, &mut fx, method, params)
             })) {
                 Ok(r) => r,
                 Err(_) => {
@@ -938,6 +958,7 @@ impl ErpServer {
                 | "sim.state"
                 | "sim.checksum"
                 | "registry.schema"
+                | "registry.input"
                 | "registry.types"
                 | "rpc.discover"
                 | "history.list"

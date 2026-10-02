@@ -175,7 +175,7 @@ Examples: {\"entity\":\"e_00000005\"} ; {\"entity\":\"e_00000005\",\"component\"
         title: "Get schema",
         description: "The JSON Schema (draft 2020-12) of the scene format: every component and singleton type with its fields, ranges and docs. \
 Use it to learn which fields exist and what values they take before you write a patch. With `type` you get one type (small); without it the whole schema (large, ask once). \
-With `list_types: true` you get just the type names and one-line docs. Examples: {\"type\":\"orr_physics::Body\"} ; {\"list_types\":true}.",
+With `list_types: true` you get just the type names and one-line docs. With `input: true` get the game's structured player-input schema and value format (when supported); do not combine it with `type` or `list_types`. Examples: {\"type\":\"orr_physics::Body\"} ; {\"list_types\":true} ; {\"input\":true}.",
         read_only: true,
         needs: "read",
         schema: || {
@@ -183,6 +183,7 @@ With `list_types: true` you get just the type names and one-line docs. Examples:
                 json!({
                     "type": {"type": "string", "description": "one registered type name, e.g. orr_physics::Collider"},
                     "list_types": {"type": "boolean", "description": "only list type names and docs"},
+                    "input": {"type": "boolean", "description": "the structured player-input schema and value format; exclusive with type/list_types"},
                 }),
                 &[],
             )
@@ -315,6 +316,23 @@ Typical: start, step n=120, state, stop. Examples: {\"action\":\"step\",\"n\":60
         },
     },
     ToolDef {
+        name: "sim_input",
+        group: "sim",
+        title: "Set player input",
+        description: "Set one player's structured input for subsequent play-session ticks. Discover the game's fields, ranges and value format first with get_schema input=true; input support depends on the host. Pass the complete input object, with exact decimal JSON numbers for fixed-point values. Start a session with sim_run action=start first, then sim_input and sim_run action=step. Input stays held until replaced; send the schema's neutral value to release it. This does not edit the scene document or advance a tick.",
+        read_only: false,
+        needs: "sim_control",
+        schema: || {
+            obj(
+                json!({
+                    "player": {"type": "integer", "minimum": 0, "description": "zero-based player slot in the active session"},
+                    "value": {"type": "object", "description": "complete structured input using the schema returned by get_schema input=true"},
+                }),
+                &["player", "value"],
+            )
+        },
+    },
+    ToolDef {
         name: "history",
         group: "history",
         title: "Change history",
@@ -380,6 +398,7 @@ pub fn run(bridge: &mut Bridge, name: &str, arguments: &Map<String, J>) -> Resul
         "reject_proposal" => reject_proposal(bridge, &a),
         "verify_proposal" => verify_proposal(bridge, &a),
         "sim_run" => sim_run(bridge, &a),
+        "sim_input" => sim_input(bridge, &a),
         "history" => history(bridge),
         "undo" => undo(bridge),
         other => Err(Fail(format!("unknown tool '{other}'"))),
@@ -463,6 +482,13 @@ fn get_entity(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
 }
 
 fn get_schema(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+    if a.opt_bool("input")? == Some(true) {
+        if a.raw("type").is_some() || a.opt_bool("list_types")? == Some(true) {
+            return Err(Fail::new("argument 'input' cannot be combined with 'type' or 'list_types'"));
+        }
+        let r = b.call("registry.input", J::Null)?;
+        return text_out(serde_json::to_string_pretty(&r).unwrap_or_default(), r);
+    }
     if a.opt_bool("list_types")? == Some(true) {
         let r = b.call("registry.types", J::Null)?;
         let mut text = String::new();
@@ -660,6 +686,16 @@ fn sim_run(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
         other => return Err(Fail(format!("unknown action '{other}' (state, start, step, seek, play, pause, stop)"))),
     };
     text_out(report::state_text(&r), r)
+}
+
+fn sim_input(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+    let player = a.opt_u64("player")?.ok_or_else(|| Fail::new("missing argument 'player'"))?;
+    let value = a.raw("value").ok_or_else(|| Fail::new("missing argument 'value'"))?;
+    if !value.is_object() {
+        return Err(Fail::new("argument 'value' must be an object"));
+    }
+    let r = b.call("sim.input_value", json!({"player": player, "value": value}))?;
+    text_out(format!("Player {player} input set for subsequent ticks.\n"), r)
 }
 
 fn history(b: &mut Bridge) -> Result<Out, Fail> {

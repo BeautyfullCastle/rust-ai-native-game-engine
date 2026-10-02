@@ -66,6 +66,7 @@ pub mod codec;
 mod dispatch;
 mod error;
 mod host;
+mod input;
 pub mod json;
 pub mod link;
 mod local;

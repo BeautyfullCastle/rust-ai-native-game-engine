@@ -49,7 +49,7 @@ fn an_agent_modifies_verifies_and_accepts_in_one_flow() {
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for want in [
         "scene_overview", "get_entity", "get_schema", "propose_changes", "verify_proposal", "accept_proposal", "reject_proposal",
-        "list_proposals", "history", "undo", "sim_run",
+        "list_proposals", "history", "undo", "sim_run", "sim_input",
     ] {
         assert!(names.contains(&want), "{want} in {names:?}");
     }
@@ -455,4 +455,64 @@ fn guarded_accept_forwards_verification_state_and_never_falls_back_to_manual_acc
     assert_eq!(null_state["isError"], true, "an explicitly invalid state must not select manual acceptance");
     let manual = m.call_tool("accept_proposal", json!({"proposal_id": "p1"}));
     assert_eq!(manual["isError"], false, "explicit manual acceptance keeps its existing rebase semantics");
+}
+
+#[test]
+fn physics_host_rejects_structured_input_without_raw_input_fallback() {
+    let host = TestHost::start();
+    let mut m = McpChild::against(&host, "claude-tok", &[]);
+    m.initialize();
+    let schema = m.call_tool("get_schema", json!({"input": true}));
+    assert_eq!(schema["isError"], true);
+    assert!(McpChild::text(&schema).contains("input"), "{schema}");
+    assert_eq!(m.call_tool("sim_run", json!({"action": "start"}))["isError"], false);
+    let input = m.call_tool("sim_input", json!({"player": 0, "value": {"throttle": 1}}));
+    assert_eq!(input["isError"], true);
+    assert!(McpChild::text(&input).contains("input"), "{input}");
+    assert_eq!(structured(&m.call_tool("sim_run", json!({"action": "state"})))["head_tick"], 0);
+    assert_eq!(m.call_tool("sim_run", json!({"action": "stop"}))["isError"], false);
+}
+
+#[test]
+fn arena_input_scores_and_verifies_recorded_play() {
+    let host = TestHost::start_arena();
+    let mut m = McpChild::against(&host, "claude-tok", &[]);
+    m.initialize();
+    let mut erp = host.erp("claude-tok");
+    let discovery = erp.call("rpc.discover", json!({})).unwrap();
+    assert_eq!(discovery["engine"]["game"], "Arena");
+    assert_eq!(discovery["engine"]["verify"]["bot_available"], false);
+    let before = erp.call("scene.save", json!({})).unwrap()["text"].clone();
+    let schema = m.call_tool("get_schema", json!({"input": true}));
+    assert_eq!(schema["isError"], false);
+    assert_eq!(structured(&schema), &discovery["engine"]["input"]);
+    assert_eq!(structured(&schema)["schema"]["title"], "ArenaInput");
+    assert_eq!(structured(&schema)["max_players"], 8);
+    assert!(structured(&schema)["schema"]["properties"].get("_pad").is_none());
+
+    let bot = m.call_tool("verify_proposal", json!({"inputs": {"kind": "bot", "ticks": 1}}));
+    assert_eq!(bot["isError"], true, "Arena must not advertise or silently substitute bot verification");
+    assert!(McpChild::text(&bot).contains("bot"), "{bot}");
+    assert_eq!(m.call_tool("sim_run", json!({"action": "start", "player_count": 2}))["isError"], false);
+    let fire = m.call_tool("sim_input", json!({"player": 0, "value": {"axis_x": 0, "axis_y": 0, "buttons": ["fire"]}}));
+    assert_eq!(fire["isError"], false, "{fire}");
+    assert_eq!(structured(&fire), &json!({"ok": true}));
+    assert_eq!(m.call_tool("sim_run", json!({"action": "step", "n": 1}))["isError"], false);
+    let neutral = m.call_tool("sim_input", json!({"player": 0, "value": {"axis_x": 0, "axis_y": 0, "buttons": []}}));
+    assert_eq!(neutral["isError"], false, "{neutral}");
+    assert_eq!(m.call_tool("sim_run", json!({"action": "step", "n": 19}))["isError"], false);
+    let overview = m.call_tool("scene_overview", json!({}));
+    assert_eq!(overview["isError"], false);
+    assert_eq!(structured(&overview)["singletons"]["Score"]["kills"], json!([1, 0, 0, 0, 0, 0, 0, 0]));
+    let stopped = m.call_tool("sim_run", json!({"action": "stop"}));
+    assert_eq!(stopped["isError"], false);
+    assert_eq!(structured(&stopped)["tick"], 20);
+    let verified = m.call_tool("verify_proposal", json!({"inputs": {"kind": "last_play"}, "checks": ["recording_matches", "score_0.final == 1", "score_1.final == 0", "bullets.final == 0", "players.final == 2"]}));
+    assert_eq!(verified["isError"], false, "{verified}");
+    assert_eq!(structured(&verified)["passed"], true);
+    assert_eq!(structured(&verified)["recording"]["checked"], 21);
+    assert_eq!(structured(&verified)["recording"]["mismatches"], 0);
+    assert_eq!(erp.call("scene.save", json!({})).unwrap()["text"], before);
+    assert!(structured(&m.call_tool("history", json!({})))["entries"].as_array().unwrap().is_empty());
+    m.assert_stdout_is_only_json_rpc();
 }

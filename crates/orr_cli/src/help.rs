@@ -8,7 +8,7 @@ Look
   status                       host, game, mode, tick, checksum, unsaved changes, proposals, clients
   scene                        entities (GUID, name, components) and singletons
   get <entity> [Comp[.path]]   component values, exact decimals
-  schema [type] | --types      the value schema of the game's types
+  schema [type] | --types | --input   the value schema of the game's types or player input
 
 Change
   set <entity> Comp.path=value...   edit fields (one undo entry)
@@ -18,7 +18,7 @@ Change
   history | undo | redo
 
 Other
-  sim start|stop|play|pause|step|seek|speed|state
+  sim start|stop|input|play|pause|step|seek|speed|state
   activity [-f]                what agents did on the host (a live feed with -f)
   save [--write]               scene YAML, or write the host's scene file
   agents-md                    the guide for AI agents, generated from the host
@@ -77,15 +77,18 @@ Examples:
     ),
     (
         "schema",
-        "orr schema [type] | --types",
-        "orr schema [type] | --types
+        "orr schema [type] | --types | --input",
+        "orr schema [type] | --types | --input
 
 The JSON Schema of the game's component and singleton types: fields, ranges, docs.
 --types lists just the type names and one-line docs. With a type name (short names work) it prints that type only.
+--input prints the structured player-input schema and value format when the host supports it.
+Choose one type name, --types, or --input. Input fields are game-specific; discover them before using sim input.
 
 Examples:
   orr schema --types
-  orr schema Body",
+  orr schema Body
+  orr schema --input",
     ),
     (
         "set",
@@ -183,20 +186,27 @@ Examples:
     ("redo", "orr redo", "orr redo\n\nRepeats the last undone entry."),
     (
         "sim",
-        "orr sim start [--players N] | stop | play | pause | step [N] | seek <tick> | speed <x> | state",
-        "orr sim start [--players N] | stop | play | pause | step [N] | seek <tick> | speed <x> | state
+        "orr sim start [--players N] | stop [--replay-out path] | input --player N <json> | play | pause | step [N] | seek <tick> | speed <x> | state",
+        "orr sim start [--players N] | stop [--replay-out path] | input --player N <json> | play | pause | step [N] | seek <tick> | speed <x> | state
 
 Drives a play session (a copy of the scene; the scene document is untouched).
   start   begin paused     step N   run N ticks now (default 1; starts a paused session if none)   seek T   go to a recorded tick
   play / pause   run by the wall clock or not      speed X   wall-clock speed, e.g. 0.5 or 2
   stop    end it; the recording stays for `orr verify --last-play`     state   mode, tick, checksum
+  stop --replay-out PATH   also write the recording to this CLI's exact local path (not the host filesystem)
+  input --player N JSON   set a complete structured input object, using `orr schema --input`
+
+Input needs an active session and host support. Exact decimal JSON is forwarded without float conversion.
+Input stays held for subsequent ticks until replaced; send the schema's neutral value to release it. It does not step.
+Replay export overwrites the supplied local file. No directory is created automatically.
 
 Examples:
   orr sim start
   orr sim step 60
   orr sim seek 30
   orr sim state
-  orr sim stop",
+  orr sim stop --replay-out session.orrp
+  orr verify --replay session.orrp --check recording_matches",
     ),
     (
         "activity",

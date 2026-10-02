@@ -227,6 +227,7 @@ Tool groups on in this guide: scene, propose, verify, sim, history. (`orr_mcp --
 | `reject_proposal` | propose | `scene_edit` | Discard a proposal (for example after verify_proposal failed). |
 | `verify_proposal` | verify | `read` | Check a proposal by REPLAY: the engine runs the scene without and with the proposal, headlessly and deterministically, on the same inputs, and compares checksums and metrics. |
 | `sim_run` | sim | `sim_control` | Drive a play session of the scene (a copy: the scene document is untouched). |
+| `sim_input` | sim | `sim_control` | Set one player's structured input for subsequent play-session ticks. |
 | `history` | history | `read` | The undo history of the scene, oldest first: id, label, who made it (`user` or `agent:<name>`), number of ops, whether undone. |
 | `undo` | history | `scene_edit` | Take back the last history entry (whoever made it; a whole accepted proposal at once). |
 

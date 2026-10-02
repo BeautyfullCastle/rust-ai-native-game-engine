@@ -132,7 +132,7 @@ pub fn call_local<G: Game>(
     params: &J,
 ) -> Result<J, RpcError> {
     let mut fx = Effects::default();
-    call(target, limits, &CallCtx { client, caps, last_play: None, tx_check: None }, &mut fx, method, params)
+    call(target, limits, None, &CallCtx { client, caps, last_play: None, tx_check: None }, &mut fx, method, params)
 }
 
 /// Only the connection that opened a transaction may end it.
@@ -183,6 +183,7 @@ pub(crate) fn authorize(method: &str, caps: Caps, playing: bool, params: &J) -> 
 pub(crate) fn call<G: Game>(
     t: &mut ErpTarget<'_, G>,
     lim: &HostLimits,
+    input: Option<&crate::input::StructuredInput<G>>,
     ctx: &CallCtx<'_>,
     fx: &mut Effects,
     method: &str,
@@ -198,7 +199,13 @@ pub(crate) fn call<G: Game>(
     let p = P(obj);
     let origin = crate::caps::origin_of_client(ctx.client);
     match method {
-        "rpc.discover" => Ok(proposals::discover_with_engine(t, lim, ctx)),
+        "rpc.discover" => {
+            let mut result = proposals::discover_with_engine(t, lim, ctx);
+            if let Some(input) = input {
+                result["engine"]["input"] = input.descriptor.clone();
+            }
+            Ok(result)
+        },
         "proposal.begin" => proposals::begin(t, &p, origin),
         "proposal.apply" => proposals::apply(t, &p),
         "proposal.list" => Ok(proposals::list(t)),
@@ -212,6 +219,7 @@ pub(crate) fn call<G: Game>(
         }
         "proposal.reject" => proposals::reject(t, &p),
         "registry.schema" => registry_schema(t, &p),
+        "registry.input" => input.map(|i| i.descriptor.clone()).ok_or_else(input_unavailable),
         "registry.types" => Ok(registry_types(t)),
         "world.query" => world_query(t, &p),
         "world.get" => world_get(t, &p),
@@ -274,7 +282,7 @@ pub(crate) fn call<G: Game>(
         }
         "sim.state" => Ok(state_json(t, lim)),
         "sim.checksum" => sim_checksum(t, &p),
-        "sim.start" => sim_start(t, lim, &p),
+        "sim.start" => sim_start(t, lim, input, &p),
         "sim.stop" => sim_stop(t, &p, fx),
         "sim.play" => control(t, lim, ControlOp::Play),
         "sim.pause" => control(t, lim, ControlOp::Pause),
@@ -296,6 +304,7 @@ pub(crate) fn call<G: Game>(
         }
         "session.status" => Err(RpcError::state("not_a_client", "this host is not a relay client (session.status is for hosts started with --join); see sim.state")),
         "sim.input" => sim_input(t, &p),
+        "sim.input_value" => sim_input_value(t, input, &p),
         "sim.command" => sim_command(t, &p),
         // `watch.*` is handled by the server, which owns the subscriptions.
         other => Err(RpcError::new(METHOD_NOT_FOUND, "method_not_found", format!("method '{other}' cannot be called here"))),
@@ -876,7 +885,9 @@ fn sim_checksum<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError>
     }
 }
 
-fn sim_start<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) -> Result<J, RpcError> {
+fn sim_start<G: Game>(
+    t: &mut ErpTarget<'_, G>, lim: &HostLimits, input: Option<&crate::input::StructuredInput<G>>, p: &P<'_>,
+) -> Result<J, RpcError> {
     if t.play.is_some() {
         return Err(RpcError::state("sim_running", "a play session is already running (sim.stop first)"));
     }
@@ -885,11 +896,24 @@ fn sim_start<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) -> 
     if !(1..=16).contains(&players) {
         return Err(RpcError::params("'player_count' must be 1..=16"));
     }
+    if let Some(input) = input {
+        if players > u64::from(input.max_players) {
+            return Err(RpcError::params(format!("this input adapter supports at most {} players", input.max_players)));
+        }
+    }
     if !(1..=1000).contains(&rate) {
         return Err(RpcError::params("'tick_rate' must be 1..=1000"));
     }
-    let cfg = t.doc.play_config(players as u8, rate as u32);
+    let mut cfg = t.doc.play_config(players as u8, rate as u32);
+    if input.is_some() {
+        cfg.game_id = lim.game.name.clone();
+        cfg.build_id = lim.build_id;
+    }
     let mut pc = PlayController::<G>::start_play(t.doc, cfg)?;
+    if let Some(input) = input {
+        let commands = input.commands.clone();
+        pc.session_mut().set_commands_from_input(move |slot, held| commands(slot, held));
+    }
     if p.opt_bool("run")?.unwrap_or(false) {
         pc.control(ControlOp::Play);
     }
@@ -961,13 +985,29 @@ fn slot_of<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>, required: bool) -> Result<P
     Ok(PlayerSlot(n as u8))
 }
 
+fn input_unavailable() -> RpcError {
+    RpcError::state("input_unavailable", "this host has no structured input adapter (raw sim.input is unchanged)")
+}
+
+fn sim_input_value<G: Game>(
+    t: &mut ErpTarget<'_, G>, input: Option<&crate::input::StructuredInput<G>>, p: &P<'_>,
+) -> Result<J, RpcError> {
+    let adapter = input.ok_or_else(input_unavailable)?;
+    require_writable_play(t)?;
+    let slot = slot_of(t, p, true)?;
+    let value = p.raw("value").ok_or_else(|| RpcError::params("missing parameter 'value' (the complete reflected input object)"))?;
+    let value = adapter.decode(value)?;
+    play_mut(t)?.session_mut().set_input(slot, value);
+    Ok(json!({"ok": true}))
+}
+
 fn sim_input<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
     require_writable_play(t)?;
     let slot = slot_of(t, p, true)?;
     let bytes = hex_decode(p.str("input")?).ok_or_else(|| RpcError::params("'input' is not valid hex"))?;
     let input = bytemuck::try_pod_read_unaligned::<G::Input>(&bytes)
         .map_err(|_| RpcError::params(format!("'input' must be {} bytes", core::mem::size_of::<G::Input>())))?;
-    play_mut(t)?.session_mut().set_input(slot, input);
+    play_mut(t)?.session_mut().set_input_without_commands(slot, input);
     Ok(json!({"ok": true}))
 }
 
