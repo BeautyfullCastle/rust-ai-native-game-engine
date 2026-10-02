@@ -84,6 +84,10 @@ impl Editor {
     /// separate undo entries. Repeated Begin during a drag is a no-op. A full
     /// queue visibly refuses the entire new drag until its matching End.
     pub fn begin_edit(&mut self, label: &str) {
+        if self.is_viewer() {
+            self.error("replay Viewer is read-only");
+            return;
+        }
         if self.gesture.has_input() || self.sim.mode != Mode::Edit {
             return;
         }

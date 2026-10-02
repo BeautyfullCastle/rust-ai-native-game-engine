@@ -14,6 +14,9 @@
 
 pub mod app;
 pub mod arena_view;
+pub mod editor_view;
+/// Compiled Arena game and descriptors exposed to view clients.
+pub use orr_testgame as arena_game;
 pub mod arena_audio;
 pub mod net_client;
 pub mod physics_app;

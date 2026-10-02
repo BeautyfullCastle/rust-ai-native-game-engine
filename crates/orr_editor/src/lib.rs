@@ -35,10 +35,9 @@
 //! - [`cli`] and [`script`]: command line flags (`--scene`, `--screenshot`,
 //!   `--frames`, `--play-ticks`, `--select`, `--script`) for headless checks.
 //!
-//! The editor is `PhysGame` specific (the sample physics game): the frame
-//! type of the bridge, the reflect descriptors the inspector draws from and
-//! the viewport shapes (the game's view mapping) come from `orr_sample`.
-//! Making it generic over the game is future work.
+//! Compiled adapters support local/remote `PhysGame` and remote `Arena`.
+//! Frame decoders, reflection and viewport mappings come through `orr_sample`.
+//! Arena gameplay inputs remain agent-driven through structured ERP input.
 //!
 //! This is view layer code: floats and the wall clock are fine here, but every
 //! value that reaches the document goes through exact decimal parsing.
@@ -53,6 +52,7 @@ pub mod cli;
 pub mod diagnostics;
 pub mod editor;
 pub mod inspector;
+pub mod game;
 pub mod model;
 pub mod script;
 pub mod viewport;

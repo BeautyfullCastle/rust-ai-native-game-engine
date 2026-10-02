@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Pos2, Rect, RichText, Sense, Ui};
-use orr_bridge::PlayMode;
 use orr_fp::FPVec2;
 use orr_reflect::Value;
 
@@ -31,7 +30,6 @@ pub const LBL_RESTART: &str = "Restart simulation host";
 /// The button that reconnects to a remote host.
 pub const LBL_RECONNECT: &str = "Reconnect";
 
-const BODY: &str = "orr_physics::Body";
 
 /// Which tab the bottom panel shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -230,7 +228,7 @@ impl EditorApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
         let redo_a = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
@@ -264,8 +262,11 @@ impl EditorApp {
     // ---- top bar ----
 
     fn top_bar(&mut self, ui: &mut Ui) {
+        let mutable = self.editor.can_mutate() && self.editor.previewing().is_none();
+        let live = self.editor.down().is_none();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                if !(mutable) { ui.disable(); }
                 if ui.button("Open scene\u{2026}").clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::Open, text });
@@ -282,7 +283,7 @@ impl EditorApp {
                 }
             });
             ui.menu_button("Edit", |ui| {
-                let editing = self.editor.mode() == Mode::Edit;
+                let editing = mutable && self.editor.mode() == Mode::Edit;
                 if ui.add_enabled(editing && self.editor.history().can_undo, egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
                     self.editor.undo();
                     ui.close();
@@ -294,16 +295,16 @@ impl EditorApp {
             });
             ui.separator();
             let playing = self.editor.timeline().is_some_and(|t| t.playing);
-            if ui.add_enabled(!playing, egui::Button::new(LBL_PLAY)).clicked() {
+            if ui.add_enabled(live && !playing, egui::Button::new(LBL_PLAY)).clicked() {
                 self.editor.play();
             }
-            if ui.add_enabled(playing, egui::Button::new(LBL_PAUSE)).clicked() {
+            if ui.add_enabled(live && playing, egui::Button::new(LBL_PAUSE)).clicked() {
                 self.editor.pause();
             }
-            if ui.add_enabled(!playing, egui::Button::new(LBL_STEP)).clicked() {
+            if ui.add_enabled(live && !playing, egui::Button::new(LBL_STEP)).clicked() {
                 self.editor.step(1);
             }
-            if ui.add_enabled(self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
+            if ui.add_enabled(live && self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
                 self.editor.stop();
             }
             ui.separator();
@@ -311,6 +312,8 @@ impl EditorApp {
                 Mode::Edit => ui.label(RichText::new("EDIT").strong()),
                 Mode::Play => ui.label(RichText::new("PLAY").strong().color(Color32::from_rgb(255, 150, 60))),
             };
+            ui.weak(self.editor.game().name());
+            if self.editor.is_viewer() { ui.label("REPLAY VIEWER · read-only"); }
             if self.editor.is_dirty() {
                 ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
             }
@@ -361,7 +364,8 @@ impl EditorApp {
     fn hierarchy(&mut self, ui: &mut Ui) {
         ui.heading("Hierarchy");
         ui.horizontal(|ui| {
-            if ui.button("+ Body").on_hover_text("Spawn a dynamic circle at the view center").clicked() {
+            if !(self.editor.can_mutate() && self.editor.previewing().is_none()) { ui.disable(); }
+            if self.editor.game() == crate::game::EditorGame::PhysGame && ui.button("+ Body").on_hover_text("Spawn a dynamic circle at the view center").clicked() {
                 let c = self.editor.camera.center;
                 self.editor.spawn_body(c);
             }
@@ -403,6 +407,11 @@ impl EditorApp {
 
     fn inspector(&mut self, ui: &mut Ui) {
         ui.heading("Inspector");
+        if self.editor.previewing().is_some() {
+            ui.weak("Live document inspector · read-only during proposal preview");
+        } else if self.editor.is_viewer() {
+            ui.weak("Replay Viewer · read-only");
+        }
         let mut events: Vec<(Owner, InspEvent)> = Vec::new();
         let mut add: Option<String> = None;
         let mut remove: Option<String> = None;
@@ -410,6 +419,7 @@ impl EditorApp {
         let inspect = self.editor.inspect().cloned();
         let editor = &self.editor;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if !(editor.can_mutate() && editor.previewing().is_none()) { ui.disable(); }
             let types = editor.types();
             match (&selection, &inspect) {
                 (Some(_), Some(ins)) => {
@@ -450,7 +460,7 @@ impl EditorApp {
                     }
                 }
                 (None, _) => {
-                    ui.weak("Select an entity in the hierarchy or click a body in the viewport.");
+                    ui.weak("Select an entity in the hierarchy or click an entity in the viewport.");
                 }
             }
             ui.separator();
@@ -458,7 +468,7 @@ impl EditorApp {
             for (name, value) in editor.singletons() {
                 let Some(ty) = types.get(name) else { continue };
                 let base = egui::Id::new(("singleton", name));
-                egui::CollapsingHeader::new(name).id_salt(base).default_open(false).show(ui, |ui| {
+                egui::CollapsingHeader::new(name).id_salt(base).default_open(editor.game() == crate::game::EditorGame::Arena && name == "Score").show(ui, |ui| {
                     let mut evs = Vec::new();
                     show_component(ui, base, ty.desc(), value, &mut evs);
                     events.extend(evs.into_iter().map(|e| (Owner::Singleton(name.clone()), e)));
@@ -509,15 +519,15 @@ impl EditorApp {
         let previewing = self.editor.previewing().map(str::to_string);
         let live = self.editor.down().is_none();
         // Select and move bodies with the primary button.
-        if live && previewing.is_none() && resp.drag_started_by(PointerButton::Primary) {
+        if self.editor.can_mutate() && previewing.is_none() && resp.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
                 let world = self.editor.camera.screen_to_world(to_px(origin), px);
                 if let Some(target) = self.editor.pick(world) {
                     let pos = self.editor.body_pos(&target);
                     self.editor.select(Some(target));
-                    if let Some(pos) = pos {
+                    if let Some(pos) = pos.filter(|_| self.editor.movement_owner().is_some()) {
                         self.ui.body_drag = Some(BodyDrag { offset: [pos[0] - world[0], pos[1] - world[1]] });
-                        self.editor.begin_edit("move body");
+                        self.editor.begin_edit("move entity");
                     }
                 }
             }
@@ -527,7 +537,9 @@ impl EditorApp {
                 let w = self.editor.camera.screen_to_world(to_px(at), px);
                 let p = [w[0] + drag.offset[0], w[1] + drag.offset[1]];
                 if let (Some(x), Some(y)) = (fp_of_f64(f64::from(p[0])), fp_of_f64(f64::from(p[1]))) {
-                    self.editor.set_field(&Owner::Component(BODY.to_string()), "pos", Value::Vec2(FPVec2::new(x, y)));
+                    if let Some(owner) = self.editor.movement_owner() {
+                        self.editor.set_field(&owner, "pos", Value::Vec2(FPVec2::new(x, y)));
+                    }
                 }
             }
         }
@@ -561,13 +573,13 @@ impl EditorApp {
             ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 120));
         }
         let label = match self.editor.timeline() {
-            Some(t) => format!("PLAY  tick {}", t.tick),
+            Some(t) => format!("{}  tick {}", if self.editor.is_viewer() { "REPLAY VIEWER" } else { "PLAY" }, t.tick),
             None => "EDIT".to_string(),
         };
         ui.painter().text(rect.min + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, egui::FontId::monospace(13.0), Color32::from_gray(200));
         if let Some(id) = previewing {
             let font = egui::FontId::monospace(15.0);
-            let text = format!("PREVIEW {id}");
+            let text = format!("PREVIEW {id} · read-only");
             let galley = ui.painter().layout_no_wrap(text, font, Color32::BLACK);
             let box_rect = Rect::from_min_size(rect.min + egui::vec2(8.0, 26.0), galley.size() + egui::vec2(14.0, 6.0));
             ui.painter().rect_filled(box_rect, 3.0, Color32::from_rgb(90, 200, 240));
@@ -615,10 +627,11 @@ impl EditorApp {
             return;
         };
         ui.horizontal(|ui| {
+            if !(self.editor.down().is_none()) { ui.disable(); }
             if ui.button("\u{23EE}").on_hover_text("Rewind to the first tick").clicked() {
                 self.editor.seek(tl.first_tick);
             }
-            if ui.add_enabled(!tl.playing, egui::Button::new("\u{25B6}")).on_hover_text("Play by the clock (from a rewound tick this branches)").clicked() {
+            if ui.add_enabled(!tl.playing, egui::Button::new("\u{25B6}")).on_hover_text(if self.editor.is_viewer() { "Play recorded ticks only" } else { "Play by the clock (from a rewound tick this branches)" }).clicked() {
                 self.editor.play();
             }
             if ui.add_enabled(tl.playing, egui::Button::new("\u{23F8}")).on_hover_text("Pause").clicked() {
@@ -634,7 +647,7 @@ impl EditorApp {
                 self.editor.set_speed(speed);
             }
             ui.separator();
-            let can_branch = tl.mode == PlayMode::Viewer || tl.tick < tl.last_tick;
+            let can_branch = !self.editor.is_viewer() && tl.tick < tl.last_tick;
             if ui.add_enabled(can_branch, egui::Button::new("Branch")).on_hover_text("Drop the recorded ticks after the current one").clicked() {
                 self.editor.branch();
             }

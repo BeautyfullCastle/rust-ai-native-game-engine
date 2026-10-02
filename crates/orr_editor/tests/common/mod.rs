@@ -122,3 +122,5 @@ pub fn doc_checksum(ed: &mut Editor) -> u64 {
     let r = ed.host_call("sim.state", json!({})).expect("sim.state");
     orr_remote::wire::parse_checksum(&r["doc_checksum"]).expect("doc_checksum")
 }
+
+pub mod arena;

@@ -2,8 +2,8 @@
 //! mailbox; synthetic updates exercise the editor's pinned-baseline boundary.
 
 use super::*;
-use orr_bridge::{DebugError, LifecycleRecovery};
-use orr_remote::{Auth, Caps, LocalHost, RemoteConfig, ServerConfig, ViewDeliveryMode, USER_CLIENT};
+use orr_bridge::{Bridge, DebugError, LifecycleRecovery};
+use orr_remote::{RemoteBridge, Auth, Caps, LocalHost, RemoteConfig, ServerConfig, ViewDeliveryMode, USER_CLIENT};
 
 fn reset(snapshot: Option<&Snapshot>) -> ViewResync {
     ViewResync {
@@ -44,12 +44,12 @@ fn capped_editor(capacity: usize, websocket: bool) -> (Editor, Option<LocalHost>
     } else {
         (Backend::connect(&HostSpec::local(default_scene_path())).unwrap(), None)
     };
-    backend.bridge = if let Some(host) = &backend.host {
+    backend.bridge = EditorStream::Phys(if let Some(host) = &backend.host {
         let transport = host.connector().connect(USER_CLIENT, Caps::ALL).unwrap();
         RemoteBridge::connect_transport(Box::new(transport), cfg).unwrap()
     } else {
         RemoteBridge::connect(cfg).unwrap()
-    };
+    });
     assert_eq!(backend.bridge.view_delivery(), RemoteViewDelivery::Fenced);
     let mut ed = Editor::on_backend(backend).unwrap();
     ed.sync();
@@ -58,7 +58,7 @@ fn capped_editor(capacity: usize, websocket: bool) -> (Editor, Option<LocalHost>
 
 fn assert_current_pose(ed: &Editor) {
     let snapshot = ed.snapshot().expect("current baseline");
-    let expected = body_views(snapshot.predicted());
+    let expected = ed.game().drawables(snapshot.predicted());
     assert_eq!(ed.checksum(), snapshot.predicted().checksum());
     assert_eq!(ed.bodies().len(), expected.len());
     for (shown, current) in ed.bodies().iter().zip(expected) {
@@ -211,7 +211,7 @@ fn proposal_previews_drain_events_even_when_the_snapshot_sequence_is_unchanged()
         let seq = stream.snapshot().unwrap().seq();
         {
             let p = ed.preview.as_mut().unwrap();
-            p.stream = stream;
+            p.stream = EditorStream::Phys(stream);
             p.seq = seq;
         }
         ed.refresh_preview();

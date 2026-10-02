@@ -385,3 +385,41 @@ fn observed_transaction_closure_after_begin_ack_discards_unsent_drag_input() {
     assert!(!ed.history().in_tx);
     assert!(ed.log().iter().any(|m| m.error && m.text.contains("host closed")));
 }
+
+#[path = "../../tests/common/arena.rs"]
+mod arena_fixture;
+
+#[test]
+fn arena_held_replies_coalesce_position_drag_without_blocking_and_cancel() {
+    let host = arena_fixture::ArenaHost::start(false);
+    let mut backend = Backend::connect(&HostSpec::remote(&host.url, None)).unwrap();
+    let gate = Arc::new(Mutex::new(Gate::default()));
+    let transport = orr_remote::PumpedWs::connect(&format!("{}/?client=user", host.url), Duration::from_secs(5)).unwrap();
+    backend.erp = ErpClient::with_transport(Box::new(Gated { inner: Box::new(transport), gate: gate.clone() }));
+    let mut ed = Editor::on_backend(backend).unwrap();
+    ed.select_named("hero"); ed.sync();
+    let checksum = ed.checksum();
+    let samples = ed.diagnostics().sync_erp_wait.total_samples;
+    { let mut g = gate.lock().unwrap(); g.requests.clear(); g.armed = true; g.hold = Some("tx.begin"); }
+    ed.begin_edit("Arena held position drag");
+    let owner = Owner::Component("Position".into());
+    for x in 1..=1000 { assert!(ed.set_field(&owner, "pos.x", Value::Fixed(FP::from_int(x)))); }
+    ed.end_edit();
+    pump_until(&mut ed, |_| !gate.lock().unwrap().held.is_empty());
+    assert_eq!(requests(&gate).len(), 1);
+    assert_eq!(ed.diagnostics().sync_erp_wait.total_samples, samples);
+    settle(&mut ed, &gate);
+    assert_eq!(ed.history().entries.len(), 1);
+    assert_eq!(requests(&gate).iter().map(|(m,_)| m.as_str()).collect::<Vec<_>>(), ["tx.begin","world.patch","tx.commit"]);
+    assert_eq!(requests(&gate)[1].1["component"], "Position");
+    assert_eq!(requests(&gate)[1].1["value"], 1000);
+    assert!(ed.undo()); ed.sync(); assert_eq!(ed.checksum(), checksum);
+    { let mut g = gate.lock().unwrap(); g.requests.clear(); g.armed = true; g.hold = Some("tx.begin"); }
+    ed.begin_edit("cancel Arena drag");
+    assert!(ed.set_field(&owner, "pos.x", Value::Fixed(FP::from_int(50))));
+    ed.cancel_edit(); ed.end_edit();
+    pump_until(&mut ed, |_| !gate.lock().unwrap().held.is_empty());
+    settle(&mut ed, &gate);
+    assert_eq!(requests(&gate).iter().map(|(m,_)| m.as_str()).collect::<Vec<_>>(), ["tx.begin","tx.rollback"]);
+    assert_eq!(ed.checksum(), checksum);
+}

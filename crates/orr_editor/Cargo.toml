@@ -33,6 +33,9 @@ egui-wgpu = "0.36"
 png = "0.17"
 
 [dev-dependencies]
+# Test-only Arena hosts and replay viewers; never linked directly by editor code.
+orr_edit = { path = "../orr_edit" }
+orr_sim = { path = "../orr_sim" }
 # Tests only: replay a recording to check it against the live checksum.
 orr_session = { path = "../orr_session" }
 egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }

@@ -6,7 +6,8 @@
 //! # How
 //!
 //! A background thread (one tokio current-thread runtime) holds the
-//! WebSocket. After `auth` it subscribes to `frames`, `events` and `notes`.
+//! WebSocket. After `auth`, a checked connection verifies `rpc.discover` and
+//! `registry.schema` before subscribing to `frames`, `events` and `notes`.
 //!
 //! - Frame snapshots arrive as binary messages: the full `Frame` bytes,
 //!   lz4-compressed ([`crate::wire`]). The thread rebuilds the `Frame` with
@@ -85,6 +86,51 @@ pub enum RemoteViewDelivery {
     Legacy,
 }
 
+/// The ERP identity that a checked [`RemoteBridge`] connection must match.
+///
+/// Use [`RemoteIdentity::from_discovery`] with an identity and schema that
+/// have already been validated against the caller's compiled game registry.
+/// Structural equality of the full schema guards the actual attachment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteIdentity {
+    /// Game name reported by `rpc.discover` (`engine.game`).
+    pub game: String,
+    /// Build id reported by `rpc.discover` (`engine.build_id`).
+    pub build_id: String,
+    /// Full `registry.schema` schema value expected for this game build.
+    pub schema: J,
+}
+
+impl RemoteIdentity {
+    /// Capture the identity fields from an ERP 1 `rpc.discover` result and pair
+    /// them with its separately fetched `registry.schema` value. The caller
+    /// should compare `schema` with its compiled descriptors before using it.
+    pub fn from_discovery(discovery: &J, schema: J) -> Result<Self, String> {
+        if discovery.get("erp_version").and_then(J::as_u64) != Some(1) {
+            return Err("rpc.discover does not explicitly report ERP version 1".into());
+        }
+        let engine = discovery
+            .get("engine")
+            .ok_or_else(|| "rpc.discover is missing engine identity".to_string())?;
+        let field = |name: &str| {
+            let value = engine
+                .get(name)
+                .and_then(J::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| format!("rpc.discover is missing engine.{name}"))?;
+            if value.trim().is_empty() {
+                return Err(format!("rpc.discover has an empty engine.{name}"));
+            }
+            Ok(value)
+        };
+        Ok(Self {
+            game: field("game")?,
+            build_id: field("build_id")?,
+            schema,
+        })
+    }
+}
+
 /// Settings of a [`RemoteBridge`].
 #[derive(Clone, Debug)]
 pub struct RemoteConfig {
@@ -102,6 +148,10 @@ pub struct RemoteConfig {
     /// `view` (the play frame, else the scene's preview frame) or `proposal:p3`
     /// (see `watch.subscribe`).
     pub source: String,
+    /// Optional identity fence. When set, `rpc.discover` and `registry.schema`
+    /// must match this identity on the same transport before the frame
+    /// subscription is started. `None` preserves the historical handshake.
+    pub expected_identity: Option<RemoteIdentity>,
     /// Negotiation policy (default: prefer the fenced extension).
     pub view_delivery: ViewDeliveryMode,
     /// Retained presentation notifications across staging and render queues.
@@ -119,6 +169,7 @@ impl RemoteConfig {
             max_fps: 60,
             connect_timeout: Duration::from_secs(10),
             source: "sim".to_string(),
+            expected_identity: None,
             view_delivery: ViewDeliveryMode::default(),
             view_event_capacity: orr_bridge::DEFAULT_VIEW_EVENT_CAPACITY,
         }
@@ -181,8 +232,103 @@ fn clear_last_input<I>(last_input: &Mutex<Option<I>>) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pending {
     Auth,
+    Discover,
+    Schema,
     Subscribe,
     State,
+}
+
+fn queue_handshake(
+    t: &mut dyn Transport,
+    pending: &mut BTreeMap<u64, Pending>,
+    next_id: &mut u64,
+    kind: Pending,
+    method: &str,
+    params: J,
+) -> Result<(), String> {
+    let id = *next_id;
+    *next_id = (*next_id).saturating_add(1);
+    pending.insert(id, kind);
+    t.send(Request {
+        id: Some(id),
+        method: method.to_string(),
+        params,
+    })
+    .map_err(|_| "connection closed during the handshake".to_string())
+}
+
+fn identity_check_error(message: impl core::fmt::Display) -> String {
+    format!("remote identity check: {message}")
+}
+
+fn validate_discovery(result: &J, expected: &RemoteIdentity) -> Result<(), String> {
+    if expected.game.trim().is_empty() || expected.build_id.trim().is_empty() {
+        return Err(identity_check_error(
+            "the expected identity is missing game or build id",
+        ));
+    }
+    let actual = RemoteIdentity::from_discovery(result, expected.schema.clone())
+        .map_err(identity_check_error)?;
+    if actual.game != expected.game {
+        return Err(identity_check_error(format!(
+            "game mismatch: expected {:?}, received {:?}",
+            expected.game, actual.game,
+        )));
+    }
+    if actual.build_id != expected.build_id {
+        return Err(identity_check_error(format!(
+            "build id mismatch: expected {:?}, received {:?}",
+            expected.build_id, actual.build_id,
+        )));
+    }
+    Ok(())
+}
+
+fn validate_remote_schema(result: &J, expected: &RemoteIdentity) -> Result<(), String> {
+    if !expected.schema.is_object() {
+        return Err(identity_check_error(
+            "the expected game schema is not a JSON object",
+        ));
+    }
+    let actual = result
+        .get("schema")
+        .ok_or_else(|| identity_check_error("registry.schema is missing the full schema"))?;
+    if !actual.is_object() {
+        return Err(identity_check_error(
+            "registry.schema did not return a full schema object",
+        ));
+    }
+    if actual != &expected.schema {
+        return Err(identity_check_error(
+            "registry.schema does not match the expected game schema",
+        ));
+    }
+    Ok(())
+}
+
+fn begin_subscription(
+    t: &mut dyn Transport,
+    pending: &mut BTreeMap<u64, Pending>,
+    next_id: &mut u64,
+    cfg: &RemoteConfig,
+) -> Result<(), String> {
+    let mut subscribe = json!({
+        "topics": ["frames", "events", "notes"],
+        "max_fps": cfg.max_fps.max(1),
+        "source": cfg.source,
+    });
+    if cfg.view_delivery != ViewDeliveryMode::Legacy {
+        subscribe["view_delivery"] = json!(1);
+    }
+    queue_handshake(
+        t,
+        pending,
+        next_id,
+        Pending::Subscribe,
+        "watch.subscribe",
+        subscribe,
+    )?;
+    queue_handshake(t, pending, next_id, Pending::State, "sim.state", J::Null)
 }
 
 struct Info {
@@ -449,30 +595,38 @@ fn run<G: Game>(
     };
     let mut info: Option<Info> = None;
     let mut delivery = None;
+    let checked_identity = cfg.expected_identity.is_some();
+    let mut identity_validated = false;
 
-    // Handshake requests, in order (the server answers in order).
+    // Unchecked callers keep the historical handshake. Checked callers gate
+    // subscription on an explicit ERP identity and the complete schema from
+    // this very transport, before any binary frame is decoded.
     let mut first: Vec<(Pending, &str, J)> = Vec::new();
     if let Some(tok) = &cfg.token {
         first.push((Pending::Auth, "auth", json!({"token": tok})));
     }
-    let mut subscribe = json!({"topics": ["frames", "events", "notes"], "max_fps": cfg.max_fps.max(1), "source": cfg.source});
-    if cfg.view_delivery != ViewDeliveryMode::Legacy {
-        subscribe["view_delivery"] = json!(1);
+    if checked_identity {
+        if cfg.token.is_none() {
+            first.push((Pending::Discover, "rpc.discover", J::Null));
+        }
+    } else {
+        let mut subscribe = json!({"topics": ["frames", "events", "notes"], "max_fps": cfg.max_fps.max(1), "source": cfg.source});
+        if cfg.view_delivery != ViewDeliveryMode::Legacy {
+            subscribe["view_delivery"] = json!(1);
+        }
+        first.push((Pending::Subscribe, "watch.subscribe", subscribe));
+        first.push((Pending::State, "sim.state", J::Null));
     }
-    first.push((Pending::Subscribe, "watch.subscribe", subscribe));
-    first.push((Pending::State, "sim.state", J::Null));
-    for (i, (kind, method, params)) in first.into_iter().enumerate() {
-        let id = i as u64 + 1;
-        pending.insert(id, kind);
-        if t.send(Request {
-            id: Some(id),
-            method: method.to_string(),
-            params,
-        })
-        .is_err()
-        {
+    let mut next_id = 1;
+    for (kind, method, params) in first {
+        if let Err(e) = queue_handshake(t.as_mut(), &mut pending, &mut next_id, kind, method, params) {
             if let Some(r) = ready.take() {
-                let _ = r.send(Err("connection closed during the handshake".into()));
+                let message = if matches!(kind, Pending::Discover | Pending::Schema) {
+                    identity_check_error(e)
+                } else {
+                    e
+                };
+                let _ = r.send(Err(message));
             }
             return;
         }
@@ -484,7 +638,15 @@ fn run<G: Game>(
             Ok(None) => continue,
             Err(e) => {
                 if let Some(r) = ready.take() {
-                    let _ = r.send(Err(format!("{e}")));
+                    let checking_identity = pending
+                        .values()
+                        .any(|kind| matches!(kind, Pending::Discover | Pending::Schema));
+                    let message = if checking_identity {
+                        identity_check_error(e)
+                    } else {
+                        format!("{e}")
+                    };
+                    let _ = r.send(Err(message));
                 }
                 return;
             }
@@ -492,6 +654,17 @@ fn run<G: Game>(
         match msg {
             Incoming::Text(text) => {
                 let Ok(j) = serde_json::from_str::<J>(&text) else {
+                    let checking_identity = pending
+                        .values()
+                        .any(|kind| matches!(kind, Pending::Discover | Pending::Schema));
+                    if checking_identity {
+                        fail(
+                            shared,
+                            &mut ready,
+                            identity_check_error("malformed JSON during the identity handshake"),
+                        );
+                        return;
+                    }
                     if delivery == Some(RemoteViewDelivery::Fenced) {
                         fail(shared, &mut ready, "malformed negotiated JSON".into());
                         return;
@@ -501,11 +674,75 @@ fn run<G: Game>(
                 if let Some(id) = j.get("id").and_then(J::as_u64) {
                     let error = j.get("error").map(RpcError::from_json);
                     match (pending.remove(&id), error) {
+                        (Some(Pending::Discover | Pending::Schema), Some(e)) => {
+                            if let Some(r) = ready.take() {
+                                let _ = r.send(Err(identity_check_error(e)));
+                            }
+                            return;
+                        }
                         (Some(Pending::Auth | Pending::Subscribe | Pending::State), Some(e)) => {
                             if let Some(r) = ready.take() {
                                 let _ = r.send(Err(format!("{e}")));
                             }
                             return;
+                        }
+                        (Some(Pending::Auth), None) if checked_identity => {
+                            if let Err(e) = queue_handshake(
+                                t.as_mut(),
+                                &mut pending,
+                                &mut next_id,
+                                Pending::Discover,
+                                "rpc.discover",
+                                J::Null,
+                            ) {
+                                if let Some(r) = ready.take() {
+                                    let _ = r.send(Err(identity_check_error(e)));
+                                }
+                                return;
+                            }
+                        }
+                        (Some(Pending::Discover), None) => {
+                            let result = j.get("result").unwrap_or(&J::Null);
+                            let expected = cfg
+                                .expected_identity
+                                .as_ref()
+                                .expect("discover is only requested for a checked bridge");
+                            if let Err(e) = validate_discovery(result, expected) {
+                                fail(shared, &mut ready, e);
+                                return;
+                            }
+                            if let Err(e) = queue_handshake(
+                                t.as_mut(),
+                                &mut pending,
+                                &mut next_id,
+                                Pending::Schema,
+                                "registry.schema",
+                                J::Null,
+                            ) {
+                                fail(shared, &mut ready, identity_check_error(e));
+                                return;
+                            }
+                        }
+                        (Some(Pending::Schema), None) => {
+                            let result = j.get("result").unwrap_or(&J::Null);
+                            let expected = cfg
+                                .expected_identity
+                                .as_ref()
+                                .expect("schema is only requested for a checked bridge");
+                            if let Err(e) = validate_remote_schema(result, expected) {
+                                fail(shared, &mut ready, e);
+                                return;
+                            }
+                            identity_validated = true;
+                            if let Err(e) = begin_subscription(
+                                t.as_mut(),
+                                &mut pending,
+                                &mut next_id,
+                                &cfg,
+                            ) {
+                                fail(shared, &mut ready, e);
+                                return;
+                            }
                         }
                         (Some(Pending::Subscribe), None) => {
                             let result = j.get("result").unwrap_or(&J::Null);
@@ -585,6 +822,9 @@ fn run<G: Game>(
                         _ => {}
                     }
                 } else if let Some(method) = j.get("method").and_then(J::as_str) {
+                    if checked_identity && !identity_validated {
+                        continue;
+                    }
                     let params = j.get("params").cloned().unwrap_or(J::Null);
                     if has_branch_note(method, &params) {
                         clear_last_input(&last_input);
@@ -600,6 +840,9 @@ fn run<G: Game>(
                 }
             }
             Incoming::Wire(b) => {
+                if checked_identity && !identity_validated {
+                    continue;
+                }
                 let tick_rate = info.as_ref().map_or(60, |i| i.tick_rate);
                 let started = std::time::Instant::now();
                 let Ok((meta, bytes)) = decode_frame_message(&b) else {
@@ -637,6 +880,9 @@ fn run<G: Game>(
                 }
             }
             Incoming::Local(lf) => {
+                if checked_identity && !identity_validated {
+                    continue;
+                }
                 let tick_rate = info.as_ref().map_or(60, |i| i.tick_rate);
                 if let Err(e) = on_frame(
                     &lf.meta,

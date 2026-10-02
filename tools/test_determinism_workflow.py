@@ -127,7 +127,8 @@ class DeterminismWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(job=job):
                 steps = self.jobs[job]["steps"]
-                uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
+                uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")
+                           and step.get("with", {}).get("name", "").startswith("cargo-timings-")]
                 self.assertEqual(len(uploads), 1)
                 upload = uploads[0]
                 self.assertEqual(upload["uses"], "actions/upload-artifact@v4")
@@ -140,6 +141,25 @@ class DeterminismWorkflowTests(unittest.TestCase):
                 })
                 build = next(step for step in steps if step.get("run") == command)
                 self.assertEqual(steps.index(upload), steps.index(build) + 1)
+
+    def test_arena_native_window_smoke_requires_real_windows_and_uploads_evidence(self):
+        steps = self.jobs["sample-build"]["steps"]
+        smoke = next(step for step in steps if step.get("name") == "Arena editor native-window smoke")
+        self.assertEqual(smoke["if"], "runner.os == 'Linux'")
+        self.assertFalse(smoke.get("continue-on-error", False))
+        self.assertEqual(smoke["timeout-minutes"], 3)
+        self.assertIn("xvfb-run", smoke["run"])
+        self.assertIn("--test arena arena_native_window_smoke -- --exact --nocapture", smoke["run"])
+        self.assertEqual(smoke["env"]["ORR_REQUIRE_NATIVE_EDITOR"], "1")
+        self.assertEqual(smoke["env"]["WGPU_BACKEND"], "vulkan")
+        for package in ("mesa-vulkan-drivers", "xvfb"):
+            install = next(step for step in steps if package in step.get("run", ""))
+            self.assertLess(steps.index(install), steps.index(smoke))
+        upload = next(step for step in steps if step.get("name") == "Upload Arena editor native-window evidence")
+        self.assertEqual(upload["if"], "${{ always() && runner.os == 'Linux' }}")
+        self.assertEqual(upload["with"]["path"], smoke["env"]["ORR_NATIVE_EDITOR_ARTIFACT_DIR"])
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        self.assertEqual(steps.index(upload), steps.index(smoke) + 1)
 
     def ffi_artifact_step(self):
         steps = self.jobs["native"]["steps"]

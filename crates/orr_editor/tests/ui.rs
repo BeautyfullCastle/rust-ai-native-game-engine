@@ -558,3 +558,57 @@ fn ui_frames_record_bounded_wall_time_samples() {
     assert_eq!(app.editor.diagnostics(), stats);
     assert!(app.editor.down().is_none());
 }
+
+#[test]
+fn arena_viewport_drag_undo_cancel_and_preview_inspector_gate() {
+    let host = arena::ArenaHost::start(false);
+    let mut agent = host.client();
+    let editor = orr_editor::Editor::attach(&host.url, None).unwrap();
+    let mut h = Harness::builder().with_size([1500.0,900.0]).build_eframe(move |_| EditorApp::new(editor, None));
+    settle(&mut h);
+    assert!(h.query_by_label("+ Body").is_none());
+    let before = yaml(&mut h);
+    let rect = h.state().ui.viewport_rect.unwrap();
+    let at = h.state().editor.camera.world_to_screen([-300.0,0.0], h.state().ui.viewport_px);
+    let at = Pos2::new(rect.min.x+at[0],rect.min.y+at[1]);
+    h.event(Event::PointerMoved(at)); h.step();
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }); h.step();
+    for i in 1..=6 { h.event(Event::PointerMoved(at+egui::vec2(i as f32*10.0, i as f32*3.0))); h.step(); }
+    h.event(Event::PointerButton { pos: at+egui::vec2(60.0,18.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    settle(&mut h);
+    assert_eq!(h.state().editor.history().entries.len(), 1);
+    let p = arena::position(&mut agent);
+    assert!(p[0].as_f64().unwrap() > -300.0 && p[1].as_f64().unwrap() < 0.0);
+    press(&h, Modifiers::COMMAND, Key::Z); settle(&mut h);
+    assert_eq!(yaml(&mut h), before);
+    h.event(Event::PointerMoved(at)); h.step();
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }); h.step();
+    h.event(Event::PointerMoved(at+egui::vec2(40.0,0.0))); h.step();
+    press(&h, Modifiers::NONE, Key::Escape); h.step();
+    h.event(Event::PointerButton { pos: at+egui::vec2(40.0,0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    settle(&mut h); assert_eq!(yaml(&mut h), before);
+    let id = arena::proposal(&mut agent,-100,100);
+    h.state_mut().editor.sync(); h.state_mut().editor.set_preview(Some(id)); settle(&mut h);
+    assert!(h.query_by_label_contains("Live document inspector").is_some());
+    h.get_by_label("Delete").click(); settle(&mut h);
+    assert_eq!(yaml(&mut h), before, "preview disables live-document mutation widgets");
+}
+
+#[test]
+fn arena_viewer_widgets_disable_mutation_but_keep_inspection_and_seek() {
+    let host = arena::ArenaHost::start(true);
+    let mut agent = host.client();
+    let editor = orr_editor::Editor::attach(&host.url,None).unwrap();
+    let mut h = Harness::builder().with_size([1500.0,900.0]).build_eframe(move |_| EditorApp::new(editor,None));
+    settle(&mut h); h.get_by_label("hero").click(); settle(&mut h);
+    assert!(h.state().editor.inspect().is_some());
+    assert!(h.query_by_label_contains("Replay Viewer").is_some());
+    h.get_by_label("Delete").click(); h.get_by_label("Branch").click();
+    press(&h,Modifiers::COMMAND,Key::S); settle(&mut h);
+    assert!(h.state().ui.dialog.is_none());
+    assert_eq!(h.state().editor.rows().len(),2);
+    let state=agent.call("sim.state",serde_json::Value::Null).unwrap();
+    assert_eq!(state["session_mode"],"viewer"); assert_eq!(state["branches"],0);
+    h.state_mut().editor.seek(10); settle(&mut h);
+    assert_eq!(h.state().editor.sim().head_tick,10);
+}

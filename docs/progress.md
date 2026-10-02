@@ -180,3 +180,12 @@ P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 �
 - TUI와 ERP blocking client 모두 해당 읽기를 기존 no-message polling으로 반환. 같은 parser·부분 frame·queue·RPC ID·절대 deadline 유지; 재연결·handshake 재시도·명령 재전송 없음
 - 주입된 정상 I/O interruption 회귀가 수정 전 양쪽 실패를 재현. 헤더/본문 중단, frame·notification 순서, 단일 전송, 실제 reset/close 오류 구분 확인
 - 최종 TUI 31개, remote unit 36개, 실제 CLI 통합 24개, 엄격한 scoped Clippy 및 독립 리뷰 통과. TCP read_until은 기존에도 Interrupted를 내부 재시도하므로 추가 분기는 방어적 처리임
+
+### Arena 원격 에디터 첫 경로 (2026-10-03 KST)
+
+- PhysGame/Arena compiled adapter와 공통 drawable로 Arena 플레이어·탄환 표시/선택, Position 드래그·undo, Position/PlayerTag/Score inspector 및 proposal preview 지원. local PhysGame 동작과 런타임 의존성 경계 유지
+- control/main/proposal 연결 각각에서 명시적 game/build와 전체 reflection schema 확인 후 decode. Arena는 fenced delivery 필수, Phys legacy fallback은 명시적으로 유지. 임의 plugin ABI나 같은 host instance 보장을 주장하지 않음
+- Viewer 및 preview 수정 경로 차단, GUI gameplay 입력은 보내지 않아 외부 agent 입력 보존. camera는 최초 attachment에만 fit하고 scene.load는 해당 checksum frame에서 fit
+- focused editor 113개 + remote 16개 통과(강제 software Vulkan GPU 4개 포함), 엄격한 scoped Clippy 및 독립 리뷰 완료. 리뷰에서 resync 중 camera 재설정과 scene-load frame 순서 수정
+- headless composed 실제 UI 이미지를 확인. 로컬 native 창은 SwiftShader Xlib surface/OpenGL VIEW_FORMATS 부재로 차단됐고 공식 driver metadata fetch도 실패했으므로 native 성공으로 집계하지 않음
+- 기존 Arena harness에 Linux CI 필수 Xvfb/Mesa native 창 smoke 추가: edit/play PNG, viewport 픽셀, ERP Score=1·checksum/replay, bounded child cleanup 확인. workflow 회귀 13개 통과; 실제 native smoke는 이 커밋 CI 실행 대기

@@ -60,6 +60,47 @@ do not report only the successful rerun. There are no automatic task retries or
 unexpected host restarts. Failed readiness probes are recorded separately from
 task-command retries. Timing is informational; there is no latency pass threshold.
 
+## Remote visual editor
+
+The compiled editor supports `PhysGame` and `Arena` hosts. Keep the normal local
+PhysGame launcher, and attach to an Arena authoring host with:
+
+```sh
+cargo build -p orr_editor --bin orr_editor
+# Start the Arena host and author its players through the workflow below first.
+target/debug/orr_editor --connect ws://127.0.0.1:7777 --select hero
+```
+
+The Arena viewport renders players/bullets with the sample's colors, supports
+selection and `Position.pos` drags, and uses the same reflected inspector and
+shared undo history as ERP agents. Proposal previews show changed outlines and
+old-position ghosts. Their viewport and inspector widgets are read-only; the
+inspector is explicitly labelled as the live document. Arena hides physics-only
+Body creation. The initial camera fits the authored players, while ordinary
+edits, seeks and presentation recovery preserve the person's camera.
+
+Play/seek/stop operate on the host. Gameplay input stays with the CLI/MCP's
+structured input adapter: the editor does not send raw input or overwrite an
+agent's held movement/fire. Replay Viewer sessions allow inspection and timeline
+playback, with mutations and Branch disabled; the editor never auto-branches a
+Viewer. Local Arena launch, player creation widgets and GUI gameplay keyboard
+control are outside this first slice.
+
+Before decoding a frame, attachment requires an explicit supported game, ERP 1,
+and the full compiled reflected schema. Main and proposal streams repeat the
+game/build/schema check on their own connection. Arena requires fenced stream
+delivery; existing PhysGame legacy delivery remains explicitly reported. These
+checks establish descriptor compatibility for a closed compiled adapter set,
+not an arbitrary dynamic binary ABI or a unique host instance: the default build ID
+is version/game/frame-format based, not a hash of all source code.
+
+The Linux sample CI job also requires a real-window smoke under Xvfb and Mesa:
+`ORR_REQUIRE_NATIVE_EDITOR=1` runs the normal editor binary against the test's
+real Arena ERP host, captures edit and scored-play windows, validates viewport
+pixels and unchanged authoritative checksums, and uploads PNG/log/JSON evidence.
+Default runs (including Windows) explicitly skip that optional window test.
+Missing display support or screenshot pixels fails the required CI invocation.
+
 ## Host and input contract
 
 The host is started with:

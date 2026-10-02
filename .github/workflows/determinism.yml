@@ -175,6 +175,25 @@ jobs:
       # number of frames and reads the presented frame back as a PNG.
       - if: runner.os == 'Linux'
         run: sudo apt-get install -y -q xvfb libxkbcommon-x11-0
+      # Real Arena editor windows, served by the existing integration-test host.
+      # No additional host/CLI build and no renderer fallback: missing windows,
+      # screenshots, expected pixels, or authoritative checksums fail this step.
+      - name: Arena editor native-window smoke
+        if: runner.os == 'Linux'
+        timeout-minutes: 3
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" cargo test -p orr_editor --release --test arena arena_native_window_smoke -- --exact --nocapture
+        env:
+          ORR_REQUIRE_NATIVE_EDITOR: "1"
+          ORR_NATIVE_EDITOR_ARTIFACT_DIR: ${{ runner.temp }}/arena-editor-native
+          WGPU_BACKEND: vulkan
+      - name: Upload Arena editor native-window evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-editor-native-${{ matrix.os }}
+          path: ${{ runner.temp }}/arena-editor-native
+          if-no-files-found: error
+          retention-days: 7
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
       # The mobile / weak-GPU preset (no MSAA, 512 texel shadow map, 12-segment meshes) on the same adapter.

@@ -37,16 +37,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use orr_bridge::{Bridge, BridgeEvent, ControlOp, Lifecycle, Snapshot, Timeline, ViewResync, ViewUpdate};
+use orr_bridge::{BridgeEvent, ControlOp, Lifecycle, Snapshot, Timeline, ViewResync, ViewUpdate};
 use orr_ecs::Entity;
 use orr_fp::{FPVec2, FP};
 use orr_reflect::{decimal, Guid, TypeRegistry, Value};
 use orr_remote::codec::b64_decode;
 use orr_remote::json::{json_to_value, value_to_json};
-use orr_remote::{ClientError, ErpClient, RemoteBridge, RemoteViewDelivery};
+use orr_remote::{ClientError, ErpClient, RemoteViewDelivery};
 use orr_render::{Camera, RenderList};
-use orr_sample::physics_game::{register_reflect, PhysGame};
-use orr_sample::physics_view::{body_views, BodyView};
+use crate::game::{Drawable, EditorGame, EditorStream};
 use serde_json::{json, Value as J};
 
 use crate::agent::{AgentState, Feed, FeedEntry};
@@ -68,9 +67,7 @@ const LOG_LIMIT: usize = 200;
 /// The type registry of `PhysGame` (physics types, `PaddleTag`, `Scene`): the
 /// shipped descriptors the inspector draws its widgets from.
 pub fn make_types() -> TypeRegistry {
-    let mut t = TypeRegistry::new();
-    register_reflect(&mut t);
-    t
+    EditorGame::PhysGame.types()
 }
 
 /// The demo scene: `scenes/physics_demo.scene.yaml` of the working directory
@@ -163,11 +160,11 @@ struct InFlight {
 /// The proposal whose staged frame the viewport shows.
 struct Preview {
     id: String,
-    stream: RemoteBridge<PhysGame>,
+    stream: EditorStream,
     seq: u64,
     generation: u64,
     rows_dirty: bool,
-    bodies: Vec<BodyView>,
+    bodies: Vec<Drawable>,
     rows: Vec<EntityRow>,
 }
 
@@ -194,7 +191,7 @@ pub struct Editor {
     stopped: Option<Stopped>,
     // the newest frame
     snapshot: Option<Snapshot>,
-    bodies: Vec<BodyView>,
+    bodies: Vec<Drawable>,
     checksum: u64,
     snap_entities: u32,
     preview: Option<Preview>,
@@ -209,6 +206,8 @@ pub struct Editor {
     last_clients: Option<Instant>,
     gesture: gestures::Gestures,
     refit: bool,
+    initial_camera_fit: bool,
+    refit_checksum: Option<u64>,
     agent: AgentState,
     feed: Feed,
     agent_clients: BTreeMap<String, ErpClient>,
@@ -250,9 +249,10 @@ impl Editor {
     fn on_backend(backend: Backend) -> Result<Self, String> {
         let mut feed = Feed::default();
         feed.own.clone_from(&backend.own_client);
+        let types = Arc::new(backend.game.types());
         let mut e = Self {
             backend,
-            types: Arc::new(make_types()),
+            types,
             down: None,
             selection: None,
             camera: Camera::new([0.0, 0.0], 20.0),
@@ -283,12 +283,13 @@ impl Editor {
             last_clients: None,
             gesture: gestures::Gestures::default(),
             refit: false,
+            initial_camera_fit: true,
+            refit_checksum: None,
             agent: AgentState::default(),
             feed,
             agent_clients: BTreeMap::new(),
             script_owner: BTreeMap::new(),
         };
-        e.check_registry()?;
         e.backend.subscribe()?;
         // Everything the panels need, once, so the first frame is not empty.
         e.read_state()?;
@@ -301,17 +302,6 @@ impl Editor {
         e.ingest();
         e.refresh_view();
         Ok(e)
-    }
-
-    /// The host must know every type the editor's shipped descriptors know.
-    fn check_registry(&mut self) -> Result<(), String> {
-        let r = self.timed_erp_call("registry.types", J::Null).map_err(|e| format!("registry.types: {e}"))?;
-        let host: Vec<String> = r["types"].as_array().map(|a| a.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
-        let missing: Vec<&str> = self.types.types().map(|t| t.name()).filter(|n| !host.iter().any(|h| h == n)).collect();
-        if !missing.is_empty() {
-            return Err(format!("the host does not know the type(s) {}: its game differs from the one this editor ships descriptors for", missing.join(", ")));
-        }
-        Ok(())
     }
 
     fn read_state(&mut self) -> Result<(), String> {
@@ -368,6 +358,23 @@ impl Editor {
         &self.backend.spec
     }
 
+    /// The compiled game adapter selected by discovery.
+    pub fn game(&self) -> EditorGame { self.backend.game }
+
+    /// Replay viewers and disconnected hosts never accept scene/debug mutations.
+    pub fn is_viewer(&self) -> bool {
+        self.sim.viewer || self.timeline().is_some_and(|t| t.mode == orr_bridge::PlayMode::Viewer)
+    }
+
+    pub fn can_mutate(&self) -> bool { self.down.is_none() && !self.is_viewer() }
+
+    /// Field moved by the viewport, only when selected entity has it.
+    pub fn movement_owner(&self) -> Option<Owner> {
+        let component = self.game().position_component();
+        let row = self.selection.as_ref().and_then(|t| self.row_of(t))?;
+        row.components.iter().any(|c| c == component).then(|| Owner::Component(component.to_string()))
+    }
+
     /// The type registry the inspector draws its widgets from.
     pub fn types(&self) -> &TypeRegistry {
         &self.types
@@ -408,12 +415,12 @@ impl Editor {
 
     /// The drawable bodies of the frame on screen (the scene's preview frame in
     /// edit mode, the live frame in play mode).
-    pub fn bodies(&self) -> &[BodyView] {
+    pub fn bodies(&self) -> &[Drawable] {
         &self.bodies
     }
 
     /// The drawable bodies of the staged frame of the previewed proposal, once it has arrived.
-    pub fn preview_bodies(&self) -> Option<&[BodyView]> {
+    pub fn preview_bodies(&self) -> Option<&[Drawable]> {
         self.preview.as_ref().filter(|p| p.seq > 0).map(|p| p.bodies.as_slice())
     }
 
@@ -565,6 +572,23 @@ impl Editor {
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
+        if self.game() == EditorGame::Arena {
+            let half = orr_view::fp_to_f32(orr_sample::arena_game::ARENA_HALF);
+            self.camera = Camera::new([0.0, 0.0], half * 1.06);
+            // Authoring commonly uses a few players near the center. Frame
+            // those drawables so their hit targets are useful immediately.
+            if !self.bodies.is_empty() {
+                let mut low = [f32::INFINITY; 2];
+                let mut high = [f32::NEG_INFINITY; 2];
+                for b in &self.bodies {
+                    let r = b.outline.extent();
+                    for i in 0..2 { low[i] = low[i].min(b.pos[i] - r); high[i] = high[i].max(b.pos[i] + r); }
+                }
+                self.camera = Camera::new([(low[0] + high[0]) * 0.5, (low[1] + high[1]) * 0.5],
+                    ((high[0] - low[0]).max(high[1] - low[1]) * 0.6).max(100.0));
+            }
+            return;
+        }
         let get = |name: &str| {
             let (_, v) = self.singletons.iter().find(|(n, _)| n == "Scene")?;
             let Value::Struct(fields) = v else { return None };
@@ -591,6 +615,9 @@ impl Editor {
     fn call(&mut self, method: &str, params: J) -> Result<J, String> {
         if let Some(d) = &self.down {
             return Err(d.reason.clone());
+        }
+        if self.is_viewer() && !gestures::is_read(method) && !matches!(method, "sim.play" | "sim.pause" | "sim.step" | "sim.seek" | "sim.speed" | "sim.stop") {
+            return Err("replay Viewer is read-only; editor mutations and branching are disabled".into());
         }
         if self.gesture.busy() && !gestures::is_read(method) {
             return Err("an edit is still pending; wait for it to finish or cancel the drag".into());
@@ -715,7 +742,7 @@ impl Editor {
                 self.inflight.singletons = false;
                 if let Ok(v) = r {
                     self.singletons = singletons_of(&self.types, &v);
-                    if self.refit {
+                    if self.refit && self.game() == EditorGame::PhysGame {
                         self.refit = false;
                         self.fit_camera();
                     }
@@ -945,7 +972,7 @@ impl Editor {
         }
         let started = Instant::now();
         let frame = s.predicted();
-        self.bodies = body_views(frame);
+        self.bodies = self.backend.game.drawables(frame);
         self.checksum = frame.checksum();
         let alive = frame.alive_count();
         self.telemetry.snapshot_extract.record(started.elapsed());
@@ -960,6 +987,15 @@ impl Editor {
             self.dirty.singletons = true;
         }
         self.snapshot = Some(s);
+        if self.refit_checksum == Some(self.checksum) {
+            self.refit_checksum = None;
+            self.refit = false;
+            self.fit_camera();
+        }
+        if self.initial_camera_fit {
+            self.initial_camera_fit = false;
+            if self.game() == EditorGame::Arena { self.fit_camera(); }
+        }
     }
 
     fn refresh_preview(&mut self) {
@@ -1000,7 +1036,7 @@ impl Editor {
                 false
             } else {
                 p.seq = s.seq();
-                p.bodies = body_views(s.predicted());
+                p.bodies = self.backend.game.drawables(s.predicted());
                 true
             }
         } else {
@@ -1153,9 +1189,12 @@ impl Editor {
             }
         };
         match self.call("scene.load", json!({"text": text, "path": path.display().to_string()})) {
-            Ok(_) => {
+            Ok(r) => {
                 self.select(None);
                 self.refit = true;
+                if self.game() == EditorGame::Arena {
+                    self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
+                }
                 self.mark_edited();
                 self.info(format!("opened {}", path.display()));
                 true
@@ -1213,6 +1252,10 @@ impl Editor {
     /// field coalesce until sent. A host refusal rolls the gesture back and is
     /// reported when its reply arrives. Caches only show host-confirmed values.
     pub fn set_field(&mut self, owner: &Owner, path: &str, value: Value) -> bool {
+        if self.is_viewer() {
+            self.error("replay Viewer is read-only");
+            return false;
+        }
         if let Some(down) = &self.down {
             self.error(down.reason.clone());
             return false;
@@ -1377,6 +1420,10 @@ impl Editor {
 
     /// Spawns a dynamic circle body at `at` (world units) and selects it.
     pub fn spawn_body(&mut self, at: [f32; 2]) -> bool {
+        if self.game() != EditorGame::PhysGame {
+            self.error("Body creation is only available for PhysGame");
+            return false;
+        }
         let pos = FPVec2::new(fp_of_f64(f64::from(at[0])).unwrap_or(FP::ZERO), fp_of_f64(f64::from(at[1])).unwrap_or(FP::ZERO));
         let body = Value::Struct(vec![
             ("pos".into(), Value::Vec2(pos)),
@@ -1547,7 +1594,17 @@ impl Editor {
                         true
                     }
                     Err(e) => {
-                        self.error(format!("preview: {e}"));
+                        self.preview = None;
+                        self.agent.preview = None;
+                        self.inflight.preview_rows = None;
+                        if e.contains("remote identity check:") {
+                            self.snapshot = None;
+                            self.bodies.clear();
+                            self.checksum = 0;
+                            self.connection_lost(&e);
+                        } else {
+                            self.error(format!("preview: {e}"));
+                        }
                         false
                     }
                 }
@@ -1568,7 +1625,7 @@ impl Editor {
         let selected = self.selection.as_ref().and_then(|t| self.entity_of(t));
         let previewing = self.previewing();
         let staged = self.preview.as_ref().filter(|p| Some(p.id.as_str()) == previewing && p.seq > 0);
-        let (mut list, bodies, rows): (RenderList, &[BodyView], &[EntityRow]) = match staged {
+        let (mut list, bodies, rows): (RenderList, &[Drawable], &[EntityRow]) = match staged {
             Some(p) => {
                 let scene = Scene { bodies: &p.bodies, rows: &p.rows };
                 let base = Scene { bodies: &self.bodies, rows: &self.rows };
@@ -1726,6 +1783,7 @@ impl Editor {
                 let checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum).unwrap_or(0);
                 self.stopped = Some(Stopped { tick: r.get("tick").and_then(J::as_u64).unwrap_or(0), checksum, replay });
                 self.sim.mode = Mode::Edit;
+                self.sim.viewer = false;
                 self.sim.playing = false;
                 self.mark_edited();
                 self.info("play stopped");
@@ -1761,7 +1819,10 @@ impl Editor {
             }
         };
         fresh.log = std::mem::take(&mut self.log);
-        fresh.camera = self.camera;
+        if fresh.game() == self.game() {
+            fresh.camera = self.camera;
+            fresh.initial_camera_fit = false;
+        }
         fresh.feed.filter = self.feed.filter;
         fresh.agent.expand_methods = std::mem::take(&mut self.agent.expand_methods);
         *self = fresh;

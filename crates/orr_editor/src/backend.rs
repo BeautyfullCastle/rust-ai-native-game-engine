@@ -8,7 +8,7 @@
 //!
 //! - an [`ErpClient`] for everything a person can do (edits, transactions,
 //!   undo, history, proposals, sim control, schema, queries, activity);
-//! - a [`RemoteBridge`] (`Bridge` + `SimControl` + `Snapshot`) for the
+//! - a [`orr_remote::RemoteBridge`] (`Bridge` + `SimControl` + `Snapshot`) for the
 //!   frames the viewport draws.
 //!
 //! For a local host both channels are in-process links (no sockets, frames
@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use orr_remote::sample::spawn_phys_host;
-use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteBridge, RemoteConfig, ServerConfig, ViewDeliveryMode, USER_CLIENT};
-use orr_sample::physics_game::PhysGame;
+use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteConfig, RemoteIdentity, ServerConfig, ViewDeliveryMode, USER_CLIENT};
+use crate::game::{EditorGame, EditorStream};
 use serde_json::{json, Value as J};
 
 /// Where the simulation runs.
@@ -72,7 +72,7 @@ pub struct Backend {
     /// The ERP channel.
     pub erp: ErpClient,
     /// The frame channel of the scene (play frame, else the scene's preview frame).
-    pub bridge: RemoteBridge<PhysGame>,
+    pub bridge: EditorStream,
     /// The host thread, for a local host.
     pub host: Option<LocalHost>,
     /// The name this editor's connections have on the host.
@@ -81,7 +81,9 @@ pub struct Backend {
     /// of a local host started with `--erp`, or the remote host's address.
     pub url: Option<String>,
     /// The game the host runs (`rpc.discover`).
-    pub game: String,
+    pub game: EditorGame,
+    /// Checked descriptor identity shared by control and frame connections.
+    identity: RemoteIdentity,
 }
 
 /// `ws://host:port` plus the path and query a dev-mode host needs to know
@@ -125,11 +127,11 @@ impl Backend {
                 // In process a frame is a copy, not a message: let an edit show at once instead of
                 // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
                 rc.max_fps = 240;
-                let bridge = RemoteBridge::<PhysGame>::connect_transport(Box::new(link("frames")?), rc)?;
+                let (game, identity, own_client) = discover(&mut erp)?;
+                rc.expected_identity = Some(identity.clone());
+                let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
                 let url = host.url().map(str::to_string);
-                let mut b = Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client: USER_CLIENT.to_string(), url, game: String::new() };
-                b.handshake()?;
-                Ok(b)
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity })
             }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());
@@ -139,33 +141,20 @@ impl Backend {
                 }
                 .map_err(|e| format!("cannot connect to {url}: {e}"))?;
                 erp.call_timeout = CALL_TIMEOUT;
+                let (game, identity, own_client) = discover(&mut erp)?;
                 let mut rc = RemoteConfig::new(if token.is_some() { url } else { &full });
                 rc.token.clone_from(token);
                 rc.source = "view".to_string();
-                rc.view_delivery = ViewDeliveryMode::PreferFenced;
-                let bridge = RemoteBridge::<PhysGame>::connect(rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
-                let mut b = Backend { spec: spec.clone(), erp, bridge, host: None, own_client: USER_CLIENT.to_string(), url: Some(url.clone()), game: String::new() };
-                b.handshake()?;
-                Ok(b)
+                rc.view_delivery = delivery(game, false);
+                rc.expected_identity = Some(identity.clone());
+                let bridge = EditorStream::connect(game, rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity })
             }
         }
     }
 
-    /// Learns who this connection is and what the host runs.
-    fn handshake(&mut self) -> Result<(), String> {
-        let d = self.erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
-        if let Some(c) = d.pointer("/you/client").and_then(J::as_str) {
-            self.own_client = c.to_string();
-        }
-        self.game = d.pointer("/engine/game").and_then(J::as_str).unwrap_or_default().to_string();
-        if !self.game.is_empty() && self.game != "PhysGame" {
-            return Err(format!("the host runs '{}'; this editor draws PhysGame scenes", self.game));
-        }
-        Ok(())
-    }
-
     /// Another frame stream, for what the viewport previews (`proposal:p3`).
-    pub fn frame_stream(&self, source: &str) -> Result<RemoteBridge<PhysGame>, String> {
+    pub fn frame_stream(&self, source: &str) -> Result<EditorStream, String> {
         let mut rc = match &self.spec {
             HostSpec::Local { .. } => RemoteConfig::new(""),
             HostSpec::Remote { url, token } => {
@@ -175,13 +164,14 @@ impl Backend {
             }
         };
         rc.source = source.to_string();
-        rc.view_delivery = if self.spec.is_local() { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced };
+        rc.view_delivery = delivery(self.game, self.spec.is_local());
+        rc.expected_identity = Some(self.identity.clone());
         match &self.host {
             Some(h) => {
                 let t = h.connector().connect(USER_CLIENT, Caps::ALL).map_err(|e| e.to_string())?;
-                RemoteBridge::<PhysGame>::connect_transport(Box::new(t), rc)
+                EditorStream::connect_transport(self.game, Box::new(t), rc)
             }
-            None => RemoteBridge::<PhysGame>::connect(rc),
+            None => EditorStream::connect(self.game, rc),
         }
     }
 
@@ -203,4 +193,29 @@ impl Backend {
             .map(|_| ())
             .map_err(|e| format!("watch.subscribe: {e}"))
     }
+}
+
+// Discover before choosing a native frame decoder. Schema comparison includes
+// fields, ranges and descriptors, not just type names. The stream repeats the
+// identity check on its own connection before subscribing. This checks game and
+// build/schema compatibility, not a unique host instance or source-content hash.
+fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String), String> {
+    let d = erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
+    if d["erp_version"].as_u64() != Some(1) {
+        return Err("editor requires ERP version 1".into());
+    }
+    let name = d.pointer("/engine/game").and_then(J::as_str).ok_or("host discovery is missing explicit engine.game")?;
+    let game = EditorGame::from_name(name)?;
+    let build_id = d.pointer("/engine/build_id").and_then(J::as_str).filter(|s| !s.is_empty()).ok_or("host discovery is missing engine.build_id")?.to_string();
+    let schema: J = serde_json::from_str(&game.types().json_schema()).map_err(|e| format!("compiled schema: {e}"))?;
+    let actual = erp.call("registry.schema", J::Null).map_err(|e| format!("registry.schema: {e}"))?;
+    if actual.get("schema") != Some(&schema) {
+        return Err(format!("{name} reflected schema mismatch: host descriptors differ from this editor"));
+    }
+    let own_client = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
+    Ok((game, RemoteIdentity { game: name.to_string(), build_id, schema }, own_client))
+}
+
+fn delivery(game: EditorGame, local: bool) -> ViewDeliveryMode {
+    if local || game == EditorGame::Arena { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced }
 }
