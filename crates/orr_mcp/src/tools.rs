@@ -272,7 +272,7 @@ Not possible while a play session runs. Example: {\"proposal_id\":\"p1\"}.",
 Omit `proposal_id` to run the scene alone (baseline metrics). Give `checks` for pass/fail, e.g. [\"lost_bodies.max == 0\", \"mean_height >= 2.5\", \"kinetic_energy.delta <= 10\"]. \
 Check grammar: `<metric>[.start|final|min|max|delta] <|<=|==|!=|>=|> <number>` (no stat = final; delta = candidate final minus base final; prefix `base:` reads the run without the proposal), or `no_divergence`, `no_divergence_before <tick>`, `recording_matches`. \
 Inputs: {\"kind\":\"bot\",\"ticks\":300,\"seed\":1} scripted players (the default), {\"kind\":\"idle\",\"ticks\":300} no input, {\"kind\":\"last_play\"} the last play session stopped in this host, {\"kind\":\"replay\",\"base64\":\"...\"} a .orrp file. \
-Any scene edit changes the checksums from tick 0, so judge behaviour by metrics and checks, not by divergence. The host stays responsive while verification runs on captured scene/proposal state. Only one verification may run at a time; verify_busy means retry after it finishes.",
+Metric min/max cover sampled tick boundaries only (default sample_every: 60); use sample_every: 1 for transient assertions. Events entirely within a tick are not covered. Any scene edit changes the checksums from tick 0, so judge behaviour by metrics and checks, not by divergence. The host stays responsive while verification runs on captured scene/proposal state. Only one verification may run at a time; verify_busy means retry after it finishes.",
         read_only: true,
         needs: "read",
         schema: || {
@@ -288,7 +288,7 @@ Any scene edit changes the checksums from tick 0, so judge behaviour by metrics 
                     }, "required": ["kind"]},
                     "checks": {"type": "array", "items": {"type": "string"}, "description": "pass/fail rules, e.g. [\"lost_bodies.max == 0\"]"},
                     "ticks": {"type": "integer", "minimum": 1, "description": "run at most this many ticks (of a recording)"},
-                    "sample_every": {"type": "integer", "minimum": 0, "description": "sample metrics every this many ticks (default 60)"},
+                    "sample_every": {"type": "integer", "minimum": 0, "description": "sample metrics every N ticks relative to the start, plus start/end (default 60; 0 endpoints only; 1 every tick boundary). min/max cover samples only, not events entirely within a tick"},
                     "series": {"type": "boolean", "description": "also return every sampled value of each metric (structured result only)"},
                 }),
                 &[],

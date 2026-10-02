@@ -146,6 +146,10 @@ Limits: at most 6000 simulation ticks per call. One verification runs off the ho
 
 Every scene edit changes the checksums from tick 0, so `first_divergence` is 0 for a real change. **Judge behaviour by metrics and checks**, not by divergence. An unchanged run (`identical: true`) means the change has no effect on the simulation.
 
+Metrics are sampled at the start, every 60 ticks relative to the start by default, and at the end. `--sample-every N` on `orr verify` or `orr apply` changes the interval: `0` = endpoints only; `1` = every tick boundary. MCP uses `sample_every`. `min`/`max` describe those samples only: between samples is not checked. For transient assertions such as `bullets.max == 0`, use `--sample-every 1`; even then, events created and removed entirely within one tick are not covered.
+
+Reports expose `metric_sampling`: `requested_interval`, actual `sample_count` (including start/end), `scope: sampled_tick_boundaries`, and `every_tick_boundary_observed` computed from actual samples. A short run can cover every boundary even with endpoint-only sampling. Checksum divergence is still checked every tick, and recording checks compare every recorded checksum available in the run, regardless of metric sampling.
+
 ### Checks
 
 Repeat `--check "<rule>"` for each rule; the exit code is 4 when any fails.

@@ -438,6 +438,7 @@ const OPS_FLAGS: &[(&str, bool)] = &[
     ("--players", true),
     ("--replay", true),
     ("--ticks", true),
+    ("--sample-every", true),
     ("--last-play", false),
     ("--keep", false),
 ];
@@ -559,7 +560,7 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 const VERIFY_FLAGS: &[(&str, bool)] =
-    &[("--check", true), ("--bot", true), ("--idle", true), ("--seed", true), ("--players", true), ("--replay", true), ("--ticks", true), ("--last-play", false)];
+    &[("--check", true), ("--bot", true), ("--idle", true), ("--seed", true), ("--players", true), ("--replay", true), ("--ticks", true), ("--sample-every", true), ("--last-play", false)];
 
 fn verify_args(ctx: &mut Ctx, p: &Parsed, proposal: Option<&str>, checks: &[String]) -> Result<J, CliErr> {
     let mut a = json!({"inputs": inputs_of(ctx, p)?});
@@ -568,6 +569,10 @@ fn verify_args(ctx: &mut Ctx, p: &Parsed, proposal: Option<&str>, checks: &[Stri
     }
     if !checks.is_empty() {
         a["checks"] = json!(checks);
+    }
+    if let Some(n) = p.num("--sample-every")? {
+        let n = u32::try_from(n).map_err(|_| CliErr::Usage("--sample-every is too large (maximum 4294967295)".into()))?;
+        a["sample_every"] = json!(n);
     }
     if let Some(t) = p.num("--ticks")? {
         a["ticks"] = json!(t);
@@ -1041,6 +1046,30 @@ mod tests {
 
     fn passing_report() -> J {
         json!({"checks": {"passed": true, "results": []}, "verified_state": {"document_id": "1234567890abcdef1234567890abcdef", "id": "p1", "document_revision": 3, "proposal_revision": 2}})
+    }
+
+    #[test]
+    fn apply_validates_sampling_before_staging() {
+        for invalid in ["-1", "1.5", "many", "4294967296"] {
+            let (result, calls) = run_apply_command(passing_report(), None, &[
+                "test", "spawn", "--check", "entities >= 0", "--idle", "1", "--sample-every", invalid,
+            ]);
+            assert!(matches!(result, Err(CliErr::Usage(_))), "{invalid}: {result:?}");
+            assert!(!calls.iter().any(|(method, _)| method.starts_with("proposal.")));
+        }
+        let (result, calls) = run_apply_command(passing_report(), None, &[
+            "test", "spawn", "--check", "entities >= 0", "--idle", "1", "--sample-every",
+        ]);
+        assert!(matches!(result, Err(CliErr::Usage(_))));
+        assert!(calls.is_empty());
+        for interval in ["0", "1", "4294967295"] {
+            let (result, calls) = run_apply_command(passing_report(), None, &[
+                "test", "spawn", "--check", "entities >= 0", "--idle", "1", "--sample-every", interval,
+            ]);
+            assert!(result.is_ok(), "{result:?}");
+            let verify = calls.iter().find(|(method, _)| method == "proposal.verify").unwrap();
+            assert_eq!(verify.1["sample_every"], interval.parse::<u32>().unwrap());
+        }
     }
 
     #[test]

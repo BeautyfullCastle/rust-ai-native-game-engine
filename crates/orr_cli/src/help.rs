@@ -142,8 +142,8 @@ Examples:
     ),
     (
         "verify",
-        "orr verify [<proposal>] [--bot N | --idle N | --last-play | --replay f.orrp] [--seed S] [--check <rule>]...",
-        "orr verify [<proposal>] [--bot N | --idle N | --last-play | --replay f.orrp] [--seed S] [--check <rule>]...
+        "orr verify [<proposal>] [--bot N | --idle N | --last-play | --replay f.orrp] [--seed S] [--sample-every N] [--check <rule>]...",
+        "orr verify [<proposal>] [--bot N | --idle N | --last-play | --replay f.orrp] [--seed S] [--sample-every N] [--check <rule>]...
 
 Replays the scene without and with the proposal, deterministically, on the same inputs, and compares checksums and metrics.
 Without a proposal it runs the scene alone (baseline metrics: use them to choose thresholds).
@@ -152,11 +152,15 @@ Prints pass or fail per check with the reason, and the metrics that changed. Exi
 Checks: <metric>[.start|final|min|max|delta] <|<=|==|!=|>=|> <number>, `base:` prefix for the run without the change,
 no_divergence, no_divergence_before <tick>, recording_matches.
 Inputs: --bot N ticks of scripted players (default 300; --seed S, --players P), --idle N, --last-play, --replay file.
+Metrics: --sample-every N samples every N ticks relative to the start, plus start/end (default 60; 0 endpoints only; 1 every tick boundary).
+min/max cover sampled values only. For transient assertions use --sample-every 1; events entirely within a tick are not covered.
+Checksum divergence and recording checks still compare every tick available, regardless of metric sampling.
 
 Examples:
   orr verify
   orr verify p1 --check \"lost_bodies.max == 0\" --check \"mean_height >= 2.5\"
-  orr verify p1 --idle 600 --check no_divergence_before 1",
+  orr verify p1 --idle 600 --check no_divergence_before 1
+  orr verify --last-play --sample-every 1 --check \"bullets.max == 0\"",
     ),
     (
         "accept",
@@ -168,13 +172,15 @@ Examples:
     ("diff", "orr diff <proposal>", "orr diff <proposal>\n\nThe changes a proposal would make, and the diff of the scene text.\n\nExample:\n  orr diff p1"),
     (
         "apply",
-        "orr apply <label> <ops...> [--check <rule>]... [--bot N | --idle N | --last-play | --replay f] [--keep]",
-        "orr apply <label> <ops...> [--check <rule>]... [--bot N | --idle N | --last-play | --replay f] [--seed S] [--keep]
+        "orr apply <label> <ops...> [--check <rule>]... [--bot N | --idle N | --last-play | --replay f] [--sample-every N] [--keep]",
+        "orr apply <label> <ops...> [--check <rule>]... [--bot N | --idle N | --last-play | --replay f] [--seed S] [--sample-every N] [--keep]
 
 The one-shot workflow: propose, verify with the given checks, accept if all pass; otherwise reject and exit 4 with the report.
 Default check when none is given: `lost_bodies.max == 0`, if the game reports that metric (otherwise no check).
 --keep leaves a failed proposal open instead of rejecting it. Ops: see `orr propose`; --ops-file f.json or `-` for a JSON list.
 The accepted change is one history entry; `orr undo` takes it back.
+--sample-every N: metric samples every N ticks plus start/end (default 60; 0 endpoints only; 1 every tick boundary).
+min/max cover sampled values only. Use --sample-every 1 for transient assertions; events entirely within a tick are not covered.
 
 Examples:
   orr apply \"lift hero\" set hero Body.pos=[6,18] --check \"lost_bodies.max == 0\"

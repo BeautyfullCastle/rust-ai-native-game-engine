@@ -47,6 +47,9 @@ fn the_guide_is_pinned_to_the_engine_and_describes_the_workflow() {
         "e_7f3a91c2",
         "lost_bodies",
         "no_divergence_before",
+        "--sample-every 1",
+        "events created and removed entirely within one tick",
+        "every_tick_boundary_observed",
         "orr_physics::Body",
         "`approve`",
     ] {

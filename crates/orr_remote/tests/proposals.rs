@@ -97,6 +97,9 @@ fn propose_diff_verify_accept_and_undo_over_a_socket() {
     }
     assert_ne!(report["checksums"]["base_final"], report["checksums"]["candidate_final"]);
     assert_eq!(report["samples"].as_array().unwrap().len(), 5);
+    assert_eq!(report["metric_sampling"], json!({
+        "requested_interval": 30, "sample_count": 5, "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": false
+    }));
     let lost = metric(&report, "lost_bodies");
     assert_eq!(lost["kind"], "int");
     assert_eq!(lost["candidate"]["max"], 0);

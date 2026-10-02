@@ -557,6 +557,12 @@ pub(crate) fn report_json(r: &VerifyReport, outcome: Option<&CheckOutcome>, seri
             "candidate_final": checksum_text(r.candidate_final_checksum),
         },
         "samples": r.samples.iter().map(|s| json!({"tick": s.tick, "base": checksum_text(s.base), "candidate": checksum_text(s.candidate)})).collect::<Vec<_>>(),
+        "metric_sampling": {
+            "requested_interval": r.sample_every,
+            "sample_count": r.samples.len(),
+            "scope": "sampled_tick_boundaries",
+            "every_tick_boundary_observed": r.every_tick_boundary_observed(),
+        },
         "metrics": metrics,
         "debug_commands_replayed": r.debug_commands_replayed,
         "recording": r.recording.map(|c| json!({"checked": c.checked, "mismatches": c.mismatches, "first_mismatch": c.first_mismatch})),

@@ -165,3 +165,11 @@ P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 �
 - 같은 디렉터리 임시 파일에 완전한 데이터를 기록·동기화한 후 no-clobber 게시 또는 원자적 교체. 사전 확인 이후 경로 충돌도 기존 파일을 보존하며 오류 시 `--last-play` 복구 안내 유지
 - CLI unit 18개, 실제 CLI 통합 23개, MCP 안내/input 11개, 엄격한 CLI/MCP Clippy와 독립 리뷰 통과. 도움말·생성 안내·Arena 절차 문서 갱신
 - 리플레이 포맷·시뮬레이션 변경 없음. 디렉터리 fsync에 의한 crash durability는 보장하지 않으며 비정상 중단/정리 실패 시 임시 링크가 남을 수 있음. 실제 플랫폼별 검증은 커밋 CI에서 확인
+
+### 검증 지표의 표본 범위 명시 (2026-10-03 KST)
+
+- CLI verify/apply에 기존 ERP `sample_every`를 연결하는 `--sample-every N` 추가. 기본 60, 0=endpoints, 1=매 틱 경계라는 기존 수집·min/max 의미는 유지
+- 보고서에 요청 간격·실제 표본 수·경계 범위·실제 매 틱 관측 여부를 명시하고 sparse min/max/check 설명에 표본 사이 상태는 검사하지 않는다고 경고. activity 보고서에도 동일한 메타데이터 보존
+- 정상 Arena once-fire 20틱 회귀에서 동일한 `bullets.max == 0`이 sparse에서는 통과, interval 1에서는 실패함을 확인. 점수와 체크섬·recording 검증은 동일. 매 틱 지표도 같은 틱 안에서 생겼다 사라진 이벤트를 증명하지는 않음
+- focused 16개 테스트, edit/remote/MCP/CLI 엄격한 all-targets Clippy, 생성 guide 확인과 독립 리뷰 통과
+- 기존 JSON 필드·기본 의미는 유지하지만 공개 Rust `VerifyReport.sample_every` 필드 추가로 외부 struct literal 생성 코드는 갱신 필요. 표본 누락 자체를 기본 설정에서 제거한 변경은 아님

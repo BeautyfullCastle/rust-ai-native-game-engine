@@ -278,6 +278,50 @@ fn verify_baseline() {
 }
 
 #[test]
+fn sampling_option_routes_for_verify_and_apply_and_explains_coverage() {
+    let host = TestHost::start();
+    for (option, interval, count, every_tick) in [
+        (vec![], 60, 2, false),
+        (vec!["--sample-every", "0"], 0, 2, false),
+        (vec!["--sample-every=1"], 1, 5, true),
+        (vec!["--sample-every", "3"], 3, 3, false),
+    ] {
+        let mut args = vec!["verify", "--idle", "4", "--json"];
+        args.extend(option);
+        let result = host.orr(&args);
+        assert_eq!(result.code, 0, "{}", result.err);
+        let report = result.json();
+        assert_eq!(report["metric_sampling"], json!({
+            "requested_interval": interval, "sample_count": count,
+            "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": every_tick
+        }));
+    }
+    for invalid in ["-1", "1.5", "many", "4294967296"] {
+        assert_eq!(host.orr(&["verify", "--idle", "4", "--sample-every", invalid]).code, 2);
+    }
+    assert_eq!(host.orr(&["verify", "--idle", "4", "--sample-every"]).code, 2);
+    let sparse = host.orr(&["verify", "--idle", "4", "--check", "lost_bodies.max == 0"]);
+    assert_eq!(sparse.code, 0, "{}", sparse.err);
+    assert!(sparse.out.contains("sampled min/max; between samples not checked"), "{}", sparse.out);
+    let dense = host.orr(&["verify", "--idle", "4", "--sample-every", "1"]);
+    assert_eq!(dense.code, 0, "{}", dense.err);
+    assert!(dense.out.contains("events entirely within a tick are not covered"), "{}", dense.out);
+    assert!(!dense.out.contains("between samples not checked"));
+    let short = host.orr(&["verify", "--idle", "1", "--sample-every", "0", "--json"]).json();
+    assert_eq!(short["metric_sampling"]["every_tick_boundary_observed"], true);
+    let applied = host.orr(&["apply", "sample every tick", "rename", "body_05", "hero", "--idle", "4", "--sample-every", "1", "--json"]);
+    assert_eq!(applied.code, 0, "{}", applied.err);
+    let applied = applied.json();
+    assert_eq!(applied["accepted"], true);
+    assert_eq!(applied["verify"]["metric_sampling"]["requested_interval"], 1);
+    assert_eq!(applied["verify"]["metric_sampling"]["sample_count"], 5);
+    assert!(host.yaml().contains("name: hero"));
+    for command in ["verify", "apply"] {
+        assert!(host.orr(&["help", command]).out.contains("--sample-every"));
+    }
+}
+
+#[test]
 fn sim_step_seek_state_stop_and_last_play() {
     let host = TestHost::start();
     assert_eq!(host.orr(&["sim", "state"]).out.trim_start().chars().next(), Some('E'), "edit mode first");

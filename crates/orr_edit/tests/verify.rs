@@ -113,6 +113,46 @@ fn an_identical_candidate_does_not_diverge() {
 }
 
 #[test]
+fn sampling_coverage_uses_actual_boundaries_relative_to_the_start() {
+    let doc = demo_doc();
+    let mut frame = orr_ecs::Frame::from_bytes(doc.frame_registry().clone(), &doc.frame().to_bytes()).unwrap();
+    frame.set_tick(17);
+    let mut final_checksum = None;
+    for (interval, expected) in [
+        (0, vec![17, 22]),
+        (1, vec![17, 18, 19, 20, 21, 22]),
+        (2, vec![17, 19, 21, 22]),
+        (60, vec![17, 22]),
+    ] {
+        let options = VerifyOptions { sample_every: interval, ..VerifyOptions::default() };
+        let r = orr_edit::verify_frames::<PhysGame>(&frame, &frame, &scripted(5), &PhysMetrics, &options).unwrap();
+        assert_eq!((r.start_tick, r.end_tick, r.ticks), (17, 22, 5));
+        assert_eq!(r.sample_every, interval);
+        assert_eq!(r.samples.iter().map(|s| s.tick).collect::<Vec<_>>(), expected);
+        assert_eq!(r.every_tick_boundary_observed(), interval == 1);
+        assert_eq!(r.lines().iter().any(|line| line.contains("between samples not checked")), interval != 1);
+        let check = r.check(&[Check::parse("dynamic_bodies.max == 40").unwrap()]);
+        assert!(check.passed);
+        assert_eq!(check.results[0].reason.contains("between samples not checked"), interval != 1);
+        assert!(r.identical());
+        assert_eq!(*final_checksum.get_or_insert(r.base_final_checksum), r.base_final_checksum);
+    }
+    // One tick has only the two endpoints, regardless of requested interval.
+    for interval in [0, 1, 60] {
+        let options = VerifyOptions { sample_every: interval, ..VerifyOptions::default() };
+        let r = orr_edit::verify_frames::<PhysGame>(&frame, &frame, &scripted(1), &PhysMetrics, &options).unwrap();
+        assert_eq!(r.samples.len(), 2);
+        assert!(r.every_tick_boundary_observed());
+        assert!(!r.lines().iter().any(|line| line.contains("between samples not checked")));
+        // Preserve the existing zero-tick contract: no report is produced.
+        assert!(matches!(
+            orr_edit::verify_frames::<PhysGame>(&frame, &frame, &scripted(0), &PhysMetrics, &options),
+            Err(EditError::Verify(message)) if message == "no ticks to run"
+        ));
+    }
+}
+
+#[test]
 fn a_moved_body_diverges_and_the_metrics_differ() {
     let mut doc = demo_doc();
     let id = propose_move(&mut doc, "body_05", vec2(0, 35));

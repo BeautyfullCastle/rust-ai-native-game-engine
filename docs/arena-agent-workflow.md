@@ -249,6 +249,32 @@ checksums where claimed. They do not interpret `.max` over sparse samples as an
 all-ticks safety proof. The movement task deliberately uses a multi-tick step;
 the fifty-tick restart test deliberately uses single-tick steps.
 
+Use `orr verify --last-play --sample-every 1 --check "bullets.max == 0"`
+(or `orr apply ... --sample-every 1`) when asserting about transients at tick
+boundaries. MCP accepts `sample_every: 1`. The default remains 60 ticks plus
+start/end; `--sample-every 0` requests endpoints only. In the normal ±300 Arena
+scene, a shot fired once and replayed for 20 ticks has sampled `bullets.max == 0`
+at the default interval, but `bullets.max == 1` with interval 1. Both runs still
+have final score 1 and reproduce the recording exactly. This is a sampling limit,
+not a different simulation result. Even interval 1 cannot observe an event
+created and removed entirely within a tick.
+
+Reports include `metric_sampling.requested_interval`, actual `sample_count`,
+`scope` (`sampled_tick_boundaries`), and `every_tick_boundary_observed`. The
+coverage flag is based on actual samples, so a one-tick run covers every boundary
+even with endpoints only. Sparse reports and min/max check reasons warn that
+between samples is not checked; the warning does not make missed transients
+observable. Checksum divergence remains every-tick, independent of sampling.
+
+Compatibility: existing JSON fields, metric min/max meanings, and the default
+interval of 60 are unchanged. The Rust `orr_edit::VerifyReport` has an additional
+`sample_every` field so direct and activity reports retain the requested interval.
+Downstream Rust code constructing that public struct with a literal must supply
+the new field; this is not fully Rust source-compatible. Simulation and replay
+formats and checksums are unchanged.
+
+
+
 ## Evidence and timing
 
 Each new run directory contains:

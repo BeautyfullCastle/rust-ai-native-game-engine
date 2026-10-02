@@ -512,6 +512,28 @@ fn arena_input_scores_and_verifies_recorded_play() {
     assert_eq!(structured(&verified)["passed"], true);
     assert_eq!(structured(&verified)["recording"]["checked"], 21);
     assert_eq!(structured(&verified)["recording"]["mismatches"], 0);
+    let sparse = m.call_tool("verify_proposal", json!({"inputs": {"kind": "last_play"}, "checks": ["bullets.max == 0", "recording_matches", "score_0.final == 1"]}));
+    assert_eq!(sparse["isError"], false);
+    assert_eq!(structured(&sparse)["passed"], true);
+    assert_eq!(structured(&sparse)["metric_sampling"], json!({
+        "requested_interval": 60, "sample_count": 2, "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": false
+    }));
+    assert!(McpChild::text(&sparse).contains("sampled min/max; between samples not checked"));
+    let dense = m.call_tool("verify_proposal", json!({"inputs": {"kind": "last_play"}, "sample_every": 1, "checks": ["bullets.max == 0", "recording_matches", "score_0.final == 1"]}));
+    assert_eq!(dense["isError"], false, "a failed check is a successful verification report");
+    assert_eq!(structured(&dense)["passed"], false);
+    assert_eq!(structured(&dense)["checks"]["results"][0]["passed"], false);
+    assert!(structured(&dense)["checks"]["results"][0]["reason"].as_str().unwrap().contains("bullets.max is 1"));
+    assert_eq!(structured(&dense)["checks"]["results"][1]["passed"], true);
+    assert_eq!(structured(&dense)["checks"]["results"][2]["passed"], true);
+    assert_eq!(structured(&dense)["metric_sampling"], json!({
+        "requested_interval": 1, "sample_count": 21, "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": true
+    }));
+    assert_eq!(structured(&dense)["checksums"], structured(&sparse)["checksums"]);
+    assert_eq!(structured(&dense)["recording"], structured(&sparse)["recording"]);
+    assert!(!McpChild::text(&dense).contains("between samples not checked"));
+    assert!(McpChild::text(&dense).contains("events entirely within a tick are not covered"));
+
     assert_eq!(erp.call("scene.save", json!({})).unwrap()["text"], before);
     assert!(structured(&m.call_tool("history", json!({})))["entries"].as_array().unwrap().is_empty());
     m.assert_stdout_is_only_json_rpc();

@@ -155,6 +155,24 @@ fn reflected_normal_inputs_move_fire_and_record_exactly() {
     assert_eq!(report["passed"], true, "{report}");
     assert_eq!(report["recording"]["checked"], 21);
     assert_eq!(report["recording"]["mismatches"], 0);
+    // A normal shot exists between the two default samples, then scores and
+    // disappears before the final tick. Sparse max is intentionally sampled.
+    let bullet = |report: &J| report["metrics"].as_array().unwrap().iter().find(|m| m["name"] == "bullets").unwrap()["base"]["max"].clone();
+    assert_eq!(bullet(&report), 0);
+    assert_eq!(report["metric_sampling"], json!({
+        "requested_interval": 60, "sample_count": 2, "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": false
+    }));
+    let dense = c.call("verify.self", json!({"inputs":{"kind":"last_play"},"sample_every":1,"checks":["recording_matches","score_0.final == 1","score_1.final == 0","bullets.final == 0","players.final == 2","bullets.max == 1"]})).unwrap();
+    assert_eq!(dense["passed"], true, "{dense}");
+    assert_eq!(bullet(&dense), 1);
+    assert_eq!(dense["metric_sampling"], json!({
+        "requested_interval": 1, "sample_count": 21, "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": true
+    }));
+    assert_eq!(dense["checksums"], report["checksums"]);
+    assert_eq!(dense["recording"], report["recording"]);
+    assert_eq!(dense["identical"], report["identical"]);
+    assert_eq!(dense["first_divergence"], report["first_divergence"]);
+
 }
 
 #[test]

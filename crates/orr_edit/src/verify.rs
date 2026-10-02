@@ -123,8 +123,10 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
 /// Settings of a verification run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifyOptions {
-    /// Sample metrics and checksums every this many ticks (besides the
-    /// start and the end). 0 = only the start and the end.
+    /// Sample metrics and the displayed checksum series every this many
+    /// ticks relative to the start (besides the start and the end).
+    /// 0 = endpoints only; 1 = every tick boundary. Checksums are still
+    /// compared every tick; events entirely within a tick are not sampled.
     pub sample_every: u32,
     /// Run at most this many ticks (of a recording or of a script).
     pub max_ticks: Option<u32>,
@@ -220,6 +222,9 @@ pub struct VerifyReport {
     /// Any edit of the scene makes the initial frames differ, so this is
     /// `Some(start_tick)` for a real change: judge behaviour by the metrics.
     pub first_divergence: Option<u64>,
+    /// Requested metric sampling interval, relative to `start_tick`.
+    /// 0 = endpoints only; 1 = every tick boundary.
+    pub sample_every: u32,
     /// Checksums at the sampled ticks.
     pub samples: Vec<ChecksumSample>,
     /// Every metric, base against candidate, sorted by name.
@@ -243,12 +248,29 @@ impl VerifyReport {
         self.metrics.iter().find(|m| m.name == name)
     }
 
+    /// Whether metrics were sampled at the start and after every tick run.
+    /// Derived from the actual sample boundaries, including short runs for
+    /// which endpoint-only sampling covers every boundary. This does not
+    /// observe events created and removed entirely within one tick.
+    pub fn every_tick_boundary_observed(&self) -> bool {
+        self.samples.first().is_some_and(|s| s.tick == self.start_tick)
+            && self.samples.last().is_some_and(|s| s.tick == self.end_tick)
+            && self.samples.windows(2).all(|pair| pair[0].tick.checked_add(1) == Some(pair[1].tick))
+    }
+
     /// A short human-readable summary, one line per fact.
     pub fn lines(&self) -> Vec<String> {
         let mut out = vec![format!(
             "ran {} ticks ({}..{}): base {:016x}, candidate {:016x}",
             self.ticks, self.start_tick, self.end_tick, self.base_final_checksum, self.candidate_final_checksum
         )];
+        out.push(format!(
+            "metrics: {} sampled tick boundaries (sample_every {}, start/end included)",
+            self.samples.len(), self.sample_every
+        ));
+        if !self.every_tick_boundary_observed() {
+            out.push("WARNING: sampled min/max; between samples not checked. Use --sample-every 1 for every tick boundary.".to_string());
+        }
         match self.first_divergence {
             None => out.push("no divergence".to_string()),
             Some(t) => out.push(format!("first checksum divergence at tick {t}")),
@@ -371,12 +393,12 @@ pub fn verify_frames_cancellable<G: Game>(
     };
     check_cancelled(cancel)?;
     let (b, c) = (b?, c?);
-    let report = assemble(start, &ticks, b, c, inputs);
+    let report = assemble(start, &ticks, b, c, inputs, opts.sample_every);
     check_cancelled(cancel)?;
     Ok(report)
 }
 
-fn assemble<G: Game>(start: u64, ticks: &[u64], b: SideRun, c: SideRun, inputs: &VerifyInputs<'_, G>) -> VerifyReport {
+fn assemble<G: Game>(start: u64, ticks: &[u64], b: SideRun, c: SideRun, inputs: &VerifyInputs<'_, G>, sample_every: u32) -> VerifyReport {
     let end = *ticks.last().unwrap_or(&start);
     let first_divergence = if b.start_checksum != c.start_checksum {
         Some(start)
@@ -425,6 +447,7 @@ fn assemble<G: Game>(start: u64, ticks: &[u64], b: SideRun, c: SideRun, inputs: 
         base_final_checksum: b.checksums.last().copied().unwrap_or(b.start_checksum),
         candidate_final_checksum: c.checksums.last().copied().unwrap_or(c.start_checksum),
         first_divergence,
+        sample_every,
         samples,
         metrics,
         first_metric_difference,
