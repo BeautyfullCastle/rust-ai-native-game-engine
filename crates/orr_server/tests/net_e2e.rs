@@ -13,7 +13,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -46,6 +46,10 @@ struct Live {
 
 impl Live {
     fn start(kind: TransportKind, players: u8) -> Live {
+        Self::start_observed(kind, players, |_| {})
+    }
+
+    fn start_observed(kind: TransportKind, players: u8, mut observe: impl FnMut(&ServerNote) + Send + 'static) -> Live {
         let ep = listen(&ListenOptions::new("127.0.0.1:0".parse().unwrap(), kind)).expect("listen");
         let (addr, fingerprint) = (ep.local_addr(), ep.cert_sha256());
         let mut server = RelayServer::new(ep, 7);
@@ -54,7 +58,12 @@ impl Live {
         let stop_flag = stop.clone();
         let join = thread::spawn(move || {
             let mut notes = Vec::new();
-            run_wall_clock(&mut server, &stop_flag, Duration::from_millis(1), |s, _| notes.extend(s.drain_notes()));
+            run_wall_clock(&mut server, &stop_flag, Duration::from_millis(1), |s, _| {
+                for note in s.drain_notes() {
+                    observe(&note);
+                    notes.push(note);
+                }
+            });
             let room = server.room_stats(ROOM).expect("room");
             ServerResult { room, notes, bad_messages: server.bad_messages() }
         });
@@ -229,7 +238,12 @@ fn build_hash_mismatch_is_rejected() {
 /// its token: same slot, state from the other client's snapshot, no desync.
 #[test]
 fn disconnect_and_rejoin_over_quic() {
-    let live = Live::start(TransportKind::Quic, 2);
+    let (left_tx, left_rx) = mpsc::channel();
+    let live = Live::start_observed(TransportKind::Quic, 2, move |note| {
+        if matches!(note, ServerNote::PlayerLeft { room: ROOM, slot: 1, .. }) {
+            let _ = left_tx.send(());
+        }
+    });
     let stop = Arc::new(AtomicBool::new(false));
 
     let stay = {
@@ -247,7 +261,15 @@ fn disconnect_and_rejoin_over_quic() {
     assert_eq!(before.state, ClientState::Playing);
     let token = before.token.expect("token");
     eprintln!("leaver before: {}", before.summary());
-    thread::sleep(Duration::from_millis(500));
+    // Reusing the token while the old connection is still registered takes
+    // over its slot without announcing PlayerLeft. Observe the disconnect
+    // first so this test exercises a real departure and subsequent rejoin.
+    if let Err(error) = left_rx.recv_timeout(Duration::from_secs(10)) {
+        stop.store(true, Ordering::Relaxed);
+        let stayer = stay.join().expect("stayer thread");
+        let server = live.finish();
+        panic!("slot 1 did not leave before rejoining: {error}; stayer: {}; notes: {:?}", stayer.summary(), server.notes);
+    }
 
     let mut second = ClientSetup::new(4.0);
     second.want_slot = Some(1);
