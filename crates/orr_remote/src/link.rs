@@ -18,6 +18,7 @@
 //!
 //! The same client code runs on all three.
 
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
@@ -221,6 +222,18 @@ impl WsTransport {
     }
 }
 
+/// Poll without retrying the RPC or resetting its deadline. The WebSocket keeps partial frames.
+fn recv_ws(ws: &mut WebSocket<impl Read + Write>) -> Result<Option<Incoming>, ClientError> {
+    match ws.read() {
+        Ok(Message::Text(t)) => Ok(Some(Incoming::Text(t.as_str().to_string()))),
+        Ok(Message::Binary(b)) => Ok(Some(Incoming::Wire(b.to_vec()))),
+        Ok(Message::Close(_)) => Err(ClientError::Transport("closed by the server".into())),
+        Ok(_) => Ok(None),
+        Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => Ok(None),
+        Err(e) => Err(transport(e)),
+    }
+}
+
 impl Transport for WsTransport {
     fn send(&mut self, req: Request) -> Result<(), ClientError> {
         self.send_raw_text(&req.to_text())
@@ -228,14 +241,7 @@ impl Transport for WsTransport {
 
     fn recv(&mut self, timeout: Duration) -> Result<Option<Incoming>, ClientError> {
         self.set_read_timeout(Some(timeout.max(Duration::from_millis(1))));
-        match self.ws.read() {
-            Ok(Message::Text(t)) => Ok(Some(Incoming::Text(t.as_str().to_string()))),
-            Ok(Message::Binary(b)) => Ok(Some(Incoming::Wire(b.to_vec()))),
-            Ok(Message::Close(_)) => Err(ClientError::Transport("closed by the server".into())),
-            Ok(_) => Ok(None),
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Ok(None),
-            Err(e) => Err(transport(e)),
-        }
+        recv_ws(&mut self.ws)
     }
 
     fn send_raw_text(&mut self, text: &str) -> Result<(), ClientError> {
@@ -346,3 +352,7 @@ impl Transport for PumpedWs {
         Some(Arc::new(self.tx.clone()))
     }
 }
+
+#[cfg(test)]
+#[path = "link_tests.rs"]
+mod tests;

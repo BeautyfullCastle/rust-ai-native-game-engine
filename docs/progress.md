@@ -173,3 +173,10 @@ P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 �
 - 정상 Arena once-fire 20틱 회귀에서 동일한 `bullets.max == 0`이 sparse에서는 통과, interval 1에서는 실패함을 확인. 점수와 체크섬·recording 검증은 동일. 매 틱 지표도 같은 틱 안에서 생겼다 사라진 이벤트를 증명하지는 않음
 - focused 16개 테스트, edit/remote/MCP/CLI 엄격한 all-targets Clippy, 생성 guide 확인과 독립 리뷰 통과
 - 기존 JSON 필드·기본 의미는 유지하지만 공개 Rust `VerifyReport.sample_every` 필드 추가로 외부 struct literal 생성 코드는 갱신 필요. 표본 누락 자체를 기본 설정에서 제거한 변경은 아님
+
+### CI55 클라이언트 Interrupted 읽기 복구 (2026-10-03 KST)
+
+- ARM64 TUI 및 Linux x86 CLI CI 실패를 각각 추적: 이미 연결된 WebSocket 읽기에서 `ErrorKind::Interrupted`를 연결 실패로 처리
+- TUI와 ERP blocking client 모두 해당 읽기를 기존 no-message polling으로 반환. 같은 parser·부분 frame·queue·RPC ID·절대 deadline 유지; 재연결·handshake 재시도·명령 재전송 없음
+- 주입된 정상 I/O interruption 회귀가 수정 전 양쪽 실패를 재현. 헤더/본문 중단, frame·notification 순서, 단일 전송, 실제 reset/close 오류 구분 확인
+- 최종 TUI 31개, remote unit 36개, 실제 CLI 통합 24개, 엄격한 scoped Clippy 및 독립 리뷰 통과. TCP read_until은 기존에도 Interrupted를 내부 재시도하므로 추가 분기는 방어적 처리임
