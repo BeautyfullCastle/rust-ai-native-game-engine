@@ -215,7 +215,7 @@ fn capture_native_arena(url: &str, out: &std::path::Path, name: &str) {
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
     }
     let mut child = Window(Command::new(env!("CARGO_BIN_EXE_orr_editor"))
-        .args(["--connect",url,"--select","hero","--frames","30","--size","1200x850","--screenshot"])
+        .args(["--connect",url,"--select","hero","--frames","30","--screenshot-settle","--size","1200x850","--screenshot"])
         .arg(&path).stdin(Stdio::null()).stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log))
         .spawn().expect("start the normal orr_editor binary"));
     let deadline = Instant::now() + Duration::from_secs(60);

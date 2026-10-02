@@ -48,8 +48,8 @@ jobs:
         # a specific build profile) are expected to run under in CI.
         #
         # `orr_sample` (wgpu + winit window demo) is excluded: it is view
-        # layer, needs no determinism check, and its GPU stack should not
-        # be able to break the sim crates' CI. It is built by `sample-build`.
+        # layer, needs no determinism check, and its GPU stack is checked
+        # separately from the sim crates by the required `sample-build` job.
         # `orr_editor` (egui, needs Rust 1.95+, GUI/GPU stack) is excluded for
         # the same reason and is built and tested by `sample-build` too.
         # `orr_web_gpu` (the browser's wgpu view) is excluded likewise (`sample-build`).
@@ -119,8 +119,8 @@ jobs:
         run: cargo build -p orr_sim --features hotpatch
 
   sample-build:
-    # View-layer demo (wgpu + winit). Build and test (no window, no GPU
-    # needed) on Linux and Windows; separate from the determinism jobs.
+    # View-layer demos, audio, and editor. Build and test on Linux and Windows,
+    # plus required Linux software-GPU/window tests; separate from the sim jobs.
     name: sample build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -365,22 +365,24 @@ jobs:
 
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
-    # Every checksum-producing target must finish, including non-native runners.
-    needs: [native, wasm32, wasm32-browser, android-arm64]
+    # Preserve this check name for existing branch protection. Every checksum
+    # target and the sample graphics/audio/editor matrix must pass the gate.
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require every golden-checksum runner to pass
+      - name: Require every checksum and sample runner to pass
         shell: bash
         env:
           NATIVE_RESULT: ${{ needs.native.result }}
           WASM32_RESULT: ${{ needs.wasm32.result }}
           ANDROID_ARM64_RESULT: ${{ needs['android-arm64'].result }}
           BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
+          SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then
@@ -395,6 +397,8 @@ jobs:
           echo "All native matrix legs, wasm32-wasip1 (including SIMD), and"
           echo "aarch64-linux-android passed their pinned golden-checksum assertions."
           echo "Chromium passed native/wasm checkpoint comparisons and required GPU views."
+          echo "Both sample-build matrix legs passed their graphics/audio/editor checks,"
+          echo "including required Linux software-GPU and Arena native-window smoke tests."
           echo "The targets assert the same constants in orr_fp, orr_session,"
           echo "orr_physics, orr_physics3d, orr_games, and orr_wasm_bench tests."
           echo "No checksum artifacts are exchanged: each target independently"

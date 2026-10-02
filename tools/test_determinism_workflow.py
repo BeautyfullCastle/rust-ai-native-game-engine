@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression checks for the checksum gate and native CI artifact checks.
+"""Regression checks for the checksum/sample gate and native CI artifact checks.
 
 Run from any directory with Python 3, Bash, and PyYAML installed:
     python3 tools/test_determinism_workflow.py
@@ -26,8 +26,9 @@ RESULTS = {
     "WASM32_RESULT": "${{ needs.wasm32.result }}",
     "ANDROID_ARM64_RESULT": "${{ needs['android-arm64'].result }}",
     "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
+    "SAMPLE_BUILD_RESULT": "${{ needs['sample-build'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -66,9 +67,10 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(self.step["shell"], "bash")
         self.assertEqual(self.step["env"], RESULTS)
 
-    def test_actual_golden_runners_are_required(self):
+    def test_actual_checksum_and_sample_runners_are_required(self):
         # There are no checksum artifacts. A green target proves determinism
         # only while its mandatory commands execute the shared pinned tests.
+        # The separate graphics/audio/editor matrix is mandatory as well.
         for name in REQUIRED_JOBS:
             with self.subTest(job=name):
                 self.assert_required(self.jobs[name])
@@ -274,8 +276,9 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_only_all_success_passes(self):
-        # 1296 combinations include all four GitHub result states, empty
-        # results, and an unknown state: allow success, rather than denylisting.
+        # 7776 combinations across all five jobs include all four GitHub result
+        # states, empty results, and an unknown state: allow success, rather
+        # than denylisting.
         states = ("success", "failure", "cancelled", "skipped", "", "unknown")
         for values in itertools.product(states, repeat=len(RESULTS)):
             results = dict(zip(RESULTS, values))
@@ -284,6 +287,19 @@ class DeterminismWorkflowTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, all(value == "success" for value in values), result.stdout + result.stderr)
                 for name, value in results.items():
                     self.assertIn(f"{name}={value}", result.stdout)
+
+    def test_sample_failure_skip_cancel_or_missing_cannot_pass(self):
+        # Even when every checksum target passes, a non-success/missing sample
+        # matrix result must fail the aggregate and never print success claims.
+        for sample_result in ("failure", "skipped", "cancelled", "", None):
+            results = {name: "success" for name in RESULTS if name != "SAMPLE_BUILD_RESULT"}
+            if sample_result is not None:
+                results["SAMPLE_BUILD_RESULT"] = sample_result
+            with self.subTest(sample_result=sample_result):
+                result = self.run_gate(results)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::SAMPLE_BUILD_RESULT must be success", result.stdout)
+                self.assertNotIn("passed", result.stdout)
 
     def test_unset_results_fail_closed(self):
         for missing in RESULTS:

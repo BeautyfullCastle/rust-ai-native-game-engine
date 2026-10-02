@@ -413,6 +413,28 @@ impl Editor {
         self.snapshot.as_ref()
     }
 
+    /// Nonblocking readiness for an opt-in settled screenshot. Never waits
+    /// for ERP or changes playback; the ordinary UI pump resolves this state.
+    pub(crate) fn screenshot_waiting_for(&self) -> Option<&'static str> {
+        if self.down.is_some() { return Some("host connection"); }
+        let Some(snapshot) = &self.snapshot else { return Some("frame snapshot") };
+        if self.sim.playing || snapshot.timeline().is_some_and(|t| t.playing) { return Some("paused playback"); }
+        if self.checksum != self.sim.checksum
+            || snapshot.timeline().is_some() != (self.sim.mode == Mode::Play)
+            || (self.sim.mode == Mode::Play && snapshot.timeline().is_none_or(|t| t.tick != self.sim.head_tick)) {
+            return Some("current frame snapshot");
+        }
+        if self.dirty.rows || self.dirty.inspect || self.dirty.singletons || self.dirty.history || self.dirty.state
+            || !self.pending.is_empty() || self.gesture.busy() || self.refit || self.refit_checksum.is_some() {
+            return Some("model refresh");
+        }
+        if self.selection.as_ref().is_some_and(|t| self.inspect.as_ref().is_none_or(|i| &i.target != t)) {
+            return Some("selected entity inspector");
+        }
+        if self.preview.as_ref().is_some_and(|p| p.seq == 0 || p.rows_dirty) { return Some("proposal snapshot"); }
+        None
+    }
+
     /// The drawable bodies of the frame on screen (the scene's preview frame in
     /// edit mode, the live frame in play mode).
     pub fn bodies(&self) -> &[Drawable] {

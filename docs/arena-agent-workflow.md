@@ -98,6 +98,9 @@ The Linux sample CI job also requires a real-window smoke under Xvfb and Mesa:
 `ORR_REQUIRE_NATIVE_EDITOR=1` runs the normal editor binary against the test's
 real Arena ERP host, captures edit and scored-play windows, validates viewport
 pixels and unchanged authoritative checksums, and uploads PNG/log/JSON evidence.
+Its opt-in `--screenshot-settle` waits for the current paused snapshot, completed
+panel refreshes and actual agent-pulse expiry, with a ten-second readiness
+deadline. Ordinary `--screenshot --frames N` behavior stays frame-count based.
 Default runs (including Windows) explicitly skip that optional window test.
 Missing display support or screenshot pixels fails the required CI invocation.
 

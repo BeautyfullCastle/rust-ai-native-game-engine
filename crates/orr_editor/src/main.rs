@@ -71,7 +71,10 @@ fn main() {
         viewport: egui::ViewportBuilder::default().with_inner_size([args.size.0, args.size.1]).with_title(editor.title()),
         ..Default::default()
     };
-    let shot = args.screenshot.clone().map(|p| ScreenshotJob::new(p, args.frames));
+    let shot = args.screenshot.clone().map(|p| {
+        let job = ScreenshotJob::new(p, args.frames);
+        if args.screenshot_settle { job.with_settle() } else { job }
+    });
     let result = eframe::run_native(
         "Orrery Editor",
         options,

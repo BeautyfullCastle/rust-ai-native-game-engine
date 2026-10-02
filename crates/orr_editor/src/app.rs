@@ -102,12 +102,33 @@ pub struct ScreenshotJob {
     /// Frames to render before asking for the screenshot.
     pub frames: u64,
     requested_at: Option<u64>,
+    settle: bool,
+    started_at: Option<f64>,
 }
 
 impl ScreenshotJob {
     /// Screenshot after `frames` frames.
     pub fn new(path: PathBuf, frames: u64) -> Self {
-        Self { path, frames, requested_at: None }
+        Self { path, frames, requested_at: None, settle: false, started_at: None }
+    }
+
+    /// Also wait for refreshed panels, a current paused frame and expired
+    /// agent pulses. Readiness is checked without blocking the UI; failure
+    /// to settle within ten seconds of UI time fails the screenshot job.
+    pub fn with_settle(mut self) -> Self {
+        self.settle = true;
+        self
+    }
+
+    fn ready(&mut self, frames: u64, now: f64, waiting_for: Option<&str>) -> Result<bool, String> {
+        let started = *self.started_at.get_or_insert(now);
+        if !self.settle {
+            return Ok(frames >= self.frames);
+        }
+        if now - started >= 10.0 {
+            return Err(format!("settle deadline exceeded waiting for {}", waiting_for.unwrap_or("minimum frame count")));
+        }
+        Ok(frames >= self.frames && waiting_for.is_none())
     }
 }
 
@@ -733,14 +754,21 @@ impl EditorApp {
     /// own framebuffer, write the PNG and quit.
     fn screenshot(&mut self, ctx: &egui::Context) {
         let frames = self.frames;
+        let waiting_for = if self.ui.pulses.is_empty() { self.editor.screenshot_waiting_for() } else { Some("agent pulses to expire") };
         let Some(job) = &mut self.shot else { return };
         ctx.request_repaint();
         match job.requested_at {
-            None if frames >= job.frames => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-                job.requested_at = Some(frames);
+            None => match job.ready(frames, ctx.input(|i| i.time), waiting_for) {
+                Ok(true) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                    job.requested_at = Some(frames);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("screenshot failed: {e}");
+                    std::process::exit(2);
+                }
             }
-            None => {}
             Some(at) => {
                 let image = ctx.input(|i| {
                     i.events.iter().find_map(|e| match e {
@@ -777,4 +805,57 @@ pub fn write_png(path: &std::path::Path, image: &egui::ColorImage) -> Result<(),
     let mut writer = enc.write_header().map_err(|e| e.to_string())?;
     let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
     writer.write_image_data(&bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_capture_keeps_frame_count_behavior() {
+        let mut job = ScreenshotJob::new("unused.png".into(), 30);
+        assert!(!job.ready(29, 0.0, Some("agent pulses")).unwrap());
+        assert!(job.ready(30, 0.0, Some("agent pulses")).unwrap());
+    }
+
+    #[test]
+    fn settle_is_condition_based_and_has_a_deadline() {
+        let mut job = ScreenshotJob::new("unused.png".into(), 30).with_settle();
+        assert!(!job.ready(30, 3.0, Some("agent pulses")).unwrap());
+        assert!(!job.ready(3000, 4.0, Some("model refresh")).unwrap());
+        assert!(job.ready(3001, 4.1, None).unwrap());
+        assert!(job.ready(3002, 13.0, Some("model refresh")).unwrap_err().contains("deadline exceeded waiting for model refresh"));
+    }
+
+    #[test]
+    fn settled_capture_waits_for_actual_pulse_expiry_on_egui_clock() {
+        let mut editor = Editor::open(&crate::editor::default_scene_path()).unwrap();
+        editor.select_named("body_05");
+        editor.sync();
+        assert_eq!(editor.screenshot_waiting_for(), None);
+        let target = editor.selection().unwrap().clone();
+        let mut app = EditorApp::new(editor, None).with_screenshot(ScreenshotJob::new("unused.png".into(), 30).with_settle());
+        app.frames = 30;
+        app.ui.pulses.push(Pulse { target: target.clone(), started: 0.0 });
+        let ctx = egui::Context::default();
+        let draw = |app: &mut EditorApp, now| {
+            let mut output = ctx.run_ui(egui::RawInput { time: Some(now), ..Default::default() }, |ui| {
+                let ctx = ui.ctx();
+                app.start_pulses(ctx.input(|i| i.time));
+                app.screenshot(ctx);
+            });
+            output.textures_delta.clear(); // This clock/command test deliberately has no GPU.
+            output.viewport_output.values().any(|v| v.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Screenshot(_))))
+        };
+        assert!(!draw(&mut app, 0.0));
+        assert!(!draw(&mut app, viewport::PULSE_SECONDS - 0.01));
+        assert_eq!(app.ui.pulses.len(), 1, "waiting must not remove agent activity");
+        // A later edit extends readiness according to its real pulse, not a fixed delay.
+        app.ui.pulses.push(Pulse { target, started: 1.0 });
+        assert!(!draw(&mut app, viewport::PULSE_SECONDS));
+        assert_eq!(app.ui.pulses.len(), 1);
+        assert!(draw(&mut app, 1.0 + viewport::PULSE_SECONDS));
+        assert!(app.ui.pulses.is_empty());
+        assert_eq!(app.shot.as_ref().unwrap().requested_at, Some(30));
+    }
 }

@@ -94,6 +94,37 @@ fn settle(ed: &mut Editor, gate: &Arc<Mutex<Gate>>) {
 }
 
 #[test]
+fn screenshot_readiness_waits_for_snapshot_and_gated_model_without_blocking() {
+    let (mut ed, gate) = editor();
+    assert_eq!(ed.screenshot_waiting_for(), None);
+    let snapshot = ed.snapshot.take();
+    assert_eq!(ed.screenshot_waiting_for(), Some("frame snapshot"));
+    ed.snapshot = snapshot;
+    ed.sim.checksum ^= 1;
+    assert_eq!(ed.screenshot_waiting_for(), Some("current frame snapshot"));
+    ed.sim.checksum ^= 1;
+    let sync_samples = ed.diagnostics().sync_erp_wait.total_samples;
+    gate.lock().unwrap().hold = Some("world.singleton.get");
+    ed.dirty.singletons = true;
+    ed.last_inspect = None;
+    assert_eq!(ed.screenshot_waiting_for(), Some("model refresh"));
+    pump_until(&mut ed, |_| !gate.lock().unwrap().held.is_empty());
+    for _ in 0..10 {
+        ed.pump();
+        assert_eq!(ed.screenshot_waiting_for(), Some("model refresh"));
+    }
+    assert_eq!(ed.diagnostics().sync_erp_wait.total_samples, sync_samples);
+    gate.lock().unwrap().hold = None;
+    pump_until(&mut ed, |ed| ed.screenshot_waiting_for().is_none());
+    ed.sim.playing = true;
+    assert_eq!(ed.screenshot_waiting_for(), Some("paused playback"));
+    ed.sim.playing = false;
+    gate.lock().unwrap().disconnected = true;
+    ed.pump();
+    assert_eq!(ed.screenshot_waiting_for(), Some("host connection"));
+}
+
+#[test]
 fn held_begin_patch_commit_never_block_input_and_keep_one_undo_entry() {
     let (mut ed, gate) = editor();
     let checksum = ed.checksum();
