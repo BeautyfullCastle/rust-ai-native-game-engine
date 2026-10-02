@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Regression checks for the required cross-platform checksum gate.
+"""Regression checks for the checksum gate and native CI artifact checks.
 
 Run from any directory with Python 3, Bash, and PyYAML installed:
     python3 tools/test_determinism_workflow.py
 
-These checks execute the actual gate script with synthetic GitHub job results.
-They do not run the Rust targets or emulate the GitHub Actions scheduler.
+These checks execute the actual gate and FFI artifact scripts with synthetic
+job results and library files. They do not run the Rust targets or emulate the
+GitHub Actions scheduler or native Windows/macOS shells and toolchains.
 """
 
 import itertools
@@ -13,6 +14,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -26,6 +28,13 @@ RESULTS = {
     "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
 }
 REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser"}
+NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
+SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
+FFI_ARTIFACTS = {
+    "Linux": ("liborr_ffi.so", "liborr_ffi.a"),
+    "macOS": ("liborr_ffi.dylib", "liborr_ffi.a"),
+    "Windows": ("orr_ffi.dll", "orr_ffi.dll.lib", "orr_ffi.lib"),
+}
 
 
 class DeterminismWorkflowTests(unittest.TestCase):
@@ -67,7 +76,8 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertFalse(native["strategy"]["fail-fast"])
         self.assert_required_command(
             native,
-            "cargo test --workspace --release --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu",
+            NATIVE_TEST,
+            {"ORR_REQUIRE_C_COMPILER": "${{ runner.os == 'Linux' && '1' || '0' }}"},
         )
         suites = (
             ("orr_session", "arena", "golden"),
@@ -98,6 +108,93 @@ class DeterminismWorkflowTests(unittest.TestCase):
                 f"cargo test --release --target wasm32-wasip1 --target-dir target/simd -p {package}",
                 simd_env,
             )
+
+    def test_native_and_sample_matrices_are_preserved(self):
+        self.assertEqual(self.jobs["native"]["strategy"]["matrix"]["include"], [
+            {"os": "ubuntu-latest", "name": "ubuntu-latest-x86_64"},
+            {"os": "windows-latest", "name": "windows-latest-x86_64"},
+            {"os": "macos-latest", "name": "macos-latest-arm64"},
+            {"os": "ubuntu-24.04-arm", "name": "ubuntu-24.04-arm64"},
+        ])
+        self.assertEqual(self.jobs["sample-build"]["strategy"]["matrix"]["os"], ["ubuntu-latest", "windows-latest"])
+        self.assertFalse(self.jobs["sample-build"]["strategy"]["fail-fast"])
+        self.assert_required_command(self.jobs["sample-build"], SAMPLE_TEST)
+
+    def test_release_timing_uploads_are_html_only_and_unique(self):
+        for job, command, name in (
+            ("native", NATIVE_TEST, "cargo-timings-native-${{ matrix.name }}"),
+            ("sample-build", SAMPLE_TEST, "cargo-timings-sample-${{ matrix.os }}"),
+        ):
+            with self.subTest(job=job):
+                steps = self.jobs[job]["steps"]
+                uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
+                self.assertEqual(len(uploads), 1)
+                upload = uploads[0]
+                self.assertEqual(upload["uses"], "actions/upload-artifact@v4")
+                self.assertEqual(upload["if"], "${{ always() }}")
+                self.assertEqual(upload["with"], {
+                    "name": name,
+                    "path": "target/cargo-timings/*.html",
+                    "if-no-files-found": "ignore",
+                    "retention-days": 7,
+                })
+                build = next(step for step in steps if step.get("run") == command)
+                self.assertEqual(steps.index(upload), steps.index(build) + 1)
+
+    def ffi_artifact_step(self):
+        steps = self.jobs["native"]["steps"]
+        matches = [step for step in steps if step.get("name", "").startswith("Verify orr_ffi artifacts")]
+        self.assertEqual(len(matches), 1)
+        return matches[0]
+
+    def test_ffi_artifacts_are_required_without_a_post_test_rebuild(self):
+        step = self.ffi_artifact_step()
+        self.assert_required(step)
+        self.assertEqual(step["shell"], "bash")
+        steps = self.jobs["native"]["steps"]
+        build = next(entry for entry in steps if entry.get("run") == NATIVE_TEST)
+        self.assertLess(steps.index(build), steps.index(step))
+        self.assertNotIn("cargo ", step["run"])
+        self.assertFalse(any("cargo build -p orr_ffi" in entry.get("run", "") for entry in steps))
+        result = subprocess.run(["bash", "-n"], input=step["run"], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def run_ffi_artifact_check(self, root, runner_os):
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", self.ffi_artifact_step()["run"]],
+            cwd=root, env={**os.environ, "RUNNER_OS": runner_os}, capture_output=True, text=True, check=False,
+        )
+
+    def test_every_ffi_artifact_must_be_a_nonempty_file(self):
+        for runner_os, artifacts in FFI_ARTIFACTS.items():
+            with self.subTest(runner_os=runner_os), tempfile.TemporaryDirectory() as root:
+                lib_dir = Path(root) / "target/release"
+                lib_dir.mkdir(parents=True)
+                for name in artifacts:
+                    (lib_dir / name).write_bytes(b"artifact")
+                result = self.run_ffi_artifact_check(root, runner_os)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for name in artifacts:
+                    path = lib_dir / name
+                    for state in ("missing", "empty", "directory"):
+                        with self.subTest(artifact=name, state=state):
+                            path.unlink()
+                            if state == "empty":
+                                path.touch()
+                            elif state == "directory":
+                                path.mkdir()
+                            result = self.run_ffi_artifact_check(root, runner_os)
+                            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                            self.assertIn(f"target/release/{name}", result.stdout)
+                            if path.is_dir():
+                                path.rmdir()
+                            path.write_bytes(b"artifact")
+
+    def test_unknown_ffi_platform_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            result = self.run_ffi_artifact_check(root, "unexpected")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Unsupported runner OS", result.stdout)
 
     def test_browser_runtime_is_mandatory(self):
         job = self.jobs["wasm32-browser"]

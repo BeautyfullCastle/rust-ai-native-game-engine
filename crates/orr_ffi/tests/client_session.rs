@@ -454,9 +454,7 @@ fn a_client_that_cannot_join_reports_failed() {
 /// driven through the C ABI from Rust. Both must print/see the same confirmed state.
 #[test]
 fn a_c_program_and_a_rust_driven_client_play_together() {
-    let Some(lib) = common::ensure_lib() else {
-        return common::skip_or_fail("the orr_ffi shared library is not there and `cargo build -p orr_ffi` did not make it");
-    };
+    let lib = common::ensure_lib();
     let dir = std::env::temp_dir().join(format!("orr_ffi_relay_c_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exe = match common::compile_c(&dir, &lib, "relay_client") {

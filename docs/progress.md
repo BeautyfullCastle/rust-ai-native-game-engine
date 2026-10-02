@@ -151,3 +151,10 @@ P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 �
 - Predicted/Verified 중복 방지, 취소 페이드, 완료 후 늦은 확정, pause/disconnect/seek/reset 수명과 bounded voice/history 처리. 시뮬레이션·리플레이 형식 변경 없음
 - 실제 PCM/lifecycle 14개, Arena 통합 4개(매 프레임 checksum 동일성 포함), 기본 모드 2개 통과. audio 기능 활성/비활성 엄격한 Clippy 통과, 독립 리뷰 완료
 - 로컬 native 컴파일은 ALSA 개발 메타데이터 부재로 차단. Linux/Windows CI native compile 추가; 실제 장치 출력/청취 성공을 뜻하지 않음. 오디오 Rust 최소 버전과 upstream 장치 복구·비동기 종료 제한은 `docs/audio.md` 참고
+
+### CI 중복 FFI 빌드 제거와 컴파일 시간 수집 (2026-10-03 KST)
+
+- Windows native 로그에서 초기 릴리스 컴파일 24–33분과 테스트 후 반복 FFI 빌드 57–77초를 확인. 캐시 적중 여부만으로 재컴파일 비용이 사라지지 않으며, 아직 개선 후 속도 비교 결과는 없음
+- FFI 테스트의 Cargo 실행/빌드 실패 및 누락·빈 shared/static/import 라이브러리를 모든 플랫폼에서 실패 처리. C 컴파일러 부재에 대한 기존 정책은 별도로 유지
+- 테스트 이후 반복 빌드를 엄격한 산출물 검사로 대체. native/sample 주 릴리스 명령에 Cargo timings 및 HTML-only CI artifact 추가. 릴리스 설정·검증 대상·플랫폼·집계 조건 유지
+- C client 6개, client session 6개, optional-compiler helper 회귀 6개, workflow 회귀 12개(집계 조합 1,296개 포함), 엄격한 FFI Clippy 및 독립 리뷰 통과. 실제 Windows/macOS와 artifact 업로드는 해당 커밋 CI 확인 필요

@@ -67,13 +67,38 @@ jobs:
         # it to the built cdylib and compares its output with the Rust bridge.
         # Linux must have a compiler (required); elsewhere the test skips with a
         # message if the runner has none.
-        run: cargo test --workspace --release --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu
+        run: cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu
         env:
           ORR_REQUIRE_C_COMPILER: ${{ runner.os == 'Linux' && '1' || '0' }}
 
-      - name: cargo build -p orr_ffi (cdylib + staticlib)
-        # The C ABI library must build on every desktop target.
-        run: cargo build -p orr_ffi --release
+      - name: Upload native release build timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-native-${{ matrix.name }}
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify orr_ffi artifacts (cdylib + staticlib + import library)
+        # The C ABI tests always build and verify these, even when the runner
+        # has no C compiler. Reuse their artifacts instead of rebuilding with
+        # a different workspace feature set after the tests.
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) artifacts=(liborr_ffi.so liborr_ffi.a) ;;
+            macOS) artifacts=(liborr_ffi.dylib liborr_ffi.a) ;;
+            Windows) artifacts=(orr_ffi.dll orr_ffi.dll.lib orr_ffi.lib) ;;
+            *) echo "::error::Unsupported runner OS: $RUNNER_OS"; exit 1 ;;
+          esac
+          for artifact in "${artifacts[@]}"; do
+            path="target/release/$artifact"
+            if [[ ! -f "$path" || ! -s "$path" ]]; then
+              echo "::error::Missing or empty FFI artifact: $path"
+              exit 1
+            fi
+          done
 
       - name: cargo clippy --workspace --all-targets
         # `-D warnings` only on the crates this task owns (`orr_sim`,
@@ -107,7 +132,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
-      - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release
+      - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings
+      - name: Upload sample release build timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-sample-${{ matrix.os }}
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
       - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --all-targets
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
