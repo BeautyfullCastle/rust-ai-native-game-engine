@@ -10,6 +10,7 @@ They do not run the Rust targets or emulate the GitHub Actions scheduler.
 
 import itertools
 import os
+import re
 from pathlib import Path
 import subprocess
 import unittest
@@ -22,8 +23,9 @@ RESULTS = {
     "NATIVE_RESULT": "${{ needs.native.result }}",
     "WASM32_RESULT": "${{ needs.wasm32.result }}",
     "ANDROID_ARM64_RESULT": "${{ needs['android-arm64'].result }}",
+    "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser"}
 
 
 class DeterminismWorkflowTests(unittest.TestCase):
@@ -97,6 +99,51 @@ class DeterminismWorkflowTests(unittest.TestCase):
                 simd_env,
             )
 
+    def test_browser_runtime_is_mandatory(self):
+        job = self.jobs["wasm32-browser"]
+        self.assert_required(job)
+        commands = (
+            "npm ci --prefix tools/webtransport",
+            "tools/webtransport/node_modules/.bin/playwright install --with-deps chromium",
+            'cargo install wasm-bindgen-cli --version "$version" --locked',
+            "npm test --prefix tools/webtransport",
+        )
+        for command in commands:
+            self.assert_required_command(job, command)
+        self.assert_required_command(job, "tools/build_web.sh", {"WEB_PROFILE": "release", "WEB_GPU": "1"})
+        self.assert_required_command(
+            job,
+            "cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1",
+            {"ORR_REQUIRE_BROWSER": "1", "ORR_REQUIRE_WEBGPU": "1"},
+        )
+        runs = [step.get("run", "") for step in job["steps"]]
+        install = next(command for command in runs if "cargo install wasm-bindgen-cli" in command)
+        self.assertIn('tomllib.load(open("Cargo.lock", "rb"))', install)
+        self.assertIn('assert len(v) == 1', install)
+        build_index = runs.index("tools/build_web.sh")
+        boundary_index = runs.index("npm test --prefix tools/webtransport")
+        browser_index = next(i for i, command in enumerate(runs) if "--test browser_e2e" in command)
+        self.assertLess(build_index, boundary_index)
+        self.assertLess(boundary_index, browser_index)
+
+    def test_browser_software_gpu_paths_are_explicit(self):
+        source = (WORKFLOW.parents[2] / "crates/orr_server/tests/browser_e2e.rs").read_text(encoding="utf-8")
+        required_flags = {
+            "WEBGL2": {"--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"},
+            "WEBGPU": {
+                "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader", "--use-webgpu-adapter=swiftshader",
+                "--enable-features=Vulkan", "--use-vulkan=swiftshader", "--use-angle=swiftshader",
+            },
+        }
+        for view, flags in required_flags.items():
+            with self.subTest(view=view):
+                declaration = re.search(rf'const {view}: View = View \{{(.*?)\}};', source, re.S)
+                self.assertIsNotNone(declaration)
+                configured = re.search(r'flags: "([^"]*)"', declaration.group(1))
+                self.assertIsNotNone(configured)
+                self.assertTrue(flags.issubset(set(configured.group(1).split())))
+        self.assertIn('let flags = format!("{wss_flag} {} {extra_flags}", view.flags);', source)
+
     def run_gate(self, results):
         env = {key: value for key, value in os.environ.items() if key not in RESULTS}
         env.update(results)
@@ -110,7 +157,7 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_only_all_success_passes(self):
-        # 216 combinations include all four GitHub result states, empty
+        # 1296 combinations include all four GitHub result states, empty
         # results, and an unknown state: allow success, rather than denylisting.
         states = ("success", "failure", "cancelled", "skipped", "", "unknown")
         for values in itertools.product(states, repeat=len(RESULTS)):

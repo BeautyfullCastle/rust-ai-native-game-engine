@@ -49,6 +49,9 @@ use orr_sim::PlayerSlot;
 use orr_testgame::{Arena, ArenaConfig};
 
 const ROOM: u64 = 1;
+// Intentionally not representable as a JS Number. A successful handshake proves
+// the page -> worker -> wasm constructor kept the supplied text's low bits.
+const ARENA_TEST_BUILD: u64 = (1 << 53) + 1;
 
 /// One browser run at a time: each starts a Chromium and plays in real time.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -63,8 +66,12 @@ struct View {
 
 /// The 2D canvas.
 const CANVAS_2D: View = View { render: "2d", flags: "" };
-/// `orr_render` on WebGL2 (SwiftShader in headless Chromium).
-const WEBGL2: View = View { render: "webgl", flags: "" };
+/// `orr_render` on WebGL2 with an explicit software GPU, including on Linux.
+/// These flags apply only to this fresh browser running trusted local fixtures.
+const WEBGL2: View = View {
+    render: "webgl",
+    flags: "--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader",
+};
 /// `orr_render` on WebGPU: headless Chromium needs these flags and runs it on SwiftShader.
 const WEBGPU: View = View {
     render: "webgpu",
@@ -79,7 +86,7 @@ enum TestGame {
 }
 
 fn require() -> bool {
-    std::env::var("ORR_REQUIRE_BROWSER").is_ok_and(|v| v == "1")
+    ["ORR_REQUIRE_BROWSER", "ORR_REQUIRE_WEBGPU"].iter().any(|key| std::env::var(key).is_ok_and(|v| v == "1"))
 }
 
 fn repo_root() -> PathBuf {
@@ -148,7 +155,11 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
     server.create_room(
         ROOM,
         match game {
-            TestGame::Arena => arena_room(2),
+            TestGame::Arena => {
+                let mut room = arena_room(2);
+                room.build_hash = orr_sim::build_hash_of(ARENA_TEST_BUILD, 0);
+                room
+            },
             // 300 bodies that keep moving (rotating bars), so both clients mispredict and roll back with
             // physics in the resimulation.
             TestGame::Phys => {
@@ -179,7 +190,7 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
             };
             match game {
                 TestGame::Arena => {
-                    let cfg = RelayClientConfig::new(ROOM, 1);
+                    let cfg = RelayClientConfig::new(ROOM, ARENA_TEST_BUILD);
                     let mut client: RelayClient<Arena, _> =
                         RelayClient::new(cfg, link, |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new());
                     drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &opts)
@@ -206,14 +217,15 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
         Some(a) => (format!("wss://127.0.0.1:{}/", a.port()), "--ignore-certificate-errors"),
         None => (ws_addr.port().to_string(), ""),
     };
-    let flags = format!("{wss_flag} {}", view.flags);
+    let extra_flags = std::env::var("CHROMIUM_FLAGS").unwrap_or_default();
+    let flags = format!("{wss_flag} {} {extra_flags}", view.flags);
     let shot = std::env::temp_dir().join(format!("orr_browser_e2e_{}_{}.png", std::process::id(), view.render));
     let mut cmd = Command::new("node");
     if !flags.trim().is_empty() {
         cmd.env("CHROMIUM_FLAGS", flags.trim());
     }
     if game == TestGame::Arena {
-        cmd.env("BUILD", "1");
+        cmd.env("BUILD", if wss { format!("0x{ARENA_TEST_BUILD:x}") } else { ARENA_TEST_BUILD.to_string() });
     }
     let out = cmd
         .arg(repo_root().join("tools/webtransport/browser_e2e.cjs"))
@@ -241,12 +253,14 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
         }
     };
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    eprintln!("---- browser output ----\n{stdout}------------------------");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    eprintln!("---- browser output ----\n{stdout}{stderr}------------------------");
     if out.status.code() == Some(2) {
+        assert!(!require(), "browser prerequisites are mandatory, but the browser runner skipped:\n{stdout}{stderr}");
         eprintln!("SKIP: the browser part is not available here (set ORR_REQUIRE_BROWSER=1 to fail instead)");
         return None;
     }
-    assert!(out.status.success(), "browser client failed ({:?}):\n{stdout}", out.status);
+    assert!(out.status.success(), "browser client failed ({:?}):\n{stdout}{stderr}", out.status);
     let view_kind = stdout
         .lines()
         .find_map(|l| l.strip_prefix("RENDERER "))
@@ -286,7 +300,7 @@ fn check_view(run: &Run, kind: &str) {
         eprintln!("SKIP view check: the GPU view package is not built (tools/build_web.sh without WEB_GPU=0)");
         return;
     }
-    if kind == "webgpu" && run.view_kind != "webgpu" && std::env::var("ORR_REQUIRE_WEBGPU").is_err() {
+    if kind == "webgpu" && run.view_kind != "webgpu" && !std::env::var("ORR_REQUIRE_WEBGPU").is_ok_and(|v| v == "1") {
         eprintln!("SKIP view check: this Chromium has no WebGPU adapter (set ORR_REQUIRE_WEBGPU=1 to fail instead)");
         return;
     }

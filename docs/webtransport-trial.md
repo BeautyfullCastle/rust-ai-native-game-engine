@@ -141,7 +141,7 @@ Needed flags: none. If a Chromium refuses localhost QUIC, try
 `crates/orr_server/tests/browser_e2e.rs`: an in-process relay server (QUIC +
 WebTransport on one port, plus WebSocket, 35 ms +-8 ms injected delay each way),
 a native Rust bot client and the wasm client in Chromium share a 2-player
-arena room (build id 1) and play with scripted bot inputs until the browser has
+arena room (test build id `9007199254740993`, above JavaScript's safe-integer range) and play with scripted bot inputs until the browser has
 600 verified ticks. Output of one run:
 
 ```
@@ -163,15 +163,28 @@ Run it:
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.129 --locked   # the wasm-bindgen version in Cargo.lock
-tools/build_web.sh                                           # crates/orr_web/web/pkg
-cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1
+npm ci --prefix tools/webtransport                          # pinned Playwright
+# Installs the matching Chromium and Linux shared libraries (may need sudo).
+tools/webtransport/node_modules/.bin/playwright install --with-deps chromium
+tools/build_web.sh                                           # web/pkg and web/pkg_gpu
+npm test --prefix tools/webtransport                         # Node + generated WASM boundary tests
+ORR_REQUIRE_BROWSER=1 ORR_REQUIRE_WEBGPU=1 cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1
 ```
 
-Needs Node.js and Playwright (`npm i -g playwright`, a Chromium in
-`PLAYWRIGHT_BROWSERS_PATH`, or `CHROMIUM=/path/to/chrome`). Without the pieces
-each test prints `SKIP` and passes; with `ORR_REQUIRE_BROWSER=1` a missing
-piece fails the test. The test is **not** in CI (browser, Node and
-wasm-bindgen-cli are heavy); CI builds the wasm crate (section 8).
+Needs Node.js 22+ and Playwright (the pinned local install above, `NODE_PATH`, or
+an existing global install), plus its Chromium in `PLAYWRIGHT_BROWSERS_PATH` or
+`CHROMIUM=/path/to/chrome`. Ordinary local `cargo test` still prints `SKIP` and
+passes when browser prerequisites are absent. `ORR_REQUIRE_BROWSER=1` makes
+missing prerequisites fail; `ORR_REQUIRE_WEBGPU=1` additionally requires the
+WebGPU adapter/view and implies browser prerequisites are mandatory. Only the
+exact value `1` enables either requirement (`0` keeps optional local behavior).
+
+CI's `wasm32-browser` job now installs the pinned tools, derives the exact
+wasm-bindgen CLI version from `Cargo.lock`, generates both packages, executes the
+Node/WASM assertions, and runs all six browser tests with both requirements set.
+The final `cross_platform_checksum_compare` gate also depends on this job and
+rejects failure, cancellation, skip, unknown, or missing results. The browser
+transport and renderer assertions have not been relaxed.
 
 ## 7. Firefox and Safari: what must be checked by hand
 
@@ -239,8 +252,8 @@ a trusted certificate is mandatory.
 | Relay glue | `crates/orr_relay_net/src/connect.rs` (`ListenOptions::{webtransport, ws_bind, wss_bind}`), `orr_server` flags `--webtransport --ws-bind --wss-bind` |
 | Browser client | `crates/orr_web` (`WebLink`, the bots, the report, the draw lists, `js/transport.js`, `web/worker.js`, `web/index.html`), `crates/orr_web_gpu` (the GPU view), `tools/build_web.sh` |
 | Trial tools | `crates/orr_net/examples/wt_echo.rs`, `tools/webtransport/{trial.html,trial.cjs,lib.cjs,browser_e2e.cjs}` |
-| Tests | `crates/orr_net/tests/webtransport.rs`, `ws_malformed.rs`, `crates/orr_server/tests/browser_e2e.rs`, unit tests in `orr_web` |
-| CI | `.github/workflows/determinism.yml`: job `wasm32-browser` builds the sim crates and `orr_web` for `wasm32-unknown-unknown` and runs clippy `-D warnings` on `orr_web`; `orr_net` and `orr_web` join the `-D warnings` clippy line |
+| Tests | `crates/orr_net/tests/webtransport.rs`, `ws_malformed.rs`, `crates/orr_server/tests/browser_e2e.rs`, unit tests in `orr_web`, `tools/webtransport/test_*.cjs` |
+| CI | `.github/workflows/determinism.yml`: job `wasm32-browser` builds and lints wasm, generates both JS/WASM packages, runs Node boundary tests and all six Chromium transport/GPU tests; the required aggregate gate includes its result |
 
 The sim crates (`orr_fp`, `orr_ecs`, `orr_sim`, `orr_session`, `orr_proto`,
 `orr_testgame`, `orr_physics`) build unchanged for `wasm32-unknown-unknown`.
@@ -298,7 +311,9 @@ format, and the Rust side only sees `LinkPort` events.
   validators accept that, Chrome's WGSL validator (Tint) rejects it ("must only be called from uniform control
   flow"). The derivatives moved to the top of the function (`crates/orr_render/src/shader2d.wgsl`); the native GPU
   readback tests are unchanged.
-* **Headless Chromium flags.** WebGL2 works without flags (SwiftShader). WebGPU needs
+* **Headless Chromium flags.** The trusted local WebGL2 fixture explicitly selects SwiftShader with
+  `--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader`, including on Linux; it no longer
+  depends on Chromium's deprecated implicit software fallback. WebGPU needs
   `--enable-unsafe-webgpu --enable-unsafe-swiftshader --use-webgpu-adapter=swiftshader --enable-features=Vulkan --use-vulkan=swiftshader --use-angle=swiftshader`
   (the e2e test passes them). Without a WebGPU adapter the page falls back to WebGL2 by itself (`auto`).
 * **Build.** `tools/build_web.sh` (profile `web`, optional `wasm-opt`, optional `WEB_SIMD=1`, `WEB_GPU=0` to skip
@@ -306,3 +321,32 @@ format, and the Rust side only sees `LinkPort` events.
 * **Run the end-to-end test** (all views, both games):
   `ORR_REQUIRE_BROWSER=1 cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1`.
   `ORR_REQUIRE_WEBGPU=1` makes a Chromium without WebGPU a failure instead of a skipped view check.
+
+## 11. Browser gate regression coverage and current validation
+
+`tools/webtransport/build_id_boundary.cjs` executes the actual generated JS/WASM
+constructors (`WebClient` and `PhysClient`) in Node and, during each browser run,
+in Chromium. A fake WebSocket captures the real client's encoded Hello; an
+independent BigInt reference verifies the exact build hash, including each game's
+specific default (derived from one expected ORRF-version input). Across both clients,
+30 valid/default inputs and 54 invalid inputs cover decimal/hex full-u64 strings,
+unsafe/rounded Numbers, infinities, fractions, malformed text, overflow, and
+wrong JS types. Rejected inputs must fail before creating a transport. The real
+arena E2E additionally joins with a nonrepresentable Number value supplied as
+text, including hexadecimal text over WSS.
+
+`npm test --prefix tools/webtransport` has four test groups, including executable
+runner checks for absent Playwright, WASM packages, and Chromium in optional and
+required modes. `python3 tools/test_determinism_workflow.py` checks mandatory CI
+steps and the aggregate gate across all 1,296 combinations of four job results.
+
+Current local validation (2026-10-02): both JS/WASM packages generated with
+wasm-bindgen 0.2.129, all four Node test groups passed with zero skips, the seven
+workflow regression groups passed, and the Rust browser harness compiled and
+passed strict Clippy. Full browser execution remains **unverified in this
+sandbox**: Chromium launch fails at `socket()` with `Operation not permitted`,
+the official headless-shell download was truncated/rejected, and the supported
+cloud browser blocks the loopback fixture (`ERR_BLOCKED_BY_CLIENT`). Mandatory
+mode correctly fails instead of turning this into a pass. A real CI run on the
+final commit is still needed to establish WebTransport, WS/WSS, WebGL2 and WebGPU
+runtime success; compilation and Node boundary results do not establish it.

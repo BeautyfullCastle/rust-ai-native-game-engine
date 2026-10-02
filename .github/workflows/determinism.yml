@@ -193,12 +193,11 @@ jobs:
 
   wasm32-browser:
     # The browser client (`orr_web`, wasm-bindgen glue) and the sim crates it
-    # runs must build for the browser target. Build only: the browser proof
-    # (`crates/orr_server/tests/browser_e2e.rs`, headless Chromium through
-    # Playwright) needs Node, a browser and wasm-bindgen-cli, so it is run by
-    # hand (docs/webtransport-trial.md) and not here.
-    name: wasm32-unknown-unknown (browser client build)
+    # runs must build and actually execute in Chromium: transport, rollback,
+    # native/wasm checksums and GPU canvas pixels are mandatory below.
+    name: wasm32-unknown-unknown (browser runtime)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -215,6 +214,36 @@ jobs:
 
       - name: cargo clippy (orr_web, orr_web_gpu, orr_games, orr_wasm_bench) for wasm32-unknown-unknown
         run: cargo clippy --target wasm32-unknown-unknown -p orr_web -p orr_web_gpu -p orr_games -p orr_wasm_bench --all-targets -- -D warnings
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pinned browser test tools
+        run: |
+          npm ci --prefix tools/webtransport
+          tools/webtransport/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Install matching wasm-bindgen CLI
+        shell: bash
+        run: |
+          version=$(python3 -c 'import tomllib; d=tomllib.load(open("Cargo.lock", "rb")); v={p["version"] for p in d["package"] if p["name"] == "wasm-bindgen"}; assert len(v) == 1, v; print(v.pop())')
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Generate browser JS and WASM packages
+        run: tools/build_web.sh
+        env:
+          WEB_PROFILE: release
+          WEB_GPU: "1"
+
+      - name: Browser harness regression tests
+        run: npm test --prefix tools/webtransport
+
+      - name: Browser runtime (WebTransport, WS, WSS, WebGL2 and WebGPU)
+        run: cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1
+        env:
+          ORR_REQUIRE_BROWSER: "1"
+          ORR_REQUIRE_WEBGPU: "1"
 
       - name: web profile build and size report (informational, never fails the build)
         continue-on-error: true
@@ -277,7 +306,7 @@ jobs:
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
     # Every checksum-producing target must finish, including non-native runners.
-    needs: [native, wasm32, android-arm64]
+    needs: [native, wasm32, wasm32-browser, android-arm64]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -288,9 +317,10 @@ jobs:
           NATIVE_RESULT: ${{ needs.native.result }}
           WASM32_RESULT: ${{ needs.wasm32.result }}
           ANDROID_ARM64_RESULT: ${{ needs['android-arm64'].result }}
+          BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then
@@ -304,6 +334,7 @@ jobs:
 
           echo "All native matrix legs, wasm32-wasip1 (including SIMD), and"
           echo "aarch64-linux-android passed their pinned golden-checksum assertions."
+          echo "Chromium passed native/wasm checkpoint comparisons and required GPU views."
           echo "The targets assert the same constants in orr_fp, orr_session,"
           echo "orr_physics, orr_physics3d, orr_games, and orr_wasm_bench tests."
           echo "No checksum artifacts are exchanged: each target independently"

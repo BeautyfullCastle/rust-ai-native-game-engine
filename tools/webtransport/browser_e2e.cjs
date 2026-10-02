@@ -16,8 +16,9 @@
 const fs = require("fs");
 const path = require("path");
 const lib = require("./lib.cjs");
+const { checkBuildIdBoundary } = require("./build_id_boundary.cjs");
 
-const skip = (why) => { console.log("SKIP: " + why); process.exit(process.env.ORR_REQUIRE_BROWSER ? 1 : 2); };
+const skip = (why) => { console.log((lib.requiresBrowser() ? "ERROR: " : "SKIP: ") + why); process.exit(lib.unavailableExitCode()); };
 
 (async () => {
   const pw = lib.loadPlaywright();
@@ -32,6 +33,7 @@ const skip = (why) => { console.log("SKIP: " + why); process.exit(process.env.OR
     browser = await pw.chromium.launch(lib.chromiumOptions());
   } catch (e) {
     server.close();
+    if (lib.requiresBrowser()) console.error(e);
     skip("cannot launch Chromium: " + String(e).split("\n")[0]);
   }
   let code = 1;
@@ -46,6 +48,8 @@ const skip = (why) => { console.log("SKIP: " + why); process.exit(process.env.OR
     if (env.WS) q.set("ws", /^wss?:/.test(env.WS) ? env.WS : `127.0.0.1:${env.WS}`);
     if (env.SLOT) q.set("slot", env.SLOT);
     await page.goto(`http://localhost:${httpPort}/index.html?${q}`);
+    const boundary = await page.evaluate(checkBuildIdBoundary);
+    console.log("BUILD_ID_BOUNDARY " + JSON.stringify(boundary));
     const deadline = Date.now() + +(env.TIMEOUT_MS || 60000);
     let r = null;
     while (Date.now() < deadline) {

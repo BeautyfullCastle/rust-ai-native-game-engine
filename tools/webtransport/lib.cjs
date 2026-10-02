@@ -15,6 +15,15 @@ function loadPlaywright() {
   return null;
 }
 
+/** Requirement flags use the same exact `=1` convention as the Rust harness. */
+function requiresBrowser(env = process.env) {
+  return env.ORR_REQUIRE_BROWSER === "1" || env.ORR_REQUIRE_WEBGPU === "1";
+}
+
+function unavailableExitCode(env = process.env) {
+  return requiresBrowser(env) ? 1 : 2;
+}
+
 /** Chromium launch options. CHROMIUM=path overrides the executable; CHROMIUM_FLAGS adds flags (space separated). */
 function chromiumOptions(extraArgs = []) {
   const args = [...extraArgs, ...(process.env.CHROMIUM_FLAGS ? process.env.CHROMIUM_FLAGS.split(/\s+/).filter(Boolean) : [])];
@@ -58,4 +67,4 @@ function repoRoot() {
   return path.resolve(__dirname, "..", "..");
 }
 
-module.exports = { loadPlaywright, chromiumOptions, spawnReady, serveStatic, repoRoot };
+module.exports = { loadPlaywright, chromiumOptions, spawnReady, serveStatic, repoRoot, requiresBrowser, unavailableExitCode };
