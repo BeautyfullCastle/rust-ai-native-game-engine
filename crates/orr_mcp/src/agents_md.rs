@@ -141,7 +141,7 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("| `orr sim start\\|stop\\|play\\|pause\\|step [N]\\|seek <tick>\\|speed <x>\\|state` | a play session (a copy: the scene document is untouched) | `sim_control` |");
     if input.is_some() {
         line("| `orr sim input --player <slot> '<json>'` | set a player's structured input for subsequent ticks | `sim_control` |");
-        line("| `orr sim stop --replay-out <path>` | stop and write the recording to the exact local CLI path | `sim_control` |");
+        line("| `orr sim stop --replay-out <path> [--force]` | stop and write the recording locally; replacement requires `--force` | `sim_control` |");
     }
     line("| `orr activity [--since seq] [--reads] [-f]` | the activity feed of the host | `read` |");
     line("| `orr save [--write]` | scene YAML to stdout, or write the host's scene file | `read` / `scene_edit` |");
@@ -222,7 +222,7 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
         line("```");
         line(s(&input["value_format"]));
         line("");
-        line("`orr sim stop --replay-out session.orrp` requests the recording bytes and writes them locally where the CLI runs, overwriting that exact path. The host does not save the file. Check it with `orr verify --replay session.orrp --check recording_matches`; `orr verify --last-play --check recording_matches` also uses the host's retained recording.");
+        line("`orr sim stop --replay-out session.orrp` requests the recording bytes and writes them locally where the CLI runs. Existing paths are refused before stopping play; use a fresh path to preserve earlier recordings, or add `--force` to explicitly replace the destination. The CLI stages complete bytes beside the destination before committing, and also refuses a path created during export without `--force` (play has already stopped in that case). `--force` replaces a symlink itself, not its target. No parent directory is created; export does not guarantee crash durability. The host does not save the file. Check it with `orr verify --replay session.orrp --check recording_matches`; `orr verify --last-play --check recording_matches` also uses the host's retained recording.");
         line("");
     }
 

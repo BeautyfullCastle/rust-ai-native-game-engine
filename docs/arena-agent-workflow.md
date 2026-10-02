@@ -174,7 +174,11 @@ FIRE for one tick, release, and step nineteen more ticks. At tick 20:
 - Two players, zero bullets, zero out-of-bounds entities
 - Hero and target remain at `[-300, 0]` and `[300, 0]`
 
-Export with `orr sim stop --replay-out baseline20.orrp`. Independently run
+Export with `orr sim stop --replay-out baseline20.orrp`. Existing destinations are
+refused before stopping play; choose a fresh filename to preserve the original
+recording. Use `--force` only when deliberately replacing that destination.
+Exports stage complete bytes locally before committing; they do not create
+parent directories or guarantee crash durability. Independently run
 `orr verify --replay baseline20.orrp --check recording_matches` plus `no_divergence` and final metric
 checks. Require identical baseline/candidate reruns, 21 recorded checksum comparisons (tick 0 through 20), zero
 mismatches, and zero replayed debug commands.

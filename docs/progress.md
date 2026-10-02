@@ -158,3 +158,10 @@ P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 �
 - FFI 테스트의 Cargo 실행/빌드 실패 및 누락·빈 shared/static/import 라이브러리를 모든 플랫폼에서 실패 처리. C 컴파일러 부재에 대한 기존 정책은 별도로 유지
 - 테스트 이후 반복 빌드를 엄격한 산출물 검사로 대체. native/sample 주 릴리스 명령에 Cargo timings 및 HTML-only CI artifact 추가. 릴리스 설정·검증 대상·플랫폼·집계 조건 유지
 - C client 6개, client session 6개, optional-compiler helper 회귀 6개, workflow 회귀 12개(집계 조합 1,296개 포함), 엄격한 FFI Clippy 및 독립 리뷰 통과. 실제 Windows/macOS와 artifact 업로드는 해당 커밋 CI 확인 필요
+
+### 리플레이 내보내기 원본 보호 (2026-10-03 KST)
+
+- CLI `sim stop --replay-out`는 기존 경로를 발견하면 play를 중단하기 전에 거절. 교체는 명시적 `--force`로만 허용
+- 같은 디렉터리 임시 파일에 완전한 데이터를 기록·동기화한 후 no-clobber 게시 또는 원자적 교체. 사전 확인 이후 경로 충돌도 기존 파일을 보존하며 오류 시 `--last-play` 복구 안내 유지
+- CLI unit 18개, 실제 CLI 통합 23개, MCP 안내/input 11개, 엄격한 CLI/MCP Clippy와 독립 리뷰 통과. 도움말·생성 안내·Arena 절차 문서 갱신
+- 리플레이 포맷·시뮬레이션 변경 없음. 디렉터리 fsync에 의한 crash durability는 보장하지 않으며 비정상 중단/정리 실패 시 임시 링크가 남을 수 있음. 실제 플랫폼별 검증은 커밋 CI에서 확인

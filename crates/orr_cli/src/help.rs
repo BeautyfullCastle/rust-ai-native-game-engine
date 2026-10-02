@@ -186,19 +186,23 @@ Examples:
     ("redo", "orr redo", "orr redo\n\nRepeats the last undone entry."),
     (
         "sim",
-        "orr sim start [--players N] | stop [--replay-out path] | input --player N <json> | play | pause | step [N] | seek <tick> | speed <x> | state",
-        "orr sim start [--players N] | stop [--replay-out path] | input --player N <json> | play | pause | step [N] | seek <tick> | speed <x> | state
+        "orr sim start [--players N] | stop [--replay-out path [--force]] | input --player N <json> | play | pause | step [N] | seek <tick> | speed <x> | state",
+        "orr sim start [--players N] | stop [--replay-out path [--force]] | input --player N <json> | play | pause | step [N] | seek <tick> | speed <x> | state
 
 Drives a play session (a copy of the scene; the scene document is untouched).
   start   begin paused     step N   run N ticks now (default 1; starts a paused session if none)   seek T   go to a recorded tick
   play / pause   run by the wall clock or not      speed X   wall-clock speed, e.g. 0.5 or 2
   stop    end it; the recording stays for `orr verify --last-play`     state   mode, tick, checksum
   stop --replay-out PATH   also write the recording to this CLI's exact local path (not the host filesystem)
+  --force                 allow replacing that path; only with stop --replay-out
   input --player N JSON   set a complete structured input object, using `orr schema --input`
 
 Input needs an active session and host support. Exact decimal JSON is forwarded without float conversion.
 Input stays held for subsequent ticks until replaced; send the schema's neutral value to release it. It does not step.
-Replay export overwrites the supplied local file. No directory is created automatically.
+Replay export refuses an existing path before stopping play unless --force is supplied.
+Bytes are staged beside the destination, then committed without partial replacement; --force replaces the path itself, not a symlink target.
+A path created during export is also protected without --force, but play may already have stopped.
+No directory is created automatically. Export is not a crash-durability guarantee.
 
 Examples:
   orr sim start

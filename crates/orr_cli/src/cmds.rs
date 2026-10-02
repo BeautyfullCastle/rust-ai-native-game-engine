@@ -749,7 +749,7 @@ fn permille(t: &str) -> Result<u64, CliErr> {
 }
 
 fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
-    let p = parse(args, &[("--players", true), ("--player", true), ("--replay-out", true)], false)?;
+    let p = parse(args, &[("--players", true), ("--player", true), ("--replay-out", true), ("--force", false)], false)?;
     let Some(action) = p.pos.first().map(String::as_str) else {
         return Err(CliErr::Usage("sim needs an action: start, stop, input, play, pause, step, seek, speed, state".into()));
     };
@@ -757,6 +757,9 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
         if p.get(flag).is_some() && action != allowed {
             return Err(CliErr::Usage(format!("{flag} is only valid with sim {allowed}")));
         }
+    }
+    if p.has("--force") && (action != "stop" || p.get("--replay-out").is_none()) {
+        return Err(CliErr::Usage("--force is only valid with sim stop --replay-out <path>".into()));
     }
     let arg = p.pos.get(1).map(String::as_str);
     if p.pos.len() > 2 {
@@ -808,6 +811,15 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
             if replay_out == Some("") {
                 return Err(CliErr::Usage("--replay-out needs a non-empty local path".into()));
             }
+            if let Some(path) = replay_out.filter(|_| !p.has("--force")) {
+                // Refuse a known collision before stopping play. The final
+                // no-clobber commit below also protects against a later race.
+                match std::fs::symlink_metadata(path) {
+                    Ok(_) => return Err(CliErr::Erp(format!("local replay '{path}' already exists; play was not stopped. Choose another path or use --force to replace it"))),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(CliErr::Erp(format!("could not inspect local replay '{path}': {e}; play was not stopped"))),
+                }
+            }
             let mut r = ctx.call("sim.stop", if replay_out.is_some() { json!({"include_replay": true}) } else { json!({}) })?;
             let mut text = format!(
                 "Play stopped at tick {}, checksum {}. The recording ({} bytes) is kept: `orr verify --last-play` replays it.\n",
@@ -816,7 +828,7 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
                 r["replay_bytes"]
             );
             if let Some(path) = replay_out {
-                save_replay(&mut r, path)?;
+                save_replay(&mut r, path, p.has("--force"))?;
                 text.push_str(&format!("Replay written locally to {path}.\n"));
             }
             tools::Out { text, structured: r }
@@ -828,14 +840,33 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
 }
 
 /// The destination belongs to this CLI process, never to the remote host.
-fn save_replay(result: &mut J, path: &str) -> Result<(), CliErr> {
+fn save_replay(result: &mut J, path: &str, force: bool) -> Result<(), CliErr> {
     let bytes = result["replay"].as_str().and_then(orr_remote::codec::b64_decode)
         .ok_or_else(|| CliErr::Erp("play stopped, but the host returned no valid base64 replay; no local file was written".into()))?;
-    std::fs::write(path, bytes).map_err(|e| CliErr::Erp(format!("play stopped, but could not write local replay '{path}': {e}; the host recording is still available with `orr verify --last-play`")))?;
+    write_replay_file(std::path::Path::new(path), &bytes, force).map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::AlreadyExists { "; destination already exists (replacement requires --force)" } else { "" };
+        CliErr::Erp(format!("play stopped, but could not write local replay '{path}': {e}{hint}; the host recording is still available with `orr verify --last-play`"))
+    })?;
     if let Some(object) = result.as_object_mut() {
         object.remove("replay");
         object.insert("local_replay_path".into(), json!(path));
     }
+    Ok(())
+}
+
+/// Publish only complete bytes. Staging on the same filesystem permits an
+/// atomic replacement with --force; no-clobber never replaces an existing path.
+/// Ordinary failures drop and remove the temporary file. This is not a promise
+/// of crash durability: the containing directory is not synchronized.
+fn write_replay_file(path: &std::path::Path, bytes: &[u8], force: bool) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+    let mut staged = tempfile::Builder::new().prefix(".orr-replay-").tempfile_in(parent)?;
+    staged.write_all(bytes)?;
+    staged.as_file().sync_all()?;
+    let committed = if force { staged.persist(path) } else { staged.persist_noclobber(path) };
+    committed.map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -1145,6 +1176,9 @@ mod input_tests {
             vec!["input", "--players", "2", "--player", "0", "{}"],
             vec!["input", "--player", "0", "{}", "--replay-out", "out.orrp"],
             vec!["stop", "--replay-out", ""],
+            vec!["stop", "--force"],
+            vec!["start", "--force"],
+            vec!["stop", "--replay-out", "out.orrp", "--force=true"],
         ] {
             let (mut ctx, calls) = context(J::Null);
             assert!(matches!(sim(&mut ctx, &args(&values)), Err(CliErr::Usage(_))), "{values:?}");
@@ -1167,7 +1201,94 @@ mod input_tests {
         sim(&mut ctx, &args(&["stop", "--replay-out", path.to_str().unwrap()])).unwrap();
         assert_eq!(calls.borrow().as_slice(), &[("sim.stop".into(), json!({"include_replay": true}))]);
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "successful export leaves no temporary file");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_existing_replay_is_refused_before_contacting_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("original.orrp");
+        std::fs::write(&path, b"original recording").unwrap();
+        let (mut ctx, calls) = context(J::Null);
+        let error = sim(&mut ctx, &args(&["stop", "--replay-out", path.to_str().unwrap()]));
+        assert!(matches!(error, Err(CliErr::Erp(ref e)) if e.contains("already exists") && e.contains("play was not stopped") && e.contains("--force")));
+        assert!(calls.borrow().is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original recording");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn replay_commit_refuses_a_late_collision_and_force_replaces_complete_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recording.orrp");
+        // Test the final commit independently of the preflight check: another
+        // process can create this path while the host is returning its replay.
+        std::fs::write(&path, b"original recording").unwrap();
+        let mut result = json!({"replay": orr_remote::codec::b64_encode(b"new recording")});
+        let original_result = result.clone();
+        let error = save_replay(&mut result, path.to_str().unwrap(), false);
+        assert!(matches!(error, Err(CliErr::Erp(ref e)) if e.contains("play stopped") && e.contains("already exists") && e.contains("--force") && e.contains("--last-play")));
+        assert_eq!(std::fs::read(&path).unwrap(), b"original recording");
+        assert_eq!(result, original_result, "failed export cannot claim success");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "collision cleans up staging");
+
+        save_replay(&mut result, path.to_str().unwrap(), true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new recording");
+        assert_eq!(result["local_replay_path"], path.to_str().unwrap());
+        assert!(result.get("replay").is_none());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        let fresh = dir.path().join("fresh.orrp");
+        write_replay_file(&fresh, b"fresh recording", true).unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"fresh recording");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn replay_io_failures_preserve_the_destination_and_clean_up_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("occupied-directory");
+        std::fs::create_dir(&destination).unwrap();
+        let original = destination.join("original.orrp");
+        std::fs::write(&original, b"original recording").unwrap();
+        for force in [false, true] {
+            // Creating and writing the staging file succeeds; publishing over
+            // a directory fails. In either mode no staged file may remain.
+            assert!(write_replay_file(&destination, b"new recording", force).is_err());
+            assert_eq!(std::fs::read(&original).unwrap(), b"original recording");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+            assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 1);
+            // Failure to create a staging file must not create parent folders.
+            assert!(write_replay_file(&dir.path().join("missing/replay.orrp"), b"new recording", force).is_err());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_export_protects_symlinks_and_force_replaces_only_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.orrp");
+        let link = dir.path().join("link.orrp");
+        std::fs::write(&original, b"original recording").unwrap();
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        let (mut ctx, calls) = context(J::Null);
+        assert!(matches!(sim(&mut ctx, &args(&["stop", "--replay-out", link.to_str().unwrap()])), Err(CliErr::Erp(_))));
+        assert!(calls.borrow().is_empty());
+        assert!(write_replay_file(&link, b"new recording", false).is_err());
+        write_replay_file(&link, b"new recording", true).unwrap();
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), b"new recording");
+        assert_eq!(std::fs::read(&original).unwrap(), b"original recording");
+
+        let dangling = dir.path().join("dangling.orrp");
+        std::os::unix::fs::symlink(dir.path().join("missing.orrp"), &dangling).unwrap();
+        assert!(matches!(sim(&mut ctx, &args(&["stop", "--replay-out", dangling.to_str().unwrap()])), Err(CliErr::Erp(_))));
+        assert!(calls.borrow().is_empty());
+        assert!(write_replay_file(&dangling, b"new recording", false).is_err());
+        assert!(std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
     #[test]
@@ -1176,7 +1297,7 @@ mod input_tests {
         std::fs::write(&path, b"keep").unwrap();
         for result in [json!({}), json!({"replay": "not base64"}), json!({"replay": 42})] {
             let mut result = result;
-            assert!(matches!(save_replay(&mut result, path.to_str().unwrap()), Err(CliErr::Erp(_))));
+            assert!(matches!(save_replay(&mut result, path.to_str().unwrap(), false), Err(CliErr::Erp(_))));
             assert_eq!(std::fs::read(&path).unwrap(), b"keep");
         }
         std::fs::remove_file(path).unwrap();

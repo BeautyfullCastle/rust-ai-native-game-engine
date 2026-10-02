@@ -106,7 +106,7 @@ fn generated_guide_includes_input_only_when_the_host_advertises_it() {
     assert!(!ordinary.contains("## Structured player input"));
     discovery["engine"]["input"] = json!({"schema": {"type": "object", "properties": {"throttle": {"type": "number"}}}, "value_format": "exact test decimal format"});
     let guide = orr_mcp::agents_md::render(&discovery, &types, &schema, ToolGroups::ALL);
-    for expected in ["## Structured player input", "orr schema --input", "sim_input", "throttle", "exact test decimal format", "--replay-out", "recording_matches", "The host does not save the file"] {
+    for expected in ["## Structured player input", "orr schema --input", "sim_input", "throttle", "exact test decimal format", "--replay-out", "--force", "Existing paths are refused before stopping play", "recording_matches", "The host does not save the file"] {
         assert!(guide.contains(expected), "guide must explain {expected}");
     }
     assert!(!guide.contains("axis_x"), "guide must discover game-specific fields rather than assume Arena");

@@ -587,9 +587,25 @@ fn sim_stop_exports_a_local_replay_that_verifies_and_preserves_the_document() {
 
     assert_eq!(host.orr(&["sim", "start"]).code, 0);
     assert_eq!(host.orr(&["sim", "step", "1"]).code, 0);
-    let text = host.orr(&["sim", "stop", "--replay-out", path.to_str().unwrap()]);
+    let refused = host.orr(&["sim", "stop", "--replay-out", path.to_str().unwrap(), "--json"]);
+    assert_eq!(refused.code, 1);
+    assert!(refused.out.is_empty(), "no success result on a refused export");
+    assert!(refused.err.contains("already exists") && refused.err.contains("--force") && refused.err.contains("play was not stopped"), "{}", refused.err);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes, "a name collision preserves the original recording");
+    let state = host.orr(&["sim", "state", "--json"]).json();
+    assert_eq!(state["mode"], "play");
+    assert_eq!(state["head_tick"], 1);
+
+    let text = host.orr(&["sim", "stop", "--replay-out", path.to_str().unwrap(), "--force"]);
     assert_eq!(text.code, 0, "{}", text.err);
     assert!(text.out.contains(&format!("Replay written locally to {}", path.display())), "{}", text.out);
+    assert_ne!(std::fs::read(&path).unwrap(), bytes, "explicit force replaces the recording");
+    let verified = host.orr(&["verify", "--replay", path.to_str().unwrap(), "--check", "recording_matches", "--json"]);
+    assert_eq!(verified.code, 0, "{}", verified.err);
+    assert_eq!(verified.json()["checks"]["passed"], true);
+    assert_eq!(host.yaml(), before);
+    assert!(host.history().is_empty());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no staging files remain");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
