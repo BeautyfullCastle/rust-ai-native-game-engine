@@ -459,3 +459,83 @@ fn inspector_flags_enum_and_component_buttons() {
     let hist = h.state().editor.history().entries.clone();
     assert!(hist.len() >= 5 && hist.iter().all(|e| e.origin == "user"), "{hist:?}");
 }
+
+#[test]
+fn escape_during_scrub_rolls_back_and_next_drag_is_a_fresh_undo_step() {
+    let mut h = harness();
+    h.run_steps(3);
+    h.get_by_label("body_05").click();
+    settle(&mut h);
+    let original = yaml(&mut h);
+    for cancel in [true, false] {
+        let handle = h.get_all_by_label("\u{2194}").next().unwrap().rect().center();
+        h.event(Event::PointerMoved(handle));
+        h.step();
+        h.event(Event::PointerButton { pos: handle, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        for i in 1..=3 {
+            h.event(Event::PointerMoved(handle + egui::vec2(i as f32 * 6.0, 0.0)));
+            h.step();
+        }
+        if cancel {
+            press(&h, Modifiers::NONE, Key::Escape);
+            h.step();
+            // Continuing the pointer after Escape must not issue an ordinary
+            // standalone field edit when the cancelled transaction drains.
+            h.event(Event::PointerMoved(handle + egui::vec2(30.0, 0.0)));
+            h.run_steps(3);
+        }
+        h.event(Event::PointerButton { pos: handle + egui::vec2(30.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(2);
+        settle(&mut h);
+        if cancel {
+            assert_eq!(yaml(&mut h), original);
+            assert!(h.state().editor.history().entries.is_empty());
+        } else {
+            assert_ne!(yaml(&mut h), original);
+            assert_eq!(h.state().editor.history().entries.len(), 1);
+        }
+        assert!(!h.state().editor.in_gesture());
+    }
+}
+
+#[test]
+fn focus_loss_without_pointer_release_cancels_and_rearms_the_next_drag() {
+    let mut h = harness();
+    h.run_steps(3);
+    h.get_by_label("body_05").click();
+    settle(&mut h);
+    let original = yaml(&mut h);
+    let handle = h.get_all_by_label("\u{2194}").next().unwrap().rect().center();
+    h.event(Event::PointerMoved(handle));
+    h.step();
+    h.event(Event::PointerButton { pos: handle, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::PointerMoved(handle + egui::vec2(18.0, 0.0)));
+    h.step();
+    h.input_mut().focused = false;
+    h.event(Event::WindowFocused(false));
+    h.step();
+    // The release happened outside the app; deliberately never send it.
+    h.input_mut().focused = true;
+    h.event(Event::WindowFocused(true));
+    h.event(Event::PointerMoved(handle + egui::vec2(24.0, 0.0)));
+    h.step();
+    settle(&mut h);
+    assert_eq!(yaml(&mut h), original);
+    assert!(!h.state().editor.in_gesture());
+    assert!(h.state().editor.history().entries.is_empty());
+
+    let handle = h.get_all_by_label("\u{2194}").next().unwrap().rect().center();
+    h.event(Event::PointerMoved(handle));
+    h.event(Event::PointerButton { pos: handle, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::PointerMoved(handle + egui::vec2(18.0, 0.0)));
+    h.step();
+    h.event(Event::PointerButton { pos: handle + egui::vec2(18.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    settle(&mut h);
+    assert_ne!(yaml(&mut h), original);
+    assert_eq!(h.state().editor.history().entries.len(), 1);
+    assert!(!h.state().editor.in_gesture());
+}

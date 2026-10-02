@@ -172,6 +172,15 @@ impl eframe::App for EditorApp {
         if self.editor.is_playing_mode() && self.editor.timeline().is_some_and(|t| t.playing) {
             ctx.request_repaint();
         }
+        if ctx.input(|i| i.key_pressed(Key::Escape) || !i.focused) {
+            self.editor.cancel_edit();
+            // Focus loss may hide the physical release. Forget egui's drag
+            // ownership so later moves cannot revive it; a fresh press starts
+            // a fresh gesture even when the old pointer-up never arrived.
+            ctx.stop_dragging();
+            self.editor.end_edit();
+            self.ui.body_drag = None;
+        }
         self.shortcuts(&ctx);
 
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
@@ -186,6 +195,12 @@ impl eframe::App for EditorApp {
         egui::Panel::right("inspector").resizable(true).default_size(340.0).show(ui, |ui| self.inspector(ui));
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
 
+        // A scrub widget can disappear after selection/navigation changes.
+        // Release still closes its gesture even if that widget saw no End.
+        if !ctx.input(|i| i.pointer.button_down(PointerButton::Primary)) {
+            self.editor.end_edit();
+            self.ui.body_drag = None;
+        }
         self.dialogs(&ctx);
         if !self.ui.pulses.is_empty() {
             // The pulses animate until they expire.

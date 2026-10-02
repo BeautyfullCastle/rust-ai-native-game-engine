@@ -23,8 +23,9 @@
 //! A person's actions (Undo, Play, a typed value, ...) are blocking calls:
 //! they return the host's answer, which is a round trip (microseconds for a
 //! host thread, a network round trip for a remote host). A drag is the
-//! exception: its `set_field`s are posted without waiting, between a
-//! blocking `tx.begin` and `tx.commit`, so one drag is one undo step.
+//! exception: its begin, coalesced field edits and commit are all posted
+//! without waiting. Replies advance a bounded gesture queue, preserving one
+//! undo step per accepted drag. The host remains authoritative.
 //!
 //! If the host thread panics, or the remote host goes away, the editor keeps
 //! running: [`Editor::down`] says why and [`Editor::restart`] starts the host
@@ -130,7 +131,7 @@ enum Pend {
     Clients,
     Detail(String),
     PreviewRows(String, u64),
-    Edit(String),
+    Gesture(u64, gestures::Reply),
 }
 
 struct Pending {
@@ -206,7 +207,7 @@ pub struct Editor {
     change_gen: u64,
     last_inspect: Option<Instant>,
     last_clients: Option<Instant>,
-    gesture: Option<String>,
+    gesture: gestures::Gestures,
     refit: bool,
     agent: AgentState,
     feed: Feed,
@@ -280,7 +281,7 @@ impl Editor {
             change_gen: 0,
             last_inspect: None,
             last_clients: None,
-            gesture: None,
+            gesture: gestures::Gestures::default(),
             refit: false,
             agent: AgentState::default(),
             feed,
@@ -528,6 +529,7 @@ impl Editor {
     /// Selects an entity (or clears the selection).
     pub fn select(&mut self, target: Option<Target>) {
         if self.selection != target {
+            self.cancel_edit();
             self.selection = target;
             self.inspect = None;
             self.dirty.inspect = true;
@@ -589,6 +591,9 @@ impl Editor {
     fn call(&mut self, method: &str, params: J) -> Result<J, String> {
         if let Some(d) = &self.down {
             return Err(d.reason.clone());
+        }
+        if self.gesture.busy() && !gestures::is_read(method) {
+            return Err("an edit is still pending; wait for it to finish or cancel the drag".into());
         }
         let r = self.timed_erp_call(method, params);
         self.ingest();
@@ -661,6 +666,7 @@ impl Editor {
                 self.history.can_redo = b("can_redo");
                 self.history.dirty = b("dirty");
                 self.history.in_tx = b("in_tx");
+                self.observe_gesture_transaction(b("in_tx"));
                 self.dirty.history = true;
                 self.dirty.state = true;
                 self.mark_changed();
@@ -684,11 +690,7 @@ impl Editor {
 
     fn on_answer(&mut self, kind: Pend, r: Result<J, orr_remote::RpcError>) {
         match kind {
-            Pend::Edit(what) => {
-                if let Err(e) = r {
-                    self.error(format!("{what}: {}", e.message));
-                }
-            }
+            Pend::Gesture(id, reply) => self.gesture_answer(id, reply, r),
             Pend::Rows(gen) => {
                 self.inflight.rows = false;
                 if let Ok(v) = r {
@@ -827,7 +829,7 @@ impl Editor {
         }
         let down = match &self.backend.host {
             Some(h) => {
-                let why = h.stopped_reason(Duration::from_millis(2000));
+                let why = h.stopped_reason(Duration::ZERO);
                 match why {
                     Some(w) => Down { reason: format!("simulation host stopped: {w}"), local: true },
                     None => Down { reason: format!("disconnected: {err}"), local: true },
@@ -836,7 +838,7 @@ impl Editor {
             None => Down { reason: format!("disconnected: {err}"), local: false },
         };
         self.error(down.reason.clone());
-        self.gesture = None;
+        self.gesture = gestures::Gestures::default();
         self.pending.clear();
         self.down = Some(down);
     }
@@ -854,6 +856,16 @@ impl Editor {
 
     fn pump_inner(&mut self) {
         if self.down.is_some() {
+            // A panic closes the channel just before its thread records why.
+            // Keep the initial error, then enrich it on a later frame instead
+            // of waiting for the local host (which might still be healthy).
+            if let Some(why) = self.backend.host.as_ref().and_then(|h| h.stopped_reason(Duration::ZERO)) {
+                let reason = format!("simulation host stopped: {why}");
+                if self.down.as_ref().is_some_and(|d| d.reason != reason) {
+                    self.down.as_mut().expect("checked above").reason = reason.clone();
+                    self.error(reason);
+                }
+            }
             return;
         }
         if let Err(e) = self.backend.erp.poll() {
@@ -862,6 +874,7 @@ impl Editor {
             return;
         }
         self.ingest();
+        self.check_gesture_timeout();
         self.refresh_view();
         if self.down.is_some() {
             return;
@@ -1169,7 +1182,7 @@ impl Editor {
     }
 
     fn save_with(&mut self, params: J) -> bool {
-        if self.history.in_tx || self.gesture.is_some() {
+        if self.history.in_tx || self.gesture.busy() {
             self.error("finish the current edit before saving");
             return false;
         }
@@ -1193,44 +1206,17 @@ impl Editor {
 
     // ---- editing ----
 
-    /// Starts a gesture (a drag): everything until [`end_edit`](Self::end_edit)
-    /// is one undo step. Edit mode only; in play mode edits are recorded
-    /// debug commands and there is nothing to group.
-    pub fn begin_edit(&mut self, label: &str) {
-        if self.sim.mode == Mode::Edit && self.gesture.is_none() {
-            match self.call("tx.begin", json!({"label": label})) {
-                Ok(_) => self.gesture = Some(label.to_string()),
-                Err(e) => self.error(format!("edit: {e}")),
-            }
-        }
-    }
-
-    /// Ends the gesture started by [`begin_edit`](Self::begin_edit).
-    pub fn end_edit(&mut self) {
-        if self.gesture.take().is_some() {
-            match self.call("tx.commit", J::Null) {
-                Ok(r) => {
-                    if let Some(h) = r.get("history") {
-                        self.history = History::from_json(h);
-                    }
-                    self.mark_edited();
-                }
-                Err(e) => self.error(format!("edit: {e}")),
-            }
-        }
-    }
-
-    /// True while a gesture is open.
-    pub fn in_gesture(&self) -> bool {
-        self.gesture.is_some()
-    }
-
     /// Sets one field of the selected entity's component (or a singleton).
     /// `path` is a reflect path (`"pos.x"`, `""` = whole). Returns true if
     /// something changed. A refusal is reported as an error message. Inside a
-    /// gesture the edit is sent without waiting (and assumed to succeed; a
-    /// refusal is reported when the host answers).
+    /// gesture, true means queued, not accepted: latest values for the same
+    /// field coalesce until sent. A host refusal rolls the gesture back and is
+    /// reported when its reply arrives. Caches only show host-confirmed values.
     pub fn set_field(&mut self, owner: &Owner, path: &str, value: Value) -> bool {
+        if let Some(down) = &self.down {
+            self.error(down.reason.clone());
+            return false;
+        }
         let (path, value) = self.variant_switch(owner, path, value);
         let (path, value) = (path.as_str(), value);
         let (what, method, params) = match owner {
@@ -1243,13 +1229,14 @@ impl Editor {
             }
             Owner::Singleton(s) => (format!("set {s}.{path}"), "world.singleton.patch", json!({"name": s, "path": path, "value": value_to_json(&value)})),
         };
-        self.patch_cached(owner, path, &value);
-        if self.gesture.is_some() {
-            self.post(method, params, Pend::Edit(what));
-            self.history.dirty = true;
-            self.dirty.inspect = true;
-            return true;
+        if self.gesture.has_input() {
+            return self.queue_gesture_edit(what, method, params);
         }
+        if self.gesture.busy() {
+            self.error("an edit is still pending; wait before changing another field");
+            return false;
+        }
+        self.patch_cached(owner, path, &value);
         match self.call(method, params) {
             Ok(r) => {
                 let changed = r.get("changed").and_then(J::as_bool).unwrap_or(false);
@@ -1852,3 +1839,7 @@ pub fn fp_of_f64(v: f64) -> Option<FP> {
 mod recovery_tests;
 #[cfg(test)]
 mod diagnostics_tests;
+
+mod gestures;
+#[cfg(test)]
+mod gesture_tests;
