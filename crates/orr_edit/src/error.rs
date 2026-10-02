@@ -85,6 +85,8 @@ pub enum EditError {
     /// A verification run could not be set up (bad replay, mismatched
     /// frames, no ticks) or a check rule could not be parsed.
     Verify(String),
+    /// A verification run was cancelled before a complete report was ready.
+    VerifyCancelled,
 }
 
 impl fmt::Display for EditError {
@@ -116,6 +118,7 @@ impl fmt::Display for EditError {
                 write!(f, "proposal {proposal} or the document changed since verification; verify again before accepting")
             }
             EditError::Verify(m) => write!(f, "verify: {m}"),
+            EditError::VerifyCancelled => write!(f, "verify: cancelled"),
         }
     }
 }

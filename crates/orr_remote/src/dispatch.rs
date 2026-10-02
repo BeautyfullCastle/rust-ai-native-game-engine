@@ -1,7 +1,8 @@
 //! Executes ERP methods against the host's model.
 //!
-//! Everything here is synchronous and runs on the host thread (a
-//! [`crate::LocalHost`] thread or the headless loop), inside [`crate::ErpServer::poll`].
+//! Direct calls here are synchronous. [`crate::ErpServer`] intercepts verification
+//! to capture immutable inputs and execute it on a bounded worker; other methods
+//! run on the host thread (a [`crate::LocalHost`] or the headless loop).
 
 use std::path::PathBuf;
 
@@ -43,8 +44,9 @@ pub struct HostLimits {
     pub max_step_per_call: u32,
     /// The scene file `scene.save` with `write: true` writes; `None` = never writes a file.
     pub scene_path: Option<PathBuf>,
-    /// Most ticks one `proposal.verify` / `verify.self` call may run (the
-    /// host thread is busy meanwhile). Default 6000.
+    /// Most simulation ticks one `proposal.verify` / `verify.self` call may run.
+    /// Default 6000. The server runs one verification worker at a time; this
+    /// execution cap does not bound replay decoding memory or wall-clock time.
     pub max_verify_ticks: u32,
     /// Build id of the host's simulation (shown in `rpc.discover`, given to
     /// the verification runs). Default 0 = not tracked.

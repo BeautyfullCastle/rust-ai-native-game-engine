@@ -3,7 +3,13 @@
 
 mod common;
 
-use std::time::Instant;
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 
 use common::*;
 use orr_edit::{
@@ -13,7 +19,7 @@ use orr_edit::{
 use orr_reflect::Value;
 use orr_sample::physics_game::{PhysGame, PhysInput, PhysMetrics};
 use orr_session::ControlOp;
-use orr_sim::PlayerSlot;
+use orr_sim::{Metrics, PlayerSlot};
 
 const BODY: &str = "orr_physics::Body";
 
@@ -49,6 +55,35 @@ fn propose_move(doc: &mut EditorDoc, name: &str, pos: Value) -> ProposalId {
 
 fn verify(doc: &EditorDoc, id: ProposalId, inputs: &VerifyInputs<'_, PhysGame>) -> VerifyReport {
     doc.verify_proposal::<PhysGame>(id, inputs, &PhysMetrics, &opts()).unwrap()
+}
+
+struct CancelOnSample {
+    cancel: Arc<AtomicBool>,
+    tick: u64,
+}
+
+impl Metrics for CancelOnSample {
+    fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+        if frame.tick() == self.tick {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+        Vec::new()
+    }
+}
+
+struct CancelAfterBothSample {
+    cancel: Arc<AtomicBool>,
+    tick: u64,
+    samples: AtomicUsize,
+}
+
+impl Metrics for CancelAfterBothSample {
+    fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+        if frame.tick() == self.tick && self.samples.fetch_add(1, Ordering::Relaxed) + 1 == 2 {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+        Vec::new()
+    }
 }
 
 #[test]
@@ -123,6 +158,64 @@ fn verify_is_deterministic_and_the_same_on_one_thread_or_two() {
         .unwrap();
     assert_eq!(short.ticks, 60);
     assert_eq!(short.samples.last(), a.samples.iter().find(|s| s.tick == 60));
+}
+
+#[test]
+fn cancellable_verify_stops_before_start_and_between_ticks() {
+    let doc = demo_doc();
+    let already_cancelled = AtomicBool::new(true);
+    let never_run = VerifyInputs::scripted(4, 2, |_, _| panic!("pre-cancelled input must not run"));
+    let result = orr_edit::verify_frames_cancellable::<PhysGame>(
+        doc.frame(),
+        doc.frame(),
+        &never_run,
+        &PhysMetrics,
+        &opts(),
+        &already_cancelled,
+    );
+    assert!(matches!(result, Err(EditError::VerifyCancelled)));
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let input_calls = Arc::new(AtomicUsize::new(0));
+    let calls = input_calls.clone();
+    let inputs = VerifyInputs::scripted(4, 2, move |tick, slot| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        script(tick, slot)
+    });
+    let metrics = CancelOnSample { cancel: cancel.clone(), tick: 1 };
+    let sequential = VerifyOptions { parallel: false, sample_every: 1, ..opts() };
+    let result = orr_edit::verify_frames_cancellable::<PhysGame>(doc.frame(), doc.frame(), &inputs, &metrics, &sequential, &cancel);
+    assert!(matches!(result, Err(EditError::VerifyCancelled)));
+    assert_eq!(input_calls.load(Ordering::Relaxed), 2, "only tick 1 inputs were requested");
+}
+
+#[test]
+fn cancellable_verify_does_not_return_a_report_when_cancelled_after_final_tick() {
+    let doc = demo_doc();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let input_calls = Arc::new(AtomicUsize::new(0));
+    let calls = input_calls.clone();
+    let inputs = VerifyInputs::scripted(4, 2, move |tick, slot| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        script(tick, slot)
+    });
+    let metrics = CancelOnSample { cancel: cancel.clone(), tick: 4 };
+    let sequential = VerifyOptions { parallel: false, sample_every: 4, ..opts() };
+    let result = orr_edit::verify_frames_cancellable::<PhysGame>(doc.frame(), doc.frame(), &inputs, &metrics, &sequential, &cancel);
+    assert!(matches!(result, Err(EditError::VerifyCancelled)));
+    assert_eq!(input_calls.load(Ordering::Relaxed), 8, "all four ticks ran before the final sample cancelled");
+}
+
+#[test]
+fn parallel_cancellation_is_shared_by_and_joins_both_sides() {
+    let doc = demo_doc();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let inputs = scripted(16);
+    let metrics = CancelAfterBothSample { cancel: cancel.clone(), tick: 1, samples: AtomicUsize::new(0) };
+    let parallel = VerifyOptions { parallel: true, sample_every: 1, ..opts() };
+    let result = orr_edit::verify_frames_cancellable::<PhysGame>(doc.frame(), doc.frame(), &inputs, &metrics, &parallel, &cancel);
+    assert!(matches!(result, Err(EditError::VerifyCancelled)));
+    assert_eq!(metrics.samples.load(Ordering::Relaxed), 2, "both sides reached the same sampled tick");
 }
 
 /// Records a play of `ticks` ticks of `script` from the doc's frame.

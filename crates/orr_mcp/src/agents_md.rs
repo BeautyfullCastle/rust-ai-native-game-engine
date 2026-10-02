@@ -183,7 +183,7 @@ pub fn render(discover: &J, types: &J, schema: &J, groups: ToolGroups) -> String
     line("");
     let v = &engine["verify"];
     line(&format!(
-        "Limits: at most {} ticks per call; the run blocks the host, so use a few hundred ticks for quick answers. Tick rate {}, {} players by default. Scripted players: {}.",
+        "Limits: at most {} simulation ticks per call. One verification runs off the host thread at a time; other requests and play continue. A second verification returns `verify_busy`. Reports describe the scene/proposal captured at admission; guarded acceptance rejects later changes. The tick cap does not bound replay decoding memory or elapsed time. Tick rate {}, {} players by default. Scripted players: {}.",
         v["max_ticks"],
         v["tick_rate"],
         v["default_players"],

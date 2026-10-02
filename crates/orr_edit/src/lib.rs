@@ -64,8 +64,8 @@ pub use play::{PlayController, StoppedPlay};
 pub use proposal::{Accepted, ProposalDiff, ProposalId, ProposalInfo, ProposalState};
 pub use query::{EntityInfo, Target, View};
 pub use verify::{
-    verify_frames, ChecksumSample, MetricComparison, MetricStats, RecordingCheck, ReflectMetrics, VerifyInputs, VerifyOptions,
-    VerifyReport,
+    verify_frames, verify_frames_cancellable, ChecksumSample, MetricComparison, MetricStats, RecordingCheck, ReflectMetrics,
+    VerifyInputs, VerifyOptions, VerifyReport,
 };
 
 pub use orr_sim::{MetricValue, Metrics, NoMetrics};

@@ -47,6 +47,8 @@ pub(crate) enum Inbound {
     Disconnected {
         conn: u64,
     },
+    /// An isolated verification is returning; reap only once its thread exits.
+    VerificationReady { serial: u64 },
     /// A connection presented a token that was refused.
     AuthFailed,
     Request {

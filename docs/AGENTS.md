@@ -142,7 +142,7 @@ Singleton holding the config and the persistent (rollback-safe) caches.
 | `--last-play` | the recording of the last play session stopped in this host (a person's play in the editor, or `orr sim`) |
 | `--replay file.orrp` | a recording file |
 
-Limits: at most 6000 ticks per call; the run blocks the host, so use a few hundred ticks for quick answers. Tick rate 60, 2 players by default. Scripted players: available.
+Limits: at most 6000 simulation ticks per call. One verification runs off the host thread at a time; other requests and play continue. A second verification returns `verify_busy`. Reports describe the scene/proposal captured at admission; guarded acceptance rejects later changes. The tick cap does not bound replay decoding memory or elapsed time. Tick rate 60, 2 players by default. Scripted players: available.
 
 Every scene edit changes the checksums from tick 0, so `first_divergence` is 0 for a real change. **Judge behaviour by metrics and checks**, not by divergence. An unchanged run (`identical: true`) means the change has no effect on the simulation.
 

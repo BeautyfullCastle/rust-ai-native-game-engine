@@ -5,9 +5,10 @@
 //! The network runs on its own tokio runtime (worker threads named
 //! `orr-erp`). It accepts, authenticates and parses, then queues requests.
 //! The host calls [`ErpServer::poll`] once per frame with an [`ErpTarget`]
-//! that borrows its state; requests run there, synchronously, and the
-//! responses and notifications go back through the connections' write
-//! queues. `poll` never waits for the network.
+//! that borrows its state. Most requests run there synchronously; verification
+//! captures an immutable snapshot and runs on one bounded worker. Delayed
+//! responses and notifications are sent by the host through the connections'
+//! write queues. `poll` never waits for the network or a running worker.
 //!
 //! # Notifications and the frame stream
 //!
@@ -21,10 +22,11 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::thread::JoinHandle;
 
 use orr_edit::{EditorDoc, StoppedPlay};
 use orr_session::PlayNote;
@@ -40,7 +42,7 @@ use crate::link::{LocalConnector, LocalFrame};
 use crate::net::{
     accept_loop, bind, notification, response_err, response_ok, ConnTx, Inbound, NetShared,
 };
-use crate::proposals::ProposalWatch;
+use crate::proposals::{self, ProposalWatch, VerifyResult};
 use crate::wire::{checksum_text, debug_error_name, encode_frame_message, timeline_to_json};
 
 /// Frame data queued to one connection above which frames are skipped for it.
@@ -378,6 +380,28 @@ struct BuiltFrame {
     stream: Option<Arc<Vec<u8>>>,
 }
 
+/// Host-owned routing and activity context. Never moved to a worker.
+struct VerifyRequest {
+    conn: u64,
+    id: Option<J>,
+    client: String,
+    method: String,
+    /// Only the proposal id is needed by the activity log; do not retain replay text.
+    params: J,
+}
+
+struct VerifyTask {
+    serial: u64,
+    request: VerifyRequest,
+    cancel: Arc<AtomicBool>,
+    thread: JoinHandle<Result<VerifyResult, RpcError>>,
+    notified: bool,
+}
+
+fn verification_panic() -> RpcError {
+    RpcError::new(INTERNAL_ERROR, "panic", "verification panicked (a bug); the live play session was not changed")
+}
+
 /// The ERP server. See the module docs.
 pub struct ErpServer {
     rt: Option<tokio::runtime::Runtime>,
@@ -409,6 +433,8 @@ pub struct ErpServer {
     started: Instant,
     activity: VecDeque<ActivityEntry>,
     next_seq: u64,
+    verify_task: Option<VerifyTask>,
+    next_verify_serial: u64,
 }
 
 impl ErpServer {
@@ -491,6 +517,8 @@ impl ErpServer {
             started: Instant::now(),
             activity: VecDeque::new(),
             next_seq: 1,
+            verify_task: None,
+            next_verify_serial: 1,
         })
     }
 
@@ -545,6 +573,13 @@ impl ErpServer {
         if self.stash.is_some() {
             return;
         }
+        // The completion wake is sent just before thread return. If it raced
+        // the end of poll, check again soon without joining a running thread.
+        let timeout = if self.verify_task.as_ref().is_some_and(|t| t.notified || t.thread.is_finished()) {
+            timeout.min(Duration::from_millis(1))
+        } else {
+            timeout
+        };
         if let Ok(m) = self.inbox.recv_timeout(timeout) {
             self.stash = Some(m);
         }
@@ -683,6 +718,7 @@ impl ErpServer {
     /// and frame snapshots. Call it once per host frame. Never blocks on the network.
     pub fn poll<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) -> PollReport {
         let now = Instant::now();
+        self.complete_verification(target);
         // These events came from the host's real-time advance after the last
         // poll. Fence them BEFORE any queued request can seek/replace its session.
         self.collect_view_notes(target);
@@ -759,6 +795,12 @@ impl ErpServer {
                     }
                     self.disconnected(conn, target);
                 }
+                Inbound::VerificationReady { serial } => {
+                    if let Some(task) = self.verify_task.as_mut().filter(|t| t.serial == serial) {
+                        task.notified = true;
+                    }
+                    self.complete_verification(target);
+                }
                 Inbound::AuthFailed => self.session_event(
                     "?",
                     "session.auth_failed",
@@ -789,6 +831,7 @@ impl ErpServer {
                 self.tx_owner = None;
             }
         }
+        self.complete_verification(target);
         self.publish(target, now);
         report.crash = std::mem::take(&mut self.crash);
         report.frame_pending = std::mem::take(&mut self.frame_pending);
@@ -797,6 +840,9 @@ impl ErpServer {
 
     fn disconnected<G: Game>(&mut self, conn: u64, target: &mut ErpTarget<'_, G>) {
         self.conns.remove(&conn);
+        if let Some(task) = self.verify_task.as_ref().filter(|t| t.request.conn == conn) {
+            task.cancel.store(true, Ordering::Relaxed);
+        }
         if self.tx_owner.is_some_and(|(c, _)| c == conn) {
             // The client left with a transaction open: take it back.
             if target.doc.in_tx() {
@@ -820,6 +866,10 @@ impl ErpServer {
             return;
         };
         let (client, caps, tx) = (c.client.clone(), c.caps, c.tx.clone());
+        if matches!(method, "proposal.verify" | "verify.self") && self.cfg.limits.client_session.is_none() {
+            self.request_verification(target, conn, id, client, caps, method, params);
+            return;
+        }
         let mut fx = Effects::default();
         // A person's own view reads all the time (the editor refreshes its panels): not recorded,
         // so the log keeps what agents did. Its edits are recorded like anyone's.
@@ -957,6 +1007,94 @@ impl ErpServer {
         // chains requests quickly still produces one event per step.
         if proposals_may_change(method) && self.conns.values().any(|c| c.subs.proposals) {
             self.publish_proposals(target);
+        }
+    }
+
+    /// Reserve the single worker slot before copying frames, replay bytes or
+    /// parsing checks. Admission stays on the host; execution never borrows it.
+    #[allow(clippy::too_many_arguments)]
+    fn request_verification<G: Game>(
+        &mut self,
+        target: &ErpTarget<'_, G>,
+        conn: u64,
+        id: Option<J>,
+        client: String,
+        caps: Caps,
+        method: &str,
+        params: &J,
+    ) {
+        self.complete_verification(target);
+        self.stats.requests += 1;
+        if let Some(c) = self.conns.get_mut(&conn) {
+            c.requests += 1;
+        }
+        let request = VerifyRequest {
+            conn, id, client, method: method.to_string(),
+            params: json!({"id": params.get("id").and_then(J::as_str)}),
+        };
+        let prepared = authorize(method, caps, target.play.is_some(), params).and_then(|_| {
+            if self.verify_task.is_some() {
+                return Err(RpcError::new(LIMIT_EXCEEDED, "verify_busy", "this host already has a verification running; retry after it finishes"));
+            }
+            // Capture errors/panics are also isolated: this only reads the doc.
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                proposals::prepare_verify(target.doc, &self.cfg.limits, self.last_play.as_ref(), params, method == "proposal.verify")
+            })).unwrap_or_else(|_| Err(verification_panic()))
+        });
+        let prepared = match prepared {
+            Ok(p) => p,
+            Err(e) => {
+                self.finish_verification(target, request, Err(e));
+                return;
+            }
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let serial = self.next_verify_serial;
+        self.next_verify_serial = self.next_verify_serial.checked_add(1).expect("verification serial exhausted");
+        // The worker owns only an inbox sender, never NetShared or ConnTx:
+        // dropping the host still closes every connection immediately.
+        let wake = self.net.inbox.clone();
+        let spawned = std::thread::Builder::new().name("orr-verify".into()).spawn(move || {
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| prepared.run::<G>(&worker_cancel)))
+                .unwrap_or_else(|_| Err(verification_panic()));
+            let _ = wake.send(Inbound::VerificationReady { serial });
+            result
+        });
+        match spawned {
+            Ok(thread) => self.verify_task = Some(VerifyTask { serial, request, cancel, thread, notified: false }),
+            Err(e) => self.finish_verification(target, request, Err(RpcError::new(INTERNAL_ERROR, "verify_worker", format!("cannot start verification worker: {e}")))),
+        }
+    }
+
+    fn complete_verification<G: Game>(&mut self, target: &ErpTarget<'_, G>) {
+        if !self.verify_task.as_ref().is_some_and(|t| t.thread.is_finished()) {
+            return;
+        }
+        let task = self.verify_task.take().expect("finished verification exists");
+        // Join only after actual exit. Cancellation alone must never release
+        // capacity: an uncooperative hook could still be using a worker.
+        let result = task.thread.join().unwrap_or_else(|_| Err(verification_panic()));
+        let result = if task.cancel.load(Ordering::Relaxed) { Err(proposals::verify_cancelled()) } else { result };
+        self.finish_verification(target, task.request, result);
+    }
+
+    fn finish_verification<G: Game>(&mut self, target: &ErpTarget<'_, G>, request: VerifyRequest, result: Result<VerifyResult, RpcError>) {
+        let (result, detail) = match result {
+            Ok(result) => (Ok(result.value), Some(result.detail)),
+            Err(e) => (Err(e), None),
+        };
+        if result.is_err() {
+            self.stats.errors += 1;
+        }
+        let entry = activity::build(target, &request.client, &request.method, &request.params, &result, Default::default(), detail);
+        self.push_activity(entry);
+        if let (Some(id), Some(c)) = (request.id, self.conns.get(&request.conn)) {
+            let response = match result {
+                Ok(value) => response_ok(&id, value),
+                Err(error) => response_err(&id, &error),
+            };
+            c.tx.send_control_text(response);
         }
     }
 
@@ -1883,6 +2021,11 @@ fn frame_parts<'a, G: Game>(
 
 impl Drop for ErpServer {
     fn drop(&mut self) {
+        if let Some(task) = self.verify_task.take() {
+            task.cancel.store(true, Ordering::Relaxed);
+            // Dropping JoinHandle detaches; shutdown never waits for a hook,
+            // decoder or simulation tick that has not returned yet.
+        }
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }

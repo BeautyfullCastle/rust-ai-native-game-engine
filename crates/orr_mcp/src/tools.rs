@@ -271,7 +271,7 @@ Not possible while a play session runs. Example: {\"proposal_id\":\"p1\"}.",
 Omit `proposal_id` to run the scene alone (baseline metrics). Give `checks` for pass/fail, e.g. [\"lost_bodies.max == 0\", \"mean_height >= 2.5\", \"kinetic_energy.delta <= 10\"]. \
 Check grammar: `<metric>[.start|final|min|max|delta] <|<=|==|!=|>=|> <number>` (no stat = final; delta = candidate final minus base final; prefix `base:` reads the run without the proposal), or `no_divergence`, `no_divergence_before <tick>`, `recording_matches`. \
 Inputs: {\"kind\":\"bot\",\"ticks\":300,\"seed\":1} scripted players (the default), {\"kind\":\"idle\",\"ticks\":300} no input, {\"kind\":\"last_play\"} the last play session stopped in this host, {\"kind\":\"replay\",\"base64\":\"...\"} a .orrp file. \
-Any scene edit changes the checksums from tick 0, so judge behaviour by metrics and checks, not by divergence. The run blocks the host: 300 ticks is quick, thousands are slow.",
+Any scene edit changes the checksums from tick 0, so judge behaviour by metrics and checks, not by divergence. The host stays responsive while verification runs on captured scene/proposal state. Only one verification may run at a time; verify_busy means retry after it finishes.",
         read_only: true,
         needs: "read",
         schema: || {

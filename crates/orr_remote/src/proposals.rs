@@ -4,9 +4,11 @@
 //! A proposal is a set of edits staged on a private copy of the document
 //! ([`orr_edit::EditorDoc::propose`]); this module turns the ERP JSON of the
 //! edits into [`Op`]s and the results (diff, summary, verification report)
-//! back into JSON. Everything runs on the host thread like the other methods.
+//! back into JSON. Verification captures owned inputs on the host, then runs
+//! on a worker; direct `call_local` callers still execute synchronously.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use orr_ecs::Frame;
@@ -14,7 +16,7 @@ use orr_edit::{
     Check, CheckOutcome, EditorDoc, MetricValue, Metrics, Op, Origin, ProposalId, ProposalState, ProposalSummary, ReflectMetrics, Target, VerifyInputs,
     VerifyOptions, VerifyReport, View,
 };
-use orr_reflect::{Guid, Value};
+use orr_reflect::{Guid, TypeRegistry, Value};
 use orr_sim::{Game, PlayerSlot};
 use serde_json::{json, Map, Value as J};
 
@@ -452,7 +454,7 @@ pub(crate) fn reject<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, 
 
 // ---- verification ----
 
-fn build_inputs<G: Game>(lim: &HostLimits, ctx: &CallCtx<'_>, spec: &J, top_ticks: Option<u64>) -> Result<(VerifyInputs<'static, G>, J), RpcError> {
+fn build_inputs<G: Game>(lim: &HostLimits, last_play: Option<&orr_edit::StoppedPlay>, spec: &J, top_ticks: Option<u64>) -> Result<(VerifyInputs<'static, G>, J), RpcError> {
     let obj = spec
         .as_object()
         .ok_or_else(|| RpcError::params("'inputs' must be an object like {\"kind\":\"bot\",\"ticks\":300} (kinds: last_play, replay, bot, idle)"))?;
@@ -481,14 +483,16 @@ fn build_inputs<G: Game>(lim: &HostLimits, ctx: &CallCtx<'_>, spec: &J, top_tick
     };
     match kind {
         "last_play" | "replay" => {
-            let bytes: Vec<u8> = if kind == "last_play" {
-                ctx.last_play
-                    .map(|s| s.replay.clone())
+            let decoded;
+            let bytes: &[u8] = if kind == "last_play" {
+                last_play
+                    .map(|s| s.replay.as_slice())
                     .ok_or_else(|| RpcError::state("no_last_play", "no play session has been stopped in this host yet (sim.start, sim.step, sim.stop first)"))?
             } else {
-                b64_decode(q.str("base64")?).ok_or_else(|| RpcError::params("'inputs.base64' is not valid base64"))?
+                decoded = b64_decode(q.str("base64")?).ok_or_else(|| RpcError::params("'inputs.base64' is not valid base64"))?;
+                &decoded
             };
-            let inputs = VerifyInputs::<G>::from_replay(&bytes)?;
+            let inputs = VerifyInputs::<G>::from_replay(bytes)?;
             if let Some(n) = top_ticks {
                 if n > limit {
                     return Err(too_long(n));
@@ -565,13 +569,47 @@ pub(crate) fn report_json(r: &VerifyReport, outcome: Option<&CheckOutcome>, seri
     o
 }
 
-pub(crate) fn verify<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits, ctx: &CallCtx<'_>, fx: &mut Effects, p: &P<'_>, with_proposal: bool) -> Result<J, RpcError> {
-    let id = if with_proposal { Some(proposal_id(p)?) } else { None };
+/// An immutable admission snapshot. No document, play session or connection is
+/// retained by the worker. The state stamp and both frames describe one borrow.
+pub(crate) struct PreparedVerify {
+    base: Frame,
+    candidate: Frame,
+    state: Option<ProposalState>,
+    types: Arc<TypeRegistry>,
+    limits: HostLimits,
+    input_spec: J,
+    last_play: Option<orr_edit::StoppedPlay>,
+    top_ticks: Option<u64>,
+    checks: Vec<Check>,
+    series: bool,
+    opts: VerifyOptions,
+}
+
+pub(crate) struct VerifyResult {
+    pub value: J,
+    pub detail: Arc<VerifyDetail>,
+}
+
+pub(crate) fn prepare_verify(
+    doc: &EditorDoc,
+    lim: &HostLimits,
+    last_play: Option<&orr_edit::StoppedPlay>,
+    params: &J,
+    with_proposal: bool,
+) -> Result<PreparedVerify, RpcError> {
+    let empty = Map::new();
+    let obj = match params {
+        J::Null => &empty,
+        J::Object(m) => m,
+        _ => return Err(RpcError::params("params must be an object")),
+    };
+    let p = P(obj);
+    let id = if with_proposal { Some(proposal_id(&p)?) } else { None };
     if let Some(id) = id {
-        t.doc.proposal_info(id)?;
+        doc.proposal_info(id)?;
     }
     let top_ticks = p.opt_u64("ticks")?;
-    let (inputs, described) = build_inputs::<G>(lim, ctx, p.req_raw("inputs")?, top_ticks)?;
+    let input_spec = p.req_raw("inputs")?.clone();
     let checks = match p.raw("checks") {
         None | Some(J::Null) => Vec::new(),
         Some(J::Array(a)) => {
@@ -588,28 +626,68 @@ pub(crate) fn verify<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits, ctx: &Call
     if let Some(n) = p.opt_u64("sample_every")? {
         opts.sample_every = u32::try_from(n).map_err(|_| RpcError::params("'sample_every' is too large"))?;
     }
-    let metrics = Combined::new(t.doc, lim);
-    let report = match id {
-        Some(id) => t.doc.verify_proposal::<G>(id, &inputs, &metrics, &opts)?,
-        None => t.doc.verify_self::<G>(&inputs, &metrics, &opts)?,
+    let (base, candidate, state) = match id {
+        Some(id) => {
+            let state = doc.proposal_state(id)?;
+            let (base, candidate) = doc.proposal_frames(id)?;
+            (base, candidate, Some(state))
+        }
+        None => (doc.frame().clone(), doc.frame().clone(), None),
     };
-    let outcome = if checks.is_empty() { None } else { Some(report.check(&checks)) };
-    let mut out = report_json(&report, outcome.as_ref(), series);
-    out["inputs"] = described.clone();
-    if let Some(id) = id {
-        out["proposal"] = json!(id.to_string());
-        // Verification and this capture share one immutable document borrow:
-        // no scene or proposal edit can interleave between them.
-        let state = t.doc.proposal_state(id)?;
-        out["verified_state"] = json!({
-            "document_id": format!("{:032x}", state.document_id),
-            "id": state.id.to_string(),
-            "document_revision": state.document_revision,
-            "proposal_revision": state.proposal_revision,
-        });
+    let last_play = if input_spec.get("kind").and_then(J::as_str) == Some("last_play") {
+        last_play.cloned()
+    } else {
+        None
+    };
+    // Copy only verification configuration: live view/client hooks stay on the host.
+    let limits = HostLimits {
+        player_count: lim.player_count,
+        tick_rate: lim.tick_rate,
+        max_verify_ticks: lim.max_verify_ticks,
+        build_id: lim.build_id,
+        game: lim.game.clone(),
+        ..HostLimits::default()
+    };
+    Ok(PreparedVerify { base, candidate, state, types: doc.types().clone(), limits, input_spec, last_play, top_ticks, checks, series, opts })
+}
+
+pub(crate) fn verify_cancelled() -> RpcError {
+    RpcError::state("verify_cancelled", "verification was cancelled")
+}
+
+impl PreparedVerify {
+    pub(crate) fn run<G: Game>(self, cancel: &AtomicBool) -> Result<VerifyResult, RpcError> {
+        let cancelled = || if cancel.load(Ordering::Relaxed) { Err(verify_cancelled()) } else { Ok(()) };
+        cancelled()?;
+        // Replay base64/decompression/parsing is deliberately off the host thread.
+        // The execution tick cap is not a bound on decoded recording memory.
+        let (inputs, described) = build_inputs::<G>(&self.limits, self.last_play.as_ref(), &self.input_spec, self.top_ticks)?;
+        cancelled()?;
+        let metrics = Combined { reflect: ReflectMetrics::new(&self.types), game: self.limits.game.metrics.as_deref() };
+        let report = orr_edit::verify_frames_cancellable::<G>(&self.base, &self.candidate, &inputs, &metrics, &self.opts, cancel)?;
+        cancelled()?;
+        let outcome = if self.checks.is_empty() { None } else { Some(report.check(&self.checks)) };
+        let mut out = report_json(&report, outcome.as_ref(), self.series);
+        out["inputs"] = described.clone();
+        if let Some(state) = self.state {
+            out["proposal"] = json!(state.id.to_string());
+            out["verified_state"] = json!({
+                "document_id": format!("{:032x}", state.document_id),
+                "id": state.id.to_string(),
+                "document_revision": state.document_revision,
+                "proposal_revision": state.proposal_revision,
+            });
+        }
+        cancelled()?;
+        Ok(VerifyResult { value: out, detail: Arc::new(VerifyDetail { proposal: self.state.map(|s| s.id.to_string()), inputs: described, report, outcome }) })
     }
-    fx.verify = Some(std::sync::Arc::new(VerifyDetail { proposal: id.map(|i| i.to_string()), inputs: described, report, outcome }));
-    Ok(out)
+}
+
+pub(crate) fn verify<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits, ctx: &CallCtx<'_>, fx: &mut Effects, p: &P<'_>, with_proposal: bool) -> Result<J, RpcError> {
+    let prepared = prepare_verify(t.doc, lim, ctx.last_play, &J::Object(p.0.clone()), with_proposal)?;
+    let result = prepared.run::<G>(&AtomicBool::new(false))?;
+    fx.verify = Some(result.detail);
+    Ok(result.value)
 }
 
 // ---- watch.proposals ----
