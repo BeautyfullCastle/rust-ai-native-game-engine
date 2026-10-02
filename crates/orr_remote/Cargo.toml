@@ -51,4 +51,7 @@ orr_relay_net = { path = "../orr_relay_net" }
 [[bin]]
 name = "orr_remote_host"
 path = "src/bin/orr_remote_host.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
 required-features = ["sample-host"]

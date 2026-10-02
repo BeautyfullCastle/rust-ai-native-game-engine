@@ -13,6 +13,7 @@ use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use orr_editor::app::{BottomTab, LBL_PAUSE, LBL_PLAY, LBL_STEP, LBL_STOP};
+use orr_editor::diagnostics::LATENCY_WINDOW;
 use orr_editor::editor::Mode;
 use orr_editor::{EditorApp, Target};
 use orr_reflect::{decimal, Value};
@@ -538,4 +539,22 @@ fn focus_loss_without_pointer_release_cancels_and_rearms_the_next_drag() {
     assert_ne!(yaml(&mut h), original);
     assert_eq!(h.state().editor.history().entries.len(), 1);
     assert!(!h.state().editor.in_gesture());
+}
+
+// Real egui frames populate telemetry without contacting the host when queried.
+// Each test owns its editor and egui context; there are no machine-dependent time limits.
+#[test]
+fn ui_frames_record_bounded_wall_time_samples() {
+    let mut h = Harness::builder().with_size([1500.0, 900.0]).build_eframe(|_| EditorApp::new(common::demo_editor(), None));
+    let before_frames = h.state().frame_count();
+    let before = h.state().editor.diagnostics();
+    h.run_steps(LATENCY_WINDOW + 2);
+    let app = h.state();
+    let stats = app.editor.diagnostics();
+    assert_eq!(stats.ui_frame.total_samples - before.ui_frame.total_samples, app.frame_count() - before_frames);
+    assert_eq!(stats.ui_frame.samples, LATENCY_WINDOW);
+    assert!(stats.ui_frame.max >= stats.ui_frame.last);
+    assert!(stats.ui_frame.max >= stats.ui_frame.p95);
+    assert_eq!(app.editor.diagnostics(), stats);
+    assert!(app.editor.down().is_none());
 }
