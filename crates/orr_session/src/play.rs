@@ -104,14 +104,16 @@ pub enum PlayNote {
     SeekRejected { target: u64 },
 }
 
-/// Why a seek failed. The session is still consistent (head is where the
-/// simulation is).
+/// Why a play-session operation was refused. The session is still
+/// consistent (head is where the simulation is).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayError {
     OutOfRange { target: u64, first: u64, last: u64 },
     /// A recorded tick is missing (only in a damaged foreign recording).
     MissingTick(u64),
     BadKeyframe(u64),
+    /// A read-only replay viewer cannot accept new inputs or commands.
+    ReadOnly,
 }
 
 impl core::fmt::Display for PlayError {
@@ -122,6 +124,7 @@ impl core::fmt::Display for PlayError {
             }
             PlayError::MissingTick(t) => write!(f, "recorded tick {t} is missing"),
             PlayError::BadKeyframe(t) => write!(f, "keyframe of tick {t} does not decode"),
+            PlayError::ReadOnly => f.write_str("replay viewer is read-only; branch before adding inputs or commands"),
         }
     }
 }
@@ -364,6 +367,12 @@ impl<G: Game> PlaySession<G> {
     pub fn player_count(&self) -> u8 {
         self.cfg.player_count
     }
+    /// Number of gameplay commands waiting for a newly recorded tick.
+    /// Commands are consumed when their tick is recorded; commands in the
+    /// replay history are not pending.
+    pub fn pending_command_count(&self) -> usize {
+        self.pending_commands.len()
+    }
     pub fn simulation(&self) -> &Simulation<G> {
         &self.sim
     }
@@ -430,17 +439,26 @@ impl<G: Game> PlaySession<G> {
 
     // ---- writes ----
 
-    /// Sets the input `slot` uses at every following tick, until changed.
-    /// Out-of-range slots are ignored.
+    /// Sets the input `slot` uses at every following recorded tick, until
+    /// changed. Out-of-range slots and writes in a read-only replay viewer
+    /// are ignored. Viewer inputs are not retained across a later branch.
     pub fn set_input(&mut self, slot: PlayerSlot, input: G::Input) {
+        if self.mode == PlayMode::Viewer {
+            return;
+        }
         if let Some(held) = self.held.get_mut(slot.0 as usize) {
             *held = input;
         }
     }
 
     /// Queues a game command for the next tick that is run.
-    pub fn push_command(&mut self, slot: PlayerSlot, command: G::Command) {
+    /// Returns [`PlayError::ReadOnly`] if this session is viewing a replay.
+    pub fn push_command(&mut self, slot: PlayerSlot, command: G::Command) -> Result<(), PlayError> {
+        if self.mode == PlayMode::Viewer {
+            return Err(PlayError::ReadOnly);
+        }
         self.pending_commands.push((slot, command));
+        Ok(())
     }
 
     /// One clock tick: runs a tick when [`wants_tick`](Self::wants_tick),

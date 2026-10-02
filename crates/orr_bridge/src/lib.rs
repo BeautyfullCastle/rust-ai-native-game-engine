@@ -28,6 +28,7 @@ mod event;
 mod frame_view;
 mod host;
 mod inproc;
+mod ingress;
 mod relay_host;
 mod snapshot;
 mod threaded;

@@ -226,7 +226,7 @@ impl RelayView {
             .map_err(|_| ViewError::new(ViewErrorKind::Arg, format!("input must be {} bytes", std::mem::size_of::<PhysInput>())))?;
         p.bridge
             .set_input(PlayerSlot(p.slot), input)
-            .map_err(|e| ViewError::new(ViewErrorKind::Host, format!("the session is gone: {e}")))
+            .map_err(|e| ViewError::new(ViewErrorKind::Host, format!("input refused: {e}")))
     }
 
     /// Sends a command of the game to the server with the next tick (`PhysGame` has only the no-op one).
@@ -240,7 +240,7 @@ impl RelayView {
         }
         let command = <NoCommand as SimCommand>::decode(bytes)
             .ok_or_else(|| ViewError::new(ViewErrorKind::Arg, format!("command must be {} bytes", std::mem::size_of::<NoCommand>())))?;
-        p.bridge.send_command(command).map_err(|e| ViewError::new(ViewErrorKind::Host, format!("the session is gone: {e}")))
+        p.bridge.send_command(command).map_err(|e| ViewError::new(ViewErrorKind::Host, format!("command refused: {e}")))
     }
 
     /// The checksum of the confirmed state at `tick` (0 = the newest checkpoint): `(tick, checksum)`.

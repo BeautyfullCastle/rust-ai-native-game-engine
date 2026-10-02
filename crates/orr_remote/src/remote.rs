@@ -19,9 +19,12 @@
 //! - Sim events arrive as `watch.events` and become
 //!   `BridgeEvent::Sim { status: Verified }` (a local play session has no
 //!   prediction); `watch.notes` become [`Lifecycle`] events.
-//! - Controls and debug commands are sent as `sim.*` requests. The calls
-//!   return at once; a refusal shows up in [`RemoteBridge::take_errors`]
-//!   (and, for debug commands, as `Lifecycle::DebugRejected`).
+//! - Inputs, controls and debug commands are sent as `sim.*` requests. `Ok`
+//!   means the request was queued to the transport, not accepted by the host;
+//!   an asynchronous refusal shows up in [`RemoteBridge::take_errors`] (and,
+//!   for debug commands, as `Lifecycle::DebugRejected`). The held-input
+//!   dedupe cache is invalidated after RPC errors, local play-session
+//!   changes and received Branch notes.
 //!
 //! # Bandwidth
 //!
@@ -167,8 +170,12 @@ pub struct RemoteBridge<G: Game> {
     tick_rate: u32,
     player_count: u8,
     local: PlayerSlot,
-    last_input: Option<G::Input>,
+    last_input: Arc<Mutex<Option<G::Input>>>,
     thread: Option<JoinHandle<()>>,
+}
+
+fn clear_last_input<I>(last_input: &Mutex<Option<I>>) {
+    *last_input.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -213,10 +220,12 @@ impl<G: Game> RemoteBridge<G> {
         let (ready_tx, ready_rx) = channel::<Result<Info, String>>();
         let thread_shared = shared.clone();
         let thread_cfg = cfg.clone();
+        let last_input = Arc::new(Mutex::new(None));
+        let thread_last_input = last_input.clone();
         let thread = std::thread::Builder::new()
             .name("orr-remote".to_string())
             .spawn(move || {
-                run::<G>(t, thread_cfg, &thread_shared, &event_tx, ready_tx);
+                run::<G>(t, thread_cfg, &thread_shared, &event_tx, ready_tx, thread_last_input);
                 thread_shared.alive.store(false, Ordering::Release);
                 let mut view = thread_shared.view.lock().unwrap_or_else(|p| p.into_inner());
                 if view.negotiated() {
@@ -246,7 +255,7 @@ impl<G: Game> RemoteBridge<G> {
             tick_rate: info.tick_rate,
             player_count: info.player_count,
             local: cfg.local_slot,
-            last_input: None,
+            last_input,
             thread: Some(thread),
         })
     }
@@ -258,8 +267,14 @@ impl<G: Game> RemoteBridge<G> {
     }
 
     /// Sends any ERP request without waiting for the answer (for example
-    /// `sim.start`). A refusal shows up in [`take_errors`](Self::take_errors).
+    /// `sim.start`). `Ok` means it was queued to the transport; a host refusal
+    /// shows up asynchronously in [`take_errors`](Self::take_errors). A
+    /// `sim.start`, `sim.stop` or `sim.branch` request also invalidates the
+    /// held-input dedupe cache.
     pub fn request(&self, method: &str, params: J) -> Result<(), BridgeError> {
+        if matches!(method, "sim.start" | "sim.stop" | "sim.branch") {
+            clear_last_input(&self.last_input);
+        }
         if !self.shared.alive.load(Ordering::Acquire) {
             return Err(BridgeError::Disconnected);
         }
@@ -315,15 +330,26 @@ impl<G: Game> Bridge<G> for RemoteBridge<G> {
                 local: self.local,
             });
         }
-        // Inputs are held until changed: send only changes.
-        if self.last_input.as_ref() == Some(&input) {
-            return Ok(());
+        if !self.shared.alive.load(Ordering::Acquire) {
+            return Err(BridgeError::Disconnected);
         }
-        self.request(
+        // Inputs are held until changed: send only changes. This cache is
+        // optimistic because RPC replies are asynchronous, so the receiver
+        // clears it on any RPC error or a received Branch note.
+        {
+            let mut last_input = self.last_input.lock().unwrap_or_else(|p| p.into_inner());
+            if last_input.as_ref() == Some(&input) {
+                return Ok(());
+            }
+            *last_input = Some(input);
+        }
+        if let Err(e) = self.request(
             "sim.input",
             json!({"player": player.0, "input": hex_encode(bytemuck::bytes_of(&input))}),
-        )?;
-        self.last_input = Some(input);
+        ) {
+            clear_last_input(&self.last_input);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -411,6 +437,7 @@ fn run<G: Game>(
     shared: &Shared<G::Event>,
     events: &Sender<BridgeEvent<G::Event>>,
     ready: Sender<Result<Info, String>>,
+    last_input: Arc<Mutex<Option<G::Input>>>,
 ) {
     let registry = Simulation::<G>::build_registry();
     let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
@@ -548,15 +575,20 @@ fn run<G: Game>(
                                 }));
                             }
                         }
-                        (None, Some(e)) => shared
-                            .errors
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .push(e),
+                        (None, Some(e)) => {
+                            // The bridge cannot synchronously know whether an
+                            // input request was accepted; conservatively
+                            // forget its optimistic dedupe value on refusal.
+                            clear_last_input(&last_input);
+                            shared.errors.lock().unwrap_or_else(|p| p.into_inner()).push(e);
+                        }
                         _ => {}
                     }
                 } else if let Some(method) = j.get("method").and_then(J::as_str) {
                     let params = j.get("params").cloned().unwrap_or(J::Null);
+                    if has_branch_note(method, &params) {
+                        clear_last_input(&last_input);
+                    }
                     if delivery == Some(RemoteViewDelivery::Fenced) {
                         if let Err(e) = on_fenced_notification::<G>(method, &params, shared) {
                             fail(shared, &mut ready, e);
@@ -620,6 +652,13 @@ fn run<G: Game>(
             }
         }
     }
+}
+
+fn has_branch_note(method: &str, params: &J) -> bool {
+    method == "watch.notes"
+        && params.get("notes").and_then(J::as_array).is_some_and(|notes| {
+            notes.iter().any(|n| n.get("kind").and_then(J::as_str) == Some("branched"))
+        })
 }
 
 fn fail<E>(shared: &Shared<E>, ready: &mut Option<Sender<Result<Info, String>>>, message: String) {

@@ -3,17 +3,17 @@
 //! remote recovery integration tests; this fixture models old or malformed peers.
 #![allow(clippy::disallowed_types)]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use orr_bridge::{Bridge, BridgeEvent, Lifecycle};
+use orr_bridge::{Bridge, BridgeEvent, ControlOp, Lifecycle, SimControl};
 use orr_ecs::Frame;
 use orr_remote::codec::hex_encode;
 use orr_remote::wire::{encode_frame_message, timeline_to_json};
 use orr_remote::{ClientError, Incoming, RemoteBridge, RemoteConfig, RemoteViewDelivery, Request, Transport, TxHandle, ViewDeliveryMode};
-use orr_sample::physics_game::{PhysEvent, PhysGame};
+use orr_sample::physics_game::{PhysEvent, PhysGame, PhysInput};
 use orr_session::{PlayMode, Speed, Timeline};
 use orr_sim::Simulation;
 use serde_json::{json, Value as J};
@@ -41,10 +41,12 @@ struct ScriptTx {
     pipe: Arc<Pipe>,
     acknowledgement: J,
     requests: Arc<Mutex<Vec<Request>>>,
+    reject_inputs: Arc<AtomicBool>,
 }
 
 impl TxHandle for ScriptTx {
     fn send(&self, req: Request) -> Result<(), ClientError> {
+        let read_only = req.method == "sim.input" && self.reject_inputs.load(Ordering::Acquire);
         let result = match req.method.as_str() {
             "watch.subscribe" => self.acknowledgement.clone(),
             "sim.state" => json!({"tick_rate": 60, "player_count": 2}),
@@ -52,7 +54,12 @@ impl TxHandle for ScriptTx {
         };
         let id = req.id;
         self.requests.lock().unwrap().push(req);
-        self.pipe.send(ServerMessage::Message(Incoming::Text(json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string())))?;
+        let response = if read_only {
+            json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32003, "message": "replay viewer is read-only", "data": {"kind": "read_only"}}})
+        } else {
+            json!({"jsonrpc": "2.0", "id": id, "result": result})
+        };
+        self.pipe.send(ServerMessage::Message(Incoming::Text(response.to_string())))?;
         Ok(())
     }
 }
@@ -86,15 +93,21 @@ impl Transport for ScriptTransport {
 struct ScriptHost {
     pipe: Arc<Pipe>,
     requests: Arc<Mutex<Vec<Request>>>,
+    reject_inputs: Arc<AtomicBool>,
 }
 
 impl ScriptHost {
     fn new(acknowledgement: J) -> (Self, Box<dyn Transport>) {
+        Self::new_with_input_refusal(acknowledgement, false)
+    }
+
+    fn new_with_input_refusal(acknowledgement: J, reject_inputs: bool) -> (Self, Box<dyn Transport>) {
         let (tx, rx) = channel();
         let pipe = Arc::new(Pipe { tx, sent: AtomicUsize::new(0), received: AtomicUsize::new(0) });
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let tx = Arc::new(ScriptTx { pipe: pipe.clone(), acknowledgement, requests: requests.clone() });
-        (Self { pipe, requests }, Box::new(ScriptTransport { rx, tx }))
+        let reject_inputs = Arc::new(AtomicBool::new(reject_inputs));
+        let tx = Arc::new(ScriptTx { pipe: pipe.clone(), acknowledgement, requests: requests.clone(), reject_inputs: reject_inputs.clone() });
+        (Self { pipe, requests, reject_inputs }, Box::new(ScriptTransport { rx, tx }))
     }
 
     fn send(&self, message: Incoming) {
@@ -115,6 +128,10 @@ impl ScriptHost {
 
     fn requested_mode(&self) -> Option<J> {
         self.requests.lock().unwrap().iter().find(|r| r.method == "watch.subscribe").unwrap().params.get("view_delivery").cloned()
+    }
+
+    fn input_request_count(&self) -> usize {
+        self.requests.lock().unwrap().iter().filter(|r| r.method == "sim.input").count()
     }
 }
 
@@ -137,6 +154,83 @@ fn connect(mode: ViewDeliveryMode, acknowledgement: J) -> (RemoteBridge<PhysGame
     cfg.view_event_capacity = 2;
     cfg.connect_timeout = Duration::from_secs(2);
     (RemoteBridge::connect_transport(transport, cfg).unwrap(), host)
+}
+
+fn connect_rejecting_inputs() -> (RemoteBridge<PhysGame>, ScriptHost) {
+    let (host, transport) = ScriptHost::new_with_input_refusal(acknowledgement(), true);
+    let mut cfg = RemoteConfig::new("");
+    cfg.view_delivery = ViewDeliveryMode::Legacy;
+    cfg.connect_timeout = Duration::from_secs(2);
+    (RemoteBridge::connect_transport(transport, cfg).unwrap(), host)
+}
+
+#[test]
+fn identical_input_is_retried_after_read_only_error_and_local_branch() {
+    let (mut bridge, host) = connect_rejecting_inputs();
+    let input = PhysInput::new(1, 0, 0, false);
+
+    bridge.set_input(orr_sim::PlayerSlot(0), input).unwrap();
+    host.flush();
+    assert!(bridge.take_errors().iter().any(|e| e.kind() == Some("read_only")));
+    assert_eq!(host.input_request_count(), 1);
+
+    host.reject_inputs.store(false, Ordering::Release);
+    bridge.control(ControlOp::Branch).unwrap();
+    bridge.set_input(orr_sim::PlayerSlot(0), input).unwrap();
+    host.flush();
+
+    assert_eq!(host.input_request_count(), 2, "same held input must be resent after Branch");
+    assert!(bridge.take_errors().is_empty());
+}
+
+#[test]
+fn identical_input_is_retried_after_another_clients_branch_note() {
+    let (mut bridge, host) = connect(ViewDeliveryMode::Legacy, acknowledgement());
+    let input = PhysInput::new(1, 0, 0, false);
+
+    bridge.set_input(orr_sim::PlayerSlot(0), input).unwrap();
+    host.flush();
+    assert!(bridge.take_errors().is_empty());
+    assert_eq!(host.input_request_count(), 1);
+
+    host.send(Incoming::Text(json!({"jsonrpc": "2.0", "method": "watch.notes", "params": {"notes": [{"kind": "branched", "tick": 0, "dropped": 0}]}}).to_string()));
+    host.flush();
+    bridge.set_input(orr_sim::PlayerSlot(0), input).unwrap();
+    host.flush();
+
+    assert_eq!(host.input_request_count(), 2, "same held input must be resent after a remote Branch");
+    assert!(bridge.take_errors().is_empty());
+}
+
+#[test]
+fn rejected_input_can_be_retried_without_waiting_for_a_branch_notification() {
+    let (mut bridge, host) = connect_rejecting_inputs();
+    let input = PhysInput::new(1, 0, 0, false);
+    bridge.set_input(orr_sim::PlayerSlot(0), input).unwrap();
+    host.flush();
+    assert!(bridge.take_errors().iter().any(|e| e.kind() == Some("read_only")));
+    host.reject_inputs.store(false, Ordering::Release);
+    bridge.set_input(orr_sim::PlayerSlot(0), input).unwrap();
+    host.flush();
+    assert_eq!(host.input_request_count(), 2);
+    assert!(bridge.take_errors().is_empty());
+}
+
+#[test]
+fn explicit_session_transition_requests_invalidate_an_accepted_input() {
+    let (mut bridge, host) = connect(ViewDeliveryMode::Legacy, acknowledgement());
+    let input = PhysInput::new(1, 0, 0, false);
+    bridge.set_input(orr_sim::PlayerSlot(0), input).unwrap();
+    host.flush();
+    for (index, method) in ["sim.branch", "sim.start", "sim.stop"].into_iter().enumerate() {
+        bridge.request(method, J::Null).unwrap();
+        bridge.set_input(orr_sim::PlayerSlot(0), input).unwrap();
+        host.flush();
+        assert_eq!(host.input_request_count(), index + 2, "{method}");
+    }
+    host.close();
+    wait_until("remote close", || !bridge.is_alive());
+    assert_eq!(bridge.set_input(orr_sim::PlayerSlot(0), input), Err(orr_bridge::BridgeError::Disconnected));
 }
 
 fn cut(cursor: u64, count: u64) -> J {

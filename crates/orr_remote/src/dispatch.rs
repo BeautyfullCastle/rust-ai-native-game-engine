@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use orr_ecs::Entity;
 use orr_edit::{EditorDoc, EntityInfo, Op, Origin, PlayController, StoppedPlay, Target, View};
 use orr_reflect::{Guid, TypeInfo, TypeKind, Value};
-use orr_session::{ControlOp, Speed};
+use orr_session::{ControlOp, PlayMode, Speed};
 use orr_sim::{EventKey, Game, PlayerSlot, SimCommand};
 use serde_json::{json, Map, Value as J};
 
@@ -960,7 +960,7 @@ fn slot_of<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>, required: bool) -> Result<P
 }
 
 fn sim_input<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
-    play_mut(t)?;
+    require_writable_play(t)?;
     let slot = slot_of(t, p, true)?;
     let bytes = hex_decode(p.str("input")?).ok_or_else(|| RpcError::params("'input' is not valid hex"))?;
     let input = bytemuck::try_pod_read_unaligned::<G::Input>(&bytes)
@@ -970,10 +970,17 @@ fn sim_input<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError
 }
 
 fn sim_command<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
-    play_mut(t)?;
+    require_writable_play(t)?;
     let slot = slot_of(t, p, false)?;
     let bytes = hex_decode(p.str("command")?).ok_or_else(|| RpcError::params("'command' is not valid hex"))?;
     let cmd = <G::Command as SimCommand>::decode(&bytes).ok_or_else(|| RpcError::params("'command' does not decode as this game's Command"))?;
-    play_mut(t)?.session_mut().push_command(slot, cmd);
+    play_mut(t)?.session_mut().push_command(slot, cmd).map_err(|e| RpcError::state("read_only", e.to_string()))?;
     Ok(json!({"ok": true}))
+}
+
+fn require_writable_play<G: Game>(t: &mut ErpTarget<'_, G>) -> Result<(), RpcError> {
+    if play_mut(t)?.session().mode() == PlayMode::Viewer {
+        return Err(RpcError::state("read_only", "replay viewer is read-only; branch before sending inputs or commands"));
+    }
+    Ok(())
 }
