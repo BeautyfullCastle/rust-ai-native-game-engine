@@ -78,14 +78,59 @@ lose the authoritative score in the snapshot.
 
 ## Adapter and wire limits
 
-This recovery implementation covers `InProc` and `Threaded`, including consumers
-of their view streams. `RemoteBridge`, including the editor's in-process
-`LocalHost` transport, retains its existing unbounded event queue and best-effort
-split snapshot/event delivery. ERP sends events before throttled frames without
-a shared event cursor, so no coherent bounded recovery is claimed there.
-Network disconnection still requires the existing reconnect path. A future ERP
-extension needs a snapshot/event fence and timeline identity before applying this
-contract across that transport.
+`InProc`, `Threaded`, and an explicitly negotiated `RemoteBridge` support
+bounded coherent presentation recovery. `RemoteConfig::view_delivery` selects
+`RequireFenced`, `PreferFenced` (default), or `Legacy`.
+`RemoteBridge::view_delivery()` reports the guarantee the host actually
+acknowledged. An old host may ignore the extra subscription parameter; a
+successful subscription without the explicit acknowledgement is **legacy**,
+never evidence of fenced recovery. `RequireFenced` rejects that connection.
+`PreferFenced` preserves the old unbounded, split-read behavior on an old host;
+the editor displays this fallback. Local editor hosts require the extension.
+
+The negotiated mailbox's `view_event_capacity` bounds the combined retained
+notification staging and render queues, with two fixed local status slots for
+session start and terminal disconnect. Transport ingress (`PumpedWs` and
+`LocalTransport`), RPC requests/replies, `take_errors`, and caller-retained
+snapshots are outside this bound. Oversized decoded messages have a temporary
+allocation cost. This is not a whole-transport memory or byte budget.
+
+The ERP `watch.subscribe` request opts in with `view_delivery: 1` and all three
+`frames`, `events`, and `notes` topics. The result explicitly echoes the version,
+a new subscription identity, and initial cursor/count. Every negotiated
+notification carries a `delivery` object with subscription, presentation
+timeline, independent output cursor, and cumulative notification count. Full
+snapshot metadata carries the matching `through_cursor`, loss generation, and
+bounded cumulative lifecycle summaries. All delivery counters are decimal u64
+strings; existing frame payloads and ERP/ORRS wire versions are unchanged.
+Presentation identity includes session incarnation, seek/debug epoch, explicit
+branch, and source changes; it is not the raw simulation tick or epoch alone.
+
+Notifications wait in bounded staging until a decoded full frame covers their
+output cursor. A frame's state and watermark are built together, including
+paused same-tick diagnostic progress. A cursor gap, dropped transport admission,
+timeline change, or local overflow requires a newest covering baseline. That
+reset stays pending until `poll_view()` consumes its pinned snapshot, and newer
+frames can replace it while simulation continues. Missing transient effects
+are discarded; no replay/catch-up loop runs on the render thread. Late old event
+keys are suppressed only within that presentation timeline.
+
+When a requested source is unavailable (stopped `sim`, unavailable proposal),
+`watch.view.inactive` carries the same complete delivery fence without a frame.
+It explicitly clears stale presentation state. The next available source gets
+a fresh timeline identity and baseline. Malformed negotiated metadata or payload
+fails the presentation connection closed instead of silently downgrading it.
+Disconnect is observable even while recovery awaits a frame; an older snapshot
+never masquerades as a covering reset. Reconnect uses the existing explicit
+path and starts a new subscription; it does not restart the simulation.
+
+Six ERP play-note categories have cumulative fixed-size summaries (seek,
+branch, pause, resume, debug rejection, seek rejection); local start/disconnect
+status is separate. These diagnostics are coalesced history, never fabricated
+individual RPC responses. Auth and request replies bypass presentation admission
+loss, and remain outside its bounded queue claim. The editor polls both main
+and proposal-preview streams, rebuilds from the pinned pair, and retains its
+separate request-response bookkeeping.
 
 Viewstream carries an explicit events-reset frame flag together with
 `FLAG_DISCONTINUITY`; it forces a frame even if the paused snapshot sequence has
@@ -146,3 +191,34 @@ The complete `cargo test --workspace --release` aggregate was still compiling
 and linking with thin LTO when this checkpoint was recorded. It is **pending**,
 not a claimed full-workspace pass. The focused count above must not be described
 as a full release, browser-runtime, or cross-platform verification result.
+
+
+## Negotiated remote verification
+
+85 distinct focused tests passed in the native debug profile for this extension:
+
+- `cargo test -p orr_remote --lib --test remote_delivery --test remote_view_live`:
+  44 tests (33 library, 9 negotiation/malformed-peer, 2 actual transport)
+- `cargo test -p orr_editor --lib --test attach --test agent --test crash`:
+  25 tests, including 8 main/preview recovery regressions
+- `cargo test -p orr_remote --test local --test watch_remote --test view_recovery_remote`:
+  16 compatibility tests
+
+Both actual transport regressions use `LocalHost<PhysGame>` with a capacity-one
+RemoteBridge and one-fps frames, once through its in-process transport and once
+through a real WebSocket. Real shooting events overflow staging; the recovered
+snapshot reaches tick 104 with the authoritative checksum. While presentation
+is left unread the real-time simulation keeps advancing. Recovery then accepts
+a genuine newer event tail without exposing an event ahead of its snapshot.
+The malformed-peer fixtures additionally cover missing capability acknowledgements,
+malformed fences, impossible verified progress, and disconnect before coverage.
+
+The four `cargo test -p orr_mcp --test agents_md` checks also passed, including
+identical regeneration of the committed guide (89 focused tests in total).
+`cargo clippy --workspace --all-targets -- -D warnings` also passed for the
+complete workspace. No authoritative simulation/checksum or late-join protocol
+changes are included.
+
+These focused results are not a full-workspace release, browser-runtime, or
+cross-platform result. The historical checkpoint counts above predate the
+negotiated extension. Full release/CI verification of this extension is separate.

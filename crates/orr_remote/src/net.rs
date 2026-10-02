@@ -37,11 +37,24 @@ const MAX_AUTH_FAILURES: u32 = 5;
 
 /// What the host thread gets from the network threads.
 pub(crate) enum Inbound {
-    Connected { conn: u64, client: String, caps: Caps, tx: ConnTx, binary: bool },
-    Disconnected { conn: u64 },
+    Connected {
+        conn: u64,
+        client: String,
+        caps: Caps,
+        tx: ConnTx,
+        binary: bool,
+    },
+    Disconnected {
+        conn: u64,
+    },
     /// A connection presented a token that was refused.
     AuthFailed,
-    Request { conn: u64, id: Option<J>, method: String, params: J },
+    Request {
+        conn: u64,
+        id: Option<J>,
+        method: String,
+        params: J,
+    },
 }
 
 pub(crate) enum Out {
@@ -69,7 +82,10 @@ pub(crate) struct ConnTx {
 impl ConnTx {
     /// The writing end of an in-process connection (its reading end is the client's).
     pub(crate) fn local(tx: std::sync::mpsc::Sender<Incoming>, pending: Arc<AtomicUsize>) -> Self {
-        Self { sink: Sink::Local(tx), pending }
+        Self {
+            sink: Sink::Local(tx),
+            pending,
+        }
     }
 
     pub(crate) fn is_local(&self) -> bool {
@@ -89,6 +105,61 @@ impl ConnTx {
                 let _ = tx.send(Incoming::Text(s));
             }
         }
+    }
+    /// Admission-aware presentation delivery. A rejected notification is
+    /// accounted for by the negotiated view stream's next snapshot fence.
+    pub(crate) fn try_send_text(&self, s: String) -> bool {
+        if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
+            return false;
+        }
+        self.send_control_text(s)
+    }
+
+    /// Request responses are never discarded by presentation backpressure.
+    /// This control lane is deliberately outside the presentation queue bound.
+    pub(crate) fn send_control_text(&self, s: String) -> bool {
+        let cost = s.len();
+        self.pending.fetch_add(cost, Relaxed);
+        let sent = match &self.sink {
+            Sink::Net(tx) => tx.send(Out::Text(s)).is_ok(),
+            Sink::Local(tx) => tx.send(Incoming::Text(s)).is_ok(),
+        };
+        if !sent {
+            self.pending.fetch_sub(cost, Relaxed);
+        }
+        sent
+    }
+
+    pub(crate) fn try_send_binary(&self, b: Arc<Vec<u8>>) -> bool {
+        if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
+            return false;
+        }
+        let Sink::Net(tx) = &self.sink else {
+            return false;
+        };
+        let cost = b.len();
+        self.pending.fetch_add(cost, Relaxed);
+        let sent = tx.send(Out::Binary(b)).is_ok();
+        if !sent {
+            self.pending.fetch_sub(cost, Relaxed);
+        }
+        sent
+    }
+
+    pub(crate) fn try_send_local_frame(&self, f: Arc<LocalFrame>) -> bool {
+        if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
+            return false;
+        }
+        let Sink::Local(tx) = &self.sink else {
+            return false;
+        };
+        let cost = f.cost;
+        self.pending.fetch_add(cost, Relaxed);
+        let sent = tx.send(Incoming::Local(f)).is_ok();
+        if !sent {
+            self.pending.fetch_sub(cost, Relaxed);
+        }
+        sent
     }
     pub(crate) fn send_binary(&self, b: Arc<Vec<u8>>) {
         if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
@@ -181,7 +252,9 @@ enum Flow {
 impl Link {
     fn who(&self) -> J {
         match &self.identity {
-            Some((c, caps)) => json!({"client": c, "capabilities": caps.list().into_iter().map(|c| c.name()).collect::<Vec<_>>()}),
+            Some((c, caps)) => {
+                json!({"client": c, "capabilities": caps.list().into_iter().map(|c| c.name()).collect::<Vec<_>>()})
+            }
             None => J::Null,
         }
     }
@@ -189,16 +262,25 @@ impl Link {
     fn set_identity(&mut self, client: String, caps: Caps) {
         self.identity = Some((client.clone(), caps));
         self.announced = true;
-        let _ = self.shared.inbox.send(Inbound::Connected { conn: self.id, client, caps, tx: self.out.clone(), binary: self.binary });
+        let _ = self.shared.inbox.send(Inbound::Connected {
+            conn: self.id,
+            client,
+            caps,
+            tx: self.out.clone(),
+            binary: self.binary,
+        });
     }
 
     fn reply_err(&self, id: &J, e: RpcError) {
-        self.out.send_text(response_err(id, &e));
+        self.out.send_control_text(response_err(id, &e));
     }
 
     fn finish(&self) {
         if self.announced {
-            let _ = self.shared.inbox.send(Inbound::Disconnected { conn: self.id });
+            let _ = self
+                .shared
+                .inbox
+                .send(Inbound::Disconnected { conn: self.id });
         }
         self.out.close();
     }
@@ -212,7 +294,11 @@ impl Link {
                 RpcError::new(
                     INVALID_REQUEST,
                     "too_large",
-                    format!("message of {} bytes is over the limit of {} bytes", text.len(), self.shared.max_message_bytes),
+                    format!(
+                        "message of {} bytes is over the limit of {} bytes",
+                        text.len(),
+                        self.shared.max_message_bytes
+                    ),
                 ),
             );
             return Flow::Continue;
@@ -220,27 +306,58 @@ impl Link {
         let parsed: J = match serde_json::from_str(text) {
             Ok(v) => v,
             Err(e) => {
-                self.reply_err(&null, RpcError::new(PARSE_ERROR, "parse_error", format!("invalid JSON: {e}")));
+                self.reply_err(
+                    &null,
+                    RpcError::new(PARSE_ERROR, "parse_error", format!("invalid JSON: {e}")),
+                );
                 return Flow::Continue;
             }
         };
         let J::Object(mut obj) = parsed else {
-            let msg = if parsed.is_array() { "batch requests are not supported" } else { "a request must be a JSON object" };
-            self.reply_err(&null, RpcError::new(INVALID_REQUEST, "invalid_request", msg));
+            let msg = if parsed.is_array() {
+                "batch requests are not supported"
+            } else {
+                "a request must be a JSON object"
+            };
+            self.reply_err(
+                &null,
+                RpcError::new(INVALID_REQUEST, "invalid_request", msg),
+            );
             return Flow::Continue;
         };
         let id = obj.get("id").cloned();
         let reply_id = id.clone().unwrap_or(J::Null);
         if !matches!(id, None | Some(J::Null | J::Number(_) | J::String(_))) {
-            self.reply_err(&null, RpcError::new(INVALID_REQUEST, "invalid_request", "'id' must be a string, a number or null"));
+            self.reply_err(
+                &null,
+                RpcError::new(
+                    INVALID_REQUEST,
+                    "invalid_request",
+                    "'id' must be a string, a number or null",
+                ),
+            );
             return Flow::Continue;
         }
         if obj.get("jsonrpc").and_then(J::as_str) != Some("2.0") {
-            self.reply_err(&reply_id, RpcError::new(INVALID_REQUEST, "invalid_request", "'jsonrpc' must be \"2.0\""));
+            self.reply_err(
+                &reply_id,
+                RpcError::new(
+                    INVALID_REQUEST,
+                    "invalid_request",
+                    "'jsonrpc' must be \"2.0\"",
+                ),
+            );
             return Flow::Continue;
         }
         let Some(method) = obj.get("method").and_then(J::as_str).map(str::to_string) else {
-            self.reply_err(&reply_id, RpcError::new(INVALID_REQUEST, "invalid_request", "'method' must be a string"));
+            self.reply_err(
+                &reply_id,
+                RpcError::new(
+                    INVALID_REQUEST,
+                    "invalid_request",
+                    "'method' must be a string",
+                ),
+            );
             return Flow::Continue;
         };
         let params = obj.remove("params").unwrap_or(J::Null);
@@ -256,16 +373,41 @@ impl Link {
             self.failures += 1;
             self.reply_err(
                 &reply_id,
-                RpcError::new(UNAUTHENTICATED, "unauthenticated", "authenticate first: {\"method\":\"auth\",\"params\":{\"token\":\"...\"}}"),
+                RpcError::new(
+                    UNAUTHENTICATED,
+                    "unauthenticated",
+                    "authenticate first: {\"method\":\"auth\",\"params\":{\"token\":\"...\"}}",
+                ),
             );
-            return if self.failures >= MAX_AUTH_FAILURES { Flow::Close } else { Flow::Continue };
+            return if self.failures >= MAX_AUTH_FAILURES {
+                Flow::Close
+            } else {
+                Flow::Continue
+            };
         }
         if self.shared.queued.load(Relaxed) >= self.shared.max_queued {
-            self.reply_err(&reply_id, RpcError::new(LIMIT_EXCEEDED, "busy", "the host has too many requests queued; retry"));
+            self.reply_err(
+                &reply_id,
+                RpcError::new(
+                    LIMIT_EXCEEDED,
+                    "busy",
+                    "the host has too many requests queued; retry",
+                ),
+            );
             return Flow::Continue;
         }
         self.shared.queued.fetch_add(1, Relaxed);
-        if self.shared.inbox.send(Inbound::Request { conn: self.id, id, method, params }).is_err() {
+        if self
+            .shared
+            .inbox
+            .send(Inbound::Request {
+                conn: self.id,
+                id,
+                method,
+                params,
+            })
+            .is_err()
+        {
             return Flow::Close;
         }
         Flow::Continue
@@ -274,27 +416,35 @@ impl Link {
     fn on_auth(&mut self, reply_id: &J, wants_reply: bool, params: &J) -> Flow {
         if self.identity.is_some() {
             if wants_reply {
-                self.out.send_text(response_ok(reply_id, self.who()));
+                self.out
+                    .send_control_text(response_ok(reply_id, self.who()));
             }
             return Flow::Continue;
         }
         let token = params.get("token").and_then(J::as_str).unwrap_or("");
         let found = match &self.shared.auth {
-            Auth::Tokens(list) => list.iter().find(|t| secret_eq(&t.token, token)).map(|t| (t.client.clone(), t.caps)),
+            Auth::Tokens(list) => list
+                .iter()
+                .find(|t| secret_eq(&t.token, token))
+                .map(|t| (t.client.clone(), t.caps)),
             Auth::DevNoAuth => Some(("dev".to_string(), Caps::ALL)),
         };
         match found {
             Some((client, caps)) => {
                 self.set_identity(client, caps);
                 if wants_reply {
-                    self.out.send_text(response_ok(reply_id, self.who()));
+                    self.out
+                        .send_control_text(response_ok(reply_id, self.who()));
                 }
                 Flow::Continue
             }
             None => {
                 self.failures += 1;
                 let _ = self.shared.inbox.send(Inbound::AuthFailed);
-                self.reply_err(reply_id, RpcError::new(UNAUTHENTICATED, "bad_token", "the token was refused"));
+                self.reply_err(
+                    reply_id,
+                    RpcError::new(UNAUTHENTICATED, "bad_token", "the token was refused"),
+                );
                 if self.failures >= MAX_AUTH_FAILURES {
                     Flow::Close
                 } else {
@@ -338,13 +488,23 @@ async fn serve(shared: Arc<NetShared>, stream: TcpStream) {
     }
 }
 
-fn new_link(shared: &Arc<NetShared>, binary: bool) -> (Link, tokio::sync::mpsc::UnboundedReceiver<Out>, Arc<AtomicUsize>) {
+fn new_link(
+    shared: &Arc<NetShared>,
+    binary: bool,
+) -> (
+    Link,
+    tokio::sync::mpsc::UnboundedReceiver<Out>,
+    Arc<AtomicUsize>,
+) {
     let (tx, rx) = unbounded_channel();
     let pending = Arc::new(AtomicUsize::new(0));
     let link = Link {
         id: shared.next_id.fetch_add(1, Relaxed),
         shared: shared.clone(),
-        out: ConnTx { sink: Sink::Net(tx), pending: pending.clone() },
+        out: ConnTx {
+            sink: Sink::Net(tx),
+            pending: pending.clone(),
+        },
         binary,
         identity: None,
         failures: 0,
@@ -370,7 +530,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+            let hex = std::str::from_utf8(&b[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
             if let Some(v) = hex {
                 out.push(v);
                 i += 3;
@@ -385,7 +547,10 @@ fn percent_decode(s: &str) -> String {
 
 /// A client name a dev-mode client may give: short, printable, no spaces.
 fn valid_client_name(n: &str) -> bool {
-    !n.is_empty() && n.len() <= 32 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+    !n.is_empty()
+        && n.len() <= 32
+        && n.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
 }
 
 fn refuse(status: http::StatusCode, why: &str) -> ErrorResponse {
@@ -397,7 +562,9 @@ fn refuse(status: http::StatusCode, why: &str) -> ErrorResponse {
 #[allow(clippy::result_large_err)] // the error type is fixed by the tungstenite callback trait
 async fn ws_conn(shared: Arc<NetShared>, stream: TcpStream) {
     let hard = shared.max_message_bytes.saturating_mul(4).max(1 << 16);
-    let cfg = WebSocketConfig::default().max_message_size(Some(hard)).max_frame_size(Some(hard));
+    let cfg = WebSocketConfig::default()
+        .max_message_size(Some(hard))
+        .max_frame_size(Some(hard));
     let mut url_identity: Option<(String, Caps)> = None;
     let mut dev_client: Option<String> = None;
     let check = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
@@ -410,24 +577,39 @@ async fn ws_conn(shared: Arc<NetShared>, stream: TcpStream) {
         }
         if matches!(shared.auth, Auth::DevNoAuth) {
             // Dev mode has no tokens, so a client may say who it is: `?client=user` is a person's view.
-            dev_client = req.uri().query().and_then(|q| query_param(q, "client")).filter(|n| valid_client_name(n));
+            dev_client = req
+                .uri()
+                .query()
+                .and_then(|q| query_param(q, "client"))
+                .filter(|n| valid_client_name(n));
         }
         if let Auth::Tokens(list) = &shared.auth {
             if let Some(token) = req.uri().query().and_then(|q| query_param(q, "token")) {
                 match list.iter().find(|t| secret_eq(&t.token, &token)) {
                     Some(t) => url_identity = Some((t.client.clone(), t.caps)),
-                    None => return Err(refuse(http::StatusCode::UNAUTHORIZED, "the token was refused")),
+                    None => {
+                        return Err(refuse(
+                            http::StatusCode::UNAUTHORIZED,
+                            "the token was refused",
+                        ))
+                    }
                 }
             }
         }
         Ok(resp)
     };
-    let ws = timeout(HANDSHAKE_TIMEOUT, tokio_tungstenite::accept_hdr_async_with_config(stream, check, Some(cfg))).await;
+    let ws = timeout(
+        HANDSHAKE_TIMEOUT,
+        tokio_tungstenite::accept_hdr_async_with_config(stream, check, Some(cfg)),
+    )
+    .await;
     let Ok(Ok(ws)) = ws else { return };
     let (mut sink, mut source) = ws.split();
     let (mut link, mut rx, pending) = new_link(&shared, true);
     match (&shared.auth, url_identity) {
-        (Auth::DevNoAuth, _) => link.set_identity(dev_client.unwrap_or_else(|| "dev".to_string()), Caps::ALL),
+        (Auth::DevNoAuth, _) => {
+            link.set_identity(dev_client.unwrap_or_else(|| "dev".to_string()), Caps::ALL)
+        }
         (_, Some((client, caps))) => link.set_identity(client, caps),
         _ => {}
     }
@@ -524,11 +706,21 @@ async fn ndjson_conn(shared: Arc<NetShared>, stream: TcpStream) {
             Ok(_) => {}
         }
         if line.len() > hard {
-            link.reply_err(&J::Null, RpcError::new(INVALID_REQUEST, "too_large", "line is over the limit; closing"));
+            link.reply_err(
+                &J::Null,
+                RpcError::new(
+                    INVALID_REQUEST,
+                    "too_large",
+                    "line is over the limit; closing",
+                ),
+            );
             break;
         }
         let Ok(text) = std::str::from_utf8(&line) else {
-            link.reply_err(&J::Null, RpcError::new(PARSE_ERROR, "parse_error", "the line is not UTF-8"));
+            link.reply_err(
+                &J::Null,
+                RpcError::new(PARSE_ERROR, "parse_error", "the line is not UTF-8"),
+            );
             continue;
         };
         let text = text.trim();
@@ -554,8 +746,14 @@ mod tests {
 
     #[test]
     fn query_tokens() {
-        assert_eq!(query_param("token=abc&x=1", "token").as_deref(), Some("abc"));
-        assert_eq!(query_param("x=1&token=a%3Ab", "token").as_deref(), Some("a:b"));
+        assert_eq!(
+            query_param("token=abc&x=1", "token").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            query_param("x=1&token=a%3Ab", "token").as_deref(),
+            Some("a:b")
+        );
         assert_eq!(query_param("x=1", "token"), None);
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("%zz"), "%zz");

@@ -37,8 +37,10 @@ use crate::codec::hex_encode;
 use crate::dispatch::{authorize, call, CallCtx, Effects, ErpTarget, HostLimits, TxChange};
 use crate::error::*;
 use crate::link::{LocalConnector, LocalFrame};
+use crate::net::{
+    accept_loop, bind, notification, response_err, response_ok, ConnTx, Inbound, NetShared,
+};
 use crate::proposals::ProposalWatch;
-use crate::net::{accept_loop, bind, notification, response_err, response_ok, ConnTx, Inbound, NetShared};
 use crate::wire::{checksum_text, debug_error_name, encode_frame_message, timeline_to_json};
 
 /// Frame data queued to one connection above which frames are skipped for it.
@@ -120,6 +122,105 @@ struct Subs {
     frames: Option<FrameSub>,
     /// The view stream (`viewstream` topic); reuses the frame subscription's pacing.
     viewstream: Option<FrameSub>,
+    /// Opt-in, cursor-fenced presentation delivery. Legacy topics stay unchanged.
+    delivery: Option<ViewDelivery>,
+}
+
+const MAX_VIEW_BATCH_EVENTS: usize = 100_000;
+
+#[derive(Clone)]
+struct ViewNoteTally {
+    count: u64,
+    order: u64,
+    note: PlayNote,
+}
+
+struct ViewDelivery {
+    subscription: u64,
+    timeline: u64,
+    identity: Option<FrameKey>,
+    cursor: u64,
+    count: u64,
+    loss_generation: u64,
+    notes: [Option<ViewNoteTally>; 6],
+    last_cut: Option<(Option<FrameKey>, u64, u64, u64)>,
+}
+
+impl ViewDelivery {
+    fn new(subscription: u64) -> Self {
+        Self {
+            subscription,
+            timeline: 1,
+            identity: None,
+            cursor: 0,
+            count: 0,
+            // The first complete snapshot is an explicit presentation baseline.
+            loss_generation: 1,
+            notes: std::array::from_fn(|_| None),
+            last_cut: None,
+        }
+    }
+
+    fn advance(&mut self, count: usize) {
+        self.cursor = self.cursor.checked_add(1).expect("view cursor exhausted");
+        self.count = self.count.saturating_add(count as u64);
+    }
+
+    fn lost(&mut self) {
+        self.loss_generation = self
+            .loss_generation
+            .checked_add(1)
+            .expect("view loss generation exhausted");
+    }
+
+    fn observe(&mut self, identity: FrameKey) {
+        if self.identity.is_some_and(|old| old != identity) {
+            self.timeline = self
+                .timeline
+                .checked_add(1)
+                .expect("view timeline exhausted");
+            self.lost();
+        }
+        self.identity = Some(identity);
+    }
+
+    fn notification_meta(&self) -> J {
+        json!({"subscription": self.subscription.to_string(), "timeline": self.timeline.to_string(),
+            "cursor": self.cursor.to_string(), "count": self.count.to_string()})
+    }
+
+    fn frame_meta(&self) -> J {
+        let mut notes: Vec<_> = self.notes.iter().flatten().collect();
+        notes.sort_by_key(|n| n.order);
+        json!({"subscription": self.subscription.to_string(), "timeline": self.timeline.to_string(),
+            "through_cursor": self.cursor.to_string(), "count": self.count.to_string(),
+            "loss_generation": self.loss_generation.to_string(),
+            "lifecycle": notes.into_iter().map(|n| json!({"count": n.count.to_string(),
+                "order": n.order.to_string(), "note": note_json(n.note)})).collect::<Vec<_>>()})
+    }
+
+    fn record_notes(&mut self, notes: &[PlayNote]) {
+        let start = self.count;
+        self.advance(notes.len());
+        for (i, note) in notes.iter().copied().enumerate() {
+            let kind = match note {
+                PlayNote::Seeked { .. } => 0,
+                PlayNote::Branched { .. } => 1,
+                PlayNote::Paused { .. } => 2,
+                PlayNote::Resumed { .. } => 3,
+                PlayNote::DebugRejected(_) => 4,
+                PlayNote::SeekRejected { .. } => 5,
+            };
+            let count = self.notes[kind]
+                .as_ref()
+                .map_or(1, |n| n.count.saturating_add(1));
+            self.notes[kind] = Some(ViewNoteTally {
+                count,
+                order: start.saturating_add(i as u64).saturating_add(1),
+                note,
+            });
+        }
+    }
 }
 
 struct ActivitySub {
@@ -166,7 +267,10 @@ impl FrameSub {
             if info.events_reset {
                 self.client_reset_pending = true;
                 self.client_clear_event_floor_after_frame = false;
-            } else if !self.client_reset_pending && self.client_event_floor.is_some() && info.discontinuity {
+            } else if !self.client_reset_pending
+                && self.client_event_floor.is_some()
+                && info.discontinuity
+            {
                 self.client_clear_event_floor_after_frame = true;
             }
         }
@@ -178,9 +282,15 @@ impl FrameSub {
         if self.client_reset_pending {
             return None;
         }
-        let Some(floor) = self.client_event_floor else { return Some(bytes.clone()) };
+        let Some(floor) = self.client_event_floor else {
+            return Some(bytes.clone());
+        };
         let batch = orr_viewstream::EventBatch::decode(bytes).ok()?;
-        let events: Vec<_> = batch.events.into_iter().filter(|event| event.tick > floor).collect();
+        let events: Vec<_> = batch
+            .events
+            .into_iter()
+            .filter(|event| event.tick > floor)
+            .collect();
         if events.is_empty() {
             return None;
         }
@@ -282,6 +392,10 @@ pub struct ErpServer {
     crash: bool,
     frame_pending: bool,
     events_out: Vec<(EventKey, Vec<u8>)>,
+    notes_out: Vec<PlayNote>,
+    pending_view_losses: usize,
+    view_incarnation: u64,
+    next_view_subscription: u64,
     last_hist_check: Option<Instant>,
     last_prop_check: Option<Instant>,
     prop_watch: Option<ProposalWatch>,
@@ -309,7 +423,11 @@ impl ErpServer {
                     cfg.bind
                 )));
             }
-            Auth::Tokens(t) if t.is_empty() => return Err(ServerError("no tokens configured (use Auth::DevNoAuth for local development)".into())),
+            Auth::Tokens(t) if t.is_empty() => {
+                return Err(ServerError(
+                    "no tokens configured (use Auth::DevNoAuth for local development)".into(),
+                ))
+            }
             _ => {}
         }
         let (rt, listener) = if cfg.listen {
@@ -319,7 +437,8 @@ impl ErpServer {
                 .enable_all()
                 .build()
                 .map_err(|e| ServerError(format!("cannot start the network runtime: {e}")))?;
-            let listener = bind(&rt, cfg.bind).map_err(|e| ServerError(format!("cannot listen on {}: {e}", cfg.bind)))?;
+            let listener = bind(&rt, cfg.bind)
+                .map_err(|e| ServerError(format!("cannot listen on {}: {e}", cfg.bind)))?;
             (Some(rt), Some(listener))
         } else {
             (None, None)
@@ -357,6 +476,10 @@ impl ErpServer {
             conns: BTreeMap::new(),
             tx_owner: None,
             events_out: Vec::new(),
+            notes_out: Vec::new(),
+            pending_view_losses: 0,
+            view_incarnation: 1,
+            next_view_subscription: 1,
             last_hist_check: None,
             last_prop_check: None,
             prop_watch: None,
@@ -409,7 +532,9 @@ impl ErpServer {
     /// that owns the client (an editor UI) while the host thread runs
     /// [`poll`](Self::poll). See [`crate::link`].
     pub fn connector(&self) -> LocalConnector {
-        LocalConnector { shared: self.net.clone() }
+        LocalConnector {
+            shared: self.net.clone(),
+        }
     }
 
     /// Sleeps until a request or a connection event arrives, at most
@@ -439,7 +564,13 @@ impl ErpServer {
     pub fn clients(&self) -> Vec<ClientInfo> {
         self.conns
             .iter()
-            .map(|(id, c)| ClientInfo { id: *id, name: c.client.clone(), caps: c.caps, connected_ms: c.connected_ms, requests: c.requests })
+            .map(|(id, c)| ClientInfo {
+                id: *id,
+                name: c.client.clone(),
+                caps: c.caps,
+                connected_ms: c.connected_ms,
+                requests: c.requests,
+            })
             .collect()
     }
 
@@ -491,9 +622,18 @@ impl ErpServer {
     }
 
     fn activity_list(&self, params: &J) -> J {
-        let lp = activity::list_params(params).unwrap_or(activity::ListParams { since: 0, limit: 200, include_reads: false });
+        let lp = activity::list_params(params).unwrap_or(activity::ListParams {
+            since: 0,
+            limit: 200,
+            include_reads: false,
+        });
         let start = self.activity.partition_point(|e| e.seq <= lp.since);
-        let mut list: Vec<&ActivityEntry> = self.activity.iter().skip(start).filter(|e| lp.include_reads || !e.read).collect();
+        let mut list: Vec<&ActivityEntry> = self
+            .activity
+            .iter()
+            .skip(start)
+            .filter(|e| lp.include_reads || !e.read)
+            .collect();
         let truncated = list.len() > lp.limit;
         if truncated {
             list.drain(..list.len() - lp.limit);
@@ -521,14 +661,21 @@ impl ErpServer {
     /// Hands the server sim events of ticks the host ran itself (real-time
     /// play), to forward to `events` subscribers. Dropped if nobody listens.
     pub fn push_events<E: bytemuck::Pod>(&mut self, events: &[SimEvent<E>]) {
-        if !self.conns.values().any(|c| c.subs.events || c.subs.viewstream.is_some()) {
+        if !self
+            .conns
+            .values()
+            .any(|c| c.subs.events || c.subs.viewstream.is_some())
+        {
             return;
         }
-        for e in events {
-            if self.events_out.len() >= 100_000 {
+        for (i, e) in events.iter().enumerate() {
+            if self.events_out.len() >= MAX_VIEW_BATCH_EVENTS {
+                self.pending_view_losses =
+                    self.pending_view_losses.saturating_add(events.len() - i);
                 break;
             }
-            self.events_out.push((e.key, bytemuck::bytes_of(&e.payload).to_vec()));
+            self.events_out
+                .push((e.key, bytemuck::bytes_of(&e.payload).to_vec()));
         }
     }
 
@@ -536,6 +683,26 @@ impl ErpServer {
     /// and frame snapshots. Call it once per host frame. Never blocks on the network.
     pub fn poll<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) -> PollReport {
         let now = Instant::now();
+        // These events came from the host's real-time advance after the last
+        // poll. Fence them BEFORE any queued request can seek/replace its session.
+        self.collect_view_notes(target);
+        let pending_events = std::mem::take(&mut self.events_out);
+        self.publish_delivery_events(&pending_events);
+        self.events_out = pending_events;
+        let losses = std::mem::take(&mut self.pending_view_losses);
+        if losses > 0 {
+            for c in self.conns.values_mut() {
+                if let Some(d) = c
+                    .subs
+                    .delivery
+                    .as_mut()
+                    .filter(|d| d.identity.is_some_and(|identity| identity.0 == 1))
+                {
+                    d.advance(losses);
+                    d.lost();
+                }
+            }
+        }
         let mut report = PollReport::default();
         let mut budget = self.cfg.max_requests_per_poll;
         loop {
@@ -547,23 +714,65 @@ impl ErpServer {
                 },
             };
             match msg {
-                Inbound::Connected { conn, client, caps, tx, binary } => {
+                Inbound::Connected {
+                    conn,
+                    client,
+                    caps,
+                    tx,
+                    binary,
+                } => {
                     let connected_ms = self.elapsed_ms();
                     if client != crate::caps::USER_CLIENT {
-                        self.session_event(&client, "session.connect", activity::session_summary("connected", Some(caps)), true);
+                        self.session_event(
+                            &client,
+                            "session.connect",
+                            activity::session_summary("connected", Some(caps)),
+                            true,
+                        );
                     }
-                    self.conns.insert(conn, Conn { tx, client, caps, binary, subs: Subs::default(), requests: 0, connected_ms });
+                    self.conns.insert(
+                        conn,
+                        Conn {
+                            tx,
+                            client,
+                            caps,
+                            binary,
+                            subs: Subs::default(),
+                            requests: 0,
+                            connected_ms,
+                        },
+                    );
                 }
                 Inbound::Disconnected { conn } => {
-                    if let Some(c) = self.conns.get(&conn).filter(|c| c.client != crate::caps::USER_CLIENT) {
+                    if let Some(c) = self
+                        .conns
+                        .get(&conn)
+                        .filter(|c| c.client != crate::caps::USER_CLIENT)
+                    {
                         let (name, n) = (c.client.clone(), c.requests);
-                        self.session_event(&name, "session.disconnect", format!("disconnected ({n} requests)"), true);
+                        self.session_event(
+                            &name,
+                            "session.disconnect",
+                            format!("disconnected ({n} requests)"),
+                            true,
+                        );
                     }
                     self.disconnected(conn, target);
                 }
-                Inbound::AuthFailed => self.session_event("?", "session.auth_failed", "authentication failed".to_string(), false),
-                Inbound::Request { conn, id, method, params } => {
-                    self.queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                Inbound::AuthFailed => self.session_event(
+                    "?",
+                    "session.auth_failed",
+                    "authentication failed".to_string(),
+                    false,
+                ),
+                Inbound::Request {
+                    conn,
+                    id,
+                    method,
+                    params,
+                } => {
+                    self.queued
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     self.request(target, conn, id, &method, &params);
                     report.requests += 1;
                     budget -= 1;
@@ -597,20 +806,42 @@ impl ErpServer {
         }
     }
 
-    fn request<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, conn: u64, id: Option<J>, method: &str, params: &J) {
-        let Some(c) = self.conns.get(&conn) else { return };
+    fn request<G: Game>(
+        &mut self,
+        target: &mut ErpTarget<'_, G>,
+        conn: u64,
+        id: Option<J>,
+        method: &str,
+        params: &J,
+    ) {
+        // In particular, take diagnostics before sim.stop destroys the session.
+        self.collect_view_notes(target);
+        let Some(c) = self.conns.get(&conn) else {
+            return;
+        };
         let (client, caps, tx) = (c.client.clone(), c.caps, c.tx.clone());
         let mut fx = Effects::default();
         // A person's own view reads all the time (the editor refreshes its panels): not recorded,
         // so the log keeps what agents did. Its edits are recorded like anyone's.
-        let recorded = method != "activity.list" && !(client == crate::caps::USER_CLIENT && activity::classify(method, params).1);
-        let pre = if recorded && !method.starts_with("watch.") { activity::before(target, method, params) } else { Default::default() };
+        let recorded = method != "activity.list"
+            && !(client == crate::caps::USER_CLIENT && activity::classify(method, params).1);
+        let pre = if recorded && !method.starts_with("watch.") {
+            activity::before(target, method, params)
+        } else {
+            Default::default()
+        };
         let result = if method == "activity.list" {
-            authorize(method, caps, false, params).and_then(|_| activity::list_params(params)).map(|_| self.activity_list(params))
+            authorize(method, caps, false, params)
+                .and_then(|_| activity::list_params(params))
+                .map(|_| self.activity_list(params))
         } else if method.starts_with("watch.") {
             self.watch(target, conn, caps, method, params)
-        } else if let (Some(hook), true) = (self.cfg.limits.client_session.clone(), method != "rpc.discover") {
-            authorize(method, caps, false, params).and_then(|_| crate::client_mode::call(&hook, method, params))
+        } else if let (Some(hook), true) = (
+            self.cfg.limits.client_session.clone(),
+            method != "rpc.discover",
+        ) {
+            authorize(method, caps, false, params)
+                .and_then(|_| crate::client_mode::call(&hook, method, params))
         } else {
             let limits = self.cfg.limits.clone();
             let ctx = CallCtx {
@@ -619,22 +850,51 @@ impl ErpServer {
                 last_play: self.last_play.as_ref(),
                 tx_check: Some((conn, self.tx_owner.map(|(c, _)| c))),
             };
-            match std::panic::catch_unwind(AssertUnwindSafe(|| call(target, &limits, &ctx, &mut fx, method, params))) {
+            match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                call(target, &limits, &ctx, &mut fx, method, params)
+            })) {
                 Ok(r) => r,
                 Err(_) => {
                     // A panic may have left the sim half-stepped: drop the play session
                     // rather than keep serving from an inconsistent state.
                     let dropped = target.play.take().is_some();
-                    let note = if dropped { "; the play session was dropped" } else { "" };
-                    Err(RpcError::new(INTERNAL_ERROR, "panic", format!("the request made the host panic (a bug){note}")))
+                    let note = if dropped {
+                        "; the play session was dropped"
+                    } else {
+                        ""
+                    };
+                    Err(RpcError::new(
+                        INTERNAL_ERROR,
+                        "panic",
+                        format!("the request made the host panic (a bug){note}"),
+                    ))
                 }
             }
         };
+        if result.is_ok() && matches!(method, "sim.start" | "sim.stop" | "scene.load") {
+            self.view_incarnation = self
+                .view_incarnation
+                .checked_add(1)
+                .expect("view incarnation exhausted");
+        }
+        self.observe_view_timelines(target);
+        self.publish_delivery_events(&fx.events);
         self.stats.requests += 1;
         if !matches!(
             method,
-            "world.query" | "world.get" | "world.singleton.get" | "sim.state" | "sim.checksum" | "registry.schema" | "registry.types" | "rpc.discover"
-                | "history.list" | "proposal.list" | "proposal.get" | "proposal.preview" | "activity.list"
+            "world.query"
+                | "world.get"
+                | "world.singleton.get"
+                | "sim.state"
+                | "sim.checksum"
+                | "registry.schema"
+                | "registry.types"
+                | "rpc.discover"
+                | "history.list"
+                | "proposal.list"
+                | "proposal.get"
+                | "proposal.preview"
+                | "activity.list"
         ) && !method.starts_with("watch.")
         {
             // Something may have changed under the same frame key (a stopped and restarted session).
@@ -648,7 +908,15 @@ impl ErpServer {
             c.requests += 1;
         }
         if recorded {
-            let entry = activity::build(target, &client, method, params, &result, pre, fx.verify.take());
+            let entry = activity::build(
+                target,
+                &client,
+                method,
+                params,
+                &result,
+                pre,
+                fx.verify.take(),
+            );
             self.push_activity(entry);
         }
         match fx.tx {
@@ -665,18 +933,26 @@ impl ErpServer {
         if fx.crash {
             self.crash = true;
         }
-        if !fx.events.is_empty() && self.conns.values().any(|c| c.subs.events || c.subs.viewstream.is_some()) {
+        if !fx.events.is_empty()
+            && self
+                .conns
+                .values()
+                .any(|c| c.subs.events || c.subs.viewstream.is_some())
+        {
             self.events_out.append(&mut fx.events);
         }
         if result.is_err() {
             self.stats.errors += 1;
         }
         if let Some(id) = id {
-            tx.send_text(match result {
+            let response = match result {
                 Ok(r) => response_ok(&id, r),
                 Err(e) => response_err(&id, &e),
-            });
+            };
+            tx.send_control_text(response);
         }
+        // An opt-in subscription is acknowledged before its first fenced note.
+        self.collect_view_notes(target);
         // Look right after each request that can change the proposals, so a client that
         // chains requests quickly still produces one event per step.
         if proposals_may_change(method) && self.conns.values().any(|c| c.subs.proposals) {
@@ -686,7 +962,9 @@ impl ErpServer {
 
     /// Sends `watch.proposals` to its subscribers if the proposals changed since last looked.
     fn publish_proposals<G: Game>(&mut self, target: &ErpTarget<'_, G>) {
-        let watch = self.prop_watch.get_or_insert_with(|| ProposalWatch::capture(target.doc));
+        let watch = self
+            .prop_watch
+            .get_or_insert_with(|| ProposalWatch::capture(target.doc));
         if let Some(params) = watch.advance(target.doc) {
             let n = notification("watch.proposals", params);
             for c in self.conns.values().filter(|c| c.subs.proposals) {
@@ -714,23 +992,53 @@ impl ErpServer {
             None | Some(J::Null) if method == "watch.unsubscribe" => Vec::new(),
             _ => return Err(RpcError::params("'topics' must be a list of strings (tick, history, events, notes, proposals, activity, frames, viewstream)")),
         };
-        let include_reads = params.get("include_reads").and_then(J::as_bool).unwrap_or(false);
+        let include_reads = params
+            .get("include_reads")
+            .and_then(J::as_bool)
+            .unwrap_or(false);
         let last_seq = self.next_seq - 1;
         let max_fps = match params.get("max_fps") {
             None | Some(J::Null) => 60,
-            Some(v) => v.as_u64().filter(|n| *n >= 1).ok_or_else(|| RpcError::params("'max_fps' must be a positive integer"))?.min(1000),
+            Some(v) => v
+                .as_u64()
+                .filter(|n| *n >= 1)
+                .ok_or_else(|| RpcError::params("'max_fps' must be a positive integer"))?
+                .min(1000),
         };
         let source = frame_source(params)?;
+        let fenced = match params.get("view_delivery") {
+            None | Some(J::Null) => false,
+            Some(v) if v.as_u64() == Some(1) && method == "watch.subscribe" => true,
+            Some(_) => {
+                return Err(RpcError::params(
+                    "'view_delivery' must be 1 on watch.subscribe",
+                ))
+            }
+        };
+        if fenced
+            && !["frames", "events", "notes"]
+                .iter()
+                .all(|want| topics.iter().any(|t| t == want))
+        {
+            return Err(RpcError::params(
+                "view_delivery 1 requires frames, events and notes together",
+            ));
+        }
         let client_mode = self.cfg.limits.client_session.clone();
         if let (Some(_), "watch.subscribe") = (&client_mode, method) {
-            if let Some(t) = topics.iter().find(|t| !matches!(t.as_str(), "viewstream" | "activity")) {
+            if let Some(t) = topics
+                .iter()
+                .find(|t| !matches!(t.as_str(), "viewstream" | "activity"))
+            {
                 return Err(RpcError::state(
                     "not_in_client_mode",
                     format!("topic '{t}' is not available in client mode (this host is a relay client): use viewstream or activity, and session.status for the status"),
                 ));
             }
         }
-        let Some(c) = self.conns.get_mut(&conn) else { return Err(RpcError::new(INTERNAL_ERROR, "gone", "connection is gone")) };
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return Err(RpcError::new(INTERNAL_ERROR, "gone", "connection is gone"));
+        };
         let mut initial: Vec<String> = Vec::new();
         if method == "watch.subscribe" {
             if topics.is_empty() {
@@ -787,9 +1095,28 @@ impl ErpServer {
                     other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames, viewstream)"))),
                 }
             }
+            if fenced {
+                let subscription = self.next_view_subscription;
+                self.next_view_subscription = self
+                    .next_view_subscription
+                    .checked_add(1)
+                    .expect("view subscription exhausted");
+                c.subs.delivery = Some(ViewDelivery::new(subscription));
+            } else if topics
+                .iter()
+                .any(|t| matches!(t.as_str(), "frames" | "events" | "notes"))
+            {
+                c.subs.delivery = None;
+            }
         } else if topics.is_empty() {
             c.subs = Subs::default();
         } else {
+            if topics
+                .iter()
+                .any(|t| matches!(t.as_str(), "frames" | "events" | "notes"))
+            {
+                c.subs.delivery = None;
+            }
             for t in &topics {
                 match t.as_str() {
                     "tick" => c.subs.tick = false,
@@ -818,7 +1145,13 @@ impl ErpServer {
         .filter(|(_, on)| *on)
         .map(|(n, _)| n)
         .collect();
-        let result = json!({"topics": active});
+        let mut result = json!({"topics": active});
+        if let Some(d) = &c.subs.delivery {
+            result["view_delivery"] = json!(1);
+            result["subscription"] = json!(d.subscription.to_string());
+            result["cursor"] = json!(d.cursor.to_string());
+            result["count"] = json!(d.count.to_string());
+        }
         // The current state goes out right after the response.
         for n in initial {
             c.tx.send_text(n);
@@ -828,26 +1161,177 @@ impl ErpServer {
 
     // ---- publishing ----
 
+    fn observe_view_timelines<G: Game>(&mut self, target: &ErpTarget<'_, G>) {
+        for c in self.conns.values_mut() {
+            let (Some(d), Some(f)) = (c.subs.delivery.as_mut(), c.subs.frames.as_ref()) else {
+                continue;
+            };
+            d.observe(delivery_identity(target, f.source, self.view_incarnation));
+        }
+    }
+
+    fn collect_view_notes<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) {
+        self.observe_view_timelines(target);
+        if !self.conns.values().any(|c| c.subs.notes) {
+            return;
+        }
+        let notes = target
+            .play
+            .as_mut()
+            .map_or_else(Vec::new, |pc| pc.session_mut().take_notes());
+        if notes.is_empty() {
+            return;
+        }
+        for c in self.conns.values_mut() {
+            let Some(d) = c.subs.delivery.as_mut() else {
+                continue;
+            };
+            d.record_notes(&notes);
+            let n = notification(
+                "watch.notes",
+                json!({"notes": notes.iter().copied().map(note_json).collect::<Vec<_>>(),
+                "delivery": d.notification_meta()}),
+            );
+            if !c.tx.try_send_text(n) {
+                d.lost();
+            }
+        }
+        self.notes_out.extend(notes);
+    }
+
+    fn publish_delivery_events(&mut self, events: &[(EventKey, Vec<u8>)]) {
+        if events.is_empty() || !self.conns.values().any(|c| c.subs.delivery.is_some()) {
+            return;
+        }
+        let oversized = events.len() > MAX_VIEW_BATCH_EVENTS;
+        let list: Vec<J> = if oversized {
+            Vec::new()
+        } else {
+            events
+                .iter()
+                .map(|(k, payload)| {
+                    json!({"tick": k.tick, "system": k.system_index,
+                "seq": k.seq, "payload": hex_encode(payload)})
+                })
+                .collect()
+        };
+        for c in self.conns.values_mut() {
+            let Some(d) = c.subs.delivery.as_mut() else {
+                continue;
+            };
+            // A proposal/scene preview is not the live simulation's event source.
+            if !d.identity.is_some_and(|identity| identity.0 == 1) {
+                continue;
+            }
+            d.advance(events.len());
+            if oversized
+                || !c.tx.try_send_text(notification(
+                    "watch.events",
+                    json!({"events": list, "delivery": d.notification_meta()}),
+                ))
+            {
+                d.lost();
+            }
+        }
+    }
+
+    fn publish_delivery_frames<G: Game>(&mut self, target: &ErpTarget<'_, G>, now: Instant) {
+        for c in self.conns.values_mut() {
+            let (Some(d), Some(f)) = (c.subs.delivery.as_mut(), c.subs.frames.as_mut()) else {
+                continue;
+            };
+            let key = frame_key(target, f.source);
+            let cut = (key, d.cursor, d.loss_generation, d.timeline);
+            if d.last_cut == Some(cut) {
+                continue;
+            }
+            if f.last_sent
+                .is_some_and(|sent| now.duration_since(sent) < f.min_interval)
+                || c.tx.pending() > MAX_PENDING_BYTES
+            {
+                self.frame_pending = true;
+                continue;
+            }
+            let sent = if let Some(key) = key {
+                let lim = &self.cfg.limits;
+                let Some((mut meta, frame)) =
+                    frame_parts(target, f.source, key, (lim.tick_rate, lim.player_count))
+                else {
+                    continue;
+                };
+                meta["delivery"] = d.frame_meta();
+                // Fenced metadata is built from this exact frame and output cut.
+                // Never reuse a legacy cache entry carrying an older watermark.
+                self.stats.frames_built += 1;
+                if c.tx.is_local() {
+                    let cost = 4096 + 160 * frame.alive_count() as usize;
+                    c.tx.try_send_local_frame(Arc::new(LocalFrame {
+                        meta,
+                        frame: Arc::new(frame.clone()),
+                        cost,
+                    }))
+                } else {
+                    let bytes = Arc::new(encode_frame_message(&meta, &frame.to_bytes()));
+                    self.stats.last_frame_bytes = bytes.len() as u64;
+                    c.tx.try_send_binary(bytes)
+                }
+            } else {
+                c.tx.try_send_text(notification(
+                    "watch.view.inactive",
+                    json!({
+                        "delivery": d.frame_meta(), "reason": "source_unavailable",
+                    }),
+                ))
+            };
+            if sent {
+                f.last_sent = Some(now);
+                f.last_key = key;
+                d.last_cut = Some(cut);
+                if key.is_some() {
+                    self.stats.frames_sent += 1;
+                }
+            } else {
+                d.lost();
+                self.frame_pending = true;
+                self.stats.frames_skipped += 1;
+            }
+        }
+    }
+
     fn publish<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, now: Instant) {
         if self.conns.is_empty() {
             self.events_out.clear();
+            self.notes_out.clear();
             return;
         }
+        self.collect_view_notes(target);
         // tick: each connection is told when its own last-seen key differs
         if self.conns.values().any(|c| c.subs.tick) {
             let key = tick_key(target);
             let mut note: Option<String> = None;
-            for c in self.conns.values_mut().filter(|c| c.subs.tick && c.subs.tick_seen != Some(key)) {
+            for c in self
+                .conns
+                .values_mut()
+                .filter(|c| c.subs.tick && c.subs.tick_seen != Some(key))
+            {
                 c.subs.tick_seen = Some(key);
                 c.tx.send_text(note.get_or_insert_with(|| tick_note(target)).clone());
             }
         }
         // history (checked at most every 25 ms: it walks the whole list)
-        if self.conns.values().any(|c| c.subs.history) && self.last_hist_check.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(25)) {
+        if self.conns.values().any(|c| c.subs.history)
+            && self
+                .last_hist_check
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(25))
+        {
             self.last_hist_check = Some(now);
             let sig = history_signature(target.doc);
             let mut note: Option<String> = None;
-            for c in self.conns.values_mut().filter(|c| c.subs.history && c.subs.hist_seen != Some(sig)) {
+            for c in self
+                .conns
+                .values_mut()
+                .filter(|c| c.subs.history && c.subs.hist_seen != Some(sig))
+            {
                 c.subs.hist_seen = Some(sig);
                 c.tx.send_text(note.get_or_insert_with(|| history_note(target.doc)).clone());
             }
@@ -855,7 +1339,10 @@ impl ErpServer {
         // proposals: checked after each request that can change them (see `request`), and every 25 ms
         // here for changes made outside ERP (the editor UI); nothing is tracked while nobody listens
         if self.conns.values().any(|c| c.subs.proposals) {
-            if self.last_prop_check.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(25)) {
+            if self
+                .last_prop_check
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(25))
+            {
                 self.last_prop_check = Some(now);
                 self.publish_proposals(target);
             }
@@ -866,12 +1353,20 @@ impl ErpServer {
         if self.conns.values().any(|c| c.subs.activity.is_some()) {
             let last = self.next_seq - 1;
             for c in self.conns.values_mut() {
-                let Some(sub) = c.subs.activity.as_mut() else { continue };
+                let Some(sub) = c.subs.activity.as_mut() else {
+                    continue;
+                };
                 if sub.seen >= last {
                     continue;
                 }
                 let start = self.activity.partition_point(|e| e.seq <= sub.seen);
-                let list: Vec<J> = self.activity.iter().skip(start).filter(|e| sub.reads || !e.read).map(ActivityEntry::to_json).collect();
+                let list: Vec<J> = self
+                    .activity
+                    .iter()
+                    .skip(start)
+                    .filter(|e| sub.reads || !e.read)
+                    .map(ActivityEntry::to_json)
+                    .collect();
                 sub.seen = last;
                 if !list.is_empty() {
                     c.tx.send_text(notification("watch.activity", json!({"entries": list})));
@@ -893,23 +1388,28 @@ impl ErpServer {
                 .map(|(k, payload)| json!({"tick": k.tick, "system": k.system_index, "seq": k.seq, "payload": hex_encode(&payload)}))
                 .collect();
             let n = notification("watch.events", json!({"events": list}));
-            for c in self.conns.values().filter(|c| c.subs.events) {
+            for c in self
+                .conns
+                .values()
+                .filter(|c| c.subs.events && c.subs.delivery.is_none())
+            {
                 c.tx.send_text(n.clone());
             }
         }
         // play notes
-        if self.conns.values().any(|c| c.subs.notes) {
-            if let Some(pc) = target.play.as_mut() {
-                let notes = pc.session_mut().take_notes();
-                if !notes.is_empty() {
-                    let list: Vec<J> = notes.into_iter().map(note_json).collect();
-                    let n = notification("watch.notes", json!({"notes": list}));
-                    for c in self.conns.values().filter(|c| c.subs.notes) {
-                        c.tx.send_text(n.clone());
-                    }
-                }
+        let notes = std::mem::take(&mut self.notes_out);
+        if !notes.is_empty() {
+            let list: Vec<J> = notes.into_iter().map(note_json).collect();
+            let n = notification("watch.notes", json!({"notes": list}));
+            for c in self
+                .conns
+                .values()
+                .filter(|c| c.subs.notes && c.subs.delivery.is_none())
+            {
+                c.tx.send_text(n.clone());
             }
         }
+        self.publish_delivery_frames(target, now);
         self.publish_frames(target, now);
         self.publish_viewstream(target, now);
     }
@@ -918,7 +1418,9 @@ impl ErpServer {
     /// that have received the current reset baseline, and its newest frame to
     /// those whose rate cap allows it.
     fn publish_client_stream(&mut self, now: Instant) {
-        let Some(hook) = self.cfg.limits.client_session.clone() else { return };
+        let Some(hook) = self.cfg.limits.client_session.clone() else {
+            return;
+        };
         if !self.conns.values().any(|c| c.subs.viewstream.is_some()) {
             return;
         }
@@ -944,8 +1446,12 @@ impl ErpServer {
         if let Some(events) = out.events {
             let bytes = Arc::new(events);
             for c in self.conns.values_mut() {
-                let Some(f) = c.subs.viewstream.as_ref() else { continue };
-                let Some(delivery) = f.client_events_for_send(&bytes) else { continue };
+                let Some(f) = c.subs.viewstream.as_ref() else {
+                    continue;
+                };
+                let Some(delivery) = f.client_events_for_send(&bytes) else {
+                    continue;
+                };
                 // Events queued before the recovery cut may already be in this
                 // reliable transport's prefix. The reset baseline follows
                 // them in order. Pending-cut batches are dropped; delayed
@@ -957,11 +1463,15 @@ impl ErpServer {
         let Some((seq, bytes)) = current else { return };
         let key: FrameKey = (4, seq, 0, 0);
         for c in self.conns.values_mut() {
-            let Some(f) = c.subs.viewstream.as_mut() else { continue };
+            let Some(f) = c.subs.viewstream.as_mut() else {
+                continue;
+            };
             if f.last_key == Some(key) {
                 continue;
             }
-            if f.last_sent.is_some_and(|t| now.duration_since(t) < f.min_interval) {
+            if f.last_sent
+                .is_some_and(|t| now.duration_since(t) < f.min_interval)
+            {
                 self.frame_pending = true;
                 continue;
             }
@@ -987,7 +1497,9 @@ impl ErpServer {
         if self.events_out.is_empty() || !self.conns.values().any(|c| c.subs.viewstream.is_some()) {
             return;
         }
-        let Some(hook) = self.cfg.limits.view_stream.clone() else { return };
+        let Some(hook) = self.cfg.limits.view_stream.clone() else {
+            return;
+        };
         let events: Vec<orr_viewstream::EventRecord> = {
             let producer = hook.lock();
             self.events_out
@@ -1009,12 +1521,20 @@ impl ErpServer {
     }
 
     fn publish_viewstream<G: Game>(&mut self, target: &mut ErpTarget<'_, G>, now: Instant) {
-        let Some(hook) = self.cfg.limits.view_stream.clone() else { return };
+        let Some(hook) = self.cfg.limits.view_stream.clone() else {
+            return;
+        };
         let mut due: Vec<(u64, FrameKey)> = Vec::new();
         for (id, c) in &self.conns {
-            let Some(f) = c.subs.viewstream.as_ref() else { continue };
-            let throttled = f.last_sent.is_some_and(|t| now.duration_since(t) < f.min_interval);
-            let Some(key) = frame_key(target, f.source) else { continue };
+            let Some(f) = c.subs.viewstream.as_ref() else {
+                continue;
+            };
+            let throttled = f
+                .last_sent
+                .is_some_and(|t| now.duration_since(t) < f.min_interval);
+            let Some(key) = frame_key(target, f.source) else {
+                continue;
+            };
             if f.last_key != Some(key) {
                 if throttled {
                     self.frame_pending = true;
@@ -1024,12 +1544,18 @@ impl ErpServer {
             }
         }
         for (id, key) in due {
-            let Some(c) = self.conns.get(&id) else { continue };
+            let Some(c) = self.conns.get(&id) else {
+                continue;
+            };
             if c.tx.pending() > MAX_PENDING_BYTES {
                 self.stats.frames_skipped += 1;
                 continue;
             }
-            let source = c.subs.viewstream.as_ref().map_or(FrameSource::Sim, |f| f.source);
+            let source = c
+                .subs
+                .viewstream
+                .as_ref()
+                .map_or(FrameSource::Sim, |f| f.source);
             let pos = match self.frame_cache.iter().position(|(k, _)| *k == key) {
                 Some(p) => p,
                 None => {
@@ -1044,8 +1570,12 @@ impl ErpServer {
                 let bytes = build_stream_frame(target, &hook, source, key, &mut self.vs_last);
                 self.frame_cache[pos].1.stream = bytes.map(Arc::new);
             }
-            let Some(bytes) = self.frame_cache[pos].1.stream.clone() else { continue };
-            let Some(c) = self.conns.get_mut(&id) else { continue };
+            let Some(bytes) = self.frame_cache[pos].1.stream.clone() else {
+                continue;
+            };
+            let Some(c) = self.conns.get_mut(&id) else {
+                continue;
+            };
             send_stream(c, &bytes);
             if let Some(f) = c.subs.viewstream.as_mut() {
                 f.last_sent = Some(now);
@@ -1059,9 +1589,18 @@ impl ErpServer {
         // Who is due, and with which frame.
         let mut due: Vec<(u64, FrameKey)> = Vec::new();
         for (id, c) in &self.conns {
-            let Some(f) = c.subs.frames.as_ref() else { continue };
-            let throttled = f.last_sent.is_some_and(|t| now.duration_since(t) < f.min_interval);
-            let Some(key) = frame_key(target, f.source) else { continue };
+            if c.subs.delivery.is_some() {
+                continue;
+            }
+            let Some(f) = c.subs.frames.as_ref() else {
+                continue;
+            };
+            let throttled = f
+                .last_sent
+                .is_some_and(|t| now.duration_since(t) < f.min_interval);
+            let Some(key) = frame_key(target, f.source) else {
+                continue;
+            };
             if f.last_key != Some(key) {
                 if throttled {
                     self.frame_pending = true;
@@ -1074,9 +1613,15 @@ impl ErpServer {
             return;
         }
         for (id, key) in due {
-            let Some(c) = self.conns.get(&id) else { continue };
+            let Some(c) = self.conns.get(&id) else {
+                continue;
+            };
             let local = c.tx.is_local();
-            let source = c.subs.frames.as_ref().map_or(FrameSource::Sim, |f| f.source);
+            let source = c
+                .subs
+                .frames
+                .as_ref()
+                .map_or(FrameSource::Sim, |f| f.source);
             if c.tx.pending() > MAX_PENDING_BYTES {
                 self.stats.frames_skipped += 1;
                 continue;
@@ -1093,13 +1638,25 @@ impl ErpServer {
                 }
             };
             let built = &mut self.frame_cache[pos].1;
-            let missing = if local { built.local.is_none() } else { built.wire.is_none() };
+            let missing = if local {
+                built.local.is_none()
+            } else {
+                built.wire.is_none()
+            };
             if missing {
                 let lim = &self.cfg.limits;
-                let Some((meta, frame)) = frame_parts(target, source, key, (lim.tick_rate, lim.player_count)) else { continue };
+                let Some((meta, frame)) =
+                    frame_parts(target, source, key, (lim.tick_rate, lim.player_count))
+                else {
+                    continue;
+                };
                 if local {
                     let cost = 4096 + 160 * frame.alive_count() as usize;
-                    built.local = Some(Arc::new(LocalFrame { meta, frame: Arc::new(frame.clone()), cost }));
+                    built.local = Some(Arc::new(LocalFrame {
+                        meta,
+                        frame: Arc::new(frame.clone()),
+                        cost,
+                    }));
                 } else {
                     let m = Arc::new(encode_frame_message(&meta, &frame.to_bytes()));
                     self.stats.last_frame_bytes = m.len() as u64;
@@ -1107,8 +1664,12 @@ impl ErpServer {
                 }
                 self.stats.frames_built += 1;
             }
-            let Some(c) = self.conns.get_mut(&id) else { continue };
-            let Some(f) = c.subs.frames.as_mut() else { continue };
+            let Some(c) = self.conns.get_mut(&id) else {
+                continue;
+            };
+            let Some(f) = c.subs.frames.as_mut() else {
+                continue;
+            };
             if local {
                 if let Some(lf) = &built.local {
                     c.tx.send_local_frame(lf.clone());
@@ -1129,7 +1690,10 @@ fn send_stream(c: &Conn, bytes: &Arc<Vec<u8>>) {
     if c.binary {
         c.tx.send_stream(bytes.clone());
     } else {
-        c.tx.send_text(notification("watch.viewstream", json!({"encoding": "hex", "data": hex_encode(bytes)})));
+        c.tx.send_text(notification(
+            "watch.viewstream",
+            json!({"encoding": "hex", "data": hex_encode(bytes)}),
+        ));
     }
 }
 
@@ -1144,7 +1708,10 @@ struct ClientFrameInfo {
 /// currently produces 2D or 3D viewstream frames.
 fn client_frame_info(bytes: &[u8]) -> Option<ClientFrameInfo> {
     let kind = orr_viewstream::message_type(bytes).ok()?;
-    if !matches!(kind, orr_viewstream::MSG_FRAME | orr_viewstream::MSG_FRAME3D) {
+    if !matches!(
+        kind,
+        orr_viewstream::MSG_FRAME | orr_viewstream::MSG_FRAME3D
+    ) {
         return None;
     }
     let flags = *bytes.get(7)?;
@@ -1181,7 +1748,11 @@ fn build_stream_frame<G: Game>(
             if !s.is_playing() {
                 meta.flags |= FLAG_PAUSED;
             }
-            let prev = if meta.flags & FLAG_DISCONTINUITY == 0 && meta.tick > 0 { s.frame_at(meta.tick - 1) } else { None };
+            let prev = if meta.flags & FLAG_DISCONTINUITY == 0 && meta.tick > 0 {
+                s.frame_at(meta.tick - 1)
+            } else {
+                None
+            };
             (s.frame(), prev)
         }
         (2, _) if matches!(source, FrameSource::View) => {
@@ -1203,10 +1774,38 @@ fn frame_source(params: &J) -> Result<FrameSource, RpcError> {
             "view" => Ok(FrameSource::View),
             other => {
                 let id = other.strip_prefix("proposal:").ok_or_else(bad)?;
-                id.strip_prefix('p').unwrap_or(id).parse::<u64>().map(FrameSource::Proposal).map_err(|_| bad())
+                id.strip_prefix('p')
+                    .unwrap_or(id)
+                    .parse::<u64>()
+                    .map(FrameSource::Proposal)
+                    .map_err(|_| bad())
             }
         },
         Some(_) => Err(bad()),
+    }
+}
+
+/// The key of the frame a subscription would get now, `None` if it gets none.
+fn delivery_identity<G: Game>(
+    t: &ErpTarget<'_, G>,
+    source: FrameSource,
+    incarnation: u64,
+) -> FrameKey {
+    match source {
+        FrameSource::Sim | FrameSource::View if t.play.is_some() => {
+            let s = t.play.as_ref().expect("play source").session();
+            (1, incarnation, s.epoch(), u64::from(s.branch_count()))
+        }
+        FrameSource::View => (2, incarnation, t.doc.revision(), 0),
+        FrameSource::Proposal(id) if t.play.is_none() => t
+            .doc
+            .proposal_preview(orr_edit::ProposalId(id))
+            .ok()
+            .map_or((0, incarnation, id, 0), |p| {
+                (3, incarnation, id, p.checksum())
+            }),
+        FrameSource::Sim => (0, incarnation, 0, 0),
+        FrameSource::Proposal(id) => (0, incarnation, id, 0),
     }
 }
 
@@ -1216,7 +1815,12 @@ fn frame_key<G: Game>(t: &ErpTarget<'_, G>, source: FrameSource) -> Option<Frame
         t.play.as_ref().map(|pc| {
             let s = pc.session();
             let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-            for v in [u64::from(s.is_playing()), u64::from(s.speed().permille()), s.last_tick(), u64::from(s.branch_count())] {
+            for v in [
+                u64::from(s.is_playing()),
+                u64::from(s.speed().permille()),
+                s.last_tick(),
+                u64::from(s.branch_count()),
+            ] {
                 h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
             }
             (1u8, s.head_tick(), s.epoch(), h)
@@ -1229,14 +1833,24 @@ fn frame_key<G: Game>(t: &ErpTarget<'_, G>, source: FrameSource) -> Option<Frame
             if t.play.is_some() {
                 return None;
             }
-            t.doc.proposal_preview(orr_edit::ProposalId(n)).ok().map(|v| (3, n, v.checksum(), 0))
+            t.doc
+                .proposal_preview(orr_edit::ProposalId(n))
+                .ok()
+                .map(|v| (3, n, v.checksum(), 0))
         }
     }
 }
 
 /// The metadata and the frame of `key` (as [`frame_key`] named it).
-fn frame_parts<'a, G: Game>(t: &'a ErpTarget<'_, G>, source: FrameSource, key: FrameKey, defaults: (u32, u8)) -> Option<(J, &'a orr_ecs::Frame)> {
-    let sent_at_us = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
+fn frame_parts<'a, G: Game>(
+    t: &'a ErpTarget<'_, G>,
+    source: FrameSource,
+    key: FrameKey,
+    defaults: (u32, u8),
+) -> Option<(J, &'a orr_ecs::Frame)> {
+    let sent_at_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
     match (key.0, t.play.as_ref()) {
         (1, Some(pc)) => {
             let s = pc.session();
@@ -1256,7 +1870,9 @@ fn frame_parts<'a, G: Game>(t: &'a ErpTarget<'_, G>, source: FrameSource, key: F
             Some((meta, t.doc.frame()))
         }
         (3, _) => {
-            let FrameSource::Proposal(n) = source else { return None };
+            let FrameSource::Proposal(n) = source else {
+                return None;
+            };
             let view = t.doc.proposal_preview(orr_edit::ProposalId(n)).ok()?;
             let meta = json!({"tick": 0, "epoch": key.2, "tick_rate": defaults.0, "player_count": defaults.1, "sent_at_us": sent_at_us, "mode": "edit", "proposal": format!("p{n}"), "timeline": J::Null});
             Some((meta, view.frame()))
@@ -1277,13 +1893,28 @@ impl Drop for ErpServer {
 fn proposals_may_change(method: &str) -> bool {
     matches!(
         method,
-        "proposal.begin" | "proposal.apply" | "proposal.accept" | "proposal.accept_verified" | "proposal.reject" | "scene.load" | "tx.commit" | "tx.rollback" | "history.undo" | "history.redo"
-    ) || (method.starts_with("world.") && !matches!(method, "world.query" | "world.get" | "world.singleton.get"))
+        "proposal.begin"
+            | "proposal.apply"
+            | "proposal.accept"
+            | "proposal.accept_verified"
+            | "proposal.reject"
+            | "scene.load"
+            | "tx.commit"
+            | "tx.rollback"
+            | "history.undo"
+            | "history.redo"
+    ) || (method.starts_with("world.")
+        && !matches!(method, "world.query" | "world.get" | "world.singleton.get"))
 }
 
 fn tick_key<G: Game>(t: &ErpTarget<'_, G>) -> TickKey {
     match t.play.as_ref() {
-        Some(pc) => (true, pc.session().head_tick(), pc.session().epoch(), pc.session().is_playing()),
+        Some(pc) => (
+            true,
+            pc.session().head_tick(),
+            pc.session().epoch(),
+            pc.session().is_playing(),
+        ),
         None => (false, 0, 0, false),
     }
 }
@@ -1350,11 +1981,452 @@ fn history_note(doc: &EditorDoc) -> String {
 fn note_json(n: PlayNote) -> J {
     match n {
         PlayNote::Seeked { from, to } => json!({"kind": "seeked", "from": from, "to": to}),
-        PlayNote::Branched { tick, dropped } => json!({"kind": "branched", "tick": tick, "dropped": dropped}),
+        PlayNote::Branched { tick, dropped } => {
+            json!({"kind": "branched", "tick": tick, "dropped": dropped})
+        }
         PlayNote::Paused { tick } => json!({"kind": "paused", "tick": tick}),
         PlayNote::Resumed { tick } => json!({"kind": "resumed", "tick": tick}),
-        PlayNote::DebugRejected(e) => json!({"kind": "debug_rejected", "error": debug_error_name(e)}),
+        PlayNote::DebugRejected(e) => {
+            json!({"kind": "debug_rejected", "error": debug_error_name(e)})
+        }
         PlayNote::SeekRejected { target } => json!({"kind": "seek_rejected", "target": target}),
+    }
+}
+
+#[cfg(test)]
+mod fenced_delivery_tests {
+    use super::*;
+    use crate::link::Incoming;
+    use orr_edit::PlayController;
+    use orr_reflect::TypeRegistry;
+    use orr_sample::physics_game::{register_reflect, PhysGame};
+    use orr_sim::{DebugCommand, Simulation};
+    use std::sync::atomic::Ordering::Relaxed;
+
+    fn fixture() -> (
+        ErpServer,
+        EditorDoc,
+        Option<PlayController<PhysGame>>,
+        Receiver<Incoming>,
+        Arc<AtomicUsize>,
+    ) {
+        let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+        cfg.listen = false;
+        let mut server = ErpServer::start(cfg).unwrap();
+        let (send, recv) = channel();
+        let pending = Arc::new(AtomicUsize::new(0));
+        server.conns.insert(
+            1,
+            Conn {
+                tx: ConnTx::local(send, pending.clone()),
+                client: "test".into(),
+                caps: Caps::ALL,
+                binary: true,
+                subs: Subs::default(),
+                requests: 0,
+                connected_ms: 0,
+            },
+        );
+        let mut types = TypeRegistry::new();
+        register_reflect(&mut types);
+        let text = include_str!("../../../scenes/physics_demo.scene.yaml");
+        let doc =
+            EditorDoc::from_yaml(text, types, Simulation::<PhysGame>::build_registry(), 7).unwrap();
+        (server, doc, None, recv, pending)
+    }
+
+    fn subscribe(server: &mut ErpServer, target: &mut ErpTarget<'_, PhysGame>, source: &str) -> J {
+        server.watch(target, 1, Caps::ALL, "watch.subscribe", &json!({
+            "topics": ["frames", "events", "notes"], "source": source, "max_fps": 1, "view_delivery": 1,
+        })).unwrap()
+    }
+
+    fn drain(recv: &Receiver<Incoming>, pending: &AtomicUsize) -> Vec<Incoming> {
+        recv.try_iter()
+            .inspect(|msg| {
+                let cost = match msg {
+                    Incoming::Text(t) => t.len(),
+                    Incoming::Wire(b) => b.len(),
+                    Incoming::Local(f) => f.cost,
+                };
+                pending.fetch_sub(cost, Relaxed);
+            })
+            .collect()
+    }
+
+    fn frame(messages: &[Incoming]) -> &LocalFrame {
+        messages
+            .iter()
+            .find_map(|m| match m {
+                Incoming::Local(f) => Some(f.as_ref()),
+                _ => None,
+            })
+            .expect("frame")
+    }
+
+    #[test]
+    fn coherent_subscription_requires_all_topics_and_acknowledges_version() {
+        let (mut server, mut doc, mut play, _recv, _pending) = fixture();
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        for params in [
+            json!({"topics":["frames"], "view_delivery":1}),
+            json!({"topics":["frames","events","notes"], "view_delivery":2}),
+        ] {
+            assert!(server
+                .watch(&mut target, 1, Caps::ALL, "watch.subscribe", &params)
+                .is_err());
+        }
+        let result = subscribe(&mut server, &mut target, "view");
+        assert_eq!(result["view_delivery"], 1);
+        assert_eq!(result["subscription"], "1");
+        assert_eq!(result["cursor"], "0");
+        assert_eq!(result["count"], "0");
+        let again = subscribe(&mut server, &mut target, "view");
+        assert_eq!(again["subscription"], "2");
+    }
+
+    #[test]
+    fn same_tick_rejected_note_forces_new_fence_after_fps_throttle() {
+        let (mut server, mut doc, mut play, recv, pending) = fixture();
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, Some(json!(1)), "sim.start", &J::Null);
+        subscribe(&mut server, &mut target, "sim");
+        let now = Instant::now();
+        server.publish(&mut target, now);
+        let first = drain(&recv, &pending);
+        let old_meta = frame(&first).meta.clone();
+        let old_checksum = frame(&first).frame.checksum();
+        assert_eq!(old_meta["delivery"]["through_cursor"], "0");
+        target
+            .play
+            .as_mut()
+            .unwrap()
+            .session_mut()
+            .debug(DebugCommand::Despawn {
+                entity: orr_ecs::Entity {
+                    index: u32::MAX,
+                    version: 0,
+                },
+            })
+            .unwrap_err();
+        server.publish(&mut target, now + Duration::from_millis(10));
+        let notes = drain(&recv, &pending);
+        assert!(!notes.iter().any(|m| matches!(m, Incoming::Local(_))));
+        server.publish(&mut target, now + Duration::from_secs(1));
+        let next = drain(&recv, &pending);
+        let next = frame(&next);
+        assert_eq!(next.frame.checksum(), old_checksum);
+        assert_eq!(next.meta["delivery"]["through_cursor"], "1");
+        assert_eq!(next.meta["delivery"]["count"], "1");
+        assert_eq!(
+            next.meta["delivery"]["lifecycle"][0]["note"]["kind"],
+            "debug_rejected"
+        );
+    }
+
+    #[test]
+    fn successful_paused_debug_rebuilds_payload_and_fence_at_same_tick() {
+        let (mut server, mut doc, mut play, recv, pending) = fixture();
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        subscribe(&mut server, &mut target, "sim");
+        let now = Instant::now();
+        server.publish(&mut target, now);
+        let old = drain(&recv, &pending);
+        let old = frame(&old);
+        let (tick, checksum, alive, meta) = (
+            old.frame.tick(),
+            old.frame.checksum(),
+            old.frame.alive_count(),
+            old.meta.clone(),
+        );
+        server.request(
+            &mut target,
+            1,
+            Some(json!(77)),
+            "sim.debug",
+            &json!({"cmd":"spawn", "components":[]}),
+        );
+        let response = drain(&recv, &pending);
+        let Incoming::Text(text) = &response[0] else {
+            panic!("debug response")
+        };
+        assert!(serde_json::from_str::<J>(text)
+            .unwrap()
+            .get("error")
+            .is_none());
+        server.publish(&mut target, now + Duration::from_secs(1));
+        let new = drain(&recv, &pending);
+        let new = frame(&new);
+        assert_eq!(new.frame.tick(), tick);
+        assert_ne!(new.frame.checksum(), checksum);
+        assert_eq!(new.frame.alive_count(), alive + 1);
+        assert_ne!(new.meta["epoch"], meta["epoch"]);
+        assert_ne!(
+            new.meta["delivery"]["timeline"],
+            meta["delivery"]["timeline"]
+        );
+        // No transient event is required to force this publication.
+        assert_eq!(new.meta["delivery"]["through_cursor"], "0");
+    }
+
+    #[test]
+    fn source_disappearance_and_same_tick_restart_have_distinct_timelines() {
+        let (mut server, mut doc, mut play, recv, pending) = fixture();
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        subscribe(&mut server, &mut target, "sim");
+        let now = Instant::now();
+        server.publish(&mut target, now);
+        let messages = drain(&recv, &pending);
+        let inactive = messages
+            .iter()
+            .find_map(|m| match m {
+                Incoming::Text(s) => serde_json::from_str::<J>(s).ok(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(inactive["method"], "watch.view.inactive");
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        server.publish(&mut target, now + Duration::from_secs(1));
+        let messages = drain(&recv, &pending);
+        let first = frame(&messages).meta.clone();
+        server.request(&mut target, 1, None, "sim.stop", &J::Null);
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        server.publish(&mut target, now + Duration::from_secs(2));
+        let messages = drain(&recv, &pending);
+        let restarted = &frame(&messages).meta;
+        assert_eq!(first["tick"], restarted["tick"]);
+        assert_eq!(first["epoch"], restarted["epoch"]);
+        assert_ne!(
+            first["delivery"]["timeline"],
+            restarted["delivery"]["timeline"]
+        );
+        assert_ne!(
+            first["delivery"]["loss_generation"],
+            restarted["delivery"]["loss_generation"]
+        );
+    }
+
+    #[test]
+    fn transport_drops_are_summarized_but_control_responses_are_preserved() {
+        let (mut server, mut doc, mut play, recv, pending) = fixture();
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        subscribe(&mut server, &mut target, "sim");
+        server.publish(&mut target, Instant::now());
+        drain(&recv, &pending);
+        pending.store(65 << 20, Relaxed);
+        target
+            .play
+            .as_mut()
+            .unwrap()
+            .session_mut()
+            .debug(DebugCommand::Despawn {
+                entity: orr_ecs::Entity {
+                    index: u32::MAX,
+                    version: 0,
+                },
+            })
+            .unwrap_err();
+        server.request(&mut target, 1, Some(json!(99)), "sim.state", &J::Null);
+        let responses = drain(&recv, &pending);
+        assert_eq!(responses.len(), 1);
+        let Incoming::Text(response) = &responses[0] else {
+            panic!("response")
+        };
+        assert_eq!(serde_json::from_str::<J>(response).unwrap()["id"], 99);
+        pending.store(0, Relaxed);
+        server.publish(&mut target, Instant::now() + Duration::from_secs(2));
+        let messages = drain(&recv, &pending);
+        let delivery = &frame(&messages).meta["delivery"];
+        assert_eq!(delivery["loss_generation"], "2");
+        assert_eq!(delivery["count"], "1");
+        assert_eq!(delivery["lifecycle"][0]["count"], "1");
+    }
+
+    #[test]
+    fn request_boundaries_preserve_seek_and_branch_identity_before_final_frame() {
+        let (mut server, mut doc, mut play, recv, pending) = fixture();
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        subscribe(&mut server, &mut target, "sim");
+        let now = Instant::now();
+        server.publish(&mut target, now);
+        drain(&recv, &pending);
+        server.request(&mut target, 1, None, "sim.step", &json!({"n":10}));
+        server.request(&mut target, 1, None, "sim.seek", &json!({"tick":2}));
+        let after_seek = server.conns[&1].subs.delivery.as_ref().unwrap().timeline;
+        let raw_epoch = target.play.as_ref().unwrap().session().epoch();
+        server.request(&mut target, 1, None, "sim.branch", &J::Null);
+        let after_branch = server.conns[&1].subs.delivery.as_ref().unwrap().timeline;
+        assert_eq!(target.play.as_ref().unwrap().session().epoch(), raw_epoch);
+        assert!(
+            after_branch > after_seek,
+            "branch invalidates delivery even without raw epoch change"
+        );
+        server.request(&mut target, 1, None, "sim.step", &json!({"n":1}));
+        server.publish(&mut target, now + Duration::from_secs(1));
+        let messages = drain(&recv, &pending);
+        let baseline = frame(&messages);
+        assert_eq!(baseline.frame.tick(), 3);
+        let summaries = baseline.meta["delivery"]["lifecycle"].as_array().unwrap();
+        assert!(summaries.iter().any(|n| n["note"]["kind"] == "seeked"));
+        assert!(summaries.iter().any(|n| n["note"]["kind"] == "branched"));
+    }
+
+    #[test]
+    fn legacy_subscriber_keeps_its_original_metadata_next_to_fenced_peer() {
+        let (mut server, mut doc, mut play, recv, pending) = fixture();
+        let (legacy_tx, legacy_rx) = channel();
+        let legacy_pending = Arc::new(AtomicUsize::new(0));
+        server.conns.insert(
+            2,
+            Conn {
+                tx: ConnTx::local(legacy_tx, legacy_pending.clone()),
+                client: "legacy".into(),
+                caps: Caps::ALL,
+                binary: true,
+                subs: Subs::default(),
+                requests: 0,
+                connected_ms: 0,
+            },
+        );
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        subscribe(&mut server, &mut target, "sim");
+        let ack = server
+            .watch(
+                &mut target,
+                2,
+                Caps::ALL,
+                "watch.subscribe",
+                &json!({"topics":["frames","events","notes"]}),
+            )
+            .unwrap();
+        assert!(ack.get("view_delivery").is_none());
+        server.publish(&mut target, Instant::now());
+        let fenced = drain(&recv, &pending);
+        let legacy = drain(&legacy_rx, &legacy_pending);
+        assert!(frame(&fenced).meta.get("delivery").is_some());
+        assert!(frame(&legacy).meta.get("delivery").is_none());
+        assert_eq!(
+            frame(&fenced).frame.checksum(),
+            frame(&legacy).frame.checksum()
+        );
+        // Extensible JSON metadata does not require an ORRS wire-version bump.
+        let encoded = encode_frame_message(&frame(&fenced).meta, &frame(&fenced).frame.to_bytes());
+        assert_eq!(encoded[4], 1);
+        let (meta, bytes) = crate::wire::decode_frame_message(&encoded).unwrap();
+        assert_eq!(meta, frame(&fenced).meta);
+        assert_eq!(bytes, frame(&fenced).frame.to_bytes());
+    }
+
+    #[test]
+    fn oversized_outcome_is_counted_and_requires_same_state_reset_frame() {
+        let (mut server, mut doc, mut play, recv, pending) = fixture();
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        subscribe(&mut server, &mut target, "sim");
+        let now = Instant::now();
+        server.publish(&mut target, now);
+        drain(&recv, &pending);
+        let events = vec![(EventKey::new(0, 0, 0), Vec::new()); MAX_VIEW_BATCH_EVENTS + 1];
+        server.publish_delivery_events(&events);
+        assert!(drain(&recv, &pending).is_empty());
+        server.publish(&mut target, now + Duration::from_secs(1));
+        let messages = drain(&recv, &pending);
+        let baseline = frame(&messages);
+        assert_eq!(baseline.frame.tick(), 0);
+        assert_eq!(baseline.meta["delivery"]["through_cursor"], "1");
+        assert_eq!(
+            baseline.meta["delivery"]["count"],
+            (MAX_VIEW_BATCH_EVENTS + 1).to_string()
+        );
+        assert_eq!(baseline.meta["delivery"]["loss_generation"], "2");
+    }
+
+    #[test]
+    fn truncated_live_suffix_does_not_advance_inactive_proposal() {
+        let (mut server, mut doc, mut play, _recv, _pending) = fixture();
+        let (preview_tx, _preview_rx) = channel();
+        server.conns.insert(
+            2,
+            Conn {
+                tx: ConnTx::local(preview_tx, Arc::new(AtomicUsize::new(0))),
+                client: "preview".into(),
+                caps: Caps::ALL,
+                binary: true,
+                subs: Subs::default(),
+                requests: 0,
+                connected_ms: 0,
+            },
+        );
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        subscribe(&mut server, &mut target, "sim");
+        server
+            .watch(
+                &mut target,
+                2,
+                Caps::ALL,
+                "watch.subscribe",
+                &json!({
+                    "topics": ["frames", "events", "notes"], "source": "proposal:p999",
+                    "view_delivery": 1,
+                }),
+            )
+            .unwrap();
+        // Force the actual real-time producer cap. A proposal stream is
+        // unavailable during play and must not inherit this unrelated loss.
+        let events = vec![
+            SimEvent {
+                key: EventKey::new(0, 0, 0),
+                payload: orr_sample::physics_game::PhysEvent {
+                    kind: 1,
+                    a: 0,
+                    b: 0
+                },
+            };
+            MAX_VIEW_BATCH_EVENTS + 1
+        ];
+        server.push_events(&events);
+        assert_eq!(server.pending_view_losses, 1);
+        server.poll(&mut target);
+        let live = server.conns[&1].subs.delivery.as_ref().unwrap();
+        assert_eq!(live.count, (MAX_VIEW_BATCH_EVENTS + 1) as u64);
+        assert_eq!(live.loss_generation, 2);
+        let preview = server.conns[&2].subs.delivery.as_ref().unwrap();
+        assert_eq!(preview.identity.unwrap().0, 0);
+        assert_eq!(preview.cursor, 0);
+        assert_eq!(preview.count, 0);
+        assert_eq!(preview.loss_generation, 1);
     }
 }
 
@@ -1454,15 +2526,18 @@ mod client_viewstream_recovery_tests {
         let (send, recv) = channel::<Incoming>();
         let pending = Arc::new(AtomicUsize::new(0));
         let tx = ConnTx::local(send, pending);
-        let subs = Subs { viewstream: Some(FrameSub {
-            min_interval: Duration::from_secs(1),
-            last_sent: None,
-            last_key: None,
-            source: FrameSource::Sim,
-            client_reset_pending: false,
-            client_event_floor: None,
-            client_clear_event_floor_after_frame: false,
-        }), ..Subs::default() };
+        let subs = Subs {
+            viewstream: Some(FrameSub {
+                min_interval: Duration::from_secs(1),
+                last_sent: None,
+                last_key: None,
+                source: FrameSource::Sim,
+                client_reset_pending: false,
+                client_event_floor: None,
+                client_clear_event_floor_after_frame: false,
+            }),
+            ..Subs::default()
+        };
         server.conns.insert(
             1,
             Conn {

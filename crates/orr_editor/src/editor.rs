@@ -36,13 +36,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use orr_bridge::{Bridge, BridgeEvent, ControlOp, Lifecycle, Snapshot, Timeline};
+use orr_bridge::{Bridge, BridgeEvent, ControlOp, Lifecycle, Snapshot, Timeline, ViewResync, ViewUpdate};
 use orr_ecs::Entity;
 use orr_fp::{FPVec2, FP};
 use orr_reflect::{decimal, Guid, TypeRegistry, Value};
 use orr_remote::codec::b64_decode;
 use orr_remote::json::{json_to_value, value_to_json};
-use orr_remote::{ClientError, ErpClient, RemoteBridge};
+use orr_remote::{ClientError, ErpClient, RemoteBridge, RemoteViewDelivery};
 use orr_render::{Camera, RenderList};
 use orr_sample::physics_game::{register_reflect, PhysGame};
 use orr_sample::physics_view::{body_views, BodyView};
@@ -128,7 +128,7 @@ enum Pend {
     State,
     Clients,
     Detail(String),
-    PreviewRows(String),
+    PreviewRows(String, u64),
     Edit(String),
 }
 
@@ -150,7 +150,7 @@ struct InFlight {
     state: bool,
     clients: bool,
     details: Vec<String>,
-    preview_rows: bool,
+    preview_rows: Option<u64>,
 }
 
 /// The proposal whose staged frame the viewport shows.
@@ -158,6 +158,8 @@ struct Preview {
     id: String,
     stream: RemoteBridge<PhysGame>,
     seq: u64,
+    generation: u64,
+    rows_dirty: bool,
     bodies: Vec<BodyView>,
     rows: Vec<EntityRow>,
 }
@@ -189,6 +191,7 @@ pub struct Editor {
     checksum: u64,
     snap_entities: u32,
     preview: Option<Preview>,
+    preview_generation: u64,
     // requests that are in flight, and what to ask for next
     pending: BTreeMap<u64, Pend>,
     dirty: Dirty,
@@ -226,7 +229,14 @@ impl Editor {
         } else {
             e.info(format!("attached to {}", e.backend.url.clone().unwrap_or_default()));
         }
+        e.report_view_delivery();
         Ok(e)
+    }
+
+    fn report_view_delivery(&mut self) {
+        if self.backend.bridge.view_delivery() == RemoteViewDelivery::Legacy {
+            self.info("host uses a legacy frame stream; bounded presentation recovery is unavailable");
+        }
     }
 
     fn on_backend(backend: Backend) -> Result<Self, String> {
@@ -255,6 +265,7 @@ impl Editor {
             checksum: 0,
             snap_entities: 0,
             preview: None,
+            preview_generation: 0,
             pending: BTreeMap::new(),
             dirty: Dirty::default(),
             inflight: InFlight::default(),
@@ -279,7 +290,7 @@ impl Editor {
         e.read_clients(true)?;
         e.fit_camera();
         e.ingest();
-        e.refresh_snapshot();
+        e.refresh_view();
         Ok(e)
     }
 
@@ -706,10 +717,12 @@ impl Editor {
                     }
                 }
             }
-            Pend::PreviewRows(id) => {
-                self.inflight.preview_rows = false;
+            Pend::PreviewRows(id, generation) => {
+                if self.inflight.preview_rows == Some(generation) {
+                    self.inflight.preview_rows = None;
+                }
                 if let (Ok(v), Some(p)) = (r, self.preview.as_mut()) {
-                    if p.id == id {
+                    if p.id == id && p.generation == generation {
                         p.rows = rows_of(&v);
                     }
                 }
@@ -815,18 +828,60 @@ impl Editor {
             return;
         }
         self.ingest();
-        self.drain_bridge();
+        self.refresh_view();
         if self.down.is_some() {
             return;
         }
-        self.refresh_snapshot();
         self.refresh_preview();
         self.send_refreshes();
     }
 
-    fn drain_bridge(&mut self) {
-        for ev in self.backend.bridge.drain_events() {
-            match ev {
+    /// Consume the frame, notifications and recovery fence as one pinned read.
+    fn refresh_view(&mut self) {
+        let update = self.backend.bridge.poll_view();
+        let errors = self.backend.bridge.take_errors();
+        let failure = errors.iter().rev().find(|e| e.kind() == Some("view_delivery_invalid")).map(|e| e.message.clone());
+        for error in errors {
+            self.error(format!("frame stream: {error}"));
+        }
+        // Preserve the actionable protocol failure before consuming the
+        // terminal Disconnected notification, which otherwise has no reason.
+        if let Some(reason) = failure {
+            self.connection_lost(&reason);
+        }
+        self.apply_view_update(update);
+        if !self.backend.bridge.is_alive() {
+            self.connection_lost("the frame stream closed");
+        }
+    }
+
+    fn apply_view_update<E>(&mut self, update: ViewUpdate<E>) {
+        let ViewUpdate { snapshot, events, resync } = update;
+        let disconnected = resync.as_ref().is_some_and(|r| r.disconnected);
+        if let Some(reset) = &resync {
+            // The editor draws the current predicted pose directly and owns no
+            // interpolator or speculative VFX handles. Rebuild that complete
+            // presentation baseline even when its sequence has not changed.
+            // Do not discard pending ERP responses: these diagnostics are not
+            // acknowledgements of the requests on that independent channel.
+            self.snapshot = None;
+            self.bodies.clear();
+            self.checksum = 0;
+            self.mark_changed();
+            self.dirty.state = true;
+            for message in recovery_messages("view", reset) {
+                self.push_message(message);
+            }
+        }
+        if let Some(snapshot) = snapshot {
+            self.apply_snapshot(snapshot);
+        }
+        if disconnected {
+            self.connection_lost("the frame stream closed");
+            return;
+        }
+        for event in events {
+            match event {
                 BridgeEvent::Lifecycle(Lifecycle::DebugRejected(e)) => self.error(format!("debug edit refused: {e}")),
                 BridgeEvent::Lifecycle(Lifecycle::Disconnected) => {
                     self.connection_lost("the frame stream closed");
@@ -835,13 +890,9 @@ impl Editor {
                 _ => {}
             }
         }
-        if !self.backend.bridge.is_alive() {
-            self.connection_lost("the frame stream closed");
-        }
     }
 
-    fn refresh_snapshot(&mut self) {
-        let Some(s) = self.backend.bridge.snapshot() else { return };
+    fn apply_snapshot(&mut self, s: Snapshot) {
         if self.snapshot.as_ref().is_some_and(|o| o.seq() == s.seq()) {
             return;
         }
@@ -864,20 +915,65 @@ impl Editor {
 
     fn refresh_preview(&mut self) {
         let Some(p) = self.preview.as_mut() else { return };
-        if !p.stream.is_alive() {
+        // Preview streams receive lifecycle notifications too. Drain them on
+        // every render, even when the proposal's paused snapshot is unchanged.
+        let update = p.stream.poll_view();
+        let errors = p.stream.take_errors();
+        let mut messages = update.resync.as_ref().map(|r| recovery_messages("preview", r)).unwrap_or_default();
+        let had_error = !errors.is_empty();
+        messages.extend(errors.into_iter().map(|e| Message { text: format!("preview frame stream: {e}"), error: true }));
+        for event in &update.events {
+            if let BridgeEvent::Lifecycle(life @ (Lifecycle::DebugRejected(_) | Lifecycle::SeekRejected { .. } | Lifecycle::Desync { .. })) = event {
+                messages.push(Message { text: format!("preview frame stream diagnostic: {life:?}"), error: true });
+            }
+        }
+        let disconnected = !p.stream.is_alive()
+            || update.resync.as_ref().is_some_and(|r| r.disconnected)
+            || update.events.iter().any(|e| matches!(e, BridgeEvent::Lifecycle(Lifecycle::Disconnected)));
+        if disconnected {
             self.preview = None;
+            for message in messages {
+                self.push_message(message);
+            }
+            if !had_error {
+                self.error("preview frame stream closed");
+            }
             return;
         }
-        let Some(s) = p.stream.snapshot() else { return };
-        if s.seq() == p.seq {
-            return;
+        let recovered = update.resync.is_some();
+        if recovered {
+            p.seq = 0;
+            p.bodies.clear();
+            p.rows.clear();
         }
-        p.seq = s.seq();
-        p.bodies = body_views(s.predicted());
+        let changed = if let Some(s) = update.snapshot {
+            if s.seq() == p.seq && !recovered {
+                false
+            } else {
+                p.seq = s.seq();
+                p.bodies = body_views(s.predicted());
+                true
+            }
+        } else {
+            false
+        };
+        if recovered || changed {
+            self.preview_generation += 1;
+            p.generation = self.preview_generation;
+            p.rows_dirty = true;
+        }
+        let refresh_rows = p.seq > 0 && p.rows_dirty && self.inflight.preview_rows.is_none();
         let id = p.id.clone();
-        if !self.inflight.preview_rows {
-            self.inflight.preview_rows = true;
-            self.post("proposal.preview", json!({"id": id, "values": false, "limit": ROWS_LIMIT}), Pend::PreviewRows(id));
+        let generation = p.generation;
+        if refresh_rows {
+            p.rows_dirty = false;
+        }
+        for message in messages {
+            self.push_message(message);
+        }
+        if refresh_rows {
+            self.inflight.preview_rows = Some(generation);
+            self.post("proposal.preview", json!({"id": id, "values": false, "limit": ROWS_LIMIT}), Pend::PreviewRows(id, generation));
         }
     }
 
@@ -953,8 +1049,7 @@ impl Editor {
                 let want = self.sim.checksum;
                 let end = Instant::now() + Duration::from_secs(3);
                 while Instant::now() < end {
-                    self.drain_bridge();
-                    self.refresh_snapshot();
+                    self.refresh_view();
                     let timeline_matches = self.sim.mode != Mode::Play
                         || self.timeline().is_some_and(|t| !t.playing && t.tick == self.sim.head_tick);
                     if self.down.is_some() || (self.checksum == want && timeline_matches) {
@@ -981,7 +1076,10 @@ impl Editor {
     /// Waits (briefly) until the staged frame of the previewed proposal and its entities have arrived.
     fn wait_preview(&mut self) {
         let end = Instant::now() + Duration::from_secs(3);
-        while self.down.is_none() && self.preview.as_ref().is_some_and(|p| p.seq == 0 || p.rows.is_empty() || self.inflight.preview_rows) {
+        while self.down.is_none()
+            && self.previewing().is_some()
+            && self.preview.as_ref().is_some_and(|p| p.seq == 0 || p.rows.is_empty() || self.inflight.preview_rows.is_some())
+        {
             if Instant::now() > end {
                 break;
             }
@@ -1420,7 +1518,8 @@ impl Editor {
                 }
                 match self.backend.frame_stream(&format!("proposal:{i}")) {
                     Ok(stream) => {
-                        self.preview = Some(Preview { id: i.clone(), stream, seq: 0, bodies: Vec::new(), rows: Vec::new() });
+                        self.preview_generation += 1;
+                        self.preview = Some(Preview { id: i.clone(), stream, seq: 0, generation: self.preview_generation, rows_dirty: true, bodies: Vec::new(), rows: Vec::new() });
                         self.agent.preview = Some(i);
                         true
                     }
@@ -1433,7 +1532,7 @@ impl Editor {
             None => {
                 self.preview = None;
                 self.agent.preview = None;
-                self.inflight.preview_rows = false;
+                self.inflight.preview_rows = None;
                 true
             }
         }
@@ -1648,6 +1747,7 @@ impl Editor {
         } else {
             self.info("reconnected");
         }
+        self.report_view_delivery();
         true
     }
 
@@ -1656,6 +1756,28 @@ impl Editor {
     pub fn debug_crash_host(&mut self) {
         let _ = self.call("debug.panic", J::Null);
     }
+}
+
+/// A bounded diagnostic history, never a replay of lifecycle transitions or
+/// request acknowledgements. Current state comes from the pinned snapshot and
+/// ERP, and actual request results continue through their normal response path.
+fn recovery_messages(source: &str, reset: &ViewResync) -> Vec<Message> {
+    let mut messages = vec![Message {
+        text: format!("{source} recovered at tick {}: {} presentation notifications discarded (generation {})", reset.head_tick, reset.discarded_events, reset.generation),
+        error: false,
+    }];
+    for summary in &reset.lifecycle {
+        messages.push(Message {
+            text: format!("{source} recovery diagnostics: {} coalesced occurrence(s), latest {:?}", summary.count, summary.last),
+            error: matches!(summary.last, Lifecycle::DebugRejected(_) | Lifecycle::SeekRejected { .. } | Lifecycle::Desync { .. } | Lifecycle::Disconnected),
+        });
+    }
+    if let Some(tick) = reset.last_desync {
+        if !reset.lifecycle.iter().any(|s| matches!(s.last, Lifecycle::Desync { tick: t } if t == tick)) {
+            messages.push(Message { text: format!("{source} recovery diagnostics: last desync at tick {tick}"), error: true });
+        }
+    }
+    messages
 }
 
 fn rows_of(v: &J) -> Vec<EntityRow> {
@@ -1689,3 +1811,6 @@ pub fn fp_of_f64(v: f64) -> Option<FP> {
     }
     decimal::parse_fp(&format!("{v:.5}")).ok()
 }
+
+#[cfg(test)]
+mod recovery_tests;

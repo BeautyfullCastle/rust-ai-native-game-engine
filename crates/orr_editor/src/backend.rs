@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use orr_remote::sample::spawn_phys_host;
-use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteBridge, RemoteConfig, ServerConfig, USER_CLIENT};
+use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteBridge, RemoteConfig, ServerConfig, ViewDeliveryMode, USER_CLIENT};
 use orr_sample::physics_game::PhysGame;
 use serde_json::{json, Value as J};
 
@@ -121,6 +121,7 @@ impl Backend {
                 erp.call_timeout = CALL_TIMEOUT;
                 let mut rc = RemoteConfig::new("");
                 rc.source = "view".to_string();
+                rc.view_delivery = ViewDeliveryMode::RequireFenced;
                 // In process a frame is a copy, not a message: let an edit show at once instead of
                 // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
                 rc.max_fps = 240;
@@ -141,6 +142,7 @@ impl Backend {
                 let mut rc = RemoteConfig::new(if token.is_some() { url } else { &full });
                 rc.token.clone_from(token);
                 rc.source = "view".to_string();
+                rc.view_delivery = ViewDeliveryMode::PreferFenced;
                 let bridge = RemoteBridge::<PhysGame>::connect(rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
                 let mut b = Backend { spec: spec.clone(), erp, bridge, host: None, own_client: USER_CLIENT.to_string(), url: Some(url.clone()), game: String::new() };
                 b.handshake()?;
@@ -173,6 +175,7 @@ impl Backend {
             }
         };
         rc.source = source.to_string();
+        rc.view_delivery = if self.spec.is_local() { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced };
         match &self.host {
             Some(h) => {
                 let t = h.connector().connect(USER_CLIENT, Caps::ALL).map_err(|e| e.to_string())?;

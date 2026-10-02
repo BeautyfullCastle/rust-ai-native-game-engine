@@ -6,19 +6,21 @@ use std::time::{Duration, Instant};
 
 use common::TestHost;
 use orr_bridge::{Bridge, BridgeEvent, ControlOp, Lifecycle, SimControl};
-use orr_remote::{RemoteBridge, RemoteConfig};
+use orr_remote::{RemoteBridge, RemoteConfig, RemoteViewDelivery, ViewDeliveryMode};
 use orr_sample::physics_game::PhysGame;
 use serde_json::Value as J;
 
 #[test]
-fn remote_poll_view_is_best_effort_and_does_not_claim_resync() {
+fn legacy_remote_poll_view_is_best_effort_and_does_not_claim_resync() {
     let host = TestHost::standard();
     let mut control = host.client("tok-all");
     control.call("sim.start", J::Null).unwrap();
 
     let mut cfg = RemoteConfig::new(&host.url);
     cfg.token = Some("tok-all".to_string());
+    cfg.view_delivery = ViewDeliveryMode::Legacy;
     let mut bridge = RemoteBridge::<PhysGame>::connect(cfg).expect("connect remote bridge");
+    assert_eq!(bridge.view_delivery(), RemoteViewDelivery::Legacy);
 
     // Keep draining while the first frame arrives. SessionStarted is emitted
     // during the handshake, independently of the remote frame stream.
@@ -28,7 +30,7 @@ fn remote_poll_view_is_best_effort_and_does_not_claim_resync() {
         let update = bridge.poll_view();
         assert!(
             update.resync.is_none(),
-            "remote ERP has no cursor to report a resync"
+            "legacy ERP has no negotiated cursor to report a resync"
         );
         seen.extend(update.events);
         if let Some(snapshot) = update.snapshot {

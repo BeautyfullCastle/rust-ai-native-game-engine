@@ -73,6 +73,7 @@ pub mod methods;
 mod net;
 mod proposals;
 mod remote;
+mod remote_view;
 #[cfg(feature = "sample-host")]
 pub mod sample;
 mod server;
@@ -89,6 +90,6 @@ pub use host::{Host, Pacer};
 pub use link::{Incoming, LocalConnector, LocalFrame, LocalTransport, PumpedWs, Request, Transport, TxHandle, WsTransport};
 pub use local::LocalHost;
 pub use proposals::{default_build_id, BotFn, GameHooks};
-pub use remote::{RemoteBridge, RemoteConfig, RemoteMetrics};
+pub use remote::{RemoteBridge, RemoteConfig, RemoteMetrics, RemoteViewDelivery, ViewDeliveryMode};
 pub use viewstream::ViewStreamHook;
 pub use server::{ErpServer, PollReport, ServerConfig, ServerError, ServerStats, MAX_PENDING_BYTES};
