@@ -30,6 +30,19 @@
 //! ([`RemoteConfig::max_fps`]) and skips frames for a subscriber whose
 //! socket is behind. See `tests/measure.rs` for numbers.
 
+//!
+//! # Presentation recovery
+//!
+//! Remote `poll_view` is best-effort. ERP currently sends simulation events
+//! and frame snapshots as separate messages, with no shared output cursor or
+//! event-to-frame watermark. Consequently this adapter cannot report a
+//! bounded-mailbox resync or guarantee that a snapshot covers notifications
+//! dropped by a remote transport. `ViewUpdate::resync` is therefore always
+//! `None` here; after a disconnect, consumers must use the existing reconnect
+//! flow and rebuild from a newly received snapshot. This is not network-loss
+//! recovery, and callers needing durable event delivery must use a reliable
+//! protocol separate from the view stream.
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -40,7 +53,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwapOption;
 use orr_bridge::{
     Bridge, BridgeError, BridgeEvent, BridgeStats, ControlOp, DebugCommand, EventKey, EventStatus, Lifecycle, SimControl, Snapshot,
-    SnapshotParts,
+    SnapshotParts, ViewUpdate,
 };
 use orr_ecs::Frame;
 use orr_sim::{Game, PlayerSlot, SimCommand, Simulation};
@@ -261,6 +274,18 @@ impl<G: Game> Bridge<G> for RemoteBridge<G> {
 
     fn drain_events(&mut self) -> Vec<BridgeEvent<G::Event>> {
         self.events.try_iter().collect()
+    }
+
+    /// Takes one best-effort remote update. ERP does not currently put an
+    /// event cursor on frame messages, so this cannot guarantee an atomic
+    /// snapshot/event cut or signal recovery after transport loss.
+    fn poll_view(&mut self) -> ViewUpdate<G::Event> {
+        let events = self.drain_events();
+        ViewUpdate {
+            snapshot: self.snapshot(),
+            events,
+            resync: None,
+        }
     }
 
     fn is_alive(&self) -> bool {

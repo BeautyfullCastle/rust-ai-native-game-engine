@@ -2,7 +2,6 @@
 //! its outcome into published snapshots and events.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,6 +14,7 @@ use crate::bridge::{BridgeConfig, StepTiming};
 use crate::event::{BridgeEvent, BridgeStats, Lifecycle};
 use crate::host::{HostOutcome, SimHost};
 use crate::snapshot::{Snapshot, SnapshotData};
+use crate::ViewEventSender;
 
 /// View to sim messages (Threaded). `Step` and `Shutdown` are control, not
 /// game data: `Step` is used by manual pacing only.
@@ -70,7 +70,8 @@ pub(crate) struct SimCore<G: Game, H: SimHost<G>> {
     cfg: BridgeConfig<G>,
     input: G::Input,
     commands: Vec<G::Command>,
-    events: Sender<BridgeEvent<G::Event>>,
+    events: ViewEventSender<G::Event>,
+    pending_events: Vec<BridgeEvent<G::Event>>,
     slot: SnapshotSlot,
     /// Counts finished steps; lets a manual-paced caller wait for a step.
     steps_done: Arc<AtomicU64>,
@@ -86,7 +87,7 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
     pub(crate) fn new(
         host: H,
         cfg: BridgeConfig<G>,
-        events: Sender<BridgeEvent<G::Event>>,
+        events: ViewEventSender<G::Event>,
         slot: SnapshotSlot,
         steps_done: Arc<AtomicU64>,
     ) -> Self {
@@ -96,6 +97,7 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
             input: G::Input::default(),
             commands: Vec::new(),
             events,
+            pending_events: Vec::new(),
             slot,
             steps_done,
             pool: FramePool::default(),
@@ -110,8 +112,9 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
             local_slot: core.host.local_slot(),
             player_count: core.host.player_count(),
         };
-        let _ = core.events.send(BridgeEvent::Lifecycle(started));
+        core.pending_events.push(BridgeEvent::Lifecycle(started));
         core.publish();
+        core.publish_output();
         core
     }
 
@@ -148,18 +151,19 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
     fn finish_call(&mut self, outcome: HostOutcome<G>) {
         let HostOutcome { events, lifecycle } = outcome;
         for note in lifecycle {
-            let _ = self.events.send(BridgeEvent::Lifecycle(note));
+            self.pending_events.push(BridgeEvent::Lifecycle(note));
         }
         self.send_events(events);
         if self.needs_publish() {
             self.publish();
         }
+        self.publish_output();
         self.steps_done.fetch_add(1, Ordering::Release);
     }
 
-    fn send_events(&self, batch: EventBatch<G::Event>) {
+    fn send_events(&mut self, batch: EventBatch<G::Event>) {
         for (key, status) in batch.into_vec() {
-            let _ = self.events.send(BridgeEvent::Sim { key, status });
+            self.pending_events.push(BridgeEvent::Sim { key, status });
         }
     }
 
@@ -204,7 +208,7 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
         let t_advanced = observing.then(Instant::now);
         if stalled && !self.was_stalled {
             let head_tick = self.host.head_tick();
-            let _ = self.events.send(BridgeEvent::Lifecycle(Lifecycle::Stalled { head_tick }));
+            self.pending_events.push(BridgeEvent::Lifecycle(Lifecycle::Stalled { head_tick }));
         }
         self.was_stalled = stalled;
 
@@ -216,21 +220,26 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
                 self.stats.resimulated_ticks += u64::from(info.resim_count);
                 let depth = (info.to_tick + 1 - info.from_tick) as u32;
                 self.stats.max_rollback_depth = self.stats.max_rollback_depth.max(depth);
-                let _ = self.events.send(BridgeEvent::Lifecycle(Lifecycle::Rollback(info)));
+                self.pending_events.push(BridgeEvent::Lifecycle(Lifecycle::Rollback(info)));
             }
         }
         for note in self.host.take_lifecycle() {
-            let _ = self.events.send(BridgeEvent::Lifecycle(note));
+            self.pending_events.push(BridgeEvent::Lifecycle(note));
         }
         self.send_events(batch);
 
         if self.needs_publish() {
             self.publish();
         }
+        self.publish_output();
         if let (Some(start), Some(advanced), Some(observer)) = (t_start, t_advanced, self.cfg.step_observer.as_mut()) {
             // `advance` covers the host call only; the event sends in between are cheap.
             observer(StepTiming { host_advance: advanced - start, publish: advanced.elapsed(), stalled });
         }
+    }
+
+    fn publish_output(&mut self) {
+        self.events.publish(load_snapshot(&self.slot), std::mem::take(&mut self.pending_events));
     }
 
     fn publish(&mut self) {

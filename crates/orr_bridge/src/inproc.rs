@@ -1,5 +1,4 @@
 use std::sync::atomic::AtomicU64;
-use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +13,7 @@ use crate::core::{load_snapshot, SimCore, SnapshotSlot, ToSim};
 use crate::event::BridgeEvent;
 use crate::host::SimHost;
 use crate::snapshot::Snapshot;
+use crate::{view_event_channel, ViewEventReceiver, ViewUpdate};
 
 const NANOS: u128 = 1_000_000_000;
 /// One tick in accumulator units: nanosecond x tick rate x speed (in thousandths).
@@ -27,7 +27,7 @@ const TICK_UNITS: u128 = NANOS * 1000;
 /// events are the same for the same inputs.
 pub struct InProc<G: Game, H: SimHost<G>> {
     core: SimCore<G, H>,
-    events: Receiver<BridgeEvent<G::Event>>,
+    events: ViewEventReceiver<G::Event>,
     slot: SnapshotSlot,
     local_slot: PlayerSlot,
     tick_rate: u32,
@@ -39,7 +39,7 @@ pub struct InProc<G: Game, H: SimHost<G>> {
 
 impl<G: Game, H: SimHost<G>> InProc<G, H> {
     pub fn new(host: H, cfg: BridgeConfig<G>) -> Self {
-        let (tx, events) = channel();
+        let (tx, events) = view_event_channel(cfg.view_event_capacity);
         let slot: SnapshotSlot = Arc::new(ArcSwapOption::empty());
         let (local_slot, tick_rate, player_count) = (host.local_slot(), host.tick_rate(), host.player_count());
         let core = SimCore::new(host, cfg, tx, slot.clone(), Arc::new(AtomicU64::new(0)));
@@ -116,7 +116,11 @@ impl<G: Game, H: SimHost<G>> Bridge<G> for InProc<G, H> {
     }
 
     fn drain_events(&mut self) -> Vec<BridgeEvent<G::Event>> {
-        self.events.try_iter().collect()
+        self.events.drain_events()
+    }
+
+    fn poll_view(&mut self) -> ViewUpdate<G::Event> {
+        self.events.poll()
     }
 
     fn is_alive(&self) -> bool {

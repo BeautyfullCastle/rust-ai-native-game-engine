@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use orr_bridge::Snapshot;
+use orr_bridge::{Snapshot, ViewUpdate};
 use orr_ecs::Entity;
 
 use crate::extract::InterpMode;
@@ -88,6 +88,46 @@ impl<X: Extractor3> ViewWorld3<X> {
         self.playback = 0.0;
         self.last_seq = None;
         self.rollbacks_seen = None;
+        self.lifecycle.clear();
+    }
+
+    /// Rebuilds from a recovery baseline, showing the current predicted pose
+    /// immediately. Old spawn/despawn notices and correction history are gone.
+    pub fn reset_from_snapshot(&mut self, snap: &Snapshot) {
+        self.reset();
+        self.tick_rate = snap.tick_rate() as f32;
+        self.last_seq = Some(snap.seq());
+        self.rollbacks_seen = Some(snap.stats().rollbacks);
+        let mut cur = std::mem::take(&mut self.buf_cur);
+        cur.clear();
+        self.extractor.extract(snap.predicted(), &mut cur);
+        self.push_predicted(snap.tick(), &cur, &cur, false);
+        self.alpha_raw = 1.0;
+        self.buf_cur = cur;
+        if let Some(verified) = snap.verified() {
+            let mut items = Vec::new();
+            self.extractor.extract(verified, &mut items);
+            self.push_verified(verified.tick(), &items);
+        }
+    }
+
+    /// Applies the pinned state/reset pair from `Bridge::poll_view`. External
+    /// sound/VFX owners must also clear their speculative handles on resync.
+    pub fn update_from_bridge<E>(&mut self, dt: f32, update: &ViewUpdate<E>) {
+        if update.resync.is_some()
+            || update
+                .events
+                .iter()
+                .any(|event| matches!(event, orr_bridge::BridgeEvent::ViewResynced(_)))
+        {
+            if let Some(snap) = &update.snapshot {
+                self.reset_from_snapshot(snap);
+            } else {
+                self.reset();
+            }
+        } else {
+            self.update(dt, update.snapshot.as_ref());
+        }
     }
 
     pub fn config(&self) -> &ViewConfig {

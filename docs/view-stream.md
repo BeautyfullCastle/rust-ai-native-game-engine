@@ -85,6 +85,7 @@ Frame flags (byte 7):
 | 0 | `rolled_back` | a rollback corrected the past since the previous frame sent; `rollback_from..rollback_to` is the range resimulated. Positions of those ticks changed: an interpolating view should smooth the correction (`orr_view` does this with an error offset that decays). |
 | 1 | `discontinuity` | the timeline jumped (seek, branch, new session): show this frame as it is, reset interpolation and smoothing. `prev` equals `cur` in every record. |
 | 2 | `paused` | the simulation is paused: the tick does not advance by itself. |
+| 3 | `events_reset` | presentation event history has a gap. Clear all pending predicted sound/VFX handles and event-key tables before ingesting this full baseline. Also carries `discontinuity`, with `prev == cur`. |
 
 #### Entity record (48 bytes)
 
@@ -216,7 +217,7 @@ the order below, so even a `strstr` reader can find them. Example (shortened):
  "endian":"little",
  "fixed_point":{"type":"q48.16","raw":"i64","frac_bits":16,"note":"..."},
  "frame":{"magic":"OVS1","header_len":56,"record_len":48,"shapes":["circle","quad","capsule"],
-          "interp_modes":["prediction","snapshot","none"],"flags":{"rolled_back":1,"discontinuity":2,"paused":4}},
+          "interp_modes":["prediction","snapshot","none"],"flags":{"rolled_back":1,"discontinuity":2,"paused":4,"events_reset":8}},
  "kinds":[{"id":0,"name":"static","props":[]},
           {"id":1,"name":"dynamic","props":[{"name":"speed","type":"f32"}]},
           {"id":2,"name":"bar","props":[]},
@@ -259,7 +260,10 @@ from a local host:
   the same `(tick, system, seq)` key, `verified` (the confirmed inputs produced them) or
   `canceled` (a rollback found they do not happen). A view starts a sound or particle on
   `predicted` and takes it back on `canceled`. Events that only exist after a rollback arrive as
-  new `predicted` records. Every `verified` and `canceled` record is preceded by its `predicted`.
+  new `predicted` records. In an uninterrupted stream, each settlement follows its `predicted`.
+  A presentation overflow instead emits `events_reset`: clear all speculative handles and rebuild
+  from that full frame. Missed transient effects are not replayed; late settlements belonging to
+  the discarded baseline are suppressed. `verified` is final simulation state, not durable delivery.
 - **Inputs**: `orr_set_input` works for the joined slot only (the server chose it; see the
   status). Commands go with the next submitted tick. Timeline controls (play, pause, step, seek,
   speed), `orr_erp_call` and listening sockets belong to a local host and return `ORR_ERR_ARG`.
@@ -454,8 +458,22 @@ What a Unity, Unreal or Godot view has to do, in order:
 4. Each input sample (once per sim tick is enough): write the input bytes and
    `orr_set_input`.
 5. Drain `orr_events_poll` for sounds and effects; treat `predicted` as
-   reversible and `verified` as final.
+   reversible and `verified` as final. On frame flag `events_reset` (8), clear
+   pending speculative effects and event-key history before accepting new events.
+   Older clients that ignore unknown flags must be upgraded to support recovery;
+   this flag does not alter the binary header or format version.
 6. 2D shapes are circle, quad and capsule. A 3D game streams `ViewFrame3` (sphere, box, capsule,
    plane with position and quaternion): map them to the engine's meshes (or use `kind` to pick a
    prefab), draw with the engine's own lighting and slerp the rotation. Games with richer
    visuals add properties to their kinds.
+
+
+## Presentation delivery recovery
+
+For `InProc`/`Threaded`, view notifications now have a configurable bounded
+mailbox and an explicit snapshot-based reset. See [bounded view recovery](view-recovery.md)
+for the exact cursor, lifecycle-diagnostic, and durability contract. Recovery is
+presentation-only; the authoritative simulation continues ticking. `RemoteBridge`
+and the editor's ERP `LocalHost` path are not covered by the bounded mailbox.
+The flag above signals a bridge-level reset, not network packet-loss recovery.
+The binary frame carries no diagnostic count; Rust `ViewResync` exposes counts.

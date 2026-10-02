@@ -71,7 +71,9 @@ use std::time::Duration;
 mod client;
 
 use orr_remote::{Auth, Caps, ClientError, ErpClient, LocalHost, ServerConfig};
-use orr_viewstream::{message_type, MSG_EVENTS, MSG_FRAME};
+use orr_viewstream::{
+    message_type, reset_frame_events, EventBatch, MSG_EVENTS, MSG_FRAME, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET,
+};
 use serde_json::{json, Value as J};
 
 /// Success.
@@ -233,8 +235,12 @@ const DEMO_SCENE: &str = include_str!("../../../scenes/physics_demo.scene.yaml")
 const CLIENT_NAME: &str = "ffi";
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// Event batches kept for a caller that does not poll; the oldest are dropped above this.
+/// This FFI-side cap does not synthesize `FLAG_EVENTS_RESET`; only a reset delivered by the
+/// upstream view producer can establish a fresh baseline. In particular, the local-host ERP path
+/// does not gain a new bounded-queue recovery guarantee from this FFI mailbox change.
 const MAX_QUEUED_EVENT_BATCHES: usize = 4096;
 
+#[derive(Debug)]
 struct Fail {
     code: c_int,
     msg: String,
@@ -297,11 +303,98 @@ struct Inner {
     schema_json: String,
     input_size: usize,
     player_count: u8,
-    /// The newest frame not read yet (a newer one replaces it).
-    latest: Option<Vec<u8>>,
+    /// The newest frame not read yet, with event-reset baselines latched until acknowledged.
+    view: FrameMailbox,
     /// The frame handed out by `orr_view_poll_ptr`.
     held: Vec<u8>,
     events: VecDeque<Vec<u8>>,
+}
+
+/// The newest unread view frame. An event reset remains sticky until the caller
+/// successfully takes this baseline; a too-small copy buffer does not acknowledge it.
+#[derive(Default)]
+struct FrameMailbox {
+    latest: Option<Vec<u8>>,
+    reset_pending: bool,
+    /// After a reset baseline is acknowledged, ignore late old-timeline event records.
+    reset_floor_tick: Option<u64>,
+}
+
+impl FrameMailbox {
+    fn push(&mut self, mut frame: Vec<u8>, events: &mut VecDeque<Vec<u8>>) -> Result<(), Fail> {
+        // Both 2D and 3D view-frame headers put the flags byte at offset 7. The
+        // producer's helper handles the versioned body layout when we need to
+        // coalesce a newer snapshot into the still-unread baseline.
+        let flags = frame.get(7).copied().unwrap_or_default();
+        let reset = flags & FLAG_EVENTS_RESET != 0;
+        if reset {
+            self.reset_pending = true;
+            events.clear();
+        } else if !self.reset_pending && flags & FLAG_DISCONTINUITY != 0 {
+            // A seek/branch starts a new timeline; an older reset's tick cutoff
+            // must not hide valid events in that new timeline.
+            self.reset_floor_tick = None;
+        }
+        if self.reset_pending {
+            frame = reset_frame_events(&frame).map_err(|e| Fail {
+                code: ORR_ERR_HOST,
+                msg: format!("cannot preserve the view event-reset baseline: {e}"),
+            })?;
+        }
+        self.latest = Some(frame);
+        Ok(())
+    }
+
+    fn take(&mut self) -> Option<Vec<u8>> {
+        let frame = self.latest.take()?;
+        if self.reset_pending {
+            self.reset_floor_tick = frame_tick(&frame);
+        }
+        self.reset_pending = false;
+        Some(frame)
+    }
+
+    fn acknowledge_copy(&mut self) {
+        if self.reset_pending {
+            self.reset_floor_tick = self.latest.as_deref().and_then(frame_tick);
+        }
+        self.latest = None;
+        self.reset_pending = false;
+    }
+
+    fn clear(&mut self) {
+        self.latest = None;
+        self.reset_pending = false;
+        self.reset_floor_tick = None;
+    }
+}
+
+fn frame_tick(frame: &[u8]) -> Option<u64> {
+    Some(u64::from_le_bytes(frame.get(8..16)?.try_into().ok()?))
+}
+
+fn queue_event_batch(view: &FrameMailbox, events: &mut VecDeque<Vec<u8>>, mut bytes: Vec<u8>) -> Result<(), Fail> {
+    // Do not let events from beyond the reset cut race ahead of the baseline.
+    // Once the consumer has acknowledged that baseline, newly pumped batches resume.
+    if view.reset_pending {
+        return Ok(());
+    }
+    if let Some(floor) = view.reset_floor_tick {
+        let mut batch = EventBatch::decode(&bytes).map_err(|e| Fail {
+            code: ORR_ERR_HOST,
+            msg: format!("cannot filter events against the view reset baseline: {e}"),
+        })?;
+        batch.events.retain(|event| event.tick > floor);
+        if batch.events.is_empty() {
+            return Ok(());
+        }
+        bytes = batch.encode();
+    }
+    if events.len() >= MAX_QUEUED_EVENT_BATCHES {
+        events.pop_front();
+    }
+    events.push_back(bytes);
+    Ok(())
 }
 
 /// An opaque host handle (see the header).
@@ -321,13 +414,8 @@ impl Inner {
                 let alive = l.client.poll();
                 while let Some(bytes) = l.client.frames.pop_front() {
                     match message_type(&bytes) {
-                        Ok(MSG_FRAME) => self.latest = Some(bytes),
-                        Ok(MSG_EVENTS) => {
-                            if self.events.len() >= MAX_QUEUED_EVENT_BATCHES {
-                                self.events.pop_front();
-                            }
-                            self.events.push_back(bytes);
-                        }
+                        Ok(MSG_FRAME) => self.view.push(bytes, &mut self.events)?,
+                        Ok(MSG_EVENTS) => queue_event_batch(&self.view, &mut self.events, bytes)?,
                         _ => {}
                     }
                 }
@@ -348,7 +436,16 @@ impl Inner {
                 if let Some(why) = c.failure() {
                     return fail(ORR_ERR_HOST, format!("joining the server failed: {why}"));
                 }
-                c.pump(&mut self.latest, &mut self.events, MAX_QUEUED_EVENT_BATCHES);
+                let out = c.pump();
+                // RelayView returns a frame and its events separately, so process
+                // the frame first: a reset frame must clear/suppress any batches
+                // associated with the same pump before they reach the FFI queue.
+                if let Some(frame) = out.frame {
+                    self.view.push(frame, &mut self.events)?;
+                }
+                if let Some(batch) = out.events {
+                    queue_event_batch(&self.view, &mut self.events, batch)?;
+                }
                 Ok(())
             }
         }
@@ -451,7 +548,7 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
         schema_json: String::new(),
         input_size: 0,
         player_count: 0,
-        latest: None,
+        view: FrameMailbox::default(),
         held: Vec::new(),
         events: VecDeque::new(),
     };
@@ -537,7 +634,7 @@ fn open_client(cfg: *const OrrClientConfig) -> Result<OrrHost, Fail> {
         schema_json: String::new(),
         input_size: 0,
         player_count: 0,
-        latest: None,
+        view: FrameMailbox::default(),
         held: Vec::new(),
         events: VecDeque::new(),
     };
@@ -740,12 +837,14 @@ pub unsafe extern "C" fn orr_view_poll(host: *mut OrrHost, buf: *mut u8, cap: us
         *written = 0;
         let mut inner = lock(h);
         inner.pump()?;
-        let Some(frame) = inner.latest.as_ref() else { return Ok(ORR_NO_FRAME) };
+        let Some(frame) = inner.view.latest.as_ref() else { return Ok(ORR_NO_FRAME) };
         *written = frame.len();
         if !write_out(buf, cap, frame)? {
             return fail(ORR_ERR_BUFFER, format!("buffer too small: {} bytes needed, {cap} given", frame.len()));
         }
-        inner.latest = None;
+        // Only a complete copy acknowledges a reset baseline. ORR_ERR_BUFFER
+        // above deliberately leaves both the frame and reset latch untouched.
+        inner.view.acknowledge_copy();
         Ok(ORR_OK)
     })
 }
@@ -763,7 +862,7 @@ pub unsafe extern "C" fn orr_view_poll_ptr(host: *mut OrrHost, data: *mut *const
         *len = 0;
         let mut inner = lock(h);
         inner.pump()?;
-        let Some(frame) = inner.latest.take() else { return Ok(ORR_NO_FRAME) };
+        let Some(frame) = inner.view.take() else { return Ok(ORR_NO_FRAME) };
         inner.held = frame;
         *data = inner.held.as_ptr();
         *len = inner.held.len();
@@ -878,7 +977,7 @@ pub unsafe extern "C" fn orr_control(host: *mut OrrHost, op: c_int, arg: i64) ->
             ORR_CTL_BRANCH => inner.call("sim.branch", J::Null)?,
             ORR_CTL_RESTART => {
                 inner.call("sim.stop", J::Null)?;
-                inner.latest = None;
+                inner.view.clear();
                 inner.start_session()?;
                 J::Null
             }
@@ -938,4 +1037,134 @@ pub unsafe extern "C" fn orr_erp_call(host: *mut OrrHost, request_json: *const c
         }
         Ok(code)
     })
+}
+
+#[cfg(test)]
+mod frame_mailbox_tests {
+    use super::*;
+    use orr_viewstream::{
+        EntityRecord, EventRecord, ViewFrame, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
+    };
+
+    fn frame(tick: u64, flags: u8, prev: [f32; 3], cur: [f32; 3]) -> Vec<u8> {
+        ViewFrame {
+            flags,
+            tick,
+            verified_tick: tick,
+            seq: tick,
+            rollback: None,
+            entities: vec![EntityRecord {
+                id: 7,
+                kind: 1,
+                shape: 0,
+                mode: 0,
+                size: 1.0,
+                half_y: 0.0,
+                rgba: [255; 4],
+                prev,
+                cur,
+            }],
+            props: Vec::new(),
+        }
+        .encode()
+    }
+
+    fn event(tick: u64, state: u8) -> EventRecord {
+        EventRecord { tick, system: 1, seq: 1, state, event_type: 1, payload: vec![1, 2, 3] }
+    }
+
+    #[test]
+    fn unread_reset_survives_newer_frames_and_small_copy_buffers() {
+        let mut mailbox = FrameMailbox::default();
+        let mut events = VecDeque::new();
+        queue_event_batch(&mailbox, &mut events, vec![1]).unwrap();
+        assert_eq!(events.len(), 1);
+
+        // A reset clears pre-cut batches. A subsequent status/events poll pumps a
+        // newer frame before the caller takes the baseline; that frame must still
+        // be an events-reset discontinuity with prev == cur.
+        mailbox
+            .push(frame(10, FLAG_EVENTS_RESET, [0.0, 0.0, 0.0], [10.0, 0.0, 1.0]), &mut events)
+            .unwrap();
+        assert!(events.is_empty());
+        assert!(mailbox.reset_pending);
+        assert_eq!(mailbox.reset_floor_tick, None, "the late-event cutoff starts only after acknowledgement");
+        queue_event_batch(&mailbox, &mut events, vec![2]).unwrap();
+        assert!(events.is_empty(), "post-cut events wait until the baseline is acknowledged");
+
+        mailbox.push(frame(11, 0, [10.0, 0.0, 1.0], [11.0, 0.0, 2.0]), &mut events).unwrap();
+        let mut too_small = [0u8; 1];
+        let latest = mailbox.latest.as_ref().unwrap();
+        assert!(!unsafe { write_out(too_small.as_mut_ptr(), too_small.len(), latest) }.unwrap());
+        assert!(mailbox.reset_pending, "a short-buffer poll must not acknowledge the baseline");
+        assert_eq!(mailbox.reset_floor_tick, None);
+        queue_event_batch(&mailbox, &mut events, vec![3]).unwrap();
+        assert!(events.is_empty());
+
+        mailbox.push(frame(12, 0, [11.0, 0.0, 2.0], [12.0, 0.0, 3.0]), &mut events).unwrap();
+        let coalesced = ViewFrame::decode(mailbox.latest.as_ref().unwrap()).unwrap();
+        assert_eq!(coalesced.tick, 12);
+        assert!(coalesced.has(FLAG_EVENTS_RESET));
+        assert!(coalesced.has(FLAG_DISCONTINUITY));
+        assert_eq!(coalesced.entities[0].prev, coalesced.entities[0].cur);
+
+        let mut exact = vec![0u8; mailbox.latest.as_ref().unwrap().len()];
+        assert!(unsafe { write_out(exact.as_mut_ptr(), exact.len(), mailbox.latest.as_ref().unwrap()) }.unwrap());
+        mailbox.acknowledge_copy();
+        assert!(!mailbox.reset_pending);
+        assert_eq!(mailbox.reset_floor_tick, Some(12));
+        mailbox.push(frame(13, 0, [12.0, 0.0, 3.0], [13.0, 0.0, 4.0]), &mut events).unwrap();
+        let following = ViewFrame::decode(mailbox.latest.as_ref().unwrap()).unwrap();
+        assert!(!following.has(FLAG_EVENTS_RESET | FLAG_DISCONTINUITY));
+        let post_reset = EventBatch { events: vec![event(13, 1)] }.encode();
+        queue_event_batch(&mailbox, &mut events, post_reset).unwrap();
+        assert_eq!(EventBatch::decode(events.front().unwrap()).unwrap().events[0].tick, 13);
+    }
+
+    #[test]
+    fn pointer_take_acknowledges_the_reset_baseline() {
+        let mut mailbox = FrameMailbox::default();
+        let mut events = VecDeque::new();
+        mailbox
+            .push(frame(2, FLAG_EVENTS_RESET, [0.0; 3], [2.0, 0.0, 0.0]), &mut events)
+            .unwrap();
+        let taken = mailbox.take().expect("reset baseline");
+        assert!(ViewFrame::decode(&taken).unwrap().has(FLAG_EVENTS_RESET));
+        assert!(!mailbox.reset_pending);
+        assert_eq!(mailbox.reset_floor_tick, Some(2));
+    }
+
+    #[test]
+    fn late_old_tick_events_are_filtered_until_a_new_discontinuity() {
+        let mut mailbox = FrameMailbox::default();
+        let mut events = VecDeque::new();
+        mailbox
+            .push(frame(10, FLAG_EVENTS_RESET, [0.0; 3], [10.0, 0.0, 0.0]), &mut events)
+            .unwrap();
+        mailbox.acknowledge_copy();
+        assert_eq!(mailbox.reset_floor_tick, Some(10));
+
+        let batch = EventBatch {
+            events: vec![
+                event(9, STATE_PREDICTED),
+                event(10, STATE_PREDICTED),
+                event(10, STATE_CANCELED),
+                event(11, STATE_VERIFIED),
+            ],
+        }
+        .encode();
+        queue_event_batch(&mailbox, &mut events, batch).unwrap();
+        let accepted = EventBatch::decode(events.front().unwrap()).unwrap();
+        assert_eq!(accepted.events.len(), 1);
+        assert_eq!(accepted.events[0].tick, 11);
+
+        mailbox
+            .push(frame(3, FLAG_DISCONTINUITY, [10.0, 0.0, 0.0], [3.0, 0.0, 0.0]), &mut events)
+            .unwrap();
+        assert_eq!(mailbox.reset_floor_tick, None);
+        let new_timeline = EventBatch { events: vec![event(1, STATE_PREDICTED)] }.encode();
+        queue_event_batch(&mailbox, &mut events, new_timeline).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(EventBatch::decode(events.back().unwrap()).unwrap().events[0].tick, 1);
+    }
 }

@@ -5,6 +5,7 @@ use orr_sim::{DebugCommand, Game, PlayerSlot};
 
 use crate::event::BridgeEvent;
 use crate::snapshot::Snapshot;
+use crate::{ViewUpdate, DEFAULT_VIEW_EVENT_CAPACITY};
 
 /// Why a view-to-sim call was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +48,9 @@ pub type StepObserver = Box<dyn FnMut(StepTiming) + Send>;
 
 /// Settings shared by all adapters.
 pub struct BridgeConfig<G: Game> {
+    /// Maximum queued presentation notifications; overflow resets the view.
+    /// This does not bound input/command queues or durable event consumers.
+    pub view_event_capacity: usize,
     /// Called with the timing of every sim step (for benchmarks and debug
     /// overlays). Costs two clock reads per step; `None` costs nothing.
     pub step_observer: Option<StepObserver>,
@@ -60,11 +64,16 @@ pub struct BridgeConfig<G: Game> {
 
 impl<G: Game> Default for BridgeConfig<G> {
     fn default() -> Self {
-        Self { commands_from_input: None, step_observer: None }
+        Self { commands_from_input: None, step_observer: None, view_event_capacity: DEFAULT_VIEW_EVENT_CAPACITY }
     }
 }
 
 impl<G: Game> BridgeConfig<G> {
+    pub fn with_view_event_capacity(mut self, capacity: usize) -> Self {
+        self.view_event_capacity = capacity.max(1);
+        self
+    }
+
     /// Sets the step observer (see [`StepTiming`]).
     pub fn with_step_observer(mut self, f: impl FnMut(StepTiming) + Send + 'static) -> Self {
         self.step_observer = Some(Box::new(f));
@@ -106,9 +115,18 @@ pub trait Bridge<G: Game> {
     /// `None` until the sim has published its first one.
     fn snapshot(&self) -> Option<Snapshot>;
 
-    /// Takes every event that arrived since the last call, in sim order.
-    /// Never blocks. Call it regularly: events queue up until taken.
+    /// Takes presentation events in sim order. On overflow returns an explicit
+    /// `BridgeEvent::ViewResynced`; reset effects and read a fresh snapshot.
+    /// This best-effort channel is not a durable verified-event consumer.
     fn drain_events(&mut self) -> Vec<BridgeEvent<G::Event>>;
+
+    /// Reads presentation output. InProc/Threaded provide bounded, coherent
+    /// recovery; adapters must document their guarantees. The default keeps
+    /// legacy split-read behavior and does not itself add overflow recovery.
+    fn poll_view(&mut self) -> ViewUpdate<G::Event> {
+        let events = self.drain_events();
+        ViewUpdate { snapshot: self.snapshot(), events, resync: None }
+    }
 
     /// `false` once the sim side has stopped (Threaded: the thread ended).
     fn is_alive(&self) -> bool;

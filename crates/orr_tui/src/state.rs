@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use orr_viewstream::{
-    EventBatch, ViewFrame, FLAG_DISCONTINUITY, FLAG_PAUSED, FLAG_ROLLED_BACK, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
+    EventBatch, ViewFrame, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET, FLAG_PAUSED, FLAG_ROLLED_BACK, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
 };
 
 use crate::render::Camera;
@@ -54,6 +54,7 @@ pub struct ViewState {
     arrivals: VecDeque<Instant>,
     last_rollback: Option<Instant>,
     last_discontinuity: Option<Instant>,
+    last_events_reset: Option<Instant>,
     /// The latest problem (a refused call, a bad message), shown until the next one.
     pub notice: Option<String>,
     /// The session of a network client (see [`ViewState::set_net`]); `None` for a local host.
@@ -90,6 +91,7 @@ impl ViewState {
             arrivals: VecDeque::new(),
             last_rollback: None,
             last_discontinuity: None,
+            last_events_reset: None,
             notice: None,
             net: None,
             rollback_samples: VecDeque::new(),
@@ -172,7 +174,7 @@ impl ViewState {
                 self.max_rollback_depth = self.max_rollback_depth.max(to + 1 - from.min(to + 1));
             }
         }
-        if f.has(FLAG_DISCONTINUITY) {
+        if f.has(FLAG_DISCONTINUITY) || f.has(FLAG_EVENTS_RESET) {
             self.last_discontinuity = Some(now);
             // A jump may also be a new scene: look at it again.
             self.camera = None;
@@ -180,6 +182,11 @@ impl ViewState {
             self.smooth_start = None;
         } else if f.has(FLAG_ROLLED_BACK) {
             self.start_smoothing(&f, now);
+        }
+        if f.has(FLAG_EVENTS_RESET) {
+            // Later settle notices for these predictions belong to the lost prefix.
+            self.open_events.clear();
+            self.last_events_reset = Some(now);
         }
         if self.camera.is_none() {
             self.camera = Some(Camera::fit(&f));
@@ -252,7 +259,7 @@ impl ViewState {
     /// 1 after a discontinuity and while paused.
     pub fn alpha(&self, now: Instant) -> f32 {
         match &self.frame {
-            Some(f) if !f.has(FLAG_DISCONTINUITY) && !f.has(FLAG_PAUSED) => {
+            Some(f) if !f.has(FLAG_DISCONTINUITY) && !f.has(FLAG_EVENTS_RESET) && !f.has(FLAG_PAUSED) => {
                 (now.saturating_duration_since(self.arrived).as_secs_f32() * self.schema.tick_rate as f32).clamp(0.0, 1.0)
             }
             _ => 1.0,
@@ -284,6 +291,9 @@ impl ViewState {
         if hold(self.last_discontinuity) {
             flags.push("DISCONTINUITY");
         }
+        if hold(self.last_events_reset) {
+            flags.push("EVENTS_RESET");
+        }
         if f.has(FLAG_PAUSED) {
             flags.push("PAUSED");
         }
@@ -303,12 +313,13 @@ impl ViewState {
     fn net_line(&self, net: &NetStatus, fps: f32, now: Instant) -> String {
         let hold = |t: Option<Instant>| t.is_some_and(|t| now.saturating_duration_since(t) < FLAG_HOLD);
         let rolled = if hold(self.last_rollback) { " ROLLED_BACK" } else { "" };
+        let events_reset = if hold(self.last_events_reset) { " EVENTS_RESET" } else { "" };
         let desync = if net.desyncs > 0 { " DESYNC" } else { "" };
         let [p, v, c] = self.event_counts;
         match net.state {
             NetState::Connecting | NetState::Failed => format!("{}: {} the server", self.schema.game, net.state.name()),
             _ => format!(
-                "{} slot {}/{} rtt {} ms delay {} | tick {} verified {} | rollbacks {} ({:.1}/s) last depth {} | events P{p} V{v} X{c} (P->V {}, P->X {}) | {:.0} fps{rolled}{desync}",
+                "{} slot {}/{} rtt {} ms delay {} | tick {} verified {} | rollbacks {} ({:.1}/s) last depth {} | events P{p} V{v} X{c} (P->V {}, P->X {}) | {:.0} fps{rolled}{events_reset}{desync}",
                 net.state.name(),
                 net.slot,
                 net.players,

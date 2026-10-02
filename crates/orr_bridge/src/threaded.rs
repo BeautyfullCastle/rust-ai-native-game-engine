@@ -15,6 +15,7 @@ use crate::core::{load_snapshot, SimCore, SnapshotSlot, ToSim};
 use crate::event::BridgeEvent;
 use crate::host::SimHost;
 use crate::snapshot::Snapshot;
+use crate::{view_event_channel, ViewEventReceiver, ViewUpdate};
 
 const NANOS: u128 = 1_000_000_000;
 
@@ -51,11 +52,11 @@ impl Default for ThreadedConfig {
 /// The sim thread owns the host. After each tick that changes what the view
 /// can see it publishes an immutable [`Snapshot`] into a lock-free slot
 /// (`arc_swap`). The view reads the newest one at any time without waiting.
-/// Inputs, commands and events cross by unbounded `mpsc` channels: sending
-/// or receiving never blocks either side.
+/// Presentation events use a bounded, best-effort mailbox with explicit
+/// snapshot recovery. Input and command channels remain unbounded.
 pub struct Threaded<G: Game> {
     to_sim: Sender<ToSim<G>>,
-    events: Receiver<BridgeEvent<G::Event>>,
+    events: ViewEventReceiver<G::Event>,
     slot: SnapshotSlot,
     steps_done: Arc<AtomicU64>,
     steps_sent: u64,
@@ -88,7 +89,7 @@ impl<G: Game> Threaded<G> {
         threaded: ThreadedConfig,
     ) -> Result<Self, String> {
         let (to_sim, from_view) = channel::<ToSim<G>>();
-        let (event_tx, events) = channel();
+        let (event_tx, events) = view_event_channel(cfg.view_event_capacity);
         let (ready_tx, ready_rx) = channel::<Result<(PlayerSlot, u32, u8), String>>();
         let slot: SnapshotSlot = Arc::new(ArcSwapOption::empty());
         let steps_done = Arc::new(AtomicU64::new(0));
@@ -226,7 +227,11 @@ impl<G: Game> Bridge<G> for Threaded<G> {
     }
 
     fn drain_events(&mut self) -> Vec<BridgeEvent<G::Event>> {
-        self.events.try_iter().collect()
+        self.events.drain_events()
+    }
+
+    fn poll_view(&mut self) -> ViewUpdate<G::Event> {
+        self.events.poll()
     }
 
     fn is_alive(&self) -> bool {

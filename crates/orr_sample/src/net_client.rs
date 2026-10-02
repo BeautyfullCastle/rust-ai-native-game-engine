@@ -354,3 +354,17 @@ pub fn log_lifecycle(note: &Lifecycle) {
         _ => {}
     }
 }
+
+/// Recovery summaries are diagnostics, not a replay of lifecycle transitions.
+pub fn log_view_resync(reset: &orr_bridge::ViewResync) {
+    eprintln!(
+        "view resynced at tick {}: {} presentation notifications discarded",
+        reset.head_tick, reset.discarded_events
+    );
+    for note in &reset.lifecycle {
+        eprintln!(
+            "  coalesced {} lifecycle notifications; latest: {:?}",
+            note.count, note.last
+        );
+    }
+}

@@ -88,14 +88,19 @@ impl<B: Bridge<Arena>> App<B> {
             let _ = self.bridge.set_input(self.bridge.local_slot(), self.keys.to_input());
         }
         self.bridge.update(dt);
-        let snapshot = self.bridge.snapshot();
-        self.view.update(dt.as_secs_f32().min(0.1), snapshot.as_ref());
-        for event in self.bridge.drain_events() {
+        let update = self.bridge.poll_view();
+        let snapshot = update.snapshot.clone();
+        if let Some(reset) = &update.resync {
+            crate::net_client::log_view_resync(reset);
+        }
+        self.view.update_from_bridge(dt.as_secs_f32().min(0.1), &update);
+        for event in update.events {
             match event {
                 BridgeEvent::Sim { status: EventStatus::Predicted(_), .. } => self.summary.predicted_hits += 1,
                 BridgeEvent::Sim { status: EventStatus::Verified(_), .. } => self.summary.verified_hits += 1,
                 BridgeEvent::Sim { status: EventStatus::Canceled, .. } => self.summary.canceled_events += 1,
                 BridgeEvent::Lifecycle(note) => log_lifecycle(&note),
+                BridgeEvent::ViewResynced(reset) => crate::net_client::log_view_resync(&reset),
             }
         }
 

@@ -144,6 +144,69 @@ struct FrameSub {
     last_sent: Option<Instant>,
     last_key: Option<FrameKey>,
     source: FrameSource,
+    /// Client mode only: keep the next complete snapshot as an event-reset
+    /// baseline until this subscriber can receive it.
+    client_reset_pending: bool,
+    /// Once a reset baseline is delivered, reject delayed event records at or
+    /// before its tick until a later normal discontinuity frame is delivered.
+    client_event_floor: Option<u64>,
+    /// Release the event floor only after the later timeline's frame is queued.
+    client_clear_event_floor_after_frame: bool,
+}
+
+impl FrameSub {
+    /// Observe reset/discontinuity flags on a client-mode frame this
+    /// subscriber has not received yet. `last_key` stops a cached reset pulse
+    /// from rearming after its baseline was already delivered.
+    fn observe_client_frame(&mut self, key: FrameKey, bytes: &[u8]) {
+        if self.last_key == Some(key) {
+            return;
+        }
+        if let Some(info) = client_frame_info(bytes) {
+            if info.events_reset {
+                self.client_reset_pending = true;
+                self.client_clear_event_floor_after_frame = false;
+            } else if !self.client_reset_pending && self.client_event_floor.is_some() && info.discontinuity {
+                self.client_clear_event_floor_after_frame = true;
+            }
+        }
+    }
+
+    /// Drop event batches while a reset snapshot is pending and filter delayed
+    /// event records at or before the delivered baseline tick.
+    fn client_events_for_send(&self, bytes: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
+        if self.client_reset_pending {
+            return None;
+        }
+        let Some(floor) = self.client_event_floor else { return Some(bytes.clone()) };
+        let batch = orr_viewstream::EventBatch::decode(bytes).ok()?;
+        let events: Vec<_> = batch.events.into_iter().filter(|event| event.tick > floor).collect();
+        if events.is_empty() {
+            return None;
+        }
+        Some(Arc::new(orr_viewstream::EventBatch { events }.encode()))
+    }
+
+    /// Turn the newest cached frame into a reset baseline if needed. A normal
+    /// discontinuity clears an older baseline's event floor only after its
+    /// snapshot has been queued.
+    fn client_frame_for_send(&mut self, bytes: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
+        if !self.client_reset_pending && !self.client_clear_event_floor_after_frame {
+            return Some(bytes.clone());
+        }
+        let info = client_frame_info(bytes)?;
+        if self.client_reset_pending {
+            let baseline = orr_viewstream::reset_frame_events(bytes).ok()?;
+            self.client_event_floor = Some(info.tick);
+            self.client_reset_pending = false;
+            self.client_clear_event_floor_after_frame = false;
+            Some(Arc::new(baseline))
+        } else {
+            self.client_event_floor = None;
+            self.client_clear_event_floor_after_frame = false;
+            Some(bytes.clone())
+        }
+    }
 }
 
 struct Conn {
@@ -699,7 +762,7 @@ impl ErpServer {
                         if !c.binary {
                             return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
                         }
-                        c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source });
+                        c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
                     }
                     "viewstream" if client_mode.is_some() => {
                         let Some(schema) = client_mode.as_ref().and_then(|h| h.lock().schema()) else {
@@ -707,7 +770,7 @@ impl ErpServer {
                         };
                         // Frames wait for their subscriber's rate cap but are never skipped from the host's side:
                         // events are sent at once, the newest frame goes out as soon as the cap allows.
-                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source });
+                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
                         initial.push(notification("watch.viewstream.schema", schema.to_json()));
                     }
                     "viewstream" => {
@@ -717,7 +780,7 @@ impl ErpServer {
                         if matches!(source, FrameSource::Proposal(_)) {
                             return Err(RpcError::params("'viewstream' shows the play session or the scene (`source`: sim or view), not a proposal"));
                         }
-                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source });
+                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
                         // The schema goes out right after the response, before any frame.
                         initial.push(notification("watch.viewstream.schema", hook.lock().schema().to_json()));
                     }
@@ -851,25 +914,47 @@ impl ErpServer {
         self.publish_viewstream(target, now);
     }
 
-    /// Client mode: pumps the session and sends its event batch to every view stream subscriber at
-    /// once, and its newest frame to those whose rate cap allows it.
+    /// Client mode: pumps the session and sends event batches to subscribers
+    /// that have received the current reset baseline, and its newest frame to
+    /// those whose rate cap allows it.
     fn publish_client_stream(&mut self, now: Instant) {
         let Some(hook) = self.cfg.limits.client_session.clone() else { return };
         if !self.conns.values().any(|c| c.subs.viewstream.is_some()) {
             return;
         }
         let out = hook.lock().pump();
-        if let Some(events) = out.events {
-            let bytes = Arc::new(events);
-            for c in self.conns.values().filter(|c| c.subs.viewstream.is_some()) {
-                send_stream(c, &bytes);
-            }
-        }
         if let Some(frame) = out.frame {
             let seq = self.client_frame.as_ref().map_or(1, |(s, _)| s + 1);
             self.client_frame = Some((seq, Arc::new(frame)));
         }
-        let Some((seq, bytes)) = self.client_frame.clone() else { return };
+
+        let current = self.client_frame.clone();
+        if let Some((seq, bytes)) = &current {
+            let key: FrameKey = (4, *seq, 0, 0);
+            // A connection may subscribe while a reset frame is still cached.
+            // Observe it before forwarding this pump's events, even if a later
+            // pump replaces that frame before this subscriber is due.
+            for c in self.conns.values_mut() {
+                if let Some(f) = c.subs.viewstream.as_mut() {
+                    f.observe_client_frame(key, bytes);
+                }
+            }
+        }
+
+        if let Some(events) = out.events {
+            let bytes = Arc::new(events);
+            for c in self.conns.values_mut() {
+                let Some(f) = c.subs.viewstream.as_ref() else { continue };
+                let Some(delivery) = f.client_events_for_send(&bytes) else { continue };
+                // Events queued before the recovery cut may already be in this
+                // reliable transport's prefix. The reset baseline follows
+                // them in order. Pending-cut batches are dropped; delayed
+                // records at/below the delivered baseline tick are filtered.
+                send_stream(c, &delivery);
+            }
+        }
+
+        let Some((seq, bytes)) = current else { return };
         let key: FrameKey = (4, seq, 0, 0);
         for c in self.conns.values_mut() {
             let Some(f) = c.subs.viewstream.as_mut() else { continue };
@@ -884,9 +969,13 @@ impl ErpServer {
                 self.stats.frames_skipped += 1;
                 continue;
             }
+            let Some(delivery) = f.client_frame_for_send(&bytes) else {
+                self.stats.frames_skipped += 1;
+                continue;
+            };
             f.last_sent = Some(now);
             f.last_key = Some(key);
-            send_stream(c, &bytes);
+            send_stream(c, &delivery);
             self.stats.frames_sent += 1;
         }
     }
@@ -1042,6 +1131,29 @@ fn send_stream(c: &Conn, bytes: &Arc<Vec<u8>>) {
     } else {
         c.tx.send_text(notification("watch.viewstream", json!({"encoding": "hex", "data": hex_encode(bytes)})));
     }
+}
+
+#[derive(Clone, Copy)]
+struct ClientFrameInfo {
+    tick: u64,
+    events_reset: bool,
+    discontinuity: bool,
+}
+
+/// The tick and recovery flags of an encoded client-mode frame. Client mode
+/// currently produces 2D or 3D viewstream frames.
+fn client_frame_info(bytes: &[u8]) -> Option<ClientFrameInfo> {
+    let kind = orr_viewstream::message_type(bytes).ok()?;
+    if !matches!(kind, orr_viewstream::MSG_FRAME | orr_viewstream::MSG_FRAME3D) {
+        return None;
+    }
+    let flags = *bytes.get(7)?;
+    let tick = u64::from_le_bytes(bytes.get(8..16)?.try_into().ok()?);
+    Some(ClientFrameInfo {
+        tick,
+        events_reset: flags & orr_viewstream::FLAG_EVENTS_RESET != 0,
+        discontinuity: flags & orr_viewstream::FLAG_DISCONTINUITY != 0,
+    })
 }
 
 /// The view stream frame message for `key`: the frame, the one before it
@@ -1243,5 +1355,269 @@ fn note_json(n: PlayNote) -> J {
         PlayNote::Resumed { tick } => json!({"kind": "resumed", "tick": tick}),
         PlayNote::DebugRejected(e) => json!({"kind": "debug_rejected", "error": debug_error_name(e)}),
         PlayNote::SeekRejected { target } => json!({"kind": "seek_rejected", "target": target}),
+    }
+}
+
+#[cfg(test)]
+mod client_viewstream_recovery_tests {
+    use super::*;
+    use crate::client_mode::{ClientPump, ClientSession, ClientSessionHook, SessionError};
+    use crate::link::Incoming;
+    use orr_viewstream::{
+        EntityRecord, EventBatch, EventRecord, ViewFrame, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET,
+        MSG_EVENTS, MSG_FRAME, STATE_VERIFIED,
+    };
+
+    struct ScriptedSession(VecDeque<ClientPump>);
+
+    impl ClientSession for ScriptedSession {
+        fn pump(&mut self) -> ClientPump {
+            self.0.pop_front().unwrap_or_default()
+        }
+
+        fn schema(&self) -> Option<orr_viewstream::Schema> {
+            None
+        }
+
+        fn status(&self) -> J {
+            J::Null
+        }
+
+        fn confirmed_checksum(&self, _tick: u64) -> Option<(u64, u64)> {
+            None
+        }
+
+        fn set_input(&mut self, _player: u8, _bytes: &[u8]) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        fn send_command(&mut self, _player: u8, _bytes: &[u8]) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
+    fn view_frame(flags: u8, seq: u64) -> Vec<u8> {
+        view_frame_at(flags, seq, seq)
+    }
+
+    fn view_frame_at(flags: u8, seq: u64, tick: u64) -> Vec<u8> {
+        ViewFrame {
+            flags,
+            tick,
+            verified_tick: tick,
+            seq,
+            rollback: None,
+            entities: vec![EntityRecord {
+                id: 1,
+                kind: 0,
+                shape: orr_viewstream::SHAPE_CIRCLE,
+                mode: orr_viewstream::MODE_PREDICTION,
+                size: 1.0,
+                half_y: 0.0,
+                rgba: [255; 4],
+                prev: [seq as f32, 0.0, 0.0],
+                cur: [(seq + 1) as f32, 0.0, 0.0],
+            }],
+            props: Vec::new(),
+        }
+        .encode()
+    }
+
+    fn event_batch(seq: u32) -> Vec<u8> {
+        event_batch_records(&[(u64::from(seq), seq)])
+    }
+
+    fn event_batch_records(records: &[(u64, u32)]) -> Vec<u8> {
+        EventBatch {
+            events: records
+                .iter()
+                .map(|(tick, seq)| EventRecord {
+                    tick: *tick,
+                    system: 0,
+                    seq: *seq,
+                    state: STATE_VERIFIED,
+                    event_type: 0,
+                    payload: vec![],
+                })
+                .collect(),
+        }
+        .encode()
+    }
+
+    fn test_server(pumps: impl IntoIterator<Item = ClientPump>) -> (ErpServer, Receiver<Incoming>) {
+        let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+        cfg.listen = false;
+        cfg.limits.client_session = Some(ClientSessionHook::new(ScriptedSession(
+            pumps.into_iter().collect(),
+        )));
+        let mut server = ErpServer::start(cfg).unwrap();
+        let (send, recv) = channel::<Incoming>();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let tx = ConnTx::local(send, pending);
+        let subs = Subs { viewstream: Some(FrameSub {
+            min_interval: Duration::from_secs(1),
+            last_sent: None,
+            last_key: None,
+            source: FrameSource::Sim,
+            client_reset_pending: false,
+            client_event_floor: None,
+            client_clear_event_floor_after_frame: false,
+        }), ..Subs::default() };
+        server.conns.insert(
+            1,
+            Conn {
+                tx,
+                client: "test".into(),
+                caps: Caps::ALL,
+                binary: true,
+                subs,
+                requests: 0,
+                connected_ms: 0,
+            },
+        );
+        (server, recv)
+    }
+
+    fn take_messages(recv: &Receiver<Incoming>) -> Vec<Vec<u8>> {
+        let mut messages = Vec::new();
+        while let Ok(incoming) = recv.try_recv() {
+            match incoming {
+                Incoming::Wire(bytes) => messages.push(bytes),
+                _ => panic!("expected only binary viewstream messages"),
+            }
+        }
+        messages
+    }
+
+    #[test]
+    fn client_reset_survives_rate_skip_and_drops_cut_events_without_replay() {
+        let (mut server, recv) = test_server([
+            ClientPump {
+                frame: Some(view_frame(0, 1)),
+                events: Some(event_batch(11)),
+            },
+            ClientPump {
+                frame: Some(view_frame(FLAG_DISCONTINUITY | FLAG_EVENTS_RESET, 2)),
+                events: Some(event_batch(22)),
+            },
+            ClientPump {
+                frame: Some(view_frame(0, 3)),
+                events: Some(event_batch(33)),
+            },
+            ClientPump {
+                frame: Some(view_frame(0, 4)),
+                events: Some(event_batch(44)),
+            },
+            ClientPump {
+                frame: None,
+                events: Some(event_batch_records(&[(2, 56), (5, 57)])),
+            },
+            ClientPump {
+                frame: Some(view_frame_at(FLAG_DISCONTINUITY, 5, 1)),
+                events: Some(event_batch_records(&[(1, 66)])),
+            },
+            ClientPump {
+                frame: None,
+                events: Some(event_batch_records(&[(1, 77)])),
+            },
+            ClientPump {
+                frame: None,
+                events: Some(event_batch_records(&[(1, 88)])),
+            },
+        ]);
+        let t0 = Instant::now();
+
+        server.publish_client_stream(t0);
+        let before_cut = take_messages(&recv);
+        assert_eq!(
+            before_cut
+                .iter()
+                .map(|b| orr_viewstream::message_type(b).unwrap())
+                .collect::<Vec<_>>(),
+            [MSG_EVENTS, MSG_FRAME]
+        );
+        assert_eq!(
+            EventBatch::decode(&before_cut[0]).unwrap().events[0].seq,
+            11
+        );
+
+        // The reset pulse and two newer frames arrive inside the one-fps
+        // interval. The raw reset frame is replaced, while the subscriber
+        // keeps its sticky reset and sees no post-cut events yet.
+        server.publish_client_stream(t0 + Duration::from_millis(10));
+        assert!(take_messages(&recv).is_empty());
+        server.publish_client_stream(t0 + Duration::from_millis(20));
+        assert!(take_messages(&recv).is_empty());
+
+        // Events from this pump are still held back: frames are delivered
+        // after this pump's event portion, so baseline-before-events ordering
+        // is preserved even as the rate-limited frame finally becomes due.
+        server.publish_client_stream(t0 + Duration::from_secs(1));
+        let baseline_only = take_messages(&recv);
+        assert_eq!(baseline_only.len(), 1);
+        assert_eq!(
+            orr_viewstream::message_type(&baseline_only[0]).unwrap(),
+            MSG_FRAME
+        );
+        let baseline = ViewFrame::decode(&baseline_only[0]).unwrap();
+        assert!(baseline.has(FLAG_DISCONTINUITY | FLAG_EVENTS_RESET));
+        assert_eq!(baseline.entities[0].prev, baseline.entities[0].cur);
+        assert_eq!(
+            baseline.seq, 4,
+            "the newer cached frame replaces the missed reset pulse"
+        );
+
+        // A delayed event at or before the delivered baseline tick is filtered,
+        // while a newer event in the same batch remains eligible.
+        server.publish_client_stream(t0 + Duration::from_millis(1_010));
+        let after_cut = take_messages(&recv);
+        assert_eq!(after_cut.len(), 1);
+        assert_eq!(
+            orr_viewstream::message_type(&after_cut[0]).unwrap(),
+            MSG_EVENTS
+        );
+        assert_eq!(
+            EventBatch::decode(&after_cut[0])
+                .unwrap()
+                .events
+                .iter()
+                .map(|e| e.seq)
+                .collect::<Vec<_>>(),
+            [57]
+        );
+
+        // A non-reset discontinuity releases the tick floor only after its
+        // new-timeline snapshot is sent. Same-pump old events remain filtered.
+        server.publish_client_stream(t0 + Duration::from_millis(1_020));
+        assert!(take_messages(&recv).is_empty());
+        server.publish_client_stream(t0 + Duration::from_secs(2));
+        let new_timeline_baseline = take_messages(&recv);
+        assert_eq!(new_timeline_baseline.len(), 1);
+        assert_eq!(
+            orr_viewstream::message_type(&new_timeline_baseline[0]).unwrap(),
+            MSG_FRAME
+        );
+        assert_eq!(
+            ViewFrame::decode(&new_timeline_baseline[0]).unwrap().tick,
+            1
+        );
+
+        // Old-timeline tick numbers are valid again after that boundary.
+        server.publish_client_stream(t0 + Duration::from_millis(2_010));
+        let after_discontinuity = take_messages(&recv);
+        assert_eq!(after_discontinuity.len(), 1);
+        assert_eq!(
+            orr_viewstream::message_type(&after_discontinuity[0]).unwrap(),
+            MSG_EVENTS
+        );
+        assert_eq!(
+            EventBatch::decode(&after_discontinuity[0])
+                .unwrap()
+                .events
+                .iter()
+                .map(|e| e.seq)
+                .collect::<Vec<_>>(),
+            [88]
+        );
     }
 }
