@@ -10,7 +10,13 @@ default-run = "arena"
 [lints]
 workspace = true
 
+[features]
+default = []
+audio = ["dep:orr_audio"]
+audio-native = ["audio", "orr_audio/native"]
+
 [dependencies]
+orr_audio = { path = "../orr_audio", optional = true }
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
 orr_viewstream = { path = "../orr_viewstream" }

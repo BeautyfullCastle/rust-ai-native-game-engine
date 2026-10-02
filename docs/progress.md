@@ -144,3 +144,10 @@ P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 �
 
 - 에디터 `diagnostics()`는 UI callback, pump, 동기 ERP 대기, 비동기 요청→응답 반영, snapshot 추출의 최근 120개 last/max/p95와 pending/high-water를 제공한다. 기록은 고정 공간·O(1)이며 추가 RPC나 대기를 넣지 않는다. CPU wall time이며 구간은 겹칠 수 있다. 라이브러리 17개, 새 egui 진단 1개, 기존 UI 15개, 의존성 경계 2개와 strict affected Clippy 통과. debug measure의 기존 첫 드래그 40ms 기준은 152ms로 실패했고 중앙값은 8.26ms였다. 비교 가능한 변경 전 기준과 release 측정이 없으므로 속도 개선이나 전체 measure 통과를 주장하지 않는다.
 - 2D/3D 렌더러 `last_frame_stats()`는 실제 pass/draw/instance, upload bytes/calls, buffer·attachment 할당/재할당, 실제 MSAA 및 CPU prepare/encode/submit 시간을 노출한다. 그림자를 끈 경우에도 실행된 clear pass를 센다. GPU 실행 시간이 아니며 WASM의 시간 필드는 unavailable이다. unit 34개와 필수 SwiftShader Vulkan GPU 2D 10개/3D 13개 통과; 기존 픽셀 조건은 유지했다. strict affected Clippy와 독립 소스 리뷰 통과. 이 계측 추가는 렌더 품질·성능 향상을 입증하는 벤치마크가 아니며, 해당 커밋의 전체 CI는 별도로 확인한다.
+
+### Arena 실제 오디오 첫 경로 (2026-10-03 KST)
+
+- 선택적 `orr_audio`와 Arena Hit 절차적 타격음: Kira 실제 믹서의 오프라인 PCM, 선택적 CPAL native 출력, `--audio off|auto|required`
+- Predicted/Verified 중복 방지, 취소 페이드, 완료 후 늦은 확정, pause/disconnect/seek/reset 수명과 bounded voice/history 처리. 시뮬레이션·리플레이 형식 변경 없음
+- 실제 PCM/lifecycle 14개, Arena 통합 4개(매 프레임 checksum 동일성 포함), 기본 모드 2개 통과. audio 기능 활성/비활성 엄격한 Clippy 통과, 독립 리뷰 완료
+- 로컬 native 컴파일은 ALSA 개발 메타데이터 부재로 차단. Linux/Windows CI native compile 추가; 실제 장치 출력/청취 성공을 뜻하지 않음. 오디오 Rust 최소 버전과 upstream 장치 복구·비동기 종료 제한은 `docs/audio.md` 참고

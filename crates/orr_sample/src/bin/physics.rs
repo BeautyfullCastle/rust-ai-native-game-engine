@@ -71,6 +71,7 @@ fn real_main() -> Result<(), String> {
     let mut opts = Options {
         label: String::new(),
         vsync: true,
+        audio: orr_sample::arena_audio::AudioMode::Off,
         seconds: None,
         remote_mode: InterpMode::Prediction,
         view: ViewConfig::default(),

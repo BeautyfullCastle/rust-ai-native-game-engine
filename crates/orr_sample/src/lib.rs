@@ -14,6 +14,7 @@
 
 pub mod app;
 pub mod arena_view;
+pub mod arena_audio;
 pub mod net_client;
 pub mod physics_app;
 pub use orr_games::physics_game;

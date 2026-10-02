@@ -109,6 +109,14 @@ jobs:
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
       - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release
       - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --all-targets
+      # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
+      # compile coverage; opening a physical device is not a CI success claim.
+      - run: cargo test -p orr_audio --release
+      - run: cargo test -p orr_sample --features audio --release --lib arena_audio
+      - run: cargo clippy -p orr_audio --all-targets -- -D warnings
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev
+      - run: cargo check -p orr_sample --features audio-native --all-targets
       # GPU readback pixel tests on a software Vulkan adapter (lavapipe), so
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
