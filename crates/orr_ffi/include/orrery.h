@@ -187,6 +187,10 @@ ORR_API size_t orr_host_url(OrrHost* host, char* buf, size_t cap);
  *   ORR_OK          copied
  *   ORR_NO_FRAME    nothing new (*written = 0)
  *   ORR_ERR_BUFFER  cap too small: *written = size needed, the frame stays
+ *   ORR_ERR_NULL    buf is NULL with nonzero cap, even if nothing is ready;
+ *                   *written = 0, no frame/event is consumed
+ * NULL with cap 0 is a size probe: ORR_ERR_BUFFER if data exists, otherwise
+ * ORR_NO_FRAME. Neither case consumes data.
  * Newer frames normally replace older unread ones: poll as often as you draw.
  * A frame carrying view-stream FLAG_EVENTS_RESET (bit 3; see docs/view-stream.md)
  * is a recovery baseline: pending event batches are discarded and later batches

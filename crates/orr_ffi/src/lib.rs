@@ -829,12 +829,17 @@ pub unsafe extern "C" fn orr_host_url(host: *mut OrrHost, buf: *mut c_char, cap:
 /// `*written` to its size. Returns `ORR_OK`; `ORR_NO_FRAME` if nothing new
 /// (`*written` = 0); `ORR_ERR_BUFFER` if `cap` is too small (`*written` = the
 /// size needed, the frame stays for the next poll).
+/// A null `buf` with nonzero `cap` returns `ORR_ERR_NULL` before polling,
+/// even when there is no new frame. Null with zero capacity remains a size probe.
 #[no_mangle]
 pub unsafe extern "C" fn orr_view_poll(host: *mut OrrHost, buf: *mut u8, cap: usize, written: *mut usize) -> c_int {
     guard(|| {
         let h = host_ref(host)?;
         let written = written.as_mut().ok_or(Fail { code: ORR_ERR_NULL, msg: "written is null".into() })?;
         *written = 0;
+        if buf.is_null() && cap != 0 {
+            return fail(ORR_ERR_NULL, "output buffer is null but its capacity is not 0");
+        }
         let mut inner = lock(h);
         inner.pump()?;
         let Some(frame) = inner.view.latest.as_ref() else { return Ok(ORR_NO_FRAME) };
@@ -879,6 +884,9 @@ pub unsafe extern "C" fn orr_events_poll(host: *mut OrrHost, buf: *mut u8, cap: 
         let h = host_ref(host)?;
         let written = written.as_mut().ok_or(Fail { code: ORR_ERR_NULL, msg: "written is null".into() })?;
         *written = 0;
+        if buf.is_null() && cap != 0 {
+            return fail(ORR_ERR_NULL, "output buffer is null but its capacity is not 0");
+        }
         let mut inner = lock(h);
         inner.pump()?;
         let Some(batch) = inner.events.front() else { return Ok(ORR_NO_FRAME) };
@@ -1045,6 +1053,72 @@ mod frame_mailbox_tests {
     use orr_viewstream::{
         EntityRecord, EventRecord, ViewFrame, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
     };
+
+    /// Keep the real host alive, but make incoming presentation data entirely
+    /// fixture-owned: empty polls cannot race the host's initial publication.
+    struct EmptyTransport;
+
+    impl orr_remote::Transport for EmptyTransport {
+        fn send(&mut self, _req: orr_remote::Request) -> Result<(), ClientError> {
+            panic!("the polling fixture does not send requests");
+        }
+
+        fn recv(&mut self, _timeout: Duration) -> Result<Option<orr_remote::Incoming>, ClientError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn poll_buffer_validation_precedes_data_availability() {
+        let mut host = open_host(std::ptr::null(), std::ptr::null()).unwrap();
+        {
+            let mut inner = lock(&host);
+            inner.local().unwrap().client = ErpClient::with_transport(Box::new(EmptyTransport));
+            inner.view = FrameMailbox::default();
+            inner.events.clear();
+        }
+        type Poll = unsafe extern "C" fn(*mut OrrHost, *mut u8, usize, *mut usize) -> c_int;
+        let polls: [Poll; 2] = [orr_view_poll, orr_events_poll];
+        for poll in polls {
+            let mut written = 99;
+            assert_eq!(unsafe { poll(&mut host, std::ptr::null_mut(), 5, &mut written) }, ORR_ERR_NULL);
+            assert_eq!(written, 0);
+            assert_eq!(unsafe { poll(&mut host, std::ptr::null_mut(), 0, &mut written) }, ORR_NO_FRAME);
+            assert_eq!(written, 0);
+            let mut untouched = [17u8; 1];
+            assert_eq!(unsafe { poll(&mut host, untouched.as_mut_ptr(), 1, &mut written) }, ORR_NO_FRAME);
+            assert_eq!(untouched, [17]);
+        }
+
+        let frame = frame(10, FLAG_EVENTS_RESET | FLAG_DISCONTINUITY, [1.0; 3], [1.0; 3]);
+        {
+            let mut inner = lock(&host);
+            let Inner { view, events, .. } = &mut *inner;
+            view.push(frame.clone(), events).unwrap();
+        }
+        let mut written = 99;
+        assert_eq!(unsafe { orr_view_poll(&mut host, std::ptr::null_mut(), 5, &mut written) }, ORR_ERR_NULL);
+        assert_eq!(written, 0);
+        assert_eq!(unsafe { orr_view_poll(&mut host, std::ptr::null_mut(), 0, &mut written) }, ORR_ERR_BUFFER);
+        assert_eq!(written, frame.len());
+        assert!(lock(&host).view.reset_pending, "invalid buffers and size probes must retain the reset");
+        let mut copied = vec![0; written];
+        assert_eq!(unsafe { orr_view_poll(&mut host, copied.as_mut_ptr(), copied.len(), &mut written) }, ORR_OK);
+        assert_eq!(copied, frame);
+        assert!(!lock(&host).view.reset_pending);
+
+        let batch = EventBatch { events: vec![event(11, STATE_VERIFIED)] }.encode();
+        lock(&host).events.push_back(batch.clone());
+        assert_eq!(unsafe { orr_events_poll(&mut host, std::ptr::null_mut(), 5, &mut written) }, ORR_ERR_NULL);
+        assert_eq!(written, 0);
+        assert_eq!(unsafe { orr_events_poll(&mut host, std::ptr::null_mut(), 0, &mut written) }, ORR_ERR_BUFFER);
+        assert_eq!(written, batch.len());
+        assert_eq!(lock(&host).events.front(), Some(&batch));
+        copied.resize(written, 0);
+        assert_eq!(unsafe { orr_events_poll(&mut host, copied.as_mut_ptr(), copied.len(), &mut written) }, ORR_OK);
+        assert_eq!(copied, batch);
+        assert!(lock(&host).events.is_empty());
+    }
 
     fn frame(tick: u64, flags: u8, prev: [f32; 3], cur: [f32; 3]) -> Vec<u8> {
         ViewFrame {
