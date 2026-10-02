@@ -13,14 +13,14 @@ mod common;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{arena_room, arena_script};
 use orr_proto::RejectReason;
 use orr_relay_net::{
-    connect, drive, listen, ClientReport, ConnectOptions, DriveOptions, ListenOptions, SimConditions, TransportKind, Trust,
+    connect, drive, listen, report, ClientReport, ConnectOptions, DriveOptions, ListenOptions, SimConditions, TransportKind, Trust,
 };
 use orr_server::serve::run_wall_clock;
 use orr_server::{RelayServer, RoomStats, ServerNote};
@@ -122,6 +122,124 @@ fn run_client(live: &Live, setup: ClientSetup, stop: Option<Arc<AtomicBool>>, ta
         ..DriveOptions::default()
     };
     drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &opts)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProgressGoal {
+    verified_ticks: u64,
+    shared_checkpoints: usize,
+}
+
+/// Rejoin-only counterpart to `drive`: keep its update/leave behavior, but
+/// finish on observed progress instead of a wall-clock play window. A late
+/// join's snapshot/catch-up ticks do not count toward its Playing baseline.
+fn run_progress_client(
+    live: &Live,
+    setup: ClientSetup,
+    stop: Option<Arc<AtomicBool>>,
+    tag: &str,
+    goal: Option<ProgressGoal>,
+    mut observe: impl FnMut(&ClientReport) -> usize,
+) -> ClientReport {
+    let link = connect(&live.options(setup.sim)).expect("connect");
+    let mut cfg = RelayClientConfig::new(ROOM, setup.build_id);
+    cfg.want_slot = setup.want_slot.map(PlayerSlot);
+    cfg.token = setup.token;
+    let mut client: RelayClient<Arena, _> =
+        RelayClient::new(cfg, link, |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new());
+    let start = Instant::now();
+    let mut playing: Option<(Instant, u64)> = None;
+    // Failure guards only: two 20 s client runs plus the 10 s PlayerLeft
+    // barrier and cleanup fit within the stayer's 60 s overall watchdog.
+    let watchdog = Duration::from_secs(if goal.is_some() { 20 } else { 60 });
+    let rep = loop {
+        let slot = client.welcome().map_or(0, |w| w.slot);
+        client.update(start.elapsed().as_micros() as u64, &mut |tick| arena_script(usize::from(slot), tick));
+        let r = report(&client, playing.map_or(0.0, |(p, _)| p.elapsed().as_secs_f64()));
+        if playing.is_none() && r.state == ClientState::Playing {
+            playing = Some((Instant::now(), r.verified_tick));
+        }
+        let shared = observe(&r);
+        let baseline = playing.map(|(_, tick)| tick);
+        let target = baseline.zip(goal).map(|(tick, goal)| tick + goal.verified_ticks);
+        if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+            break r;
+        }
+        assert!(
+            !matches!(r.state, ClientState::Rejected(_) | ClientState::Disconnected | ClientState::Failed(_)),
+            "{tag} stopped before progress: state {:?}, baseline {baseline:?}, target {target:?}, goal {goal:?}, shared {shared}; {}",
+            r.state,
+            r.summary()
+        );
+        assert!(
+            start.elapsed() < watchdog,
+            "{tag} progress watchdog after {:?}: state {:?}, baseline {baseline:?}, target {target:?}, goal {goal:?}, shared {shared}, checkpoints {}; {}",
+            start.elapsed(),
+            r.state,
+            r.checksums.len(),
+            r.summary()
+        );
+        if r.state == ClientState::Playing
+            && target.is_some_and(|tick| r.verified_tick >= tick)
+            && goal.is_some_and(|goal| shared >= goal.shared_checkpoints)
+        {
+            eprintln!("{tag}: baseline {baseline:?}, target {target:?}, shared {shared}; {}", r.summary());
+            break r;
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    if setup.leave_at_end && matches!(client.state(), ClientState::Playing | ClientState::Syncing | ClientState::CatchingUp) {
+        client.leave();
+        let slot = client.welcome().map_or(0, |w| w.slot);
+        // Same reliable Leave flush as `orr_relay_net::drive`.
+        for _ in 0..20 {
+            client.update(start.elapsed().as_micros() as u64, &mut |tick| arena_script(usize::from(slot), tick));
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    rep
+}
+
+/// Own only this scenario's threads. In particular, address-only `Live`
+/// copies elsewhere must never stop or join their owner's server.
+struct RejoinRun {
+    live: Live,
+    stop: Arc<AtomicBool>,
+    stayer: Option<JoinHandle<ClientReport>>,
+}
+
+impl RejoinRun {
+    fn finish(mut self) -> (ClientReport, ServerResult) {
+        self.stop.store(true, Ordering::Relaxed);
+        let stayer = self.stayer.take().expect("stayer handle").join().expect("stayer thread");
+        self.live.stop.store(true, Ordering::Relaxed);
+        let server = self.live.join.take().expect("server handle").join().expect("server thread");
+        (stayer, server)
+    }
+}
+
+impl Drop for RejoinRun {
+    fn drop(&mut self) {
+        // Signal both before joining either, even while unwinding from a
+        // connect, progress, disconnect-barrier or assertion failure.
+        self.stop.store(true, Ordering::Relaxed);
+        self.live.stop.store(true, Ordering::Relaxed);
+        if let Some(stayer) = self.stayer.take() {
+            match stayer.join() {
+                Ok(r) => eprintln!("rejoin cleanup stayer: state {:?}; {}", r.state, r.summary()),
+                Err(_) => eprintln!("rejoin cleanup: stayer thread panicked"),
+            }
+        }
+        if let Some(server) = self.live.join.take() {
+            match server.join() {
+                Ok(s) => eprintln!(
+                    "rejoin cleanup server: finalized {}, desyncs {}, bad messages {}, notes {:?}",
+                    s.room.finalized, s.room.desyncs, s.bad_messages, s.notes
+                ),
+                Err(_) => eprintln!("rejoin cleanup: server thread panicked"),
+            }
+        }
+    }
 }
 
 /// Checks that every report's verified checksums agree with the others on
@@ -244,45 +362,64 @@ fn disconnect_and_rejoin_over_quic() {
             let _ = left_tx.send(());
         }
     });
-    let stop = Arc::new(AtomicBool::new(false));
-
-    let stay = {
+    let mut run = RejoinRun { live, stop: Arc::new(AtomicBool::new(false)), stayer: None };
+    let stayer_progress = Arc::new(Mutex::new(None));
+    run.stayer = Some({
+        let live = &run.live;
         let l = Live { kind: live.kind, addr: live.addr, fingerprint: live.fingerprint, stop: live.stop.clone(), join: None };
         let mut setup = ClientSetup::new(0.0);
         setup.play_for = None;
         setup.want_slot = Some(0);
-        let stop = stop.clone();
-        thread::spawn(move || run_client(&l, setup, Some(stop), "stayer"))
-    };
-    let mut first = ClientSetup::new(2.5);
+        let stop = run.stop.clone();
+        let progress = stayer_progress.clone();
+        thread::spawn(move || {
+            run_progress_client(&l, setup, Some(stop), "stayer", None, |r| {
+                *progress.lock().expect("stayer progress") = Some(r.clone());
+                0
+            })
+        })
+    });
+    let mut first = ClientSetup::new(0.0);
     first.want_slot = Some(1);
     first.leave_at_end = false; // just drop the connection
-    let before = run_client(&live, first, None, "leaver");
+    // Equivalent simulation depth to the old 2.5 s at 60 Hz, irrespective
+    // of how much wall time the clients need under load.
+    let before = run_progress_client(
+        &run.live, first, None, "leaver", Some(ProgressGoal { verified_ticks: 150, shared_checkpoints: 0 }), |_| 0,
+    );
     assert_eq!(before.state, ClientState::Playing);
     let token = before.token.expect("token");
     eprintln!("leaver before: {}", before.summary());
     // Reusing the token while the old connection is still registered takes
     // over its slot without announcing PlayerLeft. Observe the disconnect
     // first so this test exercises a real departure and subsequent rejoin.
-    if let Err(error) = left_rx.recv_timeout(Duration::from_secs(10)) {
-        stop.store(true, Ordering::Relaxed);
-        let stayer = stay.join().expect("stayer thread");
-        let server = live.finish();
-        panic!("slot 1 did not leave before rejoining: {error}; stayer: {}; notes: {:?}", stayer.summary(), server.notes);
-    }
+    left_rx.recv_timeout(Duration::from_secs(10)).expect("slot 1 did not leave before rejoining");
 
-    let mut second = ClientSetup::new(4.0);
+    let mut second = ClientSetup::new(0.0);
     second.want_slot = Some(1);
     second.token = token;
-    let after = run_client(&live, second, None, "rejoiner");
+    let after = run_progress_client(
+        &run.live,
+        second,
+        None,
+        "rejoiner",
+        Some(ProgressGoal { verified_ticks: 240, shared_checkpoints: 3 }),
+        |r| {
+            let progress = stayer_progress.lock().expect("stayer progress");
+            progress.as_ref().map_or(0, |stayer| {
+                r.checksums.iter().filter(|(tick, _)| stayer.checksums.binary_search_by_key(tick, |&(t, _)| t).is_ok()).count()
+            })
+        },
+    );
     eprintln!("rejoiner after: {}", after.summary());
     assert_eq!(after.state, ClientState::Playing);
     assert_eq!(after.slot, Some(1));
-    stop.store(true, Ordering::Relaxed);
-    let stayer = stay.join().unwrap();
+    assert_eq!(after.token, Some(token));
+    let (stayer, server) = run.finish();
     eprintln!("stayer: {}", stayer.summary());
-    let server = live.finish();
 
+    assert_eq!(before.desyncs, 0);
+    assert_eq!(stayer.state, ClientState::Playing);
     assert_eq!(stayer.desyncs, 0);
     assert_eq!(after.desyncs, 0);
     assert!(after.verified_tick > before.verified_tick, "the rejoiner did not advance past its earlier tick");
