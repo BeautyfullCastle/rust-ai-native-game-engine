@@ -42,6 +42,7 @@ use crate::list3d::{Instance3D, Lighting, LineInstance3D, RenderList3D};
 use crate::math3::{cross, dot, normalize, scale, Mat4, Vec3};
 use crate::mesh::{MeshKind, MeshSet, Vertex3};
 use crate::renderer::Growing;
+use crate::stats::{CpuClock, FrameStats, PassStats};
 
 const SHADER: &str = include_str!("shader3d.wgsl");
 const DEPTH: TextureFormat = TextureFormat::Depth32Float;
@@ -171,6 +172,7 @@ pub struct Renderer3D<B: Rhi> {
     instances: Growing<B>,
     lines: Growing<B>,
     attachments: Option<Attachments<B>>,
+    last_frame_stats: FrameStats,
 }
 
 impl<B: Rhi> Renderer3D<B> {
@@ -311,6 +313,7 @@ impl<B: Rhi> Renderer3D<B> {
             instances,
             lines,
             attachments: None,
+            last_frame_stats: FrameStats::default(),
         }
     }
 
@@ -331,9 +334,14 @@ impl<B: Rhi> Renderer3D<B> {
         self.settings
     }
 
-    fn ensure_attachments(&mut self, size: (u32, u32)) {
+    /// Work submitted by the last completed draw, including shadow-map clear passes.
+    pub fn last_frame_stats(&self) -> FrameStats {
+        self.last_frame_stats
+    }
+
+    fn ensure_attachments(&mut self, size: (u32, u32)) -> u32 {
         if self.attachments.as_ref().is_some_and(|a| a.size == size) {
-            return;
+            return 0;
         }
         let rhi = &self.rhi;
         let (color, color_view) = if self.samples > 1 {
@@ -362,6 +370,7 @@ impl<B: Rhi> Renderer3D<B> {
         });
         let depth_view = rhi.create_texture_view(&depth, None);
         self.attachments = Some(Attachments { size, _color: color, color_view, _depth: depth, depth_view });
+        1 + u32::from(self.samples > 1)
     }
 
     fn globals(&self, camera: &Camera3D, size: (u32, u32), lighting: &Lighting, light_vp: &Mat4) -> Globals {
@@ -400,36 +409,49 @@ impl<B: Rhi> Renderer3D<B> {
     /// Draws `list` into `view` (`size` pixels, multisampled internally and
     /// resolved into `view`) seen through `camera`, and submits it.
     pub fn draw(&mut self, view: &B::TextureView, size: (u32, u32), list: &RenderList3D, camera: &Camera3D) {
-        self.ensure_attachments(size);
+        let prepare_clock = CpuClock::start();
+        let replacing_attachments = self.attachments.is_some();
+        let mut stats = FrameStats {
+            mesh_instances: list.instance_count() as u64,
+            line_instances: list.lines.len() as u64,
+            msaa_samples: self.samples,
+            attachment_allocations: self.ensure_attachments(size),
+            ..FrameStats::default()
+        };
+        if replacing_attachments {
+            stats.attachment_reallocations = stats.attachment_allocations;
+        }
         let light_vp = light_view_proj(&list.lighting, self.settings.shadow_map_size);
         let globals = self.globals(camera, size, &list.lighting, &light_vp);
         let shadow_globals = Globals { view_proj: light_vp.0, ..globals };
         let rhi = &self.rhi;
-        rhi.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        rhi.write_buffer(&self.shadow_globals, 0, bytemuck::bytes_of(&shadow_globals));
+        stats.upload(rhi, &self.globals, 0, bytemuck::bytes_of(&globals));
+        stats.upload(rhi, &self.shadow_globals, 0, bytemuck::bytes_of(&shadow_globals));
 
         // One instance buffer, the kinds back to back in `MeshKind` order.
         let total = list.instance_count();
         let mut ranges = [0u32..0u32, 0..0, 0..0, 0..0];
         if total > 0 {
-            self.instances.reserve(rhi, total);
+            stats.buffer_reallocations += u32::from(self.instances.reserve(rhi, total));
             let item = std::mem::size_of::<Instance3D>() as u64;
             let mut first = 0u32;
             for kind in MeshKind::ALL {
                 let part = list.instances(kind);
                 if !part.is_empty() {
-                    rhi.write_buffer(&self.instances.buffer, u64::from(first) * item, bytemuck::cast_slice(part));
+                    stats.upload(rhi, &self.instances.buffer, u64::from(first) * item, bytemuck::cast_slice(part));
                 }
                 ranges[kind as usize] = first..first + part.len() as u32;
                 first += part.len() as u32;
             }
         }
         if !list.lines.is_empty() {
-            self.lines.reserve(rhi, list.lines.len());
-            rhi.write_buffer(&self.lines.buffer, 0, bytemuck::cast_slice(&list.lines));
+            stats.buffer_reallocations += u32::from(self.lines.reserve(rhi, list.lines.len()));
+            stats.upload(rhi, &self.lines.buffer, 0, bytemuck::cast_slice(&list.lines));
         }
 
-        let draw_meshes = |commands: &mut Vec<Command<B>>, with_planes: bool| {
+        stats.cpu_prepare_time = prepare_clock.elapsed();
+        let encode_clock = CpuClock::start();
+        let draw_meshes = |commands: &mut Vec<Command<B>>, with_planes: bool, pass: &mut PassStats| {
             for kind in MeshKind::ALL {
                 if kind == MeshKind::Plane && !with_planes {
                     continue;
@@ -439,6 +461,7 @@ impl<B: Rhi> Renderer3D<B> {
                     continue;
                 }
                 let (indices, base_vertex) = self.mesh_ranges[kind as usize].clone();
+                pass.draw(instances.end - instances.start);
                 commands.push(Command::DrawIndexed { indices, base_vertex, instances });
             }
         };
@@ -452,7 +475,7 @@ impl<B: Rhi> Renderer3D<B> {
                 Command::SetVertexBuffer(1, &self.instances.buffer),
                 Command::SetIndexBuffer(&self.mesh_indices),
             ];
-            draw_meshes(&mut commands, false);
+            draw_meshes(&mut commands, false, &mut stats.shadow);
             rhi.encode_pass(
                 &mut encoder,
                 "3d shadow",
@@ -471,6 +494,8 @@ impl<B: Rhi> Renderer3D<B> {
             );
         }
 
+        stats.shadow.passes += 1;
+
         let mut commands: Vec<Command<B>> = Vec::with_capacity(24);
         if total > 0 {
             commands.push(Command::SetPipeline(&self.main_pipeline));
@@ -478,13 +503,14 @@ impl<B: Rhi> Renderer3D<B> {
             commands.push(Command::SetVertexBuffer(0, &self.mesh_vertices));
             commands.push(Command::SetVertexBuffer(1, &self.instances.buffer));
             commands.push(Command::SetIndexBuffer(&self.mesh_indices));
-            draw_meshes(&mut commands, true);
+            draw_meshes(&mut commands, true, &mut stats.main);
         }
         if !list.lines.is_empty() {
             commands.push(Command::SetPipeline(&self.line_pipeline));
             commands.push(Command::SetBindGroup(0, &self.line_bind));
             commands.push(Command::SetVertexBuffer(0, &self.lines.buffer));
             commands.push(Command::Draw { vertices: 0..6, instances: 0..list.lines.len() as u32 });
+            stats.main.draw(list.lines.len() as u32);
         }
         let att = self.attachments.as_ref().expect("attachments created above");
         let color = match &att.color_view {
@@ -498,7 +524,12 @@ impl<B: Rhi> Renderer3D<B> {
             Some(&DepthAttachment { view: &att.depth_view, clear: Some(1.0), store: false }),
             &commands,
         );
+        stats.main.passes += 1;
+        stats.cpu_encode_time = encode_clock.elapsed();
+        let submit_clock = CpuClock::start();
         rhi.submit(encoder);
+        stats.cpu_submit_time = submit_clock.elapsed();
+        self.last_frame_stats = stats;
     }
 }
 

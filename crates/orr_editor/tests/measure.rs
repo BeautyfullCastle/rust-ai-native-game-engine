@@ -21,6 +21,7 @@ use common::*;
 use egui::{Event, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
 use orr_editor::editor::Editor;
+use orr_editor::diagnostics::{EditorDiagnostics, LatencyStats, LATENCY_WINDOW};
 use orr_editor::EditorApp;
 use serde_json::json;
 
@@ -40,6 +41,21 @@ fn settle(h: &mut Harness<'_, EditorApp>) {
         h.state_mut().editor.sync();
         h.run_steps(2);
     }
+}
+
+fn print_diagnostics(phase: &str, d: EditorDiagnostics) {
+    let timing = |name: &str, s: LatencyStats| {
+        eprintln!(
+            "MEASURE {phase} {name} CPU wall: last {:.3} / max {:.3} / p95 {:.3} ms (recent {} / {LATENCY_WINDOW}, total {})",
+            s.last.as_secs_f64() * 1000.0, s.max.as_secs_f64() * 1000.0, s.p95.as_secs_f64() * 1000.0, s.samples, s.total_samples,
+        );
+    };
+    timing("UI callback", d.ui_frame);
+    timing("pump", d.pump);
+    timing("blocking ERP wait", d.sync_erp_wait);
+    timing("async post->ingest", d.async_request);
+    timing("snapshot extraction", d.snapshot_extract);
+    eprintln!("MEASURE {phase} pending ERP: {} current / {} high-water", d.pending_requests, d.pending_high_water);
 }
 
 fn median(v: &mut [f64]) -> f64 {
@@ -99,6 +115,7 @@ fn drag_to_viewport_latency() {
         worst,
         ms_worst
     );
+    print_diagnostics("drag", h.state().editor.diagnostics());
     assert!(ms_worst < 40.0, "a dragged body shows within a couple of display frames");
 }
 
@@ -120,6 +137,7 @@ fn play_frame_time_with_a_thousand_bodies() {
     };
     let (edit_mean, _) = time_steps(&mut h, 60);
     eprintln!("MEASURE edit-mode UI frame (1000+ bodies): {edit_mean:.3} ms");
+    print_diagnostics("edit", h.state().editor.diagnostics());
 
     h.state_mut().editor.play();
     h.run_steps(5);
@@ -130,11 +148,15 @@ fn play_frame_time_with_a_thousand_bodies() {
     let t1 = h.state_mut().editor.host_call("sim.state", json!({})).unwrap()["head_tick"].as_u64().unwrap();
     eprintln!("MEASURE play-mode UI frame (1000+ bodies, local host thread, 1x): mean {mean:.3} ms, worst {worst:.3} ms, host ran {} ticks in {secs:.2} s", t1 - t0);
 
+    print_diagnostics("play 1x", h.state().editor.diagnostics());
+
     // The host at 4x: the UI frame does not get slower, the host thread does the simulating.
     h.state_mut().editor.set_speed(4.0);
     h.state_mut().editor.control(orr_bridge::ControlOp::Play);
     let (mean4, worst4) = time_steps(&mut h, 240);
     eprintln!("MEASURE play-mode UI frame (4x): mean {mean4:.3} ms, worst {worst4:.3} ms");
+
+    print_diagnostics("play 4x", h.state().editor.diagnostics());
 
     // How fast the host simulates (a blocking step of 600 ticks, which also publishes one frame).
     h.state_mut().editor.pause();
@@ -142,6 +164,7 @@ fn play_frame_time_with_a_thousand_bodies() {
     h.state_mut().editor.step(600);
     let per_tick = t.elapsed().as_secs_f64() * 1000.0 / 600.0;
     eprintln!("MEASURE host simulation: {per_tick:.3} ms per tick (600-tick step, 1000+ bodies)");
+    print_diagnostics("600-tick step", h.state().editor.diagnostics());
     assert!(mean < 50.0 && mean4 < 50.0, "the UI stays responsive");
     let _ = Duration::ZERO;
 }

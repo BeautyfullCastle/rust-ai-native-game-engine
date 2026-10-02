@@ -50,6 +50,7 @@ pub mod agent_ui;
 pub mod app;
 pub mod backend;
 pub mod cli;
+pub mod diagnostics;
 pub mod editor;
 pub mod inspector;
 pub mod model;

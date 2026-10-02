@@ -5,6 +5,7 @@
 //! translates input into `Editor` calls.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Pos2, Rect, RichText, Sense, Ui};
 use orr_bridge::PlayMode;
@@ -156,6 +157,7 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let started = Instant::now();
         let ctx = ui.ctx().clone();
         self.frames += 1;
 
@@ -196,6 +198,7 @@ impl eframe::App for EditorApp {
             self.last_title = title;
         }
         self.screenshot(&ctx);
+        self.editor.record_ui_frame(started.elapsed());
     }
 }
 

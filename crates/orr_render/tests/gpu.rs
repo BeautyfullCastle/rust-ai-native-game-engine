@@ -291,3 +291,116 @@ fn software_adapter_renders_the_same_circle() {
     let area = red_area(&img);
     assert!((area - 405.0).abs() < 405.0 * 0.08, "area {area}");
 }
+
+#[test]
+fn frame_stats_track_empty_growing_warm_and_resized_frames() {
+    let Some((_guard, gpu)) = gpu() else { return };
+    let camera = Camera::new([0.0, 0.0], 8.0);
+    let mut target = OffscreenTarget::new(&gpu, 64, 64, TextureFormat::Rgba8Unorm);
+    let mut renderer = Renderer::new(gpu.clone(), target.format());
+    renderer.clear = Some(BLACK);
+    assert_eq!(
+        renderer.last_frame_stats(),
+        orr_render::FrameStats::default()
+    );
+    let mut list = RenderList::new();
+    target.render(&mut renderer, &list, &camera);
+    let empty = renderer.last_frame_stats();
+    assert_eq!(
+        empty.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        }
+    );
+    assert_eq!(empty.shadow, orr_render::PassStats::default());
+    assert_eq!(
+        (
+            empty.shape_instances,
+            empty.mesh_instances,
+            empty.line_instances
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!((empty.upload_calls, empty.upload_bytes), (1, 32)); // 2D globals
+    assert_eq!(empty.buffer_reallocations, 0);
+    assert_eq!(
+        (empty.attachment_allocations, empty.attachment_reallocations),
+        (0, 0)
+    );
+    assert_eq!(empty.msaa_samples, 1);
+    assert!(
+        empty.cpu_prepare_time.is_some()
+            && empty.cpu_encode_time.is_some()
+            && empty.cpu_submit_time.is_some()
+    );
+    assert_eq!(px(&target.read_rgba8(), 64, 32, 32), [0, 0, 0, 255]);
+
+    list.circle([2.0, 0.0], 3.0, RED);
+    // Cross the initial capacity of both instance buffers; the extras are offscreen.
+    for _ in 0..1025 {
+        list.circle([100.0, 100.0], 1.0, RED);
+        list.line([100.0, 100.0], [101.0, 101.0], 1.0, RED);
+    }
+    target.render(&mut renderer, &list, &camera);
+    let cold = renderer.last_frame_stats();
+    assert_eq!(
+        (
+            cold.shape_instances,
+            cold.mesh_instances,
+            cold.line_instances
+        ),
+        (1026, 0, 1025)
+    );
+    assert_eq!(
+        cold.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 2,
+            instances: 2051
+        }
+    );
+    assert_eq!(cold.shadow, orr_render::PassStats::default());
+    assert_eq!(cold.upload_calls, 3);
+    assert_eq!(
+        cold.upload_bytes,
+        32 + (1026 * std::mem::size_of::<orr_render::ShapeInstance>()
+            + 1025 * std::mem::size_of::<orr_render::LineInstance>()) as u64
+    );
+    assert_eq!(cold.buffer_reallocations, 2);
+    let first = target.read_rgba8();
+    assert!(near(px(&first, 64, 40, 32), [255, 0, 0, 255], 2));
+
+    target.render(&mut renderer, &list, &camera);
+    let warm = renderer.last_frame_stats();
+    assert_eq!(warm.main, cold.main);
+    assert_eq!(
+        (warm.upload_calls, warm.upload_bytes),
+        (cold.upload_calls, cold.upload_bytes)
+    );
+    assert_eq!(warm.buffer_reallocations, 0);
+    assert_eq!(
+        target.read_rgba8(),
+        first,
+        "instrumentation preserves warm-frame pixels"
+    );
+
+    assert!(target.resize(80, 40));
+    list.clear();
+    target.render(&mut renderer, &list, &camera);
+    let resized = renderer.last_frame_stats();
+    assert_eq!(resized.main, empty.main);
+    assert_eq!((resized.shape_instances, resized.line_instances), (0, 0));
+    assert_eq!((resized.upload_calls, resized.upload_bytes), (1, 32));
+    assert_eq!(resized.buffer_reallocations, 0);
+    assert_eq!(
+        (
+            resized.attachment_allocations,
+            resized.attachment_reallocations
+        ),
+        (0, 0),
+        "the caller's target resize is not a renderer allocation"
+    );
+    assert_eq!(px(&target.read_rgba8(), 80, 40, 20), [0, 0, 0, 255]);
+}

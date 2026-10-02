@@ -32,6 +32,7 @@ pub mod math3;
 pub mod mesh;
 pub mod renderer;
 pub mod renderer3d;
+mod stats;
 pub mod targets;
 pub mod text;
 
@@ -43,6 +44,7 @@ pub use renderer3d::{light_view_proj, Renderer3D, Settings3D, DEFAULT_CLEAR_3D};
 pub use extract::{extract_items, instance_of};
 pub use list::{LineInstance, RenderList, ShapeInstance};
 pub use renderer::{Renderer, DEFAULT_CLEAR};
+pub use stats::{FrameStats, PassStats};
 pub use targets::{OffscreenTarget, WindowRenderer, WindowRenderer3D};
 
 pub use orr_rhi;

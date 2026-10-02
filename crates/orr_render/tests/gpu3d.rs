@@ -36,6 +36,7 @@ fn render_with(gpu: &Wgpu, size: (u32, u32), settings: Settings3D, list: &Render
     let mut r = Renderer3D::with_settings(gpu.clone(), target.format(), settings);
     r.clear = BLACK;
     target.render3d(&mut r, list, cam);
+    assert_eq!(r.last_frame_stats().msaa_samples, r.samples());
     (target.read_rgba8(), r.samples())
 }
 
@@ -398,7 +399,46 @@ fn render_into_a_resized_target_and_an_empty_list() {
     let cam = Camera3D::perspective([0.0, 0.0, 5.0], [0.0; 3], 40.0);
     let mut target = OffscreenTarget::new(&gpu, 48, 48, TextureFormat::Rgba8UnormSrgb);
     let mut r = Renderer3D::with_settings(gpu.clone(), target.format(), SETTINGS);
+    assert_eq!(r.last_frame_stats(), orr_render::FrameStats::default());
     target.render3d(&mut r, &RenderList3D::new(), &cam);
+    let empty = r.last_frame_stats();
+    let attachments = 1 + u32::from(r.samples() > 1);
+    assert_eq!(
+        empty.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        }
+    );
+    assert_eq!(
+        empty.shadow,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        }
+    );
+    assert_eq!(
+        (
+            empty.shape_instances,
+            empty.mesh_instances,
+            empty.line_instances
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!((empty.upload_calls, empty.upload_bytes), (2, 512)); // two 3D globals
+    assert_eq!(empty.buffer_reallocations, 0);
+    assert_eq!(
+        (empty.attachment_allocations, empty.attachment_reallocations),
+        (attachments, 0)
+    );
+    assert_eq!(empty.msaa_samples, r.samples());
+    assert!(
+        empty.cpu_prepare_time.is_some()
+            && empty.cpu_encode_time.is_some()
+            && empty.cpu_submit_time.is_some()
+    );
     let img = target.read_rgba8();
     assert!(img.chunks_exact(4).all(|p| p == &img[0..4]), "an empty list shows only the background");
     assert!(target.resize(80, 40));
@@ -408,4 +448,169 @@ fn render_into_a_resized_target_and_an_empty_list() {
     let img = target.read_rgba8();
     assert_eq!(img.len(), 80 * 40 * 4);
     assert_ne!(px(&img, 80, 40, 20), px(&img, 80, 2, 2));
+    let resized = r.last_frame_stats();
+    assert_eq!(
+        resized.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 1,
+            instances: 1
+        }
+    );
+    assert_eq!(resized.shadow, resized.main);
+    assert_eq!((resized.upload_calls, resized.upload_bytes), (3, 512 + 80));
+    assert_eq!(resized.buffer_reallocations, 0);
+    assert_eq!(
+        (
+            resized.attachment_allocations,
+            resized.attachment_reallocations
+        ),
+        (attachments, attachments)
+    );
+
+    target.render3d(&mut r, &list, &cam);
+    let warm = r.last_frame_stats();
+    assert_eq!(warm.main, resized.main);
+    assert_eq!(warm.shadow, resized.shadow);
+    assert_eq!(
+        (warm.attachment_allocations, warm.attachment_reallocations),
+        (0, 0)
+    );
+    assert_eq!(warm.buffer_reallocations, 0);
+    assert_eq!(
+        target.read_rgba8(),
+        img,
+        "instrumentation preserves warm-frame pixels"
+    );
+
+    list.clear();
+    list.lighting.shadows = false;
+    target.render3d(&mut r, &list, &cam);
+    let cleared = r.last_frame_stats();
+    assert_eq!(cleared.main, empty.main);
+    assert_eq!(
+        cleared.shadow, empty.shadow,
+        "disabled shadows still encode a clear pass"
+    );
+    assert_eq!((cleared.mesh_instances, cleared.line_instances), (0, 0));
+    assert_eq!((cleared.upload_calls, cleared.upload_bytes), (2, 512));
+    assert_eq!(
+        (
+            cleared.attachment_allocations,
+            cleared.attachment_reallocations
+        ),
+        (0, 0)
+    );
+    assert_eq!(cleared.buffer_reallocations, 0);
+    let img = target.read_rgba8();
+    assert!(img.chunks_exact(4).all(|p| p == &img[0..4]));
+}
+
+#[test]
+fn frame_stats_count_mesh_batches_shadow_exclusions_and_buffer_growth() {
+    let Some((_g, gpu)) = gpu() else { return };
+    let target = OffscreenTarget::new(&gpu, 32, 32, TextureFormat::Rgba8UnormSrgb);
+    let mut r = Renderer3D::with_settings(gpu.clone(), target.format(), Settings3D::LOW);
+    r.clear = BLACK;
+    let cam = Camera3D::perspective([0.0, 0.0, 5.0], [0.0; 3], 40.0);
+    let mut list = RenderList3D::new();
+    list.lighting = unlit();
+    let red = Material::new([1.0, 0.0, 0.0]).glow(1.0);
+    list.sphere([0.0; 3], IDENTITY_ROT, 1.0, &red);
+    list.capsule([100.0; 3], IDENTITY_ROT, 1.0, 1.0, &red);
+    list.plane([100.0; 3], 1.0, 1.0, &red);
+    for _ in 0..1025 {
+        list.cuboid([100.0; 3], IDENTITY_ROT, [1.0; 3], &red);
+        list.line([100.0; 3], [101.0; 3], 1.0, [1.0; 4]);
+    }
+    target.render3d(&mut r, &list, &cam);
+    let cold = r.last_frame_stats();
+    assert_eq!(
+        (
+            cold.shape_instances,
+            cold.mesh_instances,
+            cold.line_instances
+        ),
+        (0, 1028, 1025)
+    );
+    assert_eq!(
+        cold.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 5,
+            instances: 2053
+        }
+    );
+    assert_eq!(
+        cold.shadow,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        },
+        "disabled shadows still clear, without drawing casters"
+    );
+    assert_eq!(cold.upload_calls, 7); // two uniforms, four mesh kinds, lines
+    assert_eq!(cold.upload_bytes, 512 + 1028 * 80 + 1025 * 48);
+    assert_eq!(cold.buffer_reallocations, 2);
+    assert_eq!(
+        (cold.attachment_allocations, cold.attachment_reallocations),
+        (1, 0)
+    );
+    assert_eq!(cold.msaa_samples, 1);
+    let image = target.read_rgba8();
+    assert!(px(&image, 32, 16, 16)[0] > 200);
+
+    list.lighting.shadows = true;
+    target.render3d(&mut r, &list, &cam);
+    let warm = r.last_frame_stats();
+    assert_eq!(warm.main, cold.main);
+    assert_eq!(
+        warm.shadow,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 3,
+            instances: 1027
+        },
+        "planes and lines are excluded from the shadow pass"
+    );
+    assert_eq!(
+        (warm.upload_calls, warm.upload_bytes),
+        (cold.upload_calls, cold.upload_bytes)
+    );
+    assert_eq!(warm.buffer_reallocations, 0);
+    assert_eq!(
+        (warm.attachment_allocations, warm.attachment_reallocations),
+        (0, 0)
+    );
+    assert_eq!(
+        target.read_rgba8(),
+        image,
+        "the emissive object remains unchanged"
+    );
+
+    list.clear();
+    list.plane([100.0; 3], 1.0, 1.0, &red);
+    target.render3d(&mut r, &list, &cam);
+    let plane = r.last_frame_stats();
+    assert_eq!(
+        plane.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 1,
+            instances: 1
+        }
+    );
+    assert_eq!(
+        plane.shadow,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        },
+        "the shadow pass runs with no caster draws for a plane-only list"
+    );
+    assert_eq!((plane.mesh_instances, plane.line_instances), (1, 0));
+    assert_eq!((plane.upload_calls, plane.upload_bytes), (3, 512 + 80));
+    assert_eq!(plane.buffer_reallocations, 0);
 }

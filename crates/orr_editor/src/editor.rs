@@ -50,6 +50,7 @@ use serde_json::{json, Value as J};
 
 use crate::agent::{AgentState, Feed, FeedEntry};
 use crate::backend::{Backend, HostSpec};
+use crate::diagnostics::{EditorDiagnostics, Telemetry};
 use crate::model::{ClientInfo, EntityRow, History, ProposalDetail, ProposalInfo, SimState, Stopped, Target};
 pub use crate::model::Mode;
 use crate::viewport::{self, Scene};
@@ -132,6 +133,11 @@ enum Pend {
     Edit(String),
 }
 
+struct Pending {
+    kind: Pend,
+    posted_at: Instant,
+}
+
 #[derive(Default)]
 struct Dirty {
     rows: bool,
@@ -193,7 +199,8 @@ pub struct Editor {
     preview: Option<Preview>,
     preview_generation: u64,
     // requests that are in flight, and what to ask for next
-    pending: BTreeMap<u64, Pend>,
+    pending: BTreeMap<u64, Pending>,
+    telemetry: Telemetry,
     dirty: Dirty,
     inflight: InFlight,
     change_gen: u64,
@@ -267,6 +274,7 @@ impl Editor {
             preview: None,
             preview_generation: 0,
             pending: BTreeMap::new(),
+            telemetry: Telemetry::default(),
             dirty: Dirty::default(),
             inflight: InFlight::default(),
             change_gen: 0,
@@ -296,7 +304,7 @@ impl Editor {
 
     /// The host must know every type the editor's shipped descriptors know.
     fn check_registry(&mut self) -> Result<(), String> {
-        let r = self.backend.erp.call("registry.types", J::Null).map_err(|e| format!("registry.types: {e}"))?;
+        let r = self.timed_erp_call("registry.types", J::Null).map_err(|e| format!("registry.types: {e}"))?;
         let host: Vec<String> = r["types"].as_array().map(|a| a.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
         let missing: Vec<&str> = self.types.types().map(|t| t.name()).filter(|n| !host.iter().any(|h| h == n)).collect();
         if !missing.is_empty() {
@@ -306,43 +314,53 @@ impl Editor {
     }
 
     fn read_state(&mut self) -> Result<(), String> {
-        let r = self.backend.erp.call("sim.state", J::Null).map_err(|e| format!("sim.state: {e}"))?;
+        let r = self.timed_erp_call("sim.state", J::Null).map_err(|e| format!("sim.state: {e}"))?;
         self.sim = SimState::from_json(&r);
         Ok(())
     }
 
     fn read_history(&mut self) -> Result<(), String> {
-        let r = self.backend.erp.call("history.list", J::Null).map_err(|e| format!("history.list: {e}"))?;
+        let r = self.timed_erp_call("history.list", J::Null).map_err(|e| format!("history.list: {e}"))?;
         self.history = History::from_json(&r);
         Ok(())
     }
 
     fn read_rows(&mut self) -> Result<(), String> {
-        let r = self.backend.erp.call("world.query", json!({"limit": ROWS_LIMIT})).map_err(|e| format!("world.query: {e}"))?;
+        let r = self.timed_erp_call("world.query", json!({"limit": ROWS_LIMIT})).map_err(|e| format!("world.query: {e}"))?;
         self.rows = rows_of(&r);
         Ok(())
     }
 
     fn read_singletons(&mut self) -> Result<(), String> {
-        let r = self.backend.erp.call("world.singleton.get", J::Null).map_err(|e| format!("world.singleton.get: {e}"))?;
+        let r = self.timed_erp_call("world.singleton.get", J::Null).map_err(|e| format!("world.singleton.get: {e}"))?;
         self.singletons = singletons_of(&self.types, &r);
         Ok(())
     }
 
     fn read_proposals(&mut self) -> Result<(), String> {
-        let r = self.backend.erp.call("proposal.list", J::Null).map_err(|e| format!("proposal.list: {e}"))?;
+        let r = self.timed_erp_call("proposal.list", J::Null).map_err(|e| format!("proposal.list: {e}"))?;
         self.proposals = r["proposals"].as_array().map(|a| a.iter().filter_map(ProposalInfo::from_json).collect()).unwrap_or_default();
         Ok(())
     }
 
     fn read_clients(&mut self, backlog: bool) -> Result<(), String> {
         let params = if backlog { json!({"since": 0, "include_reads": true, "limit": 2000}) } else { json!({"since": self.feed.last_seq, "include_reads": true, "limit": 200}) };
-        let r = self.backend.erp.call("activity.list", params).map_err(|e| format!("activity.list: {e}"))?;
+        let r = self.timed_erp_call("activity.list", params).map_err(|e| format!("activity.list: {e}"))?;
         self.apply_activity_list(&r);
         Ok(())
     }
 
     // ---- reads ----
+
+    /// Bounded CPU wall-clock diagnostics, with no host calls or heap allocation.
+    /// See [`EditorDiagnostics`] for exact boundaries and rolling-window semantics.
+    pub fn diagnostics(&self) -> EditorDiagnostics {
+        self.telemetry.summary(self.pending.len())
+    }
+
+    pub(crate) fn record_ui_frame(&mut self, elapsed: Duration) {
+        self.telemetry.ui_frame.record(elapsed);
+    }
 
     /// Where the editor's host is and how it was started.
     pub fn spec(&self) -> &HostSpec {
@@ -560,12 +578,19 @@ impl Editor {
 
     // ---- talking to the host ----
 
+    fn timed_erp_call(&mut self, method: &str, params: J) -> Result<J, ClientError> {
+        let started = Instant::now();
+        let result = self.backend.erp.call(method, params);
+        self.telemetry.sync_erp_wait.record(started.elapsed());
+        result
+    }
+
     /// Runs a method and waits for the answer. `Err` carries the host's message.
     fn call(&mut self, method: &str, params: J) -> Result<J, String> {
         if let Some(d) = &self.down {
             return Err(d.reason.clone());
         }
-        let r = self.backend.erp.call(method, params);
+        let r = self.timed_erp_call(method, params);
         self.ingest();
         match r {
             Ok(v) => Ok(v),
@@ -582,9 +607,11 @@ impl Editor {
         if self.down.is_some() {
             return;
         }
+        let posted_at = Instant::now();
         match self.backend.erp.post(method, params) {
             Ok(id) => {
-                self.pending.insert(id, kind);
+                self.pending.insert(id, Pending { kind, posted_at });
+                self.telemetry.pending_high_water = self.telemetry.pending_high_water.max(self.pending.len());
             }
             Err(e) => self.connection_lost(&e.to_string()),
         }
@@ -599,8 +626,9 @@ impl Editor {
         }
         let answers: Vec<_> = self.backend.erp.responses.drain(..).collect();
         for (id, r) in answers {
-            if let Some(kind) = self.pending.remove(&id) {
-                self.on_answer(kind, r);
+            if let Some(pending) = self.pending.remove(&id) {
+                self.telemetry.async_request.record(pending.posted_at.elapsed());
+                self.on_answer(pending.kind, r);
             }
         }
         // Frames are not asked for on this channel.
@@ -819,6 +847,12 @@ impl Editor {
     /// frame, and sends the requests that refresh what changed. Never waits
     /// for the host.
     pub fn pump(&mut self) {
+        let started = Instant::now();
+        self.pump_inner();
+        self.telemetry.pump.record(started.elapsed());
+    }
+
+    fn pump_inner(&mut self) {
         if self.down.is_some() {
             return;
         }
@@ -896,10 +930,12 @@ impl Editor {
         if self.snapshot.as_ref().is_some_and(|o| o.seq() == s.seq()) {
             return;
         }
+        let started = Instant::now();
         let frame = s.predicted();
         self.bodies = body_views(frame);
         self.checksum = frame.checksum();
         let alive = frame.alive_count();
+        self.telemetry.snapshot_extract.record(started.elapsed());
         if alive != self.snap_entities {
             self.snap_entities = alive;
             if alive as usize != self.rows.len() {
@@ -1814,3 +1850,5 @@ pub fn fp_of_f64(v: f64) -> Option<FP> {
 
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod diagnostics_tests;

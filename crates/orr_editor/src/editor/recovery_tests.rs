@@ -112,7 +112,7 @@ fn coalesced_diagnostics_do_not_acknowledge_requests_or_replay_old_transitions()
         LifecycleRecovery { count: 8, last: Lifecycle::DebugRejected(DebugError::EntityNotAlive) },
         LifecycleRecovery { count: 13, last: Lifecycle::SeekRejected { target: 999 } },
     ];
-    ed.pending.insert(u64::MAX, Pend::State);
+    ed.pending.insert(u64::MAX, Pending { kind: Pend::State, posted_at: Instant::now() });
     ed.log.clear();
     ed.apply_view_update(ViewUpdate::<()> { snapshot: Some(snapshot), events: Vec::new(), resync: Some(resync) });
 
