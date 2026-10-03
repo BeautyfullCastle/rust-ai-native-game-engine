@@ -73,7 +73,11 @@ elapsed-time guarantee exists (`docs/nonblocking-verification.md`; server
 `disconnected`, `complete_verification`, and `Drop for ErpServer`).
 
 Each side stores one checksum per executed tick. Sampling also retains metric
-series and checksum samples; `series: false` only omits metric-series arrays
+series and checksum samples. `RecordingCheck.checked` additionally compares a
+recorded starting boundary: the generated probe fixture executes ticks 1–16
+and checks exactly 17 recorded boundaries (0–16). Recordings without that
+starting checkpoint need not have this count. `series: false` only omits metric
+series arrays
 from the JSON projection and does not remove the typed report's internal
 series. A successful job builds both JSON response data and a typed report
 retained in an `Arc<VerifyDetail>` on its activity entry. The default activity

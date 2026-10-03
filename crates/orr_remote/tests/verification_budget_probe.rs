@@ -27,6 +27,8 @@ const FIXTURE_SEED: u64 = 7;
 const PLAYERS: u8 = 2;
 const REPLAY_TICKS: u64 = 256;
 const EXECUTION_TICKS: u32 = 16;
+// This generated fixture records the initial boundary and every executed tick.
+const EXECUTION_CHECKSUM_BOUNDARIES: u32 = EXECUTION_TICKS + 1;
 const MAX_YAML_BYTES: usize = 256 * 1024;
 const MAX_ENTITIES: usize = 128;
 const MAX_REPLAY_BYTES: usize = 256 * 1024;
@@ -186,6 +188,19 @@ fn fixture(include_replay: bool) -> Fixture {
         );
         assert_eq!(parsed.first_tick(), 1);
         assert_eq!(parsed.last_tick(), REPLAY_TICKS);
+        assert_eq!(
+            parsed.checksums.first().copied(),
+            Some((0, initial_checksum))
+        );
+        for tick in 0..=u64::from(EXECUTION_TICKS) {
+            assert!(
+                parsed
+                    .checksums
+                    .iter()
+                    .any(|&(recorded_tick, _)| recorded_tick == tick),
+                "generated replay retains every executed checksum boundary"
+            );
+        }
         assert!(
             parsed.keyframe_count() > 0,
             "generated recording contains a keyframe"
@@ -393,8 +408,8 @@ fn run_cell(cell: Cell) {
                 .recording
                 .expect("recorded verification reports its checksum match");
             assert_eq!(
-                recording.checked, EXECUTION_TICKS,
-                "all executed ticks are checked against the recording"
+                recording.checked, EXECUTION_CHECKSUM_BOUNDARIES,
+                "initial boundary and all executed ticks are checked against the recording"
             );
             recording_checksums_checked = Some(u64::from(recording.checked));
             assert_eq!(
@@ -505,8 +520,8 @@ fn run_cell(cell: Cell) {
                 .expect("recording checked count");
             assert_eq!(
                 checked,
-                u64::from(EXECUTION_TICKS),
-                "all executed ticks are checked against the recording"
+                u64::from(EXECUTION_CHECKSUM_BOUNDARIES),
+                "initial boundary and all executed ticks are checked against the recording"
             );
             recording_checksums_checked = Some(checked);
             assert_eq!(
