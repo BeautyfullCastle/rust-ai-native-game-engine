@@ -43,7 +43,7 @@ fn settle(h: &mut Harness<'_, EditorApp>) {
     }
 }
 
-fn print_diagnostics(phase: &str, d: EditorDiagnostics) {
+fn print_diagnostics(phase: &str, d: EditorDiagnostics, body_count: usize) {
     let stats = |s: LatencyStats| {
         json!({
             "samples": s.samples,
@@ -61,7 +61,7 @@ fn print_diagnostics(phase: &str, d: EditorDiagnostics) {
             "case": "diagnostics",
             "phase": phase,
             "scene_id": if phase == "drag" { "demo_editor" } else { "demo_editor_1000_bodies" },
-            "body_count": demo_editor().bodies().len() + if phase == "drag" { 0 } else { 1000 },
+            "body_count": body_count,
             "window_px": [1500, 900],
             "backend": "egui_kittest",
             "erp_connected": false,
@@ -168,7 +168,7 @@ fn drag_to_viewport_latency() {
         worst,
         ms_worst
     );
-    print_diagnostics("drag", h.state().editor.diagnostics());
+    print_diagnostics("drag", h.state().editor.diagnostics(), h.state().editor.bodies().len());
     assert!(ms_worst < 40.0, "a dragged body shows within a couple of display frames");
 }
 
@@ -207,7 +207,7 @@ fn play_frame_time_with_a_thousand_bodies() {
     };
     let (edit_mean, _) = time_steps(&mut h, 60, "edit");
     eprintln!("MEASURE edit-mode UI frame (1000+ bodies): {edit_mean:.3} ms");
-    print_diagnostics("edit", h.state().editor.diagnostics());
+    print_diagnostics("edit", h.state().editor.diagnostics(), h.state().editor.bodies().len());
 
     h.state_mut().editor.play();
     h.run_steps(5);
@@ -218,7 +218,7 @@ fn play_frame_time_with_a_thousand_bodies() {
     let t1 = h.state_mut().editor.host_call("sim.state", json!({})).unwrap()["head_tick"].as_u64().unwrap();
     eprintln!("MEASURE play-mode UI frame (1000+ bodies, local host thread, 1x): mean {mean:.3} ms, worst {worst:.3} ms, host ran {} ticks in {secs:.2} s", t1 - t0);
 
-    print_diagnostics("play 1x", h.state().editor.diagnostics());
+    print_diagnostics("play 1x", h.state().editor.diagnostics(), h.state().editor.bodies().len());
 
     // The host at 4x: the UI frame does not get slower, the host thread does the simulating.
     h.state_mut().editor.set_speed(4.0);
@@ -226,7 +226,7 @@ fn play_frame_time_with_a_thousand_bodies() {
     let (mean4, worst4) = time_steps(&mut h, 240, "play_4x");
     eprintln!("MEASURE play-mode UI frame (4x): mean {mean4:.3} ms, worst {worst4:.3} ms");
 
-    print_diagnostics("play 4x", h.state().editor.diagnostics());
+    print_diagnostics("play 4x", h.state().editor.diagnostics(), h.state().editor.bodies().len());
 
     // How fast the host simulates (a blocking step of 600 ticks, which also publishes one frame).
     h.state_mut().editor.pause();
@@ -234,7 +234,7 @@ fn play_frame_time_with_a_thousand_bodies() {
     h.state_mut().editor.step(600);
     let per_tick = t.elapsed().as_secs_f64() * 1000.0 / 600.0;
     eprintln!("MEASURE host simulation: {per_tick:.3} ms per tick (600-tick step, 1000+ bodies)");
-    print_diagnostics("600-tick step", h.state().editor.diagnostics());
+    print_diagnostics("600-tick step", h.state().editor.diagnostics(), h.state().editor.bodies().len());
     assert!(mean < 50.0 && mean4 < 50.0, "the UI stays responsive");
     let _ = Duration::ZERO;
 }
