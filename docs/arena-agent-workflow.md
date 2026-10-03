@@ -368,6 +368,10 @@ script run is not a statistical agent evaluation.
 
 ## Later native-agent trial
 
+The separate [trial harness contract](arena-agent-trial.md) keeps mock protocol
+and accounting validation distinct from a genuine model trial. The scripted
+control and its independent oracles remain the baseline described above.
+
 Only after the scripted baseline is demonstrated should a separate native-agent
 trial be run. Give the agent the five goals, the running host's generated guide,
 and the same supported CLI/ERP interface. Keep the detailed validation/oracle
