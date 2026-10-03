@@ -159,6 +159,11 @@ sample or cleaning up a fixture.
 
 The minimum fixture matrix should include:
 
+The `parallel: false/true` comparison below is a core-level `VerifyOptions`
+harness comparison. Current ERP verification and direct `call_local` use the
+default `parallel: true` and expose no toggle parameter. Their fixture cells
+use those supported default options; this plan does not add a public toggle.
+
 | Case | Inputs / options | What it separates |
 | --- | --- | --- |
 | Short scripted baseline | Small normal scene; bot and idle; short valid tick count; default sample interval; `series` false/true; include `parallel` false/true around 15 and 16 ticks | Admission and fixed costs; serial versus conditional side-thread execution; report option cost. |
