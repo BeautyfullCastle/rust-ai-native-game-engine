@@ -25,11 +25,11 @@ use crate::arena_view::arena_fire_commands;
 use crate::physics_game::{NoCommand, PhysConfig, PhysGame, PhysInput};
 use crate::physics_host::{physics_bridge_config, SimMetrics};
 
-/// Build id of the arena sample; the server room's build hash is
+/// Frame-format-bound build id of the arena sample; the room's build hash is
 /// `build_hash_of(ARENA_BUILD_ID, 0)` (`orr_server --game arena`).
-pub const ARENA_BUILD_ID: u64 = 0x0A2E_4A00_0001;
-/// Build id of the physics sample (`orr_server --game physics`).
-pub const PHYSICS_BUILD_ID: u64 = 0x0A2E_4A00_0002;
+pub const ARENA_BUILD_ID: u64 = orr_sim::frame_build_id(0x0A2E_4A00_0001);
+/// Frame-format-bound build id of the physics sample (`orr_server --game physics`).
+pub const PHYSICS_BUILD_ID: u64 = orr_sim::frame_build_id(0x0A2E_4A00_0002);
 
 /// Client mode options of the sample programs.
 #[derive(Clone, Debug)]
@@ -40,6 +40,9 @@ pub struct NetArgs {
     pub fingerprint: Option<[u8; 32]>,
     pub insecure_dev: bool,
     pub room: u64,
+    /// Override the sample's frame-format-bound game identity (`--build-id`).
+    /// `Some(0)` intentionally preserves the engine's untracked development mode.
+    pub build_id: Option<u64>,
     pub slot: Option<u8>,
     /// Label in log lines.
     pub name: String,
@@ -62,6 +65,7 @@ impl Default for NetArgs {
             fingerprint: None,
             insecure_dev: false,
             room: 1,
+            build_id: None,
             slot: None,
             name: "client".to_string(),
             sim: SimConditions { latency_ms: 0, jitter_ms: 0, loss: 0.0, seed: 0 },
@@ -81,6 +85,7 @@ pub const NET_HELP: &str = "\
   --trust-fingerprint HEX      QUIC: pin the server certificate (the server prints it)
   --insecure-dev               QUIC: accept any certificate (development only)
   --room N                     room id (default 1)
+  --build-id N                 override the game's frame-format-bound build id (exact decimal u64)
   --slot N                     ask for this slot (default: any free slot)
   --name TEXT                  label in log lines
   --sim-latency MS             add MS of one-way delay in each direction (test the network)
@@ -107,6 +112,7 @@ impl NetArgs {
             "--trust-fingerprint" => self.fingerprint = Some(parse_fingerprint(&next(arg)?)?),
             "--insecure-dev" => self.insecure_dev = true,
             "--room" => self.room = num(arg, next(arg)?)?,
+            "--build-id" => self.build_id = Some(num(arg, next(arg)?)?),
             "--slot" => self.slot = Some(num(arg, next(arg)?)?),
             "--name" => self.name = next(arg)?,
             "--sim-latency" => self.sim.latency_ms = num(arg, next(arg)?)?,
@@ -169,7 +175,7 @@ impl NetArgs {
 pub fn arena_client(args: &NetArgs) -> Result<RelayClient<Arena, NetLink>, String> {
     let link = args.link()?;
     Ok(RelayClient::new(
-        args.client_config(ARENA_BUILD_ID),
+        args.client_config(args.build_id.unwrap_or(ARENA_BUILD_ID)),
         link,
         |w| ArenaConfig { player_count: w.player_count },
         DirSink::new(&args.desync_dir),
@@ -187,7 +193,7 @@ pub type SceneSink = Arc<Mutex<Option<PhysConfig>>>;
 fn physics_client_with(args: &NetArgs, sink: Option<SceneSink>) -> Result<RelayClient<PhysGame, NetLink>, String> {
     let link = args.link()?;
     Ok(RelayClient::new(
-        args.client_config(PHYSICS_BUILD_ID),
+        args.client_config(args.build_id.unwrap_or(PHYSICS_BUILD_ID)),
         link,
         move |w| {
             let scene = PhysConfig::from_blob(&w.config, w.player_count)
@@ -352,5 +358,19 @@ pub fn log_lifecycle(note: &Lifecycle) {
         Lifecycle::DebugRejected(e) => println!("debug command refused: {e}"),
         Lifecycle::SeekRejected { target } => println!("seek to tick {target} refused (outside the recording)"),
         _ => {}
+    }
+}
+
+/// Recovery summaries are diagnostics, not a replay of lifecycle transitions.
+pub fn log_view_resync(reset: &orr_bridge::ViewResync) {
+    eprintln!(
+        "view resynced at tick {}: {} presentation notifications discarded",
+        reset.head_tick, reset.discarded_events
+    );
+    for note in &reset.lifecycle {
+        eprintln!(
+            "  coalesced {} lifecycle notifications; latest: {:?}",
+            note.count, note.last
+        );
     }
 }

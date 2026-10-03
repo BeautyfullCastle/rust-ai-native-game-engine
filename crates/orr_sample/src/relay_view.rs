@@ -138,11 +138,13 @@ enum Link {
 pub struct RelayView {
     link: Link,
     metrics: Arc<RelayMetrics>,
+    build_id: u64,
 }
 
 impl RelayView {
     /// Starts joining on a thread.
     pub fn start(args: NetArgs) -> Result<RelayView, String> {
+        let build_id = args.build_id.unwrap_or(PHYSICS_BUILD_ID);
         let metrics = RelayMetrics::new();
         let (tx, rx) = channel::<Joined>();
         let (thread_metrics, sim) = (metrics.clone(), SimMetrics::new());
@@ -153,7 +155,7 @@ impl RelayView {
                 let _ = tx.send(physics_bridge(&args, thread_metrics, sim));
             })
             .map_err(|e| format!("cannot start the connection thread: {e}"))?;
-        Ok(RelayView { link: Link::Connecting(rx), metrics })
+        Ok(RelayView { link: Link::Connecting(rx), metrics, build_id })
     }
 
     /// Joins and waits until the room has started (at most the connect timeout plus [`WAIT_SLACK`]).
@@ -187,7 +189,7 @@ impl RelayView {
         match result {
             Ok((bridge, _scene)) => {
                 let (slot, players, tick_rate) = (bridge.local_slot().0, bridge.player_count(), bridge.tick_rate());
-                let source = phys_client_stream_source(PHYSICS_BUILD_ID, players, tick_rate, slot);
+                let source = phys_client_stream_source(self.build_id, players, tick_rate, slot);
                 let ready = Ready { schema: source.schema().clone(), input_size: std::mem::size_of::<PhysInput>(), player_count: players };
                 self.link = Link::Playing(Box::new(Playing { bridge, source, slot, players }));
                 Some(ready)
@@ -226,7 +228,7 @@ impl RelayView {
             .map_err(|_| ViewError::new(ViewErrorKind::Arg, format!("input must be {} bytes", std::mem::size_of::<PhysInput>())))?;
         p.bridge
             .set_input(PlayerSlot(p.slot), input)
-            .map_err(|e| ViewError::new(ViewErrorKind::Host, format!("the session is gone: {e}")))
+            .map_err(|e| ViewError::new(ViewErrorKind::Host, format!("input refused: {e}")))
     }
 
     /// Sends a command of the game to the server with the next tick (`PhysGame` has only the no-op one).
@@ -240,7 +242,7 @@ impl RelayView {
         }
         let command = <NoCommand as SimCommand>::decode(bytes)
             .ok_or_else(|| ViewError::new(ViewErrorKind::Arg, format!("command must be {} bytes", std::mem::size_of::<NoCommand>())))?;
-        p.bridge.send_command(command).map_err(|e| ViewError::new(ViewErrorKind::Host, format!("the session is gone: {e}")))
+        p.bridge.send_command(command).map_err(|e| ViewError::new(ViewErrorKind::Host, format!("command refused: {e}")))
     }
 
     /// The checksum of the confirmed state at `tick` (0 = the newest checkpoint): `(tick, checksum)`.

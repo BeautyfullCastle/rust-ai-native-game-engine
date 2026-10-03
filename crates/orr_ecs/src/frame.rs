@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::codec::{put_len, put_u32, put_u64, FrameDecodeError, Reader, FORMAT_VERSION, MAGIC};
+use crate::codec::{hash_len, put_len, put_u32, put_u64, FrameDecodeError, Reader, FORMAT_VERSION, MAGIC};
 use crate::component::{Component, ComponentId, ListId, SingletonId};
 use crate::entity::{Entity, EntityAllocator};
 use crate::list::{FrameList, ListPool};
@@ -269,14 +269,36 @@ impl Frame {
         }
     }
 
-    /// Deterministic checksum of the entire frame: tick, entity allocator
-    /// state, every component store (in registration order: dense entities
-    /// then dense data), every singleton, and every list pool. Two frames
-    /// built by replaying the same operation sequence from the same initial
-    /// state always produce the same checksum, on any platform.
+    /// Deterministic xxh3 checksum of the complete ORRF v2 body, excluding
+    /// only its checksum trailer. Streams without allocating: format and
+    /// schema, tick, entity allocator, component stores, singletons and list
+    /// pools, including every collection length and ordered free list.
+    /// Derived sparse indexes and allocation capacities are not state.
+    /// Two frames built by replaying the same operation sequence from the
+    /// same initial state produce the same checksum on supported platforms.
+    /// This intentionally differs from the incomplete ORRF v1 checksum.
     pub fn checksum(&self) -> u64 {
         let mut h = Xxh3::new();
+        h.update(&MAGIC);
+        h.update(&FORMAT_VERSION.to_le_bytes());
         h.update(&self.tick.to_le_bytes());
+
+        hash_len(&mut h, self.components.len());
+        for i in 0..self.components.len() {
+            let id = ComponentId(i as u16);
+            hash_schema_entry(&mut h, self.registry.component_name(id), self.registry.component_size(id));
+        }
+        hash_len(&mut h, self.singletons.len());
+        for i in 0..self.singletons.len() {
+            let id = SingletonId(i as u16);
+            hash_schema_entry(&mut h, self.registry.singleton_name(id), self.registry.singleton_size(id));
+        }
+        hash_len(&mut h, self.lists.len());
+        for i in 0..self.lists.len() {
+            let id = ListId(i as u16);
+            hash_schema_entry(&mut h, self.registry.list_name(id), self.registry.list_size(id));
+        }
+
         self.allocator.hash_into(&mut h);
         for store in &self.components {
             store.hash_into(&mut h);
@@ -302,7 +324,7 @@ impl Frame {
 
     /// Appends the frame's byte form to `out`.
     ///
-    /// Format v1, all integers little-endian, all lengths `u32`:
+    /// Format v2, all integers little-endian, all lengths `u32`:
     /// `"ORRF"`, `version u32`, `tick u64`; a schema block (for components,
     /// singletons, then lists: `count u32`, and per type `name_len u32`,
     /// name bytes, `elem_size u32`); the entity allocator; every component
@@ -310,6 +332,11 @@ impl Frame {
     /// bytes); finally the frame's `checksum u64`. Types are identified by
     /// registration order, name and size, never by `TypeId`, so the bytes
     /// are the same on every platform and process.
+    ///
+    /// V2 retains the v1 field layout but checksums the entire preceding
+    /// body, including schema and collection boundaries. V1 snapshots are
+    /// rejected with [`FrameDecodeError::UnsupportedVersion`]; the old
+    /// checksum omitted state that can change future simulation behavior.
     pub fn write_bytes(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&MAGIC);
         put_u32(out, FORMAT_VERSION);
@@ -405,6 +432,12 @@ fn put_schema_entry(out: &mut Vec<u8>, name: &str, elem_size: u32) {
     put_len(out, name.len());
     out.extend_from_slice(name.as_bytes());
     put_u32(out, elem_size);
+}
+
+fn hash_schema_entry(h: &mut Xxh3, name: &str, elem_size: u32) {
+    hash_len(h, name.len());
+    h.update(name.as_bytes());
+    h.update(&elem_size.to_le_bytes());
 }
 
 /// Checks one schema section against the registry's `(name, size)` per index.

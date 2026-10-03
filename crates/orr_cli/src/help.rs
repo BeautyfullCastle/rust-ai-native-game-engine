@@ -8,7 +8,7 @@ Look
   status                       host, game, mode, tick, checksum, unsaved changes, proposals, clients
   scene                        entities (GUID, name, components) and singletons
   get <entity> [Comp[.path]]   component values, exact decimals
-  schema [type] | --types      the value schema of the game's types
+  schema [type] | --types | --input   the value schema of the game's types or player input
 
 Change
   set <entity> Comp.path=value...   edit fields (one undo entry)
@@ -18,7 +18,7 @@ Change
   history | undo | redo
 
 Other
-  sim start|stop|play|pause|step|seek|speed|state
+  sim start|stop|input|play|pause|step|seek|speed|state
   activity [-f]                what agents did on the host (a live feed with -f)
   save [--write]               scene YAML, or write the host's scene file
   agents-md                    the guide for AI agents, generated from the host
@@ -77,15 +77,18 @@ Examples:
     ),
     (
         "schema",
-        "orr schema [type] | --types",
-        "orr schema [type] | --types
+        "orr schema [type] | --types | --input",
+        "orr schema [type] | --types | --input
 
 The JSON Schema of the game's component and singleton types: fields, ranges, docs.
 --types lists just the type names and one-line docs. With a type name (short names work) it prints that type only.
+--input prints the structured player-input schema and value format when the host supports it.
+Choose one type name, --types, or --input. Input fields are game-specific; discover them before using sim input.
 
 Examples:
   orr schema --types
-  orr schema Body",
+  orr schema Body
+  orr schema --input",
     ),
     (
         "set",
@@ -139,8 +142,8 @@ Examples:
     ),
     (
         "verify",
-        "orr verify [<proposal>] [--bot N | --idle N | --last-play | --replay f.orrp] [--seed S] [--check <rule>]...",
-        "orr verify [<proposal>] [--bot N | --idle N | --last-play | --replay f.orrp] [--seed S] [--check <rule>]...
+        "orr verify [<proposal>] [--bot N | --idle N | --last-play | --replay f.orrp] [--seed S] [--sample-every N] [--check <rule>]...",
+        "orr verify [<proposal>] [--bot N | --idle N | --last-play | --replay f.orrp] [--seed S] [--sample-every N] [--check <rule>]...
 
 Replays the scene without and with the proposal, deterministically, on the same inputs, and compares checksums and metrics.
 Without a proposal it runs the scene alone (baseline metrics: use them to choose thresholds).
@@ -149,11 +152,15 @@ Prints pass or fail per check with the reason, and the metrics that changed. Exi
 Checks: <metric>[.start|final|min|max|delta] <|<=|==|!=|>=|> <number>, `base:` prefix for the run without the change,
 no_divergence, no_divergence_before <tick>, recording_matches.
 Inputs: --bot N ticks of scripted players (default 300; --seed S, --players P), --idle N, --last-play, --replay file.
+Metrics: --sample-every N samples every N ticks relative to the start, plus start/end (default 60; 0 endpoints only; 1 every tick boundary).
+min/max cover sampled values only. For transient assertions use --sample-every 1; events entirely within a tick are not covered.
+Checksum divergence and recording checks still compare every tick available, regardless of metric sampling.
 
 Examples:
   orr verify
   orr verify p1 --check \"lost_bodies.max == 0\" --check \"mean_height >= 2.5\"
-  orr verify p1 --idle 600 --check no_divergence_before 1",
+  orr verify p1 --idle 600 --check no_divergence_before 1
+  orr verify --last-play --sample-every 1 --check \"bullets.max == 0\"",
     ),
     (
         "accept",
@@ -165,13 +172,15 @@ Examples:
     ("diff", "orr diff <proposal>", "orr diff <proposal>\n\nThe changes a proposal would make, and the diff of the scene text.\n\nExample:\n  orr diff p1"),
     (
         "apply",
-        "orr apply <label> <ops...> [--check <rule>]... [--bot N | --idle N | --last-play | --replay f] [--keep]",
-        "orr apply <label> <ops...> [--check <rule>]... [--bot N | --idle N | --last-play | --replay f] [--seed S] [--keep]
+        "orr apply <label> <ops...> [--check <rule>]... [--bot N | --idle N | --last-play | --replay f] [--sample-every N] [--keep]",
+        "orr apply <label> <ops...> [--check <rule>]... [--bot N | --idle N | --last-play | --replay f] [--seed S] [--sample-every N] [--keep]
 
 The one-shot workflow: propose, verify with the given checks, accept if all pass; otherwise reject and exit 4 with the report.
 Default check when none is given: `lost_bodies.max == 0`, if the game reports that metric (otherwise no check).
 --keep leaves a failed proposal open instead of rejecting it. Ops: see `orr propose`; --ops-file f.json or `-` for a JSON list.
 The accepted change is one history entry; `orr undo` takes it back.
+--sample-every N: metric samples every N ticks plus start/end (default 60; 0 endpoints only; 1 every tick boundary).
+min/max cover sampled values only. Use --sample-every 1 for transient assertions; events entirely within a tick are not covered.
 
 Examples:
   orr apply \"lift hero\" set hero Body.pos=[6,18] --check \"lost_bodies.max == 0\"
@@ -183,20 +192,31 @@ Examples:
     ("redo", "orr redo", "orr redo\n\nRepeats the last undone entry."),
     (
         "sim",
-        "orr sim start [--players N] | stop | play | pause | step [N] | seek <tick> | speed <x> | state",
-        "orr sim start [--players N] | stop | play | pause | step [N] | seek <tick> | speed <x> | state
+        "orr sim start [--players N] | stop [--replay-out path [--force]] | input --player N <json> | play | pause | step [N] | seek <tick> | speed <x> | state",
+        "orr sim start [--players N] | stop [--replay-out path [--force]] | input --player N <json> | play | pause | step [N] | seek <tick> | speed <x> | state
 
 Drives a play session (a copy of the scene; the scene document is untouched).
   start   begin paused     step N   run N ticks now (default 1; starts a paused session if none)   seek T   go to a recorded tick
   play / pause   run by the wall clock or not      speed X   wall-clock speed, e.g. 0.5 or 2
   stop    end it; the recording stays for `orr verify --last-play`     state   mode, tick, checksum
+  stop --replay-out PATH   also write the recording to this CLI's exact local path (not the host filesystem)
+  --force                 allow replacing that path; only with stop --replay-out
+  input --player N JSON   set a complete structured input object, using `orr schema --input`
+
+Input needs an active session and host support. Exact decimal JSON is forwarded without float conversion.
+Input stays held for subsequent ticks until replaced; send the schema's neutral value to release it. It does not step.
+Replay export refuses an existing path before stopping play unless --force is supplied.
+Bytes are staged beside the destination, then committed without partial replacement; --force replaces the path itself, not a symlink target.
+A path created during export is also protected without --force, but play may already have stopped.
+No directory is created automatically. Export is not a crash-durability guarantee.
 
 Examples:
   orr sim start
   orr sim step 60
   orr sim seek 30
   orr sim state
-  orr sim stop",
+  orr sim stop --replay-out session.orrp
+  orr verify --replay session.orrp --check recording_matches",
     ),
     (
         "activity",

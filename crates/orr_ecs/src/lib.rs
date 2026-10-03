@@ -36,3 +36,10 @@ pub use list::FrameList;
 pub use query::{QueryFetch, QueryIter, QueryTuple};
 pub use registry::{ComponentRegistry, ComponentRegistryBuilder};
 pub use ring::FrameRing;
+
+/// Current ORRF snapshot format and frame-checksum version.
+///
+/// The checksum covers the encoded body, including this version. Peers and
+/// recorded frame checksums from different versions are incompatible; game
+/// build identities should incorporate it when guarding that boundary.
+pub const FRAME_FORMAT_VERSION: u32 = codec::FORMAT_VERSION;

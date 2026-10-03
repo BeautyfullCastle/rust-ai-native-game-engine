@@ -2,7 +2,7 @@ use core::any::Any;
 
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::codec::{put_len, FrameDecodeError, Reader};
+use crate::codec::{hash_len, put_len, FrameDecodeError, Reader};
 use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
 
@@ -151,7 +151,7 @@ pub trait AnyStore: Send + Sync {
     /// concrete component type.
     fn copy_from(&mut self, other: &dyn AnyStore);
     /// Feeds this store's entire deterministic byte representation (dense
-    /// entities, then dense data) into `h`.
+    /// count, entities, then dense data) into `h`, matching `write_bytes`.
     fn hash_into(&self, h: &mut Xxh3);
     /// Appends `count u32`, the dense entities, then the dense data. The
     /// sparse index is derived state and is not written.
@@ -204,6 +204,7 @@ impl<T: Component> AnyStore for SparseSet<T> {
     }
 
     fn hash_into(&self, h: &mut Xxh3) {
+        hash_len(h, self.dense_entities.len());
         h.update(bytemuck::cast_slice(&self.dense_entities));
         h.update(bytemuck::cast_slice(&self.data));
     }

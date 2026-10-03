@@ -4,8 +4,8 @@
 //! The server does not know the games. What the players must agree on
 //! travels in the room config: build hash, input size, seed, and an opaque
 //! config blob that every client hands to its `Game::Config`. For the sample
-//! games these values are constants here and in `orr_sample` (a test in
-//! `orr_sample` checks that they match).
+//! games these values are constants here, in `orr_sample` and in `orr_web`
+//! (tests in `orr_sample` check their identities and wire handshakes).
 
 use orr_ecs::Frame;
 use orr_fp::{FPVec2, FP};
@@ -13,11 +13,11 @@ use orr_testgame::{Arena, ArenaConfig, ArenaInput, PlayerTag, Position, SpawnBul
 
 use crate::{Audit, GameSim, RoomConfig, Violation};
 
-/// Build id of the arena sample (`Simulation::with_build_id`). The room
-/// build hash is `orr_sim::build_hash_of(build_id, 0)`.
-pub const ARENA_BUILD_ID: u64 = 0x0A2E_4A00_0001;
-/// Build id of the physics sample.
-pub const PHYSICS_BUILD_ID: u64 = 0x0A2E_4A00_0002;
+/// Frame-format-bound build id of the arena sample (`Simulation::with_build_id`).
+/// The room build hash is `orr_sim::build_hash_of(build_id, 0)`.
+pub const ARENA_BUILD_ID: u64 = orr_sim::frame_build_id(0x0A2E_4A00_0001);
+/// Frame-format-bound build id of the physics sample.
+pub const PHYSICS_BUILD_ID: u64 = orr_sim::frame_build_id(0x0A2E_4A00_0002);
 /// Byte size of `ArenaInput` and of `PhysInput`.
 pub const SAMPLE_INPUT_SIZE: u32 = 24;
 /// Default sim seed of the sample rooms.

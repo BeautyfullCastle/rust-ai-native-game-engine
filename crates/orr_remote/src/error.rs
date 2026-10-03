@@ -115,6 +115,8 @@ impl From<EditError> for RpcError {
             EditError::PlayStart(_) => RpcError::state("play_start_failed", msg),
             EditError::UnknownProposal(_) => RpcError::new(NOT_FOUND, "unknown_proposal", msg),
             EditError::ProposalConflict { .. } => RpcError::new(CONFLICT, "proposal_conflict", msg),
+            EditError::StaleVerification { .. } => RpcError::new(CONFLICT, "stale_verification", msg),
+            EditError::VerifyCancelled => RpcError::state("verify_cancelled", msg),
             EditError::Verify(_) => RpcError::new(INVALID_VALUE, "verify_failed", msg),
         }
     }

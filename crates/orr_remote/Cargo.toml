@@ -14,7 +14,7 @@ workspace = true
 default = ["sample-host"]
 # The headless host binary `orr_remote_host` (PhysGame from `orr_sample`).
 # Off = the library only, without the wgpu/winit stack of `orr_sample`.
-sample-host = ["dep:orr_sample", "dep:orr_relay_net"]
+sample-host = ["dep:orr_sample", "dep:orr_relay_net", "dep:orr_testgame"]
 
 [dependencies]
 orr_fp = { path = "../orr_fp" }
@@ -36,9 +36,11 @@ lz4_flex = { version = "0.14", default-features = false, features = ["std", "saf
 arc-swap = "1"
 bytemuck = "1"
 orr_sample = { path = "../orr_sample", optional = true }
+orr_testgame = { path = "../orr_testgame", optional = true }
 orr_relay_net = { path = "../orr_relay_net", optional = true }
 
 [dev-dependencies]
+orr_testgame = { path = "../orr_testgame" }
 orr_sample = { path = "../orr_sample" }
 orr_physics = { path = "../orr_physics" }
 orr_view = { path = "../orr_view" }
@@ -49,4 +51,7 @@ orr_relay_net = { path = "../orr_relay_net" }
 [[bin]]
 name = "orr_remote_host"
 path = "src/bin/orr_remote_host.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
 required-features = ["sample-host"]

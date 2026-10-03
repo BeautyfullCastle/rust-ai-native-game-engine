@@ -1,0 +1,27 @@
+[package]
+name = "orr_asset_fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Presentation-only PCM preload and device-free Kira rendering.
+audio = ["dep:orr_audio", "dep:orr_bridge"]
+
+[dependencies]
+orr_audio = { path = "../orr_audio", optional = true }
+orr_bridge = { path = "../orr_bridge", optional = true }
+orr_asset = { path = "../orr_asset" }
+orr_fp = { path = "../orr_fp", default-features = false }
+orr_ecs = { path = "../orr_ecs" }
+orr_sim = { path = "../orr_sim" }
+orr_session = { path = "../orr_session" }
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"

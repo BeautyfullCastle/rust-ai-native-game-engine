@@ -244,7 +244,15 @@ impl Check {
                         (_, Side::Base) => pick(&m.base, *stat),
                         (_, Side::Candidate) => pick(&m.candidate, *stat),
                     };
-                    (cmp.holds(actual.cmp_value(*value)), format!("{name}.{} is {actual}", stat.text()))
+                    let mut reason = format!("{name}.{} is {actual}", stat.text());
+                    if matches!(stat, MetricStat::Min | MetricStat::Max) {
+                        reason.push_str(if report.every_tick_boundary_observed() {
+                            " (sampled at every tick boundary)"
+                        } else {
+                            " (sampled min/max; between samples not checked)"
+                        });
+                    }
+                    (cmp.holds(actual.cmp_value(*value)), reason)
                 }
             },
             Check::NoDivergence => match report.first_divergence {

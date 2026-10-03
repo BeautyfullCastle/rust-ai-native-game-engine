@@ -99,3 +99,59 @@ fn the_sources_do_not_name_simulation_crates() {
     }
     assert!(checked >= 8);
 }
+
+/// Guard entrypoints with `test = false` against test attributes, local
+/// modules, include! and macro definitions. External/procedural macros still
+/// need review: this is not a macro expander. The conservative text scan also
+/// rejects these words in strings/block comments; move testable code to the
+/// library/tests, or re-enable the bin's harness.
+fn hidden_bin_test_source(source: &str) -> Option<&str> {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .flat_map(|line| line.split(|c: char| !c.is_alphanumeric() && c != '_'))
+        .find(|word| matches!(*word, "test" | "mod" | "include" | "macro_rules"))
+}
+
+#[test]
+fn bins_without_test_harnesses_have_no_tests_or_local_modules() {
+    // Ask Cargo for the actual target selection: re-enabling a harness also
+    // removes the source restriction, and new opt-outs cannot evade this check.
+    let out = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--no-deps", "--locked", "--offline"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run cargo metadata");
+    assert!(out.status.success(), "cargo metadata failed: {}", String::from_utf8_lossy(&out.stderr));
+    let metadata: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for package in metadata["packages"].as_array().unwrap() {
+        for target in package["targets"].as_array().unwrap() {
+            if target["kind"] != serde_json::json!(["bin"]) || target["test"] != false {
+                continue;
+            }
+            let path = target["src_path"].as_str().unwrap();
+            let source = std::fs::read_to_string(path).unwrap();
+            assert_eq!(hidden_bin_test_source(&source), None, "{path}: put tests in the library/tests, or re-enable the bin harness before adding test/module/generated code");
+        }
+    }
+}
+
+#[test]
+fn the_testless_bin_guard_catches_attributes_modules_and_generated_sources() {
+    for source in [
+        "#[test] fn regression() {}",
+        "#[ tokio :: test ] async fn regression() {}",
+        "#[cfg_attr(unix, test)] fn regression() {}",
+        "#[cfg(test)] fn helper() {}",
+        "#[path = \"shared.rs\"] mod shared;",
+        "mod nested { fn helper() {} }",
+        "include!(concat!(env!(\"OUT_DIR\"), \"/tests.rs\"));",
+        "macro_rules! generate_tests { () => {} }",
+        // Conservative on purpose: strings and block comments are not parsed.
+        "fn main() { let _ = \"test\"; }",
+        "/* test */ fn main() {}",
+    ] {
+        assert!(hidden_bin_test_source(source).is_some(), "guard missed: {source}");
+    }
+    assert_eq!(hidden_bin_test_source("//! A test game.\nfn main() { let _ = include_str!(\"usage.txt\"); }"), None);
+}

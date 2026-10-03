@@ -4,7 +4,7 @@
 //! nothing but the documented messages; the C ABI one is in [`crate::ffi`].
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
@@ -126,6 +126,29 @@ enum Wire {
     Ws(Box<WebSocket<TcpStream>>),
     /// Newline-delimited JSON; `partial` keeps a line that a read timeout cut in two.
     Tcp { reader: BufReader<TcpStream>, partial: Vec<u8> },
+}
+
+/// An interrupted/timed-out read yields to the caller so its existing deadline is still checked.
+fn read_pending(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted)
+}
+
+/// Poll the same WebSocket again after a recoverable read; it retains any partial frame.
+fn read_ws_text_or_queue(ws: &mut WebSocket<impl Read + Write>, queue: &mut VecDeque<Incoming>) -> Result<Option<String>, String> {
+    match ws.read() {
+        Ok(Message::Text(t)) => Ok(Some(t.as_str().to_string())),
+        Ok(Message::Binary(b)) => {
+            if let Some(m) = classify(b.to_vec()) {
+                queue.push_back(m);
+            }
+            Ok(None)
+        }
+        Ok(Message::Close(_)) => Err("the host closed the connection".into()),
+        Ok(_) => Ok(None),
+        Err(tungstenite::Error::Io(e)) if read_pending(&e) => Ok(None),
+        Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => Err("the host closed the connection".into()),
+        Err(e) => Err(format!("connection: {e}")),
+    }
 }
 
 /// What a connection does about the play session of the host.
@@ -285,20 +308,7 @@ impl SocketSource {
         match &mut self.wire {
             Wire::Ws(ws) => {
                 let _ = ws.get_ref().set_read_timeout(Some(timeout.max(Duration::from_millis(1))));
-                match ws.read() {
-                    Ok(Message::Text(t)) => Ok(Some(t.as_str().to_string())),
-                    Ok(Message::Binary(b)) => {
-                        if let Some(m) = classify(b.to_vec()) {
-                            self.queue.push_back(m);
-                        }
-                        Ok(None)
-                    }
-                    Ok(Message::Close(_)) => Err("the host closed the connection".into()),
-                    Ok(_) => Ok(None),
-                    Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Ok(None),
-                    Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => Err("the host closed the connection".into()),
-                    Err(e) => Err(format!("connection: {e}")),
-                }
+                read_ws_text_or_queue(ws, &mut self.queue)
             }
             Wire::Tcp { reader, partial } => {
                 let _ = reader.get_ref().set_read_timeout(Some(timeout.max(Duration::from_millis(1))));
@@ -310,7 +320,7 @@ impl SocketSource {
                         Ok(Some(line))
                     }
                     Ok(_) => Ok(None),
-                    Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Ok(None),
+                    Err(e) if read_pending(&e) => Ok(None),
                     Err(e) => Err(format!("connection: {e}")),
                 }
             }
@@ -404,3 +414,7 @@ impl Source for SocketSource {
         u64::from_str_radix(r["checksum"].as_str()?.strip_prefix("0x")?, 16).ok()
     }
 }
+
+#[cfg(test)]
+#[path = "source_tests.rs"]
+mod tests;

@@ -31,6 +31,22 @@ impl fmt::Display for ProposalId {
     }
 }
 
+/// A document-local concurrency guard for a proposal's verification inputs.
+/// Capture it while holding the same shared document borrow as verification,
+/// then pass it to [`EditorDoc::accept_if_unchanged`]. This is not proof that
+/// verification ran or that its checks passed; the caller must judge the report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProposalState {
+    /// Opaque document-instance identity; a new host/document cannot reuse it.
+    pub document_id: u128,
+    /// The proposal whose ops were captured.
+    pub id: ProposalId,
+    /// Revision of the base document.
+    pub document_revision: u64,
+    /// Revision of the proposal's staged document.
+    pub proposal_revision: u64,
+}
+
 /// One line of [`EditorDoc::list_proposals`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposalInfo {
@@ -176,6 +192,18 @@ impl EditorDoc {
         Ok(&self.proposal(id)?.ops)
     }
 
+    /// Captures the current base and proposal revisions. Edits, undo, redo
+    /// and rollback invalidate this state even if they restore old values.
+    /// Reading or successfully staging no-op edits does not invalidate it.
+    pub fn proposal_state(&self, id: ProposalId) -> Result<ProposalState, EditError> {
+        Ok(ProposalState {
+            document_id: self.instance_id,
+            id,
+            document_revision: self.revision(),
+            proposal_revision: self.proposal(id)?.staged.revision(),
+        })
+    }
+
     /// Name, origin and size of one proposal.
     pub fn proposal_info(&self, id: ProposalId) -> Result<ProposalInfo, EditError> {
         Ok(self.info_of(id.0, self.proposal(id)?))
@@ -223,6 +251,21 @@ impl EditorDoc {
         let p = self.proposal(id)?;
         let mut copy = self.fork()?;
         run_ops(&mut copy, id, &p.ops, &p.origin).map(|_| ())
+    }
+
+    /// Accepts only if neither the base document nor the proposal has changed
+    /// since `expected` was captured. The comparison and acceptance happen
+    /// under one exclusive borrow. A stale state leaves both untouched;
+    /// verify again before retrying. Like [`accept`](Self::accept), this does
+    /// not decide whether the caller's verification checks passed.
+    pub fn accept_if_unchanged(&mut self, id: ProposalId, expected: ProposalState) -> Result<Accepted, EditError> {
+        if self.in_tx() {
+            return Err(EditError::TxOpen);
+        }
+        if self.proposal_state(id)? != expected {
+            return Err(EditError::StaleVerification { proposal: id.0 });
+        }
+        self.accept(id)
     }
 
     /// Applies the proposal to the document as one history entry (label of

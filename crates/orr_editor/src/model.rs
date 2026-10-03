@@ -99,6 +99,8 @@ impl EntityRow {
 pub struct SimState {
     /// Edit or play.
     pub mode: Mode,
+    /// True for a read-only replay session (`session_mode: viewer`).
+    pub viewer: bool,
     /// A play session runs by the clock.
     pub playing: bool,
     /// The tick the session is at (0 in edit mode).
@@ -135,6 +137,7 @@ impl SimState {
         let b = |k: &str| j.get(k).and_then(J::as_bool).unwrap_or(false);
         SimState {
             mode: if j.get("mode").and_then(J::as_str) == Some("play") { Mode::Play } else { Mode::Edit },
+            viewer: j.get("session_mode").and_then(J::as_str) == Some("viewer"),
             playing: b("playing"),
             head_tick: u("head_tick"),
             first_tick: u("first_tick"),

@@ -281,12 +281,16 @@ impl<B: Bridge<Yard3D>> App<B> {
             let _ = self.bridge.set_input(self.bridge.local_slot(), input);
         }
         self.bridge.update(dt);
-        let snapshot = self.bridge.snapshot();
+        let update = self.bridge.poll_view();
+        let snapshot = update.snapshot.clone();
+        if let Some(reset) = &update.resync {
+            crate::net_client::log_view_resync(reset);
+        }
 
         let t = Instant::now();
-        self.view.update(dt.as_secs_f32().min(0.1), snapshot.as_ref());
+        self.view.update_from_bridge(dt.as_secs_f32().min(0.1), &update);
         self.stages.view_update.push(ms(t.elapsed()));
-        for event in self.bridge.drain_events() {
+        for event in update.events {
             if let BridgeEvent::Lifecycle(note) = event {
                 log_lifecycle(&note);
             }

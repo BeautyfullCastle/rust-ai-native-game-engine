@@ -41,6 +41,31 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Simulation float-type guard
+        # Type declarations (including arithmetic-free POD fields) are checked
+        # separately from float arithmetic. Keep view/test/bench float use out
+        # of this library-only policy; FP's feature-gated conversion boundary
+        # is exercised explicitly. Failure is mandatory on every native leg.
+        run: python tools/check_sim_float_types.py
+
+      - name: Simulation POD regression fixtures
+        # Keep native commands in separate steps so Windows' default pwsh
+        # cannot hide the library guard's failure behind a later success.
+        run: python tools/test_sim_float_guard.py
+
+      - name: Asset core, cooker, and strict fixture gates
+        run: cargo test --locked --release -p orr_asset -p orr_asset_cook -p orr_asset_fixture
+
+      - name: Reproduce checked-in cooked asset bytes
+        run: cargo run --locked --release -p orr_asset_cook -- cook --index assets/fixture_v1/index.json --out assets/fixture_v1/cooked --root a_0000000000001001 --root a_0000000000002001 --check
+
+      - name: Strict asset crate clippy
+        run: cargo clippy --locked -p orr_asset -p orr_asset_cook -p orr_asset_fixture --all-targets -- -D warnings
+
       - name: cargo test --workspace --release
         # Release, not debug: matches the profile the design doc's tick
         # budget is measured against, and is what the golden tests (whose
@@ -48,8 +73,8 @@ jobs:
         # a specific build profile) are expected to run under in CI.
         #
         # `orr_sample` (wgpu + winit window demo) is excluded: it is view
-        # layer, needs no determinism check, and its GPU stack should not
-        # be able to break the sim crates' CI. It is built by `sample-build`.
+        # layer, needs no determinism check, and its GPU stack is checked
+        # separately from the sim crates by the required `sample-build` job.
         # `orr_editor` (egui, needs Rust 1.95+, GUI/GPU stack) is excluded for
         # the same reason and is built and tested by `sample-build` too.
         # `orr_web_gpu` (the browser's wgpu view) is excluded likewise (`sample-build`).
@@ -67,13 +92,38 @@ jobs:
         # it to the built cdylib and compares its output with the Rust bridge.
         # Linux must have a compiler (required); elsewhere the test skips with a
         # message if the runner has none.
-        run: cargo test --workspace --release --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu
+        run: cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu
         env:
           ORR_REQUIRE_C_COMPILER: ${{ runner.os == 'Linux' && '1' || '0' }}
 
-      - name: cargo build -p orr_ffi (cdylib + staticlib)
-        # The C ABI library must build on every desktop target.
-        run: cargo build -p orr_ffi --release
+      - name: Upload native release build timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-native-${{ matrix.name }}
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify orr_ffi artifacts (cdylib + staticlib + import library)
+        # The C ABI tests always build and verify these, even when the runner
+        # has no C compiler. Reuse their artifacts instead of rebuilding with
+        # a different workspace feature set after the tests.
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) artifacts=(liborr_ffi.so liborr_ffi.a) ;;
+            macOS) artifacts=(liborr_ffi.dylib liborr_ffi.a) ;;
+            Windows) artifacts=(orr_ffi.dll orr_ffi.dll.lib orr_ffi.lib) ;;
+            *) echo "::error::Unsupported runner OS: $RUNNER_OS"; exit 1 ;;
+          esac
+          for artifact in "${artifacts[@]}"; do
+            path="target/release/$artifact"
+            if [[ ! -f "$path" || ! -s "$path" ]]; then
+              echo "::error::Missing or empty FFI artifact: $path"
+              exit 1
+            fi
+          done
 
       - name: cargo clippy --workspace --all-targets
         # `-D warnings` only on the crates this task owns (`orr_sim`,
@@ -94,8 +144,8 @@ jobs:
         run: cargo build -p orr_sim --features hotpatch
 
   sample-build:
-    # View-layer demo (wgpu + winit). Build and test (no window, no GPU
-    # needed) on Linux and Windows; separate from the determinism jobs.
+    # View-layer demos, audio, and editor. Build and test on Linux and Windows,
+    # plus required Linux software-GPU/window tests; separate from the sim jobs.
     name: sample build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -107,8 +157,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
-      - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release
+      - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings
+      - name: Upload sample release build timings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-sample-${{ matrix.os }}
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
       - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --all-targets
+      # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
+      # compile coverage; opening a physical device is not a CI success claim.
+      - run: cargo test -p orr_audio --release
+      - name: Asset fixture device-free audio and all-tick equality
+        run: cargo test --locked -p orr_asset_fixture --features audio --release
+      - name: Strict asset fixture audio clippy
+        run: cargo clippy --locked -p orr_asset_fixture --features audio --all-targets -- -D warnings
+      - run: cargo test -p orr_sample --features audio --release --lib arena_audio
+      - run: cargo clippy -p orr_audio --all-targets -- -D warnings
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev
+      - run: cargo check -p orr_sample --features audio-native --all-targets
       # GPU readback pixel tests on a software Vulkan adapter (lavapipe), so
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
@@ -134,6 +204,25 @@ jobs:
       # number of frames and reads the presented frame back as a PNG.
       - if: runner.os == 'Linux'
         run: sudo apt-get install -y -q xvfb libxkbcommon-x11-0
+      # Real Arena editor windows, served by the existing integration-test host.
+      # No additional host/CLI build and no renderer fallback: missing windows,
+      # screenshots, expected pixels, or authoritative checksums fail this step.
+      - name: Arena editor native-window smoke
+        if: runner.os == 'Linux'
+        timeout-minutes: 3
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" cargo test -p orr_editor --release --test arena arena_native_window_smoke -- --exact --nocapture
+        env:
+          ORR_REQUIRE_NATIVE_EDITOR: "1"
+          ORR_NATIVE_EDITOR_ARTIFACT_DIR: ${{ runner.temp }}/arena-editor-native
+          WGPU_BACKEND: vulkan
+      - name: Upload Arena editor native-window evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-editor-native-${{ matrix.os }}
+          path: ${{ runner.temp }}/arena-editor-native
+          if-no-files-found: error
+          retention-days: 7
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
       # The mobile / weak-GPU preset (no MSAA, 512 texel shadow map, 12-segment meshes) on the same adapter.
@@ -167,6 +256,8 @@ jobs:
         # (avoids dragging in anything future-added that isn't
         # `no_std`/wasm-clean yet).
         run: |
+          cargo test --locked --release --target wasm32-wasip1 -p orr_asset
+          cargo test --locked --release --target wasm32-wasip1 -p orr_asset_fixture --lib
           cargo test --release --target wasm32-wasip1 -p orr_fp
           cargo test --release --target wasm32-wasip1 -p orr_ecs
           cargo test --release --target wasm32-wasip1 -p orr_session --test arena -- golden
@@ -180,6 +271,7 @@ jobs:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
           RUSTFLAGS: -C target-feature=+simd128
         run: |
+          cargo test --locked --release --target wasm32-wasip1 --target-dir target/simd -p orr_asset_fixture --lib
           cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_fp
           cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_ecs
           cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_games --test golden
@@ -193,12 +285,11 @@ jobs:
 
   wasm32-browser:
     # The browser client (`orr_web`, wasm-bindgen glue) and the sim crates it
-    # runs must build for the browser target. Build only: the browser proof
-    # (`crates/orr_server/tests/browser_e2e.rs`, headless Chromium through
-    # Playwright) needs Node, a browser and wasm-bindgen-cli, so it is run by
-    # hand (docs/webtransport-trial.md) and not here.
-    name: wasm32-unknown-unknown (browser client build)
+    # runs must build and actually execute in Chromium: transport, rollback,
+    # native/wasm checksums and GPU canvas pixels are mandatory below.
+    name: wasm32-unknown-unknown (browser runtime)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -210,11 +301,47 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
+      - name: Check asset core without default features on wasm32
+        run: cargo check --target wasm32-unknown-unknown -p orr_asset --no-default-features
+
+      - name: Check audio-free asset fixture on wasm32
+        run: cargo check --locked --target wasm32-unknown-unknown -p orr_asset_fixture --no-default-features
+
       - name: cargo build (sim crates + orr_web) for wasm32-unknown-unknown
         run: cargo build --release --target wasm32-unknown-unknown -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_games -p orr_web -p orr_web_gpu -p orr_wasm_bench
 
       - name: cargo clippy (orr_web, orr_web_gpu, orr_games, orr_wasm_bench) for wasm32-unknown-unknown
         run: cargo clippy --target wasm32-unknown-unknown -p orr_web -p orr_web_gpu -p orr_games -p orr_wasm_bench --all-targets -- -D warnings
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pinned browser test tools
+        run: |
+          npm ci --prefix tools/webtransport
+          tools/webtransport/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Install matching wasm-bindgen CLI
+        shell: bash
+        run: |
+          version=$(python3 -c 'import tomllib; d=tomllib.load(open("Cargo.lock", "rb")); v={p["version"] for p in d["package"] if p["name"] == "wasm-bindgen"}; assert len(v) == 1, v; print(v.pop())')
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Generate browser JS and WASM packages
+        run: tools/build_web.sh
+        env:
+          WEB_PROFILE: release
+          WEB_GPU: "1"
+
+      - name: Browser harness regression tests
+        run: npm test --prefix tools/webtransport
+
+      - name: Browser runtime (WebTransport, WS, WSS, WebGL2 and WebGPU)
+        run: cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1
+        env:
+          ORR_REQUIRE_BROWSER: "1"
+          ORR_REQUIRE_WEBGPU: "1"
 
       - name: web profile build and size report (informational, never fails the build)
         continue-on-error: true
@@ -266,6 +393,8 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
           export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
           export AR_aarch64_linux_android="$BIN/llvm-ar"
+          cargo test --locked --release --target aarch64-linux-android -p orr_asset --tests -- --test-threads=1
+          cargo test --locked --release --target aarch64-linux-android -p orr_asset_fixture --lib -- --test-threads=1
           cargo test --release --target aarch64-linux-android -p orr_fp --tests -- --test-threads=1
           cargo test --release --target aarch64-linux-android -p orr_ecs --tests -- --test-threads=1
           cargo test --release --target aarch64-linux-android -p orr_session --test arena -- golden --test-threads=1
@@ -276,18 +405,41 @@ jobs:
 
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
-    needs: [native]
+    # Preserve this check name for existing branch protection. Every checksum
+    # target and the sample graphics/audio/editor matrix must pass the gate.
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build]
+    # Without always(), a failed/skipped dependency skips this required check.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: All native jobs passed with identical golden-checksum assertions
+      - name: Require every checksum and sample runner to pass
+        shell: bash
+        env:
+          NATIVE_RESULT: ${{ needs.native.result }}
+          WASM32_RESULT: ${{ needs.wasm32.result }}
+          ANDROID_ARM64_RESULT: ${{ needs['android-arm64'].result }}
+          BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
+          SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
         run: |
-          echo "Each 'native' matrix leg independently asserts the same"
-          echo "hardcoded golden checksums (see crates/orr_session/tests/arena.rs,"
-          echo "crates/orr_fp/tests/determinism_golden.rs and"
-          echo "crates/orr_physics/tests/physics.rs and"
-          echo "crates/orr_physics3d/tests/golden.rs, crates/orr_games/tests/golden.rs"
-          echo "and crates/orr_wasm_bench/tests/checksums.rs). A leg failing"
-          echo "that assertion is exactly a cross-platform determinism failure,"
-          echo "so requiring every matrix leg to pass *is* the cross-platform"
-          echo "checksum comparison; this job just gives that fact a clear,"
-          echo "single required-status-check name for branch protection."
+          failed=0
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT; do
+            result="${!result_var}"
+            echo "$result_var=$result"
+            if [[ "$result" != "success" ]]; then
+              echo "::error::$result_var must be success, got '$result'"
+              failed=1
+            fi
+          done
+          if [[ "$failed" != "0" ]]; then
+            exit 1
+          fi
+
+          echo "All native matrix legs, wasm32-wasip1 (including SIMD), and"
+          echo "aarch64-linux-android passed their pinned golden-checksum assertions."
+          echo "Chromium passed native/wasm checkpoint comparisons and required GPU views."
+          echo "Both sample-build matrix legs passed their graphics/audio/editor checks,"
+          echo "including required Linux software-GPU and Arena native-window smoke tests."
+          echo "The targets assert the same constants in orr_fp, orr_session,"
+          echo "orr_physics, orr_physics3d, orr_games, orr_wasm_bench, and orr_asset_fixture tests."
+          echo "No checksum artifacts are exchanged: each target independently"
+          echo "matches those shared expected values, so every runner must pass."

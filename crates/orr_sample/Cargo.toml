@@ -10,7 +10,13 @@ default-run = "arena"
 [lints]
 workspace = true
 
+[features]
+default = []
+audio = ["dep:orr_audio"]
+audio-native = ["audio", "orr_audio/native"]
+
 [dependencies]
+orr_audio = { path = "../orr_audio", optional = true }
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
 orr_viewstream = { path = "../orr_viewstream" }
@@ -32,6 +38,8 @@ png = "0.18"
 winit = "0.30"
 
 [dev-dependencies]
+# Compile-check browser and native sample identities together.
+orr_web = { path = "../orr_web" }
 orr_server = { path = "../orr_server", features = ["harness"] }
 orr_proto = { path = "../orr_proto" }
 orr_edit = { path = "../orr_edit" }
@@ -40,3 +48,24 @@ lz4_flex = { version = "0.14", default-features = false, features = ["std", "saf
 [[bench]]
 name = "seek"
 harness = false
+
+[[bin]]
+name = "arena"
+path = "src/bin/arena.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
+
+[[bin]]
+name = "physics"
+path = "src/bin/physics.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
+
+[[bin]]
+name = "physics3d"
+path = "src/bin/physics3d.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false

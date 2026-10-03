@@ -1,5 +1,4 @@
 use std::sync::atomic::AtomicU64;
-use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,10 +9,12 @@ use orr_session::ControlOp;
 use orr_sim::DebugCommand;
 
 use crate::bridge::{Bridge, BridgeConfig, BridgeError, SimControl};
-use crate::core::{load_snapshot, SimCore, SnapshotSlot, ToSim};
+use crate::core::{load_snapshot, SimCore, SnapshotSlot};
 use crate::event::BridgeEvent;
 use crate::host::SimHost;
+use crate::ingress::Ingress;
 use crate::snapshot::Snapshot;
+use crate::{view_event_channel, ViewEventReceiver, ViewUpdate};
 
 const NANOS: u128 = 1_000_000_000;
 /// One tick in accumulator units: nanosecond x tick rate x speed (in thousandths).
@@ -27,7 +28,8 @@ const TICK_UNITS: u128 = NANOS * 1000;
 /// events are the same for the same inputs.
 pub struct InProc<G: Game, H: SimHost<G>> {
     core: SimCore<G, H>,
-    events: Receiver<BridgeEvent<G::Event>>,
+    ingress: Arc<Ingress<G>>,
+    events: ViewEventReceiver<G::Event>,
     slot: SnapshotSlot,
     local_slot: PlayerSlot,
     tick_rate: u32,
@@ -39,11 +41,12 @@ pub struct InProc<G: Game, H: SimHost<G>> {
 
 impl<G: Game, H: SimHost<G>> InProc<G, H> {
     pub fn new(host: H, cfg: BridgeConfig<G>) -> Self {
-        let (tx, events) = channel();
+        let (tx, events) = view_event_channel(cfg.view_event_capacity);
         let slot: SnapshotSlot = Arc::new(ArcSwapOption::empty());
         let (local_slot, tick_rate, player_count) = (host.local_slot(), host.tick_rate(), host.player_count());
-        let core = SimCore::new(host, cfg, tx, slot.clone(), Arc::new(AtomicU64::new(0)));
-        Self { core, events, slot, local_slot, tick_rate, player_count, acc: 0, max_catchup: 8 }
+        let ingress = Arc::new(Ingress::new(cfg.command_capacity, cfg.control_capacity));
+        let core = SimCore::new(host, cfg, tx, slot.clone(), Arc::new(AtomicU64::new(0)), ingress.clone());
+        Self { core, ingress, events, slot, local_slot, tick_rate, player_count, acc: 0, max_catchup: 8 }
     }
 
     /// The most ticks one `update` may run to catch up after a long frame
@@ -57,6 +60,12 @@ impl<G: Game, H: SimHost<G>> InProc<G, H> {
     pub fn step(&mut self, n: u32) {
         for _ in 0..n {
             self.core.step();
+        }
+    }
+
+    fn apply_admitted(&mut self) {
+        if let Some(msg) = self.ingress.try_recv() {
+            self.core.apply(msg);
         }
     }
 
@@ -84,12 +93,12 @@ impl<G: Game, H: SimHost<G>> Bridge<G> for InProc<G, H> {
         if player != self.local_slot {
             return Err(BridgeError::NotLocalPlayer { player, local: self.local_slot });
         }
-        self.core.apply(ToSim::Input(input));
-        Ok(())
+        self.ingress.set_input(input)
     }
 
     fn send_command(&mut self, command: G::Command) -> Result<(), BridgeError> {
-        self.core.apply(ToSim::Command(command));
+        self.ingress.command(command)?;
+        self.apply_admitted();
         Ok(())
     }
 
@@ -116,22 +125,28 @@ impl<G: Game, H: SimHost<G>> Bridge<G> for InProc<G, H> {
     }
 
     fn drain_events(&mut self) -> Vec<BridgeEvent<G::Event>> {
-        self.events.try_iter().collect()
+        self.events.drain_events()
+    }
+
+    fn poll_view(&mut self) -> ViewUpdate<G::Event> {
+        self.events.poll()
     }
 
     fn is_alive(&self) -> bool {
-        true
+        self.ingress.is_open()
     }
 }
 
 impl<G: Game, H: SimHost<G>> SimControl<G> for InProc<G, H> {
     fn control(&mut self, op: ControlOp) -> Result<(), BridgeError> {
-        self.core.apply(ToSim::Control(op));
+        self.ingress.control(op)?;
+        self.apply_admitted();
         Ok(())
     }
 
     fn debug_command(&mut self, cmd: DebugCommand) -> Result<(), BridgeError> {
-        self.core.apply(ToSim::Debug(cmd));
+        self.ingress.debug(cmd)?;
+        self.apply_admitted();
         Ok(())
     }
 }

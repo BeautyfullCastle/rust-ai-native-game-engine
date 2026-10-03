@@ -27,6 +27,167 @@ fn gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
     }
 }
 
+fn baseline_gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
+    let force_software = match std::env::var("ORR_BASELINE_GPU_MODE").as_deref() {
+        Ok("software") => true,
+        Ok("hardware") | Err(_) => false,
+        Ok(other) => {
+            panic!("ORR_BASELINE_GPU_MODE must be 'hardware' or 'software', got {other:?}")
+        }
+    };
+    let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    match Wgpu::headless(WgpuOptions {
+        force_software,
+        ..WgpuOptions::default()
+    }) {
+        Ok(gpu) => Some((guard, gpu)),
+        Err(e) => {
+            assert!(
+                std::env::var_os("ORR_REQUIRE_GPU").is_none(),
+                "ORR_REQUIRE_GPU is set but no adapter: {e}"
+            );
+            eprintln!("SKIP: no GPU adapter ({e})");
+            None
+        }
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+fn duration_ms(value: Option<std::time::Duration>) -> String {
+    value.map_or_else(
+        || "null".to_owned(),
+        |d| format!("{:.6}", d.as_secs_f64() * 1000.0),
+    )
+}
+
+#[expect(clippy::disallowed_types, reason = "Wall clocks measure this view-only benchmark and its separate readback latency.")]
+fn run_release_baseline_3d(preset: &str, settings: Settings3D) {
+    let Some((_guard, gpu)) = baseline_gpu() else {
+        return;
+    };
+    const W: u32 = 640;
+    const H: u32 = 360;
+    let target = OffscreenTarget::new(&gpu, W, H, TextureFormat::Rgba8UnormSrgb);
+    let mut renderer = Renderer3D::with_settings(gpu.clone(), target.format(), settings);
+    renderer.clear = BLACK;
+    let camera = Camera3D::perspective([0.0, 28.0, 34.0], [0.0, 0.0, 0.0], 55.0);
+    let mut list = RenderList3D::new();
+    for z in 0..25u32 {
+        for x in 0..40u32 {
+            let color = [
+                x as f32 / 39.0,
+                0.25 + z as f32 / 50.0,
+                ((x * 7 + z * 13) % 40) as f32 / 39.0,
+            ];
+            list.sphere(
+                [x as f32 - 19.5, 0.35, z as f32 - 12.0],
+                IDENTITY_ROT,
+                0.32,
+                &Material::new(color),
+            );
+        }
+    }
+    assert_eq!(list.instance_count(), 1000);
+    let info = gpu.adapter().get_info();
+    eprintln!(
+        "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"metadata\",\"renderer\":\"3d\",\"preset\":\"{preset}\",\"scene_id\":\"sphere_grid_1000_v1\",\"instance_count\":1000,\"resolution_px\":[{W},{H}],\"target_format\":\"Rgba8UnormSrgb\",\"renderer_initialization_included\":false,\"target_creation_included\":false,\"cold_scope\":\"first_frame_after_renderer_construction\",\"settings\":{{\"requested_msaa\":{},\"shadow_map_size\":{},\"mesh_segments\":{}}},\"shadows\":{},\"adapter_name\":\"{}\",\"adapter_backend\":\"{:?}\",\"adapter_device_type\":\"{:?}\",\"adapter_vendor\":{},\"adapter_device\":{},\"driver\":\"{}\",\"driver_info\":\"{}\",\"software\":{}}}",
+        settings.msaa,
+        settings.shadow_map_size,
+        settings.mesh_segments,
+        list.lighting.shadows,
+        json_escape(&info.name),
+        info.backend,
+        info.device_type,
+        info.vendor,
+        info.device,
+        json_escape(&info.driver),
+        json_escape(&info.driver_info),
+        gpu.is_software(),
+    );
+
+    for (frame_class, count) in [("cold", 1), ("warmup", 10), ("steady", 30)] {
+        for frame_index in 0..count {
+            let start = std::time::Instant::now();
+            target.render3d(&mut renderer, &list, &camera);
+            let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let stats = renderer.last_frame_stats();
+            eprintln!(
+                "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"frame\",\"renderer\":\"3d\",\"preset\":\"{preset}\",\"scene_id\":\"sphere_grid_1000_v1\",\"instance_count\":1000,\"resolution_px\":[{W},{H}],\"adapter_name\":\"{}\",\"adapter_backend\":\"{:?}\",\"adapter_device_type\":\"{:?}\",\"adapter_vendor\":{},\"adapter_device\":{},\"driver\":\"{}\",\"driver_info\":\"{}\",\"software\":{},\"frame_class\":\"{frame_class}\",\"frame_index\":{frame_index},\"wall_scope\":\"render_call_return_not_gpu_completion\",\"wall_ms\":{wall_ms:.6},\"cpu_prepare_ms\":{},\"cpu_encode_ms\":{},\"cpu_submit_ms\":{},\"shape_instances\":{},\"mesh_instances\":{},\"line_instances\":{},\"main\":{{\"passes\":{},\"draw_calls\":{},\"instances\":{}}},\"shadow\":{{\"passes\":{},\"draw_calls\":{},\"instances\":{}}},\"upload_calls\":{},\"upload_bytes\":{},\"buffer_reallocations\":{},\"attachment_allocations\":{},\"attachment_reallocations\":{},\"msaa_samples\":{}}}",
+                json_escape(&info.name),
+                info.backend,
+                info.device_type,
+                info.vendor,
+                info.device,
+                json_escape(&info.driver),
+                json_escape(&info.driver_info),
+                gpu.is_software(),
+                duration_ms(stats.cpu_prepare_time),
+                duration_ms(stats.cpu_encode_time),
+                duration_ms(stats.cpu_submit_time),
+                stats.shape_instances,
+                stats.mesh_instances,
+                stats.line_instances,
+                stats.main.passes,
+                stats.main.draw_calls,
+                stats.main.instances,
+                stats.shadow.passes,
+                stats.shadow.draw_calls,
+                stats.shadow.instances,
+                stats.upload_calls,
+                stats.upload_bytes,
+                stats.buffer_reallocations,
+                stats.attachment_allocations,
+                stats.attachment_reallocations,
+                stats.msaa_samples,
+            );
+        }
+    }
+    let read_start = std::time::Instant::now();
+    let image = target.read_rgba8();
+    let readback_ms = read_start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(image.len(), (W * H * 4) as usize);
+    assert!(
+        image
+            .chunks_exact(4)
+            .any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0),
+        "baseline scene produced no visible pixels"
+    );
+    let checksum = image.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    eprintln!(
+        "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"readback\",\"renderer\":\"3d\",\"preset\":\"{preset}\",\"scene_id\":\"sphere_grid_1000_v1\",\"resolution_px\":[{W},{H}],\"readback_ms\":{readback_ms:.6},\"pixel_bytes\":{},\"fnv1a64\":\"{checksum:016x}\",\"timing_included_in_frame_samples\":false}}",
+        image.len()
+    );
+}
+
+#[test]
+#[ignore = "opt-in release baseline; run serially with --ignored --exact"]
+fn release_baseline_3d_low() {
+    run_release_baseline_3d("low", Settings3D::LOW);
+}
+
+#[test]
+#[ignore = "opt-in release baseline; run serially with --ignored --exact"]
+fn release_baseline_3d_default() {
+    run_release_baseline_3d("default", Settings3D::default());
+}
+
 const BLACK: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
 const SETTINGS: Settings3D = Settings3D { msaa: 4, shadow_map_size: 1024, mesh_segments: 32 };
 
@@ -36,6 +197,7 @@ fn render_with(gpu: &Wgpu, size: (u32, u32), settings: Settings3D, list: &Render
     let mut r = Renderer3D::with_settings(gpu.clone(), target.format(), settings);
     r.clear = BLACK;
     target.render3d(&mut r, list, cam);
+    assert_eq!(r.last_frame_stats().msaa_samples, r.samples());
     (target.read_rgba8(), r.samples())
 }
 
@@ -398,7 +560,46 @@ fn render_into_a_resized_target_and_an_empty_list() {
     let cam = Camera3D::perspective([0.0, 0.0, 5.0], [0.0; 3], 40.0);
     let mut target = OffscreenTarget::new(&gpu, 48, 48, TextureFormat::Rgba8UnormSrgb);
     let mut r = Renderer3D::with_settings(gpu.clone(), target.format(), SETTINGS);
+    assert_eq!(r.last_frame_stats(), orr_render::FrameStats::default());
     target.render3d(&mut r, &RenderList3D::new(), &cam);
+    let empty = r.last_frame_stats();
+    let attachments = 1 + u32::from(r.samples() > 1);
+    assert_eq!(
+        empty.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        }
+    );
+    assert_eq!(
+        empty.shadow,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        }
+    );
+    assert_eq!(
+        (
+            empty.shape_instances,
+            empty.mesh_instances,
+            empty.line_instances
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!((empty.upload_calls, empty.upload_bytes), (2, 512)); // two 3D globals
+    assert_eq!(empty.buffer_reallocations, 0);
+    assert_eq!(
+        (empty.attachment_allocations, empty.attachment_reallocations),
+        (attachments, 0)
+    );
+    assert_eq!(empty.msaa_samples, r.samples());
+    assert!(
+        empty.cpu_prepare_time.is_some()
+            && empty.cpu_encode_time.is_some()
+            && empty.cpu_submit_time.is_some()
+    );
     let img = target.read_rgba8();
     assert!(img.chunks_exact(4).all(|p| p == &img[0..4]), "an empty list shows only the background");
     assert!(target.resize(80, 40));
@@ -408,4 +609,169 @@ fn render_into_a_resized_target_and_an_empty_list() {
     let img = target.read_rgba8();
     assert_eq!(img.len(), 80 * 40 * 4);
     assert_ne!(px(&img, 80, 40, 20), px(&img, 80, 2, 2));
+    let resized = r.last_frame_stats();
+    assert_eq!(
+        resized.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 1,
+            instances: 1
+        }
+    );
+    assert_eq!(resized.shadow, resized.main);
+    assert_eq!((resized.upload_calls, resized.upload_bytes), (3, 512 + 80));
+    assert_eq!(resized.buffer_reallocations, 0);
+    assert_eq!(
+        (
+            resized.attachment_allocations,
+            resized.attachment_reallocations
+        ),
+        (attachments, attachments)
+    );
+
+    target.render3d(&mut r, &list, &cam);
+    let warm = r.last_frame_stats();
+    assert_eq!(warm.main, resized.main);
+    assert_eq!(warm.shadow, resized.shadow);
+    assert_eq!(
+        (warm.attachment_allocations, warm.attachment_reallocations),
+        (0, 0)
+    );
+    assert_eq!(warm.buffer_reallocations, 0);
+    assert_eq!(
+        target.read_rgba8(),
+        img,
+        "instrumentation preserves warm-frame pixels"
+    );
+
+    list.clear();
+    list.lighting.shadows = false;
+    target.render3d(&mut r, &list, &cam);
+    let cleared = r.last_frame_stats();
+    assert_eq!(cleared.main, empty.main);
+    assert_eq!(
+        cleared.shadow, empty.shadow,
+        "disabled shadows still encode a clear pass"
+    );
+    assert_eq!((cleared.mesh_instances, cleared.line_instances), (0, 0));
+    assert_eq!((cleared.upload_calls, cleared.upload_bytes), (2, 512));
+    assert_eq!(
+        (
+            cleared.attachment_allocations,
+            cleared.attachment_reallocations
+        ),
+        (0, 0)
+    );
+    assert_eq!(cleared.buffer_reallocations, 0);
+    let img = target.read_rgba8();
+    assert!(img.chunks_exact(4).all(|p| p == &img[0..4]));
+}
+
+#[test]
+fn frame_stats_count_mesh_batches_shadow_exclusions_and_buffer_growth() {
+    let Some((_g, gpu)) = gpu() else { return };
+    let target = OffscreenTarget::new(&gpu, 32, 32, TextureFormat::Rgba8UnormSrgb);
+    let mut r = Renderer3D::with_settings(gpu.clone(), target.format(), Settings3D::LOW);
+    r.clear = BLACK;
+    let cam = Camera3D::perspective([0.0, 0.0, 5.0], [0.0; 3], 40.0);
+    let mut list = RenderList3D::new();
+    list.lighting = unlit();
+    let red = Material::new([1.0, 0.0, 0.0]).glow(1.0);
+    list.sphere([0.0; 3], IDENTITY_ROT, 1.0, &red);
+    list.capsule([100.0; 3], IDENTITY_ROT, 1.0, 1.0, &red);
+    list.plane([100.0; 3], 1.0, 1.0, &red);
+    for _ in 0..1025 {
+        list.cuboid([100.0; 3], IDENTITY_ROT, [1.0; 3], &red);
+        list.line([100.0; 3], [101.0; 3], 1.0, [1.0; 4]);
+    }
+    target.render3d(&mut r, &list, &cam);
+    let cold = r.last_frame_stats();
+    assert_eq!(
+        (
+            cold.shape_instances,
+            cold.mesh_instances,
+            cold.line_instances
+        ),
+        (0, 1028, 1025)
+    );
+    assert_eq!(
+        cold.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 5,
+            instances: 2053
+        }
+    );
+    assert_eq!(
+        cold.shadow,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        },
+        "disabled shadows still clear, without drawing casters"
+    );
+    assert_eq!(cold.upload_calls, 7); // two uniforms, four mesh kinds, lines
+    assert_eq!(cold.upload_bytes, 512 + 1028 * 80 + 1025 * 48);
+    assert_eq!(cold.buffer_reallocations, 2);
+    assert_eq!(
+        (cold.attachment_allocations, cold.attachment_reallocations),
+        (1, 0)
+    );
+    assert_eq!(cold.msaa_samples, 1);
+    let image = target.read_rgba8();
+    assert!(px(&image, 32, 16, 16)[0] > 200);
+
+    list.lighting.shadows = true;
+    target.render3d(&mut r, &list, &cam);
+    let warm = r.last_frame_stats();
+    assert_eq!(warm.main, cold.main);
+    assert_eq!(
+        warm.shadow,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 3,
+            instances: 1027
+        },
+        "planes and lines are excluded from the shadow pass"
+    );
+    assert_eq!(
+        (warm.upload_calls, warm.upload_bytes),
+        (cold.upload_calls, cold.upload_bytes)
+    );
+    assert_eq!(warm.buffer_reallocations, 0);
+    assert_eq!(
+        (warm.attachment_allocations, warm.attachment_reallocations),
+        (0, 0)
+    );
+    assert_eq!(
+        target.read_rgba8(),
+        image,
+        "the emissive object remains unchanged"
+    );
+
+    list.clear();
+    list.plane([100.0; 3], 1.0, 1.0, &red);
+    target.render3d(&mut r, &list, &cam);
+    let plane = r.last_frame_stats();
+    assert_eq!(
+        plane.main,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 1,
+            instances: 1
+        }
+    );
+    assert_eq!(
+        plane.shadow,
+        orr_render::PassStats {
+            passes: 1,
+            draw_calls: 0,
+            instances: 0
+        },
+        "the shadow pass runs with no caster draws for a plane-only list"
+    );
+    assert_eq!((plane.mesh_instances, plane.line_instances), (1, 0));
+    assert_eq!((plane.upload_calls, plane.upload_bytes), (3, 512 + 80));
+    assert_eq!(plane.buffer_reallocations, 0);
 }

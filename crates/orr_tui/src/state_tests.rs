@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use orr_viewstream::{
-    EntityRecord, EventBatch, EventRecord, ViewFrame, FLAG_DISCONTINUITY, FLAG_ROLLED_BACK, MODE_PREDICTION, SHAPE_CIRCLE, STATE_CANCELED,
-    STATE_PREDICTED, STATE_VERIFIED,
+    EntityRecord, EventBatch, EventRecord, ViewFrame, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET, FLAG_ROLLED_BACK, MODE_PREDICTION, SHAPE_CIRCLE,
+    STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
 };
 
 use crate::schema::{KindInfo, ViewSchema};
@@ -94,6 +94,24 @@ fn events_are_counted_by_state_and_by_transition() {
     s.ingest(&batch(vec![event(9, 0, STATE_VERIFIED)]), t0);
     assert_eq!(s.event_counts, [3, 2, 1]);
     assert_eq!((s.verified_after_predicted, s.canceled_after_predicted), (1, 1));
+}
+
+#[test]
+fn event_reset_discards_unsettled_predictions_without_faking_a_transition() {
+    let t0 = Instant::now();
+    let mut s = ViewState::new(schema(), t0);
+    let batch = |events| Incoming::Events(EventBatch { events }.encode());
+    s.ingest(&batch(vec![event(1, 7, STATE_PREDICTED)]), t0);
+
+    let t1 = t0 + Duration::from_millis(16);
+    s.ingest(&frame(8, FLAG_DISCONTINUITY | FLAG_EVENTS_RESET, None, vec![]), t1);
+    assert!(s.status_line(t1).contains("EVENTS_RESET"));
+
+    // A settle record arriving after the cut is counted, but cannot settle the
+    // predicted event whose announcement was discarded.
+    s.ingest(&batch(vec![event(1, 7, STATE_VERIFIED)]), t1);
+    assert_eq!(s.event_counts, [1, 1, 0]);
+    assert_eq!(s.verified_after_predicted, 0);
 }
 
 #[test]

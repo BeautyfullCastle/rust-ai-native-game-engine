@@ -1,5 +1,7 @@
 //! [`EditorDoc`]: the edit-mode document.
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::sync::Arc;
 
 use orr_ecs::{ComponentRegistry, Frame};
@@ -44,6 +46,9 @@ struct Tx {
 ///
 /// Nothing here touches a window, a socket or a clock.
 pub struct EditorDoc {
+    /// Opaque identity for optimistic concurrency guards. Not scene or
+    /// simulation state: never serialized into a frame or its checksum.
+    pub(crate) instance_id: u128,
     pub(crate) scene: Scene,
     pub(crate) types: Arc<TypeRegistry>,
     pub(crate) frame_registry: Arc<ComponentRegistry>,
@@ -99,6 +104,7 @@ impl EditorDoc {
         let (frame, index) = bake(&scene, &types, &frame_registry, seed)?;
         let next_guid = next_free_guid(&scene, 1);
         Ok(Self {
+            instance_id: new_instance_id(),
             scene,
             types,
             frame_registry,
@@ -145,6 +151,7 @@ impl EditorDoc {
         let frame = Frame::from_bytes(self.frame_registry.clone(), &self.frame.to_bytes())
             .map_err(|e| EditError::Invalid(format!("cannot copy the preview frame: {e}")))?;
         Ok(EditorDoc {
+            instance_id: new_instance_id(),
             scene: self.scene.clone(),
             types: self.types.clone(),
             frame_registry: self.frame_registry.clone(),
@@ -498,6 +505,14 @@ impl EditorDoc {
         self.revision += 1;
         Ok(())
     }
+}
+
+/// A per-document nonce, including across host restarts. The two hashes are
+/// domain-separated under a fresh standard-library random hash seed. This
+/// identifies concurrency state only; it is not an authentication secret.
+fn new_instance_id() -> u128 {
+    let seed = RandomState::new();
+    (u128::from(seed.hash_one(0_u8)) << 64) | u128::from(seed.hash_one(1_u8))
 }
 
 /// Adds `step`, merging it into the last one when both set the same field.

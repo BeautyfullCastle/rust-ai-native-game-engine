@@ -4,7 +4,7 @@ use core::marker::PhantomData;
 use bytemuck::{Pod, Zeroable};
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::codec::{put_len, put_pods, put_u32, FrameDecodeError, Reader};
+use crate::codec::{hash_len, put_len, put_pods, put_u32, FrameDecodeError, Reader};
 use crate::component::Component;
 
 /// A `Pod` handle (index + version, like [`Entity`](crate::Entity)) into a
@@ -143,11 +143,16 @@ pub trait AnyListPool: Send + Sync {
 
 impl<T: Component> AnyListPool for ListPool<T> {
     fn hash_into(&self, h: &mut Xxh3) {
+        hash_len(h, self.slots.len());
         for s in &self.slots {
             h.update(&s.version.to_le_bytes());
             h.update(&[s.alive as u8]);
+            hash_len(h, s.items.len());
             h.update(bytemuck::cast_slice(&s.items));
         }
+        // LIFO order affects the next handle returned by alloc.
+        hash_len(h, self.free.len());
+        h.update(bytemuck::cast_slice(&self.free));
     }
 
     fn copy_from(&mut self, other: &dyn AnyListPool) {

@@ -33,6 +33,16 @@ egui-wgpu = "0.36"
 png = "0.17"
 
 [dev-dependencies]
+# Test-only Arena hosts and replay viewers; never linked directly by editor code.
+orr_edit = { path = "../orr_edit" }
+orr_sim = { path = "../orr_sim" }
 # Tests only: replay a recording to check it against the live checksum.
 orr_session = { path = "../orr_session" }
 egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }
+
+[[bin]]
+name = "orr_editor"
+path = "src/main.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false

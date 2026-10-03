@@ -210,7 +210,7 @@ pub(crate) fn classify(method: &str, params: &J) -> (ActivityKind, bool) {
         m if m.starts_with("world.") => ActivityKind::Edit,
         "tx.begin" | "tx.commit" | "tx.rollback" | "history.undo" | "history.redo" | "scene.load" => ActivityKind::Edit,
         "scene.save" if params.get("write").and_then(J::as_bool) == Some(true) => ActivityKind::Edit,
-        "proposal.begin" | "proposal.apply" | "proposal.accept" | "proposal.reject" => ActivityKind::Proposal,
+        "proposal.begin" | "proposal.apply" | "proposal.accept" | "proposal.accept_verified" | "proposal.reject" => ActivityKind::Proposal,
         "proposal.verify" | "verify.self" => ActivityKind::Verify,
         "sim.state" | "sim.checksum" => ActivityKind::Read,
         m if m.starts_with("sim.") => ActivityKind::Sim,
@@ -250,7 +250,7 @@ pub(crate) fn before<G: Game>(t: &ErpTarget<'_, G>, method: &str, params: &J) ->
                 pre.old = view(t).singleton(name, p.opt_str("path").ok().flatten().unwrap_or("")).ok();
             }
         }
-        "proposal.accept" | "proposal.reject" => {
+        "proposal.accept" | "proposal.accept_verified" | "proposal.reject" => {
             if let Ok(id) = proposal_id(&p) {
                 if let Ok(d) = t.doc.proposal_diff(id) {
                     pre.entities = guids_of(&d);
@@ -447,9 +447,9 @@ pub(crate) fn summarize(method: &str, params: &J, res: Option<&J>, verify: Optio
                 None => format!("proposal.apply {} +{}", sv(params, "id"), plural(n, "op", "ops")),
             }
         }
-        "proposal.accept" => match arg("history_id").and_then(J::as_u64) {
-            Some(h) => format!("proposal.accept {} \u{2192} history #{h}", sv(params, "id")),
-            None => format!("proposal.accept {}", sv(params, "id")),
+        "proposal.accept" | "proposal.accept_verified" => match arg("history_id").and_then(J::as_u64) {
+            Some(h) => format!("{method} {} \u{2192} history #{h}", sv(params, "id")),
+            None => format!("{method} {}", sv(params, "id")),
         },
         "proposal.reject" | "proposal.get" | "proposal.preview" => format!("{method} {}", sv(params, "id")),
         "proposal.verify" | "verify.self" => {

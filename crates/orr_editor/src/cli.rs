@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// Usage text.
 pub const USAGE: &str = "\
 orr_editor [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
-           [--screenshot <out.png> [--frames <n>]] [--size <WxH>]
+           [--screenshot <out.png> [--frames <n>] [--screenshot-settle]] [--size <WxH>]
            [--erp <addr>] [--erp-token <name:token:caps>]... [--erp-dev]
 orr_editor --connect <ws://host:port> [--token <t>] [same flags, but --scene/--erp]
 
@@ -26,6 +26,8 @@ editor's ERP) that is already running.
   --screenshot <png>    render --frames frames, save the window's own
                         framebuffer to the PNG and exit
   --frames <n>          frames before the screenshot (default 30)
+  --screenshot-settle   additionally wait for a current paused frame, refreshed
+                        panels and expired agent pulses (10 second deadline)
   --size <WxH>          window size in points (default 1600x900)
   --erp <addr>          serve ERP (JSON-RPC over WebSocket) on this address,
                         e.g. 127.0.0.1:7777, so AI agents can edit and play
@@ -51,6 +53,8 @@ pub struct Args {
     pub screenshot: Option<PathBuf>,
     /// `--frames`.
     pub frames: u64,
+    /// `--screenshot-settle` (requires `--screenshot`).
+    pub screenshot_settle: bool,
     /// `--size`.
     pub size: (f32, f32),
     /// `--erp`.
@@ -67,7 +71,7 @@ pub struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Self { scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
+        Self { scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -84,6 +88,7 @@ impl Args {
                 "--select" => out.select = Some(value("--select")?),
                 "--script" => out.script = Some(PathBuf::from(value("--script")?)),
                 "--screenshot" => out.screenshot = Some(PathBuf::from(value("--screenshot")?)),
+                "--screenshot-settle" => out.screenshot_settle = true,
                 "--play-ticks" => out.play_ticks = Some(value("--play-ticks")?.parse().map_err(|_| "--play-ticks needs a whole number".to_string())?),
                 "--frames" => out.frames = value("--frames")?.parse().map_err(|_| "--frames needs a whole number".to_string())?,
                 "--size" => {
@@ -105,6 +110,9 @@ impl Args {
         }
         if out.token.is_some() && out.connect.is_none() {
             return Err("--token is for --connect (use --erp-token to set tokens for --erp)".to_string());
+        }
+        if out.screenshot_settle && out.screenshot.is_none() {
+            return Err("--screenshot-settle requires --screenshot".to_string());
         }
         Ok(out)
     }
@@ -135,11 +143,18 @@ mod tests {
         assert!(parse("--size 10").is_err());
         assert!(parse("--connect ws://h:1 --scene a.yaml").is_err());
         assert!(parse("--token x").is_err());
+        assert!(parse("--screenshot-settle").is_err());
     }
 
     #[test]
     fn parses_connect() {
         let a = parse("--connect ws://127.0.0.1:7790 --token s3 --screenshot /tmp/a.png").unwrap();
         assert_eq!((a.connect.as_deref(), a.token.as_deref()), (Some("ws://127.0.0.1:7790"), Some("s3")));
+    }
+
+    #[test]
+    fn screenshot_settle_is_opt_in() {
+        assert!(!parse("--screenshot out.png --frames 30").unwrap().screenshot_settle);
+        assert!(parse("--screenshot out.png --frames 30 --screenshot-settle").unwrap().screenshot_settle);
     }
 }

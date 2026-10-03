@@ -1,0 +1,16 @@
+[package]
+name = "orr_asset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"], default-features = false }
+orr_fp = { path = "../orr_fp", default-features = false }

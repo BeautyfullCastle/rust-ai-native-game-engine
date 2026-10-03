@@ -21,6 +21,7 @@ use common::*;
 use egui::{Event, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
 use orr_editor::editor::Editor;
+use orr_editor::diagnostics::{EditorDiagnostics, LatencyStats, LATENCY_WINDOW};
 use orr_editor::EditorApp;
 use serde_json::json;
 
@@ -40,6 +41,54 @@ fn settle(h: &mut Harness<'_, EditorApp>) {
         h.state_mut().editor.sync();
         h.run_steps(2);
     }
+}
+
+fn print_diagnostics(phase: &str, d: EditorDiagnostics, body_count: usize) {
+    let stats = |s: LatencyStats| {
+        json!({
+            "samples": s.samples,
+            "total_samples": s.total_samples,
+            "last_ms": s.last.as_secs_f64() * 1000.0,
+            "max_ms": s.max.as_secs_f64() * 1000.0,
+            "p95_ms": s.p95.as_secs_f64() * 1000.0,
+        })
+    };
+    eprintln!(
+        "ORR_BASELINE {}",
+        json!({
+            "schema_version": 1,
+            "suite": "editor",
+            "case": "diagnostics",
+            "phase": phase,
+            "scene_id": if phase == "drag" { "demo_editor" } else { "demo_editor_1000_bodies" },
+            "body_count": body_count,
+            "window_px": [1500, 900],
+            "backend": "egui_kittest",
+            "erp_connected": false,
+            "gpu": false,
+            "metrics": {
+                "ui_frame": stats(d.ui_frame),
+                "pump": stats(d.pump),
+                "sync_erp_wait": stats(d.sync_erp_wait),
+                "async_request": stats(d.async_request),
+                "snapshot_extract": stats(d.snapshot_extract),
+            },
+            "pending_requests": d.pending_requests,
+            "pending_high_water": d.pending_high_water,
+        })
+    );
+    let timing = |name: &str, s: LatencyStats| {
+        eprintln!(
+            "MEASURE {phase} {name} CPU wall: last {:.3} / max {:.3} / p95 {:.3} ms (recent {} / {LATENCY_WINDOW}, total {})",
+            s.last.as_secs_f64() * 1000.0, s.max.as_secs_f64() * 1000.0, s.p95.as_secs_f64() * 1000.0, s.samples, s.total_samples,
+        );
+    };
+    timing("UI callback", d.ui_frame);
+    timing("pump", d.pump);
+    timing("blocking ERP wait", d.sync_erp_wait);
+    timing("async post->ingest", d.async_request);
+    timing("snapshot extraction", d.snapshot_extract);
+    eprintln!("MEASURE {phase} pending ERP: {} current / {} high-water", d.pending_requests, d.pending_high_water);
 }
 
 fn median(v: &mut [f64]) -> f64 {
@@ -80,12 +129,32 @@ fn drag_to_viewport_latency() {
                 break;
             }
         }
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        frames.push(f64::from(n));
+        millis.push(elapsed_ms);
+        eprintln!(
+            "ORR_BASELINE {}",
+            json!({
+                "schema_version": 1,
+                "suite": "editor",
+                "case": "drag_move",
+                "scene_id": "demo_editor",
+                "body_count": h.state().editor.bodies().len(),
+                "window_px": [1500, 900],
+                "backend": "egui_kittest",
+                "erp_connected": false,
+                "gpu": false,
+                "move_index": i,
+                "group": if i == 1 { "first" } else { "steady" },
+                "frames": n,
+                "wall_ms": elapsed_ms,
+                "timed_out": n >= 200,
+            })
+        );
         if n >= 200 {
             let near: Vec<_> = h.state().editor.bodies().iter().filter(|b| (b.pos[1] - p[1]).abs() < 1.0).map(|b| b.pos).collect();
             panic!("the moved body never showed (move {i}): want x {want_x}, p {p:?}, bodies near: {near:?}, history {:?}, status {:?}", h.state().editor.history(), h.state().editor.status());
         }
-        frames.push(f64::from(n));
-        millis.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
     h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
     settle(&mut h);
@@ -99,6 +168,7 @@ fn drag_to_viewport_latency() {
         worst,
         ms_worst
     );
+    print_diagnostics("drag", h.state().editor.diagnostics(), h.state().editor.bodies().len());
     assert!(ms_worst < 40.0, "a dragged body shows within a couple of display frames");
 }
 
@@ -107,34 +177,56 @@ fn play_frame_time_with_a_thousand_bodies() {
     let ed = thousand_bodies();
     let mut h = Harness::builder().with_size([1500.0, 900.0]).with_step_dt(1.0 / 60.0).build_eframe(move |_cc| EditorApp::new(ed, None));
     settle(&mut h);
-    let time_steps = |h: &mut Harness<'_, EditorApp>, n: u32| -> (f64, f64) {
+    let time_steps = |h: &mut Harness<'_, EditorApp>, n: u32, phase: &str| -> (f64, f64) {
         let (mut total, mut worst) = (0.0f64, 0.0f64);
-        for _ in 0..n {
+        for frame_index in 0..n {
             let t = Instant::now();
             h.step();
             let ms = t.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "ORR_BASELINE {}",
+                json!({
+                    "schema_version": 1,
+                    "suite": "editor",
+                    "case": "ui_frame",
+                    "scene_id": "demo_editor_1000_bodies",
+                    "body_count": h.state().editor.bodies().len(),
+                    "window_px": [1500, 900],
+                    "backend": "egui_kittest",
+                    "erp_connected": false,
+                    "gpu": false,
+                    "phase": phase,
+                    "frame_index": frame_index,
+                    "wall_ms": ms,
+                })
+            );
             total += ms;
             worst = worst.max(ms);
         }
         (total / f64::from(n), worst)
     };
-    let (edit_mean, _) = time_steps(&mut h, 60);
+    let (edit_mean, _) = time_steps(&mut h, 60, "edit");
     eprintln!("MEASURE edit-mode UI frame (1000+ bodies): {edit_mean:.3} ms");
+    print_diagnostics("edit", h.state().editor.diagnostics(), h.state().editor.bodies().len());
 
     h.state_mut().editor.play();
     h.run_steps(5);
     let t0 = h.state().editor.sim().head_tick;
     let wall = Instant::now();
-    let (mean, worst) = time_steps(&mut h, 240);
+    let (mean, worst) = time_steps(&mut h, 240, "play_1x");
     let secs = wall.elapsed().as_secs_f64();
     let t1 = h.state_mut().editor.host_call("sim.state", json!({})).unwrap()["head_tick"].as_u64().unwrap();
     eprintln!("MEASURE play-mode UI frame (1000+ bodies, local host thread, 1x): mean {mean:.3} ms, worst {worst:.3} ms, host ran {} ticks in {secs:.2} s", t1 - t0);
 
+    print_diagnostics("play 1x", h.state().editor.diagnostics(), h.state().editor.bodies().len());
+
     // The host at 4x: the UI frame does not get slower, the host thread does the simulating.
     h.state_mut().editor.set_speed(4.0);
     h.state_mut().editor.control(orr_bridge::ControlOp::Play);
-    let (mean4, worst4) = time_steps(&mut h, 240);
+    let (mean4, worst4) = time_steps(&mut h, 240, "play_4x");
     eprintln!("MEASURE play-mode UI frame (4x): mean {mean4:.3} ms, worst {worst4:.3} ms");
+
+    print_diagnostics("play 4x", h.state().editor.diagnostics(), h.state().editor.bodies().len());
 
     // How fast the host simulates (a blocking step of 600 ticks, which also publishes one frame).
     h.state_mut().editor.pause();
@@ -142,6 +234,7 @@ fn play_frame_time_with_a_thousand_bodies() {
     h.state_mut().editor.step(600);
     let per_tick = t.elapsed().as_secs_f64() * 1000.0 / 600.0;
     eprintln!("MEASURE host simulation: {per_tick:.3} ms per tick (600-tick step, 1000+ bodies)");
+    print_diagnostics("600-tick step", h.state().editor.diagnostics(), h.state().editor.bodies().len());
     assert!(mean < 50.0 && mean4 < 50.0, "the UI stays responsive");
     let _ = Duration::ZERO;
 }

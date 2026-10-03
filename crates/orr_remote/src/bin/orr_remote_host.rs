@@ -3,11 +3,12 @@
 //! It loads a scene, keeps it in an `EditorDoc` (edit mode, undo history)
 //! and serves the Engine Remote Protocol, so AI agents (through an MCP
 //! adapter), scripts and `RemoteBridge` views can look at and change it.
-//! `sim.start` begins a play session of `PhysGame`; while it is playing the
+//! `sim.start` begins a play session of the selected game (`PhysGame` by
+//! default, or Arena with `--game arena`); while it is playing the
 //! host ticks it in real time.
 //!
 //! ```text
-//! orr_remote_host [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]
+//! orr_remote_host [--game physics|arena] [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]
 //!                 [--seed N] [--players N] [--tick-rate N] [--max-step N] [--build-id N]
 //!                 [--join HOST:PORT [--fingerprint HEX | --insecure] [--ws] [--room N] [--slot N]
 //!                  [--sim-latency MS] [--sim-jitter MS] [--sim-loss P] [--sim-seed N] [--connect-timeout S]]
@@ -47,7 +48,7 @@ use orr_sample::physics_game::{bot_input, register_reflect, PhysGame, PhysMetric
 use orr_sample::physics_stream::phys_stream_source;
 use orr_sim::{PlayerSlot, Simulation};
 
-const USAGE: &str = "usage: orr_remote_host [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]\n\
+const USAGE: &str = "usage: orr_remote_host [--game physics|arena] [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]\n\
                      \x20                       [--seed N] [--players N] [--tick-rate N] [--max-step N] [--build-id N]\n\
                      \x20                       [--join HOST:PORT [--fingerprint HEX | --insecure] [--ws] [--room N] [--slot N]\n\
                      \x20                        [--sim-latency MS] [--sim-jitter MS] [--sim-loss P] [--sim-seed N] [--connect-timeout S]]\n\
@@ -57,9 +58,10 @@ const USAGE: &str = "usage: orr_remote_host [--scene PATH] [--bind ADDR] [--toke
                      \x20       and timeline methods are not available. QUIC needs --fingerprint HEX (the server prints it) or --insecure\n\
                      \x20       (development only); --ws uses WebSocket; --sim-* simulate latency/jitter/loss of this client's network.\n\
                      caps: read, scene_edit, sim_control, approve (comma separated) or all\n\
-                     default scene: scenes/physics_demo.scene.yaml, default bind: 127.0.0.1:7777";
+                     default scene: scenes/physics_demo.scene.yaml (arena: scenes/arena_blank.scene.yaml), default bind: 127.0.0.1:7777";
 
 struct Args {
+    game: String,
     scene: PathBuf,
     bind: SocketAddr,
     tokens: Vec<TokenEntry>,
@@ -73,17 +75,19 @@ struct Args {
     join: NetArgs,
 }
 
-fn default_scene() -> PathBuf {
-    let rel = PathBuf::from("scenes/physics_demo.scene.yaml");
+fn default_scene(game: &str) -> PathBuf {
+    let file = if game == "arena" { "arena_blank.scene.yaml" } else { "physics_demo.scene.yaml" };
+    let rel = PathBuf::from("scenes").join(file);
     if rel.exists() {
         return rel;
     }
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes/physics_demo.scene.yaml"))
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes")).join(file)
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
-        scene: default_scene(),
+        game: "physics".into(),
+        scene: default_scene("physics"),
         bind: SocketAddr::from(([127, 0, 0, 1], 7777)),
         tokens: Vec::new(),
         dev: false,
@@ -94,11 +98,13 @@ fn parse_args() -> Result<Args, String> {
         build_id: None,
         join: NetArgs { name: "host".to_string(), quiet: true, ..NetArgs::default() },
     };
+    let mut scene_explicit = false;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
         match flag.as_str() {
-            "--scene" => a.scene = PathBuf::from(value("--scene")?),
+            "--game" => a.game = value("--game")?,
+            "--scene" => { a.scene = PathBuf::from(value("--scene")?); scene_explicit = true; },
             "--bind" => a.bind = value("--bind")?.parse().map_err(|e| format!("--bind: {e}"))?,
             "--token" => a.tokens.push(TokenEntry::parse(&value("--token")?).map_err(|e| format!("--token: {e}"))?),
             "--dev-no-auth" => a.dev = true,
@@ -124,6 +130,16 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown flag '{other}'")),
         }
     }
+    if !matches!(a.game.as_str(), "physics" | "arena") {
+        return Err("--game must be physics or arena".into());
+    }
+    if a.game == "arena" && a.join.connect.is_some() {
+        return Err("--game arena is local authoring only; --join remains physics-only".into());
+    }
+    if a.game == "arena" && !(1..=8).contains(&a.players) {
+        return Err("Arena --players must be 1..=8".into());
+    }
+    if !scene_explicit { a.scene = default_scene(&a.game); }
     if a.dev && !a.tokens.is_empty() {
         return Err("--dev-no-auth and --token cannot be combined".into());
     }
@@ -150,6 +166,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.game == "arena" { return run_arena(args); }
     let client_mode = args.join.connect.is_some();
     let text = match std::fs::read_to_string(&args.scene) {
         Ok(t) => t,
@@ -187,7 +204,11 @@ fn main() -> ExitCode {
     if client_mode {
         let room = args.join.room;
         println!("orr_remote_host: joining room {room} on {} ...", args.join.connect.as_deref().unwrap_or(""));
-        if let Err(e) = join_phys_client(&mut cfg.limits, args.join.clone()) {
+        let mut join = args.join.clone();
+        if args.build_id.is_some() {
+            join.build_id = args.build_id;
+        }
+        if let Err(e) = join_phys_client(&mut cfg.limits, join) {
             eprintln!("error: joining the server failed: {e}");
             return ExitCode::FAILURE;
         }
@@ -211,5 +232,53 @@ fn main() -> ExitCode {
     let mut host = Host::<PhysGame>::new(doc, server);
     let stop = AtomicBool::new(false);
     host.run(&stop, Duration::from_millis(1));
+    ExitCode::SUCCESS
+}
+
+
+fn run_arena(args: Args) -> ExitCode {
+    use orr_testgame::{Arena, ArenaMetrics};
+    let text = match std::fs::read_to_string(&args.scene) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("error: cannot read scene {}: {e}", args.scene.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut types = TypeRegistry::new();
+    orr_testgame::register_reflect(&mut types);
+    let doc = match EditorDoc::from_yaml(&text, types, Simulation::<Arena>::build_registry(), args.seed) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("error: {}: {e}", args.scene.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let entities = doc.scene().entities.len();
+    let auth = if args.dev { Auth::DevNoAuth } else { Auth::Tokens(args.tokens.clone()) };
+    let mut cfg = ServerConfig::new(auth);
+    cfg.bind = args.bind;
+    cfg.limits.player_count = args.players;
+    cfg.limits.tick_rate = args.tick_rate;
+    cfg.limits.max_step_per_call = args.max_step;
+    cfg.limits.scene_path = Some(args.scene.clone());
+    cfg.limits.build_id = args.build_id.unwrap_or_else(|| default_build_id("Arena"));
+    // Scripted verification cannot derive commands yet. Advertise no bot;
+    // normal live input and its recorded commands support exact replay.
+    cfg.limits.game = GameHooks::new("Arena").with_metrics(ArenaMetrics);
+    let mut server = match ErpServer::start(cfg) {
+        Ok(server) => server,
+        Err(e) => { eprintln!("error: {e}"); return ExitCode::FAILURE; }
+    };
+    server.set_structured_input::<Arena>("ArenaInput", 8, |slot, input| {
+        orr_sample::arena_view::arena_fire_commands(u32::from(slot.0), input)
+    });
+    server.enable_managed_input();
+    println!("orr_remote_host: Arena scene {} ({entities} entities)", args.scene.display());
+    println!("orr_remote_host: ERP listening on {}", server.url());
+    if args.dev { println!("orr_remote_host: DEV MODE, no authentication (loopback only)"); }
+    for token in &args.tokens { println!("orr_remote_host: client '{}' may {}", token.client, token.caps); }
+    let mut host = Host::<Arena>::new(doc, server);
+    host.run(&AtomicBool::new(false), Duration::from_millis(1));
     ExitCode::SUCCESS
 }

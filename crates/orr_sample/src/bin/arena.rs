@@ -7,6 +7,7 @@
 //!   --jitter TICKS               loopback jitter (default 2)
 //!   --remote snapshot|prediction|none   how the other player is shown (default snapshot)
 //!   --tau SECONDS                rollback smoothing time constant (default 0.12, 0 = off)
+//!   --audio off|auto|required     optional native output (default auto; build --features audio-native)
 //!   --no-vsync                   do not wait for the display (measure raw speed)
 //!   --seconds N                  close after N seconds and print a summary
 //!   --headless                   with --connect --bot: no window, play as a scripted bot (default 30 s)
@@ -46,6 +47,7 @@ fn real_main() -> Result<(), String> {
     let mut opts = Options {
         label: String::new(),
         vsync: true,
+        audio: Default::default(),
         seconds: None,
         remote_mode: InterpMode::Snapshot,
         view: ViewConfig::default(),
@@ -59,6 +61,7 @@ fn real_main() -> Result<(), String> {
         }
         match arg.as_str() {
             "--headless" => headless = true,
+            "--audio" => opts.audio = value("--audio")?.parse()?,
             "--bridge" => {
                 threaded = match value("--bridge")?.as_str() {
                     "threaded" => true,
@@ -83,6 +86,12 @@ fn real_main() -> Result<(), String> {
         }
     }
 
+    if headless {
+        if opts.audio == orr_sample::arena_audio::AudioMode::Required {
+            return Err("--audio required is unavailable in headless bot mode".into());
+        }
+        eprintln!("audio: off (headless bot mode)");
+    }
     if netargs.connect.is_some() {
         if headless {
             if !netargs.bot {
@@ -125,6 +134,7 @@ fn run_with<B: Bridge<orr_testgame::Arena>>(bridge: B, opts: Options) -> Result<
 
 fn print_summary(s: &Summary) {
     println!("adapter        : {}", s.adapter);
+    println!("audio          : {} ({} voices started)", s.audio_status, s.audio_started);
     println!("frames         : {} in {:.2} s = {:.1} fps (worst frame {:.1} ms)", s.frames, s.seconds, s.fps, s.worst_frame_ms);
     println!("sim tick       : {} (verified {})", s.sim_tick, s.verified_tick);
     println!("rollbacks      : {} (deepest {} ticks), stalls {}", s.rollbacks, s.max_rollback_depth, s.stalls);

@@ -1,9 +1,66 @@
 # Orrery 진행 현황
 
-최종 갱신: 2026-09-30 (M5 완료) · 설계: `docs/design-v1.md`
-코드: https://github.com/BeautyfullCastle/rust-ai-native-game-engine (`main`)
+최종 갱신: 2026-10-03 UTC / KST (최신 전체 통과 원격 `c73169b8` CI #58 10/10; managed held-input·키보드 제어는 로컬 검증 완료, 전체 CI 대기) · 설계: `docs/design-v1.md`
+코드: https://github.com/BeautyfullCastle/rust-ai-native-game-engine · 안정화 변경: [`su/engine-correctness-hardening`, draft PR #1](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/1) (`main` 병합 완료를 뜻하지 않음)
 
-## 완료
+## 현재 검증 근거와 완료 경계 (2026-10-03 UTC / KST)
+
+완료 상태는 아래 커밋/실행별 근거로 판단한다. 개별 계약 문서의 집중 검증·CI 대기 설명과 아래 과거 측정치는 작성 당시 체크포인트이며, 이후 원격 통과는 이 절에서 구분한다. 이번 문서 대조는 새 빌드·테스트 실행이 아니다.
+
+- **최신 전체 통과 기준:** 원격 `c73169b8fcb57a55123cc5d8f1e4b7571d356ed0`의 [CI #58](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37075110952), **10/10 잡 통과**. CI #56까지의 누적 변경에 Arena 원격 에디터·native 창 캡처 안정화·sample-build 집계 보강을 포함한다. Linux Arena 실제 edit/scored-play 창, Score=1 및 리플레이 체크섬 **21개 전부 일치**를 확인했다. [native 창 근거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37075110952/artifacts/11257087128)
+- **해결된 CI 이력:** `55ed1e4d` CI #57의 Linux sample은 agent activity pulse가 선택 윤곽을 덮어 노란 픽셀 검사에 실패했다. 기존 픽셀 기준을 유지한 screenshot settle 수정과 `sample-build`를 포함한 다섯 그룹 fail-closed 집계가 이후 CI #58에서 통과했다. `sample-build` 결과도 `success`이며 #57 실패는 현재 차단 항목이 아니다.
+- **현재 후속 작업 트리:** 선택적 연결 소유 managed held-input lease와 Arena realtime viewport의 명시적 **Take control**을 구현했다. 서버 40 library+5 Arena, 에디터 44 library+9 Arena로 **98개 집중 검사**, targeted release strict Clippy 및 독립 리뷰 2건을 통과했다. 아직 미커밋이며 이 기능의 전체 CI는 대기 중이다. CI #58의 통과를 새 입력 기능의 원격 검증으로 확대하지 않는다. [입력 계약](managed-held-input.md)
+- **완료 범위:** Arena 에디터는 원격 연결 전용 compiled adapter다. 새 키보드 제어는 명시적으로 획득한 슬롯의 held input만 조정하며, commands/debug/timeline으로부터의 보안 격리가 아니다. 로컬 Arena 시작·플레이어 생성 UI·임의 플러그인은 제공하지 않는다. 선택적 Kira 오디오는 실제 오프라인 PCM과 Linux/Windows native 컴파일까지 검증했지만 장치 청취·3D 공간 오디오는 미검증/미구현이다. draft PR #1은 미병합이며, 스크립트나 제한된 실제 에이전트 파일럿으로 다른 엔진보다 우수하다고 주장하지 않는다.
+
+| 범위 | 검증된 원격 커밋/실행 | 상태 |
+|---|---|---|
+| 검증 후 수락 보호, ORRF v2·골든 이전, 기본 빌드 id 경계, CI 게이트·실제 Chromium, 로컬/원격 뷰 복구, 로컬 입력 병합·커맨드 admission·리플레이 읽기 전용 | [`4780c413`](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/commit/4780c413987f0420ae6a2b4717a62a68cb07daa1), [CI #44](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37001459838) | **10/10 잡 통과** |
+| 정상 입력 검증 요청의 비차단 실행·캡처/취소/수명주기, FFI polling 출력 검증 순서 수정 | [`90c0e332`](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/commit/90c0e332089226204462ac988e3a80dc891aade0), [CI #46](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37010716086) | **10/10 잡 통과**; 추가 문제 입력 회귀는 계속 제외 |
+| 실제 연결 수·`PlayerLeft` 기반 네트워크 준비 조건, 위 완료 변경의 누적 재검증 | [`24ba4253`](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/commit/24ba425399620223de1871c707de2dd54baba597), [CI #47](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37016943870) | **10/10 잡 통과**, 2026-10-02 14:45 UTC 확인 |
+| QUIC 재접속의 고정 2.5초·4초 창을 검증 tick·공통 체크포인트 진행 조건으로 교체 | 로컬 `2605d67`과 같은 tree의 원격 [`1381d3cb`](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/commit/1381d3cbb952a184daa0a6361ced138a25bcbe2b), [CI #48](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37024146596) | **10/10 잡 통과**, 2026-10-02 15:43:59 UTC 확인 |
+| Arena CLI·워크플로, 계측·비동기 gesture, 선택적 오디오, CI 중복 빌드 제거, 리플레이 원본 보호, 지표 sampling 설명, Interrupted 읽기 복구의 누적 검증 | [`c9da7cbd`](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/commit/c9da7cbd77e8c7d3e9ee694dd1b7291f4b1d6a3a), [CI #56](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37062765780) | **10/10 잡 통과**, 당시 누적 기준 |
+| Arena 원격 에디터·game/build/schema 검사·read-only Viewer·Linux 필수 native 창 smoke | [`55ed1e4d`](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/commit/55ed1e4df562919e531878eab4cd50a774bfe69e), [CI #57](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37071691146) | **과거 Linux sample 실패**: 실제 창 시작·렌더링 후 선택 노란 픽셀 검사 실패; 당시 Windows native 대기. 이 실행은 전체 통과 아님, 후속 #58에서 수정 검증 |
+| Arena 원격 에디터 누적 검증·native 창 screenshot settle·sample-build 포함 fail-closed 집계 | [`c73169b8`](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/commit/c73169b8fcb57a55123cc5d8f1e4b7571d356ed0), [CI #58](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37075110952) | **10/10 잡 통과**, 최신 전체 통과 기준; 실제 edit/scored-play 창·Score=1·21개 replay checksum 일치 |
+| Managed held-input lease·Arena 키보드 Take control | 미커밋 작업 트리 | **집중 98개·targeted release strict Clippy·독립 리뷰 2건 통과**, 전체 CI 대기 |
+
+통과한 10개 잡은 native 4개(Linux x86_64/ARM64, Windows x86_64, macOS ARM64), sample build 2개(Linux/Windows), Wasmtime 기본·SIMD slice, Android ARM64 NDK+qemu, 실제 Chromium, 교차 플랫폼 집계다. Chromium은 `ORR_REQUIRE_BROWSER=1`·`ORR_REQUIRE_WEBGPU=1`에서 **6 passed / 0 failed / 0 ignored**이며 WT/WS/WSS·Web Worker·WebGL2/WebGPU 경로를 실행했다. Linux sample 잡은 lavapipe GPU 리드백·Xvfb 창 smoke를 실제 실행했다. Windows의 Linux 전용 단계 skip은 의도된 것이며, 하드웨어 GPU·Android 실기기·iOS·Firefox/Safari 검증으로 확대 해석하지 않는다. native 잡은 GUI 크레이트를 제외하고 별도 sample 잡이 보완하므로, 각 플랫폼에서 동일한 전체 workspace를 실행했다는 뜻도 아니다. **최신 전체 통과 커밋은 `c73169b8`이며, CI #58의 모든 10개 잡과 sample-build의 성공을 확인했다. 새 Arena native-window smoke도 완전히 통과했다. CI #57 실패 이력은 보존하되 현재 차단으로 취급하지 않으며, 집계 잡 하나의 성공이나 진행 중인 managed-input 작업 트리 변경을 전체 통과로 취급하지 않는다.**
+
+## 현재 안정화 패치 상태 (2026-10-03 UTC / KST)
+
+- **에디터 드래그 트랜잭션 비동기화: 집중 debug 76개·에디터 strict Clippy 및 누적 원격 CI #56 10/10 통과.** inspector scrub·viewport 이동의 `tx.begin`/patch/commit을 응답 상관관계로 진행하는 비차단 수명주기로 바꿨다. begin 성공 뒤에만 patch를 보내고 patch 승인 뒤 commit하며, 최대 8개 gesture·각 64개 미전송 필드·동시 트랜잭션 요청 1개로 제한한다. 같은 필드의 최신 절대값을 병합하되 중첩 경로 순서를 보존하며, 가득 찬 큐·경합하는 undo/save는 오류를 표시한다. 문서·표시 캐시는 호스트가 권위이고, 취소/거부는 rollback, 선택 변경·Escape·focus loss·누락된 pointer-up·재연결을 처리한다. 다른 클라이언트의 버퍼된 history 알림을 begin 승인 전 자기 트랜잭션으로 오인하지 않으며, 로컬 단절 원인 조회의 2초 대기도 제거하고 늦은 panic 상세는 다음 pump에서 갱신한다. 실제 호스트의 begin/patch/commit 응답을 붙잡는 transport가 UI의 blocking receive를 즉시 실패시키는 검사, 별도 undo 순서·rollback·재드래그 회귀를 포함해 **76 passed / 0 failed / 0 ignored**(lib 31, model 19, UI 17, attach 5, crash 3, diagnostics 1), `cargo clippy -p orr_editor --all-targets --no-deps -- -D warnings`, `git diff --check` 통과. 동일 프로필 전후 성능 측정이나 속도 향상 주장은 없고 기존 debug 40ms 기준을 수정하지 않았다. ERP/렌더/시뮬·체크섬은 변경하지 않았으며, ERP에 transaction token이 없어 관측 전 서버 timeout과 뒤늦은 patch 사이를 완전히 차단할 수 없는 기존 한계는 그대로다. 추가 문제 입력 회귀는 계속 제외한다.
+
+- **QUIC 재접속 진행 조건: 최종 debug 4개·반복 10회·해당 패키지 strict Clippy 및 원격 CI 10/10 통과.** `disconnect_and_rejoin_over_quic`의 2.5초·4초 플레이 창을 테스트 전용 진행 드라이버로 바꿨다. 각 클라이언트가 처음 `Playing`이 된 시점의 확정 tick을 한 번 캡처하고, 이탈 전 **+150 tick**, 재접속 후 **+240 tick**과 잔류 클라이언트가 실제로 보유한 공통 체크포인트 **3개 이상**을 기다린다. 따라서 재접속 스냅샷·catch-up만으로 진행 목표를 채울 수 없다. 기존 `PlayerLeft` 장벽·같은 슬롯·체크섬 일치·디싱크 0 검사를 유지하고 반환 토큰·이탈 전 디싱크 0·잔류 클라이언트의 `Playing` 상태도 검사한다. 연결부터 진행 목표까지 각 실행의 **20초 전체 실패 감시**, 잔류 클라이언트의 **60초 전체 실패 감시**를 성공 조건과 분리했으며, 실패 진단에 상태·기준/목표/확정/head tick·공통 체크포인트 수를 남긴다. 이 시나리오 전용 RAII가 unwind 때 두 정지 플래그를 먼저 설정하고 스레드를 모두 join한다(정리 경로는 소스 리뷰, 새 실패 입력 테스트는 추가하지 않음). 최종 바이너리는 **4 passed / 0 failed / 1 ignored**(기존 60초 soak), 단독 5회·동시 5회는 **10 passed / 0 failed**였다. 반복 실행은 이탈 전 0→150, 재접속 기준 155–160→395–400, 공통 체크포인트 8개, 디싱크 0을 관측했다. `cargo clippy -p orr_server --all-targets -- -D warnings`와 `git diff --check`도 통과했다. 원격 `1381d3cb`의 CI #48은 전체 10개 잡을 통과했고, Windows·Linux ARM64에서 새 진행 조건의 재접속 테스트와 기존 FFI 오류 경로·polling 회귀의 실제 통과도 확인했다. 변경 전 고정 플레이 창의 위험은 소스에서 확인했으며 간헐 실패 재현·지속적인 병렬 빌드 부하·새 정리 실패 입력의 runtime 검증을 주장하지 않는다. 운영 드라이버·전송 타이머·다른 테스트의 종료 조건·FFI·골든 값은 변경하지 않았다.
+- **실제 소켓 테스트 준비 조건: 집중 debug 29개·반복 45회·strict Clippy 및 원격 CI 10/10 통과.** `orr_net`의 최대 연결 수 검사는 서버의 서로 다른 `Connected` 두 건과 실제 연결 수 2를 확인한 뒤 세 번째 클라이언트를 연결한다. `orr_server`의 QUIC 재접속 검사는 고정 500ms 대기 대신 해당 방·슬롯의 `PlayerLeft`를 관측하고 진행한다(10초 실패 감시, 실패 시 스레드 정리·진단). 토큰 재사용이 아직 남은 연결을 조용히 교체해 실제 이탈 경로를 건너뛰지 않도록 하는 테스트 전용 변경이다. 소스에서 확인한 순서 보장 누락을 보완했으며, 변경 전 간헐 실패를 로컬에서 재현했다는 뜻은 아니다. 두 테스트 바이너리는 **29 passed / 0 failed / 1 ignored**(기존 60초 soak 제외), 연결 제한 QUIC·WS 각 20회와 QUIC 재접속 5회 반복은 **45 passed / 0 failed**, `cargo clippy -p orr_net -p orr_server --all-targets -- -D warnings`와 `git diff --check`도 통과했다. 운영 코드·체크섬 기대값·기존 거부/연결 수/체크포인트 비교 assertion은 그대로다. 이 첫 패치에서는 재접속 전후 2.5초·4초 플레이 창을 유지했으며, 검증 tick·체크포인트 기반 종료 전환은 위 후속 패치에서 완료했다. 이 첫 패치의 원격 `24ba4253`은 이후 CI 10/10을 통과했다. 최신 진행 드라이버 커밋 `1381d3cb`도 별도 CI #48에서 10/10을 통과했다. 나머지 부하 민감성은 후속 범위다.
+- **로컬 커맨드 admission·리플레이 읽기 전용: 집중 debug 212개·workspace strict Clippy 및 원격 CI 10/10 통과.** `InProc`/`Threaded`는 명시적 게임 커맨드의 mailbox·정지 중 core·표준 host 미제출 staging 전체에 개수 제한(기본 1024)을 적용하고, 포화 시 `Backpressure`를 반환한다. 신뢰성 메시지는 단일 FIFO를 유지하며 별도 control quota(기본 64), 최신 held input 병합, Step admission 시 입력 캡처, realtime bounded drain, out-of-band 종료를 갖는다. Viewer의 live input/command는 명시적으로 거부하고 입력 파생·bot 커맨드를 만들지 않으며, 승인된 Branch 뒤 입력은 오래된 snapshot과 무관하게 순서대로 받는다. ERP 거부와 RemoteBridge 비동기 오류·Branch 이후 입력 dedupe 복구도 검증했다. `cargo test -p orr_bridge -p orr_session -p orr_remote --tests -- --skip measure_1000_body_scene`는 **212 passed / 0 failed / 0 ignored / 1 filtered**이며 strict workspace Clippy와 `git diff --check`도 통과했다. 제외한 기존 처리량 검사는 debug 최초 실행에서 3초 17프레임으로 기준 `>100`에 실패했고, 문서화된 release 프로필의 동일 검사(`--release --test measure measure_1000_body_scene -- --exact --nocapture`)는 최종 소스에서 **181프레임/3초, 1 passed**로 통과했다. golden·리플레이 형식은 변경하지 않았다. 동적 payload의 byte 크기, 파생 커맨드, 이미 제출한 history/network, 원격 RPC·전송·오류·FFI 큐는 이 개수 제한 밖이다. [계약·검증 범위](command-admission.md)
+- **로컬 뷰 복구: focused 139개·strict Clippy 및 누적 원격 CI 통과.** `InProc`/`Threaded`의 기본 4096개 presentation 상한과 `poll_view()` snapshot/output cursor 복구, 12종 lifecycle 요약·sticky disconnect/desync, 2D/3D 뷰·viewstream/TUI reset, FFI 미수신 latest 슬롯과 ERP client-viewstream 구독자별 reset 보존을 구현했다. 이 presentation 제한을 FFI의 별도 4096-batch 정책이나 엔진 전체 메모리 상한으로 확대하지 않는다. 아래 과거 체크포인트 수치와 이후 누적 원격 CI를 구분한다. [계약·검증 범위](view-recovery.md)
+- **협상형 `RemoteBridge`·에디터 뷰 복구: 집중 89개·workspace strict Clippy 및 누적 원격 CI 10/10 통과.** `watch.subscribe`의 `view_delivery: 1`을 호스트가 명시적으로 승인한 경우에만 subscription·presentation timeline·u64 문자열 output cursor로 이벤트와 실제 snapshot을 묶는다. `view_event_capacity`는 수신 이벤트 staging과 렌더 대기열을 합친 보관량을 제한한다. overflow·cursor 누락·타임라인 변경 시 시뮬은 계속 진행하고, 뷰는 누락 구간을 덮는 최신 baseline을 한 번 받아 재구성하며 이후 새 출력부터 따라간다. paused 동일 tick 진단, seek/branch·stop/start·편집/제안 전환, source 비활성 tombstone, malformed stream fail-closed를 처리한다. 에디터는 main/preview 모두 `poll_view()`의 고정된 snapshot/reset 쌍을 사용하고 오래된 preview 행 응답을 거부한다. 실제 LocalHost와 WebSocket의 capacity-1·1fps 테스트에서 tick 104 snapshot·권위 체크섬 일치, 뷰 미소비 중 실시간 시뮬 진행, 이후 새 이벤트 전달을 확인했다. 원격 44개·에디터 25개·호환성 16개·MCP 가이드 4개로 **89개 통과**, `cargo clippy --workspace --all-targets -- -D warnings`와 `git diff --check`도 통과했다. `RequireFenced`는 구 호스트를 거부하고, 기본 `PreferFenced`의 구 호스트 fallback 및 명시적 `Legacy`는 기존 unbounded/best-effort 동작이며 API·에디터에 표시한다. 이 복구 패치 자체는 입력/커맨드 큐를 제한하지 않았고, 로컬 입력 병합·커맨드 admission은 위 후속 패치로 완료했다. 전송 ingress·RPC/오류 및 기존 FFI batch 정책까지 bounded 복구라고 주장하지 않는다. 권위 시뮬·late-join·체크섬 변경은 없으며, 이후 `4780c413`와 누적 원격 CI의 전체 10개 잡에서 검증됐다. [계약·검증 범위](view-recovery.md)
+- **검증 요청 격리: 정상 입력 focused 111개·workspace strict Clippy 및 원격 CI 10/10 통과.** `proposal.verify`/`verify.self`는 문서/제안 Frame과 revision·입력·last_play를 함께 캡처하고, 리플레이 디코딩·시뮬·보고서를 단일 bounded worker에서 실행한다. 호스트별 1개 상한, 즉시 `verify_busy`, 연결 종료/호스트 drop의 협력 취소, 실제 worker 종료 전 슬롯 유지, host-owned 완료 응답/활동 기록과 idle wake를 적용했다. 변경/거절된 제안에도 캡처 당시 보고서를 반환하고 `accept_verified`가 낡은 상태를 거부한다. worker panic은 라이브 플레이를 제거하지 않는다. 골든 변경 없음. focused 고유 **111개**(기존 묶음 102개+정상 동시성/수명주기 신규 9개), 신규 묶음 5회 연속 반복과 정상 경로 11개 재검사, workspace all-targets strict Clippy가 통과했다. 최초 원격 `2152181b`는 별도 FFI polling 순서 문제로 실패했고, 아래 수정을 포함한 `90c0e332`에서 전체 10개 잡이 통과했다. 이 통과는 이번 변경의 정상 입력/기존 테스트 범위다. 추가 비정상/문제 입력 회귀는 계속 보류·제외하며, panic 격리의 새 문제 입력 runtime 검증을 주장하지 않는다. 남은 자원/선점 한계는 P1에 분리했다. [계약·검증 범위](nonblocking-verification.md)
+- **FFI polling 출력 버퍼 검증 순서: 집중 10개·기존 오류 경로 5회 반복 및 원격 CI 10/10 통과.** 비어 있는 frame/event 큐에서도 null인 nonzero-capacity 출력 버퍼를 pump/데이터 준비 확인보다 먼저 거부한다. zero-capacity 크기 조회와 reset/event 보존, 기존 ABI assertion은 유지했다. 결정론적인 빈 전송 polling 회귀, `ORR_REQUIRE_C_COMPILER=1` FFI 10개, 기존 `error_paths_return_codes_not_crashes` 5회 반복, workspace strict Clippy가 통과했다. `90c0e332` 및 `24ba4253`의 Linux ARM64 CI에서 새 polling 회귀와 기존 오류 경로가 실제 통과했고, `1381d3cb`에서는 Windows·Linux ARM64 양쪽의 통과를 확인했다. 과거의 FFI readiness 실패는 수정 완료이며, 지속적 빌드 부하 스트레스와는 구분한다.
+- **교차 플랫폼 완료 게이트: sample 포함 다섯 그룹 보강 및 원격 CI #58 10/10 통과.** `cross_platform_checksum_compare`는 `native`·`sample-build`·`wasm32`·`android-arm64`·`wasm32-browser`에 의존하며 `always()`로 실행 후 다섯 결과가 모두 `success`인지 검사한다. 기존 네 그룹의 로컬 7개 테스트 그룹·결과 조합 1,296개와 원격 성공은 당시 이력이다. 그 집계는 CI #57의 Linux sample 실패를 막지 못했으나, 이후 보강은 workflow 회귀 14개·7,776개 조합과 리뷰를 통과하고 `c73169b8` CI #58에서 게시·검증됐다. `sample-build` 결과도 `success`다. 로컬 Python 검사는 GitHub Actions/Rust 실행을 대신하지 않으며 전체 10/10은 개별 잡까지 확인한 결과다.
+- **브라우저 CI 필수 실행: 실제 Chromium 6개 원격 통과.** 고정 Playwright 설치, `Cargo.lock`과 일치하는 wasm-bindgen CLI, 두 JS/WASM 패키지 생성, Node 경계 검사, 6개 Chromium e2e를 CI에 연결했다. `ORR_REQUIRE_BROWSER=1`·`ORR_REQUIRE_WEBGPU=1`로 전송·렌더링의 자체 SKIP을 실패로 처리하며 WebGL2/WebGPU에 SwiftShader를 명시한다. 로컬 `npm ci`·4개 Node 테스트 그룹은 통과했다. 실제 생성 WASM의 두 constructor에서 정상/기본값 30개·거부값 54개를 확인하고 실제 Hello 인코딩의 u64 빌드 해시를 독립 BigInt 기준과 비교했다. 전제조건 누락 15경우의 선택적 SKIP/필수 실패도 확인했다. 당시 로컬 Chromium 시작은 `socket()` EPERM, 지원 클라우드 브라우저의 루프백 접근은 `ERR_BLOCKED_BY_CLIENT`로 차단되어 필수 모드 시도 1개가 실패했다. 하네스 release 컴파일·strict clippy는 통과했다. 이후 위 CI #44/#46/#47/#48에서는 WT/WS/WSS·Web Worker·WebGL2/WebGPU를 실제 Chromium에서 필수 모드로 실행해 각각 **6 passed / 0 failed / 0 ignored**를 확인했다. 로컬 차단 이력은 이 원격 실행 성공을 취소하지 않는다. 상세는 [브라우저 검증](webtransport-trial.md#11-browser-gate-regression-coverage-and-current-validation).
+- **검증 후 수락 경쟁 조건: 집중 72개·네이티브 workspace 및 누적 원격 CI 통과.** `ProposalState`(문서 인스턴스 id·문서/제안 revision), `accept_if_unchanged`, ERP `proposal.accept_verified`를 추가하고 CLI `apply`가 검증 결과의 `verified_state`로만 자동 수락하도록 연결했다. 오래된 호스트에서는 수동 수락으로 대체하지 않고 제안을 열린 상태로 남긴다. 기존 수동 `proposal.accept`는 유지한다. 검증 결과: `orr_edit` verify 16개, 실제 소켓 ERP proposals 13개, MCP integration 10개·생성 가이드 4개, CLI unit 9개·integration 20개로 총 72개 통과(신규 회귀 16개). 요청한 검사 결과가 명시적 true가 아니거나 검증 상태가 없으면 CLI 자동 수락을 거부하며, MCP의 명시적 null 상태는 오류다. 가이드는 생성 명령으로 빌드 id pin만 갱신했으며 수기 수정하지 않았다. 네이티브 전체 workspace에서도 통과했다. 전체/strict CI clippy와 wasm 골든 기본·SIMD slice는 통과했다. 이후 위 누적 원격 CI에서 설정된 플랫폼 잡·실제 Chromium e2e까지 통과했다. `verified_state`는 동시 수정 방지용이며 검사 통과의 인증서는 아니다. 수동 수락의 같은 필드 “제안 값 우선” 정책은 유지하며, 충돌 경고는 P2에 남긴다.
+- **Frame 체크섬 누락: ORRF v2 네이티브·wasm 기본/SIMD 및 원격 교차 플랫폼 골든 통과.** v1에서 빠진 컬렉션 경계·리스트 free 순서 등을 포함해 `Frame::checksum()`을 직렬화 바이트의 체크섬으로 맞췄다. 스냅샷 버전이 2로 바뀌며 v1은 거부한다. 집중 검증에서 최신 Cargo 빌드 라이브러리를 사용한 4개 통합 테스트 suite의 36개 테스트(신규 회귀 9개·갱신 골든 포함)가 통과했고, 앞선 Cargo doctest 1개도 통과했다. `core.rs` 기대값은 의도적인 체크섬 변경으로 `14364510420768418636`→`2074994390429319065`이며 이유를 소스에 기록했다. 이후 7개 테스트 파일의 Frame 기반 기대값 21개(ECS 1개+downstream 20개)를 관측된 새 값으로 이전했다. 원시 FP·캡슐 쿼리 기대값과 테스트 workload/assertion 로직은 바꾸지 않았다. 이전한 21개 기대값은 네이티브 전체 workspace와 기본 wasm 재검증에서 모두 일치했고, 이후 위 원격 CI의 설정된 native·wasm·Android 골든 잡과 집계도 통과했다. 직렬화 body와 checksum의 동일성, 상태 경계·free 순서 구별, ZST 리스트 길이 복원, clone/restore 뒤 할당 순서 및 v1 거부는 완료 범위다. `.orrp` 내부 스냅샷, 기존 골든, 서로 다른 버전 피어에 영향이 있으므로 [Frame/리플레이 호환성](frame-compatibility.md)을 먼저 확인한다.
+- **기본 빌드 id 호환 경계: 구현·네이티브 workspace 및 누적 원격 CI 통과.** `orr_ecs::FRAME_FORMAT_VERSION`과 `orr_sim::frame_build_id`로 native/browser/server의 arena·physics 및 ERP 기본 id를 ORRF 버전에 묶었다. 명시적 custom id는 호출자가 helper를 사용하거나 직접 변경해야 하며, 0은 기존 추적 안 함 wildcard다. 브라우저 custom build id는 십진/0x 문자열을 손실 없이 전달·파싱하고, 안전한 정수 범위를 벗어난 JS Number는 연결 전에 거부하도록 수정했다. 서로 다른 버전 Hello의 양방향 거부·현재 버전 일치·u64 경계를 포함한 신규 9개 검사(remote 1·sample 3·sim 2·web parser 3)가 네이티브 workspace에서 통과했다. Node의 정확한 u64 경계 검사와 실제 Chromium 연결 검사는 별도이며, 두 경로 모두 위 원격 브라우저 잡에서 통과했다. 같은 ORRF 버전 안의 게임 코드 변경 식별은 P2에 남는다.
+
+독립적인 구/신 ECS 라이브러리 비교에서 엔티티 재사용·동일 크기 컴포넌트·singleton·해제 리스트·ZST를 포함한 128프레임의 스키마/상태 payload 바이트가 동일했고, ORRF 버전 4바이트와 체크섬 trailer 8바이트만 달랐다. 전체 게임/플랫폼 동등성 검증을 대체하지는 않는다.
+
+체크섬 paired 벤치(최적화 빌드, 각 10만 회·3쌍 중앙값): 1000엔티티/리스트 없음 2778→2648ns(−4.7%, 측정 잡음 범위), 리스트 있음 3681→4055ns(+10.2%, +374ns); 1만 엔티티/리스트 없음 26569→26566ns(거의 동일), 리스트 있음 27080→27775ns(+2.6%). 전체 틱 비용 재측정 결과는 아니다.
+
+**첫 번째 안정화 배치 네이티브 전체 검증(브라우저 CI 연결 전):** `cargo test --workspace --release --no-fail-fast -j5`를 `ORR_REQUIRE_GPU=1`(lavapipe)·`ORR_REQUIRE_C_COMPILER=1`·`RUST_TEST_THREADS=1`로 실행해 exit 0. 하네스 집계는 **847 passed / 0 failed / 4 ignored**이며 GPU 리드백·에디터·C FFI 필수 검사도 통과했다. 실제 실행 841개와 자체 SKIP 6개를 합친 수치다. 브라우저 e2e 함수 6개는 `crates/orr_web/web/pkg` 생성물이 없어 자체 SKIP 뒤 성공 반환했다. 따라서 실제 브라우저 실행 6개가 통과했다고 해석하면 안 된다(`ORR_REQUIRE_BROWSER=1`이면 이 누락을 실패로 처리).
+
+**첫 번째 안정화 배치 clippy(과거 기록):** `--workspace --all-targets` exit 0, CI의 엄격한 20개 패키지 `-D warnings` 검사도 exit 0. 전체 workspace 검사에는 변경 전부터 있던 `orr_editor/src/agent_ui.rs:382`의 불필요한 `&name_of` borrow 경고 1개가 남아 있으므로 “전체 경고 0”은 아니다.
+
+**wasm 실제 실행:** Wasmtime 25.0.0에서 wasm32-wasip1 기본 **120 passed / 0 failed / 4 ignored**, 설정된 SIMD slice **96 passed / 0 failed / 4 ignored**. reflection bake fixture도 양쪽에 추가 실행했고, 이전한 Frame 골든 21개 전부가 네이티브·기본 wasm에서 일치했다. 신규 체크섬 회귀 9개(최대 u32 ZST 포함)는 기본·SIMD 모두 통과했다. SIMD 결과는 설정된 slice 범위이며 전체 workspace 실행은 아니다.
+
+**추가 확인:** `wasm32-unknown-unknown` 브라우저 타깃 release 빌드·strict clippy 통과, 네이티브 hotpatch 기능 빌드 통과. 2D/3D 헤드리스 샘플 각각 300바디·300틱 실행 성공, stall 0, 엔티티 수 339/443 유지. 검증 도구체인은 Rust 1.99.0이며 첫 번째 배치의 로컬 워크플로 5그룹/216조합 및 `git diff --check`도 통과했다. 브라우저 CI 연결 뒤 워크플로 검사는 위 7그룹/1,296조합으로 확대했으며, 앞서 기록한 네이티브·wasm 수치는 첫 번째 배치 결과를 그대로 보존한다.
+
+**첫 번째 안정화 배치의 미실행 범위(과거 기록):** 당시 Windows·macOS·ARM/Android, 하드웨어 GPU, 실제 브라우저 e2e, Xvfb 창 smoke, 원격 GitHub Actions는 실행하지 않았다. 이후 위 원격 CI에서 native 4타깃·NDK+qemu Android·실제 Chromium·Linux lavapipe/Xvfb는 통과했다. 하드웨어 GPU·실기기 검증은 여전히 별도이며, 당시 로컬 소프트웨어 GPU 리드백·C FFI 필수 실행 기록은 그대로 유효하다.
+
+**이전 로컬 뷰 복구 체크포인트(과거 기록):** focused 139개와 strict Clippy 통과, 실제 capacity-2 Threaded→ERP→WebSocket overflow 복구를 확인했다. 그때 전체 workspace release는 LTO 링크 중으로 기록했다. 이후 협상형 원격 확장은 focused 89개, 누적 원격 10/10으로 별도 검증했으며, 과거 focused 139개 자체를 전체 release/CI 수치로 바꾸지 않는다.
+
+## 구현 완료 기록
+
+M0~M6의 구현 마일스톤 기록이다. 아래 성능·플랫폼 통과 수치는 각 구현 시점의 측정이며, 2026-10-02 문서 대조만으로 다시 검증한 수치가 아니다. 플랫폼 실기기 확인과 제품화·안정화 과제는 아래에 따로 적는다. M6는 설계 §10에 정량 완료 조건이 없으므로, 모든 확장 기능·플랫폼이 완성되었다는 뜻으로 읽지 않는다. **표의 Frame 기반 골든 값과 “골든 불변”은 ORRF v1 시절의 이력이다. ORRF v2의 현재 기대값은 위 재검증을 거쳐 테스트 소스에 고정했으며, FP 연산만의 골든과는 구분한다.**
 
 | 크레이트 | 내용 | 수치 |
 |---|---|---|
@@ -11,7 +68,7 @@
 | `orr_ecs` | Frame(스파스셋, Pod 컴포넌트), 결정론 엔티티 할당, 쿼리 1~4개 + Without, Commands, 싱글톤, FrameList, FrameRing, xxh3 체크섬 | 1M 순회 1.9ms (순수 Vec 1.2ms), 10만 스냅샷 0.66ms, 체크섬 0.48ms. 골든 `14364510420768418636` |
 | `orr_sim` | Game/System/SimContext, TickInputs, 이벤트 키, 핫패치 간접 호출(`hotpatch` 기능, subsecond 연결), 빌드 해시 | |
 | `orr_session` | 예측/롤백, stall, 이벤트 3상태 조정, 체크섬 비교, `.orrp` 리플레이(lz4) + 빌드 해시 검사 | 1만 엔티티 틱 180µs, 8틱 재시뮬 787µs. 리플레이 약 19B/틱(2인) |
-| `orr_ecs` 직렬화 | `Frame::to_bytes`/`from_bytes` (ORRF v1, LE, u32 길이, 체크섬 검증, 잘못된 입력은 Err). `.orrp` v2 키프레임 + `seek` | 직렬화/역직렬화 1만 179/136µs, 10만 3.5/3.1ms. 키프레임 50틱 간격 시 400틱 2인 리플레이 7.5KB→10.6KB |
+| `orr_ecs` 직렬화 | `Frame::to_bytes`/`from_bytes` (현재 ORRF v2, LE, u32 길이, 체크섬 검증, 잘못된 입력은 Err; v1 호환 단절은 위 패치 상태 참고). `.orrp` v2 키프레임 + `seek` | 직렬화/역직렬화 1만 179/136µs, 10만 3.5/3.1ms. 키프레임 50틱 간격 시 400틱 2인 리플레이 7.5KB→10.6KB |
 | 늦은 참가 | 확정 틱(`verified_tick`) Frame 스냅샷 + lz4, 빌드 해시·설정·체크섬 검증. 빈 슬롯은 호스트가 기본 입력으로 채움. 기존 피어는 `authored_since`로 입력 재전송. `.orrp` 파서: 신뢰할 수 없는 개수·lz4 크기·틱 경계 검사 | 3번째 피어가 150틱에 참가, 600라운드까지 체크섬 일치(롤백 1028회) |
 | 참가 복구 | 기존 피어가 `ORRB` 알림으로 보유 입력 구간을 알림 → 참가자가 빈틈을 시간 없이 판정(`InputGap`). 시도 번호로 재요청·새 스냅샷, 참가 중 입력 보관(hold), `max_join_attempts`(기본 3), `mark_slot_vacant`로 재입장 | 느린 전송(80라운드, 보관 4틱)도 재시도 없이 수렴. 누락→재요청, 재입장 모두 체크섬 일치 |
 | `orr_testgame` | arena 테스트 게임, 루프백 네트워크 2클라 2000틱 테스트 | 골든 `0x13cdc3c810d65459` |
@@ -41,18 +98,151 @@
 | ERP 호스트 클라이언트 모드 | 공통 `orr_sample::relay_view::RelayView`(Relay 클라 + Threaded 브리지 + ViewStreamSource)를 `orr_ffi`와 `orr_remote`가 공유. `orr_remote_host --join 서버` → ERP `viewstream`이 클라이언트 브리지 프레임(롤백 표시·범위, 예측/확정/취소 이벤트)을 소켓으로 전송. `session.status`, `sim.checksum`, 자기 슬롯 `sim.input`; 편집·타임라인은 `not_in_client_mode`. `orr_tui --connect` 클라이언트 모드 지원 | `--join` 호스트 2 + Rust 클라 1, WS·지연·손실 2%: 확정 체크섬 19지점 일치, 디싱크 0, 롤백 프레임 약 85(최대 8틱) |
 | 브라우저 클라 (WebTransport) | 시험 구현 결과 `docs/webtransport-trial.md`: h3 + h3-webtransport + h3-quinn, 기존 QUIC `orrery/1`과 `h3`가 **UDP 포트 하나 공유**(ALPN 분기), 개발용 ECDSA P-256 13일 자체서명 + SHA-256(`serverCertificateHashes`), Safari용 PEM 옵션, `ws://`·`wss://`. `orr_server --webtransport --ws-bind --wss-bind`. `orr_web`(wasm32-unknown-unknown): 브라우저에서 같은 RelayClient + Arena 시뮬, WebTransport → WebSocket 대체. Firefox/Safari 체크리스트는 문서 7절 | 헤드리스 Chromium + 네이티브 봇 약 600틱: 체크포인트 20/20 일치, 디싱크 0, 브라우저 롤백 약 137회(WT·WS·wss 모두). 로컬 왕복 중앙값 WT 0.9ms, WS 0.7ms |
 | 권위 서버 (M6 ①) | 방 단위 선택(`orr_server --authoritative [--ai-slot N]`). 서버가 확정 입력으로 `Simulation<G>`을 헤드리스 실행 → 클라 체크섬을 서버 값과 비교(투표 없음), 불일치 클라에만 교정 스냅샷(`Correction`, lz4) → `Session::restore_confirmed`, `.orrd` 덤프, 반복 디싱크(60초 3회)·치트(감사 훅) 추방. 늦은 참가는 서버 스냅샷. 서버 AI 슬롯. 프로토콜 v3(Relay 트래픽은 v2와 바이트 동일). `docs/authoritative.md` | 서버 비용: 물리 1000바디 약 1ms/틱(예산 6%), arena 2.4µs. 강제 디싱크: 체크포인트 4틱 뒤 감지, 교정 104B, 이후 일치(QUIC 포함) |
-| 3D 물리 (M6 ②) | `orr_fp` 3D 수학(FPMat3, 쿼터니언 적분, 골든 `0x1e80d8a6af9b420d`). `orr_physics3d`(2D와 별도 크레이트, 2D 불변): 구·캡슐·박스 6쌍(정확한 선분 최근접점, 박스 15축 SAT + 4점 클리핑), sort-and-sweep, 순차 임펄스 서브스텝 8회·warm start·마찰 2방향·반발, 슬립 아일랜드, raycast·구 캐스트, 상태 전부 Frame. 롤백·리플레이·2인 세션 테스트 | 골든 5개(stack10 `0x21eb449802e96d0f`, pyramid5 `0x28f6e5ce7d1c811e`, rain75 `0xa509c0497431ac58`, ramp6 `0x2a04b439faf52168`, mixed120 `0x02692d01c7d15ab6`), wasm32 동일. 10단 600틱 밀림 0.012, 25단까지. 1000바디 깨어 있음 약 4.5ms/틱(목표 4ms 약간 초과), 잠듦 22µs, 500바디 1.9ms. 없음: 볼록 다각형·조인트·CCD·센서·3D 뷰 |
+| 3D 물리 (M6 ②) | `orr_fp` 3D 수학(FPMat3, 쿼터니언 적분, 골든 `0x1e80d8a6af9b420d`). `orr_physics3d`(2D와 별도 크레이트, 2D 불변): 구·캡슐·박스 6쌍(정확한 선분 최근접점, 박스 15축 SAT + 4점 클리핑), sort-and-sweep, 순차 임펄스 서브스텝 8회·warm start·마찰 2방향·반발, 슬립 아일랜드, raycast·구 캐스트, 상태 전부 Frame. 롤백·리플레이·2인 세션 테스트 | 골든 5개(stack10 `0x21eb449802e96d0f`, pyramid5 `0x28f6e5ce7d1c811e`, rain75 `0xa509c0497431ac58`, ramp6 `0x2a04b439faf52168`, mixed120 `0x02692d01c7d15ab6`), wasm32 동일. 10단 600틱 밀림 0.012, 25단까지. 1000바디 깨어 있음 약 4.5ms/틱(목표 4ms 약간 초과), 잠듦 22µs, 500바디 1.9ms. 없음: 볼록 다각형·조인트·CCD·센서. 3D 뷰는 다음 행에서 구현 |
 | 3D 렌더·뷰 (M6 ③) | `orr_render::Renderer3D`: 원근/직교 + 궤도 카메라, 깊이, MSAA 4x(폴백), 구·박스·캡슐·바닥 인스턴싱, 금속도/거칠기 Blinn-Phong, 반구 앰비언트, 방향광 2048² PCF 그림자(텍셀 스냅), ACES 선택, sRGB, 3D 디버그 선, 5x7 텍스트. `orr_view` 3D(slerp, 롤백 오차 감쇠). 뷰 스트림 v2 `ViewFrame3`(88B 레코드, 2D v1 바이트 불변). `orr_sample --bin physics3d`(2인 롤백, 궤도 카메라, 발사·생성). 스크린샷 `docs/img/physics3d.png` | GPU 리드백 11개(조명·그림자·가림·MSAA·1만 인스턴스·투영). CPU 인스턴스 생성 0.075ms/1076개. lavapipe 1000바디 그림자+MSAA 481ms(소프트웨어). 없음: 캐스케이드·LOD·접촉 표시, 3D 스트림의 ERP·C ABI·orr_tui 연결, 하드웨어 GPU·Windows 확인 |
 | 모바일·웹 최적화 (M6 ④) | 렌더 없는 샘플 게임을 `orr_games`로 분리(골든 5개, 이동 전후 동일). 크로스 타깃 벤치 `orr_wasm_bench`(12케이스, 체크섬 고정) + `tools/wasm_bench.sh`. wasm32 FP 빠른 경로(mul i64, div |a|<2^47, sqrt 표+뉴턴), 결과 비트 동일. 브라우저: 시뮬·전송을 Web Worker로, `PhysClient`(PhysGame), 뷰는 WebGPU→WebGL2→2D 캔버스(`orr_web_gpu`, `Wgpu::for_canvas`), 2D 셰이더 `fwidth` 분기 밖으로. `web`/`web-small` 프로필 + wasm-opt. Android aarch64(NDK r27c, qemu로 골든). `Settings3D::LOW`·`physics3d --low`. CI: android-arm64 잡, wasm simd128 골든 반복, 웹 크기 보고. `docs/wasm-bench.md`, `docs/mobile.md` | wasm(Chromium) fp_mul 4.10→1.80ns, fp_div 10.6→3.18, fp_sqrt 160→7.4, 물리 2D 1000바디 1262→883µs/틱, 3D 4627→4069µs. 웹 번들(PhysGame 포함) -O3 594KB, gzip 209KB. 브라우저 e2e 6개(WT/WS/WSS, WebGL2, WebGPU) 체크포인트 20/20 일치. lavapipe 1000바디 `--low` 291→55ms. 없음: 브라우저 3D, Firefox·Safari, 터치·오디오, 실기기 Android, iOS(문서만), ECS wasm 3~5배 느림 |
 | CI | `.github/workflows/determinism.yml` — x64/ARM/Win/mac + wasm32-wasip1 골든 비교 | 2026-09-29 5개 플랫폼 모두 통과, 체크섬 일치 |
 
-## 다음
+## 완료 목록과 대조해 정리한 항목 (2026-10-02)
 
-1. (P2P 한정, Relay 모드에서는 해결됨) 참가 후속: `join_backlog_peers` 기본값 0이면 빈틈 검사 없음(참가자가 피어 수를 스스로 알 방법 필요). 자리 비우기 시 피어마다 떠난 플레이어 입력을 받은 범위가 다르면 채우지 않음(조정자 필요). 스냅샷 전 도착한 알림은 호출자가 버퍼링. 폐기된 시도의 링크 정리. Relay 서버 연동. 조작된 리플레이 입력이 debug 빌드에서 FP 오버플로 패닉
-2. 물리: 목표 엔티티 수는 1,000바디로 확정(설계 §3.4) — 1000바디는 예산 충족, 3000바디 이상 롤백 초과는 보장 대상 아님. 20단 박스 스택 붕괴(솔버 한계), 캡슐 4단 스택 축 방향 0.16 밀림, 컨트롤러 움직이는 발판 미지원. 샘플에 캡슐 렌더링 없음. CCD, 조인트. 쿼리가 `&mut Frame`을 요구. `Body` 96B로 변경되어 이전 물리 리플레이 호환 안 됨
-3. M2 마무리: 화면 텍스트, 이벤트 채널 상한, 낮은 fps에서 롤백 보정 정확도. `sample-build` CI 리눅스 확인
-4. M3 후속: (`TickInputs` 플래그·`resim_ticks`는 2026-10-01 해결) 창 클라가 방 시작 후에야 열림, 서버 속도 제한. 브라우저 클라 WebTransport·`wss://` 구현(2026-10-01, 위 표) — 남은 것: Firefox/Safari 실기기 확인, (물리 데모 브라우저·Web Worker 이전은 M6 ④에서 해결) 네이티브 WT/wss 클라 없음, h3 계열 0.x 고정
-5. **M4 에디터 MVP — 완료 (2026-09-30)**. 완료 기준(씬 편집 → 플레이 → 되감기 루프) 충족: 에디터 창과 ERP 에이전트 양쪽에서 테스트. 남은 것: 에디터가 `PhysGame` 전용(`Game` 제네릭화), 시뮬이 UI 스레드에서 돎(Threaded 호스트로), 계층 트리·기즈모·박스 선택·네이티브 파일 대화상자·도킹 없음, 플레이 중 편집 undo 없음(되감기로 대체), ERP 프레임 델타 없음·편집 모드 프레임 스트림 없음, MCP 어댑터 미구현, Windows 실제 GPU에서 에디터 확인 필요. 규칙: 화면 전체 캡처 금지(앱 자기 프레임버퍼·GPU 리드백만), 서브에이전트는 Sonnet/Haiku, 파일은 LF.
-6. **M5 AI — 완료 (2026-09-30)**. 완료 기준(에이전트가 수정 → 검증 → 수락까지 한 번에) 충족: MCP 자식 프로세스 테스트 + 에디터 내장 ERP 테스트 + 리눅스 실제 창 확인. 남은 것: 실제 LLM(Claude Code)으로 `orr_mcp` 사용 시험(Windows에서), 사람과 제안이 같은 필드를 바꾸면 제안 값이 이김(경고 없음), 제안 안 편집 하나만 빼기 없음, `proposal.verify`가 호스트 스레드를 막음(취소 없음, 최대 6000틱), 제안 소유자 구분 없음, 검증 스크린샷(`view.screenshot`) 없음, 리플레이 디버그 커맨드가 엔티티 번호 변경에 취약. 부하 민감 테스트: `orr_server` `disconnect_and_rejoin_over_quic`, `orr_net` `max_connections_enforced::quic` — 실시간 기반이라 CPU를 여러 빌드가 나눠 쓸 때 실패한 적 있음(단독 6/6 통과), 진행량 기준으로 바꾸는 것이 과제. 주의: sccache는 여러 작업 폴더를 오가면 `env!("CARGO_MANIFEST_DIR")`가 박힌 산출물을 재사용해 오류를 낸 적이 있어 끔.
-7. **뷰 교체 가능성 (결정 12) — 완료 (2026-10-01)**. ① 에디터를 브리지 뒤로 ② 언어 중립 뷰 스트림 + `orr_ffi`(C ABI) + 소켓 전송 ③ 터미널 뷰어 `orr_tui`와 C 테스트 프로그램으로 증명 — 모두 완료. 남은 것: C ABI 멀티플레이는 완료(위 표), ERP 소켓·헤드리스 호스트 클라이언트 모드 완료(위 표), C 헤더 수기 관리, Windows/mac에서 C 테스트·FFI는 CI 첫 실행, `orr_tui` 롤백 보정 스무딩·wss 없음.
-8. **M6 — 완료 (2026-10-01)**. ① 권위 서버 ② 3D 물리 ③ 3D 렌더·뷰 ④ 모바일·웹 최적화(위 표). 남은 것: 브라우저 3D(`Renderer3D` WGSL 브라우저 검증), Firefox/Safari, 터치·오디오, Android 실기기 속도, iOS 빌드(macOS 필요), wasm ECS 순회 3~5배 느림(simd128은 기본 꺼짐), CI에 wasm-opt 없음, qemu aarch64에서 다중 스레드 테스트 하네스가 가끔 segfault(단일 스레드로 실행). 부하 민감 테스트에 `orr_ffi` `c_client error_paths_return_codes_not_crashes` 추가(부하 시 107초, 단독 통과).
+다음 항목은 예전 미완료 목록에 남아 있었지만 코드와 위 구현·검증 기록에서 이미 해결되어 삭제했다. 이번 문서 대조 자체가 새로운 테스트 실행은 아니며, 실제 통과 근거는 위 커밋별 기록을 따른다.
+
+- MCP 어댑터: `crates/orr_mcp` 및 `tests/agents_md.rs`·M5 통합 테스트가 있다. `docs/AGENTS.md`는 생성물이며 직접 수정하지 않는다.
+- 에디터 시뮬을 UI 스레드에서 분리: `orr_remote::LocalHost`와 `orr_editor/src/backend.rs`의 ERP/`RemoteBridge` 경로가 구현되어 있다. `orr_editor/tests/deps.rs`는 직접 시뮬 의존을 검사한다. 이후 `PhysGame`/Arena compiled adapter로 연결·그리기를 분리했으며 Arena 원격 에디터는 게시되었다. 로컬 시작은 여전히 PhysGame 전용이고 `orr_sample` 의존도 남는다. Arena 원격 에디터는 CI #58에서 전체 통과했으며, 후속 managed-input·키보드 제어의 전체 CI 대기와 구분한다.
+- 편집 모드 프레임 스트림: `orr_remote/src/server.rs`의 `source: view` 경로는 플레이 세션이 없어도 `doc.frame()`을 보낸다. Frame 델타 최적화는 별도 미완료 항목이다.
+- 2D 샘플 캡슐 렌더링: `orr_sample/src/physics_view.rs`의 `Shape::Capsule`, `orr_render/src/list.rs`의 캡슐 렌더가 있다.
+- TUI 롤백 보정: `orr_tui/src/state.rs`에 100ms 스무딩, `state_tests.rs`에 회귀 테스트가 있다. `wss://` 지원은 여전히 없다.
+- `TickInputs` 플래그·`resim_ticks`, C ABI 멀티플레이, ERP 클라이언트 모드, WebTransport·WSS, 브라우저 물리 데모·Web Worker 이전은 위 구현 기록대로 완료했다.
+- `sample-build`의 Linux/Windows 테스트와 Linux lavapipe GPU 리드백·기존 Xvfb 실행은 CI #56까지 통과했다. CI #57에서 새 Arena native 창 자체는 실제 실행했지만 노란 선택 픽셀 검사는 실패했다. 이후 CI #58에서 캡처 안정화 수정과 새 Arena native smoke 전체가 통과했다. 실패 이력이나 창 시작만을 이 후속 통과 근거와 혼동하지 않는다.
+- 선택적 `orr_audio`·Arena Hit와 실제 PCM/lifecycle 검사는 구현했고 CI #56에서 Linux/Windows native 출력 경로 컴파일도 통과했다. 장치 청취·3D 공간 오디오·브라우저 오디오·에셋/음악 스트리밍은 별도 범위다.
+- Arena CLI/구조화 입력·리플레이 워크플로와 표본 간격 옵션/경고는 구현했다. 스크립트 기준선, 실제 에이전트 파일럿, 시각·오디오 runtime 검증의 근거는 서로 대체하지 않는다.
+
+## 우선순위가 있는 후속 작업
+
+P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 보강, P3 = 별도 설계가 필요한 확장. 위 완료 항목을 다시 구현할 목록이 아니다. 아래는 아직 남은 범위와 그 완료 조건이며, 명시적 제외·비목표는 마지막 절에 분리한다.
+
+### P1. 새 입력 기능 전체 CI·남은 자원 제한·검증 한계·부하 검증
+
+- **즉시 진행 중: managed-input·Arena 키보드 제어 전체 CI.** 연결 소유 lease와 명시적 Take control의 구현은 집중 98개·targeted release strict Clippy·독립 리뷰 2건을 통과했지만 아직 미커밋이다. 완료 조건은 최종 변경을 게시한 동일 커밋의 모든 10개 CI 잡과 필수 Arena native smoke 통과를 확인하는 것이다. 기존 CI #57 캡처/집계 문제는 `c73169b8` CI #58에서 해결됐다. 이 게이트 대기는 새 기능에 대한 것이며 draft PR의 병합을 뜻하지 않는다.
+
+1. **입력·커맨드 개수 제한 밖의 큐/메모리 예산.** 로컬 held input 병합·명시적 커맨드 admission/backpressure와 표준 host 미제출 staging 제한은 완료다. 남은 범위는 `PumpedWs`/`LocalTransport` ingress, RemoteBridge RPC 응답·오류 큐, 구 호스트 fallback/명시적 `Legacy`의 unbounded presentation 경로, FFI의 기존 4096-batch drop-oldest 정책이다. 동적 payload의 byte 크기·파생 커맨드·이미 제출된 replay/session history·network 재전송 복사본도 로컬 개수 제한에 포함되지 않는다. 기존 ERP 요청 수·연결 큐 byte 제한과 새 presentation/command 제한을 구분하고, 각 큐의 byte/개수 예산·포화 정책·관측 지표를 정해야 한다. 완료 조건: 정상 부하와 느린 소비자에서 상한·순서·거부/복구 계약을 계측해 확인하며, 일부 큐만 bounded인 상태를 엔진 전체 메모리 상한으로 부르지 않는다. [뷰 복구](view-recovery.md) · [커맨드 admission](command-admission.md)
+2. **비차단 검증의 자원/취소 한계.** 호스트별 단일 worker와 `verify_busy`, 캡처한 상태 보고, 협력 취소 및 응답/활동 수명주기는 완료다. 남은 설계는 replay 디코딩 할당량, 한 tick·custom hook·decoder의 실행시간, 강제 선점 여부다. 기본 6000틱은 디코딩 메모리나 wall time을 제한하지 않고, admission snapshot 복사는 여전히 호스트 스레드에서 이루어진다. 직접 `call_local`도 동기 계약이다. 완료 조건: 실제 지원할 입력/자원 예산과 취소 계약을 먼저 확정하고 그 범위의 측정·검증 근거를 남긴다. 보류된 추가 문제 입력 회귀를 이 목록만으로 재개하지 않는다. [계약/한계](nonblocking-verification.md)
+3. **지속적인 빌드 부하에서의 네트워크/FFI 스트레스.** 연결 수·`PlayerLeft` 장벽, 재접속 전후 검증 tick/공통 체크포인트 및 스레드 정리, FFI의 데이터 도착 여부와 무관한 출력 버퍼 검증은 구현했다. 남은 것은 지속적인 병렬 빌드 부하에서의 반복 검증과 다른 실시간 통합 테스트의 민감성 평가다. 단독/동시 테스트 반복 통과와 기본 CI 통과만으로 이 부하 조건을 검증했다고 하지 않는다. 완료 조건: 관측 가능한 진행·안전한 최종 시간제한·실패 진단을 유지하며 단독/빌드 부하에서 반복 통과, 무한 대기 없음. 과거 기록인 앞의 두 테스트 단독 6/6 및 FFI 부하 시 107초·단독 통과는 보존하되, 이후 FFI readiness 수정과 원격 회귀 통과를 무시한 미수정 결함으로 해석하지 않는다. sccache의 다른 `CARGO_MANIFEST_DIR` 산출물 재사용 사례에 대한 주의도 유지한다.
+
+### P2. 지원 범위·통합·측정 보강
+
+- **에디터/AI:** PhysGame/Arena compiled adapter와 Arena 원격 편집·proposal preview·read-only Viewer는 CI #58에서 통과했다. 명시적 managed-input 키보드 제어도 로컬 구현·검증됐으며 이 새 기능의 전체 CI는 위 P1에 남았다. 이후 범위는 로컬 Arena 시작, 플레이어 생성 UI, 추가 게임 어댑터의 지원 계약, 같은 필드 충돌 경고, 제안 소유자·수정 이력/정책, 제안 중 개별 편집 제거, `view.screenshot` 기반 검증이다. 임의 동적 플러그인 ABI는 현재 adapter가 제공하지 않는다. 실제 LLM CLI/MCP 파일럿은 시작했지만 첫 시도의 하네스 보수와 두 번째 시도의 인프라 차단·재개가 있어 깨끗한 비교 벤치마크는 아직 없다. 고정된 환경·목표·개입 정책과 독립 oracle로 Windows 포함 재현 가능한 시험이 필요하다. 플레이 중 편집 undo는 현재 되감기로 대체한다. 리플레이 디버그 커맨드의 엔티티 번호/타입 id는 씬 구조 변경에 취약하므로 안정 GUID 매핑을 검토한다. [Arena 계약/평가 범위](arena-agent-workflow.md)
+- **브리지/외부 엔진:** ERP 전체 Frame 델타·압축 최적화(현재 1000바디 약 113KB/틱, 뷰 스트림 약 52KB/틱); 3D `ViewFrame3`를 ERP·C ABI·TUI 경로에 연결; C 헤더 자동 생성 또는 ABI 일치 검사; Windows/macOS 외부 엔진 C·FFI 실제 통합 및 하드웨어 GPU 확인; TUI `wss://`. CI의 native 테스트와 cdylib/staticlib 빌드는 통과했지만 비Linux C 하네스는 컴파일러가 없으면 자체 SKIP할 수 있으므로, 실제 C 실행의 개별 로그와 제품 통합 근거를 구분한다. 3D 포맷·렌더 자체의 부재와 통합 미완료도 구분한다.
+- **네트워크:** 창 클라이언트가 방 시작 뒤에야 열리는 시작 UX, 서버 요청/입력 속도 제한, 네이티브 WT/WSS 클라이언트, h3 0.x 의존 업데이트/호환 검사. 기본 host/Relay id에는 이번 패치로 ORRF 버전이 포함된다(위 상태 참고). 같은 ORRF 버전 안의 실제 게임 코드 변경까지 자동 식별하지는 않으므로 배포 빌드 id 주입·검증은 여전히 필요하며 custom id의 변경 책임은 호출자에게 있다. P2P 전용 참가 보완은 아래 별도 항목이며 Relay에서 해결된 문제를 다시 구현하지 않는다.
+- **브라우저/모바일:** 기존 Chromium e2e 필수 연결과 Web Worker·WT/WS/WSS·WebGPU/WebGL2의 실제 원격 6개 실행은 완료했다. 최신 커밋의 재검증 상태는 위 근거 표를 따른다. 남은 지원 범위는 아래와 같으며, Node/WASM 검사만으로 브라우저 실행을 대체하지 않는다. Firefox/Safari 실기기, 브라우저 3D WGSL, 터치·오디오, Android 실제 기기의 속도·수명주기·뷰 셸, iOS 빌드/시뮬레이터(macOS/Xcode 필요)는 미검증/미이식이다. qemu Android 골든 통과는 실기기 성능 검증이 아니다. wasm-opt가 없는 CI 크기 보고는 최종 배포 번들 크기로 취급하지 않는다. qemu aarch64 테스트는 다중 스레드 하네스 불안정으로 단일 스레드 실행 유지.
+- **오디오:** 선택적 Kira 기반 Arena Hit 경로·실제 오프라인 PCM·rollback 수명주기·Linux/Windows native 컴파일은 완료했다. 물리 장치에서 실제 재생/청취, 장치 장애·복구와 종료 계약 검증은 남았다. 3D 공간 오디오, 음악/에셋 스트리밍, 브라우저 오디오는 첫 구현 범위 밖이며 별도 설계가 필요하다. [오디오 계약/한계](audio.md)
+- **성능·측정:** bounded 에디터 latency·렌더 draw/upload/allocation/CPU counters와 CI Cargo timings, 중복 FFI/빈 binary harness 빌드 제거는 구현했다. 동일 프로필·플랫폼·부하·캐시 조건의 전후 비교로 실제 wall-time 변화와 병목을 확인하는 일은 남았다. 초기 debug 첫 드래그 152ms(기준 40ms)·중앙값 8.26ms는 아래 이력 그대로이며, 계측 추가나 빌드 제거 자체를 속도 개선 증거로 취급하지 않는다. [CI 반복 비용](ci-iteration.md)
+- **성능·물리 품질:** 2D 목표 1000바디는 기존 예산 충족 기록이 있으나 3000바디 이상은 보장 대상 밖이다. 20단 박스 스택·캡슐 4단 축 방향 0.16 밀림, 움직이는 발판, 낮은 FPS 롤백 보정을 재현/측정한다. 3D 1000바디 약 4.5ms/틱은 기록된 4ms 목표를 넘고 8틱 재시뮬이면 약 36ms이므로, 설계 §3.4의 약 1ms/틱 롤백 예산과 3D 지원 목표를 명시적으로 조정하거나 최적화한다. wasm ECS 3~5배 지연은 배치/메모리 레이아웃을 변경 전후 같은 벤치로 비교한다. simd128은 기본 꺼짐.
+- **설계 계약과 구현 간 차이:** 설계 §2의 `no_std + alloc` 조건은 `orr_ecs`/`orr_sim`의 현재 `std` 의존과 일치하지 않는다. 지원 범위를 확정하고 feature/빌드 검사 또는 설계 문구를 정리한다. clippy의 `float_arithmetic`과 `HashMap`/벽시계 금지 검사는 있으나 `clippy.toml`은 f32/f64 타입 자체를 금지하지 않으므로, POD 상태에 float 타입이 들어오지 못하는 검사도 필요하다. 에디터는 이미 자체 `Cargo.toml`에 `rust-version = "1.95"`를 명시하므로 workspace 기본 1.85와의 차이를 미수정 결함으로 취급하지 않는다.
+
+### P3. 별도 설계가 필요한 확장
+
+- **P2P 참가 경로 한정:** `join_backlog_peers = 0`이면 빈틈 검사 없음(피어 수 발견 필요); 자리 비우기 시 피어별 보유 입력 범위 차이 조정, 스냅샷 전 알림 버퍼링, 폐기된 시도 링크 정리. Relay는 별도 구현으로 이 문제를 해결했다.
+- **물리 확장:** 2D/3D 조인트·CCD, 3D 볼록 다각형·센서, 쿼리 API의 `&mut Frame` 요구 정리. `Body` 96B 변경 전 물리 리플레이와의 호환/마이그레이션 정책. 기존 골든/이진 포맷에 영향을 주는 작업은 별도 설계·버전 계획부터 한다.
+- **편집·렌더 도구:** 계층 트리, 기즈모, 박스 선택, 네이티브 파일 대화상자, 도킹; 2D 화면 텍스트 보강; 3D 캐스케이드 그림자·LOD·접촉 표시. 현재 3D 렌더러에는 5x7 텍스트가 있다.
+- **장기 설계 항목:** 내비메시/경로탐색, 에셋 DB·쿠커·스트리밍, 범용 UI/input 시스템, 렌더 그래프·Forward+, 병렬 스케줄러, ECS 관계/변경 감지·차분 스냅샷은 설계 방향이다. 오디오는 더 이상 전면 미구현이 아니며, 선택적 `orr_audio` 첫 경로 이후의 3D 공간화·음악/에셋 스트리밍·범용 통합이 남는다. 현재 M0~M6 완료 기록만으로 이 기능들의 구현까지 주장하지 않는다. 아키타입 저장소는 설계 §11대로 벤치 결과에 따라 채택 여부 결정.
+
+### 명시적 제외·비목표
+
+- **추가 문제 입력 회귀:** 이번 비차단 검증 변경에서 보류·제외한 비정상/문제 입력 회귀는 그대로 제외한다. 기존 테스트는 보존했고 기본 CI는 통과했지만, 새 문제 입력 실행이나 강제 선점 검증을 했다는 뜻은 아니다. 별도 범위 확정 전에는 후속 완료 조건에 포함하지 않는다.
+- **이전 포맷 자동 호환:** ORRF v1은 명시적으로 거부한다. 파일 변환기·구버전 피어 상호운용을 제공한다고 주장하지 않으며, 필요하면 [호환성 계약](frame-compatibility.md)에 따라 별도 설계한다.
+- **권위 서버 비목표:** 관전자, 부정 입력의 소급 서버 롤백, 서버 lag compensation은 `docs/authoritative.md`에서 범위 밖으로 정의한다. 별도 요구 없이 결함으로 취급하지 않는다.
+
+작업 규칙: 화면 전체 캡처 금지(앱 자기 프레임버퍼·GPU 리드백만), 기존 골든 체크섬은 의도적 변경 없이는 유지, 성능 변경은 전후 수치를 함께 기록, 파일은 LF. 프로젝트의 서브에이전트 모델 지침은 `CLAUDE.md`를 따른다.
+
+## 최근 확장 구현·검증 체크포인트 (2026-10-03 KST)
+
+아래 집중 테스트·측정은 각 패치 당시 기록이며 수치를 합쳐 새 전체 테스트 수로 보고하지 않는다. Arena 원격 에디터 전까지의 변경은 이후 원격 `c9da7cbd` CI #56에서 누적 10/10 통과했다. Arena 원격 에디터는 `55ed1e4d` CI #57 실패 후 `c73169b8` CI #58에서 수정 포함 10/10 통과했다. 이후 managed-input·키보드 제어 작업 트리는 별도 집중 검증 단계다.
+
+### Arena CLI·일반 입력 워크플로와 에이전트 평가 경계
+
+- `orr_remote_host --game arena`와 Arena reflection/input schema를 통해 CLI/MCP에서 탐색·guarded authoring·일반 게임 입력·리플레이 검증·undo/redo·저장·실제 호스트 재시작을 수행하는 경로를 구현했다. `tools/arena_agent_benchmark.py`의 다섯 과제와 독립 oracle·명령/산출물/provenance 기록은 결정론적인 스크립트 기준선이다. [실행법·계약](arena-agent-workflow.md)
+- 실제 에이전트 pilot 1은 하네스 보수 이력이 있다. pilot 2는 목표 1·2·3을 각 첫 시도에 통과한 뒤 인프라 차단이 있었고, 명시적으로 재개한 실행에서 목표 4·5도 각 첫 시도에 통과했다. 재개 시 환경 재구성 421초와 solver 79초를 구분하며, 재개 실행은 CLI 호출 134회 실패 0·51개 checksum 및 replay bytes 동일을 확인했다. 이는 한 번에 중단 없이 실행한 다섯 목표 벤치마크가 아니다. 실패·개입·재개를 지운 무개입 성공이나 공정한 타 엔진 비교로 집계하지 않는다. 스크립트 결과를 실제 모델의 성공률·비용·완료 시간으로 취급하지 않으며, 그래픽·오디오·전체 엔진 우위도 입증하지 않는다.
+
+### 에디터·렌더 비용 계측
+
+- 에디터 `diagnostics()`는 UI callback, pump, 동기 ERP 대기, 비동기 요청→응답 반영, snapshot 추출의 최근 120개 last/max/p95와 pending/high-water를 제공한다. 기록은 고정 공간·O(1)이며 추가 RPC나 대기를 넣지 않는다. CPU wall time이며 구간은 겹칠 수 있다. 라이브러리 17개, 새 egui 진단 1개, 기존 UI 15개, 의존성 경계 2개와 strict affected Clippy 통과. debug measure의 기존 첫 드래그 40ms 기준은 152ms로 실패했고 중앙값은 8.26ms였다. 비교 가능한 변경 전 기준과 release 측정이 없으므로 속도 개선이나 전체 measure 통과를 주장하지 않는다.
+- 2D/3D 렌더러 `last_frame_stats()`는 실제 pass/draw/instance, upload bytes/calls, buffer·attachment 할당/재할당, 실제 MSAA 및 CPU prepare/encode/submit 시간을 노출한다. 그림자를 끈 경우에도 실행된 clear pass를 센다. GPU 실행 시간이 아니며 WASM의 시간 필드는 unavailable이다. unit 34개와 필수 SwiftShader Vulkan GPU 2D 10개/3D 13개 통과; 기존 픽셀 조건은 유지했다. strict affected Clippy와 독립 소스 리뷰 통과. 이 계측 추가는 렌더 품질·성능 향상을 입증하는 벤치마크가 아니다. 이후 CI #56 누적 10/10 통과와 기존 debug 지연 측정 실패는 별개의 근거다.
+
+### Arena 실제 오디오 첫 경로 (2026-10-03 KST)
+
+- 선택적 `orr_audio`와 Arena Hit 절차적 타격음: Kira 실제 믹서의 오프라인 PCM, 선택적 CPAL native 출력, `--audio off|auto|required`
+- Predicted/Verified 중복 방지, 취소 페이드, 완료 후 늦은 확정, pause/disconnect/seek/reset 수명과 bounded voice/history 처리. 시뮬레이션·리플레이 형식 변경 없음
+- 실제 PCM/lifecycle 14개, Arena 통합 4개(매 프레임 checksum 동일성 포함), 기본 모드 2개 통과. audio 기능 활성/비활성 엄격한 Clippy 통과, 독립 리뷰 완료
+- 당시 로컬 native 컴파일은 ALSA 개발 메타데이터 부재로 차단. 이후 CI #56에서 Linux/Windows native compile을 통과했으며, 실제 장치 출력/청취 성공을 뜻하지 않음. 오디오 Rust 최소 버전과 upstream 장치 복구·비동기 종료 제한은 `docs/audio.md` 참고
+
+### CI 중복 FFI 빌드 제거와 컴파일 시간 수집 (2026-10-03 KST)
+
+- Windows native 로그에서 초기 릴리스 컴파일 24–33분과 테스트 후 반복 FFI 빌드 57–77초를 확인. 캐시 적중 여부만으로 재컴파일 비용이 사라지지 않으며, 아직 개선 후 속도 비교 결과는 없음
+- FFI 테스트의 Cargo 실행/빌드 실패 및 누락·빈 shared/static/import 라이브러리를 모든 플랫폼에서 실패 처리. C 컴파일러 부재에 대한 기존 정책은 별도로 유지
+- 테스트 이후 반복 빌드를 엄격한 산출물 검사로 대체. native/sample 주 릴리스 명령에 Cargo timings 및 HTML-only CI artifact 추가. 릴리스 설정·검증 대상·플랫폼·집계 조건 유지
+- C client 6개, client session 6개, optional-compiler helper 회귀 6개, workflow 회귀 12개(당시 네 결과 그룹의 집계 조합 1,296개 포함), 엄격한 FFI Clippy 및 독립 리뷰 통과. 이후 CI #56에서 Windows/macOS 포함 설정된 모든 잡은 통과. 비Linux C 컴파일러 선택 정책과 개별 artifact 업로드 확인은 전체 CI 통과와 구분
+- 후속 패치는 실제 unit test/local module이 없는 audited binary 9개의 빈 test harness만 끄고, diagnostics 1개를 기존 UI harness로 이동(17+1개 유지). 통합 테스트용 정상 binary 빌드와 all-targets Clippy·release 프로필·플랫폼·기존 검증 대상은 유지했다. [검사/유지 규칙](ci-iteration.md). CI #56에 포함되어 통과했으나 비교 가능한 전후 wall-time 속도 향상은 아직 입증하지 않음
+
+### 리플레이 내보내기 원본 보호 (2026-10-03 KST)
+
+- CLI `sim stop --replay-out`는 기존 경로를 발견하면 play를 중단하기 전에 거절. 교체는 명시적 `--force`로만 허용
+- 같은 디렉터리 임시 파일에 완전한 데이터를 기록·동기화한 후 no-clobber 게시 또는 원자적 교체. 사전 확인 이후 경로 충돌도 기존 파일을 보존하며 오류 시 `--last-play` 복구 안내 유지
+- CLI unit 18개, 실제 CLI 통합 23개, MCP 안내/input 11개, 엄격한 CLI/MCP Clippy와 독립 리뷰 통과. 도움말·생성 안내·Arena 절차 문서 갱신
+- 리플레이 포맷·시뮬레이션 변경 없음. 디렉터리 fsync에 의한 crash durability는 보장하지 않으며 비정상 중단/정리 실패 시 임시 링크가 남을 수 있음. 이후 CI #56의 설정된 플랫폼 잡에서 누적 통과
+
+### 검증 지표의 표본 범위 명시 (2026-10-03 KST)
+
+- CLI verify/apply에 기존 ERP `sample_every`를 연결하는 `--sample-every N` 추가. 기본 60, 0=endpoints, 1=매 틱 경계라는 기존 수집·min/max 의미는 유지
+- 보고서에 요청 간격·실제 표본 수·경계 범위·실제 매 틱 관측 여부를 명시하고 sparse min/max/check 설명에 표본 사이 상태는 검사하지 않는다고 경고. activity 보고서에도 동일한 메타데이터 보존
+- 정상 Arena once-fire 20틱 회귀에서 동일한 `bullets.max == 0`이 sparse에서는 통과, interval 1에서는 실패함을 확인. 점수와 체크섬·recording 검증은 동일. 매 틱 지표도 같은 틱 안에서 생겼다 사라진 이벤트를 증명하지는 않음
+- focused 16개 테스트, edit/remote/MCP/CLI 엄격한 all-targets Clippy, 생성 guide 확인과 독립 리뷰 통과
+- 기존 JSON 필드·기본 의미는 유지하지만 공개 Rust `VerifyReport.sample_every` 필드 추가로 외부 struct literal 생성 코드는 갱신 필요. 이후 CI #56 누적 통과. 기본값은 여전히 60이며 표본 누락 자체를 기본 설정에서 제거한 변경은 아님
+
+### CI55 클라이언트 Interrupted 읽기 복구 (2026-10-03 KST)
+
+- ARM64 TUI 및 Linux x86 CLI CI 실패를 각각 추적: 이미 연결된 WebSocket 읽기에서 `ErrorKind::Interrupted`를 연결 실패로 처리
+- TUI와 ERP blocking client 모두 해당 읽기를 기존 no-message polling으로 반환. 같은 parser·부분 frame·queue·RPC ID·절대 deadline 유지; 재연결·handshake 재시도·명령 재전송 없음
+- 주입된 정상 I/O interruption 회귀가 수정 전 양쪽 실패를 재현. 헤더/본문 중단, frame·notification 순서, 단일 전송, 실제 reset/close 오류 구분 확인
+- 최종 TUI 31개, remote unit 36개, 실제 CLI 통합 24개, 엄격한 scoped Clippy 및 독립 리뷰 통과. 수정 포함 원격 `c9da7cbd` CI #56은 10/10 통과. TCP read_until은 기존에도 Interrupted를 내부 재시도하므로 추가 분기는 방어적 처리임
+
+### Arena 원격 에디터 첫 경로 (2026-10-03 KST)
+
+- PhysGame/Arena compiled adapter와 공통 drawable로 Arena 플레이어·탄환 표시/선택, Position 드래그·undo, Position/PlayerTag/Score inspector 및 proposal preview 지원. local PhysGame 동작과 런타임 의존성 경계 유지
+- control/main/proposal 연결 각각에서 명시적 game/build와 전체 reflection schema 확인 후 decode. Arena는 fenced delivery 필수, Phys legacy fallback은 명시적으로 유지. 임의 plugin ABI나 같은 host instance 보장을 주장하지 않음
+- Viewer 및 preview 수정 경로 차단. 이 첫 경로는 GUI gameplay 입력을 보내지 않아 외부 agent 입력을 보존했다(명시적 키보드 제어는 아래 후속 패치). camera는 최초 attachment에만 fit하고 scene.load는 해당 checksum frame에서 fit
+- focused editor 113개 + remote 16개 통과(강제 software Vulkan GPU 4개 포함), 엄격한 scoped Clippy 및 독립 리뷰 완료. 리뷰에서 resync 중 camera 재설정과 scene-load frame 순서 수정
+- headless composed 실제 UI 이미지를 확인. 당시 로컬 native 창은 SwiftShader Xlib surface/OpenGL VIEW_FORMATS 부재로 차단됐고 공식 driver metadata fetch도 실패했으므로 그 시도는 native 성공으로 집계하지 않음. 이후 CI #57에서는 Xvfb/Mesa native 창 시작·렌더링을 실제 확인했으나 아래 픽셀 검사가 실패하여 smoke 전체 통과는 아님
+- 기존 Arena harness에 Linux CI 필수 Xvfb/Mesa native 창 smoke 추가: edit/play PNG, viewport 픽셀, ERP Score=1·checksum/replay, bounded child cleanup 검사를 요구. 당시 workflow 회귀 13개 통과. 원격 `55ed1e4d` CI #57의 Linux sample은 agent activity pulse가 선택 윤곽을 덮어 노란 픽셀 검사에서 실패했으므로 뒤의 모든 assertion까지 통과했다고 주장하지 않음
+- 명시적 screenshot settle로 pulse 이후 캡처하는 수정은 로컬 기능 테스트 67개·strict Clippy·리뷰 통과; 기존 픽셀 임계값은 유지. 별도 sample-build 집계 보강은 로컬 workflow 회귀 14개·7,776개 조합 및 리뷰 통과. 두 수정은 이후 `c73169b8` CI #58에서 게시·전체 10/10 통과. 실제 edit/scored-play 창·Score=1·21개 replay checksum 일치도 확인했으며 sample-build 결과는 success
+- Arena는 원격 연결만 지원하며 로컬 Arena 시작·플레이어 생성 UI·임의 동적 플러그인·에디터 오디오/3D 통합까지 제공하는 것은 아님. GUI gameplay 키보드 입력은 아래 후속 패치에서 명시적 managed 제어로 추가
+
+### Managed held-input lease·Arena 키보드 제어 (2026-10-03 UTC / KST, 전체 CI 대기)
+
+- 선택적 `ErpServer::enable_managed_input()`과 표준 Arena host 활성화. 클라이언트는 광고된 v1 기능을 확인한 뒤 claim/value/renew/release를 사용하며 grant는 표시 이름이 아니라 연결에 묶인다. grant/generation/증가 sequence로 오래된 쓰기·해제를 거부하고, 성공한 명시적 claim은 해당 슬롯의 기존 legacy held input을 중립화한다. release 이후 이전 held 값은 복원하지 않는다. [정확한 wire/lifecycle 계약](managed-held-input.md)
+- 유효 입력/renew마다 2초 lease를 갱신하고 약 500ms renewal을 권장한다. 만료는 host service/request 경계와 realtime frame 진행 전에 처리하며 긴 동기 호출 중 hard realtime 보장은 없다. release·expiry·disconnect 및 ERP pause/seek/stop/start/Branch는 해당 managed grant만 중립화/무효화한다. ERP 외부에서 수명주기를 바꾸는 embedder는 명시적 invalidate가 필요하다. 활성 grant 밖에서는 기존 raw/structured AI held input과 disconnect 후 유지 의미가 그대로다.
+- Arena realtime viewport에서 슬롯 선택 후 명시적 **Take control**, WASD/방향키 이동·Space 연속 발사. attachment/focus/Step만으로 agent 입력을 덮지 않으며 raw fallback이나 자동 재획득은 없다. Viewer·preview·되감긴 상태에서 획득 차단, Escape/focus loss/text·dialog capture/preview/pause/seek/stop/reconnect/실패 응답에서 disarm한다. 관리 슬롯은 paused/Step에서 중립이며 legacy 슬롯을 일괄 삭제하지 않는다. [Arena UI 범위](arena-agent-workflow.md)
+- update/heartbeat 하나만 outstanding으로 유지하고 최신 키 상태를 병합한다. 전용 release는 이미 보낸 update의 응답을 기다리지 않고 즉시 전송할 수 있다. 미해결 요청이 남으면 새 claim을 막고, 늦은 claim 응답은 정리하며 오래된 paused-state 응답도 거부한다. 서버 admission 시점의 expiry 경쟁 조건을 수정했다. accepted_head_tick은 수락 시점일 뿐 tick 소비·렌더 완료의 증거가 아니다.
+- 서버 **40 library+5 Arena**, 에디터 **44 library+9 Arena**, 총 **98개 집중 검사** 및 targeted release strict Clippy 통과. 독립 리뷰 2건에서 수정 확인 후 차단 사항 없음. 이 수치는 이 패치의 scoped 결과이며 과거 테스트 수와 합산하지 않는다. 아직 미커밋·전체 CI 대기, draft PR #1 미병합이다.
+- held-input 조정 계약이며 authorized commands/debug edits/timeline 조작의 보안 격리는 아니다. 이미 수락된 commands를 취소하지 않고, release/expiry 후의 legacy 쓰기가 지연된 요청인지 새 의도인지 구분하지 않는다. 시뮬레이션·리플레이 형식은 유지한다. 로컬 Arena launcher·플레이어 생성 UI·임의 플러그인 지원, CI 속도 향상 또는 하드웨어 오디오 검증을 주장하지 않는다.
+
+### 공통 RPC 대기 수의 원자적 admission (2026-10-03 KST)
+
+- local/network producer가 공유하는 `max_queued_requests`의 check-then-increment 경쟁을 CAS 예약으로 교체. 연결별 한도가 아니라 서버 전체의 dispatch 대기 요청/notification 수이며 기본값은 4096
+- non-Clone permit이 counter Arc만 보유하여 inbox/stash 전송, 전송 실패, receiver/stash 종료에서 정확히 한 번 반납. 실행 직전에 예약을 해제하는 기존 queued-only 의미 유지; 수동 증감·실패 rollback 중복 제거
+- 0 거절·usize::MAX 경계, 유효 요청의 동시 예약, 종료/보관/dispatch 수명, 수락된 편집과 응답 순서, timeout/disconnect 기존 의미를 검증. remote unit 45개 + local 통합 9개, 엄격한 all-targets Clippy 및 독립 리뷰 통과
+- 동시 stress 검사는 예전 경쟁 창의 결정적 재현을 주장하지 않는다. 이미 수락한 요청을 예산 때문에 제거·병합·재시도하지 않음
+- 이는 대기 요청 수의 상한이며 local payload bytes, uncounted control events, PumpedWs/outbound channel 메모리 상한을 해결한 변경은 아님. 원격 전체 CI는 게시 후 확인 필요
+
+### Shared waiting-request byte admission (2026-10-03 UTC, scoped local validation)
+
+- Added `ServerConfig::max_queued_request_bytes` (64 MiB default) alongside the existing shared request count. Local/network producers charge identical compact canonical envelopes with a bounded borrowed-field counting writer; checked count/byte CAS reservations roll back on rejection or delivery failure.
+- The non-Clone permit owns only counter Arcs, survives inbox/stash, and releases immediately before dispatch or drop. Already admitted edits are never evicted. This is serialized waiting-payload accounting, not RSS, JSON overhead, pre-parse allocation, active-work, control/reply or PumpedWs memory accounting. Exhaustive public config literals require the new field; see [admission contract](command-admission.md).
+- Focused boundary/parity/rollback/concurrency/lifecycle and ordinary edit-ordering coverage added. `cargo test -p orr_remote --lib --test local`: 46 unit + 10 integration tests passed. `cargo clippy -p orr_remote --all-targets -- -D warnings` and `git diff --check` passed. These are scoped local checks; publication, independent review and remote CI are still pending. No simulation golden or replay-format change.
+
+### Relay bootstrap control ordering (2026-10-03 UTC, scoped validation)
+
+- Integrated-base CI #75 exposed a Windows QUIC rejoin stall at snapshot/verified tick 155 and predicted head 163, followed by disconnection without a checksum mismatch. Transport batching was not logged, so that particular run's exact event ordering is not independently established.
+- A controlled valid-message regression reproduced a related ordering defect: `RelaySource::pump` decoded a reliable `Confirmed(156)` before its queued `Welcome` configured the slot count. The same-poll case failed on the original code; a split-after-Welcome control passed. The fix stops source pumping at a control message and applies it before polling later messages, preserving transport FIFO and handshake validation.
+- Both bootstrap cases now verify and acknowledge continuously through tick 180 with exact Arena checksums and without resending tick 156. Two new bootstrap tests, nine existing `relay_scenarios` tests, affected-package all-targets strict Clippy, diff checks, and independent source review passed. No wire format, simulation golden, server acknowledgment policy, or test timeout/assertion was changed. Windows transport repetition and new-head full CI remain separate pending checks.
+- Latest earlier integrated head `87e4a526` failed a distinct Windows WebSocket idle-timeout assertion in CI #76 (`TimedOut` expected, `RemoteClose` observed). The suggested proxy-EOF cause was not reproduced using the original full proxy on Linux; no unproven proxy change was retained. That failure remains an open diagnostic item, not resolved by the relay-ordering fix or hidden by a rerun.

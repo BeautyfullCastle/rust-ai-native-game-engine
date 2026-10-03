@@ -14,6 +14,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::arena_audio::{ArenaAudio, AudioMode};
 use crate::arena_view::{arena_floor, ArenaExtractor, Keys};
 use crate::net_client::{log_lifecycle, relay_title};
 use orr_render::orr_rhi::Wgpu;
@@ -24,6 +25,8 @@ pub struct Options {
     /// Which adapter runs the sim, for the window title and the log.
     pub label: String,
     pub vsync: bool,
+    /// Arena-only audio policy; the physics sample ignores it.
+    pub audio: AudioMode,
     /// Close the window after this many seconds and print a summary.
     pub seconds: Option<f32>,
     pub remote_mode: InterpMode,
@@ -36,6 +39,8 @@ pub struct Options {
 #[derive(Clone, Debug, Default)]
 pub struct Summary {
     pub adapter: String,
+    pub audio_status: String,
+    pub audio_started: u64,
     pub frames: u64,
     pub seconds: f32,
     pub fps: f32,
@@ -57,6 +62,7 @@ struct Gfx {
 
 struct App<B: Bridge<Arena>> {
     bridge: B,
+    audio: ArenaAudio,
     view: ViewWorld<ArenaExtractor>,
     opts: Options,
     gfx: Option<Gfx>,
@@ -88,14 +94,24 @@ impl<B: Bridge<Arena>> App<B> {
             let _ = self.bridge.set_input(self.bridge.local_slot(), self.keys.to_input());
         }
         self.bridge.update(dt);
-        let snapshot = self.bridge.snapshot();
-        self.view.update(dt.as_secs_f32().min(0.1), snapshot.as_ref());
-        for event in self.bridge.drain_events() {
+        let update = self.bridge.poll_view();
+        let snapshot = update.snapshot.clone();
+        if let Err(error) = self.audio.update(&update) {
+            self.error = Some(error);
+            event_loop.exit();
+            return;
+        }
+        if let Some(reset) = &update.resync {
+            crate::net_client::log_view_resync(reset);
+        }
+        self.view.update_from_bridge(dt.as_secs_f32().min(0.1), &update);
+        for event in update.events {
             match event {
                 BridgeEvent::Sim { status: EventStatus::Predicted(_), .. } => self.summary.predicted_hits += 1,
                 BridgeEvent::Sim { status: EventStatus::Verified(_), .. } => self.summary.verified_hits += 1,
                 BridgeEvent::Sim { status: EventStatus::Canceled, .. } => self.summary.canceled_events += 1,
                 BridgeEvent::Lifecycle(note) => log_lifecycle(&note),
+                BridgeEvent::ViewResynced(reset) => crate::net_client::log_view_resync(&reset),
             }
         }
 
@@ -210,6 +226,8 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
 
 /// Opens the window and runs until it closes (or `opts.seconds` pass).
 pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String> {
+    let audio = ArenaAudio::open(opts.audio)?;
+    eprintln!("audio: {}", audio.status());
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let now = Instant::now();
@@ -217,6 +235,7 @@ pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String
     let extractor = ArenaExtractor { remote_mode: opts.remote_mode, local_slot };
     let mut app = App {
         bridge,
+        audio,
         view: ViewWorld::new(extractor, opts.view),
         opts,
         gfx: None,
@@ -238,6 +257,8 @@ pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String
         return Err(e);
     }
     let seconds = app.started.elapsed().as_secs_f32();
+    app.summary.audio_status = app.audio.status().to_string();
+    app.summary.audio_started = app.audio.started();
     app.summary.frames = app.frames;
     app.summary.seconds = seconds;
     app.summary.fps = app.frames as f32 / seconds.max(0.001);

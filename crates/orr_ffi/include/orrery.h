@@ -187,7 +187,20 @@ ORR_API size_t orr_host_url(OrrHost* host, char* buf, size_t cap);
  *   ORR_OK          copied
  *   ORR_NO_FRAME    nothing new (*written = 0)
  *   ORR_ERR_BUFFER  cap too small: *written = size needed, the frame stays
- * Newer frames replace older unread ones: poll as often as you draw. */
+ *   ORR_ERR_NULL    buf is NULL with nonzero cap, even if nothing is ready;
+ *                   *written = 0, no frame/event is consumed
+ * NULL with cap 0 is a size probe: ORR_ERR_BUFFER if data exists, otherwise
+ * ORR_NO_FRAME. Neither case consumes data.
+ * Newer frames normally replace older unread ones: poll as often as you draw.
+ * A frame carrying view-stream FLAG_EVENTS_RESET (bit 3; see docs/view-stream.md)
+ * is a recovery baseline: pending event batches are discarded and later batches
+ * are suppressed until this frame is successfully copied or taken with
+ * orr_view_poll_ptr. If newer snapshots replace an unread baseline, the returned
+ * frame retains FLAG_EVENTS_RESET | FLAG_DISCONTINUITY and prev == cur. A
+ * too-small buffer does not acknowledge the baseline. After acknowledgement,
+ * event records at or before the baseline tick are ignored to prevent late old
+ * timeline events from resurfacing; a later ordinary discontinuity clears that
+ * cutoff. */
 ORR_API int orr_view_poll(OrrHost* host, uint8_t* buf, size_t cap, size_t* written);
 
 /* Zero-copy variant: *data / *len point at the newest unread frame, valid
@@ -196,7 +209,13 @@ ORR_API int orr_view_poll(OrrHost* host, uint8_t* buf, size_t cap, size_t* writt
 ORR_API int orr_view_poll_ptr(OrrHost* host, const uint8_t** data, size_t* len);
 
 /* Takes the oldest queued event batch message. Same buffer rules as
- * orr_view_poll. Events are queued, never replaced. */
+ * orr_view_poll. Events are queued, never replaced, except that a received
+ * FLAG_EVENTS_RESET baseline discards queued batches and suppresses new batches
+ * until the baseline is acknowledged; afterward records at or before the
+ * baseline tick are ignored until an ordinary discontinuity. The FFI's own
+ * 4096-batch safety cap still drops its oldest batch without synthesizing a
+ * reset. The local-host ERP path does not gain a new upstream bounded-queue
+ * recovery guarantee here. */
 ORR_API int orr_events_poll(OrrHost* host, uint8_t* buf, size_t cap, size_t* written);
 
 /* ---- driving the simulation ---- */

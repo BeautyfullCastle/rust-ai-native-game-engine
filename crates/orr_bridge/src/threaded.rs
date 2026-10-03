@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -11,10 +11,12 @@ use orr_session::{ControlOp, Speed};
 use orr_sim::DebugCommand;
 
 use crate::bridge::{Bridge, BridgeConfig, BridgeError, SimControl};
-use crate::core::{load_snapshot, SimCore, SnapshotSlot, ToSim};
+use crate::core::{load_snapshot, SimCore, SnapshotSlot};
 use crate::event::BridgeEvent;
 use crate::host::SimHost;
+use crate::ingress::Ingress;
 use crate::snapshot::Snapshot;
+use crate::{view_event_channel, ViewEventReceiver, ViewUpdate};
 
 const NANOS: u128 = 1_000_000_000;
 
@@ -51,11 +53,15 @@ impl Default for ThreadedConfig {
 /// The sim thread owns the host. After each tick that changes what the view
 /// can see it publishes an immutable [`Snapshot`] into a lock-free slot
 /// (`arc_swap`). The view reads the newest one at any time without waiting.
-/// Inputs, commands and events cross by unbounded `mpsc` channels: sending
-/// or receiving never blocks either side.
+/// Presentation events use a bounded, best-effort mailbox with explicit
+/// snapshot recovery. Input updates coalesce into one held sample. Reliable
+/// messages share a bounded FIFO with separate data/control quotas; explicit
+/// command credits remain charged through paused/core/host staging. A running
+/// host call is additional to the queued-message quotas and never holds the
+/// mailbox lock. A call cannot be interrupted; shutdown is checked between calls.
 pub struct Threaded<G: Game> {
-    to_sim: Sender<ToSim<G>>,
-    events: Receiver<BridgeEvent<G::Event>>,
+    ingress: Arc<Ingress<G>>,
+    events: ViewEventReceiver<G::Event>,
     slot: SnapshotSlot,
     steps_done: Arc<AtomicU64>,
     steps_sent: u64,
@@ -87,16 +93,19 @@ impl<G: Game> Threaded<G> {
         cfg: BridgeConfig<G>,
         threaded: ThreadedConfig,
     ) -> Result<Self, String> {
-        let (to_sim, from_view) = channel::<ToSim<G>>();
-        let (event_tx, events) = channel();
+        let ingress = Arc::new(Ingress::new(cfg.command_capacity, cfg.control_capacity));
+        let (event_tx, events) = view_event_channel(cfg.view_event_capacity);
         let (ready_tx, ready_rx) = channel::<Result<(PlayerSlot, u32, u8), String>>();
         let slot: SnapshotSlot = Arc::new(ArcSwapOption::empty());
         let steps_done = Arc::new(AtomicU64::new(0));
 
         let (thread_slot, thread_steps) = (slot.clone(), steps_done.clone());
+        let thread_ingress = ingress.clone();
         let handle = thread::Builder::new()
             .name("orr-sim".to_string())
             .spawn(move || {
+                // Closing on unwind wakes manual callers too.
+                let _close = CloseIngress(thread_ingress.clone());
                 let host = match make_host() {
                     Ok(host) => host,
                     Err(e) => {
@@ -105,11 +114,11 @@ impl<G: Game> Threaded<G> {
                     }
                 };
                 let info = (host.local_slot(), host.tick_rate(), host.player_count());
-                let core = SimCore::new(host, cfg, event_tx, thread_slot, thread_steps);
+                let core = SimCore::new(host, cfg, event_tx, thread_slot, thread_steps, thread_ingress.clone());
                 let _ = ready_tx.send(Ok(info));
                 match threaded.pacing {
-                    Pacing::Manual => run_manual(from_view, core),
-                    Pacing::Realtime => run_realtime(from_view, core, info.1, threaded.max_catchup.max(1)),
+                    Pacing::Manual => run_manual(thread_ingress, core),
+                    Pacing::Realtime => run_realtime(thread_ingress, core, info.1, threaded.max_catchup.max(1)),
                 }
             })
             .map_err(|e| format!("start sim thread: {e}"))?;
@@ -124,7 +133,7 @@ impl<G: Game> Threaded<G> {
             Err(_) => return Err(BridgeError::Disconnected.to_string()),
         };
         Ok(Self {
-            to_sim,
+            ingress,
             events,
             slot,
             steps_done,
@@ -138,11 +147,10 @@ impl<G: Game> Threaded<G> {
         })
     }
 
-    /// Sends a message that counts as one finished step, and under manual
-    /// pacing waits for it (tests need the effect to be visible).
-    fn send_counted(&mut self, msg: ToSim<G>) -> Result<(), BridgeError> {
-        self.to_sim.send(msg).map_err(|_| BridgeError::Disconnected)?;
-        self.steps_sent += 1;
+    /// Counts only a successfully admitted request. Manual callers wait for
+    /// its exact completion; realtime controls never wait for the sim.
+    fn wait_counted(&mut self, count: u64) -> Result<(), BridgeError> {
+        self.steps_sent += count;
         if self.pacing == Pacing::Manual {
             while self.steps_done.load(Ordering::Acquire) < self.steps_sent {
                 if !self.is_alive() {
@@ -150,32 +158,38 @@ impl<G: Game> Threaded<G> {
                 }
                 thread::sleep(Duration::from_micros(50));
             }
+            // A multi-step control may terminate early on disconnect while
+            // still completing its request acknowledgement.
+            if !self.is_alive() {
+                return Err(BridgeError::Disconnected);
+            }
         }
         Ok(())
     }
 
-    /// Manual pacing: runs `n` ticks and waits for them to finish.
-    /// Does nothing under [`Pacing::Realtime`].
+    /// Manual pacing: runs `n` ticks and waits for them to finish. Realtime
+    /// and zero-count calls do nothing. Use [`Self::try_step`] to observe a
+    /// terminal disconnection. The single mutable manual producer waits for
+    /// every control, so its independent control quota cannot be saturated.
     pub fn step(&mut self, n: u32) {
-        if self.pacing != Pacing::Manual || n == 0 {
-            return;
-        }
-        if self.to_sim.send(ToSim::Step(n)).is_err() {
-            return;
-        }
-        self.steps_sent += u64::from(n);
-        while self.steps_done.load(Ordering::Acquire) < self.steps_sent {
-            if !self.is_alive() {
-                return;
-            }
-            thread::sleep(Duration::from_micros(50));
-        }
+        let _ = self.try_step(n);
     }
+
+    /// Fallible [`Self::step`]. Input is captured at admission, so later held
+    /// input changes cannot alter any tick in this explicit batch.
+    pub fn try_step(&mut self, n: u32) -> Result<(), BridgeError> {
+        if self.pacing != Pacing::Manual || n == 0 {
+            return Ok(());
+        }
+        self.ingress.step(n)?;
+        self.wait_counted(u64::from(n))
+    }
+
 }
 
 impl<G: Game> Drop for Threaded<G> {
     fn drop(&mut self) {
-        let _ = self.to_sim.send(ToSim::Shutdown);
+        self.ingress.close();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -199,11 +213,11 @@ impl<G: Game> Bridge<G> for Threaded<G> {
         if player != self.local_slot {
             return Err(BridgeError::NotLocalPlayer { player, local: self.local_slot });
         }
-        self.to_sim.send(ToSim::Input(input)).map_err(|_| BridgeError::Disconnected)
+        self.ingress.set_input(input)
     }
 
     fn send_command(&mut self, command: G::Command) -> Result<(), BridgeError> {
-        self.to_sim.send(ToSim::Command(command)).map_err(|_| BridgeError::Disconnected)
+        self.ingress.command(command)
     }
 
     fn update(&mut self, elapsed: Duration) {
@@ -226,51 +240,64 @@ impl<G: Game> Bridge<G> for Threaded<G> {
     }
 
     fn drain_events(&mut self) -> Vec<BridgeEvent<G::Event>> {
-        self.events.try_iter().collect()
+        self.events.drain_events()
+    }
+
+    fn poll_view(&mut self) -> ViewUpdate<G::Event> {
+        self.events.poll()
     }
 
     fn is_alive(&self) -> bool {
-        self.handle.as_ref().is_some_and(|h| !h.is_finished())
+        self.ingress.is_open() && self.handle.as_ref().is_some_and(|h| !h.is_finished())
     }
 }
 
 impl<G: Game> SimControl<G> for Threaded<G> {
     fn control(&mut self, op: ControlOp) -> Result<(), BridgeError> {
-        self.send_counted(ToSim::Control(op))
+        self.ingress.control(op)?;
+        self.wait_counted(1)
     }
 
     fn debug_command(&mut self, cmd: DebugCommand) -> Result<(), BridgeError> {
-        self.send_counted(ToSim::Debug(cmd))
+        self.ingress.debug(cmd)?;
+        self.wait_counted(1)
     }
 }
 
-fn run_manual<G: Game, H: SimHost<G>>(rx: Receiver<ToSim<G>>, mut core: SimCore<G, H>) {
-    while let Ok(msg) = rx.recv() {
-        match msg {
-            ToSim::Step(n) => {
-                for _ in 0..n {
-                    core.step();
-                }
-            }
-            ToSim::Shutdown => return,
-            other => core.apply(other),
-        }
+/// RAII shutdown also covers host panics and failed startup.
+struct CloseIngress<G: Game>(Arc<Ingress<G>>);
+impl<G: Game> Drop for CloseIngress<G> {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
-fn run_realtime<G: Game, H: SimHost<G>>(rx: Receiver<ToSim<G>>, mut core: SimCore<G, H>, tick_rate: u32, max_catchup: u32) {
+fn run_manual<G: Game, H: SimHost<G>>(ingress: Arc<Ingress<G>>, mut core: SimCore<G, H>) {
+    while let Some(msg) = ingress.recv() {
+        core.apply(msg);
+    }
+}
+
+/// A producer can refill even a bounded queue indefinitely. Yield to the
+/// clock after this many messages, rather than draining until it is empty.
+const MAX_MESSAGES_PER_PASS: usize = 64;
+
+fn run_realtime<G: Game, H: SimHost<G>>(ingress: Arc<Ingress<G>>, mut core: SimCore<G, H>, tick_rate: u32, max_catchup: u32) {
     let mut start = Instant::now();
     // Speed in thousandths; a change or a pause restarts the tick count.
     let mut permille: u32 = 1000;
     // Tick number k runs at `deadline(k)`, counted from `start`.
     let mut k: u64 = 1;
     loop {
-        loop {
-            match rx.try_recv() {
-                Ok(ToSim::Shutdown) | Err(TryRecvError::Disconnected) => return,
-                Ok(msg) => core.apply(msg),
-                Err(TryRecvError::Empty) => break,
+        for _ in 0..MAX_MESSAGES_PER_PASS {
+            if !ingress.is_open() {
+                return;
             }
+            let Some(msg) = ingress.try_recv() else { break; };
+            core.apply(msg);
+        }
+        if !ingress.is_open() {
+            return;
         }
         let now = Instant::now();
         let (wants, speed) = (core.host().wants_tick(), core.host().speed().permille());
@@ -286,7 +313,7 @@ fn run_realtime<G: Game, H: SimHost<G>>(rx: Receiver<ToSim<G>>, mut core: SimCor
         let rate = u128::from(tick_rate) * u128::from(permille);
         let deadline = |k: u64| start + Duration::from_nanos((u128::from(k) * NANOS * 1000 / rate) as u64);
         let mut ran = 0;
-        while deadline(k) <= now && ran < max_catchup {
+        while deadline(k) <= now && ran < max_catchup && ingress.is_open() {
             core.step();
             k += 1;
             ran += 1;
@@ -299,3 +326,7 @@ fn run_realtime<G: Game, H: SimHost<G>>(rx: Receiver<ToSim<G>>, mut core: SimCor
         thread::sleep(wait.min(Duration::from_millis(1)));
     }
 }
+
+#[cfg(test)]
+#[path = "threaded_tests.rs"]
+mod tests;

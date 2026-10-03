@@ -175,7 +175,7 @@ Examples: {\"entity\":\"e_00000005\"} ; {\"entity\":\"e_00000005\",\"component\"
         title: "Get schema",
         description: "The JSON Schema (draft 2020-12) of the scene format: every component and singleton type with its fields, ranges and docs. \
 Use it to learn which fields exist and what values they take before you write a patch. With `type` you get one type (small); without it the whole schema (large, ask once). \
-With `list_types: true` you get just the type names and one-line docs. Examples: {\"type\":\"orr_physics::Body\"} ; {\"list_types\":true}.",
+With `list_types: true` you get just the type names and one-line docs. With `input: true` get the game's structured player-input schema and value format (when supported); do not combine it with `type` or `list_types`. Examples: {\"type\":\"orr_physics::Body\"} ; {\"list_types\":true} ; {\"input\":true}.",
         read_only: true,
         needs: "read",
         schema: || {
@@ -183,6 +183,7 @@ With `list_types: true` you get just the type names and one-line docs. Examples:
                 json!({
                     "type": {"type": "string", "description": "one registered type name, e.g. orr_physics::Collider"},
                     "list_types": {"type": "boolean", "description": "only list type names and docs"},
+                    "input": {"type": "boolean", "description": "the structured player-input schema and value format; exclusive with type/list_types"},
                 }),
                 &[],
             )
@@ -239,12 +240,20 @@ People at the editor make proposals too; you see each other's.",
         name: "accept_proposal",
         group: "propose",
         title: "Accept proposal",
-        description: "Apply a proposal to the scene as ONE undoable history entry (recorded as made by whoever proposed it). Only after verify_proposal passed. \
+        description: "Apply a proposal to the scene as ONE undoable history entry (recorded as made by whoever proposed it). Only after verify_proposal passed. Pass its `verified_state` to refuse any intervening scene or proposal changes. Omitting it is manual acceptance of the current proposal. \
 If the scene changed meanwhile so that an op no longer applies you get a conflict and nothing changes. This needs the `approve` capability; if the host withheld it, ask the person to accept in the editor. \
 Not possible while a play session runs. Example: {\"proposal_id\":\"p1\"}.",
         read_only: false,
         needs: "approve",
-        schema: || obj(json!({"proposal_id": {"type": "string", "description": "e.g. p1"}}), &["proposal_id"]),
+        schema: || obj(json!({
+            "proposal_id": {"type": "string", "description": "e.g. p1"},
+            "verified_state": {"type": "object", "description": "copy unchanged from verify_proposal to reject intervening edits", "properties": {
+                "document_id": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$"},
+                "id": {"type": "string"},
+                "document_revision": {"type": "integer", "minimum": 0},
+                "proposal_revision": {"type": "integer", "minimum": 0}
+            }, "required": ["document_id", "id", "document_revision", "proposal_revision"], "additionalProperties": false}
+        }), &["proposal_id"]),
     },
     ToolDef {
         name: "reject_proposal",
@@ -263,7 +272,7 @@ Not possible while a play session runs. Example: {\"proposal_id\":\"p1\"}.",
 Omit `proposal_id` to run the scene alone (baseline metrics). Give `checks` for pass/fail, e.g. [\"lost_bodies.max == 0\", \"mean_height >= 2.5\", \"kinetic_energy.delta <= 10\"]. \
 Check grammar: `<metric>[.start|final|min|max|delta] <|<=|==|!=|>=|> <number>` (no stat = final; delta = candidate final minus base final; prefix `base:` reads the run without the proposal), or `no_divergence`, `no_divergence_before <tick>`, `recording_matches`. \
 Inputs: {\"kind\":\"bot\",\"ticks\":300,\"seed\":1} scripted players (the default), {\"kind\":\"idle\",\"ticks\":300} no input, {\"kind\":\"last_play\"} the last play session stopped in this host, {\"kind\":\"replay\",\"base64\":\"...\"} a .orrp file. \
-Any scene edit changes the checksums from tick 0, so judge behaviour by metrics and checks, not by divergence. The run blocks the host: 300 ticks is quick, thousands are slow.",
+Metric min/max cover sampled tick boundaries only (default sample_every: 60); use sample_every: 1 for transient assertions. Events entirely within a tick are not covered. Any scene edit changes the checksums from tick 0, so judge behaviour by metrics and checks, not by divergence. The host stays responsive while verification runs on captured scene/proposal state. Only one verification may run at a time; verify_busy means retry after it finishes.",
         read_only: true,
         needs: "read",
         schema: || {
@@ -279,7 +288,7 @@ Any scene edit changes the checksums from tick 0, so judge behaviour by metrics 
                     }, "required": ["kind"]},
                     "checks": {"type": "array", "items": {"type": "string"}, "description": "pass/fail rules, e.g. [\"lost_bodies.max == 0\"]"},
                     "ticks": {"type": "integer", "minimum": 1, "description": "run at most this many ticks (of a recording)"},
-                    "sample_every": {"type": "integer", "minimum": 0, "description": "sample metrics every this many ticks (default 60)"},
+                    "sample_every": {"type": "integer", "minimum": 0, "description": "sample metrics every N ticks relative to the start, plus start/end (default 60; 0 endpoints only; 1 every tick boundary). min/max cover samples only, not events entirely within a tick"},
                     "series": {"type": "boolean", "description": "also return every sampled value of each metric (structured result only)"},
                 }),
                 &[],
@@ -303,6 +312,23 @@ Typical: start, step n=120, state, stop. Examples: {\"action\":\"step\",\"n\":60
                     "player_count": {"type": "integer", "minimum": 1, "maximum": 16, "description": "start: number of players"},
                 }),
                 &["action"],
+            )
+        },
+    },
+    ToolDef {
+        name: "sim_input",
+        group: "sim",
+        title: "Set player input",
+        description: "Set one player's structured input for subsequent play-session ticks. Discover the game's fields, ranges and value format first with get_schema input=true; input support depends on the host. Pass the complete input object, with exact decimal JSON numbers for fixed-point values. Start a session with sim_run action=start first, then sim_input and sim_run action=step. Input stays held until replaced; send the schema's neutral value to release it. This does not edit the scene document or advance a tick.",
+        read_only: false,
+        needs: "sim_control",
+        schema: || {
+            obj(
+                json!({
+                    "player": {"type": "integer", "minimum": 0, "description": "zero-based player slot in the active session"},
+                    "value": {"type": "object", "description": "complete structured input using the schema returned by get_schema input=true"},
+                }),
+                &["player", "value"],
             )
         },
     },
@@ -372,6 +398,7 @@ pub fn run(bridge: &mut Bridge, name: &str, arguments: &Map<String, J>) -> Resul
         "reject_proposal" => reject_proposal(bridge, &a),
         "verify_proposal" => verify_proposal(bridge, &a),
         "sim_run" => sim_run(bridge, &a),
+        "sim_input" => sim_input(bridge, &a),
         "history" => history(bridge),
         "undo" => undo(bridge),
         other => Err(Fail(format!("unknown tool '{other}'"))),
@@ -455,6 +482,13 @@ fn get_entity(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
 }
 
 fn get_schema(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+    if a.opt_bool("input")? == Some(true) {
+        if a.raw("type").is_some() || a.opt_bool("list_types")? == Some(true) {
+            return Err(Fail::new("argument 'input' cannot be combined with 'type' or 'list_types'"));
+        }
+        let r = b.call("registry.input", J::Null)?;
+        return text_out(serde_json::to_string_pretty(&r).unwrap_or_default(), r);
+    }
     if a.opt_bool("list_types")? == Some(true) {
         let r = b.call("registry.types", J::Null)?;
         let mut text = String::new();
@@ -572,7 +606,12 @@ fn list_proposals(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
 fn accept_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     let id = a.str("proposal_id")?;
     let before = b.call("proposal.list", J::Null).ok();
-    let r = b.call("proposal.accept", json!({"id": id}))?;
+    // Args::raw treats null as absent for ordinary optional arguments.
+    // A supplied but invalid guard must never select manual acceptance.
+    let r = match a.0.get("verified_state") {
+        Some(state) => b.call("proposal.accept_verified", json!({"id": id, "verified_state": state}))?,
+        None => b.call("proposal.accept", json!({"id": id}))?,
+    };
     let info = before.as_ref().and_then(|l| l["proposals"].as_array()).and_then(|l| l.iter().find(|p| s(&p["id"]) == id));
     let who = info.map(|p| format!(" \"{}\" by {}", s(&p["label"]), s(&p["origin"]))).unwrap_or_default();
     let text = match r["history_id"].as_u64() {
@@ -647,6 +686,16 @@ fn sim_run(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
         other => return Err(Fail(format!("unknown action '{other}' (state, start, step, seek, play, pause, stop)"))),
     };
     text_out(report::state_text(&r), r)
+}
+
+fn sim_input(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+    let player = a.opt_u64("player")?.ok_or_else(|| Fail::new("missing argument 'player'"))?;
+    let value = a.raw("value").ok_or_else(|| Fail::new("missing argument 'value'"))?;
+    if !value.is_object() {
+        return Err(Fail::new("argument 'value' must be an object"));
+    }
+    let r = b.call("sim.input_value", json!({"player": player, "value": value}))?;
+    text_out(format!("Player {player} input set for subsequent ticks.\n"), r)
 }
 
 fn history(b: &mut Bridge) -> Result<Out, Fail> {
