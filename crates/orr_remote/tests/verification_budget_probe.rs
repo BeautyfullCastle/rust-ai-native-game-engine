@@ -313,6 +313,10 @@ fn run_cell(cell: Cell) {
     emit(cell_name, "start", json!({"fixture": fixture_json}));
     let (base, base_ns) = timed(cell_name, "snapshot_clone_base", || frame.clone());
     let (candidate, candidate_ns) = timed(cell_name, "snapshot_clone_candidate", || frame.clone());
+    // Keep both proxy outputs observable even in synchronous-local cells,
+    // where verification obtains its own snapshots instead of using these.
+    // The optimizer barrier is outside both reported clone intervals.
+    std::hint::black_box((&base, &candidate));
 
     let mut replay_parse_ns = None;
     let mut core_verify_ns = None;
