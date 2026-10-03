@@ -17,6 +17,7 @@ const fs = require("fs");
 const path = require("path");
 const lib = require("./lib.cjs");
 const { checkBuildIdBoundary } = require("./build_id_boundary.cjs");
+const { browserOptionsFromEnvironment } = require("./deployment_manifest.cjs");
 
 const skip = (why) => { console.log((lib.requiresBrowser() ? "ERROR: " : "SKIP: ") + why); process.exit(lib.unavailableExitCode()); };
 
@@ -26,6 +27,7 @@ const skip = (why) => { console.log((lib.requiresBrowser() ? "ERROR: " : "SKIP: 
   const web = path.join(lib.repoRoot(), "crates", "orr_web", "web");
   if (!fs.existsSync(path.join(web, "pkg", "orr_web.js"))) skip("crates/orr_web/web/pkg is missing (run tools/build_web.sh)");
   const env = process.env;
+  const deployment = browserOptionsFromEnvironment(env);
   const ticks = +(env.TICKS || 600);
   const { server, port: httpPort } = await lib.serveStatic(web);
   let browser;
@@ -41,8 +43,11 @@ const skip = (why) => { console.log((lib.requiresBrowser() ? "ERROR: " : "SKIP: 
     const page = await browser.newPage();
     page.on("console", (m) => console.log("[page]", m.text()));
     page.on("pageerror", (e) => console.log("[pageerror]", String(e)));
-    const q = new URLSearchParams({ auto: "1", bot: "1", mode: env.MODE || "auto", room: env.ROOM || "1", game: env.GAME || "arena", render: env.RENDER || "auto" });
-    if (env.BUILD) q.set("build", env.BUILD);
+    const q = new URLSearchParams({ auto: "1", bot: "1", mode: env.MODE || "auto", room: env.ROOM || "1", game: deployment ? deployment.game : (env.GAME || "arena"), render: env.RENDER || "auto" });
+    if (deployment) {
+      q.set("build", deployment.buildId);
+      console.log(`DEPLOYMENT game=${deployment.game} build_id=${deployment.buildId}`);
+    } else if (env.BUILD) q.set("build", env.BUILD);
     if (env.UDP) q.set("wt", `127.0.0.1:${env.UDP}`);
     if (env.HASH) q.set("hash", env.HASH);
     if (env.WS) q.set("ws", /^wss?:/.test(env.WS) ? env.WS : `127.0.0.1:${env.WS}`);
@@ -73,7 +78,21 @@ const skip = (why) => { console.log((lib.requiresBrowser() ? "ERROR: " : "SKIP: 
     if (frames) console.log("FRAMES " + fmt(frames));
     if (sim) console.log("SIM " + fmt(sim));
     console.log("CHECKSUMS "+ r.checksums.map(([t, c]) => `${t}:${c}`).join(","));
-    code = r.verified_tick >= ticks ? 0 : 1;
+    const expectedReject = env.EXPECT_REJECT || "";
+    if (expectedReject) {
+      const mismatch = /^rejected: BuildHashMismatch \{ server: ([0-9]+), client: ([0-9]+) \}$/.exec(r.state);
+      const isExpectedBuildMismatch = expectedReject === "build_hash_mismatch" && mismatch && r.verified_tick === 0 &&
+        env.EXPECTED_SERVER_HASH === mismatch[1] && env.EXPECTED_CLIENT_HASH === mismatch[2];
+      if (isExpectedBuildMismatch) {
+        console.log(`DEPLOYMENT_REJECT kind=build_hash_mismatch server=${mismatch[1]} client=${mismatch[2]} verified=${r.verified_tick}`);
+        code = 0;
+      } else {
+        console.error(`expected ${expectedReject} rejection, got state=${JSON.stringify(r.state)} verified=${r.verified_tick}`);
+        code = 1;
+      }
+    } else {
+      code = r.verified_tick >= ticks ? 0 : 1;
+    }
     // SCREENSHOT=/path.png: the page's canvas as drawn at the end of the run (the test counts its colored pixels).
     if (env.SCREENSHOT) await page.locator(rend && rend.kind !== "2d" ? "#g" : "#c").screenshot({ path: env.SCREENSHOT }).catch((e) => console.log("screenshot failed", String(e)));
     await page.evaluate(() => { window.orr.leave(); }).catch(() => {});

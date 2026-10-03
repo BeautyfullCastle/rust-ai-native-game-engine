@@ -30,7 +30,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -93,6 +93,36 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
+/// Creates a release fixture through the Python reference tool and reads its canonical build id.
+fn make_deployment_manifest(label: &str, raw_code_id: &str) -> (PathBuf, u64) {
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+    let root = repo_root();
+    let fixture_dir = loop {
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orr_deployment_{}_{}_{}", std::process::id(), label, fixture_id));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => break dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create browser deployment fixture directory: {error}"),
+        }
+    };
+    let path = fixture_dir.join("manifest.json");
+    let tool = root.join("tools").join("deployment_manifest.py");
+    let python = std::env::var("ORR_PYTHON")
+        .unwrap_or_else(|_| (if cfg!(windows) { "python" } else { "python3" }).into());
+    let created = Command::new(&python)
+        .arg(&tool)
+        .args(["create", "--game", "arena", "--game-code-identity", label, "--game-code-id", raw_code_id, "--output"])
+        .arg(&path)
+        .output()
+        .expect("run Python deployment manifest tool");
+    assert!(created.status.success(), "cannot create browser deployment fixture: {}", String::from_utf8_lossy(&created.stderr));
+    let id = Command::new(&python).arg(&tool).arg("id").arg(&path).output().expect("read manifest build id");
+    assert!(id.status.success(), "cannot read manifest build id: {}", String::from_utf8_lossy(&id.stderr));
+    let id = String::from_utf8_lossy(&id.stdout).trim().parse::<u64>().expect("canonical decimal manifest build id");
+    (path, id)
+}
+
 /// What the browser client printed.
 #[derive(Debug)]
 struct Browser {
@@ -135,12 +165,27 @@ struct Run {
     browser: Browser,
     native: ClientReport,
     desyncs_on_server: u64,
+    deployment_build_id: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct DeploymentCase<'a> {
+    manifest: &'a std::path::Path,
+    server_build_id: u64,
+    browser_build_id: u64,
+    expect_reject: bool,
 }
 
 /// Starts a 2-player room on real sockets (QUIC, optionally WebTransport on the
 /// same port, plus WebSocket), joins it with a native bot and the browser.
 /// `mode` is the browser's transport mode. Returns `None` when the browser part is skipped.
 fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) -> Option<Run> {
+    run_config(game, webtransport, mode, wss, view, None)
+}
+
+/// Runs an arena browser test from a Python-generated deployment manifest.
+fn run_config(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View, deployment: Option<DeploymentCase<'_>>) -> Option<Run> {
+    let server_build_id = deployment.map(|d| d.server_build_id);
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut lo = ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Quic);
     lo.webtransport = webtransport;
@@ -157,7 +202,7 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
         match game {
             TestGame::Arena => {
                 let mut room = arena_room(2);
-                room.build_hash = orr_sim::build_hash_of(ARENA_TEST_BUILD, 0);
+                room.build_hash = orr_sim::build_hash_of(server_build_id.unwrap_or(ARENA_TEST_BUILD), 0);
                 room
             },
             // 300 bodies that keep moving (rotating bars), so both clients mispredict and roll back with
@@ -190,7 +235,7 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
             };
             match game {
                 TestGame::Arena => {
-                    let cfg = RelayClientConfig::new(ROOM, ARENA_TEST_BUILD);
+                    let cfg = RelayClientConfig::new(ROOM, server_build_id.unwrap_or(ARENA_TEST_BUILD));
                     let mut client: RelayClient<Arena, _> =
                         RelayClient::new(cfg, link, |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new());
                     drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &opts)
@@ -221,15 +266,26 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
     let flags = format!("{wss_flag} {} {extra_flags}", view.flags);
     let shot = std::env::temp_dir().join(format!("orr_browser_e2e_{}_{}.png", std::process::id(), view.render));
     let mut cmd = Command::new("node");
+    cmd.env_remove("DEPLOYMENT_MANIFEST").env_remove("EXPECT_REJECT").env_remove("EXPECTED_SERVER_HASH").env_remove("EXPECTED_CLIENT_HASH");
     if !flags.trim().is_empty() {
         cmd.env("CHROMIUM_FLAGS", flags.trim());
     }
-    if game == TestGame::Arena {
-        cmd.env("BUILD", if wss { format!("0x{ARENA_TEST_BUILD:x}") } else { ARENA_TEST_BUILD.to_string() });
+    if game == TestGame::Arena && deployment.is_none() {
+        let build_id = server_build_id.unwrap_or(ARENA_TEST_BUILD);
+        cmd.env("BUILD", if wss { format!("0x{build_id:x}") } else { build_id.to_string() });
+    }
+    if let Some(case) = deployment {
+        cmd.env("DEPLOYMENT_MANIFEST", case.manifest).env_remove("BUILD");
+    }
+    if deployment.is_some_and(|d| d.expect_reject) {
+        let case = deployment.expect("checked deployment case");
+        cmd.env("EXPECT_REJECT", "build_hash_mismatch");
+        cmd.env("EXPECTED_SERVER_HASH", orr_sim::build_hash_of(case.server_build_id, 0).to_string());
+        cmd.env("EXPECTED_CLIENT_HASH", orr_sim::build_hash_of(case.browser_build_id, 0).to_string());
     }
     let out = cmd
         .arg(repo_root().join("tools/webtransport/browser_e2e.cjs"))
-        .env("GAME", if game == TestGame::Arena { "arena" } else { "phys" })
+        .env("GAME", if deployment.is_some() || game == TestGame::Arena { "arena" } else { "phys" })
         .env("UDP", addr.port().to_string())
         .env("WS", ws_target)
         .env("HASH", format_fingerprint(&fp))
@@ -261,6 +317,14 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
         return None;
     }
     assert!(out.status.success(), "browser client failed ({:?}):\n{stdout}{stderr}", out.status);
+    if let Some(case) = deployment.filter(|d| d.expect_reject) {
+        let expected = format!("DEPLOYMENT_REJECT kind=build_hash_mismatch server={} client={} verified=0",
+            orr_sim::build_hash_of(case.server_build_id, 0), orr_sim::build_hash_of(case.browser_build_id, 0));
+        assert!(stdout.lines().any(|l| l == expected), "browser did not report the expected build-hash rejection {expected}:\n{stdout}{stderr}");
+    }
+    let deployment_build_id = stdout.lines().find_map(|l| {
+        l.strip_prefix("DEPLOYMENT ")?.split(' ').find_map(|p| p.strip_prefix("build_id=").map(str::to_string))
+    });
     let view_kind = stdout
         .lines()
         .find_map(|l| l.strip_prefix("RENDERER "))
@@ -270,7 +334,7 @@ fn run(game: TestGame, webtransport: bool, mode: &str, wss: bool, view: View) ->
         .to_string();
     let colored_pixels = colored_pixels(&shot);
     let _ = std::fs::remove_file(&shot);
-    Some(Run { view_kind, colored_pixels, browser: parse_browser(&stdout), native, desyncs_on_server: room.desyncs })
+    Some(Run { view_kind, colored_pixels, browser: parse_browser(&stdout), native, desyncs_on_server: room.desyncs, deployment_build_id })
 }
 
 /// Pixels of a PNG whose channels differ by more than 60 (the bodies are saturated colors on a dark
@@ -399,4 +463,38 @@ fn browser_plays_the_physics_game_drawn_on_webgpu() {
         check(&r, "webtransport");
         check_view(&r, "webgpu");
     }
+}
+
+/// The release manifest's exact decimal build id reaches the browser and matches the native host.
+#[test]
+fn browser_joins_with_deployment_manifest_build_id() {
+    let (manifest, build_id) = make_deployment_manifest("browser-manifest-positive", "9007199254740993");
+    assert!(build_id > (1u64 << 53), "fixture build id should exercise the JS safe-integer boundary");
+    let result = run_config(TestGame::Arena, true, "webtransport", false, CANVAS_2D, Some(DeploymentCase {
+        manifest: &manifest, server_build_id: build_id, browser_build_id: build_id, expect_reject: false,
+    }));
+    if let Some(r) = result {
+        check(&r, "webtransport");
+        let expected_build_id = build_id.to_string();
+        assert_eq!(r.deployment_build_id.as_deref(), Some(expected_build_id.as_str()), "manifest build id must be passed as exact decimal text");
+        check_view(&r, "2d");
+    }
+}
+
+/// A different valid manifest reaches the relay and gets the typed build-hash rejection at tick 0.
+#[test]
+fn browser_manifest_build_id_mismatch_is_rejected() {
+    let (server_manifest, server_id) = make_deployment_manifest("browser-manifest-server", "9007199254740993");
+    let (browser_manifest, browser_id) = make_deployment_manifest("browser-manifest-client", "9007199254740995");
+    assert_ne!(server_id, browser_id);
+    let result = run_config(TestGame::Arena, true, "webtransport", false, CANVAS_2D, Some(DeploymentCase {
+        manifest: &browser_manifest, server_build_id: server_id, browser_build_id: browser_id, expect_reject: true,
+    }));
+    if let Some(r) = result {
+        assert_eq!(r.browser.num("verified"), 0, "a rejected browser must verify no simulation ticks");
+        let expected_build_id = browser_id.to_string();
+        assert_eq!(r.deployment_build_id.as_deref(), Some(expected_build_id.as_str()));
+    }
+    // Retain both generated manifests in the system temp directory for inspection.
+    let _ = (server_manifest, browser_manifest);
 }

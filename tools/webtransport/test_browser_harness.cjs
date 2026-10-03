@@ -39,7 +39,7 @@ test("the executable runner cannot silently skip missing Playwright, WASM, or Ch
   const { spawnSync } = require("node:child_process");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orr-browser-prerequisites-"));
   try {
-    for (const file of ["browser_e2e.cjs", "build_id_boundary.cjs"]) {
+    for (const file of ["browser_e2e.cjs", "build_id_boundary.cjs", "deployment_manifest.cjs"]) {
       fs.copyFileSync(path.join(__dirname, file), path.join(dir, file));
     }
     const realLib = JSON.stringify(path.join(__dirname, "lib.cjs"));
@@ -64,6 +64,7 @@ test("the executable runner cannot silently skip missing Playwright, WASM, or Ch
         const env = { ...process.env };
         delete env.ORR_REQUIRE_BROWSER;
         delete env.ORR_REQUIRE_WEBGPU;
+        delete env.DEPLOYMENT_MANIFEST;
         Object.assign(env, requirements);
         const child = spawnSync(process.execPath, [path.join(dir, "browser_e2e.cjs")], { env, encoding: "utf8", timeout: 5000 });
         assert.equal(child.error, undefined);
