@@ -118,52 +118,49 @@ fn event_reconciliation_each_verified_once() {
     let mut session_a = Session::<Arena, _>::new(ArenaConfig { player_count: 2 }, cfg_a, end_a);
     let mut session_b = Session::<Arena, _>::new(ArenaConfig { player_count: 2 }, cfg_b, end_b);
 
-    let mut predicted_seen: BTreeSet<orr_sim::EventKey> = BTreeSet::new();
-    let mut verified_seen: BTreeSet<orr_sim::EventKey> = BTreeSet::new();
-    let mut verified_count: BTreeMap<orr_sim::EventKey, u32> = BTreeMap::new();
-    let mut canceled: BTreeSet<orr_sim::EventKey> = BTreeSet::new();
+    let mut live = BTreeMap::new();
+    let mut verified_seen = BTreeSet::new();
+    let mut canceled_count = 0;
 
     let mut rng = orr_fp::FrameRng::new(9001);
-    for call in 1..=800u64 {
-        let target = call + 2;
-        let ia = scripted_input(&mut rng, 0, target);
-        let ib = scripted_input(&mut rng, 1, target);
-
+    // The last three calls only deliver the remaining in-flight inputs, so every
+    // occurrence at the simulated head must close, including replacement predictions.
+    for call in 1..=803u64 {
         clock.tick();
-        let ra = session_a.advance(ia, commands_for(ia, 0));
-        let _ = session_b.advance(ib, commands_for(ib, 1));
-
-        let events = match ra {
-            AdvanceResult::Advanced { events, .. } => events,
-            AdvanceResult::Stalled { events } => events,
+        let events = if call <= 800 {
+            let target = call + 2;
+            let ia = scripted_input(&mut rng, 0, target);
+            let ib = scripted_input(&mut rng, 1, target);
+            let ra = session_a.advance(ia, commands_for(ia, 0));
+            let _ = session_b.advance(ib, commands_for(ib, 1));
+            match ra {
+                AdvanceResult::Advanced { events, .. } | AdvanceResult::Stalled { events } => events,
+            }
+        } else {
+            session_a.poll_confirmed().0
         };
         for (key, status) in events.iter() {
+            assert!(!verified_seen.contains(key), "event {key:?} was announced after verification: {status:?}");
             match status {
-                EventStatus::Predicted(_) => {
-                    predicted_seen.insert(*key);
+                EventStatus::Predicted(payload) => {
+                    assert!(live.insert(*key, *payload).is_none(), "event {key:?} was predicted while still live");
                 }
-                EventStatus::Verified(_) => {
-                    assert!(!canceled.contains(key), "event {key:?} was Canceled and then Verified");
-                    *verified_count.entry(*key).or_insert(0) += 1;
+                EventStatus::Verified(payload) => {
+                    let prediction = live.remove(key).expect("verification must close a live prediction");
+                    assert_eq!(prediction, *payload, "event {key:?} verified a different payload");
                     verified_seen.insert(*key);
                 }
                 EventStatus::Canceled => {
-                    assert!(!verified_seen.contains(key), "event {key:?} was Verified and then Canceled");
-                    canceled.insert(*key);
+                    assert!(live.remove(key).is_some(), "event {key:?} was canceled without a live prediction");
+                    canceled_count += 1;
                 }
             }
         }
     }
 
-    for (key, count) in &verified_count {
-        assert_eq!(*count, 1, "event {key:?} was announced Verified more than once");
-    }
-    for key in &predicted_seen {
-        assert!(
-            verified_seen.contains(key) || canceled.contains(key),
-            "predicted event {key:?} was never verified nor canceled"
-        );
-    }
+    assert_eq!(session_a.verified_tick(), session_a.head_tick(), "all simulated ticks must be confirmed");
+    assert!(live.is_empty(), "predicted occurrences were never verified nor canceled: {live:?}");
+    assert!(canceled_count > 0, "expected at least one canceled occurrence");
     assert!(!verified_seen.is_empty(), "expected at least one Hit event to occur over 800 ticks");
 }
 
