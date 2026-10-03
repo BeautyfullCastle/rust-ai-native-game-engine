@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use orr_remote::sample::spawn_phys_host;
-use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteConfig, RemoteIdentity, ServerConfig, ViewDeliveryMode, USER_CLIENT};
+use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteConfig, RemoteIdentity, ScreenshotOwner, ScreenshotService, ServerConfig, ViewDeliveryMode, USER_CLIENT};
 use crate::game::{EditorGame, EditorStream};
 use serde_json::{json, Value as J};
 
@@ -85,6 +85,8 @@ pub struct Backend {
     /// Checked descriptor identity shared by control and frame connections.
     identity: RemoteIdentity,
     pub(crate) managed_input: bool,
+    /// The app-framebuffer capture endpoint, present only for an editor-owned local host.
+    pub(crate) screenshot_owner: Option<ScreenshotOwner>,
 }
 
 /// `ws://host:port` plus the path and query a dev-mode host needs to know
@@ -117,6 +119,8 @@ impl Backend {
                 cfg.limits.allow_scene_paths = true;
                 cfg.limits.debug_hooks = *debug_hooks;
                 cfg.limits.max_step_per_call = 20_000;
+                let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
+                cfg.screenshot = Some(screenshot_service);
                 let host = spawn_phys_host(text, Some(scene.clone()), cfg)?;
                 let connector = host.connector();
                 let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
@@ -132,7 +136,7 @@ impl Backend {
                 rc.expected_identity = Some(identity.clone());
                 let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
                 let url = host.url().map(str::to_string);
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input })
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner) })
             }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());
@@ -149,7 +153,7 @@ impl Backend {
                 rc.view_delivery = delivery(game, false);
                 rc.expected_identity = Some(identity.clone());
                 let bridge = EditorStream::connect(game, rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input })
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None })
             }
         }
     }
