@@ -233,3 +233,9 @@ P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 �
 - 0 거절·usize::MAX 경계, 유효 요청의 동시 예약, 종료/보관/dispatch 수명, 수락된 편집과 응답 순서, timeout/disconnect 기존 의미를 검증. remote unit 45개 + local 통합 9개, 엄격한 all-targets Clippy 및 독립 리뷰 통과
 - 동시 stress 검사는 예전 경쟁 창의 결정적 재현을 주장하지 않는다. 이미 수락한 요청을 예산 때문에 제거·병합·재시도하지 않음
 - 이는 대기 요청 수의 상한이며 local payload bytes, uncounted control events, PumpedWs/outbound channel 메모리 상한을 해결한 변경은 아님. 원격 전체 CI는 게시 후 확인 필요
+
+### Shared waiting-request byte admission (2026-10-03 UTC, scoped local validation)
+
+- Added `ServerConfig::max_queued_request_bytes` (64 MiB default) alongside the existing shared request count. Local/network producers charge identical compact canonical envelopes with a bounded borrowed-field counting writer; checked count/byte CAS reservations roll back on rejection or delivery failure.
+- The non-Clone permit owns only counter Arcs, survives inbox/stash, and releases immediately before dispatch or drop. Already admitted edits are never evicted. This is serialized waiting-payload accounting, not RSS, JSON overhead, pre-parse allocation, active-work, control/reply or PumpedWs memory accounting. Exhaustive public config literals require the new field; see [admission contract](command-admission.md).
+- Focused boundary/parity/rollback/concurrency/lifecycle and ordinary edit-ordering coverage added. `cargo test -p orr_remote --lib --test local`: 46 unit + 10 integration tests passed. `cargo clippy -p orr_remote --all-targets -- -D warnings` and `git diff --check` passed. These are scoped local checks; publication, independent review and remote CI are still pending. No simulation golden or replay-format change.

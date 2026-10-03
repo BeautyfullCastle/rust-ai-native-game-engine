@@ -70,6 +70,13 @@ pub struct ServerConfig {
     /// control events, PumpedWs channels and outbound channels are not bounded
     /// by it. The network's default 4 MiB per-message limit is separate.
     pub max_queued_requests: usize,
+    /// Most compact canonical request-envelope bytes waiting for the host,
+    /// shared by local and network producers (default 64 MiB). Zero rejects all
+    /// forwarded requests; usize::MAX is practically unrestricted. Includes
+    /// inbox/stash, not active work, JSON heap overhead, pre-parse allocations,
+    /// control events, replies or PumpedWs channels. This is not an RSS bound.
+    /// Adding this field requires updates to exhaustive config struct literals.
+    pub max_queued_request_bytes: usize,
     /// Most requests `poll` runs per call (default 256), so a flood cannot stall a frame.
     pub max_requests_per_poll: usize,
     /// A transaction that a client leaves open this long is rolled back (default 60 s).
@@ -94,6 +101,7 @@ impl ServerConfig {
             allowed_origins: Vec::new(),
             max_connections: 64,
             max_queued_requests: 4096,
+            max_queued_request_bytes: 64 << 20,
             max_requests_per_poll: 256,
             tx_timeout: Duration::from_secs(60),
             limits: HostLimits::default(),
@@ -487,10 +495,12 @@ impl ErpServer {
             allowed_origins: cfg.allowed_origins.clone(),
             max_connections: cfg.max_connections,
             max_queued: cfg.max_queued_requests,
+            max_queued_bytes: cfg.max_queued_request_bytes,
             inbox: tx,
             next_id: AtomicU64::new(1),
             conns: AtomicUsize::new(0),
             queued: queued.clone(),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
         });
         if let (Some(rt), Some(listener)) = (&rt, listener) {
             rt.spawn(accept_loop(listener, shared.clone()));
@@ -2284,26 +2294,35 @@ mod fenced_delivery_tests {
         let mut target = ErpTarget { doc: &mut doc, play: &mut play };
         server.poll(&mut target);
         let queued = server.net.queued.clone();
+        let bytes = server.net.queued_bytes.clone();
         let req = Request { id: Some(1), method: "sim.state".into(), params: J::Null };
+        let cost = req.to_text().len();
         local.send(req.clone()).unwrap();
         assert_eq!(queued.load(Relaxed), 1);
+        assert_eq!(bytes.load(Relaxed), cost);
         server.wait_for_request(Duration::ZERO);
         assert!(matches!(server.stash, Some(Inbound::Request { .. })));
         assert_eq!(queued.load(Relaxed), 1, "stash still owns the permit");
+        assert_eq!(bytes.load(Relaxed), cost);
         assert_eq!(server.poll(&mut target).requests, 1);
         assert_eq!(queued.load(Relaxed), 0, "undrained response owns no request slot");
+        assert_eq!(bytes.load(Relaxed), 0);
 
         local.send(req.clone()).unwrap();
         server.wait_for_request(Duration::ZERO);
         local.send(req).unwrap();
         assert_eq!(queued.load(Relaxed), 2, "one in stash, one in inbox");
+        assert_eq!(bytes.load(Relaxed), cost * 2);
         drop(local);
         assert_eq!(queued.load(Relaxed), 2, "disconnect does not retract admitted requests");
+        assert_eq!(bytes.load(Relaxed), cost * 2);
         drop(server);
         assert_eq!(queued.load(Relaxed), 0, "both receiver and stash release slots");
+        assert_eq!(bytes.load(Relaxed), 0);
         assert!(connector.connect("after-drop", Caps::ALL).is_err());
         // Only this observer and the connector's shared state remain.
         assert_eq!(Arc::strong_count(&queued), 2, "no permit or sender ownership cycle");
+        assert_eq!(Arc::strong_count(&bytes), 2);
     }
 
     #[test]

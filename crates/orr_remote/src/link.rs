@@ -147,9 +147,9 @@ struct LocalTx {
 
 impl TxHandle for LocalTx {
     fn send(&self, req: Request) -> Result<(), ClientError> {
-        let permit = RequestPermit::reserve(&self.shared.queued, self.shared.max_queued)
-            .ok_or_else(|| transport("the host has too many requests queued"))?;
         let id = req.id.map(|i| json!(i));
+        let permit = RequestPermit::reserve(&self.shared, id.as_ref(), &req.method, &req.params)
+            .ok_or_else(|| transport("the host has too many requests queued"))?;
         let msg = Inbound::Request { permit, conn: self.conn, id, method: req.method, params: req.params };
         self.shared.inbox.send(msg).map_err(|_| transport("the host has stopped"))
     }

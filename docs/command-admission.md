@@ -86,30 +86,48 @@ No simulation golden values or recording format changed.
 
 ## ERP waiting-request admission
 
-`ServerConfig::max_queued_requests` (default 4096) is one server-wide
-waiting-request count shared by local and network producers. Each forwarded
-request, including notifications, atomically reserves a slot before enqueueing.
-If full, the local sender returns a transport error and the network producer
-returns the existing `busy` RPC error. Zero rejects all forwarded requests;
-`usize::MAX` is supported without counter overflow.
+`ServerConfig::max_queued_requests` (default 4096) and
+`ServerConfig::max_queued_request_bytes` (default 64 MiB) are server-wide
+waiting-request budgets shared by local and network producers. Each forwarded
+request, including notifications, reserves a count slot and then its byte cost
+before enqueueing. Byte rejection restores the count slot. Either full budget
+returns the existing local transport error or network `busy` RPC error. Zero
+rejects all forwarded requests; `usize::MAX` is practically unrestricted, with
+checked arithmetic rather than wrapping counters.
 
-An admitted request owns a private, non-cloneable permit while it is in the
-inbox or the host's wait stash. Dispatch releases the slot immediately before
-running the request; replies and ongoing verification work do not retain it.
-Failed enqueue, inbox receiver drop and stash drop release their owned slots.
+Byte cost is the compact canonical JSON-RPC envelope: `jsonrpc: "2.0"`, the
+optional `id`, `method`, and `params`. Missing params normalize to null; absent
+id stays absent. String escaping, UTF-8 and nested values count as serialized.
+Network whitespace and extra envelope fields do not count because they are not
+forwarded. A bounded counting writer serializes borrowed fields, without cloning
+params or allocating a serialized request string. Local and network requests
+with the same forwarded fields have the same cost. Network authentication and
+local connection setup are separate control paths and do not consume these
+budgets. A local request named `auth` still uses normal request admission.
+
+An admitted request owns a private, non-cloneable permit for both counters while
+it is in the inbox or the host's wait stash. Dispatch releases both immediately
+before running the request; replies and ongoing verification work do not retain
+it. Failed enqueue, inbox receiver drop and stash drop release owned reservations.
 Admission never evicts, coalesces, retries or cancels already admitted work.
 Existing timeout and disconnect behavior is unchanged.
 
-This is not a total memory limit. Connection/authentication/completion control
-events are uncounted. Local payload bytes are not bounded by this quota; the
-network's default 4 MiB per-message limit is separate, not an aggregate memory
-bound. PumpedWs's unbounded channels and outbound/response channels remain
-outside this patch. Presentation and command quotas above are separate limits.
+This is not an RSS or total memory limit: JSON heap/container overhead, producer
+payloads and network pre-parse allocations are not measured. Connection,
+authentication and completion control events, active work, PumpedWs's unbounded
+channels and outbound/reply channels remain outside these quotas. The network's
+default 4 MiB per-message limit is separate, as are presentation/command quotas.
 
-Coverage uses atomic boundary cases, valid concurrent local/network producers,
-closed-inbox rollback, inbox/stash/dispatch/drop ownership, and ordinary admitted
-edits with ordered responses. The contention test exercises the shared cap; it
-does not claim to reproduce the old check-then-increment scheduling window.
+Source compatibility: the new public `ServerConfig` field must be supplied by
+exhaustive struct literals. Code using `ServerConfig::new` receives the 64 MiB
+default and can set the field explicitly to tune or practically remove the cap.
+
+Coverage includes exact byte boundaries, checked overflow, canonical parity,
+count rollback, concurrent local/network admission limited independently by
+count and bytes, failed delivery, inbox/stash/dispatch/drop ownership, and
+ordinary admitted edits with ordered responses under either saturation mode.
+The contention test exercises shared caps; it does not claim to force a specific
+interleaving. No simulation golden values or replay format changed.
 
 ## Local verification (2026-10-02)
 

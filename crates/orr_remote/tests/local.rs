@@ -232,10 +232,20 @@ fn pause_and_speed_reach_the_view_even_though_the_tick_does_not_change() {
 
 #[test]
 fn admitted_edits_and_responses_survive_queue_saturation_in_order() {
+    admitted_edits_survive_saturation(false);
+}
+
+#[test]
+fn admitted_edits_and_responses_survive_byte_saturation_in_order() {
+    admitted_edits_survive_saturation(true);
+}
+
+fn admitted_edits_survive_saturation(byte_limited: bool) {
     use orr_remote::{ErpServer, ErpTarget, Incoming, Request};
     let mut cfg = ServerConfig::new(Auth::DevNoAuth);
     cfg.listen = false;
-    cfg.max_queued_requests = 2;
+    cfg.max_queued_requests = if byte_limited { 20 } else { 2 };
+    cfg.max_queued_request_bytes = if byte_limited { 384 } else { usize::MAX };
     cfg.max_requests_per_poll = 1;
     let mut server = ErpServer::start(cfg).unwrap();
     let mut doc = demo_doc();
@@ -254,6 +264,10 @@ fn admitted_edits_and_responses_survive_queue_saturation_in_order() {
         method: "world.patch".into(),
         params: json!({"entity":guid, "component":BODY, "path":"pos.x", "value":value}),
     };
+    if byte_limited {
+        let cost = edit(1, 1).to_text().len();
+        assert!(cost * 2 <= 384 && cost * 3 > 384, "byte limit admits two edits");
+    }
     client.send(edit(1, 1)).unwrap();
     client.send(edit(2, 2)).unwrap();
     assert!(client.send(edit(3, 99)).is_err(), "rejected before admission");

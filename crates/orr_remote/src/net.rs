@@ -217,41 +217,90 @@ pub(crate) struct NetShared {
     pub allowed_origins: Vec<String>,
     pub max_connections: usize,
     pub max_queued: usize,
+    pub max_queued_bytes: usize,
     pub inbox: Sender<Inbound>,
     pub next_id: AtomicU64,
     pub conns: AtomicUsize,
     /// Reserved requests waiting in producers, the host inbox or its stash.
     pub queued: Arc<AtomicUsize>,
+    pub queued_bytes: Arc<AtomicUsize>,
 }
 
-/// One reserved waiting-request slot. It follows the request through the inbox
-/// and stash, and is dropped immediately before dispatch or when delivery ends.
-/// Hold only the counter, never NetShared (whose sender would create a cycle).
+/// One waiting request's count and canonical bytes. Never clone this permit or
+/// retain NetShared: its inbox sender would create an ownership cycle.
 pub(crate) struct RequestPermit {
     queued: Arc<AtomicUsize>,
+    queued_bytes: Arc<AtomicUsize>,
+    bytes: usize,
 }
 
 impl RequestPermit {
-    pub(crate) fn reserve(queued: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
-        // Relaxed is enough for accounting; the channel publishes request data.
-        let mut current = queued.load(Relaxed);
-        loop {
-            if current >= limit {
-                return None;
-            }
-            // current < limit <= usize::MAX, so this addition cannot overflow.
-            match queued.compare_exchange_weak(current, current + 1, Relaxed, Relaxed) {
-                Ok(_) => return Some(Self { queued: queued.clone() }),
-                Err(observed) => current = observed,
-            }
+    pub(crate) fn reserve(shared: &NetShared, id: Option<&J>, method: &str, params: &J) -> Option<Self> {
+        reserve_counter(&shared.queued, shared.max_queued, 1)?;
+        // Own the count immediately: serialization failure and byte rejection
+        // both roll it back through the same drop path as failed delivery.
+        let mut permit = Self {
+            queued: shared.queued.clone(),
+            queued_bytes: shared.queued_bytes.clone(),
+            bytes: 0,
+        };
+        let bytes = request_bytes(id, method, params, shared.max_queued_bytes)?;
+        reserve_counter(&shared.queued_bytes, shared.max_queued_bytes, bytes)?;
+        permit.bytes = bytes;
+        Some(permit)
+    }
+}
+
+fn reserve_counter(counter: &AtomicUsize, limit: usize, amount: usize) -> Option<()> {
+    // Relaxed is enough for accounting; the channel publishes request data.
+    let mut current = counter.load(Relaxed);
+    loop {
+        let next = current.checked_add(amount).filter(|next| *next <= limit)?;
+        match counter.compare_exchange_weak(current, next, Relaxed, Relaxed) {
+            Ok(_) => return Some(()),
+            Err(observed) => current = observed,
         }
     }
 }
 
 impl Drop for RequestPermit {
     fn drop(&mut self) {
+        self.queued_bytes.fetch_sub(self.bytes, Relaxed);
         self.queued.fetch_sub(1, Relaxed);
     }
+}
+
+/// Count compact JSON-RPC envelope bytes without cloning params or allocating
+/// serialized text. Network whitespace/extra fields are intentionally ignored;
+/// absent params normalize to null and absent id stays absent on both paths.
+fn request_bytes(id: Option<&J>, method: &str, params: &J, limit: usize) -> Option<usize> {
+    use std::io::Write;
+    struct Counter {
+        bytes: usize,
+        limit: usize,
+    }
+    impl Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self.bytes.checked_add(buf.len()).filter(|n| *n <= self.limit)
+                .ok_or_else(|| std::io::Error::other("request byte limit exceeded"))?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut out = Counter { bytes: 0, limit };
+    out.write_all(br#"{"jsonrpc":"2.0""#).ok()?;
+    if let Some(id) = id {
+        out.write_all(br#","id":"#).ok()?;
+        serde_json::to_writer(&mut out, id).ok()?;
+    }
+    out.write_all(br#","method":"#).ok()?;
+    serde_json::to_writer(&mut out, method).ok()?;
+    out.write_all(br#","params":"#).ok()?;
+    serde_json::to_writer(&mut out, params).ok()?;
+    out.write_all(b"}").ok()?;
+    Some(out.bytes)
 }
 
 pub(crate) fn response_ok(id: &J, result: J) -> String {
@@ -418,7 +467,7 @@ impl Link {
                 Flow::Continue
             };
         }
-        let Some(permit) = RequestPermit::reserve(&self.shared.queued, self.shared.max_queued) else {
+        let Some(permit) = RequestPermit::reserve(&self.shared, id.as_ref(), &method, &params) else {
             self.reply_err(
                 &reply_id,
                 RpcError::new(
@@ -785,31 +834,115 @@ mod tests {
             allowed_origins: Vec::new(),
             max_connections: 64,
             max_queued: limit,
+            max_queued_bytes: usize::MAX,
             inbox,
             next_id: AtomicU64::new(1),
             conns: AtomicUsize::new(0),
             queued: Arc::new(AtomicUsize::new(0)),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
         }), recv)
     }
 
     #[test]
     fn request_permit_boundaries_and_release() {
-        let queued = Arc::new(AtomicUsize::new(0));
-        assert!(RequestPermit::reserve(&queued, 0).is_none());
-        let first = RequestPermit::reserve(&queued, 1).unwrap();
-        assert!(RequestPermit::reserve(&queued, 1).is_none());
-        assert_eq!(queued.load(Relaxed), 1);
-        drop(first);
-        assert_eq!(queued.load(Relaxed), 0);
+        let (mut shared, _recv) = queue_fixture(1);
+        let cost = request_bytes(None, "sim.state", &J::Null, usize::MAX).unwrap();
+        for limit in [0, cost - 1, cost, usize::MAX] {
+            Arc::get_mut(&mut shared).unwrap().max_queued_bytes = limit;
+            let permit = RequestPermit::reserve(&shared, None, "sim.state", &J::Null);
+            assert_eq!(permit.is_some(), limit >= cost);
+            assert_eq!(shared.queued.load(Relaxed), usize::from(permit.is_some()));
+            assert_eq!(shared.queued_bytes.load(Relaxed), if permit.is_some() { cost } else { 0 });
+            if permit.is_some() {
+                assert!(RequestPermit::reserve(&shared, None, "sim.state", &J::Null).is_none());
+            }
+            drop(permit);
+            assert_eq!(shared.queued.load(Relaxed), 0);
+            assert_eq!(shared.queued_bytes.load(Relaxed), 0);
+        }
+        // Checked count and byte arithmetic, without enormous allocations.
+        Arc::get_mut(&mut shared).unwrap().max_queued = usize::MAX;
+        shared.queued.store(usize::MAX - 1, Relaxed);
+        shared.queued_bytes.store(usize::MAX - cost, Relaxed);
+        let permit = RequestPermit::reserve(&shared, None, "sim.state", &J::Null).unwrap();
+        assert_eq!(shared.queued.load(Relaxed), usize::MAX);
+        assert_eq!(shared.queued_bytes.load(Relaxed), usize::MAX);
+        assert!(RequestPermit::reserve(&shared, None, "sim.state", &J::Null).is_none());
+        drop(permit);
+        shared.queued.store(0, Relaxed);
+        shared.queued_bytes.store(usize::MAX - cost + 1, Relaxed);
+        assert!(RequestPermit::reserve(&shared, None, "sim.state", &J::Null).is_none());
+        assert_eq!(shared.queued.load(Relaxed), 0, "byte overflow restores count");
+        assert_eq!(shared.queued_bytes.load(Relaxed), usize::MAX - cost + 1);
+    }
 
-        // Synthetic boundary: no allocation of usize::MAX requests is needed.
-        queued.store(usize::MAX - 1, Relaxed);
-        let last = RequestPermit::reserve(&queued, usize::MAX).unwrap();
-        assert_eq!(queued.load(Relaxed), usize::MAX);
-        assert!(RequestPermit::reserve(&queued, usize::MAX).is_none());
-        assert_eq!(queued.load(Relaxed), usize::MAX);
-        drop(last);
-        assert_eq!(queued.load(Relaxed), usize::MAX - 1);
+    #[test]
+    fn canonical_bytes_match_local_and_network_admission() {
+        use crate::link::{LocalConnector, Request, Transport};
+        for id in [None, Some(0), Some(u64::MAX)] {
+            let request = Request {
+                id, method: "echo\"\n한글".into(),
+                params: json!({"text":"雪\"\n", "nested":[null,true,{"number":18446744073709551615u64}]}),
+            };
+            let cost = request.to_text().len();
+            assert_eq!(request_bytes(id.map(J::from).as_ref(), &request.method, &request.params, usize::MAX), Some(cost));
+            for limit in [cost - 1, cost] {
+                let (mut shared, recv) = queue_fixture(10);
+                Arc::get_mut(&mut shared).unwrap().max_queued_bytes = limit;
+                let mut local = LocalConnector { shared: shared.clone() }.connect("local", Caps::ALL).unwrap();
+                let (mut link, mut out, _pending) = new_link(&shared, false);
+                link.set_identity("net".into(), Caps::ALL);
+                assert_eq!(local.send(request.clone()).is_ok(), limit == cost);
+                assert_eq!(shared.queued_bytes.load(Relaxed), if limit == cost { cost } else { 0 });
+                // Release local request, then exercise the same byte budget over
+                // the network with whitespace and ignored extra fields.
+                drop(recv.try_iter().collect::<Vec<_>>());
+                let mut wire: J = serde_json::from_str(&request.to_text()).unwrap();
+                wire["ignored"] = json!("not forwarded");
+                assert!(matches!(link.on_text(&serde_json::to_string_pretty(&wire).unwrap()), Flow::Continue));
+                assert_eq!(shared.queued_bytes.load(Relaxed), if limit == cost { cost } else { 0 });
+                if limit < cost {
+                    let Out::Text(reply) = out.try_recv().unwrap() else { panic!("busy response") };
+                    assert_eq!(serde_json::from_str::<J>(&reply).unwrap()["error"]["data"]["kind"], "busy");
+                }
+                drop(recv);
+                assert_eq!(shared.queued.load(Relaxed), 0);
+                assert_eq!(shared.queued_bytes.load(Relaxed), 0);
+            }
+        }
+        // Network IDs additionally support null, strings and exact JSON numbers.
+        for id in [J::Null, json!("雪\"\n"), serde_json::from_str("123456789012345678901234567890.125").unwrap()] {
+            let wire = json!({"jsonrpc":"2.0", "id":id, "method":"sim.state", "params":null}).to_string();
+            let cost = wire.len();
+            for limit in [cost - 1, cost] {
+                let (mut shared, recv) = queue_fixture(10);
+                Arc::get_mut(&mut shared).unwrap().max_queued_bytes = limit;
+                let (mut link, mut out, _pending) = new_link(&shared, false);
+                link.set_identity("net".into(), Caps::ALL);
+                assert!(matches!(link.on_text(&wire), Flow::Continue));
+                assert_eq!(shared.queued.load(Relaxed), usize::from(limit == cost));
+                assert_eq!(shared.queued_bytes.load(Relaxed), if limit == cost { cost } else { 0 });
+                if limit < cost {
+                    let Out::Text(reply) = out.try_recv().unwrap() else { panic!("busy response") };
+                    let reply: J = serde_json::from_str(&reply).unwrap();
+                    assert_eq!(reply["id"], id);
+                    assert_eq!(reply["error"]["data"]["kind"], "busy");
+                }
+                drop(recv);
+                assert_eq!(shared.queued.load(Relaxed), 0);
+                assert_eq!(shared.queued_bytes.load(Relaxed), 0);
+            }
+        }
+        // Missing params and explicit null have the same canonical cost.
+        let (mut shared, recv) = queue_fixture(10);
+        let cost = request_bytes(Some(&json!(1)), "sim.state", &J::Null, usize::MAX).unwrap();
+        Arc::get_mut(&mut shared).unwrap().max_queued_bytes = cost;
+        let (mut link, _out, _pending) = new_link(&shared, false);
+        link.set_identity("net".into(), Caps::ALL);
+        link.on_text(r#"{"jsonrpc":"2.0","id":1,"method":"sim.state"}"#);
+        assert_eq!(shared.queued_bytes.load(Relaxed), cost);
+        drop(recv);
+        assert_eq!(shared.queued_bytes.load(Relaxed), 0);
     }
 
     #[test]
@@ -824,8 +957,10 @@ mod tests {
         for _ in 0..3 {
             assert!(local.send(request.clone()).unwrap_err().to_string().contains("stopped"));
             assert_eq!(shared.queued.load(Relaxed), 0);
+            assert_eq!(shared.queued_bytes.load(Relaxed), 0);
             assert!(matches!(link.on_text(&request.to_text()), Flow::Close));
             assert_eq!(shared.queued.load(Relaxed), 0);
+            assert_eq!(shared.queued_bytes.load(Relaxed), 0);
         }
     }
 
@@ -836,77 +971,87 @@ mod tests {
         const PRODUCERS: usize = 16;
         // Exercise contention with valid requests, without claiming to force the
         // old check/increment race's particular scheduling window.
-        for _ in 0..16 {
-            let (shared, recv) = queue_fixture(LIMIT);
-            let barrier = Arc::new(std::sync::Barrier::new(PRODUCERS));
-            std::thread::scope(|scope| {
-                let mut workers = Vec::new();
-                for producer in 0..PRODUCERS {
-                    let shared = shared.clone();
-                    let barrier = barrier.clone();
-                    workers.push(scope.spawn(move || {
-                        let request = crate::link::Request {
-                            id: Some(producer as u64), method: "sim.state".into(), params: J::Null,
-                        };
-                        if producer % 2 == 0 {
-                            let mut local = LocalConnector { shared: shared.clone() }
-                                .connect("local", Caps::ALL).unwrap();
-                            barrier.wait();
-                            usize::from(local.send(request).is_ok())
-                        } else {
-                            let (mut link, mut out, _pending) = new_link(&shared, false);
-                            link.set_identity("net".into(), Caps::ALL);
-                            barrier.wait();
-                            assert!(matches!(link.on_text(&request.to_text()), Flow::Continue));
-                            match out.try_recv() {
-                                Ok(Out::Text(text)) => {
-                                    let reply: J = serde_json::from_str(&text).unwrap();
-                                    assert_eq!(reply["id"], producer);
-                                    assert_eq!(reply["error"]["data"]["kind"], "busy");
-                                    0
+        for byte_limited in [false, true] {
+            for _ in 0..16 {
+                let (mut shared, recv) = queue_fixture(if byte_limited { PRODUCERS } else { LIMIT });
+                let cost = request_bytes(Some(&json!(1)), "sim.state", &J::Null, usize::MAX).unwrap();
+                Arc::get_mut(&mut shared).unwrap().max_queued_bytes = if byte_limited { LIMIT * cost } else { usize::MAX };
+                let barrier = Arc::new(std::sync::Barrier::new(PRODUCERS));
+                std::thread::scope(|scope| {
+                    let mut workers = Vec::new();
+                    for producer in 0..PRODUCERS {
+                        let shared = shared.clone();
+                        let barrier = barrier.clone();
+                        workers.push(scope.spawn(move || {
+                            let request = crate::link::Request {
+                                id: Some(1), method: "sim.state".into(), params: J::Null,
+                            };
+                            if producer % 2 == 0 {
+                                let mut local = LocalConnector { shared: shared.clone() }
+                                    .connect("local", Caps::ALL).unwrap();
+                                barrier.wait();
+                                usize::from(local.send(request).is_ok())
+                            } else {
+                                let (mut link, mut out, _pending) = new_link(&shared, false);
+                                link.set_identity("net".into(), Caps::ALL);
+                                barrier.wait();
+                                assert!(matches!(link.on_text(&request.to_text()), Flow::Continue));
+                                match out.try_recv() {
+                                    Ok(Out::Text(text)) => {
+                                        let reply: J = serde_json::from_str(&text).unwrap();
+                                        assert_eq!(reply["id"], 1);
+                                        assert_eq!(reply["error"]["data"]["kind"], "busy");
+                                        0
+                                    }
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => 1,
+                                    _ => panic!("unexpected output"),
                                 }
-                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => 1,
-                                _ => panic!("unexpected output"),
                             }
-                        }
-                    }));
+                        }));
+                    }
+                    let accepted: usize = workers.into_iter().map(|w| w.join().unwrap()).sum();
+                    assert_eq!(accepted, LIMIT);
+                });
+                assert_eq!(shared.queued.load(Relaxed), LIMIT);
+                assert_eq!(shared.queued_bytes.load(Relaxed), LIMIT * cost);
+                let mut requests = Vec::new();
+                for msg in recv.try_iter() {
+                    if matches!(msg, Inbound::Request { .. }) {
+                        requests.push(msg);
+                    }
                 }
-                let accepted: usize = workers.into_iter().map(|w| w.join().unwrap()).sum();
-                assert_eq!(accepted, LIMIT);
-            });
-            assert_eq!(shared.queued.load(Relaxed), LIMIT);
-            let mut requests = Vec::new();
-            for msg in recv.try_iter() {
-                if matches!(msg, Inbound::Request { .. }) {
-                    requests.push(msg);
-                }
+                assert_eq!(requests.len(), LIMIT);
+                assert_eq!(shared.queued.load(Relaxed), LIMIT, "taking a message retains its slot");
+                drop(requests);
+                assert_eq!(shared.queued.load(Relaxed), 0);
+                assert_eq!(shared.queued_bytes.load(Relaxed), 0);
             }
-            assert_eq!(requests.len(), LIMIT);
-            assert_eq!(shared.queued.load(Relaxed), LIMIT, "taking a message retains its slot");
-            drop(requests);
-            assert_eq!(shared.queued.load(Relaxed), 0);
         }
     }
 
     #[test]
     fn zero_capacity_rejects_requests_but_keeps_control_events() {
         use crate::link::{LocalConnector, Transport};
-        let (shared, recv) = queue_fixture(0);
-        let mut local = LocalConnector { shared: shared.clone() }.connect("local", Caps::ALL).unwrap();
-        let (mut link, mut out, _pending) = new_link(&shared, false);
-        assert!(matches!(link.on_text(r#"{"jsonrpc":"2.0","id":1,"method":"auth"}"#), Flow::Continue));
-        assert!(matches!(out.try_recv().unwrap(), Out::Text(_)));
-        let request = crate::link::Request { id: Some(2), method: "sim.state".into(), params: J::Null };
-        assert!(local.send(request.clone()).is_err());
-        assert!(matches!(link.on_text(&request.to_text()), Flow::Continue));
-        let Out::Text(text) = out.try_recv().unwrap() else { panic!("busy response") };
-        assert_eq!(serde_json::from_str::<J>(&text).unwrap()["error"]["data"]["kind"], "busy");
-        drop(local);
-        link.finish();
-        let events: Vec<_> = recv.try_iter().collect();
-        assert_eq!(events.len(), 4, "two connects and two disconnects");
-        assert!(!events.iter().any(|m| matches!(m, Inbound::Request { .. })));
-        assert_eq!(shared.queued.load(Relaxed), 0);
+        for byte_limited in [false, true] {
+            let (mut shared, recv) = queue_fixture(if byte_limited { 10 } else { 0 });
+            if byte_limited { Arc::get_mut(&mut shared).unwrap().max_queued_bytes = 0; }
+            let mut local = LocalConnector { shared: shared.clone() }.connect("local", Caps::ALL).unwrap();
+            let (mut link, mut out, _pending) = new_link(&shared, false);
+            assert!(matches!(link.on_text(r#"{"jsonrpc":"2.0","id":1,"method":"auth"}"#), Flow::Continue));
+            assert!(matches!(out.try_recv().unwrap(), Out::Text(_)));
+            let request = crate::link::Request { id: Some(2), method: "sim.state".into(), params: J::Null };
+            assert!(local.send(request.clone()).is_err());
+            assert!(matches!(link.on_text(&request.to_text()), Flow::Continue));
+            let Out::Text(text) = out.try_recv().unwrap() else { panic!("busy response") };
+            assert_eq!(serde_json::from_str::<J>(&text).unwrap()["error"]["data"]["kind"], "busy");
+            drop(local);
+            link.finish();
+            let events: Vec<_> = recv.try_iter().collect();
+            assert_eq!(events.len(), 4, "two connects and two disconnects");
+            assert!(!events.iter().any(|m| matches!(m, Inbound::Request { .. })));
+            assert_eq!(shared.queued.load(Relaxed), 0);
+            assert_eq!(shared.queued_bytes.load(Relaxed), 0);
+        }
     }
 
     #[test]
