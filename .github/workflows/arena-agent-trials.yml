@@ -34,11 +34,11 @@ jobs:
       - name: Build the actual headless Arena host and CLI
         run: cargo build --locked --release -p orr_remote --bin orr_remote_host -p orr_cli --bin orr
       - name: Actual mock-driven host success, failure, interruption and resume
-        run: python tools/arena_agent_trial.py --integration-test --output target/arena-agent-trial-integration
+        run: python tools/arena_agent_trial.py --integration-test --output "${{ runner.temp }}/arena-agent-trial-${{ github.run_id }}-${{ github.run_attempt }}"
       - name: Retain raw mock trial evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: arena-agent-trial-${{ matrix.os }}
-          path: target/arena-agent-trial-integration/
+          path: ${{ runner.temp }}/arena-agent-trial-${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: error

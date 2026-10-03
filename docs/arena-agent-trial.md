@@ -126,6 +126,10 @@ its oracle runs. Task five verifies that archived original and rejects changes
 to either the archive or its exported alias. A resumed unfinished task four
 starts with a new control directory and retains the previous segment as raw
 evidence rather than reusing its unaccepted replay.
+
+CI uses a fresh runner-temporary output path identified by run ID and attempt.
+The integration runner continues to reject an existing output directory, so
+restored Cargo target directories cannot cause trial evidence to be overwritten.
 `task_done` asks the private oracle to inspect the actual host and artifacts.
 
 This version executes only the bundled mock driver, identified as such in the
