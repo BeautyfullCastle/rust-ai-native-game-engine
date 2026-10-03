@@ -13,6 +13,19 @@ const MAX_PNG_BYTES: usize = 4 << 20;
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
+// Keep the checked allocator compatible with the workspace's older Rust
+// versions and with Rust 1.99's atomic API rename. Never wrap or reuse IDs.
+fn next_identity(counter: &AtomicU64) -> u64 {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.checked_add(1).expect("screenshot identity exhausted");
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return current,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewMode {
     Edit,
@@ -118,8 +131,7 @@ pub struct ScreenshotOwner {
 impl ScreenshotService {
     /// Create a paired host endpoint and the sole editor owner for one host lifetime.
     pub fn pair() -> (Self, ScreenshotOwner) {
-        let endpoint_id = NEXT_ENDPOINT_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .expect("screenshot endpoint id exhausted");
+        let endpoint_id = next_identity(&NEXT_ENDPOINT_ID);
         let shared = Arc::new(Shared {
             endpoint_id,
             state: Mutex::new(SharedState {
@@ -147,8 +159,7 @@ impl ScreenshotService {
             return Err(ScreenshotAdmissionError::Busy);
         }
         options.validate().map_err(|_| ScreenshotAdmissionError::Invalid)?;
-        let serial = NEXT_SERIAL.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |serial| serial.checked_add(1))
-            .expect("screenshot serial exhausted");
+        let serial = next_identity(&NEXT_SERIAL);
         let request = CaptureRequest { endpoint_id: self.shared.endpoint_id, serial, options, requested, deadline };
         state.pending = Some(Pending { request: request.clone(), delivered: false, result: None });
         Ok(request)
@@ -320,6 +331,23 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identities_are_unique_under_contention_and_exhaustion_never_wraps() {
+        let counter = Arc::new(AtomicU64::new(1));
+        let workers: Vec<_> = (0..8).map(|_| {
+            let counter = counter.clone();
+            std::thread::spawn(move || (0..32).map(|_| next_identity(&counter)).collect::<Vec<_>>())
+        }).collect();
+        let mut identities: Vec<_> = workers.into_iter().flat_map(|worker| worker.join().unwrap()).collect();
+        identities.sort_unstable();
+        assert_eq!(identities, (1..=256).collect::<Vec<_>>());
+
+        let exhausted = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(next_identity(&exhausted), u64::MAX - 1);
+        assert!(std::panic::catch_unwind(|| next_identity(&exhausted)).is_err());
+        assert_eq!(exhausted.load(Ordering::Relaxed), u64::MAX);
+    }
 
     fn pair() -> (ScreenshotService, ScreenshotOwner, CaptureRequest) {
         let (service, owner) = ScreenshotService::pair();
