@@ -3066,6 +3066,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_asset_cook"
+version = "0.0.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "orr_asset",
+ "orr_fp",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "orr_audio"
 version = "0.0.1"
 dependencies = [
