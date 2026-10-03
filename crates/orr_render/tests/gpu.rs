@@ -34,6 +34,153 @@ fn gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
     gpu_with(WgpuOptions::default())
 }
 
+fn baseline_gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
+    let force_software = match std::env::var("ORR_BASELINE_GPU_MODE").as_deref() {
+        Ok("software") => true,
+        Ok("hardware") | Err(_) => false,
+        Ok(other) => {
+            panic!("ORR_BASELINE_GPU_MODE must be 'hardware' or 'software', got {other:?}")
+        }
+    };
+    gpu_with(WgpuOptions {
+        force_software,
+        ..WgpuOptions::default()
+    })
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+fn duration_ms(value: Option<std::time::Duration>) -> String {
+    value.map_or_else(
+        || "null".to_owned(),
+        |d| format!("{:.6}", d.as_secs_f64() * 1000.0),
+    )
+}
+
+fn emit_baseline_frame(
+    gpu: &Wgpu,
+    frame_class: &str,
+    frame_index: u32,
+    wall_ms: f64,
+    stats: orr_render::FrameStats,
+) {
+    let info = gpu.adapter().get_info();
+    let name = json_escape(&info.name);
+    let driver = json_escape(&info.driver);
+    let driver_info = json_escape(&info.driver_info);
+    eprintln!(
+        "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"frame\",\"renderer\":\"2d\",\"preset\":\"default\",\"scene_id\":\"grid_1000_v1\",\"instance_count\":1000,\"resolution_px\":[640,360],\"target_format\":\"Rgba8Unorm\",\"adapter_name\":\"{name}\",\"adapter_backend\":\"{:?}\",\"adapter_device_type\":\"{:?}\",\"adapter_vendor\":{},\"adapter_device\":{},\"driver\":\"{driver}\",\"driver_info\":\"{driver_info}\",\"software\":{},\"frame_class\":\"{frame_class}\",\"frame_index\":{frame_index},\"wall_scope\":\"render_call_return_not_gpu_completion\",\"wall_ms\":{wall_ms:.6},\"cpu_prepare_ms\":{},\"cpu_encode_ms\":{},\"cpu_submit_ms\":{},\"shape_instances\":{},\"mesh_instances\":{},\"line_instances\":{},\"main\":{{\"passes\":{},\"draw_calls\":{},\"instances\":{}}},\"shadow\":{{\"passes\":{},\"draw_calls\":{},\"instances\":{}}},\"upload_calls\":{},\"upload_bytes\":{},\"buffer_reallocations\":{},\"attachment_allocations\":{},\"attachment_reallocations\":{},\"msaa_samples\":{}}}",
+        info.backend,
+        info.device_type,
+        info.vendor,
+        info.device,
+        gpu.is_software(),
+        duration_ms(stats.cpu_prepare_time),
+        duration_ms(stats.cpu_encode_time),
+        duration_ms(stats.cpu_submit_time),
+        stats.shape_instances,
+        stats.mesh_instances,
+        stats.line_instances,
+        stats.main.passes,
+        stats.main.draw_calls,
+        stats.main.instances,
+        stats.shadow.passes,
+        stats.shadow.draw_calls,
+        stats.shadow.instances,
+        stats.upload_calls,
+        stats.upload_bytes,
+        stats.buffer_reallocations,
+        stats.attachment_allocations,
+        stats.attachment_reallocations,
+        stats.msaa_samples,
+    );
+}
+
+/// Opt-in only: run three fresh processes per adapter mode for comparable release samples.
+#[test]
+#[ignore = "opt-in release baseline; run serially with --ignored --exact"]
+#[expect(clippy::disallowed_types, reason = "Wall clocks measure this view-only benchmark and its separate readback latency.")]
+fn release_baseline_2d() {
+    let Some((_guard, gpu)) = baseline_gpu() else {
+        return;
+    };
+    const W: u32 = 640;
+    const H: u32 = 360;
+    let target = OffscreenTarget::new(&gpu, W, H, TextureFormat::Rgba8Unorm);
+    let mut renderer = Renderer::new(gpu.clone(), target.format());
+    renderer.clear = Some(BLACK);
+    let camera = Camera::new([0.0, 0.0], 32.0);
+    let mut list = RenderList::new();
+    for y in 0..25u32 {
+        for x in 0..40u32 {
+            let color = [
+                x as f32 / 39.0,
+                y as f32 / 24.0,
+                ((x * 7 + y * 13) % 40) as f32 / 39.0,
+                1.0,
+            ];
+            list.quad([x as f32 - 19.5, y as f32 - 12.0], [0.35, 0.35], 0.0, color);
+        }
+    }
+    assert_eq!(list.shapes.len(), 1000);
+    eprintln!(
+        "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"metadata\",\"renderer\":\"2d\",\"preset\":\"default\",\"scene_id\":\"grid_1000_v1\",\"instance_count\":1000,\"resolution_px\":[{W},{H}],\"target_format\":\"Rgba8Unorm\",\"renderer_initialization_included\":false,\"target_creation_included\":false,\"cold_scope\":\"first_frame_after_renderer_construction\",\"adapter_name\":\"{}\",\"adapter_backend\":\"{:?}\",\"adapter_device_type\":\"{:?}\",\"adapter_vendor\":{},\"adapter_device\":{},\"driver\":\"{}\",\"driver_info\":\"{}\",\"software\":{}}}",
+        json_escape(&gpu.adapter().get_info().name),
+        gpu.adapter().get_info().backend,
+        gpu.adapter().get_info().device_type,
+        gpu.adapter().get_info().vendor,
+        gpu.adapter().get_info().device,
+        json_escape(&gpu.adapter().get_info().driver),
+        json_escape(&gpu.adapter().get_info().driver_info),
+        gpu.is_software(),
+    );
+    for (frame_class, count) in [("cold", 1), ("warmup", 10), ("steady", 30)] {
+        for frame_index in 0..count {
+            let start = std::time::Instant::now();
+            target.render(&mut renderer, &list, &camera);
+            let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+            emit_baseline_frame(
+                &gpu,
+                frame_class,
+                frame_index,
+                wall_ms,
+                renderer.last_frame_stats(),
+            );
+        }
+    }
+    let read_start = std::time::Instant::now();
+    let image = target.read_rgba8();
+    let readback_ms = read_start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(image.len(), (W * H * 4) as usize);
+    assert!(
+        image
+            .chunks_exact(4)
+            .any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0),
+        "baseline scene produced no visible pixels"
+    );
+    let checksum = image.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    eprintln!(
+        "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"readback\",\"renderer\":\"2d\",\"preset\":\"default\",\"scene_id\":\"grid_1000_v1\",\"resolution_px\":[{W},{H}],\"readback_ms\":{readback_ms:.6},\"pixel_bytes\":{},\"fnv1a64\":\"{checksum:016x}\",\"timing_included_in_frame_samples\":false}}",
+        image.len()
+    );
+}
+
 /// Renders `list` into a linear RGBA8 target of `w` x `h` and returns the pixels.
 fn render(gpu: &Wgpu, w: u32, h: u32, list: &RenderList, camera: &Camera) -> Vec<u8> {
     let target = OffscreenTarget::new(gpu, w, h, TextureFormat::Rgba8Unorm);

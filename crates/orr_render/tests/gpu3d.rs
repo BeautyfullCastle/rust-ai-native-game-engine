@@ -27,6 +27,167 @@ fn gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
     }
 }
 
+fn baseline_gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
+    let force_software = match std::env::var("ORR_BASELINE_GPU_MODE").as_deref() {
+        Ok("software") => true,
+        Ok("hardware") | Err(_) => false,
+        Ok(other) => {
+            panic!("ORR_BASELINE_GPU_MODE must be 'hardware' or 'software', got {other:?}")
+        }
+    };
+    let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    match Wgpu::headless(WgpuOptions {
+        force_software,
+        ..WgpuOptions::default()
+    }) {
+        Ok(gpu) => Some((guard, gpu)),
+        Err(e) => {
+            assert!(
+                std::env::var_os("ORR_REQUIRE_GPU").is_none(),
+                "ORR_REQUIRE_GPU is set but no adapter: {e}"
+            );
+            eprintln!("SKIP: no GPU adapter ({e})");
+            None
+        }
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+fn duration_ms(value: Option<std::time::Duration>) -> String {
+    value.map_or_else(
+        || "null".to_owned(),
+        |d| format!("{:.6}", d.as_secs_f64() * 1000.0),
+    )
+}
+
+#[expect(clippy::disallowed_types, reason = "Wall clocks measure this view-only benchmark and its separate readback latency.")]
+fn run_release_baseline_3d(preset: &str, settings: Settings3D) {
+    let Some((_guard, gpu)) = baseline_gpu() else {
+        return;
+    };
+    const W: u32 = 640;
+    const H: u32 = 360;
+    let target = OffscreenTarget::new(&gpu, W, H, TextureFormat::Rgba8UnormSrgb);
+    let mut renderer = Renderer3D::with_settings(gpu.clone(), target.format(), settings);
+    renderer.clear = BLACK;
+    let camera = Camera3D::perspective([0.0, 28.0, 34.0], [0.0, 0.0, 0.0], 55.0);
+    let mut list = RenderList3D::new();
+    for z in 0..25u32 {
+        for x in 0..40u32 {
+            let color = [
+                x as f32 / 39.0,
+                0.25 + z as f32 / 50.0,
+                ((x * 7 + z * 13) % 40) as f32 / 39.0,
+            ];
+            list.sphere(
+                [x as f32 - 19.5, 0.35, z as f32 - 12.0],
+                IDENTITY_ROT,
+                0.32,
+                &Material::new(color),
+            );
+        }
+    }
+    assert_eq!(list.instance_count(), 1000);
+    let info = gpu.adapter().get_info();
+    eprintln!(
+        "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"metadata\",\"renderer\":\"3d\",\"preset\":\"{preset}\",\"scene_id\":\"sphere_grid_1000_v1\",\"instance_count\":1000,\"resolution_px\":[{W},{H}],\"target_format\":\"Rgba8UnormSrgb\",\"renderer_initialization_included\":false,\"target_creation_included\":false,\"cold_scope\":\"first_frame_after_renderer_construction\",\"settings\":{{\"requested_msaa\":{},\"shadow_map_size\":{},\"mesh_segments\":{}}},\"shadows\":{},\"adapter_name\":\"{}\",\"adapter_backend\":\"{:?}\",\"adapter_device_type\":\"{:?}\",\"adapter_vendor\":{},\"adapter_device\":{},\"driver\":\"{}\",\"driver_info\":\"{}\",\"software\":{}}}",
+        settings.msaa,
+        settings.shadow_map_size,
+        settings.mesh_segments,
+        list.lighting.shadows,
+        json_escape(&info.name),
+        info.backend,
+        info.device_type,
+        info.vendor,
+        info.device,
+        json_escape(&info.driver),
+        json_escape(&info.driver_info),
+        gpu.is_software(),
+    );
+
+    for (frame_class, count) in [("cold", 1), ("warmup", 10), ("steady", 30)] {
+        for frame_index in 0..count {
+            let start = std::time::Instant::now();
+            target.render3d(&mut renderer, &list, &camera);
+            let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let stats = renderer.last_frame_stats();
+            eprintln!(
+                "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"frame\",\"renderer\":\"3d\",\"preset\":\"{preset}\",\"scene_id\":\"sphere_grid_1000_v1\",\"instance_count\":1000,\"resolution_px\":[{W},{H}],\"adapter_name\":\"{}\",\"adapter_backend\":\"{:?}\",\"adapter_device_type\":\"{:?}\",\"adapter_vendor\":{},\"adapter_device\":{},\"driver\":\"{}\",\"driver_info\":\"{}\",\"software\":{},\"frame_class\":\"{frame_class}\",\"frame_index\":{frame_index},\"wall_scope\":\"render_call_return_not_gpu_completion\",\"wall_ms\":{wall_ms:.6},\"cpu_prepare_ms\":{},\"cpu_encode_ms\":{},\"cpu_submit_ms\":{},\"shape_instances\":{},\"mesh_instances\":{},\"line_instances\":{},\"main\":{{\"passes\":{},\"draw_calls\":{},\"instances\":{}}},\"shadow\":{{\"passes\":{},\"draw_calls\":{},\"instances\":{}}},\"upload_calls\":{},\"upload_bytes\":{},\"buffer_reallocations\":{},\"attachment_allocations\":{},\"attachment_reallocations\":{},\"msaa_samples\":{}}}",
+                json_escape(&info.name),
+                info.backend,
+                info.device_type,
+                info.vendor,
+                info.device,
+                json_escape(&info.driver),
+                json_escape(&info.driver_info),
+                gpu.is_software(),
+                duration_ms(stats.cpu_prepare_time),
+                duration_ms(stats.cpu_encode_time),
+                duration_ms(stats.cpu_submit_time),
+                stats.shape_instances,
+                stats.mesh_instances,
+                stats.line_instances,
+                stats.main.passes,
+                stats.main.draw_calls,
+                stats.main.instances,
+                stats.shadow.passes,
+                stats.shadow.draw_calls,
+                stats.shadow.instances,
+                stats.upload_calls,
+                stats.upload_bytes,
+                stats.buffer_reallocations,
+                stats.attachment_allocations,
+                stats.attachment_reallocations,
+                stats.msaa_samples,
+            );
+        }
+    }
+    let read_start = std::time::Instant::now();
+    let image = target.read_rgba8();
+    let readback_ms = read_start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(image.len(), (W * H * 4) as usize);
+    assert!(
+        image
+            .chunks_exact(4)
+            .any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0),
+        "baseline scene produced no visible pixels"
+    );
+    let checksum = image.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    eprintln!(
+        "ORR_BASELINE {{\"schema_version\":1,\"suite\":\"renderer\",\"case\":\"readback\",\"renderer\":\"3d\",\"preset\":\"{preset}\",\"scene_id\":\"sphere_grid_1000_v1\",\"resolution_px\":[{W},{H}],\"readback_ms\":{readback_ms:.6},\"pixel_bytes\":{},\"fnv1a64\":\"{checksum:016x}\",\"timing_included_in_frame_samples\":false}}",
+        image.len()
+    );
+}
+
+#[test]
+#[ignore = "opt-in release baseline; run serially with --ignored --exact"]
+fn release_baseline_3d_low() {
+    run_release_baseline_3d("low", Settings3D::LOW);
+}
+
+#[test]
+#[ignore = "opt-in release baseline; run serially with --ignored --exact"]
+fn release_baseline_3d_default() {
+    run_release_baseline_3d("default", Settings3D::default());
+}
+
 const BLACK: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
 const SETTINGS: Settings3D = Settings3D { msaa: 4, shadow_map_size: 1024, mesh_segments: 32 };
 
