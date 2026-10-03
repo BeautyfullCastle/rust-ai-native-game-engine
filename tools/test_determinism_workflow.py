@@ -122,6 +122,23 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertFalse(self.jobs["sample-build"]["strategy"]["fail-fast"])
         self.assert_required_command(self.jobs["sample-build"], SAMPLE_TEST)
 
+    def test_simulation_type_guard_and_fixtures_are_required(self):
+        native = self.jobs["native"]
+        self.assert_required_command(native, "python tools/check_sim_float_types.py")
+        self.assert_required_command(native, "python tools/test_sim_float_guard.py")
+        steps = native["steps"]
+        tests = next(step for step in steps if step.get("run") == NATIVE_TEST)
+        guards = []
+        for command in ("python tools/check_sim_float_types.py", "python tools/test_sim_float_guard.py"):
+            guard = next(step for step in steps if command in step.get("run", "").splitlines())
+            # Each mandatory native command must own a step: the default
+            # Windows pwsh wrapper returns only the final LASTEXITCODE.
+            self.assertEqual(guard["run"].strip(), command)
+            self.assertLess(steps.index(guard), steps.index(tests))
+            guards.append(guard)
+        self.assertIsNot(guards[0], guards[1])
+        self.assertLess(steps.index(guards[0]), steps.index(guards[1]))
+
     def test_release_timing_uploads_are_html_only_and_unique(self):
         for job, command, name in (
             ("native", NATIVE_TEST, "cargo-timings-native-${{ matrix.name }}"),
