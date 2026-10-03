@@ -16,6 +16,11 @@
 //! the *view* layer (rendering, UI, editor tooling, content authoring) and
 //! must never be used in a way that feeds back into simulation state.
 //!
+//! Repository CI also runs `tools/check_sim_float_types.py`: a library-only
+//! `disallowed_types` check rejects arithmetic-free float type declarations,
+//! with the same narrow `float_interop` conversion exception. This is a
+//! repository lint contract, not a proof about arbitrary downstream POD types.
+//!
 //! # The type
 //!
 //! [`FP`] is a `Q48.16` fixed-point number backed by an `i64`: 16
@@ -83,6 +88,7 @@
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![deny(clippy::float_arithmetic)]
+#![deny(clippy::disallowed_types)]
 #![warn(missing_docs)]
 #![allow(clippy::needless_range_loop)]
 

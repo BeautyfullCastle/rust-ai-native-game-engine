@@ -41,6 +41,19 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Simulation float-type guard and POD regression fixtures
+        # Type declarations (including arithmetic-free POD fields) are checked
+        # separately from float arithmetic. Keep view/test/bench float use out
+        # of this library-only policy; FP's feature-gated conversion boundary
+        # is exercised explicitly. Failure is mandatory on every native leg.
+        run: |
+          python tools/check_sim_float_types.py
+          python tools/test_sim_float_guard.py
+
       - name: cargo test --workspace --release
         # Release, not debug: matches the profile the design doc's tick
         # budget is measured against, and is what the golden tests (whose
