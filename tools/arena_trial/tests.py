@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import os
@@ -52,6 +53,8 @@ class FakeBenchmark:
         self.doc_checksum = doc_checksum
         self.scene_responses = list(scene_responses or [])
         self.mode = mode
+        self.replay_bytes = b"fixture replay"
+        self.verified_replays: list[Path] = []
 
     def cli(self, *args: str):
         if args == ("status",):
@@ -65,6 +68,7 @@ class FakeBenchmark:
         raise AssertionError(f"unexpected fake CLI call: {args!r}")
 
     def verify(self, replay: Path, ticks: int, name: str):
+        self.verified_replays.append(replay)
         return {
             "checks": {"passed": True}, "ticks": ticks, "debug_commands_replayed": 0,
             "metrics": [
@@ -76,6 +80,11 @@ class FakeBenchmark:
             ],
             "recording": {"checked": self.recording_checked, "mismatches": 0, "first_mismatch": None},
         }
+
+    def stop_play(self, replay: Path):
+        replay.write_bytes(self.replay_bytes)
+        self.playing = False
+        return {"recording": str(replay)}
 
 
 def scene_query(hero_x: int, target_x: int, *, score: int = 1) -> dict:
@@ -119,6 +128,13 @@ class ProtocolTests(unittest.TestCase):
     def test_decode_rejects_malformed_and_non_object_frames(self):
         for line in ("{", "[]", "null", '"text"'):
             with self.subTest(line=line), self.assertRaises(ProtocolError):
+                decode(line)
+
+    def test_decode_normalizes_integer_digit_and_nesting_limits(self):
+        oversized_integer = '{"n":' + "9" * 5000 + "}"
+        deeply_nested = "[" * 1500 + "0" + "]" * 1500
+        for line in (oversized_integer, deeply_nested):
+            with self.subTest(length=len(line)), self.assertRaises(ProtocolError):
                 decode(line)
 
     def test_broker_protocol_rejects_escape_hatches_paths_and_solver_verdicts(self):
@@ -333,6 +349,35 @@ class OracleTests(unittest.TestCase):
         broker.modified_checksum = facts.get("modified_checksum", "modified")
         return broker
 
+    def test_task4_original_replay_is_archived_and_task5_cannot_replace_it(self):
+        benchmark = FakeBenchmark(self.root)
+        attempt = {"number": 1, "next_task": 4, "facts": {},
+                   "task_action_segments": {"4": []}, "tasks": []}
+        broker = Broker(self.trial, attempt, benchmark)
+        broker.playing = True
+        broker._dispatch("sim_stop", {"replay": "modified50"})
+        archived = self.root / runner.TASK4_ORIGINAL_REPLAY
+        alias = self.root / "modified50.orrp"
+        expected_hash = hashlib.sha256(benchmark.replay_bytes).hexdigest()
+        self.assertEqual(archived.read_bytes(), benchmark.replay_bytes)
+        self.assertEqual(attempt["facts"]["task4_original_replay_sha256"], expected_hash)
+
+        task5_attempt = {**attempt, "next_task": 5}
+        task5 = Broker(self.trial, task5_attempt, benchmark)
+        task5.playing = True
+        original_alias = alias.read_bytes()
+        with self.assertRaises(ProtocolError):
+            task5._dispatch("sim_stop", {"replay": "modified50"})
+        self.assertEqual(alias.read_bytes(), original_alias)
+        self.assertTrue(task5.playing)
+        task5.playing = False
+
+        task5._dispatch("verify_replay", {"replay": "modified50"})
+        self.assertEqual(benchmark.verified_replays[-1], archived)
+        alias.write_bytes(b"replaced replay")
+        with self.assertRaisesRegex(TrialError, "no longer matches"):
+            runner._task4_original_replay(self.root, attempt["facts"])
+
     def test_task1_requires_positive_integer_receipt_matching_only_history_entry(self):
         actions = [{"op": "read", "what": name} for name in ("status", "schema", "scene")]
         actions.extend([{"op": "apply", "task": 1, "accepted": True},
@@ -419,6 +464,11 @@ class OracleTests(unittest.TestCase):
                 facts = {"modified_checksum": "modified", "task4_trace": trace,
                          f"task{task}_live_final": {"tick": 20 if task == 3 else 50,
                              "scene": scene_facts(scene_query(-300, 300 if task == 3 else 900, score=1))}}
+                if task == 5:
+                    archived = self.root / runner.TASK4_ORIGINAL_REPLAY
+                    archived.write_bytes(replay.read_bytes())
+                    facts["task4_original_replay"] = runner.TASK4_ORIGINAL_REPLAY
+                    facts["task4_original_replay_sha256"] = hashlib.sha256(archived.read_bytes()).hexdigest()
                 good = self.broker(task, actions=original, facts=copy.deepcopy(facts), trace=trace,
                                    recording_checked=21 if task == 3 else 51)
                 self.assertEqual(self.trial.judge_task(good, task)["status"], "passed")
@@ -447,6 +497,10 @@ class OracleTests(unittest.TestCase):
 
         replay = self.root / "modified50.orrp"
         replay.write_bytes(b"fixture")
+        archived = self.root / runner.TASK4_ORIGINAL_REPLAY
+        archived.write_bytes(replay.read_bytes())
+        facts["task4_original_replay"] = runner.TASK4_ORIGINAL_REPLAY
+        facts["task4_original_replay_sha256"] = hashlib.sha256(archived.read_bytes()).hexdigest()
         trace = [{"tick": tick, "checksum": f"0x{tick:016x}"} for tick in range(51)]
         passing_facts = {
             **facts,
@@ -493,15 +547,66 @@ class OracleTests(unittest.TestCase):
     def test_task5_rejects_incomplete_original_replay_checksum_coverage(self):
         replay = self.root / "modified50.orrp"
         replay.write_bytes(b"fixture")
+        archived = self.root / runner.TASK4_ORIGINAL_REPLAY
+        archived.write_bytes(replay.read_bytes())
         trace = [{"tick": tick, "checksum": f"0x{tick:016x}"} for tick in range(51)]
         facts = {"modified_checksum": "modified", "task4_trace": trace,
-                 "task5_live_final": {"tick": 50, "scene": scene_facts(scene_query(-300, 900, score=1))}}
+                 "task5_live_final": {"tick": 50, "scene": scene_facts(scene_query(-300, 900, score=1))},
+                 "task4_original_replay": runner.TASK4_ORIGINAL_REPLAY,
+                 "task4_original_replay_sha256": hashlib.sha256(archived.read_bytes()).hexdigest()}
         broker = self.broker(5, actions=task5_actions(), facts=facts, trace=trace, recording_checked=50)
         with self.assertRaisesRegex(BenchmarkFailure, "original replay"):
             self.trial.judge_task(broker, 5)
 
 
 class CleanupTests(unittest.TestCase):
+    def test_prepare_readiness_failure_cleans_up_started_host_process(self):
+        class ReadinessFailureBenchmark:
+            def __init__(self, output: Path):
+                self.output = output
+                self.process = None
+                self.playing = False
+                self.host_log = None
+                self.report = {"hosts": []}
+                self.stop_host_called = False
+                self.spawned = None
+
+            def prepare(self):
+                self.output.mkdir(parents=True, exist_ok=True)
+
+            def start_host(self):
+                self.process = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.spawned = self.process
+                raise BenchmarkFailure("readiness/schema check failed")
+
+            def stop_host(self):
+                self.stop_host_called = True
+                if self.process is not None and self.process.poll() is None:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+                self.process = None
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            trial = TrialRunner(root / "trial", manifest(), repo=root,
+                                host_bin=Path("host"), cli_bin=Path("cli"))
+            attempt = {"number": 1, "facts": {}, "cleanup": []}
+            trial.attempt_dir(1).mkdir(parents=True, exist_ok=True)
+            fake = ReadinessFailureBenchmark(trial.attempt_dir(1) / "control")
+            with patch.object(runner, "frozen_provenance", return_value=trial.manifest["provenance"]), \
+                    patch.object(runner, "digest_file", side_effect=["a" * 64, "b" * 64]), \
+                    patch.object(trial, "_benchmark", return_value=fake), \
+                    self.assertRaisesRegex(BenchmarkFailure, "readiness/schema"):
+                trial._prepare_attempt(attempt, fresh=True)
+            self.assertTrue(fake.stop_host_called)
+            self.assertIsNotNone(fake.spawned)
+            self.assertIsNotNone(fake.spawned.poll())
+            host_events = [entry["host"] for entry in attempt["cleanup"] if "host" in entry]
+            self.assertEqual(len(host_events), 1)
+            self.assertIsNotNone(host_events[0]["exit_code"])
+
     def test_live_process_is_distinguished_from_a_reused_windows_pid(self):
         from .integration import process_alive
         self.assertTrue(process_alive(os.getpid(), runner.utc_now()))

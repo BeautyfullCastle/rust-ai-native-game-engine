@@ -117,6 +117,14 @@ operations are `read`, guarded `apply`, `sim_start`, `sim_input`, `sim_step`,
 `sim_stop`, `verify_replay`, `undo`, `redo`, `save`, `restart_host` and `task_done`. Each has
 typed arguments and task/state restrictions. No operation accepts a shell
 command, raw RPC method, arbitrary destination path, score edit or verdict.
+
+Replay export labels are fixed per task: task three writes `baseline20`,
+task four writes `modified50`, and tasks two and five stop without an export.
+Task four archives the replay bytes separately and pins their SHA-256 before
+its oracle runs. Task five verifies that archived original and rejects changes
+to either the archive or its exported alias. A resumed unfinished task four
+starts with a new control directory and retains the previous segment as raw
+evidence rather than reusing its unaccepted replay.
 `task_done` asks the private oracle to inspect the actual host and artifacts.
 
 This version executes only the bundled mock driver, identified as such in the

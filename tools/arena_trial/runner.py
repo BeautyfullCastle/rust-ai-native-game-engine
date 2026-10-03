@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import signal
 import shutil
 import subprocess
@@ -154,6 +155,24 @@ def _expect_actions(attempt: dict[str, Any], number: int, expected: list[str]) -
     actual = [item["op"] for item in actions]
     baseline.require(actual == expected, f"task {number} operation sequence differs: {actual}")
     return actions
+
+
+TASK4_ORIGINAL_REPLAY = "task4-original-modified50.orrp"
+
+
+def _task4_original_replay(output: Path, facts: dict[str, Any], *, verify_alias: bool = True) -> Path:
+    name = facts.get("task4_original_replay")
+    expected_hash = facts.get("task4_original_replay_sha256")
+    if name != TASK4_ORIGINAL_REPLAY or not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        raise TrialError("task 4 original replay identity is missing")
+    archived = output / TASK4_ORIGINAL_REPLAY
+    if not archived.is_file() or digest_file(archived) != expected_hash:
+        raise TrialError("immutable task 4 replay copy failed its SHA-256 identity")
+    if verify_alias:
+        exported = output / "modified50.orrp"
+        if not exported.is_file() or digest_file(exported) != expected_hash:
+            raise TrialError("task 4 exported replay no longer matches its original SHA-256")
+    return archived
 
 
 class Broker:
@@ -335,7 +354,8 @@ class Broker:
             if not allowed_task or self.playing:
                 raise ProtocolError("replay verification is not allowed in this task state")
             ticks = 20 if args["replay"] == "baseline20" else 50
-            replay = self.benchmark.output / f"{args['replay']}.orrp"
+            replay = (_task4_original_replay(self.benchmark.output, self.attempt["facts"])
+                      if self.task_number == 5 else self.benchmark.output / f"{args['replay']}.orrp")
             self.benchmark.verify(replay, ticks, f"solver-request-task{self.task_number}-verify.json")
             self.record("verify_replay", replay=args["replay"])
             return {"verification_ran": True}, False
@@ -344,9 +364,23 @@ class Broker:
             if not self.playing:
                 raise ProtocolError("sim_stop requires an active play session")
             label = args.get("replay")
+            expected_label = {2: None, 3: "baseline20", 4: "modified50", 5: None}.get(self.task_number)
+            if label != expected_label:
+                raise ProtocolError("sim_stop export label is not permitted for this task")
             if label:
                 replay_path = self.benchmark.output / f"{label}.orrp"
                 result = self.benchmark.stop_play(replay_path)
+                if self.task_number == 4:
+                    archived = self.benchmark.output / TASK4_ORIGINAL_REPLAY
+                    if not replay_path.is_file() or archived.exists():
+                        raise TrialError("task 4 original replay is missing or immutable archive already exists")
+                    replay_hash = digest_file(replay_path)
+                    shutil.copyfile(replay_path, archived)
+                    if digest_file(archived) != replay_hash:
+                        raise TrialError("task 4 original replay copy failed SHA-256 verification")
+                    self.attempt["facts"]["task4_original_replay"] = TASK4_ORIGINAL_REPLAY
+                    self.attempt["facts"]["task4_original_replay_sha256"] = replay_hash
+                    self.runner.persist()
             else:
                 result = self._cli("sim", "stop")
                 self.benchmark.playing = False
@@ -597,6 +631,52 @@ class TrialRunner:
         args.human_interventions = 0
         return baseline.Benchmark(args)
 
+    def _cleanup_benchmark(self, benchmark: baseline.Benchmark, attempt: dict[str, Any]) -> None:
+        """Close host ownership even when preparation fails before assignment to run_attempt."""
+        host_process = benchmark.process
+        stop_error = None
+        try:
+            benchmark.stop_host()
+        except BaseException as exc:
+            stop_error = str(exc)
+            if host_process is not None and host_process.poll() is None:
+                try:
+                    host_process.terminate()
+                    host_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    host_process.kill()
+                    host_process.wait(timeout=5)
+                except OSError as cleanup_exc:
+                    stop_error += f"; fallback cleanup failed: {cleanup_exc}"
+            benchmark.process = None
+            benchmark.playing = False
+        if host_process is not None:
+            job_result = self._close_job(host_process)
+            host_cleanup = {"pid": host_process.pid, "exit_code": host_process.poll(),
+                            "job": job_result, "finished_at": utc_now()}
+            if stop_error is not None:
+                host_cleanup["stop_error"] = stop_error
+            attempt.setdefault("cleanup", []).append({"host": host_cleanup})
+            try:
+                self.event({"kind": "host_cleanup", "attempt": attempt["number"], **host_cleanup})
+            except Exception:
+                pass
+        attempt["hosts"] = benchmark.report.get("hosts", [])
+        if benchmark.host_log is not None:
+            try:
+                if not benchmark.host_log.closed:
+                    benchmark.host_log.close()
+            except Exception:
+                pass
+        try:
+            write_json(benchmark.output / "lifecycle.json", {
+                "kind": "trial_runner_lifecycle_only",
+                "note": "Host lifecycle evidence; no scripted baseline solver was run.",
+                "report": benchmark.report,
+            })
+        except Exception:
+            pass
+
     def checkpoint(self, attempt: dict[str, Any], benchmark: baseline.Benchmark, next_task: int) -> None:
         attempt_dir = self.attempt_dir(attempt["number"])
         checkpoint = attempt_dir / "checkpoints" / f"task-{next_task}-before.scene.yaml"
@@ -624,28 +704,35 @@ class TrialRunner:
                 digest_file(Path(sys.executable)) != self.manifest["solver"]["interpreter_sha256"]:
             raise TrialError("solver interpreter differs from the frozen manifest")
         benchmark = self._benchmark(attempt["number"])
-        benchmark.prepare()
-        if not fresh:
-            previous_resume = attempt.get("resume_count", 0) - 1
-            prior = attempt_dir / ("control" if previous_resume == 0 else f"control-resume-{previous_resume}")
-            if prior.is_dir():
-                for replay in prior.glob("*.orrp"):
-                    shutil.copy2(replay, benchmark.output / replay.name)
-            scene_rel = attempt.get("resume_scene")
-            if not scene_rel:
-                raise TrialError("interrupted attempt has no task-boundary scene checkpoint")
-            scene = (self.output / scene_rel).read_text(encoding="utf-8")
-            benchmark.scene_path.write_text(scene, encoding="utf-8")
-        status = benchmark.start_host()
-        benchmark.engine = status["engine"]
-        schema = benchmark.cli("schema", "--input")
-        if status["engine"] != frozen["engine_identity"] or canonical_hash(schema) != frozen["input_schema_sha256"]:
-            raise TrialError("host engine or input schema differs from the frozen manifest")
-        if attempt.get("last_accepted_task", 0) >= 1:
-            attempt["facts"].setdefault("baseline_checksum", status["state"]["doc_checksum"])
-        if attempt.get("last_accepted_task", 0) >= 4:
-            attempt["facts"].setdefault("modified_checksum", status["state"]["doc_checksum"])
-        return benchmark
+        try:
+            benchmark.prepare()
+            if not fresh:
+                previous_resume = attempt.get("resume_count", 0) - 1
+                prior = attempt_dir / ("control" if previous_resume == 0 else f"control-resume-{previous_resume}")
+                if prior.is_dir():
+                    for replay in prior.glob("*.orrp"):
+                        if attempt.get("next_task", 1) <= 4 and replay.name in {
+                                "modified50.orrp", TASK4_ORIGINAL_REPLAY}:
+                            continue
+                        shutil.copy2(replay, benchmark.output / replay.name)
+                scene_rel = attempt.get("resume_scene")
+                if not scene_rel:
+                    raise TrialError("interrupted attempt has no task-boundary scene checkpoint")
+                scene = (self.output / scene_rel).read_text(encoding="utf-8")
+                benchmark.scene_path.write_text(scene, encoding="utf-8")
+            status = benchmark.start_host()
+            benchmark.engine = status["engine"]
+            schema = benchmark.cli("schema", "--input")
+            if status["engine"] != frozen["engine_identity"] or canonical_hash(schema) != frozen["input_schema_sha256"]:
+                raise TrialError("host engine or input schema differs from the frozen manifest")
+            if attempt.get("last_accepted_task", 0) >= 1:
+                attempt["facts"].setdefault("baseline_checksum", status["state"]["doc_checksum"])
+            if attempt.get("last_accepted_task", 0) >= 4:
+                attempt["facts"].setdefault("modified_checksum", status["state"]["doc_checksum"])
+            return benchmark
+        except BaseException:
+            self._cleanup_benchmark(benchmark, attempt)
+            raise
 
     def _solver_command(self) -> list[str]:
         mock_path = self.repo / "tools" / "arena_trial" / "mock_solver.py"
@@ -946,7 +1033,7 @@ class TrialRunner:
             baseline.check_report(apply_report, 20,
                                   {"base:score_0": 1, "score_0": 0, "players": 2,
                                    "score_1": 0, "out_of_bounds": 0}, recording=True)
-            replay50 = b.output / "modified50.orrp"
+            replay50 = _task4_original_replay(b.output, broker.attempt["facts"])
             verify50 = b.verify(replay50, 50, "trial-task4-verdict.json")
             trace = broker.trace
             baseline.require(len(trace) == 51 and [item["tick"] for item in trace] == list(range(51)),
@@ -989,7 +1076,7 @@ class TrialRunner:
             baseline.require(len(trace) == 51 and [item["tick"] for item in trace] == list(range(51)),
                              "task 5 must retain all 51 checksums")
             baseline.require(trace == reference, "fresh-process live checksums differ from task 4")
-            original = b.output / "modified50.orrp"
+            original = _task4_original_replay(b.output, broker.attempt["facts"])
             verify = b.verify(original, 50, "trial-task5-original-replay-verdict.json")
             baseline.require(verify["recording"]["checked"] == 51 and verify["recording"]["mismatches"] == 0,
                              "original replay failed fresh-host verification")
@@ -1081,26 +1168,7 @@ class TrialRunner:
                 self.event({"kind": "solver_stop", "attempt": attempt["number"],
                             "task": attempt.get("next_task"), **cleanup})
             if benchmark is not None:
-                host_process = benchmark.process
-                benchmark.stop_host()
-                if host_process is not None:
-                    job_closed = self._close_job(host_process)
-                    host_cleanup = {"pid": host_process.pid, "exit_code": host_process.returncode,
-                                    "job_closed": job_closed, "finished_at": utc_now()}
-                    attempt.setdefault("cleanup", []).append({"host": host_cleanup})
-                    self.event({"kind": "host_cleanup", "attempt": attempt["number"], **host_cleanup})
-                attempt["hosts"] = benchmark.report.get("hosts", [])
-                # Preserve the baseline helper's raw transcript and host logs.
-                if benchmark.host_log is not None:
-                    try:
-                        benchmark.host_log.close()
-                    except Exception:
-                        pass
-                write_json(benchmark.output / "lifecycle.json", {
-                    "kind": "trial_runner_lifecycle_only",
-                    "note": "Host lifecycle evidence; no scripted baseline solver was run.",
-                    "report": benchmark.report,
-                })
+                self._cleanup_benchmark(benchmark, attempt)
             segment_ended_at = utc_now()
             segment_elapsed = max(0.0, time.monotonic() - attempt_wall_started)
             attempt["execution_segments"][-1].update(ended_at=segment_ended_at,

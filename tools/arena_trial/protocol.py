@@ -32,7 +32,7 @@ def encode(message: dict[str, Any]) -> str:
 def decode(line: str) -> dict[str, Any]:
     try:
         value = json.loads(line)
-    except (TypeError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise ProtocolError("message must be one JSON object per line") from exc
     if not isinstance(value, dict):
         raise ProtocolError("message must be an object")
