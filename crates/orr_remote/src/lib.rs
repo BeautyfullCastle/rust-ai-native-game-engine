@@ -75,6 +75,7 @@ mod net;
 mod proposals;
 mod remote;
 mod remote_view;
+pub mod screenshot;
 #[cfg(feature = "sample-host")]
 pub mod sample;
 mod server;
@@ -94,3 +95,4 @@ pub use proposals::{default_build_id, BotFn, GameHooks};
 pub use remote::{RemoteBridge, RemoteConfig, RemoteIdentity, RemoteMetrics, RemoteViewDelivery, ViewDeliveryMode};
 pub use viewstream::ViewStreamHook;
 pub use server::{ErpServer, PollReport, ServerConfig, ServerError, ServerStats, MAX_PENDING_BYTES};
+pub use screenshot::{CaptureError, CaptureRequest, CapturedImage, ScreenshotAdmissionError, ScreenshotOptions, ScreenshotOwner, ScreenshotService, ViewMode, ViewState};

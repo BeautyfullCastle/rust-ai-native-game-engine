@@ -89,6 +89,8 @@ pub struct ServerConfig {
     /// clients that connect through [`ErpServer::connector`]: no socket, no
     /// network threads.
     pub listen: bool,
+    /// Optional local editor framebuffer capture endpoint; absent on headless hosts.
+    pub screenshot: Option<crate::screenshot::ScreenshotService>,
 }
 
 impl ServerConfig {
@@ -107,6 +109,7 @@ impl ServerConfig {
             limits: HostLimits::default(),
             activity_capacity: DEFAULT_ACTIVITY_CAPACITY,
             listen: true,
+            screenshot: None,
         }
     }
 }
@@ -411,6 +414,14 @@ struct VerifyTask {
     notified: bool,
 }
 
+struct PendingScreenshot {
+    request: crate::screenshot::CaptureRequest,
+    conn: u64,
+    id: J,
+    view_key: Option<FrameKey>,
+    incarnation: u64,
+}
+
 fn verification_panic() -> RpcError {
     RpcError::new(INTERNAL_ERROR, "panic", "verification panicked (a bug); the live play session was not changed")
 }
@@ -449,6 +460,7 @@ pub struct ErpServer {
     next_verify_serial: u64,
     structured_input: Option<Box<dyn std::any::Any + Send + Sync>>,
     managed_input: crate::input::ManagedHeld,
+    pending_screenshot: Option<PendingScreenshot>,
 }
 
 impl ErpServer {
@@ -536,6 +548,7 @@ impl ErpServer {
             next_verify_serial: 1,
             structured_input: None,
             managed_input: crate::input::ManagedHeld::default(),
+            pending_screenshot: None,
         })
     }
 
@@ -770,6 +783,7 @@ impl ErpServer {
     /// during a long synchronous step. Grants do not fence explicit commands.
     pub fn poll<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) -> PollReport {
         let now = Instant::now();
+        self.poll_screenshot(target, now);
         self.managed_input.expire(target, now);
         self.complete_verification(target);
         // These events came from the host's real-time advance after the last
@@ -885,6 +899,7 @@ impl ErpServer {
             }
         }
         self.complete_verification(target);
+        self.poll_screenshot(target, Instant::now());
         self.publish(target, now);
         self.managed_input.expire(target, Instant::now());
         report.crash = std::mem::take(&mut self.crash);
@@ -895,6 +910,11 @@ impl ErpServer {
     fn disconnected<G: Game>(&mut self, conn: u64, target: &mut ErpTarget<'_, G>) {
         self.managed_input.disconnect(target, conn);
         self.conns.remove(&conn);
+        if self.pending_screenshot.as_ref().is_some_and(|pending| pending.conn == conn) {
+            if let (Some(service), Some(pending)) = (&self.cfg.screenshot, self.pending_screenshot.take()) {
+                service.cancel(pending.request.serial);
+            }
+        }
         if let Some(task) = self.verify_task.as_ref().filter(|t| t.request.conn == conn) {
             task.cancel.store(true, Ordering::Relaxed);
         }
@@ -904,6 +924,130 @@ impl ErpServer {
                 let _ = target.doc.rollback_tx();
             }
             self.tx_owner = None;
+        }
+    }
+
+    fn screenshot_request<G: Game>(
+        &mut self,
+        target: &ErpTarget<'_, G>,
+        conn: u64,
+        id: Option<J>,
+        caps: Caps,
+        params: &J,
+    ) {
+        let authorized = authorize("view.screenshot", caps, target.play.is_some(), params);
+        let Some(id) = id else {
+            self.stats.requests += 1;
+            if let Some(c) = self.conns.get_mut(&conn) { c.requests += 1; }
+            return;
+        };
+        if self.pending_screenshot.as_ref().is_some_and(|pending| pending.conn == conn && pending.id == id) {
+            // JSON-RPC IDs are unique per connection while pending; share the
+            // original terminal result rather than issuing a second capture.
+            return;
+        }
+        let (options, timeout) = match authorized.and_then(|_| parse_screenshot_options(params)) {
+            Ok(value) => value,
+            Err(error) => {
+                self.respond_screenshot_error(conn, &id, error);
+                return;
+            }
+        };
+        let Some(service) = self.cfg.screenshot.clone() else {
+            self.respond_screenshot_error(conn, &id, view_unavailable());
+            return;
+        };
+        if self.cfg.limits.game.name.len() > 256 {
+            self.respond_screenshot_error(conn, &id, view_capture_failed());
+            return;
+        }
+        let requested = current_view_state(target);
+        let deadline = Instant::now() + timeout;
+        match service.submit(options, requested, deadline) {
+            Ok(request) => {
+                self.pending_screenshot = Some(PendingScreenshot {
+                    request,
+                    conn,
+                    id,
+                    view_key: frame_key(target, FrameSource::View),
+                    incarnation: self.view_incarnation,
+                });
+                self.stats.requests += 1;
+                if let Some(c) = self.conns.get_mut(&conn) { c.requests += 1; }
+            }
+            Err(crate::screenshot::ScreenshotAdmissionError::Busy) => self.respond_screenshot_error(conn, &id, view_busy()),
+            Err(crate::screenshot::ScreenshotAdmissionError::Unavailable) => self.respond_screenshot_error(conn, &id, view_unavailable()),
+            Err(crate::screenshot::ScreenshotAdmissionError::Invalid) => self.respond_screenshot_error(conn, &id, RpcError::params("screenshot limits are invalid")),
+        }
+    }
+
+    fn poll_screenshot<G: Game>(&mut self, target: &ErpTarget<'_, G>, now: Instant) {
+        let Some(pending) = self.pending_screenshot.as_ref() else { return };
+        let serial = pending.request.serial;
+        let conn = pending.conn;
+        let id = pending.id.clone();
+        let deadline = pending.request.deadline;
+        let requested = pending.request.requested;
+        let view_key = pending.view_key;
+        let incarnation = pending.incarnation;
+        let service = self.cfg.screenshot.clone();
+        let outcome = if !self.conns.contains_key(&conn) {
+            None
+        } else if service.as_ref().is_none_or(|service| !service.owner_available()) {
+            Some(Err(view_unavailable()))
+        } else if now >= deadline {
+            Some(Err(view_timeout()))
+        } else if self.view_incarnation != incarnation || frame_key(target, FrameSource::View) != view_key || current_view_state(target) != requested {
+            Some(Err(view_stale()))
+        } else {
+            service.as_ref().and_then(|service| service.poll_result(serial)).map(|result| match result {
+                Ok(image) if image.captured == requested => Ok(image),
+                Ok(_) => Err(view_stale()),
+                Err(crate::screenshot::CaptureError::Unavailable) => Err(view_unavailable()),
+                Err(crate::screenshot::CaptureError::Stale) => Err(view_stale()),
+                Err(crate::screenshot::CaptureError::Failed) => Err(view_capture_failed()),
+            })
+        };
+        let Some(outcome) = outcome else { return };
+        if let Some(service) = service { service.cancel(serial); }
+        self.pending_screenshot = None;
+        match outcome {
+            Ok(image) => {
+                let state = image.captured;
+                let mode = match state.mode { crate::screenshot::ViewMode::Edit => "edit", crate::screenshot::ViewMode::Play => "play" };
+                let result = json!({
+                    "status": "captured",
+                    "source": "editor.app_framebuffer",
+                    "game": self.cfg.limits.game.name.as_str(),
+                    "build_id": crate::wire::checksum_text(self.cfg.limits.build_id),
+                    "mode": mode,
+                    "paused": state.paused,
+                    "tick": state.tick.to_string(),
+                    "epoch": state.epoch.to_string(),
+                    "checksum": crate::wire::checksum_text(state.checksum),
+                    "frame_seq": image.frame_seq.to_string(),
+                    "ui_frame": image.ui_frame.to_string(),
+                    "width": image.width,
+                    "height": image.height,
+                    "mime_type": "image/png",
+                    "png_base64": crate::codec::b64_encode(&image.png),
+                });
+                let response = response_ok(&id, result);
+                if Instant::now() >= deadline {
+                    self.respond_screenshot_error(conn, &id, view_timeout());
+                } else if let Some(c) = self.conns.get(&conn) {
+                    c.tx.send_control_text(response);
+                }
+            }
+            Err(error) => self.respond_screenshot_error(conn, &id, error),
+        }
+    }
+
+    fn respond_screenshot_error(&mut self, conn: u64, id: &J, error: RpcError) {
+        self.stats.errors += 1;
+        if let Some(c) = self.conns.get_mut(&conn) {
+            c.requests += 1;
+            c.tx.send_control_text(response_err(id, &error));
         }
     }
 
@@ -922,6 +1066,10 @@ impl ErpServer {
             return;
         };
         let (client, caps, tx) = (c.client.clone(), c.caps, c.tx.clone());
+        if method == "view.screenshot" {
+            self.screenshot_request(target, conn, id, caps, params);
+            return;
+        }
         if matches!(method, "proposal.verify" | "verify.self") && self.cfg.limits.client_session.is_none() {
             self.request_verification(target, conn, id, client, caps, method, params);
             return;
@@ -2055,6 +2203,81 @@ fn frame_key<G: Game>(t: &ErpTarget<'_, G>, source: FrameSource) -> Option<Frame
     }
 }
 
+fn current_view_state<G: Game>(target: &ErpTarget<'_, G>) -> crate::screenshot::ViewState {
+    match target.play.as_ref() {
+        Some(pc) => {
+            let session = pc.session();
+            crate::screenshot::ViewState {
+                mode: crate::screenshot::ViewMode::Play,
+                paused: !session.is_playing(),
+                tick: session.head_tick(),
+                epoch: session.epoch(),
+                checksum: session.frame().checksum(),
+            }
+        }
+        None => crate::screenshot::ViewState {
+            mode: crate::screenshot::ViewMode::Edit,
+            paused: true,
+            tick: 0,
+            epoch: 0,
+            checksum: target.doc.checksum(),
+        },
+    }
+}
+
+fn parse_screenshot_options(params: &J) -> Result<(crate::screenshot::ScreenshotOptions, Duration), RpcError> {
+    let object = params.as_object().ok_or_else(|| RpcError::params("params must be an object"))?;
+    for key in object.keys() {
+        if !matches!(key.as_str(), "target" | "timeout_ms" | "max_width" | "max_height") {
+            return Err(RpcError::params(format!("unsupported screenshot parameter '{key}'")));
+        }
+    }
+    if let Some(target) = object.get("target") {
+        if target.as_str() != Some("app_framebuffer") {
+            return Err(RpcError::params("'target' must be 'app_framebuffer'"));
+        }
+    }
+    let number = |key: &str, default: u64| -> Result<u64, RpcError> {
+        match object.get(key) {
+            None => Ok(default),
+            Some(value) => value.as_u64().ok_or_else(|| RpcError::params(format!("'{key}' must be an unsigned integer"))),
+        }
+    };
+    let timeout_ms = number("timeout_ms", 5000)?;
+    if !(50..=5000).contains(&timeout_ms) {
+        return Err(RpcError::params("'timeout_ms' must be in 50..=5000"));
+    }
+    let max_width = number("max_width", 2048)?;
+    let max_height = number("max_height", 2048)?;
+    if max_width == 0 || max_height == 0 || max_width > 2048 || max_height > 2048 {
+        return Err(RpcError::params("'max_width' and 'max_height' must be in 1..=2048"));
+    }
+    Ok((
+        crate::screenshot::ScreenshotOptions { max_width: max_width as u32, max_height: max_height as u32 },
+        Duration::from_millis(timeout_ms),
+    ))
+}
+
+fn view_unavailable() -> RpcError {
+    RpcError::new(INVALID_STATE, "view_unavailable", "no local editor screenshot owner is available")
+}
+
+fn view_busy() -> RpcError {
+    RpcError::new(LIMIT_EXCEEDED, "view_busy", "the editor screenshot endpoint is busy")
+}
+
+fn view_timeout() -> RpcError {
+    RpcError::new(INVALID_STATE, "view_timeout", "the editor screenshot request timed out")
+}
+
+fn view_stale() -> RpcError {
+    RpcError::new(INVALID_STATE, "view_stale", "the view changed before its screenshot completed")
+}
+
+fn view_capture_failed() -> RpcError {
+    RpcError::new(INTERNAL_ERROR, "view_capture_failed", "the editor could not capture or encode its framebuffer")
+}
+
 /// The metadata and the frame of `key` (as [`frame_key`] named it).
 fn frame_parts<'a, G: Game>(
     t: &'a ErpTarget<'_, G>,
@@ -2097,6 +2320,9 @@ fn frame_parts<'a, G: Game>(
 
 impl Drop for ErpServer {
     fn drop(&mut self) {
+        if let (Some(service), Some(pending)) = (&self.cfg.screenshot, self.pending_screenshot.take()) {
+            service.cancel(pending.request.serial);
+        }
         if let Some(task) = self.verify_task.take() {
             task.cancel.store(true, Ordering::Relaxed);
             // Dropping JoinHandle detaches; shutdown never waits for a hook,

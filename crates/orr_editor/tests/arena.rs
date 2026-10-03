@@ -201,6 +201,116 @@ fn arena_native_window_smoke() {
     assert_eq!(verify["passed"], true, "{verify}");
     std::fs::write(out.join("verified.json"), serde_json::to_vec_pretty(&verify).unwrap()).unwrap();
     eprintln!("PASS: real native Arena edit/score windows, pixels, host checksums and replay verified in {}", out.display());
+    capture_native_local_erp(&out);
+}
+
+/// The same required Xvfb run also exercises the asynchronous API on its owning
+/// local Phys editor. The Arena windows above still use their original CLI path.
+fn capture_native_local_erp(out: &std::path::Path) {
+    use std::{process::{Command, Stdio}, time::{Duration, Instant}};
+    let log_path = out.join("local-erp.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    struct Window(std::process::Child);
+    impl Drop for Window {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let mut child = Window(Command::new(env!("CARGO_BIN_EXE_orr_editor"))
+        .args(["--scene", "scenes/physics_demo.scene.yaml", "--select", "body_05",
+            "--erp", "127.0.0.1:0", "--erp-dev", "--size", "960x720"])
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .stdin(Stdio::null()).stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log))
+        .spawn().expect("start the normal local editor with ERP"));
+    let startup = Instant::now() + Duration::from_secs(60);
+    let url = loop {
+        let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(child.0.try_wait().unwrap().is_none(), "local editor exited before ERP capture\n{text}");
+        // The early ERP diagnostic precedes native GPU setup. This stderr
+        // diagnostic comes from a settled UI pass; capture still has to prove
+        // actual readback within its unchanged five-second API deadline.
+        if let Some(url) = text.lines().find_map(|line| line.strip_prefix("Editor UI settled: ")) {
+            break url.to_string();
+        }
+        assert!(Instant::now() < startup, "local editor never reached a settled native UI pass\n{text}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut agent = orr_remote::ErpClient::connect(&url, None).expect("connect to local editor ERP");
+    agent.call_timeout = Duration::from_secs(10);
+    let discovery = agent.call("rpc.discover", J::Null).unwrap();
+    assert_eq!(discovery["engine"]["game"], "PhysGame");
+    let edit = agent.call("sim.state", J::Null).unwrap();
+    assert_eq!(edit["mode"], "edit");
+    let image = capture_erp_frame(&mut agent, &edit, &discovery, &mut child.0, &log_path);
+    save_erp_frame(out, "local-erp-edit", &image);
+    assert_eq!(agent.call("sim.state", J::Null).unwrap()["checksum"], edit["checksum"]);
+
+    agent.call("sim.start", json!({})).unwrap();
+    agent.call("sim.step", json!({"n":20})).unwrap();
+    let play = agent.call("sim.state", J::Null).unwrap();
+    assert_eq!(play["mode"], "play");
+    assert_eq!(play["playing"], false);
+    assert_eq!(play["head_tick"], 20);
+    let image = capture_erp_frame(&mut agent, &play, &discovery, &mut child.0, &log_path);
+    save_erp_frame(out, "local-erp-play", &image);
+    assert_eq!(agent.call("sim.state", J::Null).unwrap()["checksum"], play["checksum"]);
+    eprintln!("PASS: actual local editor ERP PNG capture in edit and paused play, correlated metadata and unchanged host checksums");
+}
+
+fn capture_erp_frame(agent: &mut orr_remote::ErpClient, state: &J, discovery: &J,
+    child: &mut std::process::Child, log_path: &std::path::Path) -> J {
+    use std::time::{Duration, Instant};
+    let capture_id = agent.post("view.screenshot", json!({"target":"app_framebuffer", "timeout_ms":5000})).unwrap();
+    // A second request uses the ordinary ERP pump while capture is outstanding.
+    let probe_id = agent.post("sim.state", J::Null).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut capture = None;
+    let mut probe = None;
+    while capture.is_none() || probe.is_none() {
+        agent.poll().unwrap();
+        if capture.is_none() { capture = agent.take_response(capture_id); }
+        if probe.is_none() { probe = agent.take_response(probe_id); }
+        assert!(child.try_wait().unwrap().is_none(), "local editor exited\n{}", std::fs::read_to_string(log_path).unwrap_or_default());
+        assert!(Instant::now() < deadline, "ERP capture or concurrent state response missing\n{}", std::fs::read_to_string(log_path).unwrap_or_default());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(probe.unwrap().unwrap()["checksum"], state["checksum"]);
+    let image = capture.unwrap().expect("actual eframe capture must succeed without a retry");
+    assert_eq!(image["status"], "captured");
+    assert_eq!(image["source"], "editor.app_framebuffer");
+    assert_eq!(image["game"], discovery["engine"]["game"]);
+    assert_eq!(image["build_id"], discovery["engine"]["build_id"]);
+    assert_eq!(image["mode"], state["mode"]);
+    assert_eq!(image["paused"], true);
+    assert_eq!(image["tick"], state["head_tick"].as_u64().unwrap().to_string());
+    assert_eq!(image["epoch"], state["epoch"].as_u64().unwrap().to_string());
+    assert_eq!(image["checksum"], state["checksum"]);
+    assert_eq!(image["mime_type"], "image/png");
+    for key in ["frame_seq", "ui_frame"] {
+        assert!(image[key].as_str().unwrap().parse::<u64>().unwrap() > 0, "{key}: {image}");
+    }
+    let bytes = orr_remote::codec::b64_decode(image["png_base64"].as_str().unwrap()).expect("valid PNG base64");
+    assert!(!bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024);
+    let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes)).read_info().expect("decode actual ERP PNG");
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    assert_eq!(info.bit_depth, png::BitDepth::Eight);
+    assert_eq!(image["width"].as_u64(), Some(u64::from(info.width)));
+    assert_eq!(image["height"].as_u64(), Some(u64::from(info.height)));
+    assert!(info.width >= 800 && info.height >= 600 && info.width <= 2048 && info.height <= 2048);
+    assert!(u64::from(info.width) * u64::from(info.height) <= 1_048_576);
+    let first = &pixels[..4];
+    assert!(pixels[..info.buffer_size()].chunks_exact(4).filter(|pixel| *pixel != first).count() > 1000,
+        "actual app framebuffer must contain rendered UI and scene pixels");
+    image
+}
+
+fn save_erp_frame(out: &std::path::Path, name: &str, image: &J) {
+    let path = out.join(format!("{name}.png"));
+    assert!(!path.exists(), "refusing stale ERP screenshot {}", path.display());
+    std::fs::write(path, orr_remote::codec::b64_decode(image["png_base64"].as_str().unwrap()).unwrap()).unwrap();
+    let mut metadata = image.clone();
+    metadata.as_object_mut().unwrap().remove("png_base64");
+    std::fs::write(out.join(format!("{name}.json")), serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
 }
 
 fn capture_native_arena(url: &str, out: &std::path::Path, name: &str) {

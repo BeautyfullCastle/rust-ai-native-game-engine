@@ -4,12 +4,15 @@
 //! All state changes go through [`Editor`]; this file only draws and
 //! translates input into `Editor` calls.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Pos2, Rect, RichText, Sense, Ui};
 use orr_fp::FPVec2;
 use orr_reflect::Value;
+use orr_remote::{CaptureError, CaptureRequest, CapturedImage, ViewState};
 
 use crate::editor::{fp_of_f64, Editor, Message, Mode, Owner};
 use crate::inspector::{show_component, InspEvent};
@@ -108,6 +111,57 @@ pub struct ScreenshotJob {
     started_at: Option<f64>,
 }
 
+const MAX_CAPTURE_PIXELS: u64 = 1_048_576;
+const MAX_CAPTURE_RGBA_BYTES: usize = 4 << 20;
+
+#[derive(Clone, Copy)]
+struct FramebufferInfo {
+    viewport: egui::ViewportId,
+    logical_width: f32,
+    logical_height: f32,
+    pixels_per_point: f32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Copy)]
+struct CapturePass {
+    state: ViewState,
+    frame_seq: u64,
+    ui_frame: u64,
+    framebuffer: FramebufferInfo,
+}
+
+struct RemoteCapture {
+    request: CaptureRequest,
+    pass: Option<CapturePass>,
+    screenshot_requested: bool,
+    image_received: bool,
+    orphaned: bool,
+}
+
+struct EncoderWorker {
+    serial: u64,
+    pass: CapturePass,
+    handle: JoinHandle<Result<Vec<u8>, CaptureError>>,
+}
+
+struct BoundedPngWriter<'a>(&'a mut Vec<u8>);
+
+impl Write for BoundedPngWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.0.len().saturating_add(bytes.len()) > MAX_CAPTURE_RGBA_BYTES {
+            return Err(io::Error::other("PNG exceeds screenshot byte limit"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 impl ScreenshotJob {
     /// Screenshot after `frames` frames.
     pub fn new(path: PathBuf, frames: u64) -> Self {
@@ -143,6 +197,9 @@ pub struct EditorApp {
     render_state: Option<egui_wgpu::RenderState>,
     gpu: Option<GpuViewport>,
     shot: Option<ScreenshotJob>,
+    remote_capture: Option<RemoteCapture>,
+    encoder: Option<EncoderWorker>,
+    ui_settled_reported: bool,
     frames: u64,
     last_title: String,
 }
@@ -151,7 +208,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, ui: UiState::default(), render_state, gpu: None, shot: None, frames: 0, last_title: String::new() }
+        Self { editor, ui: UiState::default(), render_state, gpu: None, shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new() }
     }
 
     /// Asks for a screenshot of the window after some frames, then quits.
@@ -190,6 +247,7 @@ impl eframe::App for EditorApp {
         }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
         self.editor.pump();
+        self.poll_remote_capture_request();
         self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {
             self.ui.bottom_tab = BottomTab::Agent;
@@ -239,6 +297,8 @@ impl eframe::App for EditorApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+        self.process_remote_capture(&ctx);
+        self.report_ui_settled(&ctx);
         self.screenshot(&ctx);
         self.editor.record_ui_frame(started.elapsed());
     }
@@ -794,6 +854,245 @@ impl EditorApp {
         }
     }
 
+    fn poll_remote_capture_request(&mut self) {
+        let mut clear_unrequested = false;
+        if let Some(capture) = self.remote_capture.as_mut() {
+            if !self.editor.screenshot_is_active(capture.request.serial) {
+                self.editor.cancel_screenshot_validation(capture.request.serial);
+                if capture.screenshot_requested && !capture.image_received {
+                    // Keep the old ticket/pass until its matching GPU event is
+                    // consumed; this remains true across a backend restart in
+                    // the same App because the physical renderer is unchanged.
+                    capture.orphaned = true;
+                } else if !capture.screenshot_requested {
+                    clear_unrequested = true;
+                }
+            }
+        }
+        if clear_unrequested {
+            self.remote_capture = None;
+        }
+        if self.remote_capture.is_some() {
+            return;
+        }
+        let Some(request) = self.editor.take_screenshot_request() else { return };
+        if self.shot.is_some() {
+            self.editor.screenshot_complete(request.serial, Err(CaptureError::Unavailable));
+            return;
+        }
+        match self.editor.begin_screenshot_validation(&request) {
+            Ok(()) => {
+                self.remote_capture = Some(RemoteCapture { request, pass: None, screenshot_requested: false, image_received: false, orphaned: false });
+            }
+            Err(error) => self.editor.screenshot_complete(request.serial, Err(error)),
+        }
+    }
+
+    fn process_remote_capture(&mut self, ctx: &egui::Context) {
+        self.reap_capture_encoder(ctx);
+        self.receive_capture_event(ctx);
+        self.request_capture_frame(ctx);
+        if self.remote_capture.as_ref().is_some_and(|capture| !capture.orphaned) || self.encoder.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
+    fn request_capture_frame(&mut self, ctx: &egui::Context) {
+        let Some(capture) = self.remote_capture.as_ref() else { return };
+        if capture.orphaned || capture.pass.is_some() || !self.editor.screenshot_is_active(capture.request.serial) {
+            return;
+        }
+        if self.encoder.is_some() {
+            return;
+        }
+        let serial = capture.request.serial;
+        let request = capture.request.clone();
+        let state = match self.editor.screenshot_capture_ready(serial) {
+            Ok(Some(state)) => state,
+            Ok(None) => return,
+            Err(error) => {
+                self.finish_remote_capture(serial, Err(error));
+                return;
+            }
+        };
+        if !self.ui.pulses.is_empty() || self.editor.previewing().is_some() || self.editor.screenshot_gesture_busy() {
+            return;
+        }
+        let Some(frame_seq) = self.editor.capture_snapshot_seq().filter(|seq| *seq > 0) else { return };
+        let Some(framebuffer) = framebuffer_info(ctx) else {
+            self.finish_remote_capture(serial, Err(CaptureError::Unavailable));
+            return;
+        };
+        let pixels = u64::from(framebuffer.width) * u64::from(framebuffer.height);
+        if framebuffer.width > request.options.max_width
+            || framebuffer.height > request.options.max_height
+            || pixels > MAX_CAPTURE_PIXELS
+            || pixels.saturating_mul(4) > MAX_CAPTURE_RGBA_BYTES as u64
+        {
+            self.finish_remote_capture(serial, Err(CaptureError::Failed));
+            return;
+        }
+        let pass = CapturePass { state, frame_seq, ui_frame: self.frames, framebuffer };
+        if self.editor.capture_view_state() != state || !self.editor.capture_snapshot_matches(state) {
+            self.finish_remote_capture(serial, Err(CaptureError::Stale));
+            return;
+        }
+        if let Err(error) = self.editor.screenshot_begin_capture(serial) {
+            self.finish_remote_capture(serial, Err(error));
+            return;
+        }
+        if let Some(capture) = self.remote_capture.as_mut().filter(|capture| capture.request.serial == serial) {
+            capture.pass = Some(pass);
+            capture.screenshot_requested = true;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(serial)));
+    }
+
+    fn receive_capture_event(&mut self, ctx: &egui::Context) {
+        let Some(capture) = self.remote_capture.as_ref() else { return };
+        if !capture.screenshot_requested || capture.image_received {
+            return;
+        }
+        let serial = capture.request.serial;
+        let Some(pass) = capture.pass else { return };
+        let event = ctx.input(|input| {
+            input.events.iter().find_map(|event| {
+                if screenshot_event_matches(event, pass.framebuffer.viewport, serial) {
+                    match event {
+                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+        });
+        let Some(image) = event else { return };
+        if let Some(capture) = self.remote_capture.as_mut().filter(|capture| capture.request.serial == serial) {
+            capture.image_received = true;
+        }
+        if !self.editor.screenshot_is_active(serial) {
+            self.editor.screenshot_end_capture(serial);
+            self.editor.cancel_screenshot_validation(serial);
+            self.remote_capture = None;
+            return;
+        }
+        if !self.capture_pass_still_current(ctx, pass) {
+            self.editor.screenshot_end_capture(serial);
+            self.finish_remote_capture(serial, Err(CaptureError::Stale));
+            return;
+        }
+        let (Ok(width), Ok(height)) = (u32::try_from(image.width()), u32::try_from(image.height())) else {
+            self.editor.screenshot_end_capture(serial);
+            self.finish_remote_capture(serial, Err(CaptureError::Stale));
+            return;
+        };
+        let pixels = u64::from(width) * u64::from(height);
+        if width != pass.framebuffer.width
+            || height != pass.framebuffer.height
+            || pixels > MAX_CAPTURE_PIXELS
+            || pixels.saturating_mul(4) > MAX_CAPTURE_RGBA_BYTES as u64
+            || image.pixels.len() as u64 != pixels
+        {
+            self.editor.screenshot_end_capture(serial);
+            self.finish_remote_capture(serial, Err(CaptureError::Stale));
+            return;
+        }
+        if let Err(error) = self.editor.screenshot_begin_encoder(serial) {
+            self.editor.screenshot_end_capture(serial);
+            self.finish_remote_capture(serial, Err(error));
+            return;
+        }
+        let handle = std::thread::Builder::new()
+            .name("orr-screenshot-png".into())
+            .spawn(move || encode_png_bounded(&image));
+        match handle {
+            Ok(handle) => self.encoder = Some(EncoderWorker { serial, pass, handle }),
+            Err(_) => {
+                self.editor.screenshot_end_encoder(serial);
+                self.finish_remote_capture(serial, Err(CaptureError::Failed));
+            }
+        }
+    }
+
+    fn reap_capture_encoder(&mut self, ctx: &egui::Context) {
+        if !self.encoder.as_ref().is_some_and(|worker| worker.handle.is_finished()) {
+            return;
+        }
+        let worker = self.encoder.take().expect("finished screenshot worker exists");
+        let result = worker.handle.join().unwrap_or(Err(CaptureError::Failed));
+        if !self.editor.screenshot_is_active(worker.serial) {
+            self.editor.screenshot_end_encoder(worker.serial);
+            self.editor.cancel_screenshot_validation(worker.serial);
+            if self.remote_capture.as_ref().is_some_and(|capture| capture.request.serial == worker.serial) {
+                self.remote_capture = None;
+            }
+            return;
+        }
+        if !self.capture_pass_still_current(ctx, worker.pass) {
+            self.editor.screenshot_end_encoder(worker.serial);
+            self.finish_remote_capture(worker.serial, Err(CaptureError::Stale));
+            return;
+        }
+        match result {
+            Ok(png) => {
+                let image = CapturedImage {
+                    png,
+                    width: worker.pass.framebuffer.width,
+                    height: worker.pass.framebuffer.height,
+                    captured: worker.pass.state,
+                    frame_seq: worker.pass.frame_seq,
+                    ui_frame: worker.pass.ui_frame,
+                };
+                self.editor.cancel_screenshot_validation(worker.serial);
+                // Publish while the just-finished worker still owns the shared
+                // capture permit; release only after its real exit is observed.
+                self.editor.screenshot_complete(worker.serial, Ok(image));
+                self.editor.screenshot_end_encoder(worker.serial);
+                self.remote_capture = None;
+            }
+            Err(error) => {
+                self.editor.screenshot_end_encoder(worker.serial);
+                self.finish_remote_capture(worker.serial, Err(error));
+            }
+        }
+    }
+
+    fn capture_pass_still_current(&self, ctx: &egui::Context, pass: CapturePass) -> bool {
+        let Some(current) = framebuffer_info(ctx) else { return false };
+        same_framebuffer(current, pass.framebuffer)
+            && self.editor.capture_view_state() == pass.state
+            && self.editor.capture_snapshot_seq() == Some(pass.frame_seq)
+            && self.editor.capture_snapshot_matches(pass.state)
+            && self.editor.previewing().is_none()
+            && !self.editor.screenshot_gesture_busy()
+            && self.ui.pulses.is_empty()
+            && self.editor.screenshot_waiting_for().is_none()
+    }
+
+    fn finish_remote_capture(&mut self, serial: u64, result: Result<CapturedImage, CaptureError>) {
+        self.editor.cancel_screenshot_validation(serial);
+        self.editor.screenshot_complete(serial, result);
+        if self.remote_capture.as_ref().is_some_and(|capture| capture.request.serial == serial) {
+            self.remote_capture = None;
+        }
+    }
+
+    fn report_ui_settled(&mut self, ctx: &egui::Context) {
+        if self.ui_settled_reported || !self.editor.has_local_screenshot_owner() || self.render_state.is_none() {
+            return;
+        }
+        if !self.ui.pulses.is_empty() || self.editor.previewing().is_some() || self.editor.screenshot_gesture_busy() {
+            return;
+        }
+        if framebuffer_info(ctx).is_none() || self.editor.screenshot_waiting_for().is_some() {
+            return;
+        }
+        let Some((url, _)) = self.editor.erp_status() else { return };
+        eprintln!("Editor UI settled: {url}");
+        self.ui_settled_reported = true;
+    }
+
     /// `--screenshot`: after N frames ask the window for a screenshot of its
     /// own framebuffer, write the PNG and quit.
     fn screenshot(&mut self, ctx: &egui::Context) {
@@ -816,7 +1115,8 @@ impl EditorApp {
             Some(at) => {
                 let image = ctx.input(|i| {
                     i.events.iter().find_map(|e| match e {
-                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                        egui::Event::Screenshot { viewport_id, user_data, image }
+                            if *viewport_id == egui::ViewportId::ROOT && user_data.data.is_none() => Some(image.clone()),
                         _ => None,
                     })
                 });
@@ -837,6 +1137,81 @@ impl EditorApp {
             }
         }
     }
+}
+
+fn framebuffer_info(ctx: &egui::Context) -> Option<FramebufferInfo> {
+    let (viewport, inner_rect) = ctx.input(|input| (input.raw.viewport_id, input.raw.viewport().inner_rect));
+    framebuffer_info_from(viewport, inner_rect?, ctx.pixels_per_point())
+}
+
+fn framebuffer_info_from(viewport: egui::ViewportId, rect: Rect, ppp: f32) -> Option<FramebufferInfo> {
+    if viewport != egui::ViewportId::ROOT { return None; }
+    let physical_width = rect.width() * ppp;
+    let physical_height = rect.height() * ppp;
+    if !rect.width().is_finite()
+        || !rect.height().is_finite()
+        || !ppp.is_finite()
+        || !physical_width.is_finite()
+        || !physical_height.is_finite()
+        || rect.width() <= 0.0
+        || rect.height() <= 0.0
+        || ppp <= 0.0
+        || physical_width < 1.0
+        || physical_height < 1.0
+        || physical_width >= u32::MAX as f32
+        || physical_height >= u32::MAX as f32
+    {
+        return None;
+    }
+    Some(FramebufferInfo {
+        viewport,
+        logical_width: rect.width(),
+        logical_height: rect.height(),
+        pixels_per_point: ppp,
+        width: physical_width.round() as u32,
+        height: physical_height.round() as u32,
+    })
+}
+
+fn same_framebuffer(a: FramebufferInfo, b: FramebufferInfo) -> bool {
+    a.viewport == b.viewport
+        && a.width == b.width
+        && a.height == b.height
+        && a.logical_width.to_bits() == b.logical_width.to_bits()
+        && a.logical_height.to_bits() == b.logical_height.to_bits()
+        && a.pixels_per_point.to_bits() == b.pixels_per_point.to_bits()
+}
+
+fn screenshot_event_matches(event: &egui::Event, viewport: egui::ViewportId, serial: u64) -> bool {
+    matches!(event,
+        egui::Event::Screenshot { viewport_id, user_data, .. }
+            if *viewport_id == viewport
+                && user_data.data.as_ref().and_then(|data| data.downcast_ref::<u64>()).copied() == Some(serial)
+    )
+}
+
+fn encode_png_bounded(image: &egui::ColorImage) -> Result<Vec<u8>, CaptureError> {
+    let width = u32::try_from(image.width()).map_err(|_| CaptureError::Failed)?;
+    let height = u32::try_from(image.height()).map_err(|_| CaptureError::Failed)?;
+    let pixels = u64::from(width) * u64::from(height);
+    let rgba_len = usize::try_from(pixels.checked_mul(4).ok_or(CaptureError::Failed)?)
+        .map_err(|_| CaptureError::Failed)?;
+    if width == 0 || height == 0 || pixels > MAX_CAPTURE_PIXELS || rgba_len > MAX_CAPTURE_RGBA_BYTES || image.pixels.len() as u64 != pixels {
+        return Err(CaptureError::Failed);
+    }
+    let mut rgba = Vec::with_capacity(rgba_len);
+    for pixel in &image.pixels {
+        rgba.extend_from_slice(&pixel.to_array());
+    }
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(BoundedPngWriter(&mut png), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder.write_header().map_err(|_| CaptureError::Failed)?;
+    writer.write_image_data(&rgba).map_err(|_| CaptureError::Failed)?;
+    writer.finish().map_err(|_| CaptureError::Failed)?;
+    Ok(png)
 }
 
 /// Writes a `ColorImage` as an RGBA PNG.
@@ -901,5 +1276,55 @@ mod screenshot_tests {
         assert!(draw(&mut app, 1.0 + viewport::PULSE_SECONDS));
         assert!(app.ui.pulses.is_empty());
         assert_eq!(app.shot.as_ref().unwrap().requested_at, Some(30));
+    }
+
+    #[test]
+    fn remote_screenshot_event_requires_its_ticket_and_root_viewport() {
+        let image = std::sync::Arc::new(egui::ColorImage::filled([1, 1], Color32::BLACK));
+        let matching = egui::Event::Screenshot {
+            viewport_id: egui::ViewportId::ROOT,
+            user_data: egui::UserData::new(42_u64),
+            image: image.clone(),
+        };
+        let duplicate = egui::Event::Screenshot {
+            viewport_id: egui::ViewportId::ROOT,
+            user_data: egui::UserData::new(41_u64),
+            image: image.clone(),
+        };
+        let foreign_viewport = egui::Event::Screenshot {
+            viewport_id: egui::ViewportId::from_hash_of("secondary"),
+            user_data: egui::UserData::new(42_u64),
+            image,
+        };
+        assert!(screenshot_event_matches(&matching, egui::ViewportId::ROOT, 42));
+        assert!(!screenshot_event_matches(&duplicate, egui::ViewportId::ROOT, 42));
+        assert!(!screenshot_event_matches(&foreign_viewport, egui::ViewportId::ROOT, 42));
+    }
+
+    #[test]
+    fn physical_framebuffer_identity_invalidates_resize_and_dpi_changes() {
+        let root = egui::ViewportId::ROOT;
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let original = framebuffer_info_from(root, rect, 1.0).unwrap();
+        assert!(same_framebuffer(original, framebuffer_info_from(root, rect, 1.0).unwrap()));
+        assert!(!same_framebuffer(original, framebuffer_info_from(root, Rect::from_min_size(Pos2::ZERO, egui::vec2(801.0, 600.0)), 1.0).unwrap()));
+        assert!(!same_framebuffer(original, framebuffer_info_from(root, rect, 1.25).unwrap()));
+        assert!(framebuffer_info_from(egui::ViewportId::from_hash_of("secondary"), rect, 1.0).is_none());
+    }
+
+    #[test]
+    fn bounded_png_encoder_and_writer_enforce_allocation_limits() {
+        let image = egui::ColorImage::filled([2, 2], Color32::from_rgb(10, 20, 30));
+        let png = encode_png_bounded(&image).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png.len() <= MAX_CAPTURE_RGBA_BYTES);
+
+        let mut output = vec![0; MAX_CAPTURE_RGBA_BYTES];
+        let mut writer = BoundedPngWriter(&mut output);
+        assert!(writer.write_all(b"x").is_err());
+        assert_eq!(writer.0.len(), MAX_CAPTURE_RGBA_BYTES);
+
+        let oversized = egui::ColorImage::filled([1025, 1024], Color32::BLACK);
+        assert_eq!(encode_png_bounded(&oversized), Err(CaptureError::Failed));
     }
 }
