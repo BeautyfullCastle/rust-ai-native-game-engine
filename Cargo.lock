@@ -3154,7 +3154,9 @@ dependencies = [
  "orr_sim",
  "orr_view",
  "orr_viewstream",
+ "regex",
  "serde_json",
+ "syn 2.0.119",
 ]
 
 [[package]]
