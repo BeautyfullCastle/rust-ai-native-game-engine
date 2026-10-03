@@ -713,6 +713,15 @@ def validate_cook(record, fixture, hits):
     return {domain: lines[i].split()[1] for i, domain in enumerate(("sim", "view"))}
 
 
+def validate_runtime(record):
+    assert_pass(record)
+    text = record["stdout_text"]
+    require(text.splitlines().count(f"test {SELECTOR} ... ok") == 1,
+            "exact runtime test name was not reported once as ok")
+    require(re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored;", text) is not None,
+            "exact runtime selector not executed once")
+
+
 def campaign(output, capture=child_capture):
     output, plan, root, head = load_plan(output)
     require(not (output / "campaign-started.json").exists(), "campaign cannot be reused/rerun")
@@ -780,9 +789,7 @@ def campaign(output, capture=child_capture):
         rec = capture([run, SELECTOR, "--exact", "--nocapture", "--test-threads=1"], root,
                       output / "evidence" / "08-runtime-boundary", budget)
         report["records"].append(rec)
-        assert_pass(rec)
-        require(re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored;", rec["stdout_text"]) is not None,
-                "exact runtime selector not executed once")
+        validate_runtime(rec)
         require(source_identity(root, head) == plan["source"], "source drift after campaign")
         for b in builds["binaries"].values():
             require(fingerprint(b["path"]) == {k: b[k] for k in ("bytes", "sha256")}, "binary drift after campaign")
@@ -798,6 +805,18 @@ def campaign(output, capture=child_capture):
 
 
 class SelfTests(unittest.TestCase):
+    def test_runtime_exact_name_and_summary(self):
+        summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 27 filtered out; finished in 0.01s\n"
+        record = {"status": "passed", "actual_exit": 0, "errors": [], "streams": {},
+                  "stdout_text": f"test {SELECTOR} ... ok\n" + summary}
+        validate_runtime(record)
+        for text in (summary, "test wrong::selector ... ok\n" + summary,
+                     f"test {SELECTOR} ... ok\ntest {SELECTOR} ... ok\n" + summary,
+                     f"test {SELECTOR} ... ok\n" + summary.replace("1 passed", "0 passed")):
+            record["stdout_text"] = text
+            with self.assertRaises(ValueError):
+                validate_runtime(record)
+
     def test_signed_pcm_division(self):
         self.assertEqual(trunc_div(-7, 3), -2)
         self.assertEqual(pcm(8192, 4, 4), struct.pack("<IIhhhh", 48000, 4, -8192, 0, 4096, 0))
