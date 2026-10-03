@@ -204,7 +204,11 @@ fn main() -> ExitCode {
     if client_mode {
         let room = args.join.room;
         println!("orr_remote_host: joining room {room} on {} ...", args.join.connect.as_deref().unwrap_or(""));
-        if let Err(e) = join_phys_client(&mut cfg.limits, args.join.clone()) {
+        let mut join = args.join.clone();
+        if args.build_id.is_some() {
+            join.build_id = args.build_id;
+        }
+        if let Err(e) = join_phys_client(&mut cfg.limits, join) {
             eprintln!("error: joining the server failed: {e}");
             return ExitCode::FAILURE;
         }

@@ -40,6 +40,9 @@ pub struct NetArgs {
     pub fingerprint: Option<[u8; 32]>,
     pub insecure_dev: bool,
     pub room: u64,
+    /// Override the sample's frame-format-bound game identity (`--build-id`).
+    /// `Some(0)` intentionally preserves the engine's untracked development mode.
+    pub build_id: Option<u64>,
     pub slot: Option<u8>,
     /// Label in log lines.
     pub name: String,
@@ -62,6 +65,7 @@ impl Default for NetArgs {
             fingerprint: None,
             insecure_dev: false,
             room: 1,
+            build_id: None,
             slot: None,
             name: "client".to_string(),
             sim: SimConditions { latency_ms: 0, jitter_ms: 0, loss: 0.0, seed: 0 },
@@ -81,6 +85,7 @@ pub const NET_HELP: &str = "\
   --trust-fingerprint HEX      QUIC: pin the server certificate (the server prints it)
   --insecure-dev               QUIC: accept any certificate (development only)
   --room N                     room id (default 1)
+  --build-id N                 override the game's frame-format-bound build id (exact decimal u64)
   --slot N                     ask for this slot (default: any free slot)
   --name TEXT                  label in log lines
   --sim-latency MS             add MS of one-way delay in each direction (test the network)
@@ -107,6 +112,7 @@ impl NetArgs {
             "--trust-fingerprint" => self.fingerprint = Some(parse_fingerprint(&next(arg)?)?),
             "--insecure-dev" => self.insecure_dev = true,
             "--room" => self.room = num(arg, next(arg)?)?,
+            "--build-id" => self.build_id = Some(num(arg, next(arg)?)?),
             "--slot" => self.slot = Some(num(arg, next(arg)?)?),
             "--name" => self.name = next(arg)?,
             "--sim-latency" => self.sim.latency_ms = num(arg, next(arg)?)?,
@@ -169,7 +175,7 @@ impl NetArgs {
 pub fn arena_client(args: &NetArgs) -> Result<RelayClient<Arena, NetLink>, String> {
     let link = args.link()?;
     Ok(RelayClient::new(
-        args.client_config(ARENA_BUILD_ID),
+        args.client_config(args.build_id.unwrap_or(ARENA_BUILD_ID)),
         link,
         |w| ArenaConfig { player_count: w.player_count },
         DirSink::new(&args.desync_dir),
@@ -187,7 +193,7 @@ pub type SceneSink = Arc<Mutex<Option<PhysConfig>>>;
 fn physics_client_with(args: &NetArgs, sink: Option<SceneSink>) -> Result<RelayClient<PhysGame, NetLink>, String> {
     let link = args.link()?;
     Ok(RelayClient::new(
-        args.client_config(PHYSICS_BUILD_ID),
+        args.client_config(args.build_id.unwrap_or(PHYSICS_BUILD_ID)),
         link,
         move |w| {
             let scene = PhysConfig::from_blob(&w.config, w.player_count)
