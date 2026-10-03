@@ -126,6 +126,81 @@ class CiCostReportTests(unittest.TestCase):
                 self.assertTrue(result["common_reasons"])
                 self.assertIsNone(result["metrics"]["compile"].get("ratio_baseline_over_current"))
 
+    def test_unknown_condition_keys_are_preserved_and_block_every_metric(self):
+        cases = (
+            ("root_env_differs", (True, True), lambda base, current: (
+                base["conditions"].__setitem__("env", {"RUSTFLAGS": "-C panic=abort"}),
+                current["conditions"].__setitem__("env", {"RUSTFLAGS": "-C panic=unwind"}))),
+            ("platform_extra_equal", (True, True), lambda base, current: (
+                base["conditions"]["platform"].__setitem__("provider", "linux"),
+                current["conditions"]["platform"].__setitem__("provider", "linux"))),
+            ("runner_extra_null_on_baseline", (True, False), lambda base, current:
+             base["conditions"]["runner"].__setitem__("host_image_digest", None)),
+            ("cache_extra_only_on_current", (False, True), lambda base, current:
+             current["conditions"]["cache"].__setitem__("implementation", "local-fs")),
+            ("root_extra_null_both", (True, True), lambda base, current: (
+                base["conditions"].__setitem__("env", None),
+                current["conditions"].__setitem__("env", None))),
+        )
+        for label, invalid_sides, mutate in cases:
+            with self.subTest(case=label):
+                baseline = record("base", run_id=181)
+                current = record("current", run_id=182)
+                mutate(baseline, current)
+                result = report.build_report(document(baseline, current))
+                self.assertEqual(result["records"][0]["input"], baseline)
+                self.assertEqual(result["records"][1]["input"], current)
+                for row, invalid in zip(result["records"], invalid_sides):
+                    self.assertEqual(bool(row["validation_errors"]), invalid)
+                pair = result["comparisons"][0]
+                for metric in pair["metrics"].values():
+                    self.assertFalse(metric["comparable"])
+                    self.assertNotIn("ratio_baseline_over_current", metric)
+                self.assertEqual(pair["status"], "incomparable")
+
+    def test_unknown_condition_key_cli_returns_incomparable_json_not_global_error(self):
+        baseline = record("base", run_id=191)
+        current = record("current", run_id=192)
+        baseline["conditions"]["env"] = {"RUSTFLAGS": "-C panic=abort"}
+        current["conditions"]["env"] = {"RUSTFLAGS": "-C panic=unwind"}
+        with tempfile.TemporaryDirectory(prefix="ci-cost-unknown-condition-") as temp:
+            path = Path(temp) / "unknown-condition.json"
+            path.write_text(json.dumps(document(baseline, current)), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(SCRIPT), str(path), "--format", "json"],
+                                    cwd=ROOT, text=True, encoding="utf-8", capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        output = json.loads(result.stdout)
+        self.assertEqual(output["comparisons"][0]["status"], "incomparable")
+        self.assertEqual(output["records"][0]["input"]["conditions"]["env"],
+                         {"RUSTFLAGS": "-C panic=abort"})
+        self.assertEqual(output["records"][1]["input"]["conditions"]["env"],
+                         {"RUSTFLAGS": "-C panic=unwind"})
+        self.assertTrue(all(row["validation_errors"] for row in output["records"]))
+        for metric in output["comparisons"][0]["metrics"].values():
+            self.assertFalse(metric["comparable"])
+            self.assertNotIn("ratio_baseline_over_current", metric)
+
+    def test_measurement_sources_are_labels_but_scope_mismatch_blocks_ratio(self):
+        baseline = record("base", run_id=201)
+        current = record("current", run_id=202)
+        for metric in report.METRICS:
+            baseline["measurements"][metric]["source"] = f"artifacts/run-1/{metric}.log"
+            current["measurements"][metric]["source"] = f"artifacts/run-2/{metric}.log"
+        comparable = comparison(report.build_report(document(baseline, current)))
+        self.assertEqual(comparable["status"], "comparable")
+        self.assertTrue(all(item["comparable"] for item in comparable["metrics"].values()))
+
+        baseline["measurements"]["total"]["scope"] = "job-wall"
+        current["measurements"]["total"]["scope"] = "command-wall"
+        current["measurements"]["total"]["source"] = "a-different-log-path.json"
+        result = comparison(report.build_report(document(baseline, current)))
+        self.assertTrue(result["metrics"]["compile"]["comparable"])
+        self.assertTrue(result["metrics"]["runtime"]["comparable"])
+        self.assertFalse(result["metrics"]["total"]["comparable"])
+        self.assertIn("measurement_scope_mismatch", result["metrics"]["total"]["reasons"])
+        self.assertNotIn("ratio_baseline_over_current", result["metrics"]["total"])
+
     def test_failed_cancelled_timeout_or_unknown_runs_never_make_a_speedup(self):
         for status, code in (("failure", 1), ("cancelled", None), ("timed_out", 124), ("unknown", 0)):
             with self.subTest(status=status):

@@ -23,6 +23,12 @@ SCOPES = {
     "total": {"command-wall", "job-wall"},
 }
 STATUSES = {"success", "failure", "cancelled", "timed_out", "unknown"}
+CONDITION_KEYS = {
+    "": {"platform", "runner", "cache", "toolchain", "profile", "target", "features", "command"},
+    "platform": {"os", "arch", "image"},
+    "runner": {"class", "hardware", "isolation"},
+    "cache": {"state", "key"},
+}
 
 
 def _unique_object(pairs):
@@ -93,6 +99,13 @@ def _optional_text(value, path, errors):
         errors.append(f"{path}: expected string or null")
 
 
+def _condition_keys(value, group, errors):
+    path = "conditions" + ("." + group if group else "")
+    for key in value:
+        if key not in CONDITION_KEYS[group]:
+            errors.append(f"{path}.{key}: unsupported condition field; not validated")
+
+
 def _validate_record(record):
     errors = []
     provenance = _object(record.get("provenance"), "provenance", errors)
@@ -117,10 +130,12 @@ def _validate_record(record):
     if code is not None and type(code) is not int:
         errors.append("exit_code: expected integer or null")
     conditions = _object(record.get("conditions"), "conditions", errors)
+    _condition_keys(conditions, "", errors)
     for key, fields in (("platform", ("os", "arch", "image")),
                         ("runner", ("class", "hardware", "isolation")),
                         ("cache", ("state", "key"))):
         nested = _object(conditions.get(key), f"conditions.{key}", errors)
+        _condition_keys(nested, key, errors)
         for field in fields:
             _optional_text(nested.get(field), f"conditions.{key}.{field}", errors)
     for key in ("toolchain", "profile", "target"):

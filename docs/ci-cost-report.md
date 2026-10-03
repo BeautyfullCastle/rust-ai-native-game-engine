@@ -21,6 +21,13 @@ baseline/current record IDs. Each record declares:
   `command` argv, and `cache` (`state`, `key`). A comparable pair requires all
   compared condition fields to be known and equal; `runner.isolation` must be
   `exclusive`, and cache state must be `cold` or `warm`.
+  These are the only supported keys at the `conditions` root and inside
+  `platform`, `runner`, and `cache`. Any additional key is retained with an
+  `unsupported condition field` record validation error and blocks every
+  metric involving that record, even when both records supply the same extra
+  value or `null`. For example, `conditions.env.RUSTFLAGS` is not validated by
+  this version and cannot silently produce a comparable pair. Extending the
+  condition contract requires explicit validation and comparison support.
 - `status` and `exit_code`. A comparable timing requires `success` and exit
   code zero. Failed, cancelled, timed-out, and unknown outcomes remain in the
   report but do not produce ratios.
@@ -30,6 +37,16 @@ baseline/current record IDs. Each record declares:
   `command-wall` or `job-wall` for total. Both sides of a metric must use the
   same scope and a positive, known duration. Never derive one duration by
   subtracting another from wall time.
+  `source` is a nonempty evidence locator or description of the captured
+  interval, such as `run/1001/logs/build.txt:42-60`; it is not a measurement
+  method identifier. The two records normally refer to different evidence,
+  so their source strings need not match. Unknown source values still block
+  that metric. `scope` defines the caller-declared timing interval: Cargo
+  build wall time, test execution wall time, or command/job wall time. Equal
+  scopes declare the same interval semantics; they do not attest collector
+  accuracy or equivalent measurement methods. Keep the actual collection
+  method with the linked evidence and use matching interval semantics before
+  supplying a pair; this offline parser does not verify that claim.
 
 The source SHA may differ between baseline and current. Their runner,
 platform, toolchain, profile, target, features, command, cache state/key, and
