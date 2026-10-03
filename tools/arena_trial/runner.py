@@ -364,8 +364,9 @@ class Broker:
             if not self.playing:
                 raise ProtocolError("sim_stop requires an active play session")
             label = args.get("replay")
-            expected_label = {2: None, 3: "baseline20", 4: "modified50", 5: None}.get(self.task_number)
-            if label != expected_label:
+            permitted_labels = {2: {None}, 3: {"baseline20"}, 4: {"modified50"},
+                                5: {None, "fresh50"}}.get(self.task_number, set())
+            if label not in permitted_labels:
                 raise ProtocolError("sim_stop export label is not permitted for this task")
             if label:
                 replay_path = self.benchmark.output / f"{label}.orrp"

@@ -370,7 +370,12 @@ class OracleTests(unittest.TestCase):
             task5._dispatch("sim_stop", {"replay": "modified50"})
         self.assertEqual(alias.read_bytes(), original_alias)
         self.assertTrue(task5.playing)
-        task5.playing = False
+        benchmark.replay_bytes = b"new task 5 replay"
+        task5._dispatch("sim_stop", {"replay": "fresh50"})
+        self.assertEqual((self.root / "fresh50.orrp").read_bytes(), benchmark.replay_bytes)
+        self.assertEqual(alias.read_bytes(), original_alias)
+        self.assertEqual(archived.read_bytes(), original_alias)
+        self.assertFalse(task5.playing)
 
         task5._dispatch("verify_replay", {"replay": "modified50"})
         self.assertEqual(benchmark.verified_replays[-1], archived)

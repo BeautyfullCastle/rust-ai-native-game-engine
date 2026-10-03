@@ -119,7 +119,8 @@ typed arguments and task/state restrictions. No operation accepts a shell
 command, raw RPC method, arbitrary destination path, score edit or verdict.
 
 Replay export labels are fixed per task: task three writes `baseline20`,
-task four writes `modified50`, and tasks two and five stop without an export.
+task four writes `modified50`, task two stops without an export, and task five
+may write a separate `fresh50` replay or stop without exporting.
 Task four archives the replay bytes separately and pins their SHA-256 before
 its oracle runs. Task five verifies that archived original and rejects changes
 to either the archive or its exported alias. A resumed unfinished task four
