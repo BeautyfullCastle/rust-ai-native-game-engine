@@ -456,13 +456,20 @@ def _aggregate(values: list[Any]) -> dict[str, Any]:
 def _validate_editor(records: list[dict[str, Any]], errors: list[str]) -> dict[str, Any]:
     editor = [r for r in records if r.get("suite") == "editor"]
     for r in editor:
-        if r.get("schema_version") != 1:
+        if not _is_int(r.get("schema_version")) or r.get("schema_version") != 1:
             errors.append("editor record has unsupported schema_version")
         if r.get("backend") != "egui_kittest" or r.get("erp_connected") is not False or r.get("gpu") is not False:
             errors.append("editor record has unexpected backend/ERP/GPU metadata")
         if r.get("window_px") != [1500, 900]:
             errors.append("editor record has unexpected window resolution")
-    drag = sorted((r for r in editor if r.get("case") == "drag_move"), key=lambda x: x.get("move_index", -1))
+    drag_records = [r for r in editor if r.get("case") == "drag_move"]
+    invalid_drag_indices = [r for r in drag_records if not _is_int(r.get("move_index"))]
+    if invalid_drag_indices:
+        errors.append("editor drag_move indices must be integers before ordering")
+    # Keep only validated integer keys in the ordering operation. Malformed rows
+    # remain in the record set and make the run invalid through the checks below.
+    drag = sorted((r for r in drag_records if _is_int(r.get("move_index"))),
+                  key=lambda x: x["move_index"])
     frames = [r for r in editor if r.get("case") == "ui_frame"]
     diagnostics = [r for r in editor if r.get("case") == "diagnostics"]
     expected_cases = {"drag_move": 40, "ui_frame": 540, "diagnostics": 5}
@@ -479,10 +486,12 @@ def _validate_editor(records: list[dict[str, Any]], errors: list[str]) -> dict[s
     if any(r.get("group") != ("first" if i == 1 else "steady") for i, r in enumerate(drag, 1)):
         errors.append("editor drag groups must be one first plus 39 steady samples")
     drag_body_counts = [r.get("body_count") for r in drag]
-    if any(not _is_int(value) or value <= 0 for value in drag_body_counts):
+    valid_drag_body_counts = [value for value in drag_body_counts if _is_int(value) and value > 0]
+    if len(valid_drag_body_counts) != len(drag_body_counts):
         errors.append("editor drag body_count must be a positive integer")
-    elif len(set(drag_body_counts)) > 1:
+    elif len(set(valid_drag_body_counts)) > 1:
         errors.append("editor drag scene body_count changed during the sample")
+    expected_drag_body_count = valid_drag_body_counts[0] if valid_drag_body_counts else None
     expected_phase = {"edit": 60, "play_1x": 240, "play_4x": 240}
     for phase, count in expected_phase.items():
         selected = [r for r in frames if r.get("phase") == phase]
@@ -493,13 +502,17 @@ def _validate_editor(records: list[dict[str, Any]], errors: list[str]) -> dict[s
     if not diagnostics:
         errors.append("editor diagnostics records are missing")
     expected_diagnostic_phases = {"drag", "edit", "play 1x", "play 4x", "600-tick step"}
-    if len(diagnostics) != 5 or {r.get("phase") for r in diagnostics} != expected_diagnostic_phases:
+    diagnostic_phases = [r.get("phase") for r in diagnostics]
+    if any(not isinstance(phase, str) for phase in diagnostic_phases):
+        errors.append("editor diagnostics phase keys must be strings")
+    elif len(diagnostics) != 5 or set(diagnostic_phases) != expected_diagnostic_phases:
         errors.append("editor diagnostics phases are missing or duplicated")
     diagnostic_availability: dict[str, Any] = {}
     metric_names = {"ui_frame", "pump", "sync_erp_wait", "async_request", "snapshot_extract"}
-    for d in diagnostics:
-        expected_body_count = (drag_body_counts[0] if d.get("phase") == "drag" and drag_body_counts
-                               else (drag_body_counts[0] + 1000 if drag_body_counts else None))
+    for diagnostic_index, d in enumerate(diagnostics):
+        phase = d.get("phase")
+        expected_body_count = (expected_drag_body_count if phase == "drag" else
+                               (expected_drag_body_count + 1000 if expected_drag_body_count is not None else None))
         if d.get("body_count") != expected_body_count:
             errors.append(f"editor diagnostics {d.get('phase')!r} body_count differs from scene")
         expected_scene = "demo_editor" if d.get("phase") == "drag" else "demo_editor_1000_bodies"
@@ -527,7 +540,8 @@ def _validate_editor(records: list[dict[str, Any]], errors: list[str]) -> dict[s
                 errors.append(f"editor diagnostic {metric_name} has timings without samples")
             phase_result[metric_name] = {"available": samples > 0, "samples": samples,
                                          "total_samples": total, "raw_ms": values}
-        diagnostic_availability[d.get("phase", "unknown")] = phase_result
+        safe_phase = phase if isinstance(phase, str) else f"invalid-phase-{diagnostic_index}"
+        diagnostic_availability[safe_phase] = phase_result
     for index, r in enumerate(drag):
         if not _is_int(r.get("frames")) or r["frames"] <= 0:
             errors.append(f"editor drag frame sample {index} must be a positive integer")
@@ -536,14 +550,14 @@ def _validate_editor(records: list[dict[str, Any]], errors: list[str]) -> dict[s
         if not _is_int(r.get("frame_index")) or r["frame_index"] < 0:
             errors.append(f"editor ui frame index[{index}] must be a nonnegative integer")
         _finite(r.get("wall_ms"), f"editor ui wall_ms[{index}]", errors)
-        if not drag_body_counts or not _is_int(r.get("body_count")) or r.get("body_count") != drag_body_counts[0] + 1000:
+        if expected_drag_body_count is None or not _is_int(r.get("body_count")) or r.get("body_count") != expected_drag_body_count + 1000:
             errors.append("editor play/edit frame body_count differs from the demo scene plus 1000")
         if r.get("scene_id") != "demo_editor_1000_bodies":
             errors.append("editor frame sample has unexpected scene_id")
     if any(r.get("scene_id") != "demo_editor" for r in drag):
         errors.append("editor drag sample has unexpected scene_id")
     return {
-        "identity": {"body_count": drag_body_counts[0] if drag_body_counts else None,
+        "identity": {"body_count": expected_drag_body_count,
                      "window_px": [1500, 900], "backend": "egui_kittest"},
         "drag_first": {"frames": drag[0].get("frames"), "wall_ms": drag[0].get("wall_ms")} if drag else None,
         "drag_steady_39_wall_ms_summary": _aggregate([r.get("wall_ms") for r in drag[1:]]),
@@ -575,7 +589,9 @@ GPU_FRAME_IDENTITY_KEYS = ("renderer", "preset", "scene_id", "instance_count", "
 def _validate_gpu(run_name: str, records: list[dict[str, Any]], errors: list[str],
                   gpu_mode: str = "default") -> dict[str, Any] | None:
     expected = GPU_EXPECTED[run_name]
-    if len(records) != 43 or any(r.get("case") not in {"metadata", "frame", "readback"} for r in records):
+    if len(records) != 43 or any(not isinstance(r.get("case"), str) or
+                                  r.get("case") not in {"metadata", "frame", "readback"}
+                                  for r in records):
         errors.append(f"{run_name}: expected exactly 1 metadata + 41 frame + 1 readback records")
     if any(r.get("suite") != "renderer" for r in records):
         errors.append(f"{run_name}: unexpected non-renderer ORR_BASELINE record")
@@ -587,6 +603,8 @@ def _validate_gpu(run_name: str, records: list[dict[str, Any]], errors: list[str
         meta = metadata[0] if metadata else {}
     else:
         meta = metadata[0]
+    if not _is_int(meta.get("schema_version")) or meta.get("schema_version") != 1:
+        errors.append(f"{run_name}: unsupported metadata schema")
     for key, value in {**GPU_COMMON, **expected}.items():
         if meta.get(key) != value:
             errors.append(f"{run_name}: metadata {key} mismatch (expected {value!r}, got {meta.get(key)!r})")
@@ -613,14 +631,21 @@ def _validate_gpu(run_name: str, records: list[dict[str, Any]], errors: list[str
     if gpu_mode == "default" and meta.get("software") is True:
         errors.append(f"{run_name}: default mode resolved to software; hardware baseline is unverified")
     required_frames = [("cold", 1), ("warmup", 10), ("steady", 30)]
-    expected_pairs = [(kind, index) for kind, count in required_frames for index in range(count)]
-    actual_pairs = [(r.get("frame_class"), r.get("frame_index")) for r in frames]
-    if sorted(actual_pairs) != sorted(expected_pairs):
+    expected_pairs = sorted((kind, index) for kind, count in required_frames for index in range(count))
+    valid_classes = {kind for kind, _ in required_frames}
+    actual_pairs = []
+    for i, record in enumerate(frames):
+        frame_class, frame_index = record.get("frame_class"), record.get("frame_index")
+        if not isinstance(frame_class, str) or frame_class not in valid_classes or not _is_int(frame_index):
+            errors.append(f"{run_name}: frame class/index keys must be a known string and integer at frame {i}")
+            continue
+        actual_pairs.append((frame_class, frame_index))
+    if len(actual_pairs) != len(frames) or sorted(actual_pairs) != expected_pairs:
         errors.append(f"{run_name}: expected 1 cold, 10 warmup, 30 steady frames with exact indices")
     base_sig = _gpu_signature(meta)
     frame_sig = {key: meta.get(key) for key in GPU_FRAME_IDENTITY_KEYS}
     for i, r in enumerate(frames):
-        if r.get("schema_version") != 1 or r.get("case") != "frame":
+        if not _is_int(r.get("schema_version")) or r.get("schema_version") != 1 or r.get("case") != "frame":
             errors.append(f"{run_name}: unsupported frame schema at index {i}")
         for key, value in frame_sig.items():
             if r.get(key) != value:
@@ -654,7 +679,8 @@ def _validate_gpu(run_name: str, records: list[dict[str, Any]], errors: list[str
     if len(readbacks) != 1:
         errors.append(f"{run_name}: expected one readback record, got {len(readbacks)}")
     readback = readbacks[0] if readbacks else {}
-    if readback.get("schema_version") != 1 or readback.get("suite") != "renderer" or readback.get("case") != "readback":
+    if not _is_int(readback.get("schema_version")) or readback.get("schema_version") != 1 or \
+            readback.get("suite") != "renderer" or readback.get("case") != "readback":
         errors.append(f"{run_name}: invalid readback record schema")
     for key in ("renderer", "preset", "scene_id", "resolution_px"):
         if readback.get(key) != meta.get(key):

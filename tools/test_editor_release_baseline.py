@@ -138,6 +138,87 @@ class ParserTests(unittest.TestCase):
             self.assertIsNotNone(result["exit_code"])
             self.assertIn(b"started", (root / "stdout.log").read_bytes())
 
+    def test_collect_persists_malformed_key_outcomes_and_marks_manifest_incomplete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "capture"
+            counts = {"editor_measure": 0, "gpu_2d_default": 0,
+                      "gpu_3d_low": 0, "gpu_3d_default": 0}
+            identity = {"head": "commit", "tree": "tree", "dirty_status": "",
+                        "source_sha256": "a" * 64, "source_file_count": 1}
+
+            def fake_launch(argv, env, cwd, run_dir):
+                result = {"exit_code": 0, "timed_out": False, "interrupted": False,
+                          "launch_error": None, "child_cleanup_verified": True,
+                          "elapsed_seconds": 0.01, "started_at": "start", "finished_at": "finish",
+                          "cleanup": {"action": "normal_exit"}}
+                if "--no-run" in argv:
+                    (run_dir / "stdout.log").write_text("build ok\n", encoding="utf-8")
+                    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+                    return result
+                if "orr_editor" in argv:
+                    suite = "editor_measure"
+                    records = editor_records()
+                    if counts[suite] == 0:
+                        next(row for row in records if row.get("case") == "drag_move")["move_index"] = None
+                else:
+                    target = argv[argv.index("--test") + 1]
+                    suite = {"gpu": "gpu_2d_default", "gpu3d":
+                             ("gpu_3d_low" if "release_baseline_3d_low" in argv else "gpu_3d_default")}[target]
+                    records = gpu_records(suite)
+                    if counts[suite] == 0:
+                        frame = next(row for row in records if row.get("case") == "frame")
+                        frame["frame_class"] = None
+                        frame["frame_index"] = []
+                counts[suite] += 1
+                (run_dir / "stdout.log").write_text("", encoding="utf-8")
+                with (run_dir / "stderr.log").open("w", encoding="utf-8") as stream:
+                    for record in records:
+                        stream.write("ORR_BASELINE " + json.dumps(record) + "\n")
+                return result
+
+            args = type("Args", (), {"output": "capture", "repetitions": 3, "gpu_mode": "default"})()
+            with patch.object(baseline, "REPO", root), \
+                 patch.object(baseline, "_source_identity", return_value=identity), \
+                 patch.object(baseline, "_toolchain", return_value={"rustc_verbose": "test"}), \
+                 patch.object(baseline, "_power_metadata", return_value={"active_scheme": "test"}), \
+                 patch.object(baseline, "_output_path", return_value=output), \
+                 patch.object(baseline, "_compiled_binary", return_value={"target": "test", "sha256": "b" * 64, "bytes": 1}), \
+                 patch.object(baseline, "_launch", side_effect=fake_launch):
+                result = baseline.collect(args)
+            self.assertEqual(result, 1)
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "incomplete")
+            self.assertEqual(len(manifest["build_runs"]), 3)
+            self.assertEqual(len(manifest["runs"]), 12)
+            self.assertEqual({name: sum(row["suite_name"] == name for row in manifest["runs"])
+                              for name in counts}, {name: 3 for name in counts})
+            editor = next(row for row in manifest["runs"] if row["suite_name"] == "editor_measure" and row["repetition"] == 1)
+            gpu = next(row for row in manifest["runs"] if row["suite_name"] == "gpu_2d_default" and row["repetition"] == 1)
+            self.assertEqual(editor["exit_code"], 0)
+            self.assertEqual(gpu["exit_code"], 0)
+            self.assertEqual(editor["record_count"], len(editor_records()))
+            self.assertEqual(gpu["record_count"], 43)
+            self.assertFalse(editor["validation"]["valid"])
+            self.assertFalse(gpu["validation"]["valid"])
+            self.assertIn("records.jsonl", editor["record_file"])
+            self.assertIn("records.jsonl", gpu["record_file"])
+            for name in counts:
+                for repetition in (2, 3):
+                    row = next(row for row in manifest["runs"] if row["suite_name"] == name and
+                               row["repetition"] == repetition)
+                    self.assertTrue(row["validation"]["valid"], (name, repetition, row["validation"]["errors"]))
+            persisted_editor = [json.loads(line) for line in
+                                (output / "rep-01-editor_measure" / "records.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(persisted_editor), 585)
+            self.assertIsNone(next(row for row in persisted_editor if row.get("case") == "drag_move")["move_index"])
+            persisted_gpu = [json.loads(line) for line in
+                             (output / "rep-01-gpu_2d_default" / "records.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(persisted_gpu), 43)
+            malformed_frame = next(row for row in persisted_gpu if row.get("frame_index") == [])
+            self.assertIsNone(malformed_frame["frame_class"])
+            self.assertEqual(malformed_frame["frame_index"], [])
+
     def test_fixed_plan_has_all_builds_and_all_independent_repetitions(self):
         plan = baseline._planned_commands(3, "software", Path("repo"))
         self.assertEqual(len(plan), len(baseline.BUILD_RUNS) + 12)
@@ -166,6 +247,29 @@ class EditorContractTests(unittest.TestCase):
         errors: list[str] = []
         baseline._validate_editor(rows, errors)
         self.assertTrue(any("play_4x frame records" in error for error in errors))
+
+    def test_editor_malformed_sort_and_phase_keys_are_rejected_without_raising(self):
+        for key_value in (None, "2", [], True):
+            rows = editor_records()
+            next(row for row in rows if row.get("case") == "drag_move")["move_index"] = key_value
+            errors: list[str] = []
+            with self.subTest(move_index=key_value):
+                summary = baseline._validate_editor(rows, errors)
+                self.assertTrue(any("indices must be integers" in error for error in errors))
+                self.assertTrue(any("drag_move records" in error for error in errors))
+                self.assertIsInstance(summary, dict)
+        for malformed_phase in ([], {}):
+            rows = editor_records()
+            next(row for row in rows if row.get("case") == "diagnostics")["phase"] = malformed_phase
+            errors = []
+            with self.subTest(diagnostic_phase=malformed_phase):
+                baseline._validate_editor(rows, errors)
+                self.assertTrue(any("phase keys must be strings" in error for error in errors))
+        rows = editor_records()
+        next(row for row in rows if row.get("case") == "drag_move")["body_count"] = []
+        errors = []
+        baseline._validate_editor(rows, errors)
+        self.assertTrue(any("body_count must be a positive integer" in error for error in errors))
 
     def test_editor_zero_sample_timing_cannot_be_reported_as_a_measurement(self):
         rows = editor_records()
@@ -213,6 +317,27 @@ class RendererContractTests(unittest.TestCase):
         self.assertTrue(any("exact indices" in error for error in errors))
         self.assertTrue(any("finite nonnegative" in error for error in errors))
         self.assertTrue(any("must be labelled render-call return" in error for error in errors))
+
+    def test_gpu_malformed_frame_pair_keys_are_rejected_without_raising(self):
+        for field, value in (("frame_class", None), ("frame_class", []),
+                             ("frame_index", None), ("frame_index", []), ("frame_index", True)):
+            rows = gpu_records("gpu_2d_default")
+            frame = next(row for row in rows if row.get("case") == "frame")
+            frame[field] = value
+            errors: list[str] = []
+            with self.subTest(field=field, value=value):
+                summary = baseline._validate_gpu("gpu_2d_default", rows, errors, "default")
+                self.assertIsNotNone(summary)
+                self.assertTrue(any("frame class/index keys" in error for error in errors))
+                self.assertTrue(any("exact indices" in error for error in errors))
+
+    def test_gpu_unhashable_case_key_is_rejected_without_raising(self):
+        rows = gpu_records("gpu_2d_default")
+        rows[1]["case"] = []
+        errors: list[str] = []
+        summary = baseline._validate_gpu("gpu_2d_default", rows, errors, "default")
+        self.assertIsNotNone(summary)
+        self.assertTrue(any("expected exactly 1 metadata" in error for error in errors))
 
     def test_gpu_mode_must_match_resolved_adapter_kind(self):
         errors: list[str] = []
