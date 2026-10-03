@@ -173,6 +173,13 @@ impl<G: Game, L: Link> RelaySource<G, L> {
     }
 
     fn pump(&mut self) {
+        // Control messages must be applied before later bundles: in particular,
+        // Welcome configures the slot count used to decode the join backlog.
+        // Session polling cannot handle controls, so leave this barrier intact
+        // until RelayClient::update drains it.
+        if !self.others.is_empty() {
+            return;
+        }
         while let Some(ev) = self.link.poll() {
             match ev {
                 LinkEvent::Connected => self.connected = true,
@@ -187,7 +194,10 @@ impl<G: Game, L: Link> RelaySource<G, L> {
                             self.on_bundle(b);
                         }
                     }
-                    Ok(other) => self.others.push_back(other),
+                    Ok(other) => {
+                        self.others.push_back(other);
+                        return;
+                    }
                     Err(_) => self.stats.decode_errors += 1,
                 },
             }
@@ -663,8 +673,9 @@ impl<G: Game, L: Link> RelayClient<G, L> {
         let mut up = RelayUpdate::default();
         let dt = now_us.saturating_sub(self.now_us);
         self.now_us = now_us;
-        self.src_mut().pump();
-        while let Some(msg) = self.src_mut().others.pop_front() {
+        loop {
+            self.src_mut().pump();
+            let Some(msg) = self.src_mut().others.pop_front() else { break };
             self.handle(msg);
         }
         up.events.append(&mut self.correction_events);
