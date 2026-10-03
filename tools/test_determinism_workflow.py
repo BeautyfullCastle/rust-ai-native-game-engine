@@ -235,6 +235,19 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Unsupported runner OS", result.stdout)
 
+    def test_asset_core_wasm_check_is_required_and_isolated(self):
+        job = self.jobs["wasm32-browser"]
+        command = "cargo check --target wasm32-unknown-unknown -p orr_asset --no-default-features"
+        self.assert_required(job)
+        self.assert_required_command(job, command)
+        step = next(step for step in job["steps"] if step.get("run") == command)
+        # Keep default-feature isolation in its own invocation rather than
+        # unifying features with the existing view/browser package build.
+        self.assertEqual(step["run"], command)
+        install = next(step for step in job["steps"]
+                       if step.get("with", {}).get("targets") == "wasm32-unknown-unknown")
+        self.assertLess(job["steps"].index(install), job["steps"].index(step))
+
     def test_browser_runtime_is_mandatory(self):
         job = self.jobs["wasm32-browser"]
         self.assert_required(job)

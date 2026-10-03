@@ -57,6 +57,15 @@ jobs:
         # cannot hide the library guard's failure behind a later success.
         run: python tools/test_sim_float_guard.py
 
+      - name: Asset core, cooker, and strict fixture gates
+        run: cargo test --locked --release -p orr_asset -p orr_asset_cook -p orr_asset_fixture
+
+      - name: Reproduce checked-in cooked asset bytes
+        run: cargo run --locked --release -p orr_asset_cook -- cook --index assets/fixture_v1/index.json --out assets/fixture_v1/cooked --root a_0000000000001001 --root a_0000000000002001 --check
+
+      - name: Strict asset crate clippy
+        run: cargo clippy --locked -p orr_asset -p orr_asset_cook -p orr_asset_fixture --all-targets -- -D warnings
+
       - name: cargo test --workspace --release
         # Release, not debug: matches the profile the design doc's tick
         # budget is measured against, and is what the golden tests (whose
@@ -161,6 +170,10 @@ jobs:
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
       - run: cargo test -p orr_audio --release
+      - name: Asset fixture device-free audio and all-tick equality
+        run: cargo test --locked -p orr_asset_fixture --features audio --release
+      - name: Strict asset fixture audio clippy
+        run: cargo clippy --locked -p orr_asset_fixture --features audio --all-targets -- -D warnings
       - run: cargo test -p orr_sample --features audio --release --lib arena_audio
       - run: cargo clippy -p orr_audio --all-targets -- -D warnings
       - if: runner.os == 'Linux'
@@ -243,6 +256,8 @@ jobs:
         # (avoids dragging in anything future-added that isn't
         # `no_std`/wasm-clean yet).
         run: |
+          cargo test --locked --release --target wasm32-wasip1 -p orr_asset
+          cargo test --locked --release --target wasm32-wasip1 -p orr_asset_fixture --lib
           cargo test --release --target wasm32-wasip1 -p orr_fp
           cargo test --release --target wasm32-wasip1 -p orr_ecs
           cargo test --release --target wasm32-wasip1 -p orr_session --test arena -- golden
@@ -256,6 +271,7 @@ jobs:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
           RUSTFLAGS: -C target-feature=+simd128
         run: |
+          cargo test --locked --release --target wasm32-wasip1 --target-dir target/simd -p orr_asset_fixture --lib
           cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_fp
           cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_ecs
           cargo test --release --target wasm32-wasip1 --target-dir target/simd -p orr_games --test golden
@@ -284,6 +300,12 @@ jobs:
 
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
+
+      - name: Check asset core without default features on wasm32
+        run: cargo check --target wasm32-unknown-unknown -p orr_asset --no-default-features
+
+      - name: Check audio-free asset fixture on wasm32
+        run: cargo check --locked --target wasm32-unknown-unknown -p orr_asset_fixture --no-default-features
 
       - name: cargo build (sim crates + orr_web) for wasm32-unknown-unknown
         run: cargo build --release --target wasm32-unknown-unknown -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_games -p orr_web -p orr_web_gpu -p orr_wasm_bench
@@ -371,6 +393,8 @@ jobs:
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
           export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
           export AR_aarch64_linux_android="$BIN/llvm-ar"
+          cargo test --locked --release --target aarch64-linux-android -p orr_asset --tests -- --test-threads=1
+          cargo test --locked --release --target aarch64-linux-android -p orr_asset_fixture --lib -- --test-threads=1
           cargo test --release --target aarch64-linux-android -p orr_fp --tests -- --test-threads=1
           cargo test --release --target aarch64-linux-android -p orr_ecs --tests -- --test-threads=1
           cargo test --release --target aarch64-linux-android -p orr_session --test arena -- golden --test-threads=1
@@ -416,6 +440,6 @@ jobs:
           echo "Both sample-build matrix legs passed their graphics/audio/editor checks,"
           echo "including required Linux software-GPU and Arena native-window smoke tests."
           echo "The targets assert the same constants in orr_fp, orr_session,"
-          echo "orr_physics, orr_physics3d, orr_games, and orr_wasm_bench tests."
+          echo "orr_physics, orr_physics3d, orr_games, orr_wasm_bench, and orr_asset_fixture tests."
           echo "No checksum artifacts are exchanged: each target independently"
           echo "matches those shared expected values, so every runner must pass."
