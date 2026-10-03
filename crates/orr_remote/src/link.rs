@@ -35,7 +35,7 @@ use tungstenite::{Message, WebSocket};
 
 use crate::caps::Caps;
 use crate::client::ClientError;
-use crate::net::{ConnTx, Inbound, NetShared};
+use crate::net::{ConnTx, Inbound, NetShared, RequestPermit};
 
 /// One JSON-RPC request. `id: None` is a notification (no response).
 #[derive(Clone, Debug)]
@@ -147,16 +147,11 @@ struct LocalTx {
 
 impl TxHandle for LocalTx {
     fn send(&self, req: Request) -> Result<(), ClientError> {
-        if self.shared.queued.load(Relaxed) >= self.shared.max_queued {
-            return Err(transport("the host has too many requests queued"));
-        }
-        self.shared.queued.fetch_add(1, Relaxed);
+        let permit = RequestPermit::reserve(&self.shared.queued, self.shared.max_queued)
+            .ok_or_else(|| transport("the host has too many requests queued"))?;
         let id = req.id.map(|i| json!(i));
-        let msg = Inbound::Request { conn: self.conn, id, method: req.method, params: req.params };
-        self.shared.inbox.send(msg).map_err(|_| {
-            self.shared.queued.fetch_sub(1, Relaxed);
-            transport("the host has stopped")
-        })
+        let msg = Inbound::Request { permit, conn: self.conn, id, method: req.method, params: req.params };
+        self.shared.inbox.send(msg).map_err(|_| transport("the host has stopped"))
     }
 }
 

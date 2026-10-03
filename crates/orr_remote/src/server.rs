@@ -63,7 +63,12 @@ pub struct ServerConfig {
     pub allowed_origins: Vec<String>,
     /// Most simultaneous connections (default 64).
     pub max_connections: usize,
-    /// Most requests waiting for the host (default 4096); more get a "busy" error.
+    /// Most requests waiting for the host, shared by local and network producers
+    /// (default 4096). Zero rejects all forwarded requests; more get a "busy"
+    /// error. Includes the inbox and stash, not running requests or replies.
+    /// This is a request count, not a total memory bound: local payload bytes,
+    /// control events, PumpedWs channels and outbound channels are not bounded
+    /// by it. The network's default 4 MiB per-message limit is separate.
     pub max_queued_requests: usize,
     /// Most requests `poll` runs per call (default 256), so a flood cannot stall a frame.
     pub max_requests_per_poll: usize,
@@ -407,7 +412,6 @@ pub struct ErpServer {
     rt: Option<tokio::runtime::Runtime>,
     addr: SocketAddr,
     inbox: Receiver<Inbound>,
-    queued: Arc<AtomicUsize>,
     cfg: ServerConfig,
     conns: BTreeMap<u64, Conn>,
     tx_owner: Option<(u64, Instant)>,
@@ -499,7 +503,6 @@ impl ErpServer {
             frame_pending: false,
             addr,
             inbox,
-            queued,
             cfg,
             conns: BTreeMap::new(),
             tx_owner: None,
@@ -848,13 +851,13 @@ impl ErpServer {
                     false,
                 ),
                 Inbound::Request {
+                    permit,
                     conn,
                     id,
                     method,
                     params,
                 } => {
-                    self.queued
-                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    drop(permit); // Capacity counts waiting requests, not running work or replies.
                     self.request(target, conn, id, &method, &params);
                     report.requests += 1;
                     budget -= 1;
@@ -2268,6 +2271,39 @@ mod fenced_delivery_tests {
                 _ => None,
             })
             .expect("frame")
+    }
+
+    #[test]
+    fn request_permits_follow_inbox_stash_dispatch_and_server_drop() {
+        use crate::link::{Request, Transport};
+        let (mut server, mut doc, mut play, _recv, _pending) = fixture();
+        let connector = server.connector();
+        // Unique connection ID: fixture already installed connection 1.
+        server.net.next_id.store(2, Relaxed);
+        let mut local = connector.connect("local", Caps::ALL).unwrap();
+        let mut target = ErpTarget { doc: &mut doc, play: &mut play };
+        server.poll(&mut target);
+        let queued = server.net.queued.clone();
+        let req = Request { id: Some(1), method: "sim.state".into(), params: J::Null };
+        local.send(req.clone()).unwrap();
+        assert_eq!(queued.load(Relaxed), 1);
+        server.wait_for_request(Duration::ZERO);
+        assert!(matches!(server.stash, Some(Inbound::Request { .. })));
+        assert_eq!(queued.load(Relaxed), 1, "stash still owns the permit");
+        assert_eq!(server.poll(&mut target).requests, 1);
+        assert_eq!(queued.load(Relaxed), 0, "undrained response owns no request slot");
+
+        local.send(req.clone()).unwrap();
+        server.wait_for_request(Duration::ZERO);
+        local.send(req).unwrap();
+        assert_eq!(queued.load(Relaxed), 2, "one in stash, one in inbox");
+        drop(local);
+        assert_eq!(queued.load(Relaxed), 2, "disconnect does not retract admitted requests");
+        drop(server);
+        assert_eq!(queued.load(Relaxed), 0, "both receiver and stash release slots");
+        assert!(connector.connect("after-drop", Caps::ALL).is_err());
+        // Only this observer and the connector's shared state remain.
+        assert_eq!(Arc::strong_count(&queued), 2, "no permit or sender ownership cycle");
     }
 
     #[test]

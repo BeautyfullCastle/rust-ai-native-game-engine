@@ -52,6 +52,7 @@ pub(crate) enum Inbound {
     /// A connection presented a token that was refused.
     AuthFailed,
     Request {
+        permit: RequestPermit,
         conn: u64,
         id: Option<J>,
         method: String,
@@ -219,8 +220,38 @@ pub(crate) struct NetShared {
     pub inbox: Sender<Inbound>,
     pub next_id: AtomicU64,
     pub conns: AtomicUsize,
-    /// Requests sent to the host and not yet taken.
+    /// Reserved requests waiting in producers, the host inbox or its stash.
     pub queued: Arc<AtomicUsize>,
+}
+
+/// One reserved waiting-request slot. It follows the request through the inbox
+/// and stash, and is dropped immediately before dispatch or when delivery ends.
+/// Hold only the counter, never NetShared (whose sender would create a cycle).
+pub(crate) struct RequestPermit {
+    queued: Arc<AtomicUsize>,
+}
+
+impl RequestPermit {
+    pub(crate) fn reserve(queued: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        // Relaxed is enough for accounting; the channel publishes request data.
+        let mut current = queued.load(Relaxed);
+        loop {
+            if current >= limit {
+                return None;
+            }
+            // current < limit <= usize::MAX, so this addition cannot overflow.
+            match queued.compare_exchange_weak(current, current + 1, Relaxed, Relaxed) {
+                Ok(_) => return Some(Self { queued: queued.clone() }),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+impl Drop for RequestPermit {
+    fn drop(&mut self) {
+        self.queued.fetch_sub(1, Relaxed);
+    }
 }
 
 pub(crate) fn response_ok(id: &J, result: J) -> String {
@@ -387,7 +418,7 @@ impl Link {
                 Flow::Continue
             };
         }
-        if self.shared.queued.load(Relaxed) >= self.shared.max_queued {
+        let Some(permit) = RequestPermit::reserve(&self.shared.queued, self.shared.max_queued) else {
             self.reply_err(
                 &reply_id,
                 RpcError::new(
@@ -397,12 +428,12 @@ impl Link {
                 ),
             );
             return Flow::Continue;
-        }
-        self.shared.queued.fetch_add(1, Relaxed);
+        };
         if self
             .shared
             .inbox
             .send(Inbound::Request {
+                permit,
                 conn: self.id,
                 id,
                 method,
@@ -745,6 +776,138 @@ pub(crate) fn bind(rt: &tokio::runtime::Runtime, addr: SocketAddr) -> std::io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queue_fixture(limit: usize) -> (Arc<NetShared>, std::sync::mpsc::Receiver<Inbound>) {
+        let (inbox, recv) = std::sync::mpsc::channel();
+        (Arc::new(NetShared {
+            auth: Auth::DevNoAuth,
+            max_message_bytes: 4 << 20,
+            allowed_origins: Vec::new(),
+            max_connections: 64,
+            max_queued: limit,
+            inbox,
+            next_id: AtomicU64::new(1),
+            conns: AtomicUsize::new(0),
+            queued: Arc::new(AtomicUsize::new(0)),
+        }), recv)
+    }
+
+    #[test]
+    fn request_permit_boundaries_and_release() {
+        let queued = Arc::new(AtomicUsize::new(0));
+        assert!(RequestPermit::reserve(&queued, 0).is_none());
+        let first = RequestPermit::reserve(&queued, 1).unwrap();
+        assert!(RequestPermit::reserve(&queued, 1).is_none());
+        assert_eq!(queued.load(Relaxed), 1);
+        drop(first);
+        assert_eq!(queued.load(Relaxed), 0);
+
+        // Synthetic boundary: no allocation of usize::MAX requests is needed.
+        queued.store(usize::MAX - 1, Relaxed);
+        let last = RequestPermit::reserve(&queued, usize::MAX).unwrap();
+        assert_eq!(queued.load(Relaxed), usize::MAX);
+        assert!(RequestPermit::reserve(&queued, usize::MAX).is_none());
+        assert_eq!(queued.load(Relaxed), usize::MAX);
+        drop(last);
+        assert_eq!(queued.load(Relaxed), usize::MAX - 1);
+    }
+
+    #[test]
+    fn local_and_network_failed_delivery_release_their_permits() {
+        use crate::link::{LocalConnector, Transport};
+        let (shared, recv) = queue_fixture(1);
+        let mut local = LocalConnector { shared: shared.clone() }.connect("local", Caps::ALL).unwrap();
+        let (mut link, _out, _pending) = new_link(&shared, false);
+        link.set_identity("net".into(), Caps::ALL);
+        drop(recv);
+        let request = crate::link::Request { id: Some(1), method: "sim.state".into(), params: J::Null };
+        for _ in 0..3 {
+            assert!(local.send(request.clone()).unwrap_err().to_string().contains("stopped"));
+            assert_eq!(shared.queued.load(Relaxed), 0);
+            assert!(matches!(link.on_text(&request.to_text()), Flow::Close));
+            assert_eq!(shared.queued.load(Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn concurrent_local_and_network_requests_share_one_cap() {
+        use crate::link::{LocalConnector, Transport};
+        const LIMIT: usize = 7;
+        const PRODUCERS: usize = 16;
+        // Exercise contention with valid requests, without claiming to force the
+        // old check/increment race's particular scheduling window.
+        for _ in 0..16 {
+            let (shared, recv) = queue_fixture(LIMIT);
+            let barrier = Arc::new(std::sync::Barrier::new(PRODUCERS));
+            std::thread::scope(|scope| {
+                let mut workers = Vec::new();
+                for producer in 0..PRODUCERS {
+                    let shared = shared.clone();
+                    let barrier = barrier.clone();
+                    workers.push(scope.spawn(move || {
+                        let request = crate::link::Request {
+                            id: Some(producer as u64), method: "sim.state".into(), params: J::Null,
+                        };
+                        if producer % 2 == 0 {
+                            let mut local = LocalConnector { shared: shared.clone() }
+                                .connect("local", Caps::ALL).unwrap();
+                            barrier.wait();
+                            usize::from(local.send(request).is_ok())
+                        } else {
+                            let (mut link, mut out, _pending) = new_link(&shared, false);
+                            link.set_identity("net".into(), Caps::ALL);
+                            barrier.wait();
+                            assert!(matches!(link.on_text(&request.to_text()), Flow::Continue));
+                            match out.try_recv() {
+                                Ok(Out::Text(text)) => {
+                                    let reply: J = serde_json::from_str(&text).unwrap();
+                                    assert_eq!(reply["id"], producer);
+                                    assert_eq!(reply["error"]["data"]["kind"], "busy");
+                                    0
+                                }
+                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => 1,
+                                _ => panic!("unexpected output"),
+                            }
+                        }
+                    }));
+                }
+                let accepted: usize = workers.into_iter().map(|w| w.join().unwrap()).sum();
+                assert_eq!(accepted, LIMIT);
+            });
+            assert_eq!(shared.queued.load(Relaxed), LIMIT);
+            let mut requests = Vec::new();
+            for msg in recv.try_iter() {
+                if matches!(msg, Inbound::Request { .. }) {
+                    requests.push(msg);
+                }
+            }
+            assert_eq!(requests.len(), LIMIT);
+            assert_eq!(shared.queued.load(Relaxed), LIMIT, "taking a message retains its slot");
+            drop(requests);
+            assert_eq!(shared.queued.load(Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn zero_capacity_rejects_requests_but_keeps_control_events() {
+        use crate::link::{LocalConnector, Transport};
+        let (shared, recv) = queue_fixture(0);
+        let mut local = LocalConnector { shared: shared.clone() }.connect("local", Caps::ALL).unwrap();
+        let (mut link, mut out, _pending) = new_link(&shared, false);
+        assert!(matches!(link.on_text(r#"{"jsonrpc":"2.0","id":1,"method":"auth"}"#), Flow::Continue));
+        assert!(matches!(out.try_recv().unwrap(), Out::Text(_)));
+        let request = crate::link::Request { id: Some(2), method: "sim.state".into(), params: J::Null };
+        assert!(local.send(request.clone()).is_err());
+        assert!(matches!(link.on_text(&request.to_text()), Flow::Continue));
+        let Out::Text(text) = out.try_recv().unwrap() else { panic!("busy response") };
+        assert_eq!(serde_json::from_str::<J>(&text).unwrap()["error"]["data"]["kind"], "busy");
+        drop(local);
+        link.finish();
+        let events: Vec<_> = recv.try_iter().collect();
+        assert_eq!(events.len(), 4, "two connects and two disconnects");
+        assert!(!events.iter().any(|m| matches!(m, Inbound::Request { .. })));
+        assert_eq!(shared.queued.load(Relaxed), 0);
+    }
 
     #[test]
     fn query_tokens() {

@@ -225,3 +225,11 @@ P1 = 현재 신뢰성/검증 보장 강화, P2 = 통합·성능·지원 범위 �
 - update/heartbeat 하나만 outstanding으로 유지하고 최신 키 상태를 병합한다. 전용 release는 이미 보낸 update의 응답을 기다리지 않고 즉시 전송할 수 있다. 미해결 요청이 남으면 새 claim을 막고, 늦은 claim 응답은 정리하며 오래된 paused-state 응답도 거부한다. 서버 admission 시점의 expiry 경쟁 조건을 수정했다. accepted_head_tick은 수락 시점일 뿐 tick 소비·렌더 완료의 증거가 아니다.
 - 서버 **40 library+5 Arena**, 에디터 **44 library+9 Arena**, 총 **98개 집중 검사** 및 targeted release strict Clippy 통과. 독립 리뷰 2건에서 수정 확인 후 차단 사항 없음. 이 수치는 이 패치의 scoped 결과이며 과거 테스트 수와 합산하지 않는다. 아직 미커밋·전체 CI 대기, draft PR #1 미병합이다.
 - held-input 조정 계약이며 authorized commands/debug edits/timeline 조작의 보안 격리는 아니다. 이미 수락된 commands를 취소하지 않고, release/expiry 후의 legacy 쓰기가 지연된 요청인지 새 의도인지 구분하지 않는다. 시뮬레이션·리플레이 형식은 유지한다. 로컬 Arena launcher·플레이어 생성 UI·임의 플러그인 지원, CI 속도 향상 또는 하드웨어 오디오 검증을 주장하지 않는다.
+
+### 공통 RPC 대기 수의 원자적 admission (2026-10-03 KST)
+
+- local/network producer가 공유하는 `max_queued_requests`의 check-then-increment 경쟁을 CAS 예약으로 교체. 연결별 한도가 아니라 서버 전체의 dispatch 대기 요청/notification 수이며 기본값은 4096
+- non-Clone permit이 counter Arc만 보유하여 inbox/stash 전송, 전송 실패, receiver/stash 종료에서 정확히 한 번 반납. 실행 직전에 예약을 해제하는 기존 queued-only 의미 유지; 수동 증감·실패 rollback 중복 제거
+- 0 거절·usize::MAX 경계, 유효 요청의 동시 예약, 종료/보관/dispatch 수명, 수락된 편집과 응답 순서, timeout/disconnect 기존 의미를 검증. remote unit 45개 + local 통합 9개, 엄격한 all-targets Clippy 및 독립 리뷰 통과
+- 동시 stress 검사는 예전 경쟁 창의 결정적 재현을 주장하지 않는다. 이미 수락한 요청을 예산 때문에 제거·병합·재시도하지 않음
+- 이는 대기 요청 수의 상한이며 local payload bytes, uncounted control events, PumpedWs/outbound channel 메모리 상한을 해결한 변경은 아님. 원격 전체 CI는 게시 후 확인 필요

@@ -84,6 +84,33 @@ debug edits, submitted replay/session history, network retransmission copies,
 RemoteBridge RPC/transport/error queues, and FFI batches are outside this bound.
 No simulation golden values or recording format changed.
 
+## ERP waiting-request admission
+
+`ServerConfig::max_queued_requests` (default 4096) is one server-wide
+waiting-request count shared by local and network producers. Each forwarded
+request, including notifications, atomically reserves a slot before enqueueing.
+If full, the local sender returns a transport error and the network producer
+returns the existing `busy` RPC error. Zero rejects all forwarded requests;
+`usize::MAX` is supported without counter overflow.
+
+An admitted request owns a private, non-cloneable permit while it is in the
+inbox or the host's wait stash. Dispatch releases the slot immediately before
+running the request; replies and ongoing verification work do not retain it.
+Failed enqueue, inbox receiver drop and stash drop release their owned slots.
+Admission never evicts, coalesces, retries or cancels already admitted work.
+Existing timeout and disconnect behavior is unchanged.
+
+This is not a total memory limit. Connection/authentication/completion control
+events are uncounted. Local payload bytes are not bounded by this quota; the
+network's default 4 MiB per-message limit is separate, not an aggregate memory
+bound. PumpedWs's unbounded channels and outbound/response channels remain
+outside this patch. Presentation and command quotas above are separate limits.
+
+Coverage uses atomic boundary cases, valid concurrent local/network producers,
+closed-inbox rollback, inbox/stash/dispatch/drop ownership, and ordinary admitted
+edits with ordered responses. The contention test exercises the shared cap; it
+does not claim to reproduce the old check-then-increment scheduling window.
+
 ## Local verification (2026-10-02)
 
 - `cargo test -p orr_bridge -p orr_session -p orr_remote --tests -- --skip measure_1000_body_scene`:
