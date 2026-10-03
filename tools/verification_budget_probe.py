@@ -840,6 +840,12 @@ def run_probe(argv, *, cell, cwd, output_dir, budget, on_line, on_sample=None,
                     report["status"] = "failed"
                     report["outcome"] = "failed"
                     capture.status = "failed"
+                report["process_report_write_error"] = "KeyboardInterrupt"
+                # A checkpoint fault must not prevent the next child poll/reap.
+                # Try once more, then retain the in-memory failure and supervise.
+                if retried_write_error:
+                    return
+                retried_write_error = True
             except BaseException as exc:
                 capture.signal("process_report_write_failed", type(exc).__name__)
                 report["process_report_write_error"] = type(exc).__name__
@@ -1450,6 +1456,19 @@ class RuntimeCaptureTests(unittest.TestCase):
         self.assertEqual(report["streams"]["stderr"]["saved_bytes"], len(b"raw stderr"))
         self.assertEqual((fake.terminate_calls, fake.kill_calls), (0, 0))
 
+    def test_repeated_checkpoint_interrupt_still_polls_and_reaps(self):
+        class InterruptedBudget(self.FakeBudget):
+            def replace_report(self, path, data):
+                raise KeyboardInterrupt("injected checkpoint interrupt")
+        fake = self.FakeProcess(self.FakePipe([b"raw\n"]), self.FakePipe([]),
+                                finish_after_polls=2)
+        report = self._run_fake(fake, InterruptedBudget(1024))
+        self.assertEqual(report["exit_code"], 0)
+        self.assertGreaterEqual(fake.polls, 2)
+        self.assertEqual(report["outcome"], "failed")
+        self.assertEqual(report["process_report_write_error"], "KeyboardInterrupt")
+        self.assertEqual((fake.terminate_calls, fake.kill_calls), (0, 0))
+
     def test_reader_start_failure_returns_without_spawning(self):
         old_popen, old_thread_start, old_clock = _RUNTIME_POPEN, _RUNTIME_THREAD_START, _RUNTIME_CLOCK_NS
         calls = {"thread": 0, "popen": 0}
@@ -1796,6 +1815,13 @@ class DriverTests(unittest.TestCase):
             self.assertEqual([(r, i) for c, r, i in rows if c == cell],
                              [("warmup", 0), ("sample", 1), ("sample", 2), ("sample", 3)])
 
+    def test_campaign_cli_requires_expected_head_before_preflight(self):
+        with mock.patch(__name__ + ".campaign") as launch, mock.patch.object(sys, "stderr"):
+            with self.assertRaises(SystemExit) as caught:
+                main(["--test-executable", "prebuilt", "--plan", "plan.json", "--output", "target/new"])
+        self.assertEqual(caught.exception.code, 2)
+        launch.assert_not_called()
+
     def test_custom_or_duplicate_plan_is_rejected(self):
         for value in ({"protocol": True, "cells": list(CELL_IDS)},
                       {"protocol": 1, "cells": list(reversed(CELL_IDS))},
@@ -1915,8 +1941,8 @@ def main(argv=None):
     if args.print_plan:
         print(json.dumps({"protocol": 1, "cells": list(CELL_IDS)}, indent=2))
         return 0
-    if not all((args.test_executable, args.plan, args.output)):
-        parser.error("--test-executable, --plan and --output are required")
+    if not all((args.test_executable, args.plan, args.output, args.expected_head)):
+        parser.error("--test-executable, --plan, --output and --expected-head are required")
     if args.expected_head is not None and not re.fullmatch(r"[0-9a-f]{40}", args.expected_head):
         parser.error("--expected-head must be an exact lowercase 40-hex commit SHA")
     try:
