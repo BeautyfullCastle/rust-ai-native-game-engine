@@ -129,8 +129,10 @@ the manifest, raw logs, per-command outcomes and complete parsed records.
 The [Windows release baseline captured on 2026-10-03](baselines/2026-10-03-windows-release/README.md)
 preserves three repetitions per case in separate RTX 5070/Vulkan hardware and
 WARP/DX12 software campaigns. Both were measured from clean commit
-`120efa6efa4b7ba6c82a88be7cb402e1e69ca2a1`, with identical source and test-binary
-identities before and after collection. Each campaign completed all twelve
+`120efa6efa4b7ba6c82a88be7cb402e1e69ca2a1`, with identical source identities
+before and after collection. Executable hashes were recorded during prebuild and
+match across campaigns; executables were not rehashed after collection or saved
+in the raw archive. Each campaign completed all twelve
 measurement commands after three successful prebuilds. The report contains the
 per-process distributions, environment, raw archive and hashes. Later commits
 that only add these reports are not additional measurement runs.
@@ -140,3 +142,8 @@ software capture. The latter's tests passed, but its validator rejected DX12's
 unavailable optional driver description. That original failure remains visible;
 the final campaigns use the corrected collector and are not pooled with it.
 The existing 40 ms drag, 50 ms UI and GPU correctness assertions were retained.
+
+The report also documents a later collector fix for malformed record keys. Its
+19 regression tests and revalidation of the original observations are saved
+separately from the measurement evidence; this does not create a new performance
+baseline or change the recorded capture commit.

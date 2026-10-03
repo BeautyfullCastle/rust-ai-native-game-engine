@@ -8,6 +8,7 @@ Final, separately captured release-mode baselines for the same clean source revi
 - Default Cargo features, locked release builds; Rust `1.97.1` (`x86_64-pc-windows-msvc`), Cargo `1.97.1`; Windows 11 build `10.0.26200`, Intel Core i7-14700, 28 logical CPUs, Balanced power scheme.
 - The editor test uses `egui_kittest`: `demo_editor` has 49 fixture bodies; the UI workload uses `demo_editor_1000_bodies`, 1,049 actual bodies. Renderer workloads use 1,000 instances at 640×360.
 - Each campaign compiled the existing editor-measure and renderer test targets with `--release --locked --no-run`, then ran each of its four measurement commands serially three times. All 12 process rows per mode exited 0, were not timed out/interrupted, and passed record validation.
+- The three executable hashes were recorded at prebuild and match across campaigns. Source identity was checked before and after; executables were not rehashed after collection or included in the raw archive.
 
 ## Editor measurements
 
@@ -106,7 +107,7 @@ followed and finished at 07:09:55 UTC. Other workers' compiler and test loads we
 excluded from this window; normal desktop/app services remained. Dependency
 artifacts were warm, so these prebuild durations are not cold compilation costs.
 
-Collector regression tests passed **15/15**. All three changed release test
+At the capture commit, collector regression tests passed **15/15**. All three changed release test
 targets compiled, and focused strict Clippy passed for `measure`, `gpu` and
 `gpu3d`. The archive retains both earlier strict-Clippy failures: benchmark-local
 clock annotations were corrected after the first; the second is the unchanged
@@ -116,6 +117,28 @@ mandatory CI gate was relaxed. These local results do not replace exact-head CI.
 The raw ZIP is 602,007 bytes with 265 indexed entries and SHA-256
 `5fbe098894d39cce96d8b92984e8946e86c20409c7c10db35f231265c2c3720c`.
 Its CRC, entry sizes/hashes and captured source bytes were independently checked.
+
+### Later collector validation fix
+
+Review found that malformed JSON sort keys could raise `TypeError` before a
+process outcome and parsed records were saved. Commit
+`1abf1aa423ed4f543219f6b7f897076295ec1677` validates integer editor/GPU indices and
+string phase/class keys before sorting, hashing or dependent arithmetic. Invalid
+rows remain in the raw record file, the fixed repetition plan continues, and the
+manifest ends as `incomplete`.
+
+The corrected collector passed **19/19** tests, including a synthetic collection
+that preserves all three builds and twelve process outcomes despite malformed
+rows. Independent review also exercised null, boolean, string, list and object
+values. Revalidation of the original 24 final captures produced zero errors and
+exactly the same per-run and per-campaign summaries. This is recorded in
+[validator-review.json](validator-review.json), with the clean validation commit,
+source identity, actual test command/output and unchanged archive hash.
+
+These are validator checks, not additional performance measurements. The
+measurement source stays `120efa6`; the renderer/editor workload code and original
+raw archive are unchanged. Later collector fixes must not be described as the
+code that originally captured those observations.
 
 ## Scope and historical captures
 
