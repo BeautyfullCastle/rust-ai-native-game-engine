@@ -266,10 +266,12 @@ class ProtocolValidator:
             raise ProtocolError("report is not identical")
         if spec["replay"]:
             if checks["recording_matches"] is not True:
-                raise ProtocolError("replay must match all 16 executed checksums")
+                raise ProtocolError("replay must match the initial and all 16 tick checkpoints")
             _integer(obj["recording_checksums_checked"], "recording_checksums_checked", positive=True)
-            if obj["recording_checksums_checked"] != 16:
-                raise ProtocolError("replay must match all 16 executed checksums")
+            # This fixed fixture records the starting boundary as well as each
+            # executed tick: 16 transitions therefore require 17 comparisons.
+            if obj["recording_checksums_checked"] != 17:
+                raise ProtocolError("replay must match exactly 17 checkpoints (initial plus 16 ticks)")
         elif checks["recording_matches"] is not None or obj["recording_checksums_checked"] is not None:
             raise ProtocolError("idle cell cannot report recording checks")
         checksums = obj["checksums"]
@@ -412,7 +414,7 @@ def synthetic_records(cell):
         "requested_parallel": spec["requested_parallel"],
         "effective_parallel": spec["effective_parallel"], "series": spec["series"],
         "checks": {"identical": True, "recording_matches": True if spec["replay"] else None},
-        "recording_checksums_checked": 16 if spec["replay"] else None,
+        "recording_checksums_checked": 17 if spec["replay"] else None,
         "checksums": checksums,
         "timings_ns": {p: 7 if p in phases else None for p in PHASES},
         "counts": {"checksum_samples": 2, "metric_comparisons": 3,
@@ -469,7 +471,10 @@ class ProtocolTests(unittest.TestCase):
         cases = (
             ("core_idle15_parallel", "execution_ticks", -1),
             ("core_idle15_parallel", "effective_parallel", True),
+            ("core_replay16_serial", "recording_checksums_checked", 16),
+            ("core_replay16_parallel", "recording_checksums_checked", 18),
             ("local_replay16_series_on", "recording_checksums_checked", 15),
+            ("local_replay16_series_on", "recording_checksums_checked", 16),
         )
         for cell, key, value in cases:
             rows = synthetic_records(cell)
