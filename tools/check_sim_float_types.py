@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "tools/sim-float-guard"
 PACKAGES = (
     "orr_fp", "orr_ecs", "orr_sim", "orr_session", "orr_testgame",
-    "orr_physics", "orr_physics3d", "orr_games",
+    "orr_physics", "orr_physics3d", "orr_games", "orr_asset",
 )
 
 
@@ -55,7 +55,7 @@ def main():
     for command in commands:
         print("+ " + " ".join(command), flush=True)
         subprocess.run(command, cwd=ROOT, env=env, check=True)
-    print("Simulation float-type guard passed (8 libraries; FP interop also checked).")
+    print("Simulation float-type guard passed (9 libraries; FP interop also checked).")
 
 
 if __name__ == "__main__":

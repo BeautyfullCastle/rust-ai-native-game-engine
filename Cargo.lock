@@ -3058,6 +3058,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_asset"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_fp",
+]
+
+[[package]]
 name = "orr_audio"
 version = "0.0.1"
 dependencies = [

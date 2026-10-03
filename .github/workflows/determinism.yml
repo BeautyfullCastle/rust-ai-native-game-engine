@@ -285,6 +285,9 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
+      - name: Check asset core without default features on wasm32
+        run: cargo check --target wasm32-unknown-unknown -p orr_asset --no-default-features
+
       - name: cargo build (sim crates + orr_web) for wasm32-unknown-unknown
         run: cargo build --release --target wasm32-unknown-unknown -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_games -p orr_web -p orr_web_gpu -p orr_wasm_bench
 
