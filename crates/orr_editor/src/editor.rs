@@ -43,7 +43,7 @@ use orr_fp::{FPVec2, FP};
 use orr_reflect::{decimal, Guid, TypeRegistry, Value};
 use orr_remote::codec::b64_decode;
 use orr_remote::json::{json_to_value, value_to_json};
-use orr_remote::{ClientError, ErpClient, RemoteViewDelivery};
+use orr_remote::{CaptureError, CaptureRequest, CapturedImage, ClientError, ErpClient, RemoteViewDelivery, ViewMode, ViewState};
 use orr_render::{Camera, RenderList};
 use crate::game::{Drawable, EditorGame, EditorStream};
 use serde_json::{json, Value as J};
@@ -160,6 +160,20 @@ struct InFlight {
     preview_rows: Option<u64>,
 }
 
+#[derive(Clone, Copy)]
+enum ScreenshotQueryKind {
+    State,
+    View,
+}
+
+struct ScreenshotValidation {
+    requested: ViewState,
+    state_id: u64,
+    view_id: u64,
+    state: Option<Result<ViewState, CaptureError>>,
+    view: Option<Result<(u64, u64), CaptureError>>,
+}
+
 /// The proposal whose staged frame the viewport shows.
 struct Preview {
     id: String,
@@ -202,6 +216,8 @@ pub struct Editor {
     preview_generation: u64,
     // requests that are in flight, and what to ask for next
     pending: BTreeMap<u64, Pending>,
+    screenshot_queries: BTreeMap<u64, (u64, ScreenshotQueryKind)>,
+    screenshot_validations: BTreeMap<u64, ScreenshotValidation>,
     telemetry: Telemetry,
     dirty: Dirty,
     inflight: InFlight,
@@ -282,6 +298,8 @@ impl Editor {
             preview: None,
             preview_generation: 0,
             pending: BTreeMap::new(),
+            screenshot_queries: BTreeMap::new(),
+            screenshot_validations: BTreeMap::new(),
             telemetry: Telemetry::default(),
             dirty: Dirty::default(),
             inflight: InFlight::default(),
@@ -441,6 +459,132 @@ impl Editor {
         }
         if self.preview.as_ref().is_some_and(|p| p.seq == 0 || p.rows_dirty) { return Some("proposal snapshot"); }
         None
+    }
+
+    /// Takes the next editor-owned screenshot request from the local host.
+    pub(crate) fn take_screenshot_request(&self) -> Option<CaptureRequest> {
+        self.backend.screenshot_owner.as_ref()?.take_request()
+    }
+
+    pub(crate) fn has_local_screenshot_owner(&self) -> bool {
+        self.backend.screenshot_owner.is_some()
+    }
+
+    pub(crate) fn screenshot_gesture_busy(&self) -> bool {
+        self.gesture.busy()
+    }
+
+    pub(crate) fn screenshot_is_active(&self, serial: u64) -> bool {
+        self.backend.screenshot_owner.as_ref().is_some_and(|owner| owner.is_active(serial))
+    }
+
+    pub(crate) fn screenshot_complete(&self, serial: u64, result: Result<CapturedImage, CaptureError>) {
+        if let Some(owner) = &self.backend.screenshot_owner {
+            owner.complete(serial, result);
+        }
+    }
+
+    pub(crate) fn screenshot_begin_encoder(&self, serial: u64) -> Result<(), CaptureError> {
+        self.backend.screenshot_owner.as_ref().ok_or(CaptureError::Unavailable)?.begin_encoder(serial)
+    }
+
+    pub(crate) fn screenshot_begin_capture(&self, serial: u64) -> Result<(), CaptureError> {
+        self.backend.screenshot_owner.as_ref().ok_or(CaptureError::Unavailable)?.begin_capture(serial)
+    }
+
+    pub(crate) fn screenshot_end_capture(&self, serial: u64) {
+        if let Some(owner) = &self.backend.screenshot_owner {
+            owner.end_capture(serial);
+        }
+    }
+
+    pub(crate) fn screenshot_end_encoder(&self, serial: u64) {
+        if let Some(owner) = &self.backend.screenshot_owner {
+            owner.end_encoder(serial);
+        }
+    }
+
+    /// Begins fresh host reads after the broker delivered this request.
+    pub(crate) fn begin_screenshot_validation(&mut self, request: &CaptureRequest) -> Result<(), CaptureError> {
+        if self.down.is_some() || self.preview.is_some() || !request.requested.paused || !self.screenshot_is_active(request.serial) {
+            return Err(CaptureError::Unavailable);
+        }
+        let state_id = self.backend.erp.post("sim.state", J::Null).map_err(|_| CaptureError::Unavailable)?;
+        let view_id = match self.backend.erp.post("world.query", json!({"limit": 1, "values": false})) {
+            Ok(id) => id,
+            Err(_) => return Err(CaptureError::Unavailable),
+        };
+        self.screenshot_queries.insert(state_id, (request.serial, ScreenshotQueryKind::State));
+        self.screenshot_queries.insert(view_id, (request.serial, ScreenshotQueryKind::View));
+        self.screenshot_validations.insert(request.serial, ScreenshotValidation {
+            requested: request.requested,
+            state_id,
+            view_id,
+            state: None,
+            view: None,
+        });
+        Ok(())
+    }
+
+    /// Returns the exact admitted stamp only after fresh host queries and the
+    /// editor's current primary snapshot agree and all presentation caches settle.
+    pub(crate) fn screenshot_capture_ready(&self, serial: u64) -> Result<Option<ViewState>, CaptureError> {
+        if self.down.is_some() || !self.screenshot_is_active(serial) {
+            return Err(CaptureError::Unavailable);
+        }
+        if self.preview.is_some() {
+            return Err(CaptureError::Unavailable);
+        }
+        let validation = self.screenshot_validations.get(&serial).ok_or(CaptureError::Stale)?;
+        let (Some(state), Some(view)) = (&validation.state, &validation.view) else { return Ok(None) };
+        let state = state.as_ref().map_err(|error| *error)?;
+        let (tick, checksum) = view.as_ref().map_err(|error| *error)?;
+        let requested = validation.requested;
+        if *state != requested || *tick != requested.tick || *checksum != requested.checksum {
+            return Err(CaptureError::Stale);
+        }
+        if self.capture_view_state() != requested || !self.capture_snapshot_matches(requested) {
+            return Ok(None);
+        }
+        if self.screenshot_waiting_for().is_some() || self.gesture.busy() {
+            return Ok(None);
+        }
+        Ok(Some(requested))
+    }
+
+    pub(crate) fn cancel_screenshot_validation(&mut self, serial: u64) {
+        if let Some(validation) = self.screenshot_validations.remove(&serial) {
+            self.screenshot_queries.remove(&validation.state_id);
+            self.screenshot_queries.remove(&validation.view_id);
+        }
+    }
+
+    pub(crate) fn capture_view_state(&self) -> ViewState {
+        ViewState {
+            mode: if self.sim.mode == Mode::Play { ViewMode::Play } else { ViewMode::Edit },
+            paused: !self.sim.playing,
+            tick: self.sim.head_tick,
+            epoch: self.sim.epoch,
+            checksum: self.sim.checksum,
+        }
+    }
+
+    pub(crate) fn capture_snapshot_seq(&self) -> Option<u64> {
+        self.snapshot.as_ref().map(Snapshot::seq)
+    }
+
+    pub(crate) fn capture_snapshot_matches(&self, requested: ViewState) -> bool {
+        if self.checksum != requested.checksum {
+            return false;
+        }
+        let Some(snapshot) = &self.snapshot else { return false };
+        match (requested.mode, snapshot.timeline()) {
+            (ViewMode::Edit, None) => requested.tick == 0,
+            (ViewMode::Play, Some(timeline)) => {
+                !timeline.playing && timeline.tick == requested.tick && timeline.epoch == requested.epoch
+            }
+            _ => false,
+        }
     }
 
     /// The drawable bodies of the frame on screen (the scene's preview frame in
@@ -689,7 +833,9 @@ impl Editor {
         }
         let answers: Vec<_> = self.backend.erp.responses.drain(..).collect();
         for (id, r) in answers {
-            if let Some(pending) = self.pending.remove(&id) {
+            if let Some((serial, kind)) = self.screenshot_queries.remove(&id) {
+                self.on_screenshot_answer(serial, kind, r);
+            } else if let Some(pending) = self.pending.remove(&id) {
                 self.telemetry.async_request.record(pending.posted_at.elapsed());
                 self.on_answer(pending.kind, r);
             }
@@ -697,6 +843,16 @@ impl Editor {
         // Frames are not asked for on this channel.
         self.backend.erp.frames.clear();
         self.backend.erp.local_frames.clear();
+    }
+
+    fn on_screenshot_answer(&mut self, serial: u64, kind: ScreenshotQueryKind, result: Result<J, orr_remote::RpcError>) {
+        let Some(validation) = self.screenshot_validations.get_mut(&serial) else { return };
+        match (kind, result) {
+            (ScreenshotQueryKind::State, Ok(value)) => validation.state = Some(parse_capture_state(&value).ok_or(CaptureError::Failed)),
+            (ScreenshotQueryKind::View, Ok(value)) => validation.view = Some(parse_capture_view(&value).ok_or(CaptureError::Failed)),
+            (ScreenshotQueryKind::State, Err(_)) => validation.state = Some(Err(CaptureError::Failed)),
+            (ScreenshotQueryKind::View, Err(_)) => validation.view = Some(Err(CaptureError::Failed)),
+        }
     }
 
     fn on_notification(&mut self, method: &str, params: &J) {
@@ -903,6 +1059,8 @@ impl Editor {
         self.gesture = gestures::Gestures::default();
         self.input = input::Input::default();
         self.pending.clear();
+        self.screenshot_queries.clear();
+        self.screenshot_validations.clear();
         self.down = Some(down);
     }
 
@@ -1903,6 +2061,29 @@ fn recovery_messages(source: &str, reset: &ViewResync) -> Vec<Message> {
         }
     }
     messages
+}
+
+fn parse_capture_state(value: &J) -> Option<ViewState> {
+    let mode = match value.get("mode")?.as_str()? {
+        "edit" => ViewMode::Edit,
+        "play" => ViewMode::Play,
+        _ => return None,
+    };
+    let playing = value.get("playing")?.as_bool()?;
+    Some(ViewState {
+        mode,
+        paused: !playing,
+        tick: value.get("head_tick")?.as_u64()?,
+        epoch: value.get("epoch")?.as_u64()?,
+        checksum: orr_remote::wire::parse_checksum(value.get("checksum")?)?,
+    })
+}
+
+fn parse_capture_view(value: &J) -> Option<(u64, u64)> {
+    Some((
+        value.get("tick")?.as_u64()?,
+        orr_remote::wire::parse_checksum(value.get("checksum")?)?,
+    ))
 }
 
 fn rows_of(v: &J) -> Vec<EntityRow> {

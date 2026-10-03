@@ -30,7 +30,7 @@ use orr_server::{RelayServer, RoomStats};
 use orr_sim::PlayerSlot;
 use orr_view::InterpMode;
 use orr_viewstream::{
-    EventBatch, FrameEncoder, FrameMeta, ViewFrame, FLAG_ROLLED_BACK, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
+    EventBatch, EventRecord, FrameEncoder, FrameMeta, ViewFrame, FLAG_ROLLED_BACK, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
 };
 
 mod common;
@@ -101,10 +101,8 @@ struct FfiPeer {
     last_input_tick: u64,
     /// Entity records (id, kind, cur) of frames at or after `COMPARE_FROM`, by tick.
     late_frames: BTreeMap<u64, Vec<(u64, u16, [f32; 3])>>,
-    /// Event states by key, in the order they arrived.
-    events: BTreeMap<(u64, u32, u32), Vec<u8>>,
-    /// A verified or canceled record whose key had not been announced as predicted.
-    orphan: Vec<(u64, u32, u32, u8)>,
+    /// Event occurrences by key, in the order they arrived (including replacement payloads).
+    events: BTreeMap<(u64, u32, u32), Vec<EventRecord>>,
     buf: Vec<u8>,
     status: OrrSessionStatus,
 }
@@ -141,7 +139,6 @@ impl FfiPeer {
             last_input_tick: 0,
             late_frames: BTreeMap::new(),
             events: BTreeMap::new(),
-            orphan: Vec::new(),
             buf: vec![0; 1 << 17],
             status: OrrSessionStatus::default(),
         }
@@ -206,11 +203,7 @@ impl FfiPeer {
             }
             for e in EventBatch::decode(&self.buf[..written]).unwrap().events {
                 let key = (e.tick, e.system, e.seq);
-                let seen = self.events.entry(key).or_default();
-                if e.state != STATE_PREDICTED && seen.is_empty() {
-                    self.orphan.push((e.tick, e.system, e.seq, e.state));
-                }
-                seen.push(e.state);
+                self.events.entry(key).or_default().push(e);
             }
         }
         if self.last_tick > self.last_input_tick || self.last_input_tick == 0 {
@@ -222,8 +215,89 @@ impl FfiPeer {
     }
 
     fn count_events(&self) -> (usize, usize, usize) {
-        let predicted_then = |last: u8| self.events.values().filter(|v| v.first() == Some(&STATE_PREDICTED) && v.last() == Some(&last)).count();
-        (self.events.len(), predicted_then(STATE_VERIFIED), predicted_then(STATE_CANCELED))
+        let mut counts = (0, 0, 0);
+        for (key, records) in &self.events {
+            let (predicted, verified, canceled) = event_lifecycle(records)
+                .unwrap_or_else(|reason| panic!("{}: {key:?}: {reason}: {records:?}", self.name));
+            counts.0 += predicted;
+            counts.1 += verified;
+            counts.2 += canceled;
+        }
+        counts
+    }
+}
+
+/// Validate one key's ordered lifecycle, rather than treating cancellation as a
+/// lifetime tombstone. A final live prediction is allowed while the client is ahead.
+fn event_lifecycle(records: &[EventRecord]) -> Result<(usize, usize, usize), &'static str> {
+    let mut live: Option<&EventRecord> = None;
+    let (mut predicted, mut verified, mut canceled) = (0, 0, 0);
+    for record in records {
+        if verified != 0 {
+            return Err("event after verification");
+        }
+        match record.state {
+            STATE_PREDICTED => {
+                if live.is_some() {
+                    return Err("prediction while an occurrence is still live");
+                }
+                live = Some(record);
+                predicted += 1;
+            }
+            STATE_VERIFIED => {
+                let Some(prediction) = live.take() else {
+                    return Err("verification without a live prediction");
+                };
+                if (record.event_type, &record.payload) != (prediction.event_type, &prediction.payload) {
+                    return Err("verification differs from the latest prediction");
+                }
+                verified += 1;
+            }
+            STATE_CANCELED => {
+                if live.take().is_none() {
+                    return Err("cancellation without a live prediction");
+                }
+                canceled += 1;
+            }
+            _ => return Err("unknown event state"),
+        }
+    }
+    Ok((predicted, verified, canceled))
+}
+
+#[test]
+fn event_lifecycle_accepts_replacement_occurrences() {
+    let record = |state, payload| EventRecord {
+        tick: 42, system: 0, seq: 0, state, event_type: 1, payload: if state == STATE_CANCELED { Vec::new() } else { vec![payload] },
+    };
+    // Same payload after disappearance, then a changed-payload replacement.
+    let records = [
+        record(STATE_PREDICTED, 1), record(STATE_CANCELED, 0),
+        record(STATE_PREDICTED, 1), record(STATE_CANCELED, 0),
+        record(STATE_PREDICTED, 2), record(STATE_VERIFIED, 2),
+    ];
+    assert_eq!(event_lifecycle(&records), Ok((3, 1, 2)));
+    assert_eq!(event_lifecycle(&records[..5]), Ok((3, 0, 2)));
+}
+
+#[test]
+fn event_lifecycle_rejects_invalid_transitions_and_stale_payloads() {
+    let record = |state, payload| EventRecord {
+        tick: 42, system: 0, seq: 0, state, event_type: 1, payload: if state == STATE_CANCELED { Vec::new() } else { vec![payload] },
+    };
+    let p = record(STATE_PREDICTED, 1);
+    let c = record(STATE_CANCELED, 0);
+    let v = record(STATE_VERIFIED, 1);
+    for records in [
+        vec![c.clone()], vec![v.clone()], vec![p.clone(), p.clone()],
+        vec![p.clone(), c.clone(), c.clone()], vec![p.clone(), c.clone(), v.clone()],
+        vec![p.clone(), v.clone(), p.clone()], vec![p.clone(), v.clone(), c.clone()],
+        vec![p.clone(), v.clone(), v.clone()], vec![p.clone(), record(STATE_VERIFIED, 2)],
+        vec![p.clone(), c, record(STATE_PREDICTED, 2), v.clone()],
+        vec![p.clone(), EventRecord { event_type: 2, ..v }],
+        vec![p, record(255, 1)],
+    ] {
+        assert!(event_lifecycle(&records).is_err(), "accepted invalid lifecycle: {records:?}");
     }
 }
 
@@ -329,18 +403,13 @@ fn two_c_abi_clients_and_a_rust_client_play_with_prediction_and_rollback() {
         assert!(p.rolled_back > 0, "{}: no frame had rolled_back set in {} frames", p.name, p.frames);
         assert!(p.status.rollbacks > 0 && p.status.resim_ticks >= p.status.rollbacks, "{}: {:?}", p.name, p.status);
         assert!(p.status.last_rollback_to >= p.status.last_rollback_from && p.status.last_rollback_from > 0);
-        // Events: predicted, then verified (final) or canceled (taken back by a rollback).
+        // Each live occurrence closes with verification or cancellation. Cancellation permits
+        // a replacement prediction at the same key; verification is final for that key.
         let (total, verified, canceled) = p.count_events();
-        assert!(p.orphan.is_empty(), "{}: verified/canceled without a predicted record: {:?}", p.name, &p.orphan[..p.orphan.len().min(5)]);
         assert!(verified > 0, "{}: no event went predicted -> verified ({total} events)", p.name);
         assert!(canceled > 0, "{}: no event went predicted -> canceled ({total} events)", p.name);
-        // A canceled key is never verified afterwards (and vice versa).
-        for (key, states) in &p.events {
-            let finals = states.iter().filter(|s| **s != STATE_PREDICTED).count();
-            assert!(finals <= 1 || states.iter().filter(|s| **s == STATE_VERIFIED).count() == 0, "{}: {key:?} {states:?}", p.name);
-        }
         println!(
-            "{}: slot {} rtt {} ms delay {} | {} frames, {} with rolled_back, deepest rollback {} ticks, {} rollbacks / {} resimulated ticks, {} stalls | {total} events: {verified} predicted->verified, {canceled} predicted->canceled",
+            "{}: slot {} rtt {} ms delay {} | {} frames, {} with rolled_back, deepest rollback {} ticks, {} rollbacks / {} resimulated ticks, {} stalls | {total} occurrences: {verified} predicted->verified, {canceled} predicted->canceled",
             p.name, p.status.slot, p.status.rtt_ms, p.status.input_delay, p.frames, p.rolled_back, p.max_depth, p.status.rollbacks, p.status.resim_ticks, p.status.stall_episodes
         );
     }

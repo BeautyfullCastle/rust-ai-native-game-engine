@@ -3,8 +3,7 @@ use super::*;
 use super::input::{Input, Keys, Op, Phase};
 use super::gesture_tests::{Gate, Gated};
 use std::sync::Mutex;
-#[path = "../../tests/common/arena.rs"]
-mod arena;
+use super::gesture_tests::arena_fixture as arena;
 
 fn fixture() -> (arena::ArenaHost, Editor, Arc<Mutex<Gate>>) {
     let host = arena::ArenaHost::start(false);

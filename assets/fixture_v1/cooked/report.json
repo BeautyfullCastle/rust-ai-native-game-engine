@@ -1,0 +1,19 @@
+{
+  "format": "orr.asset-cook-report/1",
+  "cooker_format_version": 1,
+  "importer_version": 1,
+  "sources": [
+    {
+      "id": "a_0000000000001001",
+      "source": "source/motion.json",
+      "source_sha256": "52af7d0d808ea3f4e90739a5e57a22a85583819c7b99d966c3fdc9daab1e4b76",
+      "cache_key": "a55bc6ec23538c4f76faf1b34fb7dc1da1490a518a3ff7045c34259dced4cd7f"
+    },
+    {
+      "id": "a_0000000000002001",
+      "source": "source/impact.json",
+      "source_sha256": "3add451cba6f42803b790f8cef4f836d2f10f6f8d663a51717fdcd22e45f5db9",
+      "cache_key": "3fde0ae311746684fbb4c59835a815347b89abad4ec195c3efdb79222c498e74"
+    }
+  ]
+}

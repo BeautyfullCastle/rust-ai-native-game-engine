@@ -418,7 +418,7 @@ fn observed_transaction_closure_after_begin_ack_discards_unsent_drag_input() {
 }
 
 #[path = "../../tests/common/arena.rs"]
-mod arena_fixture;
+pub(super) mod arena_fixture;
 
 #[test]
 fn arena_held_replies_coalesce_position_drag_without_blocking_and_cancel() {

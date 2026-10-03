@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any
 
 
+from check_sim_float_types import PACKAGES, check_config
+
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "tools" / "sim-float-guard" / "fixtures"
 CLIPPY_CONFIG = ROOT / "tools" / "sim-float-guard" / "clippy.toml"
@@ -75,6 +78,11 @@ def fail(message: str, output: str | None = None) -> int:
 
 
 def main() -> int:
+    check_config()
+    required = {"orr_fp", "orr_ecs", "orr_sim", "orr_session", "orr_testgame",
+                "orr_physics", "orr_physics3d", "orr_games", "orr_asset"}
+    if not required.issubset(PACKAGES):
+        return fail("simulation guard dropped a required core library")
     cargo = shutil.which("cargo")
     if cargo is None:
         return fail("cargo was not found on PATH")

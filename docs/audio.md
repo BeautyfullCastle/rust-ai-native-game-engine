@@ -85,3 +85,29 @@ Official dependency references: [Kira 0.12.5](https://docs.rs/kira/0.12.5/kira/)
 [backend API](https://docs.rs/kira/0.12.5/kira/backend/trait.Backend.html),
 [CPAL](https://github.com/RustAudio/cpal). The pinned crate manifests were checked:
 Kira default features are disabled and CPAL's own default feature list is empty.
+
+
+## Opt-in cooked asset fixture
+
+`orr_asset_fixture --features audio` is a separate device-free vertical slice;
+it does not replace Arena's clips or change its default audio contract. Its
+`FixtureAudio` requires an already admitted `PreparedFixture`, verifies the
+release's view SHA and every PCM16 object's length/hash/header, and owns stereo
+clips before event consumption. Only fixture cue 1 maps to its declared impact
+asset. Pass the complete result of one `Bridge::poll_view()` once with a stable
+source ID, including lifecycle/resync; use a new ID for a replacement owner.
+
+Required failures return an error. Auto failures return an explicit muted reason;
+off skips preload and mixer construction. These policies apply only to the
+presentation copy after strict fixture admission; missing/corrupt release
+packages still fail the unchanged preparation gate. The fixture currently opens
+no native output device in any mode and makes no physical-playback claim.
+
+```sh
+cargo test --locked -p orr_asset_fixture --features audio
+cargo clippy --locked -p orr_asset_fixture --features audio --all-targets -- -D warnings
+```
+
+Bounds, public usage, source lifetime and measured validation are documented in
+[`orr_asset_fixture`](../crates/orr_asset_fixture/README.md#optional-device-free-presentation)
+and [its audio validation record](../crates/orr_asset_fixture/AUDIO_VALIDATION.md).
