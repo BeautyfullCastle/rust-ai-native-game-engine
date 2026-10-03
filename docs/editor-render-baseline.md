@@ -94,6 +94,13 @@ harness backend, frame phase and metric sample counts. GPU records identify the
 scene, target size, settings, actual adapter/backend/driver, frame class and
 existing CPU/render counters.
 
+An empty `driver_info` string means the backend did not provide that optional
+description (wgpu-hal 30.0.1 uses an empty string for DX12). The collector preserves
+it and reports `driver_metadata_availability.driver_info=false`; it does not
+invent a description. The field must still exist and have string type, and frame
+identity must match it. Driver version, adapter, backend and OS build remain
+separate recorded fields.
+
 The collector freezes metadata and schedules all repetitions before execution.
 It checks record counts and numeric types, preserves ordinary test failures,
 and refuses a complete baseline when records are missing, skipped, malformed or

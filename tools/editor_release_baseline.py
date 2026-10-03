@@ -590,10 +590,14 @@ def _validate_gpu(run_name: str, records: list[dict[str, Any]], errors: list[str
     for key, value in {**GPU_COMMON, **expected}.items():
         if meta.get(key) != value:
             errors.append(f"{run_name}: metadata {key} mismatch (expected {value!r}, got {meta.get(key)!r})")
-    required_text = ("adapter_name", "adapter_backend", "adapter_device_type", "driver", "driver_info")
+    required_text = ("adapter_name", "adapter_backend", "adapter_device_type", "driver")
     for key in required_text:
         if not isinstance(meta.get(key), str) or not meta[key].strip():
             errors.append(f"{run_name}: metadata {key} is missing")
+    # wgpu-hal's DX12 backend deliberately supplies an empty driver_info.
+    # Preserve that unavailable value, while missing or non-string data fails.
+    if not isinstance(meta.get("driver_info"), str):
+        errors.append(f"{run_name}: metadata driver_info must be a present string")
     if not _is_int(meta.get("adapter_vendor")) or not _is_int(meta.get("adapter_device")):
         errors.append(f"{run_name}: adapter vendor/device ids must be integers")
     if not isinstance(meta.get("software"), bool):
@@ -669,7 +673,10 @@ def _validate_gpu(run_name: str, records: list[dict[str, Any]], errors: list[str
                 for kind, _ in required_frames}
         for field in ("cpu_prepare_ms", "cpu_encode_ms", "cpu_submit_ms")
     }
-    return {"signature": base_sig, "frame_wall_ms": groups,
+    return {"signature": base_sig,
+            "driver_metadata_availability": {"driver": bool(meta.get("driver")),
+                                             "driver_info": bool(meta.get("driver_info"))},
+            "frame_wall_ms": groups,
             "frame_wall_ms_summary": {kind: _aggregate(values) for kind, values in groups.items()},
             "cpu_stage_ms_summary": cpu_groups,
             "cpu_frame_fields_are_not_gpu_completion": True,
@@ -751,6 +758,7 @@ def collect(args: argparse.Namespace) -> int:
         "repetitions": args.repetitions, "gpu_mode": args.gpu_mode,
         "source_before": before, "source_after": None,
         "platform": {"system": platform.system(), "release": platform.release(),
+                     "version": platform.version(),
                      "machine": platform.machine(), "python": platform.python_version(),
                      "cpu": _cpu_metadata()},
         "toolchain": toolchain, "power": power, "default_features": True,

@@ -177,6 +177,21 @@ class EditorContractTests(unittest.TestCase):
 
 
 class RendererContractTests(unittest.TestCase):
+    def test_dx12_empty_driver_info_is_unavailable_but_missing_info_fails(self):
+        records = gpu_records("gpu_2d_default", software=True)
+        for record in records:
+            if record["case"] in ("metadata", "frame"):
+                record["adapter_backend"] = "Dx12"
+                record["driver_info"] = ""
+        errors = []
+        summary = baseline._validate_gpu("gpu_2d_default", records, errors, "software")
+        self.assertEqual(errors, [])
+        self.assertFalse(summary["driver_metadata_availability"]["driver_info"])
+        del records[0]["driver_info"]
+        errors = []
+        baseline._validate_gpu("gpu_2d_default", records, errors, "software")
+        self.assertTrue(any("present string" in error for error in errors))
+
     def test_valid_gpu_records_accept_nullable_cpu_timing_without_claiming_gpu_time(self):
         for name in baseline.GPU_EXPECTED:
             with self.subTest(name=name):
