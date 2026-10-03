@@ -37,6 +37,7 @@ impl ArenaHost {
             server.set_structured_input::<Arena>("ArenaInput", 8, |slot, input| {
                 orr_sample::arena_view::arena_fire_commands(u32::from(slot.0), input)
             });
+            server.enable_managed_input();
             let mut host = Host::<Arena>::new(doc, server);
             if viewer {
                 let mut play = PlayController::<Arena>::start_play(&host.doc, host.doc.play_config(2, 60)).unwrap();

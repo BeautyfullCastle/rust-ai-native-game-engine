@@ -84,6 +84,7 @@ pub struct Backend {
     pub game: EditorGame,
     /// Checked descriptor identity shared by control and frame connections.
     identity: RemoteIdentity,
+    pub(crate) managed_input: bool,
 }
 
 /// `ws://host:port` plus the path and query a dev-mode host needs to know
@@ -127,11 +128,11 @@ impl Backend {
                 // In process a frame is a copy, not a message: let an edit show at once instead of
                 // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
                 rc.max_fps = 240;
-                let (game, identity, own_client) = discover(&mut erp)?;
+                let (game, identity, own_client, managed_input) = discover(&mut erp)?;
                 rc.expected_identity = Some(identity.clone());
                 let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
                 let url = host.url().map(str::to_string);
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity })
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input })
             }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());
@@ -141,14 +142,14 @@ impl Backend {
                 }
                 .map_err(|e| format!("cannot connect to {url}: {e}"))?;
                 erp.call_timeout = CALL_TIMEOUT;
-                let (game, identity, own_client) = discover(&mut erp)?;
+                let (game, identity, own_client, managed_input) = discover(&mut erp)?;
                 let mut rc = RemoteConfig::new(if token.is_some() { url } else { &full });
                 rc.token.clone_from(token);
                 rc.source = "view".to_string();
                 rc.view_delivery = delivery(game, false);
                 rc.expected_identity = Some(identity.clone());
                 let bridge = EditorStream::connect(game, rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity })
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input })
             }
         }
     }
@@ -199,7 +200,7 @@ impl Backend {
 // fields, ranges and descriptors, not just type names. The stream repeats the
 // identity check on its own connection before subscribing. This checks game and
 // build/schema compatibility, not a unique host instance or source-content hash.
-fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String), String> {
+fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, bool), String> {
     let d = erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
     if d["erp_version"].as_u64() != Some(1) {
         return Err("editor requires ERP version 1".into());
@@ -213,7 +214,12 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String),
         return Err(format!("{name} reflected schema mismatch: host descriptors differ from this editor"));
     }
     let own_client = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
-    Ok((game, RemoteIdentity { game: name.to_string(), build_id, schema }, own_client))
+    let input = if game == EditorGame::Arena { erp.call("registry.input", J::Null).ok() } else { None };
+    let mut input_types = orr_reflect::TypeRegistry::new();
+    input_types.register_component::<orr_sample::arena_game::ArenaInput>("ArenaInput");
+    let expected_input: J = serde_json::from_str(&input_types.type_json_schema("ArenaInput").expect("registered input")).expect("valid reflected schema");
+    let managed_input = game == EditorGame::Arena && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
+    Ok((game, RemoteIdentity { game: name.to_string(), build_id, schema }, own_client, managed_input))
 }
 
 fn delivery(game: EditorGame, local: bool) -> ViewDeliveryMode {

@@ -119,12 +119,15 @@ pub struct Inspect {
 }
 
 /// What the answer to a request that was sent without waiting is for.
+pub mod input;
+
 enum Pend {
+    Input(u64, input::Op),
     Rows(u64),
     Inspect(Target),
     Singletons,
     History,
-    State,
+    State(u64),
     Clients,
     Detail(String),
     PreviewRows(String, u64),
@@ -171,6 +174,7 @@ struct Preview {
 /// See the module docs.
 pub struct Editor {
     backend: Backend,
+    input: input::Input,
     types: Arc<TypeRegistry>,
     down: Option<Down>,
     selection: Option<Target>,
@@ -202,6 +206,7 @@ pub struct Editor {
     dirty: Dirty,
     inflight: InFlight,
     change_gen: u64,
+    state_generation: u64,
     last_inspect: Option<Instant>,
     last_clients: Option<Instant>,
     gesture: gestures::Gestures,
@@ -250,7 +255,9 @@ impl Editor {
         let mut feed = Feed::default();
         feed.own.clone_from(&backend.own_client);
         let types = Arc::new(backend.game.types());
+        let input = input::Input::new(backend.managed_input);
         let mut e = Self {
+            input,
             backend,
             types,
             down: None,
@@ -279,6 +286,7 @@ impl Editor {
             dirty: Dirty::default(),
             inflight: InFlight::default(),
             change_gen: 0,
+            state_generation: 0,
             last_inspect: None,
             last_clients: None,
             gesture: gestures::Gestures::default(),
@@ -644,6 +652,7 @@ impl Editor {
         if self.gesture.busy() && !gestures::is_read(method) {
             return Err("an edit is still pending; wait for it to finish or cancel the drag".into());
         }
+        if method.starts_with("sim.") && method != "sim.state" { self.state_generation += 1; }
         let r = self.timed_erp_call(method, params);
         self.ingest();
         match r {
@@ -739,6 +748,9 @@ impl Editor {
 
     fn on_answer(&mut self, kind: Pend, r: Result<J, orr_remote::RpcError>) {
         match kind {
+            Pend::Input(intent, op) => {
+                if let Some(message) = self.input.answer(intent, op, r, Instant::now()) { self.error(message); }
+            }
             Pend::Gesture(id, reply) => self.gesture_answer(id, reply, r),
             Pend::Rows(gen) => {
                 self.inflight.rows = false;
@@ -776,8 +788,9 @@ impl Editor {
                     self.history = History::from_json(&v);
                 }
             }
-            Pend::State => {
+            Pend::State(generation) => {
                 self.inflight.state = false;
+                if generation != self.state_generation { self.dirty.state = true; return; }
                 if let Ok(v) = r {
                     self.apply_state(&v);
                 }
@@ -888,6 +901,7 @@ impl Editor {
         };
         self.error(down.reason.clone());
         self.gesture = gestures::Gestures::default();
+        self.input = input::Input::default();
         self.pending.clear();
         self.down = Some(down);
     }
@@ -924,6 +938,7 @@ impl Editor {
         }
         self.ingest();
         self.check_gesture_timeout();
+        self.pump_input();
         self.refresh_view();
         if self.down.is_some() {
             return;
@@ -1089,7 +1104,7 @@ impl Editor {
         if self.dirty.state && !self.inflight.state {
             self.dirty.state = false;
             self.inflight.state = true;
-            self.post("sim.state", J::Null, Pend::State);
+            self.post("sim.state", J::Null, Pend::State(self.state_generation));
         }
         if self.dirty.history && !self.inflight.history {
             self.dirty.history = false;
@@ -1595,6 +1610,7 @@ impl Editor {
     /// play mode. The staged frame reaches the viewport through a second frame
     /// stream of the host (`watch.subscribe` source `proposal:<id>`).
     pub fn set_preview(&mut self, id: Option<String>) -> bool {
+        self.release_control();
         match id {
             Some(_) if self.sim.mode == Mode::Play => {
                 self.error("preview needs edit mode; stop play first");
@@ -1755,6 +1771,7 @@ impl Editor {
 
     /// Runs a timeline control (play mode only).
     pub fn control(&mut self, op: ControlOp) {
+        if !matches!(op, ControlOp::Play | ControlOp::SetSpeed(_)) { self.release_control(); }
         if self.sim.mode != Mode::Play {
             return;
         }
@@ -1796,6 +1813,7 @@ impl Editor {
     /// Ends play. The document is exactly as it was before play; the
     /// recording stays available from [`last_stopped`](Self::last_stopped).
     pub fn stop(&mut self) -> Option<&Stopped> {
+        self.release_control();
         if self.sim.mode != Mode::Play {
             return None;
         }
@@ -1824,6 +1842,7 @@ impl Editor {
     /// (edits that were not saved are lost), a remote one is connected to afresh.
     /// On failure the editor stays down and says why.
     pub fn restart(&mut self) -> bool {
+        self.release_control();
         let spec = self.backend.spec.clone();
         let local = spec.is_local();
         let backend = match Backend::connect(&spec) {
@@ -1926,3 +1945,5 @@ mod diagnostics_tests;
 mod gestures;
 #[cfg(test)]
 mod gesture_tests;
+#[cfg(test)]
+mod input_tests;

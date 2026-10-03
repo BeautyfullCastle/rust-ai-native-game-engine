@@ -20,8 +20,8 @@ fn timings_follow_calls_replies_and_changed_snapshots_without_polling_on_read() 
     assert_eq!(ed.diagnostics().sync_erp_wait.total_samples, baseline.sync_erp_wait.total_samples + 2);
     assert!(ed.down().is_none(), "RPC errors do not change connection behavior");
 
-    ed.post("sim.state", J::Null, Pend::State);
-    ed.post("unknown.telemetry.test", J::Null, Pend::State);
+    ed.post("sim.state", J::Null, Pend::State(ed.state_generation));
+    ed.post("unknown.telemetry.test", J::Null, Pend::State(ed.state_generation));
     let posted = ed.diagnostics();
     assert_eq!(posted.pending_requests, 2);
     assert!(posted.pending_high_water >= 2);
@@ -47,7 +47,7 @@ fn disconnected_requests_do_not_create_latency_samples() {
     });
     let before = ed.diagnostics();
     assert!(ed.call("sim.state", J::Null).is_err());
-    ed.post("sim.state", J::Null, Pend::State);
+    ed.post("sim.state", J::Null, Pend::State(ed.state_generation));
     ed.pump();
     let after = ed.diagnostics();
     assert_eq!(after.sync_erp_wait, before.sync_erp_wait);

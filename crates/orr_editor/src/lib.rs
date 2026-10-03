@@ -37,7 +37,8 @@
 //!
 //! Compiled adapters support local/remote `PhysGame` and remote `Arena`.
 //! Frame decoders, reflection and viewport mappings come through `orr_sample`.
-//! Arena gameplay inputs remain agent-driven through structured ERP input.
+//! Arena optionally claims a focused realtime keyboard slot through negotiated
+//! structured ERP input. Ordinary attachment never changes agent-held input.
 //!
 //! This is view layer code: floats and the wall clock are fine here, but every
 //! value that reaches the document goes through exact decimal parsing.

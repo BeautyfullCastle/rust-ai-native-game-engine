@@ -79,12 +79,28 @@ inspector is explicitly labelled as the live document. Arena hides physics-only
 Body creation. The initial camera fits the authored players, while ordinary
 edits, seeks and presentation recovery preserve the person's camera.
 
-Play/seek/stop operate on the host. Gameplay input stays with the CLI/MCP's
-structured input adapter: the editor does not send raw input or overwrite an
-agent's held movement/fire. Replay Viewer sessions allow inspection and timeline
-playback, with mutations and Branch disabled; the editor never auto-branches a
-Viewer. Local Arena launch, player creation widgets and GUI gameplay keyboard
-control are outside this first slice.
+Play/seek/stop operate on the host. Ordinary attachment, viewport focus and GUI
+Step never overwrite an agent's held movement/fire. On hosts advertising managed
+held input v1 with the matching ArenaInput schema, realtime play exposes a player
+slot selector and **Take control**. Taking control deliberately focuses the viewport
+and explicitly replaces only that slot's held input; it does not cancel accepted
+commands, identify a legacy writer, or take over the simulation. WASD/arrows move;
+holding Space preserves normal per-tick fire semantics. No raw `sim.input` is sent.
+
+Escape, focus loss, text/dialog capture, preview, pause/seek/stop, reconnect and
+failed acknowledgements disarm keyboard control. Returning to the viewport never
+reacquires it. The UI keeps one update/heartbeat outstanding, coalesces the newest
+key state, and reserves one release message that can follow a sent update without
+waiting for its reply. New claims wait for old requests to settle or for an explicit reconnect. Renewals use the host's
+500 ms heartbeat and 2000 ms lease; failed or missing replies leave bounded server
+expiry as the fallback. An admission acknowledgement is not proof that a tick has
+consumed or rendered the input. Paused/Step remains neutral for managed slots;
+legacy AI-held input is not automatically cleared.
+
+Replay Viewer sessions allow inspection and timeline playback, with mutations,
+Take control and Branch disabled; the editor never auto-branches. Rewound playback
+cannot claim input until it reaches the live head. PhysGame behavior is unchanged.
+Local Arena launch and player creation widgets remain outside this slice.
 
 Before decoding a frame, attachment requires an explicit supported game, ERP 1,
 and the full compiled reflected schema. Main and proposal streams repeat the

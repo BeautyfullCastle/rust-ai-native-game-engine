@@ -976,7 +976,7 @@ fn sim_seek<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) -> R
     Ok(state_json(t, lim))
 }
 
-fn slot_of<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>, required: bool) -> Result<PlayerSlot, RpcError> {
+pub(crate) fn slot_of<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>, required: bool) -> Result<PlayerSlot, RpcError> {
     let n = if required { p.req_u64("player")? } else { p.opt_u64("player")?.unwrap_or(0) };
     let players = t.play.as_ref().map_or(0, |pc| pc.session().player_count());
     if n >= u64::from(players) {
@@ -992,6 +992,7 @@ fn input_unavailable() -> RpcError {
 fn sim_input_value<G: Game>(
     t: &mut ErpTarget<'_, G>, input: Option<&crate::input::StructuredInput<G>>, p: &P<'_>,
 ) -> Result<J, RpcError> {
+    reject_unhandled_grant(p)?;
     let adapter = input.ok_or_else(input_unavailable)?;
     require_writable_play(t)?;
     let slot = slot_of(t, p, true)?;
@@ -1001,7 +1002,15 @@ fn sim_input_value<G: Game>(
     Ok(json!({"ok": true}))
 }
 
+fn reject_unhandled_grant(p: &P<'_>) -> Result<(), RpcError> {
+    if ["grant", "generation", "sequence"].iter().any(|key| p.raw(key).is_some()) {
+        return Err(RpcError::state("input_stale", "managed input requires an active server connection and grant"));
+    }
+    Ok(())
+}
+
 fn sim_input<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
+    reject_unhandled_grant(p)?;
     require_writable_play(t)?;
     let slot = slot_of(t, p, true)?;
     let bytes = hex_decode(p.str("input")?).ok_or_else(|| RpcError::params("'input' is not valid hex"))?;
@@ -1020,7 +1029,7 @@ fn sim_command<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcErr
     Ok(json!({"ok": true}))
 }
 
-fn require_writable_play<G: Game>(t: &mut ErpTarget<'_, G>) -> Result<(), RpcError> {
+pub(crate) fn require_writable_play<G: Game>(t: &mut ErpTarget<'_, G>) -> Result<(), RpcError> {
     if play_mut(t)?.session().mode() == PlayMode::Viewer {
         return Err(RpcError::state("read_only", "replay viewer is read-only; branch before sending inputs or commands"));
     }

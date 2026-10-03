@@ -269,6 +269,7 @@ fn run_arena(args: Args) -> ExitCode {
     server.set_structured_input::<Arena>("ArenaInput", 8, |slot, input| {
         orr_sample::arena_view::arena_fire_commands(u32::from(slot.0), input)
     });
+    server.enable_managed_input();
     println!("orr_remote_host: Arena scene {} ({entities} entities)", args.scene.display());
     println!("orr_remote_host: ERP listening on {}", server.url());
     if args.dev { println!("orr_remote_host: DEV MODE, no authentication (loopback only)"); }

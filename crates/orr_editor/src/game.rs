@@ -1,4 +1,4 @@
-//! Closed, compiled game adapters. No runtime plugins or gameplay input ownership.
+//! Closed, compiled game adapters. Gameplay ownership lives in the editor ERP state machine.
 use orr_bridge::{Bridge, BridgeEvent, FrameView, ViewUpdate};
 use orr_reflect::TypeRegistry;
 use orr_remote::{RemoteBridge, RemoteConfig, RemoteViewDelivery, RpcError, Transport};

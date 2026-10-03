@@ -436,6 +436,7 @@ pub struct ErpServer {
     verify_task: Option<VerifyTask>,
     next_verify_serial: u64,
     structured_input: Option<Box<dyn std::any::Any + Send + Sync>>,
+    managed_input: crate::input::ManagedHeld,
 }
 
 impl ErpServer {
@@ -521,6 +522,7 @@ impl ErpServer {
             verify_task: None,
             next_verify_serial: 1,
             structured_input: None,
+            managed_input: crate::input::ManagedHeld::default(),
         })
     }
 
@@ -539,6 +541,22 @@ impl ErpServer {
     {
         assert!((1..=16).contains(&max_players), "structured input player limit must be 1..=16");
         self.structured_input = Some(Box::new(crate::input::StructuredInput::<G>::new(name, max_players, commands)));
+    }
+
+    /// Enables connection-bound, two-second renewable held-input grants.
+    /// Install a structured input adapter first. Legacy writes retain their
+    /// existing behavior except while their slot has an active managed grant.
+    pub fn enable_managed_input(&mut self) {
+        assert!(self.structured_input.is_some(), "managed input requires a structured adapter");
+        self.managed_input.enabled = true;
+    }
+
+    /// Neutralizes managed slots and invalidates all grants synchronously.
+    /// Embedders replacing public `Host::play` or controlling it out of band
+    /// must call this BEFORE the replacement/transition. ERP transitions do so
+    /// automatically. This never clears legacy slots or accepted commands.
+    pub fn invalidate_managed_input<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) {
+        self.managed_input.invalidate(target);
     }
 
     /// Tells the server about a play session the host stopped itself (for
@@ -735,8 +753,11 @@ impl ErpServer {
 
     /// Runs the queued requests against `target`, then sends notifications
     /// and frame snapshots. Call it once per host frame. Never blocks on the network.
+    /// Managed held-input expiry is serviced at poll/request boundaries, not
+    /// during a long synchronous step. Grants do not fence explicit commands.
     pub fn poll<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) -> PollReport {
         let now = Instant::now();
+        self.managed_input.expire(target, now);
         self.complete_verification(target);
         // These events came from the host's real-time advance after the last
         // poll. Fence them BEFORE any queued request can seek/replace its session.
@@ -852,12 +873,14 @@ impl ErpServer {
         }
         self.complete_verification(target);
         self.publish(target, now);
+        self.managed_input.expire(target, Instant::now());
         report.crash = std::mem::take(&mut self.crash);
         report.frame_pending = std::mem::take(&mut self.frame_pending);
         report
     }
 
     fn disconnected<G: Game>(&mut self, conn: u64, target: &mut ErpTarget<'_, G>) {
+        self.managed_input.disconnect(target, conn);
         self.conns.remove(&conn);
         if let Some(task) = self.verify_task.as_ref().filter(|t| t.request.conn == conn) {
             task.cancel.store(true, Ordering::Relaxed);
@@ -879,6 +902,7 @@ impl ErpServer {
         method: &str,
         params: &J,
     ) {
+        self.managed_input.expire(target, Instant::now());
         // In particular, take diagnostics before sim.stop destroys the session.
         self.collect_view_notes(target);
         let Some(c) = self.conns.get(&conn) else {
@@ -921,12 +945,30 @@ impl ErpServer {
             };
             match std::panic::catch_unwind(AssertUnwindSafe(|| {
                 let input = self.structured_input.as_ref().and_then(|a| a.downcast_ref::<crate::input::StructuredInput<G>>());
-                call(target, &limits, input, &ctx, &mut fx, method, params)
+                authorize(method, caps, target.play.is_some(), params)?;
+                let mut result = if let Some(result) = self.managed_input.handle(target, input, (conn, Instant::now()), method, params) {
+                    result
+                } else {
+                    call(target, &limits, input, &ctx, &mut fx, method, params)
+                }?;
+                if matches!(method, "sim.start" | "sim.stop" | "sim.pause" | "sim.seek" | "sim.branch") {
+                    self.managed_input.invalidate(target);
+                }
+                if self.managed_input.enabled && input.is_some() {
+                    match method {
+                        "sim.state" => result["managed_held"] = self.managed_input.status(conn),
+                        "registry.input" => result["managed_held"] = crate::input::ManagedHeld::descriptor(),
+                        "rpc.discover" => result["engine"]["input"]["managed_held"] = crate::input::ManagedHeld::descriptor(),
+                        _ => {}
+                    }
+                }
+                Ok(result)
             })) {
                 Ok(r) => r,
                 Err(_) => {
                     // A panic may have left the sim half-stepped: drop the play session
                     // rather than keep serving from an inconsistent state.
+                    self.managed_input.invalidate(target);
                     let dropped = target.play.take().is_some();
                     let note = if dropped {
                         "; the play session was dropped"

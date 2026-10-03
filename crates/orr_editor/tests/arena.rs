@@ -248,3 +248,69 @@ fn capture_native_arena(url: &str, out: &std::path::Path, name: &str) {
     assert!(counts[0] > 100 && counts[1] > 100 && counts[2] > 25,
         "native {name} viewport must show both Arena players and hero selection, got pixel counts {counts:?}");
 }
+
+#[test]
+fn arena_keyboard_explicit_focus_fire_release_and_recording() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    use orr_editor::{EditorApp, editor::input::Phase};
+    use std::time::{Duration,Instant};
+    let host = ArenaHost::start(false);
+    let mut agent=host.client();
+    let mut ed=Editor::attach(&host.url,None).unwrap(); ed.play(); ed.sync();
+    let mut h=Harness::builder().with_size([1500.0,900.0]).build_eframe(|_| EditorApp::new(ed,None));
+    h.run_steps(3);
+    assert_eq!(h.state().editor.input_phase(),Phase::Off);
+    h.get_by_label("Take control").click();
+    let end=Instant::now()+Duration::from_secs(10);
+    while h.state().editor.input_phase()!=Phase::Active { assert!(Instant::now()<end,"{:?}",h.state().editor.status());h.run_steps(1);std::thread::sleep(Duration::from_millis(2)); }
+    for key in [egui::Key::D,egui::Key::Space] {
+        h.input_mut().events.push(egui::Event::Key {key,physical_key:Some(key),pressed:true,repeat:false,modifiers:egui::Modifiers::NONE});
+    }
+    let tick=h.state().editor.sim().head_tick;
+    while h.state().editor.sim().head_tick<tick+6 { assert!(Instant::now()<end);h.run_steps(1);std::thread::sleep(Duration::from_millis(2)); }
+    assert_eq!(h.state().editor.input_phase(),Phase::Active,"Space must not toggle playback");
+    assert!(position(&mut agent)[0].as_i64().unwrap()>-300);
+    assert!(h.state().editor.bodies().len()>2,"held Space derives normal fire");
+    for key in [egui::Key::D,egui::Key::Space] {
+        h.input_mut().events.push(egui::Event::Key {key,physical_key:Some(key),pressed:false,repeat:false,modifiers:egui::Modifiers::NONE});
+    }
+    // Focus a real text widget: gameplay and editor shortcuts must not steal it.
+    h.get_by(|n| n.role()==egui::accesskit::Role::TextInput && n.value().as_deref()==Some("")).focus();
+    while h.state().editor.input_phase()!=Phase::Off { assert!(Instant::now()<end);h.run_steps(1);std::thread::sleep(Duration::from_millis(2)); }
+    h.get_by(|n| n.role()==egui::accesskit::Role::TextInput && n.value().as_deref()==Some("")).type_text("wasd ");
+    h.run_steps(2);
+    assert_eq!(h.state().ui.filter,"wasd ");
+    assert_eq!(h.state().editor.input_phase(),Phase::Off);
+    h.get_by_label("Take control").click();
+    while h.state().editor.input_phase()!=Phase::Active { assert!(Instant::now()<end);h.run_steps(1);std::thread::sleep(Duration::from_millis(2)); }
+    h.input_mut().focused=false;
+    while h.state().editor.input_phase()!=Phase::Off { assert!(Instant::now()<end);h.run_steps(1);std::thread::sleep(Duration::from_millis(2)); }
+    h.input_mut().focused=true;h.run_steps(3);
+    assert_eq!(h.state().editor.input_phase(),Phase::Off);
+    h.state_mut().editor.pause();h.state_mut().editor.sync();
+    let before=position(&mut agent);
+    h.state_mut().editor.step(2);h.state_mut().editor.sync();
+    assert_eq!(position(&mut agent),before,"Step is neutral after managed release");
+    h.state_mut().editor.stop();
+    assert_eq!(agent.call("verify.self",json!({"inputs":{"kind":"last_play"},"checks":["recording_matches"]})).unwrap()["passed"],true);
+}
+
+#[test]
+fn arena_keyboard_viewer_paused_preview_and_dialog_are_disarmed() {
+    use egui_kittest::Harness;
+    use orr_editor::{EditorApp,editor::input::Phase,app::{Dialog,DialogKind}};
+    let host=ArenaHost::start(true);
+    let mut ed=Editor::attach(&host.url,None).unwrap(); ed.play();ed.sync();
+    assert!(!ed.take_control(0,true));
+    let host=ArenaHost::start(false);
+    let mut agent=host.client();let mut ed=Editor::attach(&host.url,None).unwrap();
+    let id=proposal(&mut agent,-200,0);ed.sync();ed.set_preview(Some(id));
+    assert!(!ed.take_control(0,true));ed.set_preview(None);ed.start_play();
+    assert!(!ed.take_control(0,true));ed.play();ed.sync();
+    assert!(!ed.take_control(0,false));
+    assert!(ed.take_control(0,true));
+    let mut h=Harness::builder().with_size([1500.0,900.0]).build_eframe(|_|EditorApp::new(ed,None));
+    h.state_mut().ui.dialog=Some(Dialog {kind:DialogKind::SaveAs,text:String::new()});
+    for _ in 0..50 {h.run_steps(1);std::thread::sleep(std::time::Duration::from_millis(2));}
+    assert_eq!(h.state().editor.input_phase(),Phase::Off);
+}

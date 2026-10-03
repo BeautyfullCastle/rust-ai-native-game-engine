@@ -93,6 +93,8 @@ pub struct UiState {
     /// Entities an agent just edited, pulsing in the viewport (see [`Pulse`]).
     pub pulses: Vec<Pulse>,
     body_drag: Option<BodyDrag>,
+    input_player: u8,
+    take_control: bool,
 }
 
 /// A request to save the app's own framebuffer as a PNG and quit (see [`crate::cli`]).
@@ -180,6 +182,12 @@ impl eframe::App for EditorApp {
         let ctx = ui.ctx().clone();
         self.frames += 1;
 
+        // Disarm before ingesting a late claim/update; focus returning is not intent.
+        let input_focus = ctx.memory(|m| m.focused()) == Some(egui::Id::new("arena_keyboard_viewport"));
+        let outside_click = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !self.ui.viewport_rect.is_some_and(|r| r.contains(p))));
+        if !input_focus || outside_click || self.ui.dialog.is_some() || ctx.input(|i| !i.focused || i.key_pressed(Key::Escape)) {
+            self.editor.release_control();
+        }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
         self.editor.pump();
         self.start_pulses(ctx.input(|i| i.time));
@@ -249,7 +257,7 @@ impl EditorApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
+        if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
         let redo_a = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
@@ -339,6 +347,20 @@ impl EditorApp {
                 ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
             }
         });
+        if self.editor.game() == crate::game::EditorGame::Arena {
+            ui.horizontal_wrapped(|ui| {
+                use crate::editor::input::Phase;
+                let phase = self.editor.input_phase();
+                ui.label("Keyboard player slot");
+                ui.add_enabled(phase == Phase::Off, egui::DragValue::new(&mut self.ui.input_player).range(0..=self.editor.sim().player_count.saturating_sub(1)));
+                if ui.add_enabled(phase == Phase::Off && self.editor.can_take_control(), egui::Button::new("Take control")).on_hover_text("Replaces this slot's current held input. Does not cancel commands or take over the simulation.").clicked() {
+                    self.ui.take_control = true;
+                }
+                if ui.add_enabled(phase != Phase::Off, egui::Button::new("Release control")).clicked() { self.editor.release_control(); }
+                if self.editor.input_cleanup_pending() && ui.button("Reconnect control").clicked() { self.editor.restart(); }
+                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => "Active · WASD/arrows · hold Space to fire · Escape releases", Phase::Releasing => "Releasing…" });
+            });
+        }
     }
 
     /// The banner of a host that is gone: why, and the way back.
@@ -517,7 +539,29 @@ impl EditorApp {
     // ---- viewport ----
 
     fn viewport(&mut self, ui: &mut Ui) {
-        let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        let (rect, resp) = if self.editor.game() == crate::game::EditorGame::Arena {
+            let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+            (rect, ui.interact(rect, egui::Id::new("arena_keyboard_viewport"), Sense::click_and_drag()))
+        } else {
+            ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag())
+        };
+        if self.ui.take_control {
+            self.ui.take_control = false;
+            if self.ui.dialog.is_none() && ui.input(|i| i.focused) {
+                resp.request_focus();
+                self.editor.take_control(self.ui.input_player, true);
+            }
+        }
+        let focused = resp.has_focus() && self.ui.dialog.is_none() && ui.input(|i| i.focused && !i.key_pressed(Key::Escape));
+        let keys = ui.input(|i| crate::editor::input::Keys {
+            x: i8::from(i.key_down(Key::D) || i.key_down(Key::ArrowRight)) - i8::from(i.key_down(Key::A) || i.key_down(Key::ArrowLeft)),
+            y: i8::from(i.key_down(Key::W) || i.key_down(Key::ArrowUp)) - i8::from(i.key_down(Key::S) || i.key_down(Key::ArrowDown)),
+            fire: i.key_down(Key::Space),
+        });
+        self.editor.arena_keys(focused, keys);
+        if focused && self.editor.input_phase() == crate::editor::input::Phase::Active {
+            ui.input_mut(|i| i.events.retain(|event| !matches!(event, egui::Event::Key { key: Key::W | Key::A | Key::S | Key::D | Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight | Key::Space, .. })));
+        }
         let ppp = ui.ctx().pixels_per_point();
         let px = (((rect.width() * ppp).round() as u32).clamp(1, 8192), ((rect.height() * ppp).round() as u32).clamp(1, 8192));
         self.ui.viewport_rect = Some(rect);

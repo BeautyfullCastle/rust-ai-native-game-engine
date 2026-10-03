@@ -9,17 +9,17 @@ use orr_remote::{Caps, Incoming, Request, Transport, USER_CLIENT};
 const BODY: &str = "orr_physics::Body";
 
 #[derive(Default)]
-struct Gate {
-    armed: bool,
-    hold: Option<&'static str>,
-    requests: Vec<(u64, String, J)>,
-    held: VecDeque<Incoming>,
-    disconnected: bool,
+pub(super) struct Gate {
+    pub(super) armed: bool,
+    pub(super) hold: Option<&'static str>,
+    pub(super) requests: Vec<(u64, String, J)>,
+    pub(super) held: VecDeque<Incoming>,
+    pub(super) disconnected: bool,
 }
 
-struct Gated {
-    inner: Box<dyn Transport>,
-    gate: Arc<Mutex<Gate>>,
+pub(super) struct Gated {
+    pub(super) inner: Box<dyn Transport>,
+    pub(super) gate: Arc<Mutex<Gate>>,
 }
 
 impl Transport for Gated {
