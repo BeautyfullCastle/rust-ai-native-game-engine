@@ -585,6 +585,7 @@ fn parse_model(source: &str) -> Result<AbiModel, String> {
                     if !matches!(arg.pat.as_ref(), Pat::Ident(_)) {
                         return Err(format!("unsupported argument pattern in {}", name));
                     }
+                    reject_conditional_attrs(&arg.attrs, &format!("{name} argument"))?;
                     args.push(abi_type(&arg.ty, &imports)?);
                 }
                 let result = match &item.sig.output {
@@ -634,6 +635,16 @@ fn resolve_module_file(
     parent_file: &Path,
     is_root: bool,
 ) -> Result<PathBuf, String> {
+    if module
+        .attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("cfg_attr"))
+    {
+        return Err(format!(
+            "#[cfg_attr] module {} is unsupported by ABI inventory",
+            module.ident
+        ));
+    }
     if module.attrs.iter().any(|attr| attr.path().is_ident("path")) {
         return Err(format!(
             "#[path] module {} is unsupported by ABI inventory",
@@ -782,6 +793,16 @@ fn reject_module_abi_items(items: &[Item], file: &Path, is_root: bool) -> Result
                 ))
             }
             Item::Mod(module) => {
+                if module
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.path().is_ident("cfg_attr"))
+                {
+                    return Err(format!(
+                        "#[cfg_attr] module {} is unsupported by ABI inventory",
+                        module.ident
+                    ));
+                }
                 if let Some((_, inline_items)) = &module.content {
                     reject_module_abi_items(inline_items, file, false)?;
                 } else {
@@ -1345,6 +1366,16 @@ mod regression_tests {
 
         let namespace_shadow = source_with("mod std {}");
         assert!(parse_model(&namespace_shadow).is_err());
+
+        let conditional_argument = source_with("").replace(
+            "fn orr_test(value: u32)",
+            "fn orr_test(#[cfg(any())] value: u32)",
+        );
+        let error = parse_model(&conditional_argument).unwrap_err();
+        assert!(
+            error.contains("conditional ABI declaration on orr_test argument"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1419,11 +1450,31 @@ mod regression_tests {
         assert!(validate_module_abi(&root, &fs::read_to_string(&root).unwrap()).is_err());
 
         fs::write(
+            &root,
+            "#[cfg_attr(all(), path = \"alternate.rs\")] mod client;\n",
+        )
+        .unwrap();
+        fs::write(
+            source_dir.join("client.rs"),
+            "pub fn ordinary_helper() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            source_dir.join("alternate.rs"),
+            "#[no_mangle] pub extern \"C\" fn orr_alternate() {}\n",
+        )
+        .unwrap();
+        let error = validate_module_abi(&root, &fs::read_to_string(&root).unwrap()).unwrap_err();
+        assert!(error.contains("#[cfg_attr] module client"), "{error}");
+
+        fs::write(&root, "mod client;\n").unwrap();
+        fs::write(
             source_dir.join("client.rs"),
             "#[cfg_attr(unix, no_mangle)] extern \"C\" fn orr_hidden() {}\n",
         )
         .unwrap();
-        assert!(validate_module_abi(&root, &fs::read_to_string(&root).unwrap()).is_err());
+        let error = validate_module_abi(&root, &fs::read_to_string(&root).unwrap()).unwrap_err();
+        assert!(error.contains("cfg_attr on function orr_hidden"), "{error}");
     }
 
     #[test]
