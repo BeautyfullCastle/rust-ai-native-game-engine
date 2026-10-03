@@ -1,6 +1,6 @@
 # ADR 초안: 최소 에셋 파이프라인 v1
 
-상태: **독립 설계 검토 완료 / 첫 core 구현 검토 중 (#32)**. 추적: [#24](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/24). 2026-10-03 기준.
+상태: **core/cooker/static fixture 구현, opt-in audio 집중 검증 / 최종 원격 통합 CI 대기**. 추적: [#24](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/24). 2026-10-03 기준.
 
 ## 1. 결정 요약
 
@@ -211,3 +211,43 @@ admission 순서(새 core API나 private-field 접근 불필요):
 - [replay API](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/blob/87e4a526e0e2cb8726cfc4c06de01f7cfea6a41c/crates/orr_session/src/replay.rs)
 - [audio 경계](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/blob/87e4a526e0e2cb8726cfc4c06de01f7cfea6a41c/docs/audio.md)
 
+
+
+## 13. 구현된 opt-in audio 경로와 검증 범위 (#35)
+
+`orr_asset_fixture`의 기본 feature는 audio-free다. 선택적 `audio` feature만
+`orr_audio`와 `orr_bridge`를 추가하며 cooker/sample/native-device 의존은 추가하지
+않는다. `audio::FixtureAudio`는 먼저 기존 strict `PreparedFixture`를 요구한다.
+별도 view copy를 전체 manifest SHA, object SHA/길이/PCM header로 다시 검증하고
+PCM16을 stereo Clip으로 preload한 뒤 caller bytes를 보유하지 않는다.
+
+`required`는 view 오류를 반환하고 `auto`는 `Muted { reason }`를 명시적으로
+반환한다. `off`는 view preload와 mixer 생성을 생략한다. 이 정책은 **이미 정상
+admission을 통과한 sim의 presentation copy**에만 적용한다. 기존 package
+preparation의 필수 view 검사나 replay allowlist/header/keyframe/300-checksum
+검사를 완화하지 않는다. 불완전 release package를 auto로 실행하는 bypass는 없다.
+
+한 번의 `Bridge::poll_view()`가 반환한 batch를 시각화와 audio에 공유하며 ordered
+lifecycle/resync를 그대로 전달한다. source ID는 bridge/session owner가 소유한다.
+`Impact { cue: 1 }`만 고정 `IMPACT_ID`로 매핑한다. 기존 32 voices/4096 history,
+predicted→verified dedupe, cancel/replacement/reset 규칙은 EventAudio를 재사용한다.
+
+4 MiB decoded 상한은 bank가 보유하는 stereo sample 합이다. 전체 수량을 먼저
+검사한 뒤 clip을 순차 변환한다. Vec→Arc 변환 때 최대 한 clip (384000 bytes)의
+추가 sample buffer가 일시적으로 존재할 수 있으며 input/mixer/allocator overhead도
+있다. 전체 프로세스 peak RSS는 이 4 MiB와 같다고 주장하지 않는다. 현재 v1의
+manifest 최대 912 bytes 및 cooked 최대 1536128 bytes는 일반 128 KiB/2 MiB byte
+상한보다 작다. 따라서 byte guard 자체의 최대/+1 산술 검사와 실제 유효 package의
+record/frame/decoded 최대/+1 검사를 구분한다.
+
+현재 determinism workflow는 native core/cook/fixture 및 cooked `--check`,
+Linux/Windows opt-in audio, WASI 및 SIMD fixture, Android fixture, browser-target
+**compile-only** fixture를 연결한다. 실행되지 않은 target을 통과로 보고하지 않는다.
+기존 workspace release/clippy와 aggregate mandatory gate는 유지한다. 하드웨어
+청취/browser audio/streaming/spatialization은 지원·검증 범위가 아니다.
+
+실행 명령, baseline 비교와 RSS 관측치는
+[fixture audio validation](../crates/orr_asset_fixture/AUDIO_VALIDATION.md)에 기록한다.
+위 설계 시점의 미구현 설명은 역사적 조사이며, 구현 API/제약은
+[fixture README](../crates/orr_asset_fixture/README.md)와 해당 검증 기록을 따른다.
+#24는 children 완료와 최종 통합 CI 전에 닫지 않는다.

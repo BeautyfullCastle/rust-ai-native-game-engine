@@ -3078,6 +3078,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_asset_fixture"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_asset",
+ "orr_audio",
+ "orr_bridge",
+ "orr_ecs",
+ "orr_fp",
+ "orr_session",
+ "orr_sim",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "orr_audio"
 version = "0.0.1"
 dependencies = [
