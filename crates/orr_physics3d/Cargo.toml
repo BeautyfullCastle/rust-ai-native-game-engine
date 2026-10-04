@@ -16,6 +16,7 @@ orr_reflect = { path = "../orr_reflect", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+orr_reflect = { path = "../orr_reflect", default-features = false, features = ["scene"] }
 orr_session = { path = "../orr_session" }
 criterion = { version = "0.5", default-features = false }
 

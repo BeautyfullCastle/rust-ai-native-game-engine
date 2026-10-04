@@ -521,6 +521,151 @@ pub fn register_reflect(types: &mut TypeRegistry) {
 mod tests {
     use super::*;
     use orr_ecs::{ComponentRegistryBuilder, FrameList};
+    use orr_reflect::{Scene, SceneIndex};
+
+    fn nonempty_target() -> (TypeRegistry, Frame, u32) {
+        let mut builder = ComponentRegistryBuilder::new();
+        crate::register(&mut builder);
+        let mut target = Frame::new(builder.build());
+        let config = PhysicsConfig {
+            gravity: FPVec3::new(fp!(1), fp!(-4), fp!(2)),
+            substeps: 6,
+            ..PhysicsConfig::default()
+        };
+        crate::init(&mut target, config);
+        let contacts = target.singleton::<PhysicsState>().contacts;
+        target.list_push(
+            contacts,
+            ContactCache {
+                a: 2,
+                b: 7,
+                id: 19,
+                _pad: 0,
+                normal_impulse: fp!(0.25),
+                tangent_impulse: FPVec3::new(fp!(1), fp!(2), fp!(3)),
+            },
+        );
+        let sentinel = crate::spawn_body(
+            &mut target,
+            Body::new_static(FPVec3::new(fp!(3), fp!(4), fp!(5))),
+            Collider::new(Shape::sphere(fp!(0.5))),
+        );
+        let freed = target.spawn();
+        assert!(target.despawn(freed));
+        target.set_tick(23);
+
+        assert_eq!(target.singleton::<PhysicsState>().config, config);
+        assert_eq!(target.list(contacts).len(), 1);
+        assert!(target.get::<Body>(sentinel).is_some());
+        assert!(!target.exists(freed));
+
+        let mut types = TypeRegistry::new();
+        register_reflect(&mut types);
+        (types, target, freed.index)
+    }
+
+    fn collider_fields_mut(scene: &mut Scene) -> &mut Vec<(String, Value)> {
+        let value = scene
+            .entities
+            .values_mut()
+            .find_map(|entity| {
+                entity
+                    .components
+                    .iter_mut()
+                    .find(|(name, _)| name == "orr_physics3d::Collider")
+                    .map(|(_, value)| value)
+            })
+            .expect("the target scene has a collider");
+        match value {
+            Value::Struct(fields) => fields,
+            other => panic!("Collider is not a struct: {other:?}"),
+        }
+    }
+
+    fn body_fields_mut(scene: &mut Scene) -> &mut Vec<(String, Value)> {
+        let value = scene
+            .entities
+            .values_mut()
+            .find_map(|entity| {
+                entity
+                    .components
+                    .iter_mut()
+                    .find(|(name, _)| name == "orr_physics3d::Body")
+                    .map(|(_, value)| value)
+            })
+            .expect("the target scene has a body");
+        match value {
+            Value::Struct(fields) => fields,
+            other => panic!("Body is not a struct: {other:?}"),
+        }
+    }
+
+    fn assert_invalid_scene_load_preserves_target(
+        mutate: fn(&mut Scene),
+        guard_message: &str,
+    ) {
+        fn load(
+            text: &str,
+            types: &TypeRegistry,
+            target: &mut Frame,
+        ) -> Result<SceneIndex, String> {
+            Scene::parse(text, types)
+                .map_err(|error| format!("parse: {error}"))
+                .and_then(|scene| {
+                    scene
+                        .bake(types, target)
+                        .map_err(|error| format!("bake: {error}"))
+                })
+        }
+
+        let (types, mut target, freed_index) = nonempty_target();
+        let valid_scene = Scene::unbake(&types, &target, None).unwrap();
+        let valid_yaml = valid_scene.to_yaml();
+        let mut invalid_scene = valid_scene.clone();
+        mutate(&mut invalid_scene);
+        let invalid_yaml = invalid_scene.to_yaml();
+
+        let original = target.clone();
+        let before_bytes = original.to_bytes();
+        let before_checksum = original.checksum();
+        let error = load(&invalid_yaml, &types, &mut target).unwrap_err();
+        assert!(
+            error.starts_with("parse: "),
+            "invalid YAML must be rejected by Scene::parse before bake, got: {error}"
+        );
+        assert!(
+            error.contains(guard_message),
+            "parse should report the custom guard {guard_message:?}, got: {error}"
+        );
+        assert_eq!(
+            target.to_bytes(),
+            before_bytes,
+            "a rejected load must not touch frame bytes"
+        );
+        assert_eq!(
+            target.checksum(),
+            before_checksum,
+            "a rejected load must not alter frame state"
+        );
+
+        let mut expected = original.clone();
+        let expected_index = Scene::parse(&valid_yaml, &types)
+            .unwrap()
+            .bake(&types, &mut expected)
+            .unwrap();
+        let actual_index = load(&valid_yaml, &types, &mut target).unwrap();
+        assert_eq!(
+            actual_index, expected_index,
+            "failed loads preserve allocation identity"
+        );
+        assert_eq!(
+            actual_index.iter().next().unwrap().1.index,
+            freed_index,
+            "the subsequent valid load reuses the original freed slot"
+        );
+        assert_eq!(target.to_bytes(), expected.to_bytes());
+        assert_eq!(target.checksum(), expected.checksum());
+    }
 
     #[test]
     fn body_descriptor_round_trips_layout_and_hides_runtime_words() {
@@ -648,5 +793,47 @@ mod tests {
         assert_eq!(baked_state.config, authored);
         assert_ne!(baked_state.contacts, FrameList::<ContactCache>::NONE);
         assert!(baked.list(baked_state.contacts).is_empty());
+    }
+
+    #[test]
+    fn scene_parse_rejects_capsule_overall_extent_without_mutating_target() {
+        assert_invalid_scene_load_preserves_target(
+            |scene| {
+                let (_, shape) = collider_fields_mut(scene)
+                    .iter_mut()
+                    .find(|(name, _)| name == "shape")
+                    .unwrap();
+                *shape = Value::Variant(
+                    "capsule".into(),
+                    vec![
+                        ("half_length".into(), fixed(fp!(600))),
+                        ("radius".into(), fixed(fp!(500))),
+                    ],
+                );
+            },
+            "half_length: half_length + radius must be at most 1000",
+        );
+    }
+
+    #[test]
+    fn scene_parse_rejects_non_unit_quaternion_without_mutating_target() {
+        assert_invalid_scene_load_preserves_target(
+            |scene| {
+                let (_, rot) = body_fields_mut(scene)
+                    .iter_mut()
+                    .find(|(name, _)| name == "rot")
+                    .unwrap();
+                *rot = Value::Variant(
+                    "unit".into(),
+                    vec![
+                        ("x".into(), fixed(FP::ONE)),
+                        ("y".into(), fixed(FP::ONE)),
+                        ("z".into(), fixed(FP::ZERO)),
+                        ("w".into(), fixed(FP::ZERO)),
+                    ],
+                );
+            },
+            "quaternion must have unit length (squared length within 0.001 of 1)",
+        );
     }
 }
