@@ -224,6 +224,205 @@ fn release_baseline_3d_default() {
     run_release_baseline_3d("default", Settings3D::default());
 }
 
+#[test]
+#[ignore = "observer-only RTX 5070 Vulkan LOD capture; run as one exact test process"]
+fn release_sphere_lod_perf_default_mixed_off() {
+    run_release_sphere_lod_perf_default_mixed(false);
+}
+
+#[test]
+#[ignore = "observer-only RTX 5070 Vulkan LOD capture; run as one exact test process"]
+fn release_sphere_lod_perf_default_mixed_on() {
+    run_release_sphere_lod_perf_default_mixed(true);
+}
+
+#[expect(clippy::float_arithmetic, reason = "Observer-only renderer benchmark fixture uses deterministic floating-point scene values.")]
+#[expect(clippy::disallowed_types, reason = "Wall clocks measure this view-only benchmark and its separate readback latency.")]
+fn run_release_sphere_lod_perf_default_mixed(lod_enabled: bool) {
+    assert_eq!(std::env::var("ORR_REQUIRE_GPU").as_deref(), Ok("1"), "this capture requires an available GPU");
+    assert_eq!(
+        std::env::var("ORR_BASELINE_GPU_MODE").as_deref(),
+        Ok("hardware"),
+        "this capture must request the hardware adapter lane"
+    );
+    let Some((_guard, gpu)) = baseline_gpu() else {
+        panic!("required hardware adapter was unavailable");
+    };
+
+    const W: u32 = 640;
+    const H: u32 = 360;
+    const SPHERE_COUNT: u32 = 1000;
+    const NEAR_SEGMENTS: u32 = 32;
+    const FAR_SEGMENTS: u32 = 12;
+    const FRAME_COUNTS: [(&str, u32); 3] = [("cold", 1), ("warmup", 10), ("steady", 30)];
+    let info = gpu.adapter().get_info();
+    assert!(!gpu.is_software(), "software adapter is not the approved RTX 5070 hardware target: {info:?}");
+    assert_eq!(format!("{:?}", info.device_type), "DiscreteGpu", "adapter must be discrete: {info:?}");
+    assert_eq!(info.vendor, 0x10de, "adapter must be NVIDIA: {info:?}");
+    assert_eq!(info.name, "NVIDIA GeForce RTX 5070", "adapter must match the observed RTX 5070 model: {info:?}");
+    assert_eq!(format!("{:?}", info.backend), "Vulkan", "adapter backend must be Vulkan: {info:?}");
+
+    let settings = Settings3D::default();
+    let policy = SphereLod3D::default();
+    assert_eq!(settings.msaa, 4, "fixture requires default 4x MSAA request");
+    assert_eq!(settings.shadow_map_size, 2048, "fixture requires default shadow map size");
+    assert_eq!(settings.mesh_segments, NEAR_SEGMENTS, "fixture requires default near sphere detail");
+    assert_eq!(policy.far_segments, FAR_SEGMENTS, "fixture requires default far sphere detail");
+    assert_eq!(policy.max_projected_radius_px, 6.0, "fixture requires default projected-radius cutoff");
+
+    let target = OffscreenTarget::new(&gpu, W, H, TextureFormat::Rgba8UnormSrgb);
+    let mut renderer = if lod_enabled {
+        Renderer3D::with_sphere_lod(gpu.clone(), target.format(), settings, policy)
+            .expect("default sphere LOD policy must be valid")
+    } else {
+        Renderer3D::with_settings(gpu.clone(), target.format(), settings)
+    };
+    renderer.clear = BLACK;
+    assert_eq!(renderer.samples(), 4, "actual renderer sample count must remain 4x before timing");
+
+    let camera = Camera3D::perspective([0.0, 28.0, 34.0], [0.0, 0.0, 0.0], 55.0);
+    let mut list = RenderList3D::new();
+    list.lighting.shadows = true;
+    for z in 0..25u32 {
+        for x in 0..40u32 {
+            let color = [
+                x as f32 / 39.0,
+                0.25 + z as f32 / 50.0,
+                ((x * 7 + z * 13) % 40) as f32 / 39.0,
+            ];
+            let radius = [0.30, 0.45, 0.70, 0.96][((x * 7 + z * 13) % 4) as usize];
+            list.sphere(
+                [x as f32 - 19.5, 0.35, z as f32 - 12.0],
+                IDENTITY_ROT,
+                radius,
+                &Material::new(color),
+            );
+        }
+    }
+    assert_eq!(list.instance_count(), SPHERE_COUNT as usize);
+    assert!(list.lines.is_empty(), "fixture must contain only spheres");
+
+    eprintln!(
+        "ORR_LOD_PERF {{\"schema_version\":1,\"case\":\"metadata\",\"scene_id\":\"sphere_grid_1000_mixed_size_v1\",\"lod_enabled\":{lod_enabled},\"instance_count\":{SPHERE_COUNT},\"radius_bins\":[0.30,0.45,0.70,0.96],\"radius_assignment\":\"(x*7+z*13)%4\",\"resolution_px\":[{W},{H}],\"target_format\":\"Rgba8UnormSrgb\",\"camera_eye\":[0.0,28.0,34.0],\"camera_target\":[0.0,0.0,0.0],\"camera_fov_degrees\":55.0,\"shadows\":true,\"requested_msaa\":{},\"actual_msaa\":{},\"shadow_map_size\":{},\"near_segments\":{},\"far_segments\":{},\"max_projected_radius_px\":{},\"adapter_name\":\"{}\",\"adapter_backend\":\"{:?}\",\"adapter_device_type\":\"{:?}\",\"adapter_vendor\":{},\"adapter_device\":{},\"driver\":\"{}\",\"driver_info\":\"{}\",\"software\":{},\"additional_static_mesh_bytes\":{}}}",
+        settings.msaa,
+        renderer.samples(),
+        settings.shadow_map_size,
+        settings.mesh_segments,
+        policy.far_segments,
+        policy.max_projected_radius_px,
+        json_escape(&info.name),
+        info.backend,
+        info.device_type,
+        info.vendor,
+        info.device,
+        json_escape(&info.driver),
+        json_escape(&info.driver_info),
+        gpu.is_software(),
+        renderer.last_sphere_lod_stats().additional_static_mesh_bytes,
+    );
+
+    let mut observed_buckets = None;
+    for (frame_class, count) in FRAME_COUNTS {
+        for frame_index in 0..count {
+            let start = std::time::Instant::now();
+            target.render3d(&mut renderer, &list, &camera);
+            let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let frame = renderer.last_frame_stats();
+            let lod = renderer.last_sphere_lod_stats();
+
+            assert_eq!(frame.shape_instances, 0);
+            assert_eq!(frame.mesh_instances, u64::from(SPHERE_COUNT));
+            assert_eq!(frame.line_instances, 0);
+            assert_eq!(frame.msaa_samples, 4);
+            assert_eq!(frame.main.passes, 1);
+            assert_eq!(frame.shadow.passes, 1);
+            assert_eq!(frame.shadow.instances, u64::from(SPHERE_COUNT));
+            assert_eq!(lod.enabled, lod_enabled);
+            assert_eq!(lod.near_instances + lod.far_instances, SPHERE_COUNT);
+            assert!(lod.fallback_instances <= lod.near_instances);
+            assert_eq!(lod.shadow_draw_calls, 1);
+            assert_eq!(lod.shadow_index_invocations, sphere_index_invocations(NEAR_SEGMENTS, SPHERE_COUNT));
+            assert_eq!(lod.upload_calls, 1);
+            assert_eq!(lod.upload_bytes, u64::from(SPHERE_COUNT) * 80);
+            if lod_enabled {
+                assert!(lod.near_instances > 0, "fixture must exercise near LOD");
+                assert!(lod.far_instances > 0, "fixture must exercise far LOD");
+                assert_eq!(lod.main_draw_calls, 2);
+                assert_eq!(lod.main_index_invocations,
+                    sphere_index_invocations(NEAR_SEGMENTS, lod.near_instances)
+                        + sphere_index_invocations(FAR_SEGMENTS, lod.far_instances));
+            } else {
+                assert_eq!((lod.near_instances, lod.far_instances, lod.fallback_instances), (SPHERE_COUNT, 0, 0));
+                assert_eq!(lod.main_draw_calls, 1);
+                assert_eq!(lod.main_index_invocations, sphere_index_invocations(NEAR_SEGMENTS, SPHERE_COUNT));
+            }
+            assert_eq!(frame.main.draw_calls, lod.main_draw_calls);
+            assert_eq!(frame.main.instances, u64::from(SPHERE_COUNT));
+            assert_eq!(frame.shadow.draw_calls, 1);
+            assert_eq!(frame.upload_calls, 3);
+            assert_eq!(frame.upload_bytes, u64::from(SPHERE_COUNT) * 80 + 512);
+            if frame_class != "cold" {
+                assert_eq!(frame.buffer_reallocations, 0, "steady fixture unexpectedly grew instance buffers");
+                assert_eq!(frame.attachment_allocations, 0, "steady fixture unexpectedly allocated attachments");
+                assert_eq!(frame.attachment_reallocations, 0, "steady fixture unexpectedly reallocated attachments");
+                assert_eq!(lod.staging_reallocations, 0, "steady fixture unexpectedly grew LOD staging");
+            }
+            let buckets = (lod.near_instances, lod.far_instances, lod.fallback_instances);
+            if let Some(expected) = observed_buckets {
+                assert_eq!(buckets, expected, "camera/scene LOD bucket counts changed during capture");
+            } else {
+                observed_buckets = Some(buckets);
+            }
+
+            eprintln!(
+                "ORR_LOD_PERF {{\"schema_version\":1,\"case\":\"frame\",\"scene_id\":\"sphere_grid_1000_mixed_size_v1\",\"lod_enabled\":{lod_enabled},\"frame_class\":\"{frame_class}\",\"frame_index\":{frame_index},\"wall_scope\":\"render_call_return_not_gpu_completion\",\"wall_ms\":{wall_ms:.6},\"cpu_prepare_ms\":{},\"cpu_classify_pack_staging_ms\":{},\"cpu_encode_ms\":{},\"cpu_submit_ms\":{},\"shape_instances\":{},\"mesh_instances\":{},\"line_instances\":{},\"main\":{{\"passes\":{},\"draw_calls\":{},\"instances\":{}}},\"shadow\":{{\"passes\":{},\"draw_calls\":{},\"instances\":{}}},\"near_instances\":{},\"far_instances\":{},\"fallback_instances\":{},\"main_index_invocations\":{},\"shadow_index_invocations\":{},\"lod_upload_calls\":{},\"lod_upload_bytes\":{},\"frame_upload_calls\":{},\"frame_upload_bytes\":{},\"staging_capacity\":{},\"classification_capacity\":{},\"staging_reallocations\":{},\"buffer_reallocations\":{},\"attachment_allocations\":{},\"attachment_reallocations\":{},\"actual_msaa\":{}}}",
+                duration_ms(frame.cpu_prepare_time),
+                duration_ms(lod.cpu_classify_time),
+                duration_ms(frame.cpu_encode_time),
+                duration_ms(frame.cpu_submit_time),
+                frame.shape_instances,
+                frame.mesh_instances,
+                frame.line_instances,
+                frame.main.passes,
+                frame.main.draw_calls,
+                frame.main.instances,
+                frame.shadow.passes,
+                frame.shadow.draw_calls,
+                frame.shadow.instances,
+                lod.near_instances,
+                lod.far_instances,
+                lod.fallback_instances,
+                lod.main_index_invocations,
+                lod.shadow_index_invocations,
+                lod.upload_calls,
+                lod.upload_bytes,
+                frame.upload_calls,
+                frame.upload_bytes,
+                lod.staging_capacity,
+                lod.classification_capacity,
+                lod.staging_reallocations,
+                frame.buffer_reallocations,
+                frame.attachment_allocations,
+                frame.attachment_reallocations,
+                frame.msaa_samples,
+            );
+        }
+    }
+
+    let readback_start = std::time::Instant::now();
+    let image = target.read_rgba8();
+    let readback_ms = readback_start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(image.len(), (W * H * 4) as usize);
+    assert!(image.chunks_exact(4).any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0), "fixture produced no visible pixels");
+    let checksum = image.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    eprintln!(
+        "ORR_LOD_PERF {{\"schema_version\":1,\"case\":\"readback\",\"scene_id\":\"sphere_grid_1000_mixed_size_v1\",\"lod_enabled\":{lod_enabled},\"readback_ms\":{readback_ms:.6},\"pixel_bytes\":{},\"fnv1a64\":\"{checksum:016x}\",\"timing_included_in_frame_samples\":false}}",
+        image.len()
+    );
+}
+
 const BLACK: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
 const SETTINGS: Settings3D = Settings3D { msaa: 4, shadow_map_size: 1024, mesh_segments: 32 };
 
