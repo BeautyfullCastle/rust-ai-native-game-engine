@@ -23,7 +23,7 @@ Four ways to get the same bytes:
 
 | Way | For | Entry point |
 | --- | --- | --- |
-| C ABI | a view in the same process (Unity plugin, Unreal module, GDExtension, console title) | `orr_host_open` (local), `orr_client_open` (multiplayer), `orr_view_poll` |
+| C ABI | a view in the same process (Unity plugin, Unreal module, GDExtension, console title) | `orr_host_open` (local PhysGame), `orr_yard3d_host_open_v1` (local Yard3D), `orr_client_open` (PhysGame multiplayer), `orr_view_poll` |
 | WebSocket | a view in another process, machine or devkit | `watch.subscribe {"topics":["viewstream"]}` |
 | Plain TCP | scripts, tools, anything without a WebSocket library | same call, frames arrive as hex in JSON |
 | Rust | `orr_bridge` users | `ViewStreamSource::pump(&mut bridge)` |
@@ -375,15 +375,28 @@ verified=.. canceled=.. checkpoint=300 checksum=0x..`; every player of a room pr
 --dump file` prints `RESULT entities=.. frames=.. fnv=0x..`, the same line the
 C client and the Rust bridge produce for the same scenario.
 
+The Yard3D socket TUI is a separate #13 follow-up; this C ABI change does not
+add that consumer. Its scope is an XZ observer through
+`orr_tui --connect ws://HOST:PORT`: `p`/space play or pause the timeline, `s`
+steps once, `r` refits the view, and `q` quits. Gameplay input is unsupported,
+including initial neutral input, held movement and fire; the 2D input encoder
+must not produce YardInput. Interactive terminal validation remains pending
+for that follow-up. 3D headless operation is unsupported, and rejection can
+occur after a socket or session handshake. A dynamically loaded Yard3D FFI
+TUI, Yard3D relay multiplayer, arbitrary scene loading and a new GPU renderer
+remain separate work.
+
 The hosts of the same tick share one encoded message, so two subscribers get
 byte-identical frames (including `seq`).
 
 ## C ABI (`orr_ffi`)
 
 Header: `crates/orr_ffi/include/orrery.h`. The library (`cdylib`: `.so`,
-`.dylib`, `.dll`; `staticlib` for consoles) hosts **one game, chosen when it is
-built**; `orr_ffi` ships the physics demo (`PhysGame`). To host another game,
-copy the crate and replace the `spawn_phys_host` call in `open_host` with a
+`.dylib`, `.dll`; `staticlib` for consoles) provides explicit built-in game
+entries. `orr_host_open(scene_path, cfg)` remains the physics demo (`PhysGame`),
+and `orr_client_open` remains its relay client. The additive
+`orr_yard3d_host_open_v1(max_view_version, cfg)` opens a local Yard3D scene.
+To compile in another game, copy the crate and replace a game factory with a
 `LocalHost::spawn::<YourGame>` whose settings include its `view_stream` producer
 (the extractor, the kinds, the schema). The header, the schema and the stream
 are the same for every game.
@@ -404,6 +417,7 @@ orr_host_close(h);
 | --- | --- |
 | `orr_abi_version`, `orr_last_error` | version check; text of the last error on this thread |
 | `orr_host_open(scene_yaml_or_NULL, cfg)` / `orr_host_close` | start / stop a host thread with a paused play session |
+| `orr_yard3d_host_open_v1(max_view_version, cfg)` | deterministic built-in Yard3D local host; requires a reader supporting view format 2 |
 | `orr_schema_json(h, buf, cap)` | the schema, NUL-terminated; returns size needed |
 | `orr_host_url(h, buf, cap)` | `ws://` URL if opened with `ORR_HOST_LISTEN` (for out-of-process views) |
 | `orr_view_poll(h, buf, cap, &written)` / `orr_view_poll_ptr(h, &data, &len)` | newest unread frame (copy / zero-copy); `ORR_NO_FRAME` if nothing new |
@@ -414,6 +428,44 @@ orr_host_close(h);
 | `orr_client_open(cfg)` | play on an `orr_server` room (ABI 2): `OrrClientConfig` has the server address, transport, certificate fingerprint, room, slot, simulated latency/jitter/loss, timeout |
 | `orr_session_status(h, &status)` | `OrrSessionStatus` of either kind of handle (state, slot, RTT, input delay, rollbacks, desyncs, ...) |
 | `orr_confirmed_checksum(h, tick, &found, &sum)` | checksum of the confirmed state at a checkpoint tick (client sessions) |
+
+### Built-in Yard3D through the C ABI
+
+`orr_yard3d_host_open_v1(2, cfg)` creates the existing nonempty deterministic
+Yard3D scene (24 initial raining bodies plus yard fixtures, default rain of
+6 bodies/second, max 2500 entities, layout seed `0x5EED_CAFE`, session seed 42,
+two players, 60 Hz, local build ID zero) and starts a
+play session, paused unless `ORR_HOST_RUN` is set. `cfg` has the same optional listen/run settings as
+`orr_host_open`; there is no scene-path argument. The handle's schema is
+`game: "Yard3D"`, `version: 2`, with `frame3d` describing
+message type 3 and 88-byte entity records. Existing copy and pointer polling
+calls return those opaque bytes, including the usual flags and properties.
+
+`max_view_version` is the highest view format the caller can decode. A value
+below 2 returns NULL with an explanation from `orr_last_error` before a host
+thread or listening socket starts. A higher maximum still selects this
+entry's version 2 stream. The `_v1` suffix versions this entry's C contract;
+it does not mean view format 1. Existing ABI version 2, structure layouts,
+symbols and PhysGame behavior are preserved. When loading a library at run
+time, resolve the new symbol explicitly: an older ABI2 library may lack it,
+which is an unsupported feature, never a reason to call the PhysGame entry
+and interpret its records as 3D.
+
+Build the held input from the returned schema: YardInput is exactly 32 bytes,
+with buttons at offset 0, zero padding at 4, three signed 32-bit origin
+coordinates in centimetres at 8, and three signed 32-bit ray-direction
+components scaled by 1000 at 20. Button bits are shoot/spawn box/spawn ball/
+spawn capsule (1/2/4/8). `orr_set_input` uses that raw layout for slots 0 and 1;
+the generic 24-byte PhysInput layout does not apply. The no-op command is
+4 bytes. Timeline controls and ERP calls operate on the same local play
+session. Seek replays its recorded history; this entry does not add a Yard3D
+relay client or genuine late-input network rollback.
+
+The dedicated external C consumer is `tests/c/yard3d_view_client.c`, run by
+`cargo test -p orr_ffi --release --test yard3d_c_client` with
+`ORR_REQUIRE_C_COMPILER=1` to require a real C compiler and shared library.
+Header parity, existing `c_client` and `client_session` tests continue to
+cover the original ABI and 2D consumers.
 
 A host opened with `ORR_HOST_LISTEN` also serves ERP on a loopback port (for out-of-process
 views and tools) **without authentication**: any local process can drive it. Use it for
