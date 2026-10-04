@@ -226,9 +226,14 @@ Cold prepare/classify/encode/submit values (ms) are retained separately:
 | LOD portion upload bytes / calls | 80,000 / 1 | 80,000 / 1 |
 | Additional static mesh payload bytes | 0 | 5,580 |
 | Retained staging capacity (instance elements) | 0 | 1,000 |
-| Retained classification capacity (boolean bits) | 0 | 1,000 |
+| Retained classification capacity (bool elements) | 0 | 1,000 |
 | Cold attachment allocations / staging reallocations | 2 / 0 | 2 / 2 |
 | Subsequent 40-frame allocation/reallocation counters | all zero | all zero |
+
+For these results, `classification_capacity` is `Vec<bool>::capacity()` and
+counts bool elements, not packed physical bits or bytes. The earlier
+correctness section/source comment uses the historical label "bits"; this
+result section clarifies that unit without changing the measured source.
 
 All 41 frames per child recorded shape=0, mesh=1000 and line=0. The reduced
 main index count is submitted logical work; it is not a GPU time or speedup.
@@ -253,7 +258,7 @@ CPU render-call return is not GPU completion, GPU execution duration or FPS.
 The final readback boundary is not a per-frame GPU timer. These six process
 observations, in fixed rather than randomized order with background activity,
 provide no CPU improvement conclusion, pooled ratio, median, p95 or product
-budget. Static payload bytes and element/bit capacities exclude full heap,
+budget. Static payload bytes and element capacities exclude full heap,
 allocator/driver overhead, RSS and private usage; none were sampled here.
 The default remains off.
 
