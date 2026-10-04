@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use orr_remote::sample::spawn_phys_host;
+use orr_remote::sample::{spawn_arena_host, spawn_phys_host};
 use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteConfig, RemoteIdentity, ScreenshotOwner, ScreenshotService, ServerConfig, ViewDeliveryMode, USER_CLIENT};
 use crate::game::{EditorGame, EditorStream};
 use serde_json::{json, Value as J};
@@ -36,6 +36,18 @@ pub enum HostSpec {
         /// Enable the `debug.panic` test hook (tests of crash isolation).
         debug_hooks: bool,
     },
+    /// A local host of the selected editor game, preserving `Local`'s legacy
+    /// PhysGame behavior and public struct-literal shape.
+    LocalGame {
+        /// The scene file the host loads and saves.
+        scene: PathBuf,
+        /// The compiled game hosted on this thread.
+        game: EditorGame,
+        /// Optional ERP listener configuration.
+        listen: Option<ServerConfig>,
+        /// Enable the `debug.panic` test hook.
+        debug_hooks: bool,
+    },
     /// A host in another process.
     Remote {
         /// `ws://host:port` of its ERP server.
@@ -51,6 +63,31 @@ impl HostSpec {
         HostSpec::Local { scene: scene.into(), listen: None, debug_hooks: false }
     }
 
+    /// A local host using a particular compiled game and scene.
+    pub fn local_game(scene: impl Into<PathBuf>, game: EditorGame) -> HostSpec {
+        HostSpec::LocalGame { scene: scene.into(), game, listen: None, debug_hooks: false }
+    }
+
+    /// Adds an ERP listener to an editor-owned local host.
+    pub fn with_listener(mut self, listen: ServerConfig) -> HostSpec {
+        match &mut self {
+            HostSpec::Local { listen: current, .. } | HostSpec::LocalGame { listen: current, .. } => *current = Some(listen),
+            HostSpec::Remote { .. } => {}
+        }
+        self
+    }
+
+    /// Updates the persisted scene path of a local host spec after open/save.
+    pub fn set_local_scene_path(&mut self, path: PathBuf) -> bool {
+        match self {
+            HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => {
+                *scene = path;
+                true
+            }
+            HostSpec::Remote { .. } => false,
+        }
+    }
+
     /// Attach to `url`.
     pub fn remote(url: &str, token: Option<&str>) -> HostSpec {
         HostSpec::Remote { url: url.to_string(), token: token.map(str::to_string) }
@@ -58,7 +95,7 @@ impl HostSpec {
 
     /// True for a host thread of this process.
     pub fn is_local(&self) -> bool {
-        matches!(self, HostSpec::Local { .. })
+        matches!(self, HostSpec::Local { .. } | HostSpec::LocalGame { .. })
     }
 }
 
@@ -105,7 +142,12 @@ impl Backend {
     /// Starts the host thread or attaches to the host, and opens both channels.
     pub fn connect(spec: &HostSpec) -> Result<Backend, String> {
         match spec {
-            HostSpec::Local { scene, listen, debug_hooks } => {
+            HostSpec::Local { scene, listen, debug_hooks } | HostSpec::LocalGame { scene, listen, debug_hooks, .. } => {
+                let selected_game = match spec {
+                    HostSpec::Local { .. } => EditorGame::PhysGame,
+                    HostSpec::LocalGame { game, .. } => *game,
+                    HostSpec::Remote { .. } => unreachable!("matched local host spec"),
+                };
                 let text = std::fs::read_to_string(scene).map_err(|e| format!("cannot read {}: {e}", scene.display()))?;
                 let mut cfg = match listen {
                     Some(c) => c.clone(),
@@ -121,7 +163,10 @@ impl Backend {
                 cfg.limits.max_step_per_call = 20_000;
                 let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
                 cfg.screenshot = Some(screenshot_service);
-                let host = spawn_phys_host(text, Some(scene.clone()), cfg)?;
+                let host = match selected_game {
+                    EditorGame::PhysGame => spawn_phys_host(text, Some(scene.clone()), cfg)?,
+                    EditorGame::Arena => spawn_arena_host(text, Some(scene.clone()), cfg)?,
+                };
                 let connector = host.connector();
                 let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
                 let mut erp = ErpClient::with_transport(Box::new(link("ERP")?));
@@ -161,7 +206,7 @@ impl Backend {
     /// Another frame stream, for what the viewport previews (`proposal:p3`).
     pub fn frame_stream(&self, source: &str) -> Result<EditorStream, String> {
         let mut rc = match &self.spec {
-            HostSpec::Local { .. } => RemoteConfig::new(""),
+            HostSpec::Local { .. } | HostSpec::LocalGame { .. } => RemoteConfig::new(""),
             HostSpec::Remote { url, token } => {
                 let mut c = RemoteConfig::new(&if token.is_some() { url.clone() } else { ws_url(url, None) });
                 c.token.clone_from(token);

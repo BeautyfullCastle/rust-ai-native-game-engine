@@ -52,6 +52,17 @@ impl LocalHost {
     /// server settings; it may fail (`Err` is returned here). The server
     /// starts from the settings, listening on `cfg.bind` only if `cfg.listen`.
     pub fn spawn<G: Game + 'static>(setup: impl FnOnce() -> Result<(EditorDoc, ServerConfig), String> + Send + 'static) -> Result<LocalHost, String> {
+        Self::spawn_configured::<G>(setup, |_| {})
+    }
+
+    /// Starts a host and configures server-side protocols after the ERP server
+    /// is live but before the host is published to clients or begins polling.
+    /// The ordinary `spawn` API retains its original setup and readiness
+    /// semantics.
+    pub(crate) fn spawn_configured<G: Game + 'static>(
+        setup: impl FnOnce() -> Result<(EditorDoc, ServerConfig), String> + Send + 'static,
+        configure: impl FnOnce(&mut ErpServer) + Send + 'static,
+    ) -> Result<LocalHost, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let reason = Arc::new(Mutex::new(None::<String>));
         let (ready_tx, ready_rx) = channel::<Result<(LocalConnector, Option<String>), String>>();
@@ -67,13 +78,14 @@ impl LocalHost {
                             return;
                         }
                     };
-                    let server = match ErpServer::start(cfg) {
+                    let mut server = match ErpServer::start(cfg) {
                         Ok(s) => s,
                         Err(e) => {
                             let _ = ready_tx.send(Err(format!("ERP: {e}")));
                             return;
                         }
                     };
+                    configure(&mut server);
                     let url = server.is_listening().then(|| server.url());
                     let _ = ready_tx.send(Ok((server.connector(), url)));
                     let mut host = Host::<G>::new(doc, server);

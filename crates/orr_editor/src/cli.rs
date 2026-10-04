@@ -2,9 +2,11 @@
 
 use std::path::PathBuf;
 
+use crate::game::EditorGame;
+
 /// Usage text.
 pub const USAGE: &str = "\
-orr_editor [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
+orr_editor [--game physics|arena] [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
            [--screenshot <out.png> [--frames <n>] [--screenshot-settle]] [--size <WxH>]
            [--erp <addr>] [--erp-token <name:token:caps>]... [--erp-dev]
 orr_editor --connect <ws://host:port> [--token <t>] [same flags, but --scene/--erp]
@@ -14,7 +16,8 @@ host: by default a thread of this process, started on the scene and
 connected in-process; with --connect, an `orr_remote_host` (or another
 editor's ERP) that is already running.
 
-  --scene <file>        scene to open (default scenes/physics_demo.scene.yaml)
+  --scene <file>        scene to open (default scene depends on --game)
+  --game <name>         local game: physics (default) or arena; cannot be used with --connect
   --connect <url>       attach to a running host instead of starting one: the
                         editor then shows and edits THAT host's scene and play
                         session (with --token when it needs one; a dev-mode
@@ -41,6 +44,8 @@ editor's ERP) that is already running.
 /// Parsed flags.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Args {
+    /// Optional local game selection. `None` preserves the PhysGame default.
+    pub game: Option<EditorGame>,
     /// `--scene`.
     pub scene: Option<PathBuf>,
     /// `--select`.
@@ -71,7 +76,7 @@ pub struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Self { scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
+        Self { game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -84,6 +89,7 @@ impl Args {
         while let Some(a) = it.next() {
             let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value\n\n{USAGE}"));
             match a.as_str() {
+                "--game" => out.game = Some(EditorGame::from_local_name(&value("--game")?)?),
                 "--scene" => out.scene = Some(PathBuf::from(value("--scene")?)),
                 "--select" => out.select = Some(value("--select")?),
                 "--script" => out.script = Some(PathBuf::from(value("--script")?)),
@@ -107,6 +113,9 @@ impl Args {
         }
         if out.connect.is_some() && (out.scene.is_some() || out.erp.is_some()) {
             return Err("--connect attaches to a host that has its own scene: it cannot be combined with --scene or --erp".to_string());
+        }
+        if out.connect.is_some() && out.game.is_some() {
+            return Err("--game selects a local game and cannot be combined with --connect".to_string());
         }
         if out.token.is_some() && out.connect.is_none() {
             return Err("--token is for --connect (use --erp-token to set tokens for --erp)".to_string());
@@ -150,6 +159,19 @@ mod tests {
     fn parses_connect() {
         let a = parse("--connect ws://127.0.0.1:7790 --token s3 --screenshot /tmp/a.png").unwrap();
         assert_eq!((a.connect.as_deref(), a.token.as_deref()), (Some("ws://127.0.0.1:7790"), Some("s3")));
+    }
+
+    #[test]
+    fn local_game_defaults_to_physics_and_accepts_arena() {
+        assert_eq!(parse("").unwrap().game, None);
+        assert_eq!(parse("--game physics").unwrap().game, Some(EditorGame::PhysGame));
+        assert_eq!(parse("--game arena").unwrap().game, Some(EditorGame::Arena));
+    }
+
+    #[test]
+    fn local_game_rejects_unknown_and_remote_selection() {
+        assert!(parse("--game nope").is_err());
+        assert!(parse("--game arena --connect ws://127.0.0.1:7790").is_err());
     }
 
     #[test]

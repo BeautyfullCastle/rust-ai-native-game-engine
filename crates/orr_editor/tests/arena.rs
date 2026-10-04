@@ -202,6 +202,87 @@ fn arena_native_window_smoke() {
     std::fs::write(out.join("verified.json"), serde_json::to_vec_pretty(&verify).unwrap()).unwrap();
     eprintln!("PASS: real native Arena edit/score windows, pixels, host checksums and replay verified in {}", out.display());
     capture_native_local_erp(&out);
+    capture_native_local_arena(&out);
+}
+
+/// The normal local Arena CLI path owns both its host and its app-framebuffer
+/// endpoint. Keep the original remote Arena and local Phys proofs above intact.
+fn capture_native_local_arena(out: &std::path::Path) {
+    use std::{process::{Command, Stdio}, time::{Duration, Instant}};
+    let scene_path = out.join("local-arena.scene.yaml");
+    std::fs::write(&scene_path, SCENE).unwrap();
+    let log_path = out.join("local-arena-erp.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    struct Window(std::process::Child);
+    impl Drop for Window {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let mut child = Window(Command::new(env!("CARGO_BIN_EXE_orr_editor"))
+        .args(["--game", "arena", "--scene"]).arg(&scene_path)
+        .args(["--select", "hero", "--erp", "127.0.0.1:0", "--erp-dev", "--size", "1200x850"])
+        .stdin(Stdio::null()).stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log))
+        .spawn().expect("start the normal local Arena editor with ERP"));
+    let startup = Instant::now() + Duration::from_secs(60);
+    let url = loop {
+        let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(child.0.try_wait().unwrap().is_none(), "local Arena editor exited before capture\n{text}");
+        if let Some(url) = text.lines().find_map(|line| line.strip_prefix("Editor UI settled: ")) {
+            break url.to_string();
+        }
+        assert!(Instant::now() < startup, "local Arena editor never settled\n{text}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut agent = orr_remote::ErpClient::connect(&url, None).unwrap();
+    agent.call_timeout = Duration::from_secs(10);
+    let discovery = agent.call("rpc.discover", J::Null).unwrap();
+    assert_eq!(discovery["engine"]["game"], "Arena");
+    assert_eq!(agent.call("registry.input", J::Null).unwrap()["managed_held"]["version"], 1);
+    let edit = agent.call("sim.state", J::Null).unwrap();
+    assert_eq!(edit["mode"], "edit");
+    let image = capture_erp_frame(&mut agent, &edit, &discovery, &mut child.0, &log_path);
+    assert_local_arena_pixels(&image);
+    save_erp_frame(out, "local-arena-erp-edit", &image);
+    assert_eq!(agent.call("sim.state", J::Null).unwrap()["checksum"], edit["checksum"]);
+
+    agent.call("sim.start", json!({})).unwrap();
+    input(&mut agent, 0, true);
+    agent.call("sim.step", json!({"n":1})).unwrap();
+    input(&mut agent, 0, false);
+    agent.call("sim.step", json!({"n":19})).unwrap();
+    let play = agent.call("sim.state", J::Null).unwrap();
+    assert_eq!(play["mode"], "play");
+    assert_eq!(play["playing"], false);
+    assert_eq!(play["head_tick"], 20);
+    assert_eq!(agent.call("world.singleton.get", json!({"name":"Score"})).unwrap()["value"]["kills"][0], 1);
+    let image = capture_erp_frame(&mut agent, &play, &discovery, &mut child.0, &log_path);
+    assert_local_arena_pixels(&image);
+    save_erp_frame(out, "local-arena-erp-play", &image);
+    assert_eq!(agent.call("sim.state", J::Null).unwrap()["checksum"], play["checksum"]);
+    agent.call("sim.stop", J::Null).unwrap();
+    assert_eq!(agent.call("sim.state", J::Null).unwrap()["checksum"], edit["checksum"]);
+    assert_eq!(agent.call("verify.self", json!({"inputs":{"kind":"last_play"},"checks":["recording_matches","score_0.final == 1"]})).unwrap()["passed"], true);
+    eprintln!("PASS: actual local Arena CLI host, managed-input descriptor and app-framebuffer Edit/paused Play PNGs, player pixels and unchanged host checksums");
+}
+
+fn assert_local_arena_pixels(image: &J) {
+    let bytes = orr_remote::codec::b64_decode(image["png_base64"].as_str().unwrap()).unwrap();
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    assert!(info.width >= 1000 && info.height >= 700);
+    let colors = [[137u8,203,255], [255,196,124], [255,237,124]];
+    let mut counts = [0usize;3];
+    for y in 24..info.height-140 {
+        for x in 240..info.width-345 {
+            let pixel = &pixels[((y*info.width+x)*4) as usize..][..3];
+            for (i,color) in colors.iter().enumerate() {
+                if pixel.iter().zip(color).all(|(actual,want)| actual.abs_diff(*want) <= 8) { counts[i]+=1; }
+            }
+        }
+    }
+    assert!(counts[0] > 100 && counts[1] > 100 && counts[2] > 25,
+        "local Arena viewport must show both players and selection, got {counts:?}");
 }
 
 /// The same required Xvfb run also exercises the asynchronous API on its owning
