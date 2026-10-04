@@ -42,10 +42,13 @@
 //! snapshot. Overflow replaces missing transient effects with a newest-state
 //! reset; the simulation keeps running. Old-host fallback is explicitly visible
 //! through [`RemoteBridge::view_delivery`] and retains legacy best-effort,
-//! unbounded notification behavior. Transport ingress and RPC/error queues are
-//! separate and are not bounded by this presentation budget.
+//! unbounded notification behavior. Pumped transport ingress/egress and retained
+//! RPC errors have separate item and payload-byte limits. RPC error overflow
+//! closes the connection and reports a fixed terminal diagnostic; it does not
+//! evict an earlier refusal. These payload-byte counters do not measure heap
+//! overhead, decoded temporaries, or snapshots retained by callers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -63,7 +66,10 @@ use serde_json::{json, Value as J};
 
 use crate::codec::{hex_decode, hex_encode};
 use crate::error::RpcError;
-use crate::link::{Incoming, PumpedWs, Request, Transport, TxHandle};
+use crate::link::{
+    Incoming, PumpedWs, QueueBudget, QueueLimits, QueuePermit, QueueStats, Request, SendError,
+    Transport, TransportQueueLimits, TransportQueueStats, TxHandle,
+};
 use crate::remote_view::{note, Stamp, ViewMailbox};
 use crate::wire::{debug_error_from_name, debug_to_json, decode_frame_message, timeline_from_json};
 
@@ -198,13 +204,91 @@ pub struct RemoteMetrics {
     pub last_decode_us: u64,
 }
 
+const DEFAULT_ERROR_QUEUE_LIMITS: QueueLimits = QueueLimits {
+    max_items: 256,
+    max_bytes: 1 << 20,
+};
+
+struct RetainedError {
+    error: RpcError,
+    _permit: QueuePermit,
+}
+
+#[derive(Default)]
+struct ErrorState {
+    entries: VecDeque<RetainedError>,
+    overflowed: bool,
+    overflow_reported: bool,
+}
+
+/// Bounded RPC diagnostics. Overflow is terminal because dropping an
+/// individual refusal would make the asynchronous request contract ambiguous.
+struct ErrorQueue {
+    budget: QueueBudget,
+    state: Mutex<ErrorState>,
+}
+
+impl ErrorQueue {
+    fn new(limits: QueueLimits) -> Self {
+        Self {
+            budget: QueueBudget::new(limits),
+            state: Mutex::new(ErrorState::default()),
+        }
+    }
+
+    fn push(&self, error: RpcError) -> bool {
+        let cost = error.to_json().to_string().len();
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.overflowed {
+            return false;
+        }
+        match self.budget.reserve(cost) {
+            Ok(permit) => {
+                state.entries.push_back(RetainedError {
+                    error,
+                    _permit: permit,
+                });
+                true
+            }
+            Err(SendError::Backpressure | SendError::Disconnected) => {
+                state.overflowed = true;
+                self.budget
+                    .close("remote RPC error queue saturated; connection closed");
+                false
+            }
+        }
+    }
+
+    fn take(&self) -> Vec<RpcError> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut errors = state
+            .entries
+            .drain(..)
+            .map(|entry| entry.error)
+            .collect::<Vec<_>>();
+        if state.overflowed && !state.overflow_reported {
+            state.overflow_reported = true;
+            errors.push(RpcError::state(
+                "remote_error_queue_overflow",
+                "RPC error queue reached its limit; the connection was closed and accepted RPC outcomes may be uncertain",
+            ));
+        }
+        errors
+    }
+
+    fn stats(&self) -> QueueStats {
+        self.budget.stats()
+    }
+}
+
 struct Shared<E> {
     view: Mutex<ViewMailbox<E>>,
     snapshot: ArcSwapOption<Snapshot>,
     alive: AtomicBool,
     stop: AtomicBool,
     metrics: Mutex<RemoteMetrics>,
-    errors: Mutex<Vec<RpcError>>,
+    errors: ErrorQueue,
+    tx: Arc<dyn TxHandle>,
 }
 
 /// Ids of the requests the bridge itself sends (the handshake) are small; the
@@ -340,9 +424,25 @@ struct Info {
 impl<G: Game> RemoteBridge<G> {
     /// Connects over WebSocket, authenticates, subscribes and waits for the first `sim.state`.
     pub fn connect(cfg: RemoteConfig) -> Result<Self, String> {
-        let t = PumpedWs::connect(&cfg.url, cfg.connect_timeout)
-            .map_err(|e| format!("cannot connect to {}: {e}", cfg.url))?;
-        Self::connect_transport(Box::new(t), cfg)
+        Self::connect_with_queue_limits(
+            cfg,
+            TransportQueueLimits::default(),
+            DEFAULT_ERROR_QUEUE_LIMITS,
+        )
+    }
+
+    /// Connects with independent retained transport and RPC-error queue limits.
+    /// Existing [`RemoteConfig`] fields and the default [`connect`](Self::connect)
+    /// behavior remain unchanged.
+    pub fn connect_with_queue_limits(
+        cfg: RemoteConfig,
+        transport_limits: TransportQueueLimits,
+        error_limits: QueueLimits,
+    ) -> Result<Self, String> {
+        let t =
+            PumpedWs::connect_with_queue_limits(&cfg.url, cfg.connect_timeout, transport_limits)
+                .map_err(|e| format!("cannot connect to {}: {e}", cfg.url))?;
+        Self::connect_transport_with_error_limits(Box::new(t), cfg, error_limits)
     }
 
     /// Like [`connect`](Self::connect) on a connection that is already
@@ -351,6 +451,17 @@ impl<G: Game> RemoteBridge<G> {
     /// copies, never serialized. `cfg.url` is ignored. The transport must
     /// offer a [`TxHandle`].
     pub fn connect_transport(t: Box<dyn Transport>, cfg: RemoteConfig) -> Result<Self, String> {
+        Self::connect_transport_with_error_limits(t, cfg, DEFAULT_ERROR_QUEUE_LIMITS)
+    }
+
+    /// Connects an existing transport with an explicit retained RPC-error
+    /// budget. Transport limits belong to the transport and can be configured
+    /// when constructing a [`PumpedWs`].
+    pub fn connect_transport_with_error_limits(
+        t: Box<dyn Transport>,
+        cfg: RemoteConfig,
+        error_limits: QueueLimits,
+    ) -> Result<Self, String> {
         let tx = t
             .sender()
             .ok_or_else(|| "this transport cannot send from several threads".to_string())?;
@@ -360,7 +471,8 @@ impl<G: Game> RemoteBridge<G> {
             alive: AtomicBool::new(true),
             stop: AtomicBool::new(false),
             metrics: Mutex::new(RemoteMetrics::default()),
-            errors: Mutex::new(Vec::new()),
+            errors: ErrorQueue::new(error_limits),
+            tx: tx.clone(),
         });
         let (event_tx, events) = channel::<BridgeEvent<G::Event>>();
         let (ready_tx, ready_rx) = channel::<Result<Info, String>>();
@@ -371,8 +483,16 @@ impl<G: Game> RemoteBridge<G> {
         let thread = std::thread::Builder::new()
             .name("orr-remote".to_string())
             .spawn(move || {
-                run::<G>(t, thread_cfg, &thread_shared, &event_tx, ready_tx, thread_last_input);
+                run::<G>(
+                    t,
+                    thread_cfg,
+                    &thread_shared,
+                    &event_tx,
+                    ready_tx,
+                    thread_last_input,
+                );
                 thread_shared.alive.store(false, Ordering::Release);
+                thread_shared.tx.close();
                 let mut view = thread_shared.view.lock().unwrap_or_else(|p| p.into_inner());
                 if view.negotiated() {
                     view.disconnect();
@@ -416,7 +536,10 @@ impl<G: Game> RemoteBridge<G> {
     /// `sim.start`). `Ok` means it was queued to the transport; a host refusal
     /// shows up asynchronously in [`take_errors`](Self::take_errors). A
     /// `sim.start`, `sim.stop` or `sim.branch` request also invalidates the
-    /// held-input dedupe cache.
+    /// held-input dedupe cache. A full transport queue returns
+    /// [`BridgeError::Backpressure`] and accepts nothing. After terminal
+    /// disconnect, outcomes of previously accepted fire-and-forget requests
+    /// may be uncertain.
     pub fn request(&self, method: &str, params: J) -> Result<(), BridgeError> {
         if matches!(method, "sim.start" | "sim.stop" | "sim.branch") {
             clear_last_input(&self.last_input);
@@ -426,17 +549,32 @@ impl<G: Game> RemoteBridge<G> {
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.tx
-            .send(Request {
+            .try_send(Request {
                 id: Some(id),
                 method: method.to_string(),
                 params,
             })
-            .map_err(|_| BridgeError::Disconnected)
+            .map_err(|error| match error {
+                SendError::Backpressure => BridgeError::Backpressure,
+                SendError::Disconnected => BridgeError::Disconnected,
+            })
     }
 
     /// Errors the server answered to controls, commands and requests since the last call.
     pub fn take_errors(&self) -> Vec<RpcError> {
-        std::mem::take(&mut *self.shared.errors.lock().unwrap_or_else(|p| p.into_inner()))
+        self.shared.errors.take()
+    }
+
+    /// Current outgoing/incoming transport accounting, when the transport
+    /// provides bounded queues.
+    pub fn transport_queue_stats(&self) -> Option<TransportQueueStats> {
+        self.tx.queue_stats()
+    }
+
+    /// Current retained RPC-error queue accounting. `closed` becomes true
+    /// after the queue overflows and the bridge terminates.
+    pub fn error_queue_stats(&self) -> QueueStats {
+        self.shared.errors.stats()
     }
 
     /// Bytes, counts and latencies of the frame stream.
@@ -452,6 +590,7 @@ impl<G: Game> RemoteBridge<G> {
 impl<G: Game> Drop for RemoteBridge<G> {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
+        self.tx.close();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -619,7 +758,9 @@ fn run<G: Game>(
     }
     let mut next_id = 1;
     for (kind, method, params) in first {
-        if let Err(e) = queue_handshake(t.as_mut(), &mut pending, &mut next_id, kind, method, params) {
+        if let Err(e) =
+            queue_handshake(t.as_mut(), &mut pending, &mut next_id, kind, method, params)
+        {
             if let Some(r) = ready.take() {
                 let message = if matches!(kind, Pending::Discover | Pending::Schema) {
                     identity_check_error(e)
@@ -734,12 +875,9 @@ fn run<G: Game>(
                                 return;
                             }
                             identity_validated = true;
-                            if let Err(e) = begin_subscription(
-                                t.as_mut(),
-                                &mut pending,
-                                &mut next_id,
-                                &cfg,
-                            ) {
+                            if let Err(e) =
+                                begin_subscription(t.as_mut(), &mut pending, &mut next_id, &cfg)
+                            {
                                 fail(shared, &mut ready, e);
                                 return;
                             }
@@ -817,7 +955,14 @@ fn run<G: Game>(
                             // input request was accepted; conservatively
                             // forget its optimistic dedupe value on refusal.
                             clear_last_input(&last_input);
-                            shared.errors.lock().unwrap_or_else(|p| p.into_inner()).push(e);
+                            if !shared.errors.push(e) {
+                                fail(
+                                    shared,
+                                    &mut ready,
+                                    "remote RPC error queue saturated; connection closed and accepted RPC outcomes may be uncertain".into(),
+                                );
+                                return;
+                            }
                         }
                         _ => {}
                     }
@@ -902,9 +1047,14 @@ fn run<G: Game>(
 
 fn has_branch_note(method: &str, params: &J) -> bool {
     method == "watch.notes"
-        && params.get("notes").and_then(J::as_array).is_some_and(|notes| {
-            notes.iter().any(|n| n.get("kind").and_then(J::as_str) == Some("branched"))
-        })
+        && params
+            .get("notes")
+            .and_then(J::as_array)
+            .is_some_and(|notes| {
+                notes
+                    .iter()
+                    .any(|n| n.get("kind").and_then(J::as_str) == Some("branched"))
+            })
 }
 
 fn fail<E>(shared: &Shared<E>, ready: &mut Option<Sender<Result<Info, String>>>, message: String) {
@@ -915,9 +1065,9 @@ fn fail<E>(shared: &Shared<E>, ready: &mut Option<Sender<Result<Info, String>>>,
     // may stop polling immediately after it observes Disconnected.
     shared
         .errors
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
         .push(RpcError::state("view_delivery_invalid", message));
+    shared.stop.store(true, Ordering::Release);
+    shared.tx.close();
     shared
         .view
         .lock()
