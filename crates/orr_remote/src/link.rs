@@ -287,9 +287,17 @@ impl IncomingSender {
 struct IncomingReceiver {
     rx: Receiver<Queued<Incoming>>,
     budget: QueueBudget,
+    sender_disconnect_reason: &'static str,
 }
 
 fn incoming_channel(limits: QueueLimits) -> (IncomingSender, IncomingReceiver) {
+    incoming_channel_with_disconnect_reason(limits, "the connection closed")
+}
+
+fn incoming_channel_with_disconnect_reason(
+    limits: QueueLimits,
+    sender_disconnect_reason: &'static str,
+) -> (IncomingSender, IncomingReceiver) {
     let budget = QueueBudget::new(limits);
     let (tx, rx) = sync_channel(limits.max_items.max(1));
     (
@@ -297,7 +305,11 @@ fn incoming_channel(limits: QueueLimits) -> (IncomingSender, IncomingReceiver) {
             tx,
             budget: budget.clone(),
         },
-        IncomingReceiver { rx, budget },
+        IncomingReceiver {
+            rx,
+            budget,
+            sender_disconnect_reason,
+        },
     )
 }
 
@@ -324,7 +336,7 @@ impl IncomingReceiver {
                     return Ok(Some(queued.into_inner()));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    self.budget.close("the connection closed");
+                    self.budget.close(self.sender_disconnect_reason);
                     return Err(self.budget.closed_error());
                 }
                 Err(RecvTimeoutError::Timeout) if started.elapsed() >= timeout => return Ok(None),
@@ -471,7 +483,10 @@ impl LocalConnector {
         limits: TransportQueueLimits,
     ) -> Result<LocalTransport, ClientError> {
         let conn = self.shared.next_id.fetch_add(1, Relaxed);
-        let (tx, rx) = incoming_channel(limits.incoming);
+        // The only producer of this channel is the local host. Preserve its
+        // shutdown diagnosis even when a call was sent before the host ended.
+        let (tx, rx) =
+            incoming_channel_with_disconnect_reason(limits.incoming, "the host has stopped");
         let incoming = rx.budget.clone();
         let outgoing = QueueBudget::new(limits.outgoing);
         let to_client = ConnTx::bounded_local(tx);
