@@ -293,6 +293,49 @@ impl EditorDoc {
 
     /// Applies several ops as one transaction: all or nothing, one undo step.
     pub fn apply_batch(&mut self, label: &str, ops: Vec<Op>, origin: Origin) -> Result<Vec<Applied>, EditError> {
+        // Preserve the existing transaction/rollback semantics, including
+        // conservative revision invalidation on a rejected proposal preview.
+        self.apply_batch_in_place(label, ops, origin)
+    }
+
+    /// Applies a batch on an isolated copy, preserving all live document state
+    /// on rejection or when every operation is a no-op. A successful changed
+    /// batch becomes one undo entry. Existing transactional callers continue
+    /// to use [`apply_batch`](Self::apply_batch).
+    pub fn apply_atomic_batch(&mut self, label: &str, ops: Vec<Op>, origin: Origin) -> Result<Vec<Applied>, EditError> {
+        // A batch is not allowed to join an existing transaction. Stage it on
+        // a private document copy so a rejected suffix cannot clear redo (or
+        // otherwise change history metadata) after a valid prefix was applied.
+        if self.tx.is_some() {
+            return Err(EditError::TxOpen);
+        }
+        let mut staged = self.fork()?;
+        staged.source = self.source.clone();
+        staged.undo = self.undo.clone();
+        staged.redo = self.redo.clone();
+        staged.clean_id = self.clean_id;
+        staged.next_id = self.next_id;
+        staged.revision = self.revision;
+
+        let out = staged.apply_batch_in_place(label, ops, origin)?;
+        if out.iter().any(|applied| applied.changed) {
+            // Preserve this document's identity and proposals; transfer only
+            // state that a successful batch can change.
+            self.scene = staged.scene;
+            self.frame = staged.frame;
+            self.index = staged.index;
+            self.source = staged.source;
+            self.undo = staged.undo;
+            self.redo = staged.redo;
+            self.clean_id = staged.clean_id;
+            self.next_id = staged.next_id;
+            self.next_guid = staged.next_guid;
+            self.revision = staged.revision;
+        }
+        Ok(out)
+    }
+
+    fn apply_batch_in_place(&mut self, label: &str, ops: Vec<Op>, origin: Origin) -> Result<Vec<Applied>, EditError> {
         self.begin_tx(label, origin.clone())?;
         let mut out = Vec::with_capacity(ops.len());
         for op in ops {

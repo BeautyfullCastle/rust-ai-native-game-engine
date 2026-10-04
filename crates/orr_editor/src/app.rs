@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Pos2, Rect, RichText, Sense, Ui};
-use orr_fp::FPVec2;
+use orr_fp::{FPVec2, FP};
 use orr_reflect::Value;
 use orr_remote::{CaptureError, CaptureRequest, CapturedImage, ViewState};
 
@@ -258,7 +258,11 @@ impl eframe::App for EditorApp {
             ctx.request_repaint();
         }
         if ctx.input(|i| i.key_pressed(Key::Escape) || !i.focused) {
+            // Escape cancels an active drag without changing its inspection
+            // target. With no gesture, Escape clears the GUID selection.
+            let cancelling_gesture = self.editor.in_gesture();
             self.editor.cancel_edit();
+            if !cancelling_gesture && ctx.input(|i| i.key_pressed(Key::Escape)) { self.editor.select(None); }
             // Focus loss may hide the physical release. Forget egui's drag
             // ownership so later moves cannot revive it; a fresh press starts
             // a fresh gesture even when the old pointer-up never arrived.
@@ -479,7 +483,7 @@ impl EditorApp {
                 let c = self.editor.camera.center;
                 self.editor.spawn_body(c);
             }
-            if ui.add_enabled(self.editor.selection().is_some(), egui::Button::new("Delete")).clicked() {
+            if ui.add_enabled(self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).clicked() {
                 self.editor.delete_selected();
             }
         });
@@ -502,14 +506,15 @@ impl EditorApp {
         let mut clicked: Option<Target> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
             for (label, target, tip) in &rows[range] {
-                let selected = self.editor.selection() == Some(target);
+                let selected = self.editor.is_selected(target);
                 if ui.selectable_label(selected, label).on_hover_text(tip).clicked() {
                     clicked = Some(target.clone());
                 }
             }
         });
         if let Some(t) = clicked {
-            self.editor.select(Some(t));
+            if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) { self.editor.toggle_selection(t); }
+            else { self.editor.select(Some(t)); }
         }
     }
 
@@ -517,6 +522,21 @@ impl EditorApp {
 
     fn inspector(&mut self, ui: &mut Ui) {
         ui.heading("Inspector");
+        let count = self.editor.selected_guids().len();
+        if count > 0 {
+            ui.label(format!("{count} selected · Ctrl-click to toggle · Esc to clear"));
+            let enabled = self.editor.can_nudge_selection();
+            ui.horizontal_wrapped(|ui| {
+                for (label, x, y) in [("Move left", -1, 0), ("Move right", 1, 0), ("Move up", 0, 1), ("Move down", 0, -1)] {
+                    if ui.add_enabled(enabled, egui::Button::new(label)).on_hover_text("Move every selected document GUID by one world unit in a single undo entry").clicked() {
+                        self.editor.nudge_selected(FPVec2::new(FP::from_int(x), FP::from_int(y)));
+                    }
+                }
+            });
+            if self.editor.batch_outcome_uncertain() {
+                ui.colored_label(Color32::YELLOW, "Move result unconfirmed. Reconnect to read document and history.");
+            }
+        }
         if self.editor.previewing().is_some() {
             ui.weak("Live document inspector · read-only during proposal preview");
         } else if self.editor.is_viewer() {
@@ -651,7 +671,8 @@ impl EditorApp {
         let previewing = self.editor.previewing().map(str::to_string);
         let live = self.editor.down().is_none();
         // Select and move bodies with the primary button.
-        if self.editor.can_mutate() && previewing.is_none() && resp.drag_started_by(PointerButton::Primary) {
+        if self.editor.can_mutate() && previewing.is_none() && self.editor.selected_guids().len() <= 1
+            && !ui.input(|i| i.modifiers.ctrl || i.modifiers.command) && resp.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
                 let world = self.editor.camera.screen_to_world(to_px(origin), px);
                 if let Some(target) = self.editor.pick(world) {
@@ -682,7 +703,9 @@ impl EditorApp {
             if let Some(at) = resp.interact_pointer_pos() {
                 let world = self.editor.camera.screen_to_world(to_px(at), px);
                 let hit = self.editor.pick(world);
-                self.editor.select(hit);
+                if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                    if let Some(hit) = hit { self.editor.toggle_selection(hit); }
+                } else { self.editor.select(hit); }
             }
         }
 
