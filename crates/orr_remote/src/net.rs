@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::caps::{secret_eq, Auth, Caps};
 use crate::error::*;
-use crate::link::{Incoming, LocalFrame};
+use crate::link::{Incoming, IncomingSender, LocalFrame, QueueBudget, QueuePermit, SendError};
 
 /// How long a connection may take to finish the WebSocket handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,7 +48,9 @@ pub(crate) enum Inbound {
         conn: u64,
     },
     /// An isolated verification is returning; reap only once its thread exits.
-    VerificationReady { serial: u64 },
+    VerificationReady {
+        serial: u64,
+    },
     /// A connection presented a token that was refused.
     AuthFailed,
     Request {
@@ -71,7 +73,12 @@ pub(crate) enum Out {
 #[derive(Clone)]
 pub(crate) enum Sink {
     Net(UnboundedSender<Out>),
-    Local(std::sync::mpsc::Sender<Incoming>),
+    Local(IncomingSender),
+    // Existing server unit fixtures inject presentation loss through their
+    // shared pending counter. Preserve that fixture contract; production
+    // LocalConnector always constructs the bounded Local variant above.
+    #[cfg(test)]
+    TestLocal(std::sync::mpsc::Sender<Incoming>),
 }
 
 /// The way to write to one connection, from any thread.
@@ -84,48 +91,62 @@ pub(crate) struct ConnTx {
 
 impl ConnTx {
     /// The writing end of an in-process connection (its reading end is the client's).
-    pub(crate) fn local(tx: std::sync::mpsc::Sender<Incoming>, pending: Arc<AtomicUsize>) -> Self {
+    pub(crate) fn bounded_local(tx: IncomingSender) -> Self {
         Self {
             sink: Sink::Local(tx),
+            pending: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn local(tx: std::sync::mpsc::Sender<Incoming>, pending: Arc<AtomicUsize>) -> Self {
+        Self {
+            sink: Sink::TestLocal(tx),
             pending,
         }
     }
 
     pub(crate) fn is_local(&self) -> bool {
-        matches!(self.sink, Sink::Local(_))
+        !matches!(self.sink, Sink::Net(_))
     }
 
     pub(crate) fn send_text(&self, s: String) {
+        if let Sink::Local(tx) = &self.sink {
+            let cost = s.len();
+            tx.send(Incoming::Text(s), cost);
+            return;
+        }
         if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
             return;
         }
-        self.pending.fetch_add(s.len(), Relaxed);
-        match &self.sink {
-            Sink::Net(tx) => {
-                let _ = tx.send(Out::Text(s));
-            }
-            Sink::Local(tx) => {
-                let _ = tx.send(Incoming::Text(s));
-            }
-        }
+        self.send_control_text(s);
     }
     /// Admission-aware presentation delivery. A rejected notification is
     /// accounted for by the negotiated view stream's next snapshot fence.
     pub(crate) fn try_send_text(&self, s: String) -> bool {
+        if let Sink::Local(tx) = &self.sink {
+            let cost = s.len();
+            return tx.send(Incoming::Text(s), cost);
+        }
         if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
             return false;
         }
         self.send_control_text(s)
     }
 
-    /// Request responses are never discarded by presentation backpressure.
-    /// This control lane is deliberately outside the presentation queue bound.
+    /// Network control responses bypass presentation backpressure. Local
+    /// ingress uses one bounded queue; refusal terminates that connection.
     pub(crate) fn send_control_text(&self, s: String) -> bool {
         let cost = s.len();
+        if let Sink::Local(tx) = &self.sink {
+            return tx.send(Incoming::Text(s), cost);
+        }
         self.pending.fetch_add(cost, Relaxed);
         let sent = match &self.sink {
             Sink::Net(tx) => tx.send(Out::Text(s)).is_ok(),
-            Sink::Local(tx) => tx.send(Incoming::Text(s)).is_ok(),
+            Sink::Local(_) => unreachable!(),
+            #[cfg(test)]
+            Sink::TestLocal(tx) => tx.send(Incoming::Text(s)).is_ok(),
         };
         if !sent {
             self.pending.fetch_sub(cost, Relaxed);
@@ -150,63 +171,104 @@ impl ConnTx {
     }
 
     pub(crate) fn try_send_local_frame(&self, f: Arc<LocalFrame>) -> bool {
-        if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
-            return false;
+        #[cfg(test)]
+        if let Sink::TestLocal(tx) = &self.sink {
+            if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
+                return false;
+            }
+            let cost = f.cost;
+            self.pending.fetch_add(cost, Relaxed);
+            let sent = tx.send(Incoming::Local(f)).is_ok();
+            if !sent {
+                self.pending.fetch_sub(cost, Relaxed);
+            }
+            return sent;
         }
         let Sink::Local(tx) = &self.sink else {
             return false;
         };
         let cost = f.cost;
-        self.pending.fetch_add(cost, Relaxed);
-        let sent = tx.send(Incoming::Local(f)).is_ok();
-        if !sent {
-            self.pending.fetch_sub(cost, Relaxed);
-        }
-        sent
+        tx.send(Incoming::Local(f), cost)
     }
     pub(crate) fn send_binary(&self, b: Arc<Vec<u8>>) {
         if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
             return;
         }
         if let Sink::Net(tx) = &self.sink {
-            self.pending.fetch_add(b.len(), Relaxed);
-            let _ = tx.send(Out::Binary(b));
+            let cost = b.len();
+            self.pending.fetch_add(cost, Relaxed);
+            if tx.send(Out::Binary(b)).is_err() {
+                self.pending.fetch_sub(cost, Relaxed);
+            }
         }
     }
     /// A view stream message: a binary message on a socket, an `Incoming::Wire` in process.
     pub(crate) fn send_stream(&self, b: Arc<Vec<u8>>) {
+        if let Sink::Local(tx) = &self.sink {
+            let cost = b.len();
+            tx.send(Incoming::Wire(b.to_vec()), cost);
+            return;
+        }
         if self.pending.load(Relaxed) > MAX_CONN_QUEUE_BYTES {
             return;
         }
-        self.pending.fetch_add(b.len(), Relaxed);
+        let cost = b.len();
+        self.pending.fetch_add(cost, Relaxed);
         match &self.sink {
             Sink::Net(tx) => {
-                let _ = tx.send(Out::Binary(b));
+                if tx.send(Out::Binary(b)).is_err() {
+                    self.pending.fetch_sub(cost, Relaxed);
+                }
             }
-            Sink::Local(tx) => {
-                let _ = tx.send(Incoming::Wire(b.to_vec()));
+            Sink::Local(_) => unreachable!(),
+            #[cfg(test)]
+            Sink::TestLocal(tx) => {
+                if tx.send(Incoming::Wire(b.to_vec())).is_err() {
+                    self.pending.fetch_sub(cost, Relaxed);
+                }
             }
         }
     }
     /// A frame for an in-process client: shared, never serialized.
     pub(crate) fn send_local_frame(&self, f: Arc<LocalFrame>) {
+        #[cfg(test)]
+        if let Sink::TestLocal(tx) = &self.sink {
+            let cost = f.cost;
+            self.pending.fetch_add(cost, Relaxed);
+            if tx.send(Incoming::Local(f)).is_err() {
+                self.pending.fetch_sub(cost, Relaxed);
+            }
+            return;
+        }
         if let Sink::Local(tx) = &self.sink {
-            self.pending.fetch_add(f.cost, Relaxed);
-            let _ = tx.send(Incoming::Local(f));
+            let cost = f.cost;
+            tx.send(Incoming::Local(f), cost);
         }
     }
     pub(crate) fn pending(&self) -> usize {
-        self.pending.load(Relaxed)
+        match &self.sink {
+            Sink::Net(_) => self.pending.load(Relaxed),
+            Sink::Local(tx) => tx.pending(),
+            #[cfg(test)]
+            Sink::TestLocal(_) => self.pending.load(Relaxed),
+        }
     }
     fn close(&self) {
-        if let Sink::Net(tx) = &self.sink {
-            let _ = tx.send(Out::Close);
+        match &self.sink {
+            Sink::Net(tx) => {
+                let _ = tx.send(Out::Close);
+            }
+            Sink::Local(tx) => tx.close(),
+            #[cfg(test)]
+            Sink::TestLocal(_) => (),
         }
     }
     async fn closed(&self) {
         match &self.sink {
             Sink::Net(tx) => tx.closed().await,
-            Sink::Local(_) => std::future::pending::<()>().await,
+            Sink::Local(tx) => tx.closed().await,
+            #[cfg(test)]
+            Sink::TestLocal(_) => std::future::pending::<()>().await,
         }
     }
 }
@@ -232,10 +294,16 @@ pub(crate) struct RequestPermit {
     queued: Arc<AtomicUsize>,
     queued_bytes: Arc<AtomicUsize>,
     bytes: usize,
+    client: Option<QueuePermit>,
 }
 
 impl RequestPermit {
-    pub(crate) fn reserve(shared: &NetShared, id: Option<&J>, method: &str, params: &J) -> Option<Self> {
+    pub(crate) fn reserve(
+        shared: &NetShared,
+        id: Option<&J>,
+        method: &str,
+        params: &J,
+    ) -> Option<Self> {
         reserve_counter(&shared.queued, shared.max_queued, 1)?;
         // Own the count immediately: serialization failure and byte rejection
         // both roll it back through the same drop path as failed delivery.
@@ -243,11 +311,19 @@ impl RequestPermit {
             queued: shared.queued.clone(),
             queued_bytes: shared.queued_bytes.clone(),
             bytes: 0,
+            client: None,
         };
         let bytes = request_bytes(id, method, params, shared.max_queued_bytes)?;
         reserve_counter(&shared.queued_bytes, shared.max_queued_bytes, bytes)?;
         permit.bytes = bytes;
         Some(permit)
+    }
+
+    /// The same waiting request owns both its global host and per-client
+    /// quotas. The host already drops this permit on dequeue or failed delivery.
+    pub(crate) fn with_client_budget(mut self, budget: &QueueBudget) -> Result<Self, SendError> {
+        self.client = Some(budget.reserve(self.bytes)?);
+        Ok(self)
     }
 }
 
@@ -281,7 +357,10 @@ fn request_bytes(id: Option<&J>, method: &str, params: &J, limit: usize) -> Opti
     }
     impl Write for Counter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.bytes = self.bytes.checked_add(buf.len()).filter(|n| *n <= self.limit)
+            self.bytes = self
+                .bytes
+                .checked_add(buf.len())
+                .filter(|n| *n <= self.limit)
                 .ok_or_else(|| std::io::Error::other("request byte limit exceeded"))?;
             Ok(buf.len())
         }
@@ -467,7 +546,8 @@ impl Link {
                 Flow::Continue
             };
         }
-        let Some(permit) = RequestPermit::reserve(&self.shared, id.as_ref(), &method, &params) else {
+        let Some(permit) = RequestPermit::reserve(&self.shared, id.as_ref(), &method, &params)
+        else {
             self.reply_err(
                 &reply_id,
                 RpcError::new(
@@ -828,19 +908,22 @@ mod tests {
 
     fn queue_fixture(limit: usize) -> (Arc<NetShared>, std::sync::mpsc::Receiver<Inbound>) {
         let (inbox, recv) = std::sync::mpsc::channel();
-        (Arc::new(NetShared {
-            auth: Auth::DevNoAuth,
-            max_message_bytes: 4 << 20,
-            allowed_origins: Vec::new(),
-            max_connections: 64,
-            max_queued: limit,
-            max_queued_bytes: usize::MAX,
-            inbox,
-            next_id: AtomicU64::new(1),
-            conns: AtomicUsize::new(0),
-            queued: Arc::new(AtomicUsize::new(0)),
-            queued_bytes: Arc::new(AtomicUsize::new(0)),
-        }), recv)
+        (
+            Arc::new(NetShared {
+                auth: Auth::DevNoAuth,
+                max_message_bytes: 4 << 20,
+                allowed_origins: Vec::new(),
+                max_connections: 64,
+                max_queued: limit,
+                max_queued_bytes: usize::MAX,
+                inbox,
+                next_id: AtomicU64::new(1),
+                conns: AtomicUsize::new(0),
+                queued: Arc::new(AtomicUsize::new(0)),
+                queued_bytes: Arc::new(AtomicUsize::new(0)),
+            }),
+            recv,
+        )
     }
 
     #[test]
@@ -852,7 +935,10 @@ mod tests {
             let permit = RequestPermit::reserve(&shared, None, "sim.state", &J::Null);
             assert_eq!(permit.is_some(), limit >= cost);
             assert_eq!(shared.queued.load(Relaxed), usize::from(permit.is_some()));
-            assert_eq!(shared.queued_bytes.load(Relaxed), if permit.is_some() { cost } else { 0 });
+            assert_eq!(
+                shared.queued_bytes.load(Relaxed),
+                if permit.is_some() { cost } else { 0 }
+            );
             if permit.is_some() {
                 assert!(RequestPermit::reserve(&shared, None, "sim.state", &J::Null).is_none());
             }
@@ -872,7 +958,11 @@ mod tests {
         shared.queued.store(0, Relaxed);
         shared.queued_bytes.store(usize::MAX - cost + 1, Relaxed);
         assert!(RequestPermit::reserve(&shared, None, "sim.state", &J::Null).is_none());
-        assert_eq!(shared.queued.load(Relaxed), 0, "byte overflow restores count");
+        assert_eq!(
+            shared.queued.load(Relaxed),
+            0,
+            "byte overflow restores count"
+        );
         assert_eq!(shared.queued_bytes.load(Relaxed), usize::MAX - cost + 1);
     }
 
@@ -881,29 +971,56 @@ mod tests {
         use crate::link::{LocalConnector, Request, Transport};
         for id in [None, Some(0), Some(u64::MAX)] {
             let request = Request {
-                id, method: "echo\"\n한글".into(),
+                id,
+                method: "echo\"\n한글".into(),
                 params: json!({"text":"雪\"\n", "nested":[null,true,{"number":18446744073709551615u64}]}),
             };
             let cost = request.to_text().len();
-            assert_eq!(request_bytes(id.map(J::from).as_ref(), &request.method, &request.params, usize::MAX), Some(cost));
+            assert_eq!(
+                request_bytes(
+                    id.map(J::from).as_ref(),
+                    &request.method,
+                    &request.params,
+                    usize::MAX
+                ),
+                Some(cost)
+            );
             for limit in [cost - 1, cost] {
                 let (mut shared, recv) = queue_fixture(10);
                 Arc::get_mut(&mut shared).unwrap().max_queued_bytes = limit;
-                let mut local = LocalConnector { shared: shared.clone() }.connect("local", Caps::ALL).unwrap();
+                let mut local = LocalConnector {
+                    shared: shared.clone(),
+                }
+                .connect("local", Caps::ALL)
+                .unwrap();
                 let (mut link, mut out, _pending) = new_link(&shared, false);
                 link.set_identity("net".into(), Caps::ALL);
                 assert_eq!(local.send(request.clone()).is_ok(), limit == cost);
-                assert_eq!(shared.queued_bytes.load(Relaxed), if limit == cost { cost } else { 0 });
+                assert_eq!(
+                    shared.queued_bytes.load(Relaxed),
+                    if limit == cost { cost } else { 0 }
+                );
                 // Release local request, then exercise the same byte budget over
                 // the network with whitespace and ignored extra fields.
                 drop(recv.try_iter().collect::<Vec<_>>());
                 let mut wire: J = serde_json::from_str(&request.to_text()).unwrap();
                 wire["ignored"] = json!("not forwarded");
-                assert!(matches!(link.on_text(&serde_json::to_string_pretty(&wire).unwrap()), Flow::Continue));
-                assert_eq!(shared.queued_bytes.load(Relaxed), if limit == cost { cost } else { 0 });
+                assert!(matches!(
+                    link.on_text(&serde_json::to_string_pretty(&wire).unwrap()),
+                    Flow::Continue
+                ));
+                assert_eq!(
+                    shared.queued_bytes.load(Relaxed),
+                    if limit == cost { cost } else { 0 }
+                );
                 if limit < cost {
-                    let Out::Text(reply) = out.try_recv().unwrap() else { panic!("busy response") };
-                    assert_eq!(serde_json::from_str::<J>(&reply).unwrap()["error"]["data"]["kind"], "busy");
+                    let Out::Text(reply) = out.try_recv().unwrap() else {
+                        panic!("busy response")
+                    };
+                    assert_eq!(
+                        serde_json::from_str::<J>(&reply).unwrap()["error"]["data"]["kind"],
+                        "busy"
+                    );
                 }
                 drop(recv);
                 assert_eq!(shared.queued.load(Relaxed), 0);
@@ -911,8 +1028,13 @@ mod tests {
             }
         }
         // Network IDs additionally support null, strings and exact JSON numbers.
-        for id in [J::Null, json!("雪\"\n"), serde_json::from_str("123456789012345678901234567890.125").unwrap()] {
-            let wire = json!({"jsonrpc":"2.0", "id":id, "method":"sim.state", "params":null}).to_string();
+        for id in [
+            J::Null,
+            json!("雪\"\n"),
+            serde_json::from_str("123456789012345678901234567890.125").unwrap(),
+        ] {
+            let wire =
+                json!({"jsonrpc":"2.0", "id":id, "method":"sim.state", "params":null}).to_string();
             let cost = wire.len();
             for limit in [cost - 1, cost] {
                 let (mut shared, recv) = queue_fixture(10);
@@ -921,9 +1043,14 @@ mod tests {
                 link.set_identity("net".into(), Caps::ALL);
                 assert!(matches!(link.on_text(&wire), Flow::Continue));
                 assert_eq!(shared.queued.load(Relaxed), usize::from(limit == cost));
-                assert_eq!(shared.queued_bytes.load(Relaxed), if limit == cost { cost } else { 0 });
+                assert_eq!(
+                    shared.queued_bytes.load(Relaxed),
+                    if limit == cost { cost } else { 0 }
+                );
                 if limit < cost {
-                    let Out::Text(reply) = out.try_recv().unwrap() else { panic!("busy response") };
+                    let Out::Text(reply) = out.try_recv().unwrap() else {
+                        panic!("busy response")
+                    };
                     let reply: J = serde_json::from_str(&reply).unwrap();
                     assert_eq!(reply["id"], id);
                     assert_eq!(reply["error"]["data"]["kind"], "busy");
@@ -949,13 +1076,25 @@ mod tests {
     fn local_and_network_failed_delivery_release_their_permits() {
         use crate::link::{LocalConnector, Transport};
         let (shared, recv) = queue_fixture(1);
-        let mut local = LocalConnector { shared: shared.clone() }.connect("local", Caps::ALL).unwrap();
+        let mut local = LocalConnector {
+            shared: shared.clone(),
+        }
+        .connect("local", Caps::ALL)
+        .unwrap();
         let (mut link, _out, _pending) = new_link(&shared, false);
         link.set_identity("net".into(), Caps::ALL);
         drop(recv);
-        let request = crate::link::Request { id: Some(1), method: "sim.state".into(), params: J::Null };
+        let request = crate::link::Request {
+            id: Some(1),
+            method: "sim.state".into(),
+            params: J::Null,
+        };
         for _ in 0..3 {
-            assert!(local.send(request.clone()).unwrap_err().to_string().contains("stopped"));
+            assert!(local
+                .send(request.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("stopped"));
             assert_eq!(shared.queued.load(Relaxed), 0);
             assert_eq!(shared.queued_bytes.load(Relaxed), 0);
             assert!(matches!(link.on_text(&request.to_text()), Flow::Close));
@@ -973,9 +1112,15 @@ mod tests {
         // old check/increment race's particular scheduling window.
         for byte_limited in [false, true] {
             for _ in 0..16 {
-                let (mut shared, recv) = queue_fixture(if byte_limited { PRODUCERS } else { LIMIT });
-                let cost = request_bytes(Some(&json!(1)), "sim.state", &J::Null, usize::MAX).unwrap();
-                Arc::get_mut(&mut shared).unwrap().max_queued_bytes = if byte_limited { LIMIT * cost } else { usize::MAX };
+                let (mut shared, recv) =
+                    queue_fixture(if byte_limited { PRODUCERS } else { LIMIT });
+                let cost =
+                    request_bytes(Some(&json!(1)), "sim.state", &J::Null, usize::MAX).unwrap();
+                Arc::get_mut(&mut shared).unwrap().max_queued_bytes = if byte_limited {
+                    LIMIT * cost
+                } else {
+                    usize::MAX
+                };
                 let barrier = Arc::new(std::sync::Barrier::new(PRODUCERS));
                 std::thread::scope(|scope| {
                     let mut workers = Vec::new();
@@ -984,11 +1129,16 @@ mod tests {
                         let barrier = barrier.clone();
                         workers.push(scope.spawn(move || {
                             let request = crate::link::Request {
-                                id: Some(1), method: "sim.state".into(), params: J::Null,
+                                id: Some(1),
+                                method: "sim.state".into(),
+                                params: J::Null,
                             };
                             if producer % 2 == 0 {
-                                let mut local = LocalConnector { shared: shared.clone() }
-                                    .connect("local", Caps::ALL).unwrap();
+                                let mut local = LocalConnector {
+                                    shared: shared.clone(),
+                                }
+                                .connect("local", Caps::ALL)
+                                .unwrap();
                                 barrier.wait();
                                 usize::from(local.send(request).is_ok())
                             } else {
@@ -1021,7 +1171,11 @@ mod tests {
                     }
                 }
                 assert_eq!(requests.len(), LIMIT);
-                assert_eq!(shared.queued.load(Relaxed), LIMIT, "taking a message retains its slot");
+                assert_eq!(
+                    shared.queued.load(Relaxed),
+                    LIMIT,
+                    "taking a message retains its slot"
+                );
                 drop(requests);
                 assert_eq!(shared.queued.load(Relaxed), 0);
                 assert_eq!(shared.queued_bytes.load(Relaxed), 0);
@@ -1034,16 +1188,34 @@ mod tests {
         use crate::link::{LocalConnector, Transport};
         for byte_limited in [false, true] {
             let (mut shared, recv) = queue_fixture(if byte_limited { 10 } else { 0 });
-            if byte_limited { Arc::get_mut(&mut shared).unwrap().max_queued_bytes = 0; }
-            let mut local = LocalConnector { shared: shared.clone() }.connect("local", Caps::ALL).unwrap();
+            if byte_limited {
+                Arc::get_mut(&mut shared).unwrap().max_queued_bytes = 0;
+            }
+            let mut local = LocalConnector {
+                shared: shared.clone(),
+            }
+            .connect("local", Caps::ALL)
+            .unwrap();
             let (mut link, mut out, _pending) = new_link(&shared, false);
-            assert!(matches!(link.on_text(r#"{"jsonrpc":"2.0","id":1,"method":"auth"}"#), Flow::Continue));
+            assert!(matches!(
+                link.on_text(r#"{"jsonrpc":"2.0","id":1,"method":"auth"}"#),
+                Flow::Continue
+            ));
             assert!(matches!(out.try_recv().unwrap(), Out::Text(_)));
-            let request = crate::link::Request { id: Some(2), method: "sim.state".into(), params: J::Null };
+            let request = crate::link::Request {
+                id: Some(2),
+                method: "sim.state".into(),
+                params: J::Null,
+            };
             assert!(local.send(request.clone()).is_err());
             assert!(matches!(link.on_text(&request.to_text()), Flow::Continue));
-            let Out::Text(text) = out.try_recv().unwrap() else { panic!("busy response") };
-            assert_eq!(serde_json::from_str::<J>(&text).unwrap()["error"]["data"]["kind"], "busy");
+            let Out::Text(text) = out.try_recv().unwrap() else {
+                panic!("busy response")
+            };
+            assert_eq!(
+                serde_json::from_str::<J>(&text).unwrap()["error"]["data"]["kind"],
+                "busy"
+            );
             drop(local);
             link.finish();
             let events: Vec<_> = recv.try_iter().collect();
