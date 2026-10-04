@@ -207,14 +207,15 @@ Source/fixture/executable fingerprints and first-start markers reject reuse or
 drift. A future campaign requires its own agreed source/environment/quiet lane
 and fresh output; this document does not authorize rerunning the retained output.
 
-## Follow-up decode allocation observation (implementation in progress)
+## Follow-up decode allocation observation
 
 The minimum follow-up was authorized in
 [su5978333338](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/30#issuecomment-5978333338).
 Its source base is `569fa578f82c440ab783a4937d0e84e223bb868b`. Local release
-compilation and focused contracts completed on 2026-10-04; mutual source review
-and the two actual observations remain pending. The earlier nine observations
-above remain separate evidence.
+compilation, focused contracts, mutual source review and the two approved actual
+observations completed on 2026-10-04. The earlier nine observations above remain
+separate evidence. This follow-up measures the requested Rust allocation layouts
+of real bank preload; it does not measure System's private heap or process RSS.
 
 The default-off `decode-memory-probe` feature exposes an opaque safe bank owner
 around the same strict `PreparedFixture`/manifest/object/4 MiB admission and
@@ -263,9 +264,8 @@ peak. No max-bank mixer, ratio, p95, product budget or RSS ceiling is inferred.
 The original source/cache/cooked/decoded single-process condition was
 **unfulfilled**. The owner adopted reporting according to actual cooker and
 runtime lifetimes, preserving that history: runtime has no source/cache input
-path. This change does not create or measure such a path. New actual results,
-exact measured source identity and raw hashes will be recorded here after the
-approved observations; final epic completion remains a separate owner decision.
+path. This change does not create or measure such a path. The new results below
+preserve that distinction; final epic completion remains a separate owner decision.
 
 Focused validation used Rust/Cargo 1.97.1, x86_64 MSVC release, locked/offline,
 with an existing dependency target cache. The default library had 18 passing
@@ -278,3 +278,96 @@ errors; a minimal conjunction change preserved the accounting order, then its
 release compile, three synthetic contracts and strict Clippy passed. The earlier
 failure raw and source remain preserved. These checks do not constitute the two
 actual observations, process memory measurements, or a max-bank mixer test.
+
+### Measured identity and execution
+
+The measured clean source was
+`fea653ac2ba09e9a6c23bf099b124fd2a912dafc`, tree
+`15a36228caf08198d513a6d15c42ba91f0479b6d`, at the source base above. The three
+executable-source files are unchanged by this results document. A subsequent
+publication commit or its synthetic integration CI has a different identity;
+neither is presented as the measured source.
+
+[Haneul source review5978968592](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/31#issuecomment-5978968592)
+reported no blocker. Fresh full #28/owners/remote and relevant-process census
+preceded [lane claim5979059875](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/28#issuecomment-5979059875).
+The two exact selectors were run once each with `--ignored --exact --nocapture
+--test-threads=1`, in max/+1 order, using the already compiled immutable release
+binary. No warmup, retry, extra case or new compilation was performed.
+
+The environment was Windows 11 Education 10.0.26200, x86_64 MSVC, Intel Core
+i7-14700 (20 cores/28 logical processors), Rust/Cargo 1.97.1, release with
+`decode-memory-probe`. The earlier compilation reused a trusted dependency
+target cache and was not cold. CPU load at the freeze was 63%; the machine was
+not isolated. These are allocation observations, not elapsed-time benchmarks.
+No OS memory sampler, mixer, audio device or GPU was used.
+
+Outer PID9032 ran from 10:33:51.1672016 to 10:33:52.1868357 UTC. Max PID24236
+ran from 10:33:51.3710392 to 10:33:51.5469085; +1 PID24104 ran from
+10:33:51.8580004 to 10:33:51.9334218. Both exited naturally with code0 and one
+test passed/zero failed/zero ignored. The processes did not overlap. Raw streams
+were drained, held handles closed and source5/fixture6/binary hashes unchanged.
+Postcensus at 10:34:13.7026387 had no relevant process; actual lane return is
+[5979071617](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/28#issuecomment-5979071617).
+Neither the 30s watchdog nor the observed raw-output threshold was triggered.
+
+### Actual allocation results
+
+All byte values below are requested Rust layouts at recorded allocator-call
+boundaries from preload entry to return. Both traces were complete, with zero
+flags and zero foreign-thread calls.
+
+| Observation | Max bank | +1 frame rejection |
+|---|---:|---:|
+| Distinct PCM records | 11 | 11 |
+| Stereo frames | 524288 | 524289 |
+| Manifest bytes | 632 | 632 |
+| Cooked payload bytes | 1048664 | 1048666 |
+| Retained-sample budget bytes | 4194304 | 4194312 (rejected) |
+| Result | `ok` | `BudgetExceeded` |
+| Conversion-start callbacks | 11 | 0 |
+| Recorded events | 46 | 0 |
+| Allocation/deallocation calls | 23/23 | 0/0 |
+| Reallocation/failed-reallocation calls | 0/0 | 0/0 |
+| Retained peak/bytes live at return | 4198880 | 0 |
+| Transient peak | 384000 | 0 |
+| Simultaneously live combined peak | 4553184 | 0 |
+| Recorded bytes/allocations after bank drop | 0/0 | 0/0 |
+
+At max return event34, twelve lifetimes remained: the bank Vec and eleven
+decoded Arc allocations. Their requested layouts include 4576 bytes beyond the
+4194304 sample bytes. The ordered trace records each temporary conversion Vec
+overlapping its new Arc before the Vec is freed. The largest transient occurred
+at a different point from the combined peak: **4198880 + 384000 is not the
+observed combined peak**. Peaks are computed from simultaneous lifetime states,
+not by adding separate maxima or subtracting final retained bytes. Drop events
+34..46 establish release of the recorded cohort and do not extend the preload
+peak interval. This actual trace had no reallocations; realloc handling has
+synthetic/source evidence only.
+
+The +1 result records zero allocation events and zero conversion callbacks in
+the guarded preload interval. Fixture construction and strict package preparation
+were outside that interval, so it does not claim zero preflight allocation.
+Caller-owned manifest and cooked payload capacities remain separate input sizes.
+The original four-data simultaneous-process condition, System internal scratch,
+native/private heap, RSS and successful max-bank mixer remain unmeasured.
+
+### Retained new evidence
+
+The local-only directory is
+`C:/Users/hot41/.codex/worktrees/ddang-24-decode-memory/rust-ai-native-game-engine/target/ddang-24-handoff/actual-two-20261004T1034Z/`.
+Its label is a directory name; exact execution timestamps are given above.
+The 6003B max stdout and 2722B +1 stdout each contain one bounded result record;
+both stderr files are empty. Executables and unnecessary raw files are not
+published with this document.
+
+| Evidence | SHA-256 |
+|---|---|
+| Observer source42934B | `191c22ea65279ed941368d78380473b36a8d9579b30fe6b4d40bcece91a33887` |
+| Safe adapter source10578B | `a0d2bb6e722db037458a24ccd2453ecfe28cf4562ad7b8f822331ba7ce2b91f6` |
+| Immutable release executable1311744B | `64bbebfb4b8f4149ba597c170259cd01a814a337cd459d39e7067a86e2011dab` |
+| Source/fixture/binary/environment freeze | `05014381873e599eac0f89aba204abd2d0d314877796b85827022d9234368f26` |
+| Two-case report16746B | `381d262488fdbb54056399fb8e0ec9071d1d7f7cb507272e43ed9842e47e0741` |
+| Max stdout6003B | `1fc9e1417a26b0176db343ce22edb6a1c2238c4ba95a87bb47371629d48fdf3f` |
+| +1 stdout2722B | `bda28210a2eb5bd4e2258e0292cb7b936d953216eca981ba052d4737ed87bfec` |
+| Each empty stderr | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
