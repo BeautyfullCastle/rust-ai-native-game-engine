@@ -67,6 +67,19 @@ fn bounded_add(total: usize, extra: usize, limit: usize) -> Result<usize> {
 
 impl ClipBank {
     fn preload(fixture: &PreparedFixture, bundle: ViewBundleBytes<'_>) -> Result<Self> {
+        Self::preload_inner(
+            fixture,
+            bundle,
+            #[cfg(feature = "decode-memory-probe")]
+            || {},
+        )
+    }
+
+    fn preload_inner(
+        fixture: &PreparedFixture,
+        bundle: ViewBundleBytes<'_>,
+        #[cfg(feature = "decode-memory-probe")] mut on_conversion: impl FnMut(),
+    ) -> Result<Self> {
         let manifest = Manifest::decode(bundle.manifest, Domain::View)?;
         if sha256(bundle.manifest) != fixture.release().view_manifest_sha256() {
             return Err(Error::DigestMismatch);
@@ -118,6 +131,10 @@ impl ClipBank {
                 .iter()
                 .find(|object| object.sha256 == entry.payload_sha256)
                 .ok_or(Error::MissingArtifact)?;
+            // Diagnostic callback is absent from the default build. It runs
+            // after whole-bank admission and immediately before conversion.
+            #[cfg(feature = "decode-memory-probe")]
+            on_conversion();
             let frames = object.bytes[8..]
                 .chunks_exact(2)
                 .map(|sample| {
@@ -140,6 +157,31 @@ impl ClipBank {
             .binary_search_by_key(&IMPACT_ID, |(id, _)| *id)
             .ok()
             .map(|index| self.clips[index].1.clone())
+    }
+}
+
+/// Opt-in diagnostic owner for the real preload helper, without a mixer.
+///
+/// The supplied capability and bundle pass exactly the normal strict admission
+/// checks. The callback marks each admitted record's conversion start; the
+/// observer must avoid allocating or printing inside it. Retain this owner to
+/// observe the returned bank's allocation lifetimes, then drop it explicitly.
+/// It exposes neither clips nor mutable simulation/package state.
+#[cfg(feature = "decode-memory-probe")]
+pub struct DecodeProbeBank(ClipBank);
+
+#[cfg(feature = "decode-memory-probe")]
+impl DecodeProbeBank {
+    pub fn preload(
+        fixture: &PreparedFixture,
+        bundle: ViewBundleBytes<'_>,
+        on_conversion: impl FnMut(),
+    ) -> Result<Self> {
+        ClipBank::preload_inner(fixture, bundle, on_conversion).map(Self)
+    }
+
+    pub fn stats(&self) -> PreloadStats {
+        self.0.stats
     }
 }
 

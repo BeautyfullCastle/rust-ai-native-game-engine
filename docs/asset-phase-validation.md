@@ -206,3 +206,75 @@ The standard-library driver has mutually exclusive `--self-test`, `--prepare`,
 Source/fixture/executable fingerprints and first-start markers reject reuse or
 drift. A future campaign requires its own agreed source/environment/quiet lane
 and fresh output; this document does not authorize rerunning the retained output.
+
+## Follow-up decode allocation observation (implementation in progress)
+
+The minimum follow-up was authorized in
+[su5978333338](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/30#issuecomment-5978333338).
+Its source base is `569fa578f82c440ab783a4937d0e84e223bb868b`. Local release
+compilation and focused contracts completed on 2026-10-04; mutual source review
+and the two actual observations remain pending. The earlier nine observations
+above remain separate evidence.
+
+The default-off `decode-memory-probe` feature exposes an opaque safe bank owner
+around the same strict `PreparedFixture`/manifest/object/4 MiB admission and
+real preload helper. It creates no mixer. A callback marks each record immediately
+before PCM conversion, after whole-bank admission. The library still forbids
+unsafe code. A separate integration-test binary wraps `System` through
+`GlobalAlloc`; no dependency or default audio/simulation path is added.
+
+Fixture generation, package admission, caller-owned input allocation and
+observer bookkeeping precede the guarded interval. The fixed event buffer holds
+4096 allocation/deallocation/reallocation events, including failed reallocations;
+serialization happens after recording, with a 1 MiB result limit. Allocations
+alive when the bank returns are classified as retained lifetimes. Lifetimes
+freed before that boundary are transient. Replaying the ordered events gives
+retained-only, transient-only and simultaneously live combined peaks; the
+transient peak is not calculated by subtracting final retained bytes from a
+whole peak. Reallocation and pointer reuse must preserve distinct lifetime
+identity. Dropping the returned bank is observed separately to establish the
+recorded cohort's release. Overflow, unrecognized pointers, foreign-thread
+events or incomplete accounting invalidate numeric conclusions and preserve
+an explicit error/unknown result.
+
+The approved actual scope is one fresh serial child for the 11-record,
+524288-frame, exactly 4 MiB retained-sample bank and one for the same fixture
+with one additional frame. The latter must return `BudgetExceeded` with zero
+conversion-start callbacks; it does not establish zero allocations during
+preflight. Strict custom package preparation uses the binary-pinned SIM table
+and a reviewed view release digest. The existing max/+1 test is unchanged.
+Synthetic accounting contract tests do not count as these actual observations.
+Before launching them, freeze source/fixture/executable/environment and obtain
+a fresh #28 lane after focused checks and Haneul's narrow source review.
+The 30 s observation watchdog does not kill or preempt a child; first failure
+stops subsequent launches, and actual exit/drain/reap precede lane return.
+
+The reported byte quantities cover Rust allocator-requested layouts in this
+bounded helper interval at recorded allocator-call boundaries. A realloc records
+its returned old-to-new layout transition; internal System scratch or moved-block
+overlap inside that call is not visible. They exclude allocator internals, native allocations,
+stack, device/GPU memory and process RSS. Borrowed cooked/manifest byte counts
+and caller Vec capacities are separate inputs, not decoder-owned allocations.
+OS WorkingSet/PeakWorkingSet/PrivateUsage may complement the trace but cannot
+identify the decoder's private phase; samples may miss transients. Neither
+peak subtraction nor summing separate maxima yields a four-way simultaneous
+peak. No max-bank mixer, ratio, p95, product budget or RSS ceiling is inferred.
+
+The original source/cache/cooked/decoded single-process condition was
+**unfulfilled**. The owner adopted reporting according to actual cooker and
+runtime lifetimes, preserving that history: runtime has no source/cache input
+path. This change does not create or measure such a path. New actual results,
+exact measured source identity and raw hashes will be recorded here after the
+approved observations; final epic completion remains a separate owner decision.
+
+Focused validation used Rust/Cargo 1.97.1, x86_64 MSVC release, locked/offline,
+with an existing dependency target cache. The default library had 18 passing
+tests. The diagnostic-feature library had 26 passing tests and one existing
+informational timing test ignored. Three synthetic ledger contracts passed;
+the two actual observation cases remained ignored. Strict all-targets Clippy
+passed in no-default, audio-only and diagnostic-feature configurations.
+The diagnostic configuration initially failed on two nested conditional lint
+errors; a minimal conjunction change preserved the accounting order, then its
+release compile, three synthetic contracts and strict Clippy passed. The earlier
+failure raw and source remain preserved. These checks do not constitute the two
+actual observations, process memory measurements, or a max-bank mixer test.
