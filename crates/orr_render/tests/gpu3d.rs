@@ -7,7 +7,9 @@
 #![allow(clippy::float_arithmetic)] // a view-layer test: pixel colors are floats
 
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu, WgpuOptions};
-use orr_render::{Camera3D, Lighting, Material, OffscreenTarget, RenderList3D, Renderer3D, Settings3D, IDENTITY_ROT};
+use orr_render::{
+    Camera3D, Lighting, Material, OffscreenTarget, RenderList3D, Renderer3D, Settings3D, SphereLod3D, IDENTITY_ROT,
+};
 use std::sync::{Mutex, MutexGuard};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -47,6 +49,40 @@ fn baseline_gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
                 "ORR_REQUIRE_GPU is set but no adapter: {e}"
             );
             eprintln!("SKIP: no GPU adapter ({e})");
+            None
+        }
+    }
+}
+
+fn sphere_lod_gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
+    let requested = match std::env::var("ORR_SPHERE_LOD_GPU_MODE") {
+        Ok(mode) if mode == "hardware" || mode == "software" => Some(if mode == "hardware" { "hardware" } else { "software" }),
+        Ok(other) => panic!("ORR_SPHERE_LOD_GPU_MODE must be 'hardware' or 'software', got {other:?}"),
+        Err(_) => None,
+    };
+    let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    match Wgpu::headless(WgpuOptions { force_software: requested == Some("software"), ..WgpuOptions::default() }) {
+        Ok(gpu) => {
+            let info = gpu.adapter().get_info();
+            if requested == Some("hardware") {
+                assert!(!gpu.is_software(), "hardware LOD lane selected software adapter: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+            }
+            if requested == Some("software") {
+                assert!(gpu.is_software(), "software LOD lane selected non-software adapter: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+            }
+            eprintln!(
+                "sphere LOD GPU adapter: mode={} name={:?} backend={:?} device_type={:?} vendor={} device={} driver={:?} driver_info={:?} software={}",
+                requested.unwrap_or("auto"), info.name, info.backend, info.device_type, info.vendor, info.device,
+                info.driver, info.driver_info, gpu.is_software()
+            );
+            Some((guard, gpu))
+        }
+        Err(e) => {
+            assert!(
+                !std::env::var("ORR_REQUIRE_GPU").is_ok_and(|v| v == "1"),
+                "ORR_REQUIRE_GPU=1 but no sphere LOD GPU adapter: {e}"
+            );
+            eprintln!("SKIP: no sphere LOD GPU adapter ({e})");
             None
         }
     }
@@ -203,6 +239,75 @@ fn render_with(gpu: &Wgpu, size: (u32, u32), settings: Settings3D, list: &Render
 
 fn render(gpu: &Wgpu, size: (u32, u32), list: &RenderList3D, cam: &Camera3D) -> Vec<u8> {
     render_with(gpu, size, SETTINGS, list, cam).0
+}
+
+fn lod_policy(settings: Settings3D) -> SphereLod3D {
+    SphereLod3D {
+        far_segments: if settings.mesh_segments.clamp(3, 64) <= 12 { 6 } else { 12 },
+        max_projected_radius_px: 6.0,
+    }
+}
+
+fn render_with_lod(
+    gpu: &Wgpu,
+    size: (u32, u32),
+    settings: Settings3D,
+    policy: SphereLod3D,
+    list: &RenderList3D,
+    cam: &Camera3D,
+) -> (Vec<u8>, orr_render::SphereLodStats3D, orr_render::FrameStats) {
+    let target = OffscreenTarget::new(gpu, size.0, size.1, TextureFormat::Rgba8UnormSrgb);
+    let mut renderer = Renderer3D::with_sphere_lod(gpu.clone(), target.format(), settings, policy)
+        .expect("the focused LOD policy is valid for these settings");
+    renderer.clear = BLACK;
+    target.render3d(&mut renderer, list, cam);
+    (target.read_rgba8(), renderer.last_sphere_lod_stats(), renderer.last_frame_stats())
+}
+
+fn sphere_index_invocations(segments: u32, instances: u32) -> u64 {
+    let rings_per_hemisphere = (segments * 3 / 8).max(2);
+    u64::from(rings_per_hemisphere * 2 * segments * 6) * u64::from(instances)
+}
+
+fn sphere_boundary(img: &[u8], width: u32, height: u32) -> Vec<(i32, i32)> {
+    let is_sphere = |x: i32, y: i32| -> bool {
+        x >= 0
+            && y >= 0
+            && x < width as i32
+            && y < height as i32
+            && px(img, width, x as u32, y as u32)[0] > 24
+    };
+    let mut boundary = Vec::new();
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            if is_sphere(x, y)
+                && [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                    .into_iter()
+                    .any(|(dx, dy)| !is_sphere(x + dx, y + dy))
+            {
+                boundary.push((x, y));
+            }
+        }
+    }
+    boundary
+}
+
+fn max_boundary_distance(a: &[(i32, i32)], b: &[(i32, i32)]) -> f32 {
+    let directed = |from: &[(i32, i32)], to: &[(i32, i32)]| {
+        from.iter()
+            .map(|&(x, y)| {
+                to.iter()
+                    .map(|&(u, v)| {
+                        let dx = (x - u) as f32;
+                        let dy = (y - v) as f32;
+                        dx * dx + dy * dy
+                    })
+                    .fold(f32::INFINITY, f32::min)
+                    .sqrt()
+            })
+            .fold(0.0f32, f32::max)
+    };
+    directed(a, b).max(directed(b, a))
 }
 
 fn px(img: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
@@ -774,4 +879,268 @@ fn frame_stats_count_mesh_batches_shadow_exclusions_and_buffer_growth() {
     assert_eq!((plane.mesh_instances, plane.line_instances), (1, 0));
     assert_eq!((plane.upload_calls, plane.upload_bytes), (3, 512 + 80));
     assert_eq!(plane.buffer_reallocations, 0);
+}
+
+#[test]
+fn sphere_lod_disabled_and_all_near_are_pixel_identical_for_both_presets() {
+    let Some((_guard, gpu)) = sphere_lod_gpu() else { return };
+    let camera = Camera3D::perspective([5.0, 4.0, 8.0], [0.0, 0.0, 0.0], 50.0);
+    let mut list = RenderList3D::new();
+    list.sphere([-0.8, 0.0, 0.0], IDENTITY_ROT, 1.0, &Material::new([0.9, 0.1, 0.05]));
+    list.sphere([0.9, 0.2, -0.8], IDENTITY_ROT, 0.55, &Material::new([0.05, 0.2, 0.9]));
+    list.cuboid([0.0, -1.6, 0.0], IDENTITY_ROT, [0.35, 0.25, 0.4], &Material::new([0.2, 0.8, 0.2]));
+    list.capsule([1.8, -0.7, -0.5], IDENTITY_ROT, 0.4, 0.25, &Material::new([0.8, 0.7, 0.1]));
+    list.plane([0.0, -2.0, 0.0], 5.0, 5.0, &Material::new([0.6, 0.6, 0.6]).checkered());
+    list.line([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0], 2.0, [1.0, 1.0, 1.0, 1.0]);
+
+    for settings in [Settings3D::default(), Settings3D::LOW] {
+        let (reference, _) = render_with(&gpu, (160, 120), settings, &list, &camera);
+        let (enabled, lod, frame) = render_with_lod(&gpu, (160, 120), settings, lod_policy(settings), &list, &camera);
+        assert_eq!(enabled, reference, "settings {settings:?}: all spheres are near and LOD must preserve the fixed-detail image");
+        assert!(lod.enabled);
+        assert_eq!((lod.near_instances, lod.far_instances, lod.fallback_instances), (2, 0, 0));
+        assert_eq!((lod.main_draw_calls, lod.shadow_draw_calls), (1, 1));
+        assert_eq!(lod.main_index_invocations, sphere_index_invocations(settings.mesh_segments.clamp(3, 64), 2));
+        assert_eq!(lod.shadow_index_invocations, lod.main_index_invocations);
+        assert_eq!((lod.upload_calls, lod.upload_bytes), (1, 160));
+        assert_eq!((frame.upload_calls, frame.upload_bytes), (7, 512 + 5 * 80 + 48));
+    }
+}
+
+#[test]
+fn sphere_lod_far_detail_keeps_the_small_silhouette_and_center_color_for_both_presets() {
+    let Some((_guard, gpu)) = sphere_lod_gpu() else { return };
+    let camera = Camera3D::perspective([0.0, 0.0, 36.0], [0.0, 0.0, 0.0], 50.0);
+    let mut list = RenderList3D::new();
+    list.lighting = unlit();
+    list.sphere([0.0; 3], IDENTITY_ROT, 1.0, &Material::new([0.75, 0.2, 0.1]).glow(0.7));
+
+    for settings in [Settings3D::default(), Settings3D::LOW] {
+        let (reference, _) = render_with(&gpu, (128, 128), settings, &list, &camera);
+        let (far, lod, frame) = render_with_lod(&gpu, (128, 128), settings, lod_policy(settings), &list, &camera);
+        assert_eq!((lod.near_instances, lod.far_instances, lod.fallback_instances), (0, 1, 0), "settings {settings:?}");
+        assert_eq!((lod.main_draw_calls, lod.shadow_draw_calls), (1, 0));
+        assert_eq!(lod.main_index_invocations, sphere_index_invocations(lod_policy(settings).far_segments, 1));
+        assert_eq!(lod.shadow_index_invocations, 0);
+        assert_eq!((lod.upload_calls, lod.upload_bytes), (1, 80));
+        assert_eq!((frame.upload_calls, frame.upload_bytes), (3, 512 + 80));
+        assert!(lod.additional_static_mesh_bytes > 0);
+
+        let reference_boundary = sphere_boundary(&reference, 128, 128);
+        let far_boundary = sphere_boundary(&far, 128, 128);
+        assert!(!reference_boundary.is_empty() && !far_boundary.is_empty(), "the reference and LOD sphere both render");
+        let displacement = max_boundary_distance(&reference_boundary, &far_boundary);
+        assert!(displacement <= 1.0, "settings {settings:?}: maximum silhouette boundary displacement is {displacement:.2}px");
+        let (reference_center, far_center) = (px(&reference, 128, 64, 64), px(&far, 128, 64, 64));
+        for channel in 0..3 {
+            assert!(
+                reference_center[channel].abs_diff(far_center[channel]) <= 4,
+                "settings {settings:?}: center channel {channel} differs: {reference_center:?} vs {far_center:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sphere_lod_mixed_buckets_preserve_counts_indices_uploads_and_reuse_staging() {
+    let Some((_guard, gpu)) = sphere_lod_gpu() else { return };
+    let settings = Settings3D::LOW;
+    let policy = SphereLod3D::LOW;
+    let mut list = RenderList3D::new();
+    list.lighting.shadows = true;
+    list.sphere([0.0, 0.0, 0.0], IDENTITY_ROT, 1.0, &Material::new([0.9, 0.1, 0.1]));
+    list.sphere([-1.8, 0.0, -1.0], IDENTITY_ROT, 0.1, &Material::new([0.1, 0.9, 0.1]));
+    list.sphere([1.8, 0.0, -1.0], IDENTITY_ROT, 0.15, &Material::new([0.1, 0.1, 0.9]));
+    let camera = Camera3D::perspective([0.0, 0.0, 10.0], [0.0; 3], 50.0);
+    let mut target = OffscreenTarget::new(&gpu, 128, 128, TextureFormat::Rgba8UnormSrgb);
+    let mut renderer = Renderer3D::with_sphere_lod(gpu.clone(), target.format(), settings, policy).unwrap();
+    renderer.clear = BLACK;
+
+    target.render3d(&mut renderer, &list, &camera);
+    let mixed = renderer.last_sphere_lod_stats();
+    let mixed_frame = renderer.last_frame_stats();
+    assert_eq!((mixed.near_instances, mixed.far_instances, mixed.fallback_instances), (1, 2, 0));
+    assert_eq!((mixed.main_draw_calls, mixed.shadow_draw_calls), (2, 1));
+    assert_eq!(mixed.main_index_invocations, sphere_index_invocations(12, 1) + sphere_index_invocations(6, 2));
+    assert_eq!(mixed.shadow_index_invocations, sphere_index_invocations(12, 3));
+    assert_eq!((mixed.upload_calls, mixed.upload_bytes), (1, 3 * 80));
+    assert_eq!((mixed_frame.upload_calls, mixed_frame.upload_bytes), (3, 512 + 3 * 80));
+    assert_eq!(mixed_frame.main.draw_calls, 2);
+    assert_eq!(mixed_frame.shadow.draw_calls, 1);
+    assert_eq!((mixed_frame.main.instances, mixed_frame.shadow.instances), (3, 3));
+    assert!(mixed.staging_capacity >= 3 && mixed.classification_capacity >= 3);
+
+    target.render3d(&mut renderer, &list, &camera);
+    let warm = renderer.last_sphere_lod_stats();
+    assert_eq!(warm.staging_reallocations, 0, "same bucket counts reuse both retained CPU buffers");
+    assert_eq!(renderer.last_frame_stats().buffer_reallocations, 0);
+
+    let farther_camera = Camera3D::perspective([0.0, 0.0, 40.0], [0.0; 3], 50.0);
+    target.render3d(&mut renderer, &list, &farther_camera);
+    let moved = renderer.last_sphere_lod_stats();
+    assert_eq!((moved.near_instances, moved.far_instances), (0, 3), "camera motion reclassifies the large sphere");
+    assert_eq!(moved.main_draw_calls, 1);
+    assert_eq!(moved.main_index_invocations, sphere_index_invocations(6, 3));
+    assert_eq!(moved.shadow_index_invocations, sphere_index_invocations(12, 3));
+
+    assert!(target.resize(512, 512));
+    target.render3d(&mut renderer, &list, &farther_camera);
+    let resized = renderer.last_sphere_lod_stats();
+    assert_eq!((resized.near_instances, resized.far_instances), (1, 2), "physical viewport resize reclassifies using the new pixel size");
+    assert_eq!(resized.main_draw_calls, 2);
+    assert_eq!(resized.shadow_index_invocations, sphere_index_invocations(12, 3));
+}
+
+#[test]
+fn sphere_lod_equal_detail_and_empty_frames_keep_single_draw_and_clear_behavior() {
+    let Some((_guard, gpu)) = sphere_lod_gpu() else { return };
+    let settings = Settings3D::LOW;
+    let policy = SphereLod3D { far_segments: 12, max_projected_radius_px: 6.0 };
+    let camera = Camera3D::perspective([0.0, 0.0, 6.0], [0.0; 3], 45.0);
+    let target = OffscreenTarget::new(&gpu, 64, 64, TextureFormat::Rgba8UnormSrgb);
+    let mut renderer = Renderer3D::with_sphere_lod(gpu.clone(), target.format(), settings, policy).unwrap();
+    renderer.clear = BLACK;
+    let mut list = RenderList3D::new();
+    list.sphere([0.0; 3], IDENTITY_ROT, 1.0, &white());
+    target.render3d(&mut renderer, &list, &camera);
+    let equal = renderer.last_sphere_lod_stats();
+    assert_eq!((equal.near_instances, equal.far_instances, equal.fallback_instances), (1, 0, 0));
+    assert_eq!((equal.main_draw_calls, equal.shadow_draw_calls), (1, 1));
+    assert_eq!(equal.main_index_invocations, sphere_index_invocations(12, 1));
+    assert_eq!(equal.shadow_index_invocations, sphere_index_invocations(12, 1));
+    assert_eq!(equal.additional_static_mesh_bytes, 0);
+    assert_eq!((equal.upload_calls, equal.upload_bytes), (1, 80));
+    assert_eq!((renderer.last_frame_stats().upload_calls, renderer.last_frame_stats().upload_bytes), (3, 512 + 80));
+
+    list.clear();
+    target.render3d(&mut renderer, &list, &camera);
+    let empty = renderer.last_sphere_lod_stats();
+    assert!(empty.enabled);
+    assert_eq!((empty.near_instances, empty.far_instances, empty.fallback_instances), (0, 0, 0));
+    assert_eq!((empty.main_draw_calls, empty.shadow_draw_calls), (0, 0));
+    assert_eq!((empty.main_index_invocations, empty.shadow_index_invocations), (0, 0));
+    assert_eq!((empty.upload_calls, empty.upload_bytes), (0, 0));
+    let frame = renderer.last_frame_stats();
+    assert_eq!(frame.main.draw_calls, 0);
+    assert_eq!(frame.shadow.draw_calls, 0, "the empty shadow pass clears without draws");
+    assert_eq!((frame.upload_calls, frame.upload_bytes), (2, 512));
+    assert!(target.read_rgba8().chunks_exact(4).all(|p| p == BLACK.map(|c| (c * 255.0) as u8)));
+}
+
+#[test]
+fn sphere_lod_far_main_mesh_keeps_near_detail_in_the_shadow_map() {
+    let Some((_guard, gpu)) = sphere_lod_gpu() else { return };
+    let settings = Settings3D::LOW;
+    let policy = SphereLod3D::LOW;
+    let mut list = RenderList3D::new();
+    list.lighting = Lighting {
+        direction: [1.0, -1.0, 0.0],
+        color: [1.0; 3],
+        intensity: 1.0,
+        sky: [0.1; 3],
+        ground: [0.1; 3],
+        ambient: 0.04,
+        shadows: true,
+        shadow_center: [0.0; 3],
+        shadow_radius: 8.0,
+        tonemap: false,
+        exposure: 1.0,
+    };
+    list.plane([0.0, -0.02, 0.0], 5.0, 5.0, &Material::new([0.8, 0.8, 0.8]).checkered());
+    list.sphere([0.0, 0.6, 0.0], IDENTITY_ROT, 0.6, &Material::new([0.7, 0.2, 0.1]));
+    let camera = Camera3D::orthographic([-5.0, 4.0, 8.0], [0.0, 0.0, 0.0], 28.0);
+    let size = (256, 256);
+    let (fixed, _) = render_with(&gpu, size, settings, &list, &camera);
+    let (lod_image, lod, frame) = render_with_lod(&gpu, size, settings, policy, &list, &camera);
+    let mut no_shadow_list = list.clone();
+    no_shadow_list.lighting.shadows = false;
+    let (no_shadow, _) = render_with(&gpu, size, settings, &no_shadow_list, &camera);
+
+    assert_eq!((lod.near_instances, lod.far_instances), (0, 1));
+    assert_eq!((lod.main_draw_calls, lod.shadow_draw_calls), (1, 1));
+    assert_eq!(lod.main_index_invocations, sphere_index_invocations(6, 1));
+    assert_eq!(lod.shadow_index_invocations, sphere_index_invocations(12, 1));
+    assert_eq!(frame.shadow.draw_calls, 1, "the shadow pass draws the near-detail sphere; planes do not cast shadows");
+
+    let mut visible_shadow_samples = 0;
+    for ix in 0..15 {
+        for iz in -6..=6 {
+            let world = [0.8 + ix as f32 * 0.1, -0.01, iz as f32 * 0.1];
+            let Some(screen) = camera.world_to_screen(world, size) else { continue };
+            let (x, y) = (screen[0].round() as u32, screen[1].round() as u32);
+            if x >= size.0 || y >= size.1 {
+                continue;
+            }
+            let (fixed_pixel, lod_pixel, lit_pixel) = (px(&fixed, size.0, x, y), px(&lod_image, size.0, x, y), px(&no_shadow, size.0, x, y));
+            assert_eq!(lod_pixel, fixed_pixel, "receiver sample at {world:?} changed when only the main sphere mesh was reduced");
+            if luma(fixed_pixel) * 1.3 < luma(lit_pixel) {
+                visible_shadow_samples += 1;
+            }
+        }
+    }
+    assert!(visible_shadow_samples > 0, "the sampled receiver region includes visible shadow pixels");
+}
+
+#[test]
+fn sphere_lod_near_plane_crossing_falls_back_to_the_original_detail() {
+    let Some((_guard, gpu)) = sphere_lod_gpu() else { return };
+    let mut list = RenderList3D::new();
+    list.lighting.shadows = false;
+    list.sphere([0.0, 0.0, 4.95], IDENTITY_ROT, 0.2, &Material::new([0.7, 0.2, 0.1]));
+    let camera = Camera3D::perspective([0.0, 0.0, 5.0], [0.0; 3], 50.0);
+    let (image, lod, frame) = render_with_lod(&gpu, (64, 64), Settings3D::LOW, SphereLod3D::LOW, &list, &camera);
+    assert_eq!((lod.near_instances, lod.far_instances, lod.fallback_instances), (1, 0, 1));
+    assert_eq!(lod.main_index_invocations, sphere_index_invocations(12, 1));
+    assert!(image.len() == 64 * 64 * 4);
+    assert_eq!(frame.main.instances, 1);
+}
+
+#[test]
+fn sphere_lod_mixed_materials_and_unequal_depth_occlusion_survive_both_input_orders() {
+    let Some((_guard, gpu)) = sphere_lod_gpu() else { return };
+    let camera = Camera3D::orthographic([0.0, 0.0, 10.0], [0.0; 3], 5.0);
+    let size = (200, 200);
+    let near_red = Material::new([1.0, 0.0, 0.0]).glow(0.7);
+    let far_blue = Material::new([0.0, 0.0, 1.0]).glow(0.7);
+    let far_green = Material::new([0.0, 1.0, 0.0]).glow(0.7);
+    let far_yellow = Material::new([1.0, 0.8, 0.0]).glow(0.7);
+
+    for settings in [Settings3D::default(), Settings3D::LOW] {
+        let policy = lod_policy(settings);
+        for near_first in [true, false] {
+            let mut list = RenderList3D::new();
+            list.lighting = unlit();
+            let near = ([0.0, 0.0, 2.0], 0.5, &near_red);
+            let far_overlap = ([0.0, 0.0, -2.0], 0.2, &far_blue);
+            let far_left = ([-2.0, 0.0, -2.0], 0.2, &far_green);
+            let far_right = ([2.0, 0.0, -2.0], 0.2, &far_yellow);
+            let ordered = if near_first {
+                [near, far_overlap, far_left, far_right]
+            } else {
+                [far_right, far_left, far_overlap, near]
+            };
+            for (pos, radius, material) in ordered {
+                list.sphere(pos, IDENTITY_ROT, radius, material);
+            }
+
+            let (image, lod, frame) = render_with_lod(&gpu, size, settings, policy, &list, &camera);
+            assert_eq!((lod.near_instances, lod.far_instances, lod.fallback_instances), (1, 3, 0), "settings {settings:?}, near_first={near_first}");
+            assert_eq!((lod.main_draw_calls, lod.shadow_draw_calls), (2, 0));
+            assert_eq!(
+                lod.main_index_invocations,
+                sphere_index_invocations(settings.mesh_segments.clamp(3, 64), 1)
+                    + sphere_index_invocations(policy.far_segments, 3)
+            );
+            assert_eq!(frame.main.draw_calls, 2);
+            assert_eq!(frame.main.instances, 4);
+            assert_eq!((frame.upload_calls, frame.upload_bytes), (3, 512 + 4 * 80));
+
+            let center = px(&image, size.0, 100, 100);
+            let left = px(&image, size.0, 60, 100);
+            let right = px(&image, size.0, 140, 100);
+            assert!(center[0] > 180 && center[1] < 20 && center[2] < 20, "settings {settings:?}, near_first={near_first}: front red sphere must win the overlap, got {center:?}");
+            assert!(left[1] > 180 && left[0] < 20 && left[2] < 20, "settings {settings:?}, near_first={near_first}: far green sphere must keep its material, got {left:?}");
+            assert!(right[0] > 180 && right[1] > 150 && right[2] < 20, "settings {settings:?}, near_first={near_first}: far yellow sphere must keep its material, got {right:?}");
+        }
+    }
 }

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sphere LOD browser fixture</title>
+<style>
+  html, body { margin: 0; width: 256px; height: 256px; overflow: hidden; background: #000; }
+  canvas { display: block; width: 256px; height: 256px; }
+</style>
+</head>
+<body>
+<canvas id="sphere" width="256" height="256"></canvas>
+<script type="module">
+const query = new URLSearchParams(location.search);
+if (query.get("probe") === "1") {
+  window.sphereLodProbePage = true;
+} else {
+  try {
+    const wasm = await import("./pkg_gpu/orr_web_gpu.js");
+    await wasm.default();
+    const lod = query.get("lod") === "1";
+    const view = await wasm.create_sphere_lod_fixture(
+      document.getElementById("sphere"),
+      query.get("backend"),
+      query.get("preset"),
+      query.get("scene"),
+      lod,
+    );
+    const drawn = view.draw_fixture();
+    if (!drawn) throw new Error("3D fixture draw was skipped or sphere classification was unexpected");
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    window.sphereLodResult = {
+      actual_backend: view.backend(),
+      adapter: view.adapter(),
+      format: view.format(),
+      size: [view.width(), view.height()],
+      msaa_samples: view.msaa_samples(),
+      near_spheres: view.near_spheres(),
+      far_spheres: view.far_spheres(),
+      preset: query.get("preset"),
+      scene: query.get("scene"),
+      lod_enabled: lod,
+      drawn,
+    };
+  } catch (error) {
+    window.sphereLodError = String((error && error.message) || error);
+  }
+}
+</script>
+</body>
+</html>

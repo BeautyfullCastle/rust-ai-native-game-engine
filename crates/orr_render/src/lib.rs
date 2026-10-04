@@ -40,7 +40,7 @@ pub use camera::Camera;
 pub use camera3d::{Camera3D, OrbitCamera, Projection};
 pub use list3d::{Instance3D, Lighting, LineInstance3D, Material, RenderList3D, IDENTITY_ROT};
 pub use mesh::{MeshKind, MeshSet, Vertex3, DEFAULT_SEGMENTS};
-pub use renderer3d::{light_view_proj, Renderer3D, Settings3D, DEFAULT_CLEAR_3D};
+pub use renderer3d::{light_view_proj, Renderer3D, Settings3D, SphereLod3D, SphereLodError3D, SphereLodStats3D, DEFAULT_CLEAR_3D};
 pub use extract::{extract_items, instance_of};
 pub use list::{LineInstance, RenderList, ShapeInstance};
 pub use renderer::{Renderer, DEFAULT_CLEAR};

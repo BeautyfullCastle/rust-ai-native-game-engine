@@ -9,7 +9,7 @@ use crate::camera3d::Camera3D;
 use crate::list::RenderList;
 use crate::list3d::RenderList3D;
 use crate::renderer::Renderer;
-use crate::renderer3d::{Renderer3D, Settings3D};
+use crate::renderer3d::{Renderer3D, Settings3D, SphereLod3D, SphereLodError3D};
 
 /// An offscreen color texture. For the editor viewport: draw into it with
 /// [`OffscreenTarget::render`], then show [`OffscreenTarget::sample_view`]
@@ -202,6 +202,22 @@ impl<B: Rhi> WindowRenderer3D<B> {
             surface,
             size: (size.0.max(1), size.1.max(1)),
         }
+    }
+
+    /// Creates a 3D window renderer with opt-in main-pass sphere LOD.
+    /// The existing `from_parts` constructor continues to use fixed mesh detail.
+    pub fn from_parts_with_sphere_lod(
+        rhi: B,
+        surface: B::Surface,
+        size: (u32, u32),
+        settings: Settings3D,
+        policy: SphereLod3D,
+    ) -> Result<Self, SphereLodError3D> {
+        let format = rhi.surface_format(&surface);
+        let renderer = Renderer3D::with_sphere_lod(rhi.clone(), format, settings, policy)?;
+        let mut overlay = Renderer::new(rhi, format);
+        overlay.clear = None;
+        Ok(Self { renderer, overlay, surface, size: (size.0.max(1), size.1.max(1)) })
     }
 
     pub fn adapter_name(&self) -> String {
