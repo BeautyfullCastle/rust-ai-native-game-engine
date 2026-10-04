@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -917,7 +918,14 @@ def prepare_binary(
     artifact = artifacts[0]
     executable = Path(artifact["executable"]).resolve()
     target_root = target_dir.resolve()
-    package_prefix = f"path+{source_path.resolve().as_uri()}#orr_editor@"
+    package_root = source_path / "crates/orr_editor"
+    package = tomllib.loads((package_root / "Cargo.toml").read_text(encoding="utf-8"))["package"]
+    version = package["version"]
+    if isinstance(version, dict) and version.get("workspace") is True:
+        version = tomllib.loads((source_path / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
+    if package["name"] != "orr_editor" or not isinstance(version, str):
+        raise ValueError("pinned Cargo manifests do not identify orr_editor and its version")
+    expected_package_id = f"path+{package_root.resolve().as_uri()}#{version}"
     if target_root not in executable.parents or not executable.is_file():
         summary.setdefault("binary_preparations", []).append(
             {"source": label, "stage": prepare["label"], "ok": False, "failure": "executable path outside isolated target"}
@@ -932,7 +940,7 @@ def prepare_binary(
              "cargo_json_artifact": artifact, "expected_src_path": str(expected_src_path)}
         )
         return None
-    if not artifact["package_id"].startswith(package_prefix):
+    if artifact["package_id"] != expected_package_id:
         summary.setdefault("binary_preparations", []).append(
             {
                 "source": label,
@@ -940,7 +948,7 @@ def prepare_binary(
                 "ok": False,
                 "failure": "Cargo JSON package ID does not identify the pinned source checkout",
                 "cargo_json_artifact": artifact,
-                "expected_package_prefix": package_prefix,
+                "expected_package_id": expected_package_id,
             }
         )
         return None
