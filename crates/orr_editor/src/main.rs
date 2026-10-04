@@ -2,13 +2,14 @@
 //!
 //! The editor is a view: the simulation runs in a host, by default a thread
 //! of this process (connected in-process), with `--connect` in another
-//! process. Flags: see `--help` (`--scene`, `--select`, `--play-ticks`,
+//! process. Flags: see `--help` (`--game`, `--scene`, `--select`, `--play-ticks`,
 //! `--script`, `--screenshot <png> --frames <n>`, `--erp <addr>` with
 //! `--erp-token` or `--erp-dev`, `--connect <ws://host:port> [--token t]`).
 use std::path::PathBuf;
 
 use orr_editor::cli::{Args, USAGE};
-use orr_editor::editor::{default_scene_path, Editor};
+use orr_editor::editor::Editor;
+use orr_editor::game::EditorGame;
 use orr_editor::{script, EditorApp, HostSpec, ScreenshotJob};
 use orr_remote::{Auth, ServerConfig, TokenEntry};
 
@@ -28,7 +29,8 @@ fn main() {
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
-            let scene: PathBuf = args.scene.clone().unwrap_or_else(default_scene_path);
+            let game = args.game.unwrap_or(EditorGame::PhysGame);
+            let scene: PathBuf = args.scene.clone().unwrap_or_else(|| game.default_scene_path());
             // With --erp the same host thread also listens for agents: they share the window's document.
             let listen = args.erp.map(|bind| {
                 let auth = if args.erp_dev {
@@ -43,7 +45,11 @@ fn main() {
                 cfg.bind = bind;
                 cfg
             });
-            HostSpec::Local { scene, listen, debug_hooks: false }
+            let spec = HostSpec::local_game(scene, game);
+            match listen {
+                Some(cfg) => spec.with_listener(cfg),
+                None => spec,
+            }
         }
     };
     let mut editor = Editor::start(&spec).unwrap_or_else(|e| fail(&e));

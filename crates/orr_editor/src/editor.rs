@@ -238,7 +238,12 @@ pub struct Editor {
 impl Editor {
     /// An editor on a host thread of this process that loads `path`.
     pub fn open(path: &Path) -> Result<Self, String> {
-        Self::start(&HostSpec::local(path))
+        Self::open_game(path, EditorGame::PhysGame)
+    }
+
+    /// An editor on a local host for the selected game that loads `path`.
+    pub fn open_game(path: &Path, game: EditorGame) -> Result<Self, String> {
+        Self::start(&HostSpec::local_game(path, game))
     }
 
     /// An editor attached to the host at `url` (`ws://host:port`), for example an
@@ -1376,6 +1381,10 @@ impl Editor {
             self.error("stop play before opening a scene");
             return false;
         }
+        if self.previewing().is_some() {
+            self.error("clear the proposal preview before opening a scene");
+            return false;
+        }
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => {
@@ -1390,6 +1399,7 @@ impl Editor {
                 if self.game() == EditorGame::Arena {
                     self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
                 }
+                self.backend.spec.set_local_scene_path(path.to_path_buf());
                 self.mark_edited();
                 self.info(format!("opened {}", path.display()));
                 true
@@ -1424,6 +1434,9 @@ impl Editor {
             Ok(r) => {
                 let written = r.get("written").and_then(J::as_str).unwrap_or_default().to_string();
                 self.sim.scene_path = Some(written.clone());
+                if !written.is_empty() {
+                    self.backend.spec.set_local_scene_path(PathBuf::from(&written));
+                }
                 self.sim.dirty = false;
                 self.history.dirty = false;
                 self.dirty.state = true;
@@ -1646,6 +1659,117 @@ impl Editor {
                 false
             }
         }
+    }
+
+    /// Adds a locally authored Arena player in an unused configured slot.
+    /// The slot layout is read from the host after acquiring a transaction so
+    /// concurrent ERP edits cannot race the duplicate check.
+    pub fn spawn_arena_player(&mut self, slot: u8, at: [f32; 2]) -> bool {
+        if self.game() != EditorGame::Arena {
+            self.error("Arena player creation is only available for Arena");
+            return false;
+        }
+        if self.sim.mode != Mode::Edit || !self.can_mutate() {
+            self.error("Arena players can only be created in editable scene mode");
+            return false;
+        }
+        if self.previewing().is_some() {
+            self.error("clear the proposal preview before creating an Arena player");
+            return false;
+        }
+        if self.history.in_tx || self.sim.in_tx || self.gesture.busy() {
+            self.error("finish the current edit before creating an Arena player");
+            return false;
+        }
+        if slot >= 8 {
+            self.error(format!("Arena player slot {slot} is outside the supported range 0..=7"));
+            return false;
+        }
+        let Some(x) = fp_of_f64(f64::from(at[0])) else {
+            self.error("Arena player position must be a finite representable value");
+            return false;
+        };
+        let Some(y) = fp_of_f64(f64::from(at[1])) else {
+            self.error("Arena player position must be a finite representable value");
+            return false;
+        };
+        let position = value_to_json(&Value::Vec2(FPVec2::new(x, y)));
+        let label = format!("create Arena player slot {slot}");
+        if let Err(e) = self.call("tx.begin", json!({"label": label})) {
+            self.error(format!("cannot create Arena player: {e}"));
+            return false;
+        }
+
+        let result = (|| -> Result<Target, String> {
+            let state = self.call("sim.state", J::Null)?;
+            if state.get("mode").and_then(J::as_str) != Some("edit")
+                || state.get("in_tx").and_then(J::as_bool) != Some(true)
+            {
+                return Err("Arena scene changed mode before player creation".into());
+            }
+            let player_count = state.get("player_count").and_then(J::as_u64)
+                .and_then(|n| u8::try_from(n).ok())
+                .filter(|n| (1..=8).contains(n))
+                .ok_or_else(|| "host returned an invalid Arena player count".to_string())?;
+            if slot >= player_count {
+                return Err(format!("Arena player slot {slot} is outside the configured player range"));
+            }
+            let query = self.call(
+                "world.query",
+                json!({"components":["PlayerTag"],"values":true,"limit":9}),
+            )?;
+            if query.get("truncated").and_then(J::as_bool) != Some(false) {
+                return Err("Arena player slot layout is too large or incomplete to validate".into());
+            }
+            let entities = query.get("entities").and_then(J::as_array)
+                .ok_or_else(|| "Arena player slot query returned no entity list".to_string())?;
+            if query.get("total").and_then(J::as_u64) != Some(entities.len() as u64) {
+                return Err("Arena player slot query returned an incomplete entity list".into());
+            }
+            let mut slots = [false; 8];
+            for entity in entities {
+                let found = entity.pointer("/values/PlayerTag/slot").and_then(J::as_u64)
+                    .and_then(|n| u8::try_from(n).ok())
+                    .filter(|n| *n < player_count && *n < 8)
+                    .ok_or_else(|| "Arena scene has a PlayerTag outside the configured player range".to_string())?;
+                if std::mem::replace(&mut slots[usize::from(found)], true) {
+                    return Err(format!("Arena scene has duplicate PlayerTag slot {found}"));
+                }
+            }
+            if slots[usize::from(slot)] {
+                return Err(format!("Arena player slot {slot} is already occupied"));
+            }
+            let created = self.call("world.spawn", json!({
+                "name": format!("player_{slot}"),
+                "components": {
+                    "Position": {"pos": position},
+                    "PlayerTag": {"slot": slot},
+                }
+            }))?;
+            created.get("guid").and_then(J::as_str)
+                .or_else(|| created.get("handle").and_then(J::as_str))
+                .and_then(Target::parse)
+                .ok_or_else(|| "Arena player creation returned no entity identifier".to_string())
+        })();
+
+        let target = match result {
+            Ok(target) => target,
+            Err(e) => {
+                let _ = self.call("tx.rollback", J::Null);
+                self.error(format!("cannot create Arena player: {e}"));
+                return false;
+            }
+        };
+        if let Err(e) = self.call("tx.commit", J::Null) {
+            let _ = self.call("tx.rollback", J::Null);
+            self.error(format!("cannot finish Arena player creation: {e}"));
+            return false;
+        }
+        self.mark_edited();
+        self.selection = Some(target);
+        self.inspect = None;
+        self.dirty.inspect = true;
+        true
     }
 
     fn fresh_name(&self) -> String {

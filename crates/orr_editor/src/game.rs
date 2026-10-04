@@ -4,6 +4,7 @@ use orr_reflect::TypeRegistry;
 use orr_remote::{RemoteBridge, RemoteConfig, RemoteViewDelivery, RpcError, Transport};
 use orr_sample::arena_game::Arena;
 use orr_sample::physics_game::PhysGame;
+use std::path::PathBuf;
 pub use orr_sample::editor_view::Drawable;
 
 /// Games with a compiled frame decoder, reflection and viewport mapping.
@@ -14,6 +15,15 @@ pub enum EditorGame {
 }
 
 impl EditorGame {
+    /// Missing or unknown identities never select a fallback decoder.
+    pub fn from_local_name(name: &str) -> Result<Self, String> {
+        match name {
+            "physics" => Ok(Self::PhysGame),
+            "arena" => Ok(Self::Arena),
+            _ => Err(format!("unsupported local game '{name}'; expected physics or arena")),
+        }
+    }
+
     /// Missing or unknown identities never select a fallback decoder.
     pub fn from_name(name: &str) -> Result<Self, String> {
         match name {
@@ -45,6 +55,20 @@ impl EditorGame {
 
     pub fn position_component(self) -> &'static str {
         match self { Self::PhysGame => "orr_physics::Body", Self::Arena => "Position" }
+    }
+
+    /// Default scene for a locally started game, preferring the current
+    /// working tree and falling back to the scene shipped with the editor.
+    pub fn default_scene_path(self) -> PathBuf {
+        let filename = match self {
+            Self::PhysGame => "physics_demo.scene.yaml",
+            Self::Arena => "arena_blank.scene.yaml",
+        };
+        let local = PathBuf::from("scenes").join(filename);
+        if local.exists() {
+            return local;
+        }
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes/")).join(filename)
     }
 }
 

@@ -413,6 +413,13 @@ impl EditorApp {
                 let phase = self.editor.input_phase();
                 ui.label("Keyboard player slot");
                 ui.add_enabled(phase == Phase::Off, egui::DragValue::new(&mut self.ui.input_player).range(0..=self.editor.sim().player_count.saturating_sub(1)));
+                if self.editor.mode() == Mode::Edit && ui.add_enabled(
+                        self.editor.can_mutate() && self.editor.previewing().is_none() && phase == Phase::Off,
+                        egui::Button::new("+ Player"),
+                ).on_hover_text("Create a player in this unused slot at the viewport center.").clicked() {
+                    let at = self.editor.camera.center;
+                    self.editor.spawn_arena_player(self.ui.input_player, at);
+                }
                 if ui.add_enabled(phase == Phase::Off && self.editor.can_take_control(), egui::Button::new("Take control")).on_hover_text("Replaces this slot's current held input. Does not cancel commands or take over the simulation.").clicked() {
                     self.ui.take_control = true;
                 }
