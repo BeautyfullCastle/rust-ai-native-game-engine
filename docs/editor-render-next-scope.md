@@ -35,7 +35,7 @@ shadows, a contact-feed overlay and a new font system are later scope decisions.
 | [editor model](../crates/orr_editor/src/model.rs), `Target` / `EntityRow::target` | GUID is preferred; a live entity handle is a fallback, not persistent document identity. |
 | [editor controller](../crates/orr_editor/src/editor.rs), `selection`, `can_mutate`, `set_preview` | Existing single-target callers, Viewer protections and preview state remain supported. |
 | [editor app](../crates/orr_editor/src/app.rs), hierarchy / inspector / viewport | Mutation controls already check permissions and proposal preview; model/API checks must also enforce them. |
-| [document transactions](../crates/orr_edit/src/doc.rs), `apply_batch` | Existing all-or-nothing operations, one undo entry, rollback on invalid operation. |
+| [document transactions](../crates/orr_edit/src/doc.rs), `apply_batch` | Existing scene rollback and one committed undo entry. A failed changed prefix can clear existing redo/history; full history preservation is not an existing guarantee. |
 | [ERP dispatch](../crates/orr_remote/src/dispatch.rs), `tx.*` / `world.patch` | These RPCs exist. A one-request batch edit RPC does **not** exist in this baseline. |
 | [3D renderer](../crates/orr_render/src/renderer3d.rs), `Settings3D` / mesh upload / draw | Default requests 4x MSAA, 2048 shadow map, 32 segments; LOW requests 1x, 512, 12. Both passes currently share fixed meshes. |
 | [3D render list](../crates/orr_render/src/list3d.rs), `Instance3D` | 80-byte instances, four mesh vectors and lines; no stable entity ID or LOD state. |
@@ -71,7 +71,7 @@ Persisted folders, reparenting and cross-document references require separate de
 
 ### Proposed API and transaction boundary
 
-Reuse `EditorDoc::apply_batch` in a **new additive ERP endpoint**, tentatively
+Build on `EditorDoc::apply_batch` in a **new additive ERP endpoint**, tentatively
 `world.patch_batch`, with a matching discovery/schema entry. The editor submits one
 request containing GUID/position patches, label and expected document checksum.
 The endpoint and its name are proposed, not implemented APIs. Retain the existing
@@ -83,6 +83,16 @@ value before publishing success. The proposed first request bound is 128 positio
 operations and 64 KiB of serialized request bytes, further restricted by any lower
 host/client limit. Limits are checked before retained batch allocation/application;
 failure returns a bounded explicit error and changes no document/history state.
+That is a stronger requirement than the current helper alone satisfies: in D9,
+the first changed operation clears redo even inside a transaction, while rollback
+reverts scene steps without restoring the cleared redo entries. Scene/checksum
+rollback therefore does not prove undo/redo/history preservation. Validate the
+whole request before mutating; use the helper only where all remaining application
+steps are guaranteed to succeed. If application can still fail, use safe staging
+or restoration that preserves the pre-request scene and complete undo/redo/history,
+including entry order and metadata. Rejecting a batch must also preserve `can_undo`
+and `can_redo`. Any needed edit-core change requires a separate owner file/scope
+assignment; this document does not authorize or implement that change.
 Reuse the game's reflected position schema and checked FP conversion; display-space
 floats must not enter simulation state. Zero displacement records no undo entry.
 One nonempty successful batch records one entry with the original client origin;
@@ -113,7 +123,12 @@ not just by greying a widget. Proposal acceptance remains the existing separate 
    checksum and positions; redo restores the committed result. No-op changes none.
 2. Invalid/missing GUID, uneditable or overflowed value, duplicate target, 129th
    operation, byte-bound overflow, stale checksum and open/foreign transaction all
-   reject with zero partial edits, zero new history entries and unchanged checksum.
+   reject with zero partial edits, unchanged positions/checksum and the complete
+   pre-existing undo/redo/history preserved. First make a real edit and undo it so
+   redo is nonempty, then submit a batch with a valid changed position prefix and
+   an invalid later operation. Assert positions, scene/preview checksum, full history
+   (entries, order and metadata), `can_undo` and `can_redo` all remain unchanged;
+   the original redo still succeeds. A rejection test with empty history is insufficient.
 3. Rename and preview rebake preserve GUID selection across changed entity handles;
    removal, scene replacement and stale replies cannot edit a substituted entity.
    Single-selection callers and existing drag transaction tests retain their behavior.
