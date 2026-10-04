@@ -6,10 +6,12 @@
 //! The header is `include/orrery.h` (hand-written; keep it in step with this
 //! file). The byte formats are in `docs/view-stream.md`.
 //!
-//! # The game is chosen at compile time
+//! # Explicit built-in games
 //!
-//! A Rust game is generic code, so one build of this library hosts one game.
-//! This crate ships the physics demo (`PhysGame` of `orr_sample`). To host
+//! A Rust game is generic code. This build provides the physics demo through
+//! [`orr_host_open`] and a built-in Yard3D scene through
+//! [`orr_yard3d_host_open_v1`]. Existing PhysGame and relay-client calls keep
+//! their meaning. To host
 //! another game, copy this crate, and in [`open_host`] replace
 //! `orr_remote::sample::spawn_phys_host` by a `LocalHost::spawn::<YourGame>`
 //! with your scene loader, `HostLimits` (including `view_stream`) and
@@ -72,7 +74,8 @@ mod client;
 
 use orr_remote::{Auth, Caps, ClientError, ErpClient, LocalHost, ServerConfig};
 use orr_viewstream::{
-    message_type, reset_frame_events, EventBatch, MSG_EVENTS, MSG_FRAME, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET,
+    message_type, reset_frame_events, EventBatch, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET,
+    MSG_EVENTS, MSG_FRAME, MSG_FRAME3D, VERSION_3D,
 };
 use serde_json::{json, Value as J};
 
@@ -125,7 +128,7 @@ pub const ORR_TRANSPORT_QUIC: u32 = 0;
 /// `OrrClientConfig::transport`: WebSocket (plain; `fingerprint` is unused).
 pub const ORR_TRANSPORT_WS: u32 = 1;
 
-/// `OrrSessionStatus::mode`: a local host (`orr_host_open`).
+/// `OrrSessionStatus::mode`: a local host (`orr_host_open` or `orr_yard3d_host_open_v1`).
 pub const ORR_MODE_LOCAL: u32 = 0;
 /// `OrrSessionStatus::mode`: a client of a relay server (`orr_client_open`).
 pub const ORR_MODE_CLIENT: u32 = 1;
@@ -146,7 +149,7 @@ pub const ORR_STATUS_DESYNC: u32 = 1;
 /// 2: client sessions (`orr_client_open`, `orr_session_status`, `ORR_ERR_NOT_READY`).
 pub const ORR_ABI_VERSION: u32 = 2;
 
-/// Settings of [`orr_host_open`]. Zero the struct, then set `struct_size`.
+/// Settings of [`orr_host_open`] and [`orr_yard3d_host_open_v1`]. Zero the struct, then set `struct_size`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct OrrHostConfig {
@@ -414,7 +417,7 @@ impl Inner {
                 let alive = l.client.poll();
                 while let Some(bytes) = l.client.frames.pop_front() {
                     match message_type(&bytes) {
-                        Ok(MSG_FRAME) => self.view.push(bytes, &mut self.events)?,
+                        Ok(MSG_FRAME | MSG_FRAME3D) => self.view.push(bytes, &mut self.events)?,
                         Ok(MSG_EVENTS) => queue_event_batch(&self.view, &mut self.events, bytes)?,
                         _ => {}
                     }
@@ -514,12 +517,15 @@ unsafe fn write_text(buf: *mut c_char, cap: usize, text: &str) -> Result<usize, 
     Ok(needed)
 }
 
-fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<OrrHost, Fail> {
+fn host_settings(cfg: *const OrrHostConfig) -> Result<(u32, u16), Fail> {
     let (flags, port) = match unsafe { cfg.as_ref() } {
         None => (0, 0),
         Some(c) => {
             if (c.struct_size as usize) < 3 * std::mem::size_of::<u32>() {
-                return fail(ORR_ERR_ARG, "OrrHostConfig.struct_size is too small (set it to sizeof(OrrHostConfig))");
+                return fail(
+                    ORR_ERR_ARG,
+                    "OrrHostConfig.struct_size is too small (set it to sizeof(OrrHostConfig))",
+                );
             }
             (c.flags, c.listen_port)
         }
@@ -527,24 +533,82 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     if port > u32::from(u16::MAX) {
         return fail(ORR_ERR_ARG, "listen_port must be 0..=65535");
     }
+    Ok((flags, port as u16))
+}
+
+fn host_server(flags: u32, port: u16) -> ServerConfig {
+    let mut server = ServerConfig::new(Auth::DevNoAuth);
+    server.listen = flags & ORR_HOST_LISTEN != 0;
+    server.bind = SocketAddr::from(([127, 0, 0, 1], port));
+    server
+}
+
+fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<OrrHost, Fail> {
+    let (flags, port) = host_settings(cfg)?;
     let (text, path) = if scene_path.is_null() {
         (DEMO_SCENE.to_string(), None)
     } else {
-        let p = unsafe { CStr::from_ptr(scene_path) }.to_str().map_err(|_| Fail { code: ORR_ERR_ARG, msg: "scene path is not UTF-8".into() })?;
-        let text = std::fs::read_to_string(p).map_err(|e| Fail { code: ORR_ERR_ARG, msg: format!("cannot read scene {p}: {e}") })?;
+        let p = unsafe { CStr::from_ptr(scene_path) }
+            .to_str()
+            .map_err(|_| Fail {
+                code: ORR_ERR_ARG,
+                msg: "scene path is not UTF-8".into(),
+            })?;
+        let text = std::fs::read_to_string(p).map_err(|e| Fail {
+            code: ORR_ERR_ARG,
+            msg: format!("cannot read scene {p}: {e}"),
+        })?;
         (text, Some(PathBuf::from(p)))
     };
-    let mut server = ServerConfig::new(Auth::DevNoAuth);
-    server.listen = flags & ORR_HOST_LISTEN != 0;
-    server.bind = SocketAddr::from(([127, 0, 0, 1], port as u16));
-    // The game is chosen here, at compile time (see the crate docs).
-    let host = orr_remote::sample::spawn_phys_host(text, path, server).map_err(|e| Fail { code: ORR_ERR_ARG, msg: e })?;
+    let host =
+        orr_remote::sample::spawn_phys_host(text, path, host_server(flags, port)).map_err(|e| {
+            Fail {
+                code: ORR_ERR_ARG,
+                msg: e,
+            }
+        })?;
+    connect_local(host, flags)
+}
+
+fn open_yard3d_host(max_view_version: u32, cfg: *const OrrHostConfig) -> Result<OrrHost, Fail> {
+    // Refuse before starting a thread or binding a socket. The API suffix is
+    // this entry's contract version; the negotiated view format is version 2.
+    if max_view_version < u32::from(VERSION_3D) {
+        return fail(
+            ORR_ERR_ARG,
+            "Yard3D requires view-stream version 2 (max_view_version is too low)",
+        );
+    }
+    let (flags, port) = host_settings(cfg)?;
+    let host = orr_remote::yard3d::spawn_yard3d_host(
+        orr_sample::yard3d_game::YardConfig::new(24),
+        host_server(flags, port),
+    )
+    .map_err(|e| Fail {
+        code: ORR_ERR_ARG,
+        msg: e,
+    })?;
+    connect_local(host, flags)
+}
+
+fn connect_local(host: LocalHost, flags: u32) -> Result<OrrHost, Fail> {
     let url = host.url().map(str::to_string);
-    let transport = host.connector().connect(CLIENT_NAME, Caps::ALL).map_err(|e| Fail { code: ORR_ERR_HOST, msg: e.to_string() })?;
+    let transport = host
+        .connector()
+        .connect(CLIENT_NAME, Caps::ALL)
+        .map_err(|e| Fail {
+            code: ORR_ERR_HOST,
+            msg: e.to_string(),
+        })?;
     let mut client = ErpClient::with_transport(Box::new(transport));
     client.call_timeout = CALL_TIMEOUT;
     let mut inner = Inner {
-        backend: Backend::Local(Box::new(Local { client, host, url, run_on_start: flags & ORR_HOST_RUN != 0 })),
+        backend: Backend::Local(Box::new(Local {
+            client,
+            host,
+            url,
+            run_on_start: flags & ORR_HOST_RUN != 0,
+        })),
         schema_json: String::new(),
         input_size: 0,
         player_count: 0,
@@ -556,7 +620,10 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     // Up to 1000 frames a second: the caller paces itself by polling.
     // (Not through `Inner::call`: it would discard the schema notification that comes with the response.)
     let local = inner.local()?;
-    match local.client.call("watch.subscribe", json!({"topics": ["viewstream"], "max_fps": 1000, "source": "sim"})) {
+    match local.client.call(
+        "watch.subscribe",
+        json!({"topics": ["viewstream"], "max_fps": 1000, "source": "sim"}),
+    ) {
         Ok(_) => {}
         Err(ClientError::Rpc(e)) => return fail(ORR_ERR_RPC, format!("watch.subscribe: {e}")),
         Err(e) => return fail(ORR_ERR_HOST, format!("watch.subscribe: {e}")),
@@ -564,14 +631,25 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     let schema = local
         .client
         .wait_notification("watch.viewstream.schema", Duration::from_secs(10))
-        .map_err(|e| Fail { code: ORR_ERR_HOST, msg: e.to_string() })?
-        .ok_or_else(|| Fail { code: ORR_ERR_HOST, msg: "the host sent no schema".into() })?;
+        .map_err(|e| Fail {
+            code: ORR_ERR_HOST,
+            msg: e.to_string(),
+        })?
+        .ok_or_else(|| Fail {
+            code: ORR_ERR_HOST,
+            msg: "the host sent no schema".into(),
+        })?;
     let schema = schema.get("params").cloned().unwrap_or(J::Null);
-    inner.input_size = schema.pointer("/input/size").and_then(J::as_u64).unwrap_or(0) as usize;
+    inner.input_size = schema
+        .pointer("/input/size")
+        .and_then(J::as_u64)
+        .unwrap_or(0) as usize;
     inner.player_count = schema.get("player_count").and_then(J::as_u64).unwrap_or(0) as u8;
     inner.schema_json = schema.to_string();
     inner.pump()?;
-    Ok(OrrHost { inner: Mutex::new(inner) })
+    Ok(OrrHost {
+        inner: Mutex::new(inner),
+    })
 }
 
 fn text_arg(p: *const c_char, what: &str) -> Result<Option<String>, Fail> {
@@ -670,7 +748,7 @@ pub extern "C" fn orr_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
-/// Opens a host of the compiled-in game on the scene at `scene_path` (a UTF-8
+/// Opens the PhysGame host on the scene at `scene_path` (a UTF-8
 /// path to a scene YAML; null = the built-in demo scene) and starts its
 /// thread. `cfg` may be null. Returns null on failure (see `orr_last_error`).
 #[no_mangle]
@@ -678,6 +756,28 @@ pub unsafe extern "C" fn orr_host_open(scene_path: *const c_char, cfg: *const Or
     let mut out: *mut OrrHost = std::ptr::null_mut();
     guard(|| {
         out = Box::into_raw(Box::new(open_host(scene_path, cfg)?));
+        Ok(ORR_OK)
+    });
+    out
+}
+
+/// Opens the deterministic built-in Yard3D scene, paused unless `ORR_HOST_RUN` is set.
+/// `max_view_version` is the highest view-stream format the caller understands:
+/// values below 2 are refused before host startup, with a null result and an
+/// explanation in [`orr_last_error`]. A higher maximum still receives version 2.
+/// `cfg` may be null and has the same meaning as for [`orr_host_open`].
+///
+/// This additive entry's `_v1` suffix versions its C contract, independently of
+/// view-stream version 2. Existing ABI 2 symbols/layouts and the PhysGame entry
+/// are unchanged. There is no scene-path or relay-client variant of this entry.
+#[no_mangle]
+pub unsafe extern "C" fn orr_yard3d_host_open_v1(
+    max_view_version: u32,
+    cfg: *const OrrHostConfig,
+) -> *mut OrrHost {
+    let mut out: *mut OrrHost = std::ptr::null_mut();
+    guard(|| {
+        out = Box::into_raw(Box::new(open_yard3d_host(max_view_version, cfg)?));
         Ok(ORR_OK)
     });
     out
@@ -1051,12 +1151,87 @@ pub unsafe extern "C" fn orr_erp_call(host: *mut OrrHost, request_json: *const c
 mod frame_mailbox_tests {
     use super::*;
     use orr_viewstream::{
-        EntityRecord, EventRecord, ViewFrame, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
+        EntityRecord, EntityRecord3, EventRecord, Pose3, ViewFrame, ViewFrame3, STATE_CANCELED,
+        STATE_PREDICTED, STATE_VERIFIED,
     };
 
     /// Keep the real host alive, but make incoming presentation data entirely
     /// fixture-owned: empty polls cannot race the host's initial publication.
     struct EmptyTransport;
+
+    #[test]
+    fn frame3_reset_survives_replacement_and_copy_probes_until_pointer_take() {
+        let frame3 = |tick, flags| {
+            ViewFrame3 {
+                tick,
+                flags,
+                verified_tick: tick,
+                seq: tick,
+                rollback: None,
+                entities: vec![EntityRecord3 {
+                    id: 7,
+                    kind: 1,
+                    shape: orr_viewstream::SHAPE3_SPHERE,
+                    mode: orr_viewstream::MODE_PREDICTION,
+                    size: [1.0, 0.0, 0.0],
+                    rgba: [1, 2, 3, 255],
+                    roughness: 200,
+                    metallic: 0,
+                    style_flags: 0,
+                    prev: Pose3::IDENTITY,
+                    cur: Pose3 {
+                        pos: [1.0, 2.0, 3.0],
+                        rot: [0.0, 0.0, 0.0, 1.0],
+                    },
+                }],
+                props: vec![0; 4],
+            }
+            .encode()
+        };
+        let mut host = open_yard3d_host(2, std::ptr::null()).unwrap();
+        {
+            let mut inner = lock(&host);
+            inner.local().unwrap().client = ErpClient::with_transport(Box::new(EmptyTransport));
+            inner.view = FrameMailbox::default();
+            inner.events.clear();
+            inner.events.push_back(
+                EventBatch {
+                    events: vec![event(1, STATE_PREDICTED)],
+                }
+                .encode(),
+            );
+            let Inner { view, events, .. } = &mut *inner;
+            view.push(frame3(2, FLAG_EVENTS_RESET), events).unwrap();
+            assert!(events.is_empty());
+            view.push(frame3(3, 0), events).unwrap();
+        }
+        let mut written = 0;
+        assert_eq!(
+            unsafe { orr_view_poll(&mut host, std::ptr::null_mut(), 0, &mut written) },
+            ORR_ERR_BUFFER
+        );
+        let mut short = [99u8; 1];
+        assert_eq!(
+            unsafe { orr_view_poll(&mut host, short.as_mut_ptr(), short.len(), &mut written) },
+            ORR_ERR_BUFFER
+        );
+        assert_eq!(short, [99]);
+        assert!(lock(&host).view.reset_pending);
+        let mut data = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            unsafe { orr_view_poll_ptr(&mut host, &mut data, &mut len) },
+            ORR_OK
+        );
+        let decoded = ViewFrame3::decode(unsafe { std::slice::from_raw_parts(data, len) }).unwrap();
+        assert_eq!(decoded.tick, 3);
+        assert!(decoded.has(FLAG_EVENTS_RESET));
+        assert!(decoded.has(FLAG_DISCONTINUITY));
+        assert_eq!(decoded.entities[0].prev, decoded.entities[0].cur);
+        let inner = lock(&host);
+        assert!(!inner.view.reset_pending);
+        assert_eq!(inner.view.reset_floor_tick, Some(3));
+    }
 
     impl orr_remote::Transport for EmptyTransport {
         fn send(&mut self, _req: orr_remote::Request) -> Result<(), ClientError> {
