@@ -1,0 +1,51 @@
+name: editor drag Linux diagnostic
+
+on:
+  push:
+    branches:
+      - codex/haneul-45-linux-diagnostic
+    paths:
+      - .github/workflows/editor-drag-linux-diagnostic.yml
+      - tools/diagnostics/editor-drag-linux/run.py
+      - tools/diagnostics/editor-drag-linux/measure.patch
+      - tools/diagnostics/editor-drag-linux/editor-baseline.patch
+      - tools/diagnostics/editor-drag-linux/editor-candidate.patch
+
+permissions:
+  contents: read
+
+jobs:
+  linux-drag-diagnostic:
+    name: first drag on pinned Linux sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out diagnostic branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create evidence directory
+        run: mkdir -p "$RUNNER_TEMP/editor-drag-linux-evidence"
+
+      - name: Install Rust 1.99.0
+        run: |
+          set -o pipefail
+          rustup toolchain install 1.99.0 --profile minimal 2>&1 | tee "$RUNNER_TEMP/editor-drag-linux-evidence/rustup-install.raw"
+
+      - name: Prepare and run one baseline then one candidate measurement
+        if: always()
+        run: python3 tools/diagnostics/editor-drag-linux/run.py
+
+      - name: Upload raw diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-drag-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/editor-drag-linux-evidence/
+          if-no-files-found: warn
+          retention-days: 14

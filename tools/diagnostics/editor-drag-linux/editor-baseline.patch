@@ -1,0 +1,30 @@
+--- a/crates/orr_editor/src/editor.rs
++++ b/crates/orr_editor/src/editor.rs
+@@ -380,6 +380,27 @@
+         self.telemetry.summary(self.pending.len())
+     }
+ 
++    /// Narrow observer for the drag latency harness; does not make host calls.
++    pub fn frame_stream_diagnostics(&self) -> serde_json::Value {
++        let metrics = match &self.backend.bridge {
++            EditorStream::Phys(bridge) => bridge.metrics(),
++            EditorStream::Arena(bridge) => bridge.metrics(),
++        };
++        json!({
++            "transport_queues": { "available": false, "reason": "not_supported_by_baseline_source", "outgoing": null, "incoming": null },
++            "frame_metrics": {
++                "frames": metrics.frames,
++                "frame_bytes": metrics.frame_bytes,
++                "last_frame_bytes": metrics.last_frame_bytes,
++                "last_frame_raw_bytes": metrics.last_frame_raw_bytes,
++                "last_latency_us": metrics.last_latency_us,
++                "max_latency_us": metrics.max_latency_us,
++                "latency_sum_us": metrics.latency_sum_us,
++                "last_decode_us": metrics.last_decode_us,
++            },
++        })
++    }
++
+     pub(crate) fn record_ui_frame(&mut self, elapsed: Duration) {
+         self.telemetry.ui_frame.record(elapsed);
+     }

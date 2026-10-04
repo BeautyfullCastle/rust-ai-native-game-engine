@@ -1,0 +1,69 @@
+--- a/crates/orr_editor/tests/measure.rs
++++ b/crates/orr_editor/tests/measure.rs
+@@ -116,20 +116,65 @@
+         let pointer = at + egui::vec2(i as f32 * 3.0, 0.0);
+         let world = h.state().editor.camera.screen_to_world([pointer.x - rect.min.x, pointer.y - rect.min.y], vp);
+         let want_x = p[0] + (world[0] - start_world[0]);
++        let mut move_trace: Vec<serde_json::Value> = Vec::with_capacity(201);
++        if i == 1 {
++            move_trace.push(json!({
++                "phase": "before_first_pointer_move",
++                "move_index": i,
++                "frame_index": 0,
++                "snapshot_seq": h.state().editor.snapshot().map(|snapshot| snapshot.seq()),
++                "expected_pos": [p[0], p[1]],
++                "observed_nearby_positions": h.state().editor.bodies().iter()
++                    .filter(|b| (b.pos[1] - p[1]).abs() < 1.0)
++                    .map(|b| [b.pos[0], b.pos[1]])
++                    .collect::<Vec<_>>(),
++                "frame_stream": h.state().editor.frame_stream_diagnostics(),
++                "editor_erp_pending": {
++                    "current": h.state().editor.diagnostics().pending_requests,
++                    "high_water": h.state().editor.diagnostics().pending_high_water,
++                },
++            }));
++        }
+         h.event(Event::PointerMoved(pointer));
+         let t0 = Instant::now();
+         let mut n = 0;
+         loop {
+             h.step();
+-            n += 1;
++            n += 1;
++            let observer_started = Instant::now();
+             // Within a pixel or two of where the pointer put it (the pointer steps are whole pixels).
+             let px_world = (world[0] - start_world[0]).abs() / (i as f32 * 3.0);
+             let shown = h.state().editor.bodies().iter().any(|b| (b.pos[1] - p[1]).abs() < 0.5 && (b.pos[0] - want_x).abs() < 2.5 * px_world);
++            let observed_nearby_positions = h.state().editor.bodies().iter()
++                .filter(|b| (b.pos[1] - p[1]).abs() < 1.0)
++                .map(|b| [b.pos[0], b.pos[1]])
++                .collect::<Vec<_>>();
++            let editor_diagnostics = h.state().editor.diagnostics();
++            let frame_stream = h.state().editor.frame_stream_diagnostics();
++            move_trace.push(json!({
++                "phase": "after_ui_step",
++                "move_index": i,
++                "frame_index": n,
++                "elapsed_since_move_start_ms": t0.elapsed().as_secs_f64() * 1000.0,
++                "snapshot_seq": h.state().editor.snapshot().map(|snapshot| snapshot.seq()),
++                "expected_pos": [want_x, p[1]],
++                "observed_nearby_positions": observed_nearby_positions,
++                "shown": shown,
++                "frame_stream": frame_stream,
++                "editor_erp_pending": {
++                    "current": editor_diagnostics.pending_requests,
++                    "high_water": editor_diagnostics.pending_high_water,
++                },
++                "observer_sample_ms": observer_started.elapsed().as_secs_f64() * 1000.0,
++            }));
+             if shown || n >= 200 {
+                 break;
+             }
+         }
+         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
++        for sample in &move_trace {
++            eprintln!("ORR_DRAG_STEP_TRACE {sample}");
++        }
+         frames.push(f64::from(n));
+         millis.push(elapsed_ms);
+         eprintln!(
