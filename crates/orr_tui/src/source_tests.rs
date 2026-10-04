@@ -137,6 +137,55 @@ fn tcp_hex_notification_classifies_a_v2_3d_frame() {
     assert!(matches!(source.queue.pop_front(), Some(Incoming::Frame3(b)) if b == frame));
 }
 
+fn set_wire_version_and_type(bytes: &mut [u8], version: u16, message_type: u8) {
+    bytes[4..6].copy_from_slice(&version.to_le_bytes());
+    bytes[6] = message_type;
+}
+
+#[test]
+fn classify_accepts_only_the_frame_type_assigned_to_each_wire_version() {
+    use orr_viewstream::{EventBatch, ViewFrame, ViewFrame3, MSG_EVENTS, MSG_FRAME, MSG_FRAME3D, VERSION, VERSION_3D};
+
+    let frame2d = ViewFrame { flags: 0, tick: 1, verified_tick: 1, seq: 1, rollback: None, entities: Vec::new(), props: Vec::new() }.encode();
+    let events = EventBatch { events: Vec::new() }.encode();
+    let frame3d = ViewFrame3 { flags: 0, tick: 1, verified_tick: 1, seq: 1, rollback: None, entities: Vec::new(), props: Vec::new() }.encode();
+
+    assert!(matches!(classify(frame2d.clone()), Some(Incoming::Frame(_))));
+    assert!(matches!(classify(events.clone()), Some(Incoming::Events(_))));
+    assert!(matches!(classify(frame3d.clone()), Some(Incoming::Frame3(_))));
+
+    let mut v1_frame3 = frame3d.clone();
+    set_wire_version_and_type(&mut v1_frame3, VERSION, MSG_FRAME3D);
+    let mut v2_frame2 = frame2d;
+    set_wire_version_and_type(&mut v2_frame2, VERSION_3D, MSG_FRAME);
+    let mut v2_events = events;
+    set_wire_version_and_type(&mut v2_events, VERSION_3D, MSG_EVENTS);
+
+    assert!(classify(v1_frame3).is_none(), "v1 must not carry a v2 3D frame");
+    assert!(classify(v2_frame2).is_none(), "v2 must not carry a v1 2D frame");
+    assert!(classify(v2_events).is_none(), "v2 must not carry a v1 event batch");
+}
+
+#[test]
+fn v1_event_batch_remains_accepted_for_a_v2_schema() {
+    use orr_viewstream::EventBatch;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let mut source = SocketSource {
+        wire: Wire::Tcp { reader: BufReader::new(client), partial: Vec::new() },
+        schema: r#"{"format":"orrery.viewstream","version":2,"game":"Yard3D","frame3d":{"message_type":3,"record_len":88}}"#.into(),
+        next_id: 1,
+        queue: VecDeque::new(),
+        target: "tcp://127.0.0.1".into(),
+        client: None,
+    };
+    drop(listener.accept().unwrap());
+    let bytes = EventBatch { events: Vec::new() }.encode();
+    source.handle_text(&serde_json::json!({"method":"watch.viewstream","params":{"data":to_hex(&bytes)}}));
+    assert!(matches!(source.queue.pop_front(), Some(Incoming::Events(_))), "event batches retain wire version 1 even when the schema describes 3D frames");
+}
+
 #[test]
 fn websocket_read_keeps_timeouts_recoverable_and_real_failures_fatal() {
     for kind in [ErrorKind::WouldBlock, ErrorKind::TimedOut, ErrorKind::Interrupted] {
