@@ -529,3 +529,45 @@ presentation-only; the authoritative simulation continues ticking. `RemoteBridge
 and the editor's ERP `LocalHost` path are not covered by the bounded mailbox.
 The flag above signals a bridge-level reset, not network packet-loss recovery.
 The binary frame carries no diagnostic count; Rust `ViewResync` exposes counts.
+
+### Yard3D snapshot consumers
+
+`Yard3dStreamProducer::pump` accepts a `Bridge<Yard3D>` and delegates to
+`ViewStreamSource3::pump`. It consumes one coherent `poll_view` update, including
+the actual snapshot and any bounded-mailbox resync. An increased snapshot
+rollback count makes the source emit that snapshot's rollback range; the
+numeric count itself is not encoded in the frame.
+Consumers must pass that update through the pump once; draining the bridge first
+would consume the recovery marker before the producer can emit its baseline.
+`StreamProducer::encode_frame` remains available for direct-frame local ERP
+hosts, whose metadata is supplied by that host.
+
+The existing generic ERP `ClientSessionHook` can publish the pump's type-3
+frames over WebSocket and TCP. Yard3D has `NoEvent` and an empty event schema;
+its lifecycle-mailbox recovery still emits `events_reset` and `discontinuity`
+with a complete frame whose previous transforms equal the current transforms.
+This reset does not create game events or change simulation state. Relay
+rollback uses delayed confirmed input bundles to correct client prediction;
+local play-session seek replays recorded history. The built-in Yard3D C ABI
+entry above remains a local play session.
+
+`cargo test -p orr_remote --release --locked --test yard3d_recovery` covers
+these two paths through a test-only generic client-session adapter and actual
+ERP sockets. The relay case holds a bounded downstream WebSocket FIFO after
+the handshake (128 messages, 128 KiB, at most 500 ms), then releases the same
+bytes in order while the uplink and other player remain live. A peer input
+accepted in the server's finalized log must correct the client's prediction;
+the resulting rollback range, complete entities and properties are checked
+against that actual snapshot and independent simulation replay of the server's
+finalized inputs. Both clients' confirmed checkpoint checksums must agree with
+the replay, and WS binary and TCP hex must carry identical corrected frames.
+This is a bounded delay test, without packet loss, jitter or retroactive edits
+to server-finalized inputs.
+
+The overrun case holds the consumer while a capacity-one `Threaded` mailbox
+receives real rejected-seek lifecycle notifications. Its actual resync must
+produce a complete reset baseline without changing the paused simulation's
+tick, checksum or timeline. A subsequent processed step must produce a normal
+frame with the reset flag clear, over both ERP transports. The tests add no
+production Yard3D relay factory or command-line mode; C ABI and TUI entry-point
+support remains as described above.

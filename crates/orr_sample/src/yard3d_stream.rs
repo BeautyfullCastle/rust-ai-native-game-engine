@@ -4,17 +4,17 @@
 //! clients see the authoritative frame with matching shapes, floor placement,
 //! transforms, and materials.
 
-use orr_bridge::FrameView;
+use orr_bridge::{Bridge, FrameView};
 use orr_ecs::Frame;
 use orr_physics3d::{BODY_DYNAMIC, Body};
 use orr_reflect::Reflect;
 use orr_view::{Extracted3, fp_to_vec3};
 use orr_viewstream::{
-    FrameMeta, InputLayout, KindDef, PropType, Schema, StreamKinds3, StreamProducer,
+    FrameMeta, InputLayout, KindDef, PropType, Pumped3, Schema, StreamKinds3, StreamProducer,
     ViewStreamSource3,
 };
 
-use crate::yard3d_game::{NoCommand, TICK_RATE, YardInput};
+use crate::yard3d_game::{NoCommand, TICK_RATE, Yard3D, YardInput};
 use crate::yard3d_view::YardExtractor;
 
 /// Static terrain and walls.
@@ -89,7 +89,7 @@ pub fn yard3d_view_schema(build_id: u64, player_count: u8) -> Schema {
     }
 }
 
-/// A direct-frame ERP producer for the Yard3D stream.
+/// A Yard3D view producer for direct frames or a snapshot-based Bridge stream.
 pub struct Yard3dStreamProducer {
     source: ViewStreamSource3<YardExtractor, YardKinds>,
 }
@@ -104,6 +104,13 @@ impl Yard3dStreamProducer {
                 yard3d_view_schema(build_id, player_count),
             ),
         }
+    }
+
+    /// Polls a Yard3D bridge and preserves its snapshot, rollback and recovery
+    /// metadata in the 3D stream. Each poll is consumed exactly once by the
+    /// underlying source, including a bounded-mailbox reset baseline.
+    pub fn pump<B: Bridge<Yard3D> + ?Sized>(&mut self, bridge: &mut B) -> Pumped3 {
+        self.source.pump(bridge)
     }
 }
 
