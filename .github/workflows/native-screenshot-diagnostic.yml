@@ -23,12 +23,14 @@ jobs:
       RUST_BACKTRACE: "1"
       ORR_REQUIRE_NATIVE_EDITOR: "1"
       WGPU_BACKEND: vulkan
-      ORR_NATIVE_EDITOR_ARTIFACT_DIR: ${{ runner.temp }}/native-screenshot
     steps:
       - uses: actions/checkout@v4
       - name: One-attempt guard and source pin
+        env:
+          ORR_NATIVE_EDITOR_ARTIFACT_DIR: ${{ runner.temp }}/native-screenshot
         run: |
           test "${{ github.run_attempt }}" = 1
+          printf 'ORR_NATIVE_EDITOR_ARTIFACT_DIR=%s\n' "$ORR_NATIVE_EDITOR_ARTIFACT_DIR" >> "$GITHUB_ENV"
           mkdir -p "$ORR_NATIVE_EDITOR_ARTIFACT_DIR"
           git rev-parse HEAD HEAD^{tree} > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/source-identity.txt"
           sha256sum Cargo.lock crates/orr_remote/src/{server,screenshot}.rs \
