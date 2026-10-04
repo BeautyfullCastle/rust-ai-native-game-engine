@@ -6,10 +6,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use orr_viewstream::{
-    EventBatch, ViewFrame, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET, FLAG_PAUSED, FLAG_ROLLED_BACK, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
+    EventBatch, ViewFrame, ViewFrame3, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET, FLAG_PAUSED, FLAG_ROLLED_BACK, STATE_CANCELED, STATE_PREDICTED,
+    STATE_VERIFIED,
 };
 
 use crate::render::Camera;
+use crate::render3d::Camera3;
 use crate::schema::ViewSchema;
 use crate::source::{Incoming, NetState, NetStatus};
 
@@ -44,12 +46,16 @@ impl EventLine {
 pub struct ViewState {
     pub schema: ViewSchema,
     pub frame: Option<ViewFrame>,
+    /// The newest 3D frame. Mutually exclusive with `frame`.
+    pub frame3: Option<ViewFrame3>,
     pub arrived: Instant,
     pub frame_bytes: usize,
     pub frames_total: u64,
     pub events_total: u64,
     pub recent_events: VecDeque<EventLine>,
     pub camera: Option<Camera>,
+    /// XZ orthographic camera, independent from the 2D camera.
+    pub camera3: Option<Camera3>,
     /// Arrival times of the frames of the last second (for frames/s).
     arrivals: VecDeque<Instant>,
     last_rollback: Option<Instant>,
@@ -74,6 +80,8 @@ pub struct ViewState {
     /// The rollback correction still to fade out: per entity id the offset (x, y) to add to the
     /// frame's positions, and when it started.
     offsets: BTreeMap<u64, [f32; 2]>,
+    /// Positional rollback correction for the 3D frame, in world xyz units.
+    offsets3: BTreeMap<u64, [f32; 3]>,
     smooth_start: Option<Instant>,
 }
 
@@ -82,12 +90,14 @@ impl ViewState {
         ViewState {
             schema,
             frame: None,
+            frame3: None,
             arrived: now,
             frame_bytes: 0,
             frames_total: 0,
             events_total: 0,
             recent_events: VecDeque::new(),
             camera: None,
+            camera3: None,
             arrivals: VecDeque::new(),
             last_rollback: None,
             last_discontinuity: None,
@@ -102,6 +112,7 @@ impl ViewState {
             rolled_back_frames: 0,
             max_rollback_depth: 0,
             offsets: BTreeMap::new(),
+            offsets3: BTreeMap::new(),
             smooth_start: None,
         }
     }
@@ -110,8 +121,20 @@ impl ViewState {
     pub fn ingest(&mut self, msg: &Incoming, now: Instant) {
         match msg {
             Incoming::Frame(bytes) => match ViewFrame::decode(bytes) {
-                Ok(f) => self.ingest_frame(f, bytes.len(), now),
+                Ok(f) if self.schema.dimensions == 2 => self.ingest_frame(f, bytes.len(), now),
+                Ok(_) => self.notice = Some("bad frame: 2D frame does not match 3D schema".into()),
                 Err(e) => self.notice = Some(format!("bad frame: {e}")),
+            },
+            Incoming::Frame3(bytes) => match ViewFrame3::decode(bytes) {
+                Ok(f) if self.schema.dimensions == 3 => {
+                    if let Some(reason) = validate_frame3(&f) {
+                        self.notice = Some(format!("bad 3D frame: {reason}"));
+                    } else {
+                        self.ingest_frame3(f, bytes.len(), now);
+                    }
+                }
+                Ok(_) => self.notice = Some("bad frame: 3D frame does not match 2D schema".into()),
+                Err(e) => self.notice = Some(format!("bad 3D frame: {e}")),
             },
             Incoming::Events(bytes) => match EventBatch::decode(bytes) {
                 Ok(b) => {
@@ -167,6 +190,9 @@ impl ViewState {
     }
 
     fn ingest_frame(&mut self, f: ViewFrame, len: usize, now: Instant) {
+        self.frame3 = None;
+        self.camera3 = None;
+        self.offsets3.clear();
         if f.has(FLAG_ROLLED_BACK) {
             self.last_rollback = Some(now);
             self.rolled_back_frames += 1;
@@ -196,6 +222,65 @@ impl ViewState {
         self.arrivals.push_back(now);
         self.frame = Some(f);
         self.arrived = now;
+    }
+
+    fn ingest_frame3(&mut self, f: ViewFrame3, len: usize, now: Instant) {
+        self.frame = None;
+        self.camera = None;
+        self.offsets.clear();
+        if f.has(FLAG_ROLLED_BACK) {
+            self.last_rollback = Some(now);
+            self.rolled_back_frames += 1;
+            if let Some((from, to)) = f.rollback {
+                self.max_rollback_depth = self.max_rollback_depth.max(to + 1 - from.min(to + 1));
+            }
+        }
+        if f.has(FLAG_DISCONTINUITY) || f.has(FLAG_EVENTS_RESET) {
+            self.last_discontinuity = Some(now);
+            self.camera3 = None;
+            self.offsets3.clear();
+            self.smooth_start = None;
+        } else if f.has(FLAG_ROLLED_BACK) {
+            self.start_smoothing3(&f, now);
+        }
+        if f.has(FLAG_EVENTS_RESET) {
+            self.open_events.clear();
+            self.last_events_reset = Some(now);
+        }
+        if self.camera3.is_none() {
+            self.camera3 = Some(Camera3::fit(&f));
+        }
+        self.frame_bytes = len;
+        self.frames_total += 1;
+        self.arrivals.push_back(now);
+        self.frame3 = Some(f);
+        self.arrived = now;
+    }
+
+    fn start_smoothing3(&mut self, new: &ViewFrame3, now: Instant) {
+        let Some(old) = &self.frame3 else { return };
+        let alpha = self.alpha(now);
+        let fade = self.fade(now);
+        let shown_before: BTreeMap<u64, [f32; 3]> = old
+            .entities
+            .iter()
+            .map(|e| {
+                let off = self.offsets3.get(&e.id).copied().unwrap_or([0.0; 3]);
+                let at = |i: usize| e.prev.pos[i] + (e.cur.pos[i] - e.prev.pos[i]) * alpha + off[i] * fade;
+                (e.id, [at(0), at(1), at(2)])
+            })
+            .collect();
+        let mut offsets = BTreeMap::new();
+        for e in &new.entities {
+            if let Some(before) = shown_before.get(&e.id) {
+                let off = [before[0] - e.prev.pos[0], before[1] - e.prev.pos[1], before[2] - e.prev.pos[2]];
+                if off.iter().any(|v| v.abs() > 1e-4) {
+                    offsets.insert(e.id, off);
+                }
+            }
+        }
+        self.smooth_start = (!offsets.is_empty()).then_some(now);
+        self.offsets3 = offsets;
     }
 
     /// A rollback moved entities: keep where they were drawn and fade to where they are now over
@@ -255,11 +340,31 @@ impl ViewState {
         Some(Cow::Owned(shown))
     }
 
+    /// The newest 3D frame with its positional rollback correction fading out.
+    pub fn display_frame3(&self, now: Instant) -> Option<Cow<'_, ViewFrame3>> {
+        let f = self.frame3.as_ref()?;
+        let fade = self.fade(now);
+        if fade <= 0.0 || self.offsets3.is_empty() {
+            return Some(Cow::Borrowed(f));
+        }
+        let mut shown = f.clone();
+        for e in &mut shown.entities {
+            if let Some(off) = self.offsets3.get(&e.id) {
+                for (i, value) in off.iter().enumerate() {
+                    e.prev.pos[i] += value * fade;
+                    e.cur.pos[i] += value * fade;
+                }
+            }
+        }
+        Some(Cow::Owned(shown))
+    }
+
     /// The viewer's own interpolation factor: `(now - arrival) * tick_rate`, clamped to `0..=1`;
     /// 1 after a discontinuity and while paused.
     pub fn alpha(&self, now: Instant) -> f32 {
-        match &self.frame {
-            Some(f) if !f.has(FLAG_DISCONTINUITY) && !f.has(FLAG_EVENTS_RESET) && !f.has(FLAG_PAUSED) => {
+        let flags = self.frame.as_ref().map(|f| f.flags).or_else(|| self.frame3.as_ref().map(|f| f.flags));
+        match flags {
+            Some(flags) if flags & (FLAG_DISCONTINUITY | FLAG_EVENTS_RESET | FLAG_PAUSED) == 0 => {
                 (now.saturating_duration_since(self.arrived).as_secs_f32() * self.schema.tick_rate as f32).clamp(0.0, 1.0)
             }
             _ => 1.0,
@@ -280,7 +385,12 @@ impl ViewState {
         if let Some(net) = self.net {
             return self.net_line(&net, fps, now);
         }
-        let Some(f) = &self.frame else {
+        let Some((tick, verified_tick, entity_count, paused, is_3d)) = self
+            .frame
+            .as_ref()
+            .map(|f| (f.tick, f.verified_tick, f.entities.len(), f.has(FLAG_PAUSED), false))
+            .or_else(|| self.frame3.as_ref().map(|f| (f.tick, f.verified_tick, f.entities.len(), f.has(FLAG_PAUSED), true)))
+        else {
             return format!("{}: waiting for the first frame (a paused session sends one per tick: s steps, space plays)", self.schema.game);
         };
         let hold = |t: Option<Instant>| t.is_some_and(|t| now.saturating_duration_since(t) < FLAG_HOLD);
@@ -294,14 +404,15 @@ impl ViewState {
         if hold(self.last_events_reset) {
             flags.push("EVENTS_RESET");
         }
-        if f.has(FLAG_PAUSED) {
+        if paused {
             flags.push("PAUSED");
         }
         format!(
-            "tick {} verified {} | {} entities | {} B/frame | {:.0} frames/s | flags [{}] | events {}",
-            f.tick,
-            f.verified_tick,
-            f.entities.len(),
+            "{}tick {} verified {} | {} entities | {} B/frame | {:.0} frames/s | flags [{}] | events {}",
+            if is_3d { "3D XZ | " } else { "" },
+            tick,
+            verified_tick,
+            entity_count,
             self.frame_bytes,
             fps,
             flags.join(" "),
@@ -319,14 +430,15 @@ impl ViewState {
         match net.state {
             NetState::Connecting | NetState::Failed => format!("{}: {} the server", self.schema.game, net.state.name()),
             _ => format!(
-                "{} slot {}/{} rtt {} ms delay {} | tick {} verified {} | rollbacks {} ({:.1}/s) last depth {} | events P{p} V{v} X{c} (P->V {}, P->X {}) | {:.0} fps{rolled}{events_reset}{desync}",
+                "{}{} slot {}/{} rtt {} ms delay {} | tick {} verified {} | rollbacks {} ({:.1}/s) last depth {} | events P{p} V{v} X{c} (P->V {}, P->X {}) | {:.0} fps{rolled}{events_reset}{desync}",
+                if self.schema.dimensions == 3 { "3D XZ | " } else { "" },
                 net.state.name(),
                 net.slot,
                 net.players,
                 net.rtt_ms,
                 net.input_delay,
-                self.frame.as_ref().map_or(net.head_tick, |f| f.tick),
-                self.frame.as_ref().map_or(net.verified_tick, |f| f.verified_tick),
+                self.frame.as_ref().map_or_else(|| self.frame3.as_ref().map_or(net.head_tick, |f| f.tick), |f| f.tick),
+                self.frame.as_ref().map_or_else(|| self.frame3.as_ref().map_or(net.verified_tick, |f| f.verified_tick), |f| f.verified_tick),
                 net.rollbacks,
                 self.rollbacks_per_s(now),
                 net.last_depth(),
@@ -336,4 +448,27 @@ impl ViewState {
             ),
         }
     }
+}
+
+fn validate_frame3(frame: &ViewFrame3) -> Option<&'static str> {
+    use orr_viewstream::{SHAPE3_BOX, SHAPE3_CAPSULE, SHAPE3_PLANE, SHAPE3_SPHERE};
+
+    for entity in &frame.entities {
+        if entity.prev.pos.iter().chain(entity.cur.pos.iter()).any(|v| !v.is_finite()) || entity.size.iter().any(|v| !v.is_finite() || *v < 0.0) {
+            return Some("non-finite pose or invalid shape size");
+        }
+        for rot in [&entity.prev.rot, &entity.cur.rot] {
+            if rot.iter().any(|v| !v.is_finite()) {
+                return Some("non-finite rotation");
+            }
+            let length2 = rot.iter().map(|v| v * v).sum::<f32>();
+            if (length2 - 1.0).abs() > 1e-3 {
+                return Some("rotation is not a unit quaternion");
+            }
+        }
+        if !matches!(entity.shape, SHAPE3_SPHERE | SHAPE3_BOX | SHAPE3_CAPSULE | SHAPE3_PLANE) {
+            return Some("unknown 3D shape");
+        }
+    }
+    None
 }

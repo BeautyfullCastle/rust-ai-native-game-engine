@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
-use orr_viewstream::{message_type, MSG_EVENTS, MSG_FRAME};
+use orr_viewstream::{message_type, MSG_EVENTS, MSG_FRAME, MSG_FRAME3D, VERSION, VERSION_3D};
 use serde_json::{json, Value as J};
 use tungstenite::{Message, WebSocket};
 
@@ -17,6 +17,8 @@ use tungstenite::{Message, WebSocket};
 pub enum Incoming {
     /// The bytes of a ViewFrame.
     Frame(Vec<u8>),
+    /// The bytes of a ViewFrame3.
+    Frame3(Vec<u8>),
     /// The bytes of an EventBatch.
     Events(Vec<u8>),
     /// The host refused something we asked (text of the error).
@@ -103,9 +105,11 @@ pub trait Source {
 
 /// Bytes of a binary message as a frame or an event batch (anything else is not ours).
 pub fn classify(bytes: Vec<u8>) -> Option<Incoming> {
-    match message_type(&bytes).ok()? {
-        MSG_FRAME => Some(Incoming::Frame(bytes)),
-        MSG_EVENTS => Some(Incoming::Events(bytes)),
+    let version = u16::from_le_bytes(bytes.get(4..6)?.try_into().ok()?);
+    match (version, message_type(&bytes).ok()?) {
+        (VERSION, MSG_FRAME) => Some(Incoming::Frame(bytes)),
+        (VERSION, MSG_EVENTS) => Some(Incoming::Events(bytes)),
+        (VERSION_3D, MSG_FRAME3D) => Some(Incoming::Frame3(bytes)),
         _ => None,
     }
 }
