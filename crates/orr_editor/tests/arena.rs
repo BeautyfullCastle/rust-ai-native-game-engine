@@ -432,7 +432,10 @@ fn capture_native_local_arena(out: &std::path::Path) {
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
     }
     let mut child = Window(Command::new(env!("CARGO_BIN_EXE_orr_editor"))
+        .env("ORR_NATIVE_SCREENSHOT_TRACE", "0")
         .args(["--game", "arena", "--scene"]).arg(&scene_path)
+        // Diagnostic opt-in is limited to these two existing LocalArena captures.
+        .env("ORR_NATIVE_SCREENSHOT_TRACE", if std::env::var("ORR_NATIVE_SCREENSHOT_TRACE_LOCAL_ARENA").as_deref() == Ok("1") { "1" } else { "0" })
         .args(["--select", "hero", "--erp", "127.0.0.1:0", "--erp-dev", "--size", "1200x850"])
         .stdin(Stdio::null()).stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log))
         .spawn().expect("start the normal local Arena editor with ERP"));
@@ -510,6 +513,7 @@ fn capture_native_local_erp(out: &std::path::Path) {
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
     }
     let mut child = Window(Command::new(env!("CARGO_BIN_EXE_orr_editor"))
+        .env("ORR_NATIVE_SCREENSHOT_TRACE", "0")
         .args(["--scene", "scenes/physics_demo.scene.yaml", "--select", "body_05",
             "--erp", "127.0.0.1:0", "--erp-dev", "--size", "960x720"])
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
@@ -620,6 +624,7 @@ fn capture_native_arena(url: &str, out: &std::path::Path, name: &str) {
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
     }
     let mut child = Window(Command::new(env!("CARGO_BIN_EXE_orr_editor"))
+        .env("ORR_NATIVE_SCREENSHOT_TRACE", "0")
         .args(["--connect",url,"--select","hero","--frames","30","--screenshot-settle","--size","1200x850","--screenshot"])
         .arg(&path).stdin(Stdio::null()).stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log))
         .spawn().expect("start the normal orr_editor binary"));

@@ -422,6 +422,19 @@ struct PendingScreenshot {
     incarnation: u64,
 }
 
+fn screenshot_trace_rpc_id(id: &J) -> u64 {
+    if let Some(id) = id.as_u64() {
+        return id;
+    }
+    if let Some(id) = id.as_str() {
+        let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        return hash | (1 << 63);
+    }
+    0
+}
+
 fn verification_panic() -> RpcError {
     RpcError::new(INTERNAL_ERROR, "panic", "verification panicked (a bug); the live play session was not changed")
 }
@@ -965,6 +978,15 @@ impl ErpServer {
         let deadline = Instant::now() + timeout;
         match service.submit(options, requested, deadline) {
             Ok(request) => {
+                crate::screenshot::diagnostic_trace_begin(request.serial, conn, screenshot_trace_rpc_id(&id));
+                // Scalar fields: requested timeout milliseconds; then play=1/edit=0 and requested tick.
+                crate::screenshot::diagnostic_trace(request.serial, "server_admit_timeout", timeout.as_millis() as u64, 0);
+                crate::screenshot::diagnostic_trace(
+                    request.serial,
+                    "server_admit_state",
+                    matches!(requested.mode, crate::screenshot::ViewMode::Play) as u64,
+                    requested.tick,
+                );
                 self.pending_screenshot = Some(PendingScreenshot {
                     request,
                     conn,
@@ -992,12 +1014,16 @@ impl ErpServer {
         let incarnation = pending.incarnation;
         let service = self.cfg.screenshot.clone();
         let outcome = if !self.conns.contains_key(&conn) {
+            crate::screenshot::diagnostic_trace(serial, "server_connection_gone", 0, 0);
             None
         } else if service.as_ref().is_none_or(|service| !service.owner_available()) {
+            crate::screenshot::diagnostic_trace(serial, "server_service_unavailable", 0, 0);
             Some(Err(view_unavailable()))
         } else if now >= deadline {
+            crate::screenshot::diagnostic_trace(serial, "server_deadline_pre_result", 0, 0);
             Some(Err(view_timeout()))
         } else if self.view_incarnation != incarnation || frame_key(target, FrameSource::View) != view_key || current_view_state(target) != requested {
+            crate::screenshot::diagnostic_trace(serial, "server_view_stale", (self.view_incarnation != incarnation) as u64, 0);
             Some(Err(view_stale()))
         } else {
             service.as_ref().and_then(|service| service.poll_result(serial)).map(|result| match result {
@@ -1013,6 +1039,7 @@ impl ErpServer {
         self.pending_screenshot = None;
         match outcome {
             Ok(image) => {
+                crate::screenshot::diagnostic_trace(serial, "server_encode_begin", 0, 0);
                 let state = image.captured;
                 let mode = match state.mode { crate::screenshot::ViewMode::Edit => "edit", crate::screenshot::ViewMode::Play => "play" };
                 let result = json!({
@@ -1033,13 +1060,27 @@ impl ErpServer {
                     "png_base64": crate::codec::b64_encode(&image.png),
                 });
                 let response = response_ok(&id, result);
+                crate::screenshot::diagnostic_trace(
+                    serial,
+                    "server_encode_end",
+                    image.png.len() as u64,
+                    response.len() as u64,
+                );
                 if Instant::now() >= deadline {
-                    self.respond_screenshot_error(conn, &id, view_timeout());
+                    crate::screenshot::diagnostic_trace(serial, "server_deadline_post_encode", 0, 0);
+                    self.respond_screenshot_error_traced(conn, &id, view_timeout(), serial);
                 } else if let Some(c) = self.conns.get(&conn) {
-                    c.tx.send_control_text(response);
+                    let enqueued = c.tx.send_control_text(response);
+                    // a = control-text enqueue accepted by the transport queue.
+                    crate::screenshot::diagnostic_trace(serial, "server_response_enqueue", enqueued as u64, 0);
+                } else {
+                    crate::screenshot::diagnostic_trace(serial, "server_response_connection_gone", 0, 0);
                 }
             }
-            Err(error) => self.respond_screenshot_error(conn, &id, error),
+            Err(error) => {
+                crate::screenshot::diagnostic_trace(serial, "server_terminal_error", 1, 0);
+                self.respond_screenshot_error_traced(conn, &id, error, serial)
+            }
         }
     }
 
@@ -1048,6 +1089,17 @@ impl ErpServer {
         if let Some(c) = self.conns.get_mut(&conn) {
             c.requests += 1;
             c.tx.send_control_text(response_err(id, &error));
+        }
+    }
+
+    fn respond_screenshot_error_traced(&mut self, conn: u64, id: &J, error: RpcError, serial: u64) {
+        self.stats.errors += 1;
+        if let Some(c) = self.conns.get_mut(&conn) {
+            c.requests += 1;
+            let enqueued = c.tx.send_control_text(response_err(id, &error));
+            crate::screenshot::diagnostic_trace(serial, "server_response_enqueue", enqueued as u64, 0);
+        } else {
+            crate::screenshot::diagnostic_trace(serial, "server_response_connection_gone", 0, 0);
         }
     }
 

@@ -524,14 +524,26 @@ impl Editor {
 
     /// Begins fresh host reads after the broker delivered this request.
     pub(crate) fn begin_screenshot_validation(&mut self, request: &CaptureRequest) -> Result<(), CaptureError> {
+        // Trace schema: sim.post/world.post=(rpc id, requested tick);
+        // sim.reply=(actual tick, paused bit 0 | play-mode bit 1), world.reply=(actual tick, checksum);
+        // query state flags are (state received, view received); match/ready values are (tick, checksum).
         if self.down.is_some() || self.preview.is_some() || !request.requested.paused || !self.screenshot_is_active(request.serial) {
+            orr_remote::screenshot::diagnostic_trace(request.serial, "sim_query_unavailable", 0, 0);
             return Err(CaptureError::Unavailable);
         }
-        let state_id = self.backend.erp.post("sim.state", J::Null).map_err(|_| CaptureError::Unavailable)?;
+        let state_id = self.backend.erp.post("sim.state", J::Null).map_err(|_| {
+            orr_remote::screenshot::diagnostic_trace(request.serial, "sim_post_error", 0, 0);
+            CaptureError::Unavailable
+        })?;
+        orr_remote::screenshot::diagnostic_trace(request.serial, "sim_post", state_id, request.requested.tick);
         let view_id = match self.backend.erp.post("world.query", json!({"limit": 1, "values": false})) {
             Ok(id) => id,
-            Err(_) => return Err(CaptureError::Unavailable),
+            Err(_) => {
+                orr_remote::screenshot::diagnostic_trace(request.serial, "world_post_error", state_id, 0);
+                return Err(CaptureError::Unavailable);
+            }
         };
+        orr_remote::screenshot::diagnostic_trace(request.serial, "world_post", view_id, request.requested.tick);
         self.screenshot_queries.insert(state_id, (request.serial, ScreenshotQueryKind::State));
         self.screenshot_queries.insert(view_id, (request.serial, ScreenshotQueryKind::View));
         self.screenshot_validations.insert(request.serial, ScreenshotValidation {
@@ -548,25 +560,52 @@ impl Editor {
     /// editor's current primary snapshot agree and all presentation caches settle.
     pub(crate) fn screenshot_capture_ready(&self, serial: u64) -> Result<Option<ViewState>, CaptureError> {
         if self.down.is_some() || !self.screenshot_is_active(serial) {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_unavailable", 0, 0);
             return Err(CaptureError::Unavailable);
         }
         if self.preview.is_some() {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_preview", 0, 0);
             return Err(CaptureError::Unavailable);
         }
-        let validation = self.screenshot_validations.get(&serial).ok_or(CaptureError::Stale)?;
-        let (Some(state), Some(view)) = (&validation.state, &validation.view) else { return Ok(None) };
-        let state = state.as_ref().map_err(|error| *error)?;
-        let (tick, checksum) = view.as_ref().map_err(|error| *error)?;
+        let Some(validation) = self.screenshot_validations.get(&serial) else {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_validation_missing", 0, 0);
+            return Err(CaptureError::Stale);
+        };
+        let (Some(state), Some(view)) = (&validation.state, &validation.view) else {
+            orr_remote::screenshot::diagnostic_trace(
+                serial,
+                "ready_queries_pending",
+                validation.state.is_some() as u64,
+                validation.view.is_some() as u64,
+            );
+            return Ok(None);
+        };
+        let state = state.as_ref().map_err(|error| {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_sim_error", 0, 0);
+            *error
+        })?;
+        let (tick, checksum) = view.as_ref().map_err(|error| {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_world_error", 0, 0);
+            *error
+        })?;
         let requested = validation.requested;
         if *state != requested || *tick != requested.tick || *checksum != requested.checksum {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_host_mismatch", *tick, *checksum);
             return Err(CaptureError::Stale);
         }
         if self.capture_view_state() != requested || !self.capture_snapshot_matches(requested) {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_snapshot_mismatch", requested.tick, requested.checksum);
             return Ok(None);
         }
-        if self.screenshot_waiting_for().is_some() || self.gesture.busy() {
+        if self.screenshot_waiting_for().is_some() {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_editor_wait", 0, 0);
             return Ok(None);
         }
+        if self.gesture.busy() {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_gesture", 0, 0);
+            return Ok(None);
+        }
+        orr_remote::screenshot::diagnostic_trace(serial, "ready", self.sim.head_tick, self.checksum);
         Ok(Some(requested))
     }
 
@@ -925,10 +964,34 @@ impl Editor {
     fn on_screenshot_answer(&mut self, serial: u64, kind: ScreenshotQueryKind, result: Result<J, orr_remote::RpcError>) {
         let Some(validation) = self.screenshot_validations.get_mut(&serial) else { return };
         match (kind, result) {
-            (ScreenshotQueryKind::State, Ok(value)) => validation.state = Some(parse_capture_state(&value).ok_or(CaptureError::Failed)),
-            (ScreenshotQueryKind::View, Ok(value)) => validation.view = Some(parse_capture_view(&value).ok_or(CaptureError::Failed)),
-            (ScreenshotQueryKind::State, Err(_)) => validation.state = Some(Err(CaptureError::Failed)),
-            (ScreenshotQueryKind::View, Err(_)) => validation.view = Some(Err(CaptureError::Failed)),
+            (ScreenshotQueryKind::State, Ok(value)) => {
+                let parsed = parse_capture_state(&value);
+                orr_remote::screenshot::diagnostic_trace(
+                    serial,
+                    "sim_reply",
+                    parsed.map_or(0, |state| state.tick),
+                    parsed.map_or(0, |state| (state.paused as u64) | (((state.mode == ViewMode::Play) as u64) << 1)),
+                );
+                validation.state = Some(parsed.ok_or(CaptureError::Failed));
+            }
+            (ScreenshotQueryKind::View, Ok(value)) => {
+                let parsed = parse_capture_view(&value);
+                orr_remote::screenshot::diagnostic_trace(
+                    serial,
+                    "world_reply",
+                    parsed.map_or(0, |(tick, _)| tick),
+                    parsed.map_or(0, |(_, checksum)| checksum),
+                );
+                validation.view = Some(parsed.ok_or(CaptureError::Failed));
+            }
+            (ScreenshotQueryKind::State, Err(_)) => {
+                orr_remote::screenshot::diagnostic_trace(serial, "sim_reply_error", 0, 0);
+                validation.state = Some(Err(CaptureError::Failed));
+            }
+            (ScreenshotQueryKind::View, Err(_)) => {
+                orr_remote::screenshot::diagnostic_trace(serial, "world_reply_error", 0, 0);
+                validation.view = Some(Err(CaptureError::Failed));
+            }
         }
     }
 

@@ -906,7 +906,19 @@ impl EditorApp {
             return;
         }
         let Some(request) = self.editor.take_screenshot_request() else { return };
+        // Scalar trace schema: receipt=(mode,tick); most readiness reasons=(0,0),
+        // pending=(state received,view received), mismatch/ready=(tick,checksum);
+        // permit/command=(frame_seq,ui_frame), GPU event=(physical width,height),
+        // encoder start=(width,height), encoder poll=(finished,ui_frame), join=(ok,PNG bytes),
+        // publication=(0 success / 1 unavailable / 2 stale / 3 failed, PNG bytes or 0).
+        orr_remote::screenshot::diagnostic_trace(
+            request.serial,
+            "editor_received",
+            (request.requested.mode == orr_remote::ViewMode::Play) as u64,
+            request.requested.tick,
+        );
         if self.shot.is_some() {
+            orr_remote::screenshot::diagnostic_trace(request.serial, "editor_rejected_cli_job", 0, 0);
             self.editor.screenshot_complete(request.serial, Err(CaptureError::Unavailable));
             return;
         }
@@ -945,11 +957,24 @@ impl EditorApp {
                 return;
             }
         };
-        if !self.ui.pulses.is_empty() || self.editor.previewing().is_some() || self.editor.screenshot_gesture_busy() {
+        if !self.ui.pulses.is_empty() {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_ui_pulse", 0, 0);
             return;
         }
-        let Some(frame_seq) = self.editor.capture_snapshot_seq().filter(|seq| *seq > 0) else { return };
+        if self.editor.previewing().is_some() {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_ui_preview", 0, 0);
+            return;
+        }
+        if self.editor.screenshot_gesture_busy() {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_ui_gesture", 0, 0);
+            return;
+        }
+        let Some(frame_seq) = self.editor.capture_snapshot_seq().filter(|seq| *seq > 0) else {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_no_frame", 0, 0);
+            return;
+        };
         let Some(framebuffer) = framebuffer_info(ctx) else {
+            orr_remote::screenshot::diagnostic_trace(serial, "ready_no_framebuffer", 0, 0);
             self.finish_remote_capture(serial, Err(CaptureError::Unavailable));
             return;
         };
@@ -959,22 +984,28 @@ impl EditorApp {
             || pixels > MAX_CAPTURE_PIXELS
             || pixels.saturating_mul(4) > MAX_CAPTURE_RGBA_BYTES as u64
         {
+            orr_remote::screenshot::diagnostic_trace(serial, "capture_dimension_limit", framebuffer.width.into(), framebuffer.height.into());
             self.finish_remote_capture(serial, Err(CaptureError::Failed));
             return;
         }
         let pass = CapturePass { state, frame_seq, ui_frame: self.frames, framebuffer };
         if self.editor.capture_view_state() != state || !self.editor.capture_snapshot_matches(state) {
+            orr_remote::screenshot::diagnostic_trace(serial, "capture_stale_before_gpu", frame_seq, self.frames);
             self.finish_remote_capture(serial, Err(CaptureError::Stale));
             return;
         }
         if let Err(error) = self.editor.screenshot_begin_capture(serial) {
+            orr_remote::screenshot::diagnostic_trace(serial, "capture_permit_error", 0, 0);
             self.finish_remote_capture(serial, Err(error));
             return;
         }
+        orr_remote::screenshot::diagnostic_trace(serial, "capture_permit_acquired", frame_seq, self.frames);
         if let Some(capture) = self.remote_capture.as_mut().filter(|capture| capture.request.serial == serial) {
             capture.pass = Some(pass);
             capture.screenshot_requested = true;
         }
+        // Fixed trace schema: frame_seq and the UI frame for the existing readback request.
+        orr_remote::screenshot::diagnostic_trace(serial, "capture_gpu_command", frame_seq, self.frames);
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(serial)));
     }
 
@@ -998,6 +1029,13 @@ impl EditorApp {
             })
         });
         let Some(image) = event else { return };
+        // This is the matching event's actual physical image size; no extra readback is requested.
+        orr_remote::screenshot::diagnostic_trace(
+            serial,
+            "capture_gpu_event",
+            image.width() as u64,
+            image.height() as u64,
+        );
         if let Some(capture) = self.remote_capture.as_mut().filter(|capture| capture.request.serial == serial) {
             capture.image_received = true;
         }
@@ -1029,16 +1067,19 @@ impl EditorApp {
             return;
         }
         if let Err(error) = self.editor.screenshot_begin_encoder(serial) {
+            orr_remote::screenshot::diagnostic_trace(serial, "encoder_permit_error", width.into(), height.into());
             self.editor.screenshot_end_capture(serial);
             self.finish_remote_capture(serial, Err(error));
             return;
         }
+        orr_remote::screenshot::diagnostic_trace(serial, "encoder_start", width.into(), height.into());
         let handle = std::thread::Builder::new()
             .name("orr-screenshot-png".into())
             .spawn(move || encode_png_bounded(&image));
         match handle {
             Ok(handle) => self.encoder = Some(EncoderWorker { serial, pass, handle }),
             Err(_) => {
+                orr_remote::screenshot::diagnostic_trace(serial, "encoder_spawn_error", width.into(), height.into());
                 self.editor.screenshot_end_encoder(serial);
                 self.finish_remote_capture(serial, Err(CaptureError::Failed));
             }
@@ -1046,11 +1087,25 @@ impl EditorApp {
     }
 
     fn reap_capture_encoder(&mut self, ctx: &egui::Context) {
-        if !self.encoder.as_ref().is_some_and(|worker| worker.handle.is_finished()) {
+        let Some(worker) = self.encoder.as_ref() else { return };
+        let finished = worker.handle.is_finished();
+        orr_remote::screenshot::diagnostic_trace(
+            worker.serial,
+            "encoder_is_finished",
+            finished as u64,
+            worker.pass.ui_frame,
+        );
+        if !finished {
             return;
         }
         let worker = self.encoder.take().expect("finished screenshot worker exists");
         let result = worker.handle.join().unwrap_or(Err(CaptureError::Failed));
+        orr_remote::screenshot::diagnostic_trace(
+            worker.serial,
+            "encoder_joined",
+            result.is_ok() as u64,
+            result.as_ref().map_or(0, |png| png.len() as u64),
+        );
         if !self.editor.screenshot_is_active(worker.serial) {
             self.editor.screenshot_end_encoder(worker.serial);
             self.editor.cancel_screenshot_validation(worker.serial);
@@ -1077,6 +1132,7 @@ impl EditorApp {
                 self.editor.cancel_screenshot_validation(worker.serial);
                 // Publish while the just-finished worker still owns the shared
                 // capture permit; release only after its real exit is observed.
+                orr_remote::screenshot::diagnostic_trace(worker.serial, "result_publish", 0, image.png.len() as u64);
                 self.editor.screenshot_complete(worker.serial, Ok(image));
                 self.editor.screenshot_end_encoder(worker.serial);
                 self.remote_capture = None;
@@ -1102,6 +1158,13 @@ impl EditorApp {
 
     fn finish_remote_capture(&mut self, serial: u64, result: Result<CapturedImage, CaptureError>) {
         self.editor.cancel_screenshot_validation(serial);
+        let (outcome, size) = match &result {
+            Ok(image) => (0, image.png.len() as u64),
+            Err(CaptureError::Unavailable) => (1, 0),
+            Err(CaptureError::Stale) => (2, 0),
+            Err(CaptureError::Failed) => (3, 0),
+        };
+        orr_remote::screenshot::diagnostic_trace(serial, "result_publish", outcome, size);
         self.editor.screenshot_complete(serial, result);
         if self.remote_capture.as_ref().is_some_and(|capture| capture.request.serial == serial) {
             self.remote_capture = None;

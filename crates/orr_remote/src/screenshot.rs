@@ -4,7 +4,7 @@
 //! and the independent encoder permit, which remains held until a worker exits.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 const MAX_DIMENSION: u32 = 2048;
@@ -12,6 +12,210 @@ const MAX_PIXELS: u64 = 1_048_576;
 const MAX_PNG_BYTES: usize = 4 << 20;
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
+
+const TRACE_REQUESTS: usize = 2;
+const TRACE_RECORDS_PER_REQUEST: u8 = 64;
+const TRACE_MAX_OUTPUT_BYTES: usize = 32 << 10;
+const TRACE_MARKER_RESERVE: usize = 256;
+const TRACE_PREFIX: &str = "ORR_NATIVE_SCREENSHOT_TRACE";
+static TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+static TRACE_LEDGER: Mutex<TraceLedger> = Mutex::new(TraceLedger::new());
+
+#[derive(Clone, Copy)]
+struct TraceRequest {
+    serial: u64,
+    connection: u64,
+    rpc_id: u64,
+    started: Option<Instant>,
+    records: u8,
+    seen: [TraceFingerprint; TRACE_RECORDS_PER_REQUEST as usize],
+    incomplete: bool,
+}
+
+impl TraceRequest {
+    const EMPTY: Self = Self {
+        serial: 0,
+        connection: 0,
+        rpc_id: 0,
+        started: None,
+        records: 0,
+        seen: [TraceFingerprint::EMPTY; TRACE_RECORDS_PER_REQUEST as usize],
+        incomplete: false,
+    };
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TraceFingerprint {
+    stage: &'static str,
+    a: u64,
+    b: u64,
+}
+
+impl TraceFingerprint {
+    const EMPTY: Self = Self { stage: "", a: 0, b: 0 };
+}
+
+struct TraceLedger {
+    requests: [TraceRequest; TRACE_REQUESTS],
+    output_bytes: usize,
+    stopped: bool,
+}
+
+impl TraceLedger {
+    const fn new() -> Self {
+        Self {
+            requests: [TraceRequest::EMPTY; TRACE_REQUESTS],
+            output_bytes: 0,
+            stopped: false,
+        }
+    }
+}
+
+fn diagnostic_trace_enabled() -> bool {
+    *TRACE_ENABLED.get_or_init(|| std::env::var_os("ORR_NATIVE_SCREENSHOT_TRACE").is_some_and(|value| value == "1"))
+}
+
+/// Begin a bounded scalar trace for one admitted native screenshot RPC.
+/// The environment switch is sampled once per process. After a disabled
+/// result, calls return before locking the ledger, formatting, or writing;
+/// the one-time environment lookup may allocate. Numeric JSON-RPC ids are
+/// preserved by the caller; string ids use a stable numeric fingerprint.
+pub fn diagnostic_trace_begin(serial: u64, connection: u64, rpc_id: u64) {
+    if serial == 0 || !diagnostic_trace_enabled() {
+        return;
+    }
+    let mut ledger = lock(&TRACE_LEDGER);
+    if ledger.stopped {
+        return;
+    }
+    if let Some(index) = ledger.requests.iter().position(|request| request.serial == serial) {
+        let request = &mut ledger.requests[index];
+        if connection != 0 {
+            request.connection = connection;
+            request.rpc_id = rpc_id;
+        }
+    } else if let Some(index) = ledger.requests.iter().position(|request| request.serial == 0) {
+        ledger.requests[index] = TraceRequest {
+            serial,
+            connection,
+            rpc_id,
+            started: Some(Instant::now()),
+            ..TraceRequest::EMPTY
+        };
+    } else {
+        emit_global_incomplete(&mut ledger, serial, "request_cap");
+        return;
+    }
+}
+
+/// Record a fixed-size scalar stage. `a` and `b` are stage-specific numeric
+/// values documented at each call site. Repeated identical observations are
+/// coalesced so a ready/poll loop cannot fill the trace by itself.
+pub fn diagnostic_trace(serial: u64, stage: &'static str, a: u64, b: u64) {
+    if serial == 0 || !diagnostic_trace_enabled() {
+        return;
+    }
+    let mut ledger = lock(&TRACE_LEDGER);
+    if ledger.stopped {
+        return;
+    }
+    let Some(index) = ledger.requests.iter().position(|request| request.serial == serial) else { return };
+    emit_trace(&mut ledger, index, stage, a, b);
+}
+
+fn emit_trace(ledger: &mut TraceLedger, index: usize, stage: &'static str, a: u64, b: u64) {
+    let request = &ledger.requests[index];
+    if request.incomplete || ledger.stopped {
+        return;
+    }
+    let fingerprint = TraceFingerprint { stage, a, b };
+    if request.seen[..usize::from(request.records)].contains(&fingerprint) {
+        return;
+    }
+    if !valid_trace_stage(stage) {
+        emit_request_incomplete(ledger, index, "invalid_stage");
+        return;
+    }
+    if request.records >= TRACE_RECORDS_PER_REQUEST - 1 {
+        emit_request_incomplete(ledger, index, "record_cap");
+        return;
+    }
+    let elapsed_us = request.started.map_or(0, |started| started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+    let line = format!(
+        "{TRACE_PREFIX} serial={} conn={} rpc={} elapsed_us={} stage={} a={} b={}\n",
+        request.serial, request.connection, request.rpc_id, elapsed_us, stage, a, b
+    );
+    if ledger.output_bytes.saturating_add(line.len()) > TRACE_MAX_OUTPUT_BYTES - TRACE_MARKER_RESERVE {
+        emit_request_incomplete(ledger, index, "output_cap");
+        ledger.stopped = true;
+        return;
+    }
+    if !write_trace_line(ledger, &line) {
+        ledger.requests[index].incomplete = true;
+        ledger.stopped = true;
+        return;
+    }
+    let request = &mut ledger.requests[index];
+    request.seen[usize::from(request.records)] = fingerprint;
+    request.records += 1;
+}
+
+fn emit_request_incomplete(ledger: &mut TraceLedger, index: usize, reason: &'static str) {
+    let (serial, connection, rpc_id) = {
+        let request = &ledger.requests[index];
+        (request.serial, request.connection, request.rpc_id)
+    };
+    ledger.requests[index].incomplete = true;
+    let line = format!(
+        "{TRACE_PREFIX} serial={} conn={} rpc={} stage=incomplete reason={}\n",
+        serial, connection, rpc_id, reason
+    );
+    if ledger.output_bytes.saturating_add(line.len()) <= TRACE_MAX_OUTPUT_BYTES {
+        if write_trace_line(ledger, &line) {
+            ledger.requests[index].records = ledger.requests[index].records.saturating_add(1);
+        } else {
+            ledger.stopped = true;
+        }
+    } else {
+        ledger.stopped = true;
+    }
+}
+
+fn emit_global_incomplete(ledger: &mut TraceLedger, serial: u64, reason: &'static str) {
+    if let Some(index) = ledger.requests.iter().position(|request| request.serial != 0 && request.records < TRACE_RECORDS_PER_REQUEST) {
+        let (request_serial, connection, rpc_id) = {
+            let request = &ledger.requests[index];
+            (request.serial, request.connection, request.rpc_id)
+        };
+        ledger.requests[index].incomplete = true;
+        let line = format!(
+            "{TRACE_PREFIX} serial={} conn={} rpc={} stage=incomplete reason={} dropped_serial={}\n",
+            request_serial, connection, rpc_id, reason, serial
+        );
+        if ledger.output_bytes.saturating_add(line.len()) <= TRACE_MAX_OUTPUT_BYTES {
+            if write_trace_line(ledger, &line) {
+                ledger.requests[index].records = ledger.requests[index].records.saturating_add(1);
+            }
+        }
+    }
+    ledger.stopped = true;
+}
+
+fn write_trace_line(ledger: &mut TraceLedger, line: &str) -> bool {
+    use std::io::Write;
+    if std::io::stderr().lock().write_all(line.as_bytes()).is_err() {
+        ledger.stopped = true;
+        return false;
+    }
+    ledger.output_bytes = ledger.output_bytes.saturating_add(line.len());
+    true
+}
+
+fn valid_trace_stage(stage: &str) -> bool {
+    !stage.is_empty()
+        && stage.len() <= 40
+        && stage.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
 
 // Keep the checked allocator compatible with the workspace's older Rust
 // versions and with Rust 1.99's atomic API rename. Never wrap or reuse IDs.
@@ -161,25 +365,54 @@ impl ScreenshotService {
         options.validate().map_err(|_| ScreenshotAdmissionError::Invalid)?;
         let serial = next_identity(&NEXT_SERIAL);
         let request = CaptureRequest { endpoint_id: self.shared.endpoint_id, serial, options, requested, deadline };
+        // Reserve the serial and trace clock before publishing so the editor's
+        // first stage is retained; the server adds connection/RPC correlation.
+        diagnostic_trace_begin(serial, 0, 0);
         state.pending = Some(Pending { request: request.clone(), delivered: false, result: None });
+        drop(state);
+        // Scalars: requested max width and max height, respectively.
+        diagnostic_trace(serial, "service_admit", u64::from(options.max_width), u64::from(options.max_height));
         Ok(request)
     }
 
     /// Abandon a caller ticket. A live encoder permit is deliberately retained.
     pub fn cancel(&self, serial: u64) {
-        let mut state = lock(&self.shared.state);
-        if state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial) {
-            state.pending = None;
-        }
+        let (removed, capture_held, encoder_held) = {
+            let mut state = lock(&self.shared.state);
+            let removed = state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial);
+            if removed {
+                state.pending = None;
+            }
+            (removed, state.capture == Some(serial), state.encoder == Some(serial))
+        };
+        // b is a bitset: bit 0 = encoder permit held, bit 1 = capture permit held.
+        diagnostic_trace(serial, "service_cancel", removed as u64, ((capture_held as u64) << 1) | encoder_held as u64);
     }
 
     /// Take the terminal result for a live ticket, if the owner has completed it.
     pub fn poll_result(&self, serial: u64) -> Option<Result<CapturedImage, CaptureError>> {
-        let mut state = lock(&self.shared.state);
-        let pending = state.pending.as_mut().filter(|pending| pending.request.serial == serial)?;
-        let result = pending.result.take()?;
-        state.pending = None;
-        Some(result)
+        let result = {
+            let mut state = lock(&self.shared.state);
+            if !state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial) {
+                None
+            } else {
+                let result = state.pending.as_mut().and_then(|pending| pending.result.take());
+                if result.is_some() {
+                    state.pending = None;
+                }
+                result
+            }
+        };
+        let status = match &result {
+            None => 0,
+            Some(Ok(_)) => 1,
+            Some(Err(CaptureError::Unavailable)) => 2,
+            Some(Err(CaptureError::Stale)) => 3,
+            Some(Err(CaptureError::Failed)) => 4,
+        };
+        // a: 0 = absent/not ready, 1 = image, 2 = unavailable, 3 = stale, 4 = failed.
+        diagnostic_trace(serial, "service_poll_result", status, 0);
+        result
     }
 
     pub fn owner_available(&self) -> bool {
@@ -207,9 +440,16 @@ impl core::fmt::Debug for ScreenshotService {
 impl Drop for ScreenshotService {
     fn drop(&mut self) {
         if Arc::strong_count(&self.handles) == 1 {
-            let mut state = lock(&self.shared.state);
-            state.service_alive = false;
-            state.pending = None;
+            let (serial, capture_held, encoder_held) = {
+                let mut state = lock(&self.shared.state);
+                let serial = state.pending.as_ref().map(|pending| pending.request.serial).or(state.capture).or(state.encoder);
+                state.service_alive = false;
+                state.pending = None;
+                (serial, state.capture.is_some(), state.encoder.is_some())
+            };
+            if let Some(serial) = serial {
+                diagnostic_trace(serial, "service_drop", capture_held as u64, encoder_held as u64);
+            }
         }
     }
 }
@@ -227,14 +467,26 @@ impl ScreenshotOwner {
 
     /// Nonblocking; returns the current ticket at most once to the UI caller.
     pub fn take_request(&self) -> Option<CaptureRequest> {
-        let mut state = lock(&self.shared.state);
-        if !state.service_alive || !state.owner_alive || state.encoder.is_some() {
-            return None;
+        let request = {
+            let mut state = lock(&self.shared.state);
+            if !state.service_alive || !state.owner_alive || state.encoder.is_some() {
+                None
+            } else {
+                state.pending.as_mut().and_then(|pending| {
+                    if pending.delivered || pending.result.is_some() {
+                        None
+                    } else {
+                        pending.delivered = true;
+                        Some(pending.request.clone())
+                    }
+                })
+            }
+        };
+        if let Some(request) = &request {
+            // a is the opaque endpoint identity; no image/frame data is logged.
+            diagnostic_trace(request.serial, "owner_take", request.endpoint_id, 0);
         }
-        let pending = state.pending.as_mut()?;
-        if pending.delivered || pending.result.is_some() { return None; }
-        pending.delivered = true;
-        Some(pending.request.clone())
+        request
     }
 
     pub fn is_active(&self, serial: u64) -> bool {
@@ -245,82 +497,135 @@ impl ScreenshotOwner {
     /// Reserve the physical framebuffer/readback slot before issuing egui's
     /// screenshot command. This permit is independent of the caller ticket.
     pub fn begin_capture(&self, serial: u64) -> Result<(), CaptureError> {
-        let mut state = lock(&self.shared.state);
-        if !state.service_alive || !state.owner_alive {
-            return Err(CaptureError::Unavailable);
-        }
-        if !state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial) {
-            return Err(CaptureError::Stale);
-        }
-        if state.capture.is_some() || state.encoder.is_some() {
-            return Err(CaptureError::Failed);
-        }
-        state.capture = Some(serial);
-        Ok(())
+        let result = {
+            let mut state = lock(&self.shared.state);
+            if !state.service_alive || !state.owner_alive {
+                Err(CaptureError::Unavailable)
+            } else if !state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial) {
+                Err(CaptureError::Stale)
+            } else if state.capture.is_some() || state.encoder.is_some() {
+                Err(CaptureError::Failed)
+            } else {
+                state.capture = Some(serial);
+                Ok(())
+            }
+        };
+        // a: 1 = reserved, 2 = unavailable, 3 = stale, 4 = permit conflict.
+        diagnostic_trace(serial, "owner_begin_capture", capture_error_code(result), 0);
+        result
     }
 
     /// Release a capture whose matching GPU event was consumed and which has
     /// no live encoder worker. Cancellation alone never calls this implicitly.
     pub fn end_capture(&self, serial: u64) {
-        let mut state = lock(&self.shared.state);
-        if state.capture == Some(serial) && state.encoder != Some(serial) {
-            state.capture = None;
-        }
+        let (released, encoder_held) = {
+            let mut state = lock(&self.shared.state);
+            let encoder_held = state.encoder == Some(serial);
+            let released = state.capture == Some(serial) && !encoder_held;
+            if released {
+                state.capture = None;
+            }
+            (released, encoder_held)
+        };
+        // a = capture permit released; b = encoder permit still held.
+        diagnostic_trace(serial, "owner_end_capture", released as u64, encoder_held as u64);
     }
 
     /// Claim the single asynchronous encoder permit for this active request.
     pub fn begin_encoder(&self, serial: u64) -> Result<(), CaptureError> {
-        let mut state = lock(&self.shared.state);
-        if !state.service_alive || !state.owner_alive {
-            return Err(CaptureError::Unavailable);
-        }
-        if !state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial) {
-            return Err(CaptureError::Stale);
-        }
-        if state.capture != Some(serial) {
-            return Err(CaptureError::Stale);
-        }
-        if state.encoder.is_some() {
-            return Err(CaptureError::Failed);
-        }
-        state.encoder = Some(serial);
-        Ok(())
+        let result = {
+            let mut state = lock(&self.shared.state);
+            if !state.service_alive || !state.owner_alive {
+                Err(CaptureError::Unavailable)
+            } else if !state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial) {
+                Err(CaptureError::Stale)
+            } else if state.capture != Some(serial) {
+                Err(CaptureError::Stale)
+            } else if state.encoder.is_some() {
+                Err(CaptureError::Failed)
+            } else {
+                state.encoder = Some(serial);
+                Ok(())
+            }
+        };
+        // a: 1 = reserved, 2 = unavailable, 3 = stale, 4 = permit conflict.
+        diagnostic_trace(serial, "owner_begin_encoder", capture_error_code(result), 0);
+        result
     }
 
     /// Release the encoder permit only after its worker has actually exited.
     pub fn end_encoder(&self, serial: u64) {
-        let mut state = lock(&self.shared.state);
-        if state.encoder == Some(serial) {
-            state.encoder = None;
-            if state.capture == Some(serial) {
-                state.capture = None;
+        let (released, capture_released) = {
+            let mut state = lock(&self.shared.state);
+            let released = state.encoder == Some(serial);
+            let mut capture_released = false;
+            if released {
+                state.encoder = None;
+                if state.capture == Some(serial) {
+                    state.capture = None;
+                    capture_released = true;
+                }
             }
-        }
+            (released, capture_released)
+        };
+        // Called after the worker exits. a = encoder permit released; b = capture permit released.
+        diagnostic_trace(serial, "owner_end_encoder", released as u64, capture_released as u64);
     }
 
     /// Publish a terminal capture result. Canceled and late results are ignored.
     pub fn complete(&self, serial: u64, result: Result<CapturedImage, CaptureError>) {
-        let mut state = lock(&self.shared.state);
-        let capture_held = state.capture == Some(serial);
-        let Some(pending) = state.pending.as_mut().filter(|pending| pending.request.serial == serial) else { return };
-        let checked = result.and_then(|image| {
-            if !capture_held {
-                Err(CaptureError::Stale)
-            } else if !pending.request.options.accepts(image.width, image.height) || image.png.is_empty() || image.png.len() > MAX_PNG_BYTES {
-                Err(CaptureError::Failed)
+        let (status, png_bytes) = {
+            let mut state = lock(&self.shared.state);
+            let capture_held = state.capture == Some(serial);
+            if let Some(pending) = state.pending.as_mut().filter(|pending| pending.request.serial == serial) {
+                let checked = result.and_then(|image| {
+                    if !capture_held {
+                        Err(CaptureError::Stale)
+                    } else if !pending.request.options.accepts(image.width, image.height) || image.png.is_empty() || image.png.len() > MAX_PNG_BYTES {
+                        Err(CaptureError::Failed)
+                    } else {
+                        Ok(image)
+                    }
+                });
+                let status = match &checked {
+                    Ok(_) => 1,
+                    Err(CaptureError::Unavailable) => 2,
+                    Err(CaptureError::Stale) => 3,
+                    Err(CaptureError::Failed) => 4,
+                };
+                let png_bytes = checked.as_ref().ok().map_or(0, |image| image.png.len() as u64);
+                pending.result = Some(checked);
+                (status, png_bytes)
             } else {
-                Ok(image)
+                (0, 0)
             }
-        });
-        pending.result = Some(checked);
+        };
+        // a: 0 = canceled/late, 1 = success, 2 = unavailable, 3 = stale, 4 = failed; b = PNG bytes only.
+        diagnostic_trace(serial, "owner_complete", status, png_bytes);
+    }
+}
+
+fn capture_error_code(result: Result<(), CaptureError>) -> u64 {
+    match result {
+        Ok(()) => 1,
+        Err(CaptureError::Unavailable) => 2,
+        Err(CaptureError::Stale) => 3,
+        Err(CaptureError::Failed) => 4,
     }
 }
 
 impl Drop for ScreenshotOwner {
     fn drop(&mut self) {
-        let mut state = lock(&self.shared.state);
-        state.owner_alive = false;
-        state.pending = None;
+        let (serial, capture_held, encoder_held) = {
+            let mut state = lock(&self.shared.state);
+            let serial = state.pending.as_ref().map(|pending| pending.request.serial).or(state.capture).or(state.encoder);
+            state.owner_alive = false;
+            state.pending = None;
+            (serial, state.capture.is_some(), state.encoder.is_some())
+        };
+        if let Some(serial) = serial {
+            diagnostic_trace(serial, "owner_drop", capture_held as u64, encoder_held as u64);
+        }
     }
 }
 

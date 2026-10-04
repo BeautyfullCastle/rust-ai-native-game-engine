@@ -1,0 +1,155 @@
+name: native screenshot diagnostic
+
+on:
+  push:
+    branches: [codex/ddang-native-timeout-trace]
+    paths:
+      - .github/workflows/native-screenshot-diagnostic.yml
+      - crates/orr_remote/src/server.rs
+      - crates/orr_remote/src/screenshot.rs
+      - crates/orr_editor/src/editor.rs
+      - crates/orr_editor/src/app.rs
+      - crates/orr_editor/tests/arena.rs
+
+permissions:
+  contents: read
+
+jobs:
+  native-screenshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: "1"
+      ORR_REQUIRE_NATIVE_EDITOR: "1"
+      WGPU_BACKEND: vulkan
+      ORR_NATIVE_EDITOR_ARTIFACT_DIR: ${{ runner.temp }}/native-screenshot
+    steps:
+      - uses: actions/checkout@v4
+      - name: One-attempt guard and source pin
+        run: |
+          test "${{ github.run_attempt }}" = 1
+          mkdir -p "$ORR_NATIVE_EDITOR_ARTIFACT_DIR"
+          git rev-parse HEAD HEAD^{tree} > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/source-identity.txt"
+          sha256sum Cargo.lock crates/orr_remote/src/{server,screenshot}.rs \
+            crates/orr_editor/src/{editor,app}.rs crates/orr_editor/tests/arena.rs \
+            .github/workflows/native-screenshot-diagnostic.yml \
+            > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/source-sha256.txt"
+          printf '%s\n' 'request_ms=5000 client_wait_s=10 startup_s=60' \
+            'compile_limit_minutes=35 smoke_limit_minutes=3 job_limit_minutes=45' \
+            'trace_requests=2 trace_records_per_request=64 trace_output_bytes=32768' \
+            > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/limits.txt"
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@1.99.0
+      - name: Registry cache only
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-on-failure: false
+      - name: Install existing Linux native dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libasound2-dev mesa-vulkan-drivers xvfb libxkbcommon-x11-0
+      - name: Compile exactly once and pin both executables
+        id: compile
+        timeout-minutes: 35
+        run: |
+          date -u +%FT%TZ > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/compile-start.txt"
+          rustc -Vv > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/rustc.txt"
+          cargo -V > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/cargo.txt"
+          set +e
+          cargo test --locked --release -p orr_editor --test arena --no-run \
+            --message-format=json-render-diagnostics \
+            > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/build.jsonl" \
+            2> "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/build.stderr"
+          code=$?
+          set -e
+          date -u +%FT%TZ > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/compile-end.txt"
+          printf '%s\n' "$code" > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/compile-exit.txt"
+          cat "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/build.stderr"
+          test "$code" = 0
+          test_exe="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "arena" and (.target.kind | index("test")) != null) | .executable // empty' "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/build.jsonl")"
+          editor_exe="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "orr_editor" and (.target.kind | index("bin")) != null and .profile.test == false) | .executable // empty' "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/build.jsonl")"
+          test -n "$test_exe"
+          test -n "$editor_exe"
+          test "$(printf '%s\n' "$test_exe" | wc -l)" = 1
+          test "$(printf '%s\n' "$editor_exe" | wc -l)" = 1
+          test -x "$test_exe"
+          test -x "$editor_exe"
+          test "$editor_exe" = "$PWD/target/release/orr_editor"
+          sha256sum "$test_exe" "$editor_exe" > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/executable-sha256.before.txt"
+          printf '%s\n' "$test_exe" > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/arena-executable.txt"
+          printf '%s\n' "$editor_exe" > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/editor-executable.txt"
+          printf 'test_exe=%s\n' "$test_exe" >> "$GITHUB_OUTPUT"
+      - name: One existing native smoke under Xvfb
+        if: success()
+        timeout-minutes: 3
+        env:
+          TEST_EXECUTABLE: ${{ steps.compile.outputs.test_exe }}
+          # Only the two existing LocalArena child captures opt in to the trace.
+          ORR_NATIVE_SCREENSHOT_TRACE: "0"
+          ORR_NATIVE_SCREENSHOT_TRACE_LOCAL_ARENA: "1"
+        run: |
+          date -u +%FT%TZ > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke-start.txt"
+          printf '%q ' xvfb-run -a -s '-screen 0 1280x1024x24' "$TEST_EXECUTABLE" \
+            arena_native_window_smoke --exact --nocapture \
+            > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke-argv.txt"
+          printf '\n' >> "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke-argv.txt"
+          set +e
+          xvfb-run -a -s "-screen 0 1280x1024x24" "$TEST_EXECUTABLE" \
+            arena_native_window_smoke --exact --nocapture \
+            > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke.stdout" \
+            2> "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke.stderr"
+          code=$?
+          set -e
+          date -u +%FT%TZ > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke-end.txt"
+          printf '%s\n' "$code" > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke-exit.txt"
+          cat "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke.stdout"
+          cat "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/smoke.stderr"
+          if test -f "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/local-arena-erp.log"; then
+            grep '^ORR_NATIVE_SCREENSHOT_TRACE ' "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/local-arena-erp.log" \
+              > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/scalar-trace.txt" || true
+            cat "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/scalar-trace.txt"
+          fi
+          sha256sum -c "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/source-sha256.txt"
+          sha256sum -c "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/executable-sha256.before.txt"
+          test "$code" = 0
+          test -s "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/scalar-trace.txt"
+          test "$(wc -c < "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/scalar-trace.txt")" -le 32768
+          if grep -Eq 'incomplete|overflow|truncated' "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/scalar-trace.txt"; then
+            echo "::error::Diagnostic trace incomplete; preserve evidence and stop without retry."
+            exit 1
+          fi
+          awk '
+            NF != 8 || $1 != "ORR_NATIVE_SCREENSHOT_TRACE" { bad=1; next }
+            {
+              serial=substr($2,8); stage=substr($6,7); a=substr($7,3)
+              counts[serial]++; total++
+              if (serial == "0" || counts[serial] > 64) bad=1
+              if (stage == "server_admit_timeout" && a == "5000") admitted[serial]=1
+              if (stage == "capture_gpu_event") gpu[serial]=1
+              if (stage == "encoder_joined" && a == "1") joined[serial]=1
+              if (stage == "result_publish" && a == "0") published[serial]=1
+              if (stage == "service_poll_result" && a == "1") polled[serial]=1
+              if (stage == "server_response_enqueue" && a == "1") replied[serial]=1
+            }
+            END {
+              for (serial in counts) {
+                requests++
+                if (!admitted[serial] || !gpu[serial] || !joined[serial] ||
+                    !published[serial] || !polled[serial] || !replied[serial]) bad=1
+              }
+              if (requests != 2 || total > 128 || bad) exit 1
+              print "Trace complete: two existing requests, GPU event/join/publication/response observed."
+            }
+          ' "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/scalar-trace.txt" \
+            > "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/trace-validation.txt"
+          cat "$ORR_NATIVE_EDITOR_ARTIFACT_DIR/trace-validation.txt"
+      - name: Preserve the one-attempt raw and existing native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-screenshot-diagnostic-${{ github.sha }}
+          path: ${{ runner.temp }}/native-screenshot
+          if-no-files-found: error
+          retention-days: 7
