@@ -8,6 +8,7 @@ mod common;
 use common::*;
 use orr_bridge::ControlOp;
 use orr_editor::editor::{fp_of_f64, Mode, Owner};
+use orr_editor::model::{EntityRow, GuidSelection, SelectionLimit, MAX_SELECTED_GUIDS};
 use orr_editor::{script, Target};
 use orr_reflect::Value;
 use serde_json::json;
@@ -378,4 +379,94 @@ fn the_frame_on_screen_is_the_hosts_frame() {
     assert_eq!(ed.checksum(), live);
     assert_eq!(ed.snapshot().unwrap().tick(), 15);
     assert!(!ed.bodies().is_empty());
+}
+
+fn guid(n: u32) -> orr_reflect::Guid {
+    orr_reflect::Guid::from_u32(n)
+}
+
+fn row(entity: orr_ecs::Entity, guid: Option<orr_reflect::Guid>) -> EntityRow {
+    EntityRow { entity, guid, name: None, components: Vec::new() }
+}
+
+#[test]
+fn guid_selection_keeps_stable_order_and_primary_across_toggles() {
+    let (a, b, c) = (guid(1), guid(2), guid(3));
+    let mut selection = GuidSelection::default();
+
+    selection.replace(a.clone());
+    selection.toggle(b.clone()).unwrap();
+    selection.toggle(c.clone()).unwrap();
+    assert_eq!(selection.guids(), &[a.clone(), b.clone(), c.clone()]);
+    assert_eq!(selection.primary(), Some(&c));
+    assert!(selection.contains(&b));
+
+    selection.toggle(b.clone()).unwrap();
+    assert_eq!(selection.guids(), &[a.clone(), c.clone()], "removal preserves survivor order");
+    assert_eq!(selection.primary(), Some(&c), "removing a non-primary keeps the primary");
+    selection.toggle(c).unwrap();
+    assert_eq!(selection.guids(), std::slice::from_ref(&a));
+    assert_eq!(selection.primary(), Some(&a), "removing the primary chooses the first survivor");
+
+    selection.toggle(a).unwrap();
+    assert!(selection.guids().is_empty());
+    assert_eq!(selection.primary(), None);
+}
+
+#[test]
+fn guid_selection_replaces_and_refuses_the_129th_without_mutation() {
+    let mut selection = GuidSelection::default();
+    for n in 1..=MAX_SELECTED_GUIDS as u32 {
+        selection.toggle(guid(n)).unwrap();
+    }
+    assert_eq!(selection.guids().len(), MAX_SELECTED_GUIDS);
+    assert_eq!(selection.primary(), Some(&guid(MAX_SELECTED_GUIDS as u32)));
+
+    let before = selection.clone();
+    let error = selection.toggle(guid(MAX_SELECTED_GUIDS as u32 + 1)).unwrap_err();
+    assert_eq!(error, SelectionLimit);
+    assert_eq!(error.to_string(), "selection is limited to 128 document entities");
+    assert_eq!(selection, before, "refusal cannot change order, members or primary");
+
+    selection.replace(guid(900));
+    assert_eq!(selection.guids(), &[guid(900)]);
+    assert_eq!(selection.primary(), Some(&guid(900)));
+}
+
+#[test]
+fn guid_selection_refreshes_by_guid_not_reused_entity_handle() {
+    let old_a = orr_ecs::Entity { index: 7, version: 1 };
+    let old_b = orr_ecs::Entity { index: 8, version: 4 };
+    let (a, b, replacement) = (guid(1), guid(2), guid(3));
+    let mut selection = GuidSelection::default();
+    selection.replace(a.clone());
+    selection.toggle(b.clone()).unwrap();
+
+    // A rebake changes both handles but preserves the selected document GUID.
+    let rebaked = [
+        row(orr_ecs::Entity { index: 20, version: 0 }, Some(a.clone())),
+        // A different GUID now occupies the old handle for `b`.
+        row(old_b, Some(replacement.clone())),
+    ];
+    selection.retain_rows(&rebaked);
+    assert_eq!(selection.guids(), std::slice::from_ref(&a));
+    assert_eq!(selection.primary(), Some(&a));
+    assert!(!selection.contains(&replacement), "a reused frame slot cannot replace a removed GUID");
+
+    // A disappeared GUID is dropped even if an entity without a GUID reuses its old slot.
+    let handle_only = row(old_a, None);
+    assert!(matches!(handle_only.target(), Target::Entity(_)));
+    selection.retain_rows(&[handle_only]);
+    assert!(selection.guids().is_empty());
+    assert_eq!(selection.primary(), None);
+}
+
+#[test]
+fn guid_selection_clear_resets_members_and_primary() {
+    let mut selection = GuidSelection::default();
+    selection.replace(guid(7));
+    selection.toggle(guid(8)).unwrap();
+    selection.clear();
+    assert!(selection.guids().is_empty());
+    assert_eq!(selection.primary(), None);
 }

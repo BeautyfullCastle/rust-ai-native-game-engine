@@ -203,6 +203,220 @@ fn arena_native_window_smoke() {
     eprintln!("PASS: real native Arena edit/score windows, pixels, host checksums and replay verified in {}", out.display());
     capture_native_local_erp(&out);
     capture_native_local_arena(&out);
+    capture_native_multi_selection(&out);
+}
+
+/// Three actual eframe app-framebuffers, after normal pointer/key input:
+/// two selected GUIDs, one position batch, and one undo. The headless harness
+/// only locates widgets; its pixels are never used as native evidence.
+fn capture_native_multi_selection(out: &std::path::Path) {
+    use egui_kittest::{kittest::Queryable, Harness};
+    use orr_editor::{EditorApp, HostSpec};
+    let scene = out.join("multi-selection.scene.yaml");
+    std::fs::write(&scene, SCENE).unwrap();
+    let editor = Editor::start(&HostSpec::local_game(&scene, EditorGame::Arena)).unwrap();
+    let mut locator = Harness::builder().with_size([1200.0, 850.0])
+        .build_eframe(move |_| EditorApp::new(editor, None));
+    locator.run_steps(3);
+    let hero = locator.get_by_label("hero").rect().center();
+    let target = locator.get_by_label("target").rect().center();
+    assert!(locator.state_mut().editor.select_named("hero"));
+    let other = target_named(&locator.state().editor, "target");
+    assert!(locator.state_mut().editor.toggle_selection(other));
+    locator.state_mut().editor.sync();
+    locator.run_steps(3);
+    let right = locator.get_by_label("Move right").rect().center();
+    let mut editor = locator.into_state().editor;
+    editor.select(None);
+    editor.sync();
+    let original = editor.checksum();
+    assert!(editor.history().entries.is_empty());
+    let finished = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let result = finished.clone();
+    let directory = out.to_path_buf();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 850.0]),
+        event_loop_builder: Some(Box::new(|_builder| {
+            #[cfg(target_os = "linux")]
+            {
+                use winit::platform::x11::EventLoopBuilderExtX11;
+                _builder.with_any_thread(true);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                use winit::platform::windows::EventLoopBuilderExtWindows;
+                _builder.with_any_thread(true);
+            }
+        })),
+        ..Default::default()
+    };
+    eframe::run_native("Orrery multi-selection native acceptance", options, Box::new(move |cc| {
+        cc.egui_ctx.set_pixels_per_point(1.0);
+        assert!(cc.wgpu_render_state.is_some(), "required native fixture has no GPU renderer");
+        Ok(Box::new(NativeSelectionProof {
+            app: EditorApp::new(editor, cc.wgpu_render_state.clone()),
+            directory, hero, target, right, original, stage: 0,
+            queued: Vec::new(), request: None,
+            started: std::time::Instant::now(), finished: result,
+        }))
+    })).expect("real eframe window and renderer");
+    let result = finished.lock().unwrap().take().expect("native selection window exited before its proof completed");
+    result.unwrap_or_else(|error| panic!("native multi-selection: {error}"));
+    eprintln!("PASS: actual native eframe two-GUID highlights, checked position batch/one undo entry and undo framebuffer/checksum restoration");
+}
+
+struct NativeSelectionProof {
+    app: orr_editor::EditorApp,
+    directory: std::path::PathBuf,
+    hero: egui::Pos2,
+    target: egui::Pos2,
+    right: egui::Pos2,
+    original: u64,
+    stage: u8,
+    queued: Vec<egui::Event>,
+    request: Option<(u8, J)>,
+    started: std::time::Instant,
+    finished: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+}
+
+impl NativeSelectionProof {
+    fn click(&mut self, at: egui::Pos2, modifiers: egui::Modifiers) {
+        self.queued.push(egui::Event::ModifiersChanged(modifiers));
+        self.queued.push(egui::Event::PointerMoved(at));
+        for pressed in [true, false] {
+            self.queued.push(egui::Event::PointerButton {
+                pos: at, button: egui::PointerButton::Primary, pressed, modifiers,
+            });
+        }
+        // Release modifiers on the following pass, so widgets observe Ctrl
+        // for this click rather than only seeing a per-event modifier field.
+    }
+
+    fn capture(&mut self, ctx: &egui::Context, phase: u8) {
+        let ui_frame = self.app.frame_count();
+        let editor = &mut self.app.editor;
+        let state = editor.host_call("sim.state", J::Null).unwrap();
+        let history = editor.host_call("history.list", J::Null).unwrap();
+        let mut positions = Vec::new();
+        let rect = self.app.ui.viewport_rect.unwrap();
+        for name in ["hero", "target"] {
+            let target = target_named(editor, name);
+            let position = editor.host_call("world.get", json!({"entity":target.param(),"component":"Position","path":"pos"})).unwrap()["value"].clone();
+            let world = editor.body_pos(&target).unwrap();
+            let point = editor.camera.world_to_screen(world, self.app.ui.viewport_px);
+            let screen = rect.min + egui::vec2(point[0], point[1]);
+            positions.push(json!({"name":name,"value":position,"screen":[screen.x,screen.y]}));
+        }
+        assert_eq!(state["mode"], "edit");
+        assert_eq!(state["doc_checksum"], format!("0x{:016x}", editor.checksum()));
+        assert_eq!(editor.selected_guids().len(), 2);
+        self.request = Some((phase, json!({"source":"editor.app_framebuffer","phase":phase,
+            "state":state,"history":history,"positions":positions,"ui_frame":ui_frame})));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(phase)));
+    }
+
+    fn save_capture(&self, phase: u8, metadata: &J, image: &egui::ColorImage) {
+        assert_eq!(image.size, [1200, 850]);
+        let pixels: Vec<u8> = image.pixels.iter().flat_map(|color| color.to_array()).collect();
+        for position in metadata["positions"].as_array().unwrap() {
+            let x = position["screen"][0].as_f64().unwrap().round() as i32;
+            let y = position["screen"][1].as_f64().unwrap().round() as i32;
+            let mut yellow = 0usize;
+            for py in (y-40).max(0)..=(y+40).min(849) {
+                for px in (x-40).max(0)..=(x+40).min(1199) {
+                    let offset = (py as usize*1200+px as usize)*4;
+                    if pixels[offset..offset+3].iter().zip([255u8,237,124])
+                        .all(|(actual,want)| actual.abs_diff(want) <= 8) { yellow += 1; }
+                }
+            }
+            assert!(yellow > 20, "{} has no independent selected outline in phase {phase}: {yellow}", position["name"]);
+        }
+        let name = ["selected", "moved", "undo"][usize::from(phase)];
+        let file = std::fs::File::create(self.directory.join(format!("multi-selection-{name}.png"))).unwrap();
+        let mut encoder = png::Encoder::new(file, 1200, 850);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+        std::fs::write(self.directory.join(format!("multi-selection-{name}.json")), serde_json::to_vec_pretty(metadata).unwrap()).unwrap();
+    }
+}
+
+impl eframe::App for NativeSelectionProof {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+        input.focused = true;
+        input.events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        input.events.append(&mut self.queued);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if self.started.elapsed() > std::time::Duration::from_secs(60) {
+            *self.finished.lock().unwrap() = Some(Err(format!("native proof timed out at stage {}", self.stage)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        // Refresh before drawing, so the captured GPU viewport and the state
+        // checked below describe the same authoritative edit frame.
+        self.app.editor.sync();
+        self.app.ui(ui, frame);
+        let ui_frame = self.app.frame_count();
+        if let Some((phase, metadata)) = self.request.take() {
+            let received = ctx.input(|input| input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { viewport_id, user_data, image }
+                    if *viewport_id == egui::ViewportId::ROOT && user_data.data.as_ref()
+                        .and_then(|data| data.downcast_ref::<u8>()) == Some(&phase) => Some(image.clone()),
+                _ => None,
+            }));
+            if let Some(image) = received {
+                self.save_capture(phase, &metadata, &image);
+                match phase {
+                    0 => { self.click(self.right, egui::Modifiers::NONE); self.stage = 4; }
+                    1 => {
+                        let modifiers = egui::Modifiers::COMMAND;
+                        self.queued.push(egui::Event::ModifiersChanged(modifiers));
+                        for pressed in [true, false] {
+                            self.queued.push(egui::Event::Key { key: egui::Key::Z, physical_key: None, pressed, repeat: false, modifiers });
+                        }
+                        self.stage = 5;
+                    }
+                    2 => {
+                        *self.finished.lock().unwrap() = Some(Ok(()));
+                        self.stage = 6;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    _ => unreachable!(),
+                }
+            } else { self.request = Some((phase, metadata)); }
+        } else {
+            let editor = &mut self.app.editor;
+            match self.stage {
+                0 if ui_frame >= 5 => { self.click(self.hero, egui::Modifiers::NONE); self.stage = 1; }
+                1 if editor.selected_guids().len() == 1 => { self.click(self.target, egui::Modifiers::CTRL); self.stage = 2; }
+                2 if editor.selected_guids().len() == 2 && editor.can_nudge_selection() => { self.capture(&ctx, 0); self.stage = 3; }
+                4 if editor.history().entries.len() == 1 && !editor.history().entries[0].undone => {
+                    assert_eq!(editor.history().entries[0].origin, "user");
+                    assert_eq!(position_from_editor(editor, "hero"), json!([-299,0]));
+                    assert_eq!(position_from_editor(editor, "target"), json!([301,0]));
+                    assert_ne!(editor.checksum(), self.original);
+                    self.capture(&ctx, 1);
+                }
+                5 if editor.history().can_redo && editor.checksum() == self.original => {
+                    assert_eq!(editor.history().entries.len(), 1);
+                    assert!(editor.history().entries[0].undone);
+                    assert_eq!(position_from_editor(editor, "hero"), json!([-300,0]));
+                    assert_eq!(position_from_editor(editor, "target"), json!([300,0]));
+                    self.capture(&ctx, 2);
+                }
+                _ => {}
+            }
+        }
+        ctx.request_repaint();
+    }
+}
+
+fn position_from_editor(editor: &mut Editor, name: &str) -> J {
+    let target = target_named(editor, name);
+    editor.host_call("world.get", json!({"entity":target.param(),"component":"Position","path":"pos"})).unwrap()["value"].clone()
 }
 
 /// The normal local Arena CLI path owns both its host and its app-framebuffer

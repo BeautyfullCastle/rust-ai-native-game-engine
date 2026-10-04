@@ -4,6 +4,7 @@
 //! to capture immutable inputs and execute it on a bounded worker; other methods
 //! run on the host thread (a [`crate::LocalHost`] or the headless loop).
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use orr_ecs::Entity;
@@ -148,7 +149,7 @@ fn own_tx<G: Game>(t: &ErpTarget<'_, G>, ctx: &CallCtx<'_>) -> Result<(), RpcErr
 fn is_world_mutation(method: &str) -> bool {
     matches!(
         method,
-        "world.patch" | "world.insert" | "world.remove" | "world.spawn" | "world.despawn" | "world.singleton.patch"
+        "world.patch" | "world.patch_batch" | "world.insert" | "world.remove" | "world.spawn" | "world.despawn" | "world.singleton.patch"
     )
 }
 
@@ -225,6 +226,7 @@ pub(crate) fn call<G: Game>(
         "world.get" => world_get(t, &p),
         "world.singleton.get" => singleton_get(t, &p),
         "world.patch" => world_patch(t, &p, origin),
+        "world.patch_batch" => world_patch_batch(t, lim, ctx, &p, origin),
         "world.insert" => world_insert(t, &p, origin),
         "world.remove" => world_remove(t, &p, origin),
         "world.spawn" => world_spawn(t, &p, origin),
@@ -624,6 +626,161 @@ fn world_patch<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> 
         }
     };
     Ok(edited(t, changed))
+}
+
+const MAX_PATCH_BATCH_ITEMS: usize = 128;
+const MAX_PATCH_BATCH_PARAMS_BYTES: usize = 64 * 1024;
+
+/// A writer which measures compact JSON serialization without retaining it.
+struct ParamSizeWriter {
+    bytes: usize,
+    too_large: bool,
+}
+
+impl Write for ParamSizeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let Some(total) = self.bytes.checked_add(buf.len()) else {
+            self.too_large = true;
+            return Err(io::Error::other("serialized params exceed the limit"));
+        };
+        if total > MAX_PATCH_BATCH_PARAMS_BYTES {
+            self.too_large = true;
+            return Err(io::Error::other("serialized params exceed the limit"));
+        }
+        self.bytes = total;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn check_patch_batch_params_size(params: &Map<String, J>) -> Result<(), RpcError> {
+    let mut writer = ParamSizeWriter { bytes: 0, too_large: false };
+    if let Err(error) = serde_json::to_writer(&mut writer, params) {
+        if writer.too_large {
+            return Err(RpcError::new(
+                LIMIT_EXCEEDED,
+                "limit_exceeded",
+                format!("world.patch_batch params exceed {MAX_PATCH_BATCH_PARAMS_BYTES} serialized bytes"),
+            ));
+        }
+        return Err(RpcError::params(format!("cannot serialize world.patch_batch params: {error}")));
+    }
+    Ok(())
+}
+
+fn position_component_for_game(game: &str) -> Option<&'static str> {
+    match game {
+        "PhysGame" => Some("orr_physics::Body"),
+        "Arena" => Some("Position"),
+        _ => None,
+    }
+}
+
+fn world_patch_batch<G: Game>(
+    t: &mut ErpTarget<'_, G>,
+    lim: &HostLimits,
+    ctx: &CallCtx<'_>,
+    p: &P<'_>,
+    origin: Origin,
+) -> Result<J, RpcError> {
+    check_patch_batch_params_size(p.0)?;
+    require_edit_mode(t, "world.patch_batch")?;
+    own_tx(t, ctx)?;
+    if t.doc.in_tx() {
+        return Err(RpcError::state("tx_open", "world.patch_batch cannot run while a transaction is open"));
+    }
+
+    let label = p.str("label")?;
+    if label.trim().is_empty() {
+        return Err(RpcError::params("'label' must not be empty"));
+    }
+    let checksum = p.str("expected_checksum")?;
+    let expected = checksum
+        .strip_prefix("0x")
+        .filter(|digits| digits.len() == 16)
+        .and_then(|digits| u64::from_str_radix(digits, 16).ok())
+        .ok_or_else(|| RpcError::params("'expected_checksum' must be 0x followed by 16 hexadecimal digits"))?;
+    let actual = t.doc.checksum();
+    if actual != expected {
+        return Err(RpcError::state(
+            "stale_checksum",
+            format!("document checksum changed (expected {}, current {})", checksum_text(expected), checksum_text(actual)),
+        ));
+    }
+
+    let component = p.str("component")?;
+    let expected_component = position_component_for_game(&lim.game.name)
+        .ok_or_else(|| RpcError::state("position_unavailable", "this game has no supported 2D position descriptor for world.patch_batch"))?;
+    if component != expected_component {
+        return Err(RpcError::params(format!(
+            "component must be the {expected_component} position component for {}",
+            lim.game.name
+        )));
+    }
+    let path = p.str("path")?;
+    if path != "pos" {
+        return Err(RpcError::params("world.patch_batch only accepts the adapter position field 'pos'"));
+    }
+    let ti = component_type(&view(t), component)?;
+    let field = desc_at_path(ti.desc(), path)
+        .map_err(|error| invalid_value(format!("{}.{path}: {error}", ti.name())))?;
+    if !matches!(field.kind, orr_reflect::Kind::Vec2 { .. }) {
+        return Err(invalid_value(format!("{}.{path} is not a 2D fixed-point position", ti.name())));
+    }
+
+    let raw_patches = p
+        .req_raw("patches")?
+        .as_array()
+        .ok_or_else(|| RpcError::params("'patches' must be an array"))?;
+    if raw_patches.is_empty() {
+        return Err(RpcError::params("'patches' must contain at least one position"));
+    }
+    if raw_patches.len() > MAX_PATCH_BATCH_ITEMS {
+        return Err(RpcError::new(
+            LIMIT_EXCEEDED,
+            "limit_exceeded",
+            format!("world.patch_batch accepts at most {MAX_PATCH_BATCH_ITEMS} positions"),
+        ));
+    }
+
+    let scene_view = t.doc.view();
+    let mut guids = Vec::with_capacity(raw_patches.len());
+    let mut ops = Vec::with_capacity(raw_patches.len());
+    for (index, raw) in raw_patches.iter().enumerate() {
+        let item = raw
+            .as_object()
+            .ok_or_else(|| RpcError::params(format!("patches[{index}] must be an object")))?;
+        if item.len() != 2 || !item.contains_key("guid") || !item.contains_key("value") {
+            return Err(RpcError::params(format!("patches[{index}] must contain only 'guid' and 'value'")));
+        }
+        let guid_text = item["guid"]
+            .as_str()
+            .ok_or_else(|| RpcError::params(format!("patches[{index}].guid must be a GUID string")))?;
+        let guid = Guid::parse(guid_text)
+            .map_err(|_| RpcError::params(format!("patches[{index}].guid is not a valid document GUID")))?;
+        if guid.to_string() != guid_text {
+            return Err(RpcError::params(format!("patches[{index}].guid must use canonical GUID spelling")));
+        }
+        if guids.contains(&guid) {
+            return Err(RpcError::params(format!("patches[{index}] duplicates GUID '{guid}'")));
+        }
+        let value = decode_value(t, ti, path, &item["value"])?;
+        if !matches!(value, Value::Vec2(_)) {
+            return Err(invalid_value(format!("patches[{index}].value must be a 2D position")));
+        }
+        // Reading through the document view validates that this GUID resolves
+        // now and owns the adapter's position component before any edit begins.
+        scene_view.component(&Target::Guid(guid.clone()), component)?;
+        guids.push(guid.clone());
+        ops.push(Op::SetField { guid, component: component.to_string(), path: path.to_string(), value });
+    }
+
+    let applied = t.doc.apply_atomic_batch(label, ops, origin)?;
+    let changed = applied.iter().any(|entry| entry.changed);
+    Ok(json!({"changed": changed, "count": applied.len(), "checksum": checksum_text(t.doc.checksum())}))
 }
 
 /// `patch` laid over `base`: struct fields of `patch` replace the ones of

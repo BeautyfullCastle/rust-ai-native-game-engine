@@ -7,6 +7,99 @@ use orr_reflect::Guid;
 use orr_remote::json::{handle_text, parse_handle};
 use orr_remote::wire::parse_checksum;
 use serde_json::Value as J;
+use std::fmt;
+
+/// Maximum number of distinct document entities in an editor selection.
+pub const MAX_SELECTED_GUIDS: usize = 128;
+
+/// A refused attempt to exceed the bounded multi-selection size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionLimit;
+
+impl fmt::Display for SelectionLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "selection is limited to {MAX_SELECTED_GUIDS} document entities")
+    }
+}
+
+impl std::error::Error for SelectionLimit {}
+
+/// A stable, bounded selection of document entities by persistent GUID.
+///
+/// Handles are deliberately not stored here: they identify a frame slot and
+/// may name a different entity after a rebake. Call [`Self::retain_rows`] with
+/// an authoritative hierarchy snapshot to discard removed GUIDs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GuidSelection {
+    guids: Vec<Guid>,
+    primary: Option<Guid>,
+}
+
+impl GuidSelection {
+    /// The selected GUIDs in stable selection order (also the batch order).
+    pub fn guids(&self) -> &[Guid] {
+        &self.guids
+    }
+
+    /// The primary selected document entity, if any.
+    pub fn primary(&self) -> Option<&Guid> {
+        self.primary.as_ref()
+    }
+
+    /// Whether `guid` is currently selected.
+    pub fn contains(&self, guid: &Guid) -> bool {
+        self.guids.iter().any(|selected| selected == guid)
+    }
+
+    /// Replace the selection with one GUID, as for an ordinary row click.
+    pub fn replace(&mut self, guid: Guid) {
+        self.guids.clear();
+        self.guids.push(guid.clone());
+        self.primary = Some(guid);
+    }
+
+    /// Toggle one GUID, as for Ctrl-click. Added GUIDs are appended and become
+    /// primary. Removing a non-primary preserves the current primary; removing
+    /// the primary chooses the first remaining GUID in stable order.
+    ///
+    /// Refusing an over-limit addition leaves both order and primary unchanged.
+    pub fn toggle(&mut self, guid: Guid) -> Result<(), SelectionLimit> {
+        if let Some(index) = self.guids.iter().position(|selected| selected == &guid) {
+            self.guids.remove(index);
+            if self.primary.as_ref() == Some(&guid) {
+                self.primary = self.guids.first().cloned();
+            }
+            return Ok(());
+        }
+
+        if self.guids.len() == MAX_SELECTED_GUIDS {
+            return Err(SelectionLimit);
+        }
+
+        self.guids.push(guid.clone());
+        self.primary = Some(guid);
+        Ok(())
+    }
+
+    /// Clear all selected GUIDs (Escape or a document/host replacement).
+    pub fn clear(&mut self) {
+        self.guids.clear();
+        self.primary = None;
+    }
+
+    /// Keep only GUIDs present in a complete, authoritative hierarchy snapshot.
+    ///
+    /// Rebuilt entity handles do not affect selection. If a GUID disappeared,
+    /// it is removed rather than substituted by a new entity occupying its old
+    /// handle. If the primary disappeared, the first remaining GUID becomes
+    /// primary. An empty authoritative row list clears the selection.
+    pub fn retain_rows(&mut self, rows: &[EntityRow]) {
+        self.guids.retain(|guid| rows.iter().any(|row| row.guid.as_ref() == Some(guid)));
+        if self.primary.as_ref().is_some_and(|guid| !self.guids.contains(guid)) {
+            self.primary = self.guids.first().cloned();
+        }
+    }
+}
 
 /// Edit mode or play mode (of the host).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

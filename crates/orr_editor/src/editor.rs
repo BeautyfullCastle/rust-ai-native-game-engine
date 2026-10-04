@@ -51,7 +51,7 @@ use serde_json::{json, Value as J};
 use crate::agent::{AgentState, Feed, FeedEntry};
 use crate::backend::{Backend, HostSpec};
 use crate::diagnostics::{EditorDiagnostics, Telemetry};
-use crate::model::{ClientInfo, EntityRow, History, ProposalDetail, ProposalInfo, SimState, Stopped, Target};
+use crate::model::{ClientInfo, EntityRow, GuidSelection, History, ProposalDetail, ProposalInfo, SimState, Stopped, Target};
 pub use crate::model::Mode;
 use crate::viewport::{self, Scene};
 
@@ -192,6 +192,10 @@ pub struct Editor {
     types: Arc<TypeRegistry>,
     down: Option<Down>,
     selection: Option<Target>,
+    guid_selection: GuidSelection,
+    batch_supported: bool,
+    scene_edit_allowed: bool,
+    batch_uncertain: bool,
     /// The viewport camera (world units, y up).
     pub camera: Camera,
     status: Option<Message>,
@@ -272,7 +276,12 @@ impl Editor {
         }
     }
 
-    fn on_backend(backend: Backend) -> Result<Self, String> {
+    fn on_backend(mut backend: Backend) -> Result<Self, String> {
+        let discovery = backend.erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
+        let batch_supported = discovery["methods"].as_array().is_some_and(|methods|
+            methods.iter().any(|m| m["name"] == "world.patch_batch"));
+        let scene_edit_allowed = discovery["you"]["capabilities"].as_array().is_some_and(|caps|
+            caps.iter().any(|cap| cap == "scene_edit"));
         let mut feed = Feed::default();
         feed.own.clone_from(&backend.own_client);
         let types = Arc::new(backend.game.types());
@@ -283,6 +292,10 @@ impl Editor {
             types,
             down: None,
             selection: None,
+            guid_selection: GuidSelection::default(),
+            batch_supported,
+            scene_edit_allowed,
+            batch_uncertain: false,
             camera: Camera::new([0.0, 0.0], 20.0),
             status: None,
             log: Vec::new(),
@@ -651,6 +664,34 @@ impl Editor {
         self.selection.as_ref()
     }
 
+    /// Document GUIDs in stable click order. Runtime handle-only selections
+    /// remain inspect-only and are never admitted to a batch.
+    pub fn selected_guids(&self) -> &[Guid] { self.guid_selection.guids() }
+
+    /// Membership used by hierarchy and viewport highlighting.
+    pub fn is_selected(&self, target: &Target) -> bool {
+        match target {
+            Target::Guid(guid) => self.guid_selection.contains(guid),
+            Target::Entity(_) => self.selection.as_ref() == Some(target),
+        }
+    }
+
+    /// A batch may have reached the host even though its acknowledgement was
+    /// lost. Reconnect reads a freshly fenced document and complete history;
+    /// no operation is retried automatically.
+    pub fn batch_outcome_uncertain(&self) -> bool { self.batch_uncertain }
+
+    /// Read-only enablement; the host repeats all admission checks.
+    pub fn can_nudge_selection(&self) -> bool {
+        self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
+            && self.batch_supported && self.scene_edit_allowed && !self.batch_uncertain
+            && !self.history.in_tx && !self.sim.in_tx && !self.gesture.busy()
+            && !self.guid_selection.guids().is_empty()
+            && self.guid_selection.guids().iter().all(|guid| self.rows.iter().any(|row|
+                row.guid.as_ref() == Some(guid)
+                    && row.components.iter().any(|c| c == self.game().position_component())))
+    }
+
     /// The selected entity's GUID, if it has one.
     pub fn selected_guid(&self) -> Option<Guid> {
         match self.selection.as_ref()? {
@@ -714,6 +755,31 @@ impl Editor {
 
     /// Selects an entity (or clears the selection).
     pub fn select(&mut self, target: Option<Target>) {
+        match &target {
+            Some(Target::Guid(guid)) => self.guid_selection.replace(guid.clone()),
+            _ => self.guid_selection.clear(),
+        }
+        self.set_primary_selection(target);
+    }
+
+    /// Ctrl-click toggles a document GUID; a handle-only target keeps the
+    /// original single inspect path. Refusing a 129th GUID changes nothing.
+    pub fn toggle_selection(&mut self, target: Target) -> bool {
+        let Target::Guid(guid) = target else { self.select(Some(target)); return true };
+        if self.rows.iter().all(|row| row.guid.as_ref() != Some(&guid)) {
+            self.error("cannot select a GUID absent from the current document rows");
+            return false;
+        }
+        if let Err(error) = self.guid_selection.toggle(guid) {
+            self.error(error.to_string());
+            return false;
+        }
+        let primary = self.guid_selection.primary().cloned().map(Target::Guid);
+        self.set_primary_selection(primary);
+        true
+    }
+
+    fn set_primary_selection(&mut self, target: Option<Target>) {
         if self.selection != target {
             self.cancel_edit();
             self.selection = target;
@@ -737,6 +803,12 @@ impl Editor {
 
     /// Drops a selection that no longer exists (after an undo, a despawn or a rewind).
     pub fn sanitize_selection(&mut self) {
+        if !self.dirty.rows && !self.inflight.rows {
+            self.guid_selection.retain_rows(&self.rows);
+            if matches!(self.selection, Some(Target::Guid(_))) {
+                self.set_primary_selection(self.guid_selection.primary().cloned().map(Target::Guid));
+            }
+        }
         if let Some(t) = &self.selection {
             if !self.rows.is_empty() && self.row_of(t).is_none() {
                 self.select(None);
@@ -900,6 +972,9 @@ impl Editor {
             }
             "watch.activity" => {
                 if let Some(list) = params.get("entries").and_then(J::as_array) {
+                    if list.iter().any(|entry| entry["method"] == "scene.load" && entry["ok"] == true) {
+                        self.select(None);
+                    }
                     self.feed.push(list.iter().filter_map(FeedEntry::from_json).collect());
                 }
             }
@@ -1453,6 +1528,71 @@ impl Editor {
 
     // ---- editing ----
 
+    /// Applies an exact fixed-point displacement to every selected GUID in
+    /// one guarded RPC. Values are read from the host, never reconstructed
+    /// from floating-point drawables. Any intervening document mutation makes
+    /// the captured checksum stale and the entire request is refused.
+    pub fn nudge_selected(&mut self, offset: FPVec2) -> bool {
+        if !self.can_nudge_selection() {
+            self.error("selection move requires editable scene mode, current document GUIDs, SceneEdit and no pending transaction or preview");
+            return false;
+        }
+        if offset == FPVec2::ZERO { return false; }
+        let state = match self.call("sim.state", J::Null) {
+            Ok(state) => state,
+            Err(error) => { self.error(error); return false; }
+        };
+        let fresh = SimState::from_json(&state);
+        self.apply_state(&state);
+        if fresh.mode != Mode::Edit || fresh.viewer || fresh.in_tx {
+            self.error("selection move refused: host is not an idle editable document");
+            return false;
+        }
+        let Some(expected_checksum) = state.get("doc_checksum").and_then(orr_remote::wire::parse_checksum) else {
+            self.error("host supplied no document checksum"); return false;
+        };
+        let guids = self.guid_selection.guids().to_vec();
+        let component = self.game().position_component();
+        let mut patches = Vec::with_capacity(guids.len());
+        for guid in &guids {
+            let position = match self.field_of(&Target::Guid(guid.clone()), component, "pos") {
+                Ok(Value::Vec2(position)) => position,
+                Ok(_) => { self.error("selected position is not a two-dimensional fixed-point value"); return false; }
+                Err(error) => { self.error(error); return false; }
+            };
+            let (Some(x), Some(y)) = (position.x.raw().checked_add(offset.x.raw()), position.y.raw().checked_add(offset.y.raw())) else {
+                self.error("selection move would overflow a fixed-point position"); return false;
+            };
+            patches.push(json!({"guid":guid.to_string(), "value":value_to_json(&Value::Vec2(FPVec2::new(FP::from_raw(x), FP::from_raw(y))))}));
+        }
+        let params = json!({"label":"move selected entities", "expected_checksum":format!("0x{expected_checksum:016x}"),
+            "component":component, "path":"pos", "patches":patches});
+        if match serde_json::to_vec(&params) { Ok(bytes) => bytes.len() > 64 * 1024, Err(_) => true } {
+            self.error("selection move exceeds the 64 KiB request limit"); return false;
+        }
+        if !self.can_nudge_selection() || self.guid_selection.guids() != guids.as_slice() {
+            self.error("selection or document changed during position reads; move was not submitted"); return false;
+        }
+        match self.call("world.patch_batch", params) {
+            Ok(result) => {
+                let Some(changed) = result["changed"].as_bool().filter(|_| result.get("checksum").and_then(orr_remote::wire::parse_checksum).is_some()) else {
+                    self.batch_uncertain = true;
+                    self.connection_lost("selection move acknowledgement was malformed; outcome uncertain, reconnect before editing");
+                    return false;
+                };
+                if changed { self.mark_edited(); }
+                changed
+            }
+            Err(error) => {
+                if self.down.is_some() {
+                    self.batch_uncertain = true;
+                    self.error("selection move outcome is uncertain; reconnect and read the document and history before editing; the request will not be retried");
+                } else { self.error(format!("selection move: {error}")); }
+                false
+            }
+        }
+    }
+
     /// Sets one field of the selected entity's component (or a singleton).
     /// `path` is a reflect path (`"pos.x"`, `""` = whole). Returns true if
     /// something changed. A refusal is reported as an error message. Inside a
@@ -1649,7 +1789,7 @@ impl Editor {
                 let t = r.get("guid").and_then(J::as_str).or_else(|| r.get("handle").and_then(J::as_str)).and_then(Target::parse);
                 self.mark_edited();
                 // The new entity is not in the hierarchy yet: keep the selection through the next refresh.
-                self.selection = t;
+                self.select(t);
                 self.inspect = None;
                 self.dirty.inspect = true;
                 true
@@ -1766,7 +1906,7 @@ impl Editor {
             return false;
         }
         self.mark_edited();
-        self.selection = Some(target);
+        self.select(Some(target));
         self.inspect = None;
         self.dirty.inspect = true;
         true
@@ -1787,7 +1927,7 @@ impl Editor {
         };
         match self.call("world.despawn", json!({"entity": t.param()})) {
             Ok(_) => {
-                self.selection = None;
+                self.select(None);
                 self.inspect = None;
                 self.mark_edited();
                 true
@@ -1974,6 +2114,17 @@ impl Editor {
                 .collect();
             viewport::add_pulses(&mut list, bodies, &live);
         }
+        // Re-resolve each GUID in the currently drawn source, including a
+        // rebaked proposal. Only its selection outline is added; shapes and
+        // grid from the small helper list are never duplicated in the frame.
+        for guid in self.guid_selection.guids() {
+            let Some(entity) = rows.iter().find(|row| row.guid.as_ref() == Some(guid)).map(|row| row.entity) else { continue };
+            if self.guid_selection.primary() == Some(guid) { continue; }
+            if let Some(body) = bodies.iter().find(|body| body.entity == entity) {
+                let mut outline = viewport::build_list(std::slice::from_ref(body), Some(entity), &self.camera, vp);
+                list.lines.append(&mut outline.lines);
+            }
+        }
         list
     }
 
@@ -2124,6 +2275,7 @@ impl Editor {
     /// (edits that were not saved are lost), a remote one is connected to afresh.
     /// On failure the editor stays down and says why.
     pub fn restart(&mut self) -> bool {
+        let was_uncertain = self.batch_uncertain;
         self.release_control();
         let spec = self.backend.spec.clone();
         let local = spec.is_local();
@@ -2155,6 +2307,10 @@ impl Editor {
             self.info("reconnected");
         }
         self.report_view_delivery();
+        if was_uncertain {
+            self.info(if local { "new local host reopened the saved file and read its document/history; the old host's uncertain batch was not retried" }
+                else { "fresh fenced connection, authoritative document and history read; inspect the confirmed result before a new edit (no batch was retried)" });
+        }
         true
     }
 
@@ -2252,3 +2408,5 @@ mod gestures;
 mod gesture_tests;
 #[cfg(test)]
 mod input_tests;
+#[cfg(test)]
+mod multi_selection_tests;

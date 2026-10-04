@@ -39,6 +39,8 @@ orr_sim = { path = "../orr_sim" }
 # Tests only: replay a recording to check it against the live checksum.
 orr_session = { path = "../orr_session" }
 egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }
+# Native test event loops run on libtest workers; this version is already locked.
+winit = { version = "0.30.13", default-features = false }
 
 [[bin]]
 name = "orr_editor"
