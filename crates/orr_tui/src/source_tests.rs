@@ -1,6 +1,7 @@
 //! Normal socket polling with deterministic I/O interruptions, without platform-specific signals.
 
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, BufReader, ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
 
 use tungstenite::protocol::Role;
 
@@ -86,6 +87,54 @@ fn interrupted_websocket_frame_preserves_the_queue() {
     assert!(matches!(queue.pop_front(), Some(Incoming::Frame(f)) if f == frame));
     assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
     assert!(queue.is_empty(), "the completed frame is queued only once");
+}
+
+#[test]
+fn websocket_classifies_a_v2_3d_frame_without_losing_bytes() {
+    let frame = orr_viewstream::ViewFrame3 {
+        flags: 0,
+        tick: 7,
+        verified_tick: 6,
+        seq: 9,
+        rollback: None,
+        entities: Vec::new(),
+        props: Vec::new(),
+    }
+    .encode();
+    let bytes = message(2, &frame);
+    let mut ws = socket(vec![Ok(bytes)]);
+    let mut queue = VecDeque::new();
+    assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
+    assert!(matches!(queue.pop_front(), Some(Incoming::Frame3(b)) if b == frame));
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn tcp_hex_notification_classifies_a_v2_3d_frame() {
+    let frame = orr_viewstream::ViewFrame3 {
+        flags: 0,
+        tick: 11,
+        verified_tick: 10,
+        seq: 12,
+        rollback: None,
+        entities: Vec::new(),
+        props: Vec::new(),
+    }
+    .encode();
+    let text = serde_json::json!({"method":"watch.viewstream","params":{"data":to_hex(&frame)}});
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let mut source = SocketSource {
+        wire: Wire::Tcp { reader: BufReader::new(client), partial: Vec::new() },
+        schema: String::new(),
+        next_id: 1,
+        queue: VecDeque::new(),
+        target: "tcp://127.0.0.1:9".into(),
+        client: None,
+    };
+    drop(listener.accept().unwrap());
+    source.handle_text(&text);
+    assert!(matches!(source.queue.pop_front(), Some(Incoming::Frame3(b)) if b == frame));
 }
 
 #[test]

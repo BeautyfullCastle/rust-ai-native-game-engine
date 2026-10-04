@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use orr_viewstream::{
-    EntityRecord, EventBatch, EventRecord, ViewFrame, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET, FLAG_ROLLED_BACK, MODE_PREDICTION, SHAPE_CIRCLE,
-    STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
+    EntityRecord, EntityRecord3, EventBatch, EventRecord, Pose3, ViewFrame, ViewFrame3, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET, FLAG_PAUSED,
+    FLAG_ROLLED_BACK, MODE_PREDICTION, SHAPE_CIRCLE, SHAPE3_SPHERE, STATE_CANCELED, STATE_PREDICTED, STATE_VERIFIED,
 };
 
 use crate::schema::{KindInfo, ViewSchema};
@@ -15,6 +15,7 @@ use crate::state::{ViewState, SMOOTH};
 fn schema() -> ViewSchema {
     ViewSchema {
         game: "T".into(),
+        dimensions: 2,
         tick_rate: 60,
         player_count: 2,
         kinds: vec![KindInfo { id: 0, name: "ball".into(), props: Vec::new() }],
@@ -24,12 +25,41 @@ fn schema() -> ViewSchema {
     }
 }
 
+fn schema3() -> ViewSchema {
+    let mut schema = schema();
+    schema.dimensions = 3;
+    schema.game = "Yard3D".into();
+    schema
+}
+
 fn ball(id: u64, prev: [f32; 3], cur: [f32; 3]) -> EntityRecord {
     EntityRecord { id, kind: 0, shape: SHAPE_CIRCLE, mode: MODE_PREDICTION, size: 1.0, half_y: 0.0, rgba: [255; 4], prev, cur }
 }
 
 fn frame(tick: u64, flags: u8, rollback: Option<(u64, u64)>, balls: Vec<EntityRecord>) -> Incoming {
     Incoming::Frame(ViewFrame { flags, tick, verified_tick: tick - 1, seq: tick, rollback, entities: balls, props: Vec::new() }.encode())
+}
+
+fn ball3(id: u64, prev: [f32; 3], cur: [f32; 3]) -> EntityRecord3 {
+    EntityRecord3 {
+        id,
+        kind: 0,
+        shape: SHAPE3_SPHERE,
+        mode: MODE_PREDICTION,
+        size: [1.0, 0.0, 0.0],
+        rgba: [255; 4],
+        roughness: 128,
+        metallic: 0,
+        style_flags: 0,
+        prev: Pose3 { pos: prev, rot: Pose3::IDENTITY.rot },
+        cur: Pose3 { pos: cur, rot: Pose3::IDENTITY.rot },
+    }
+}
+
+fn frame3(tick: u64, flags: u8, rollback: Option<(u64, u64)>, balls: Vec<EntityRecord3>) -> Incoming {
+    Incoming::Frame3(
+        ViewFrame3 { flags, tick, verified_tick: tick.saturating_sub(1), seq: tick, rollback, entities: balls, props: Vec::new() }.encode(),
+    )
 }
 
 /// The x the viewer draws the first ball at, at alpha 0 (`prev`) or alpha 1 (`cur`).
@@ -139,4 +169,58 @@ fn the_client_status_line_shows_slot_rtt_delay_rollbacks_and_depth() {
     for part in ["playing", "slot 1/2", "rtt 83 ms", "delay 4", "tick 40 verified 39", "rollbacks 12 (10.0/s)", "last depth 4", "ROLLED_BACK"] {
         assert!(line.contains(part), "{part:?} missing in {line}");
     }
+}
+
+#[test]
+fn three_dimensional_state_interpolates_tracks_flags_and_rejects_the_wrong_flavor() {
+    let t0 = Instant::now();
+    let mut s = ViewState::new(schema3(), t0);
+    s.ingest(&frame3(5, 0, None, vec![ball3(1, [0.0; 3], [2.0, 4.0, 6.0])]), t0);
+    assert!(s.frame.is_none());
+    assert!(s.camera.is_none());
+    assert!(s.camera3.is_some());
+    assert_eq!(s.display_frame3(t0).unwrap().entities[0].prev.pos, [0.0; 3]);
+    assert_eq!(s.display_frame3(t0 + Duration::from_millis(8)).unwrap().entities[0].cur.pos, [2.0, 4.0, 6.0]);
+    assert!((s.alpha(t0 + Duration::from_millis(8)) - 0.48).abs() < 0.02);
+
+    s.ingest(&frame3(6, FLAG_PAUSED, None, vec![ball3(1, [2.0, 4.0, 6.0], [3.0, 4.0, 6.0])]), t0 + Duration::from_millis(16));
+    assert_eq!(s.alpha(t0 + Duration::from_millis(17)), 1.0);
+    let previous_tick = s.frame3.as_ref().unwrap().tick;
+
+    s.ingest(&frame(7, 0, None, vec![ball(1, [0.0; 3], [1.0; 3])]), t0 + Duration::from_millis(32));
+    assert_eq!(s.frame3.as_ref().unwrap().tick, previous_tick, "a 2D frame cannot replace 3D state");
+    assert!(s.notice.as_deref().unwrap().contains("does not match 3D schema"));
+    assert!(s.status_line(t0 + Duration::from_millis(32)).contains("3D XZ"));
+    assert!(s.status_line(t0 + Duration::from_millis(32)).contains("PAUSED"));
+}
+
+#[test]
+fn three_dimensional_rollback_offsets_fade_and_events_reset_clears_predictions() {
+    let t0 = Instant::now();
+    let mut s = ViewState::new(schema3(), t0);
+    s.ingest(&frame3(5, 0, None, vec![ball3(1, [9.0, 1.0, 0.0], [10.0, 1.0, 0.0])]), t0);
+    let t1 = t0 + Duration::from_millis(16);
+    s.ingest(&frame3(6, FLAG_ROLLED_BACK, Some((3, 5)), vec![ball3(1, [4.0, 2.0, 0.0], [5.0, 2.0, 0.0])]), t1);
+    let corrected = s.display_frame3(t1).unwrap();
+    assert!(corrected.entities[0].prev.pos[0] > 9.0, "no positional snap: {:?}", corrected.entities[0].prev.pos);
+    assert_eq!(s.display_frame3(t1 + SMOOTH).unwrap().entities[0].prev.pos, [4.0, 2.0, 0.0]);
+
+    let batch = Incoming::Events(EventBatch { events: vec![event(7, 1, STATE_PREDICTED)] }.encode());
+    s.ingest(&batch, t1);
+    s.ingest(&frame3(7, FLAG_DISCONTINUITY | FLAG_EVENTS_RESET, None, vec![ball3(1, [2.0; 3], [2.0; 3])]), t1 + SMOOTH);
+    s.ingest(&Incoming::Events(EventBatch { events: vec![event(7, 1, STATE_VERIFIED)] }.encode()), t1 + SMOOTH);
+    assert_eq!(s.verified_after_predicted, 0);
+    assert_eq!(s.display_frame3(t1 + SMOOTH).unwrap().entities[0].prev.pos, [2.0; 3]);
+}
+
+#[test]
+fn malformed_three_dimensional_quaternion_does_not_replace_the_last_good_frame() {
+    let t0 = Instant::now();
+    let mut s = ViewState::new(schema3(), t0);
+    s.ingest(&frame3(5, 0, None, vec![ball3(1, [0.0; 3], [1.0; 3])]), t0);
+    let mut malformed = ball3(1, [1.0; 3], [2.0; 3]);
+    malformed.cur.rot = [0.0, 0.0, 0.0, 2.0];
+    s.ingest(&frame3(6, 0, None, vec![malformed]), t0 + Duration::from_millis(16));
+    assert_eq!(s.frame3.as_ref().unwrap().tick, 5);
+    assert!(s.notice.as_deref().unwrap().contains("unit quaternion"));
 }
