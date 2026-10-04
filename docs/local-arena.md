@@ -12,6 +12,12 @@ PhysGame startup and `physics_demo.scene.yaml` default. An explicit `--game`
 cannot be combined with `--connect`: an attached editor discovers its game
 from the running host instead.
 
+For Rust API callers, `HostSpec::Local` keeps its existing fields and PhysGame
+behavior. The new `HostSpec::LocalGame` variant requires an additional arm in
+external exhaustive matches. `cli::Args` also has a new public `game` field;
+external struct literals must supply it, or use `Args::default()` and set the
+desired fields.
+
 The local Arena host uses seed 42, two player input slots, and 60 ticks per
 second. It installs the Arena structured input and existing managed input
 protocol before the editor connects. The editor remains an ERP client; scene
