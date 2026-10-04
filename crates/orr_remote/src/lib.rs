@@ -78,6 +78,8 @@ mod remote_view;
 pub mod screenshot;
 #[cfg(feature = "sample-host")]
 pub mod sample;
+#[cfg(feature = "sample-host")]
+pub mod yard3d;
 mod server;
 mod viewstream;
 pub mod wire;
