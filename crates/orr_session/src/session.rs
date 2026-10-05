@@ -5,7 +5,7 @@ use orr_ecs::{Frame, FrameRing};
 use orr_sim::{EventKey, Game, PlayerFlags, PlayerSlot, SimCommand, SimEvent, Simulation, TickInputs};
 
 use crate::events::{EventBatch, EventStatus};
-use crate::input_source::{InputSource, RemoteInput};
+use crate::input_source::{InputSource, LocallyVerifiedTick, RemoteInput};
 use crate::join::{self, JoinError, JoinTicket};
 
 /// `Session` configuration.
@@ -465,6 +465,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// `tick` may be older than the current verified tick (the reliable
     /// correction can lag the unreliable bundles); the caller must then feed
     /// the confirmed bundles of `tick + 1..` again.
+    ///
+    /// Sources observing locally verified history must invalidate that archive
+    /// or install a fresh generation before restoring, even to a newer tick.
     pub fn restore_confirmed(
         &mut self,
         tick: u64,
@@ -1038,6 +1041,13 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 batch.push(e.key, EventStatus::Verified(e.payload));
             }
             self.verified_tick = t;
+            self.source.on_locally_verified(LocallyVerifiedTick {
+                simulated: &rec.inputs,
+                simulated_commands: &rec.cmds,
+                confirmed_inputs: confirmed,
+                confirmed_commands: self.confirmed_commands.get(&t),
+                confirmed_absent: &self.confirmed_absent,
+            });
             self.confirmed_input.remove(&t);
             self.confirmed_commands.remove(&t);
             if !self.confirmed_absent.is_empty() {
