@@ -202,10 +202,13 @@ evidence; command wall time alone does not measure compiler CPU time or CI cost.
    Each capture uses its own target directory. A fresh target does not establish
    a cold registry, filesystem, or operating-system cache. Unknown cache inputs
    remain unknown; inherited dependency caches are not an optimization result.
-3. Bind the plan to actual lane and N6-1 completion receipt files by SHA256.
-   Read current #28 reservations and live processes immediately before taking
-   the lane. N6-1 runs first. A previously idle machine is not a future guarantee,
-   and a coordinated local lane is not complete isolation from desktop services.
+3. Select the resource contract below and bind its actual receipt files by
+   SHA256. On the same resource, N6-1 must finish before N9-1. Windows keeps
+   this ordering. A separate Linux resource may use the explicit independent
+   contract for its four captures. Read current #28 reservations and live
+   processes immediately before taking the lane. A previously idle machine
+   is not a future guarantee, and a coordinated local lane is not complete
+   isolation from desktop services.
 4. Declare one attempt per selected capture, at most six captures total, a
    finite watchdog and output bound, and the owned process-tree cleanup method.
    No automatic retries or cleanup of other owners' processes is permitted.
@@ -228,6 +231,86 @@ directory and capture markers are never reused. The first failure, timeout,
 output limit, source change, or missing condition stops further captures and
 preserves the outcome and raw evidence. Do not restart a completed collection
 to obtain a more favorable observation.
+
+### Same resource and independent Linux admission
+
+The existing exact `coordination` object remains supported:
+
+```json
+{
+  "lane_receipt": {"path": "/absolute/current-lane.json", "sha256": "actual-file-sha256"},
+  "n6_receipt": {"path": "/absolute/n6-completion.json", "sha256": "actual-file-sha256"},
+  "n6_completed": true
+}
+```
+
+This is the same-resource contract. Receipt hashes bind saved bytes; N6
+completion and lane ownership remain caller declarations backed by the linked
+owner evidence. Collection rechecks these receipt hashes before each launch.
+Do not set completion to true for a pending Windows N6 run.
+
+For su's separate Linux runner, use this mutually exclusive exact object:
+
+```json
+{
+  "mode": "independent-linux",
+  "lane_receipt": {"path": "/absolute/linux-admission.json", "sha256": "actual-file-sha256"},
+  "resource_receipt": {"path": "/absolute/linux-resource.json", "sha256": "actual-file-sha256"},
+  "n6_receipt": null,
+  "n6_completed": false
+}
+```
+
+The SHA strings in these examples are placeholders, not executable plans.
+The independent variant requires actual Linux OS and architecture, the
+installed toolchain, POSIX process-group cleanup, and exactly four captures:
+one baseline/current native pair sharing a lane and one baseline/current
+sample pair sharing a different lane. It does not admit Windows or add slots
+to the six-capture campaign. Keep a single campaign ledger for Linux four and
+Windows two; the per-plan collector cannot coordinate counters across separate
+machines. A resource receipt has exactly these keys:
+
+```json
+{
+  "schema": "orr.ci-cost-independent-resource/1",
+  "owner": "su",
+  "runner_id": "su-linux-n9",
+  "n6_runner_id": "ddang-windows-n6",
+  "runner_machine_id_sha256": "actual-machine-id-file-sha256",
+  "runner_os": "Linux",
+  "runner_arch": "actual-platform.machine-value",
+  "separate_resources": true
+}
+```
+
+The independent resource owner must be `su`. The collector checks distinct
+resource labels (ignoring case) and matching actual OS,
+architecture and SHA256 of the raw `/etc/machine-id` file. Its stripped content
+must be a valid 32-hex machine ID, excluding all-zero and all-f placeholders.
+This identifies an OS installation;
+it does not prove separate physical hardware, CPU allocation or isolation.
+The owner attests the association with the N6 resource label. Receipt hashes
+are mismatch detectors, not issuer authentication. Obtain the owner's actual
+separate-resource evidence instead of manufacturing a completion receipt.
+
+The lane receipt has exactly `schema` (`orr.ci-cost-local-admission/1`),
+`runner_id`, `observed_at_utc`, `quiet` (literal `true`), and
+`active_related_pids` (an empty list). Its runner ID must match the resource
+receipt. The aware UTC observation must be between zero and 120 seconds old
+at admission; a future observation is refused. Both receipt files are read,
+hashed and parsed once at admission, and their bound snapshots are retained.
+This timestamp is not reused as evidence of fresh quiet conditions after a
+long capture.
+
+Immediately before each independent Linux launch, the collector obtains a
+new `ps` PID/executable-name census and refuses malformed, duplicate or related
+build/engine process records. The report keeps the observation UTC, collector
+PID, process count, census text hash and related-PID result without argv or
+environment contents. The hash covers the metadata probe's normalized text,
+not original subprocess bytes. Executable names can be truncated or changed;
+this point-in-time check cannot establish whole-machine isolation or future
+quiet. Existing owned-process natural exit, stream EOF and process-group
+cleanup checks remain necessary before the next capture and lane return.
 
 ### N9-1 revision and access boundaries
 

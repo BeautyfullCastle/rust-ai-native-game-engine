@@ -324,6 +324,8 @@ def render_markdown(report):
 
 LOCAL_PLAN_SCHEMA = "orr.ci-cost-local-plan/1"
 LOCAL_REPORT_SCHEMA = "orr.ci-cost-local-report/1"
+LOCAL_RESOURCE_SCHEMA = "orr.ci-cost-independent-resource/1"
+LOCAL_ADMISSION_SCHEMA = "orr.ci-cost-local-admission/1"
 LOCAL_COMMANDS = {
     "native": ["cargo", "test", "--workspace", "--release", "--timings",
                "--exclude", "orr_sample", "--exclude", "orr_editor",
@@ -401,10 +403,23 @@ def validate_local_plan(document):
         _local_path(toolchain[name + "_path"], "runner.toolchain." + name + "_path")
         _local_text(toolchain[name + "_version"], "runner.toolchain." + name + "_version")
     coordination = document["coordination"]
-    _local_fields(coordination, {"lane_receipt", "n6_receipt", "n6_completed"}, "coordination")
-    if coordination["n6_completed"] is not True:
-        raise ValueError("coordination.n6_completed must be true before collection")
-    for key in ("lane_receipt", "n6_receipt"):
+    independent = isinstance(coordination, dict) and "mode" in coordination
+    if independent:
+        _local_fields(coordination, {"mode", "lane_receipt", "resource_receipt",
+                                     "n6_receipt", "n6_completed"}, "coordination")
+        if (coordination["mode"] != "independent-linux" or coordination["n6_completed"] is not False
+                or coordination["n6_receipt"] is not None):
+            raise ValueError("independent-linux requires literal n6_completed=false and n6_receipt=null")
+        if (runner["os"] != "Linux" or runner["class"] != "coordinated-local"
+                or runner["isolation"] not in {"coordinated", "exclusive"}):
+            raise ValueError("independent-linux requires a coordinated local Linux runner")
+        receipt_keys = ("lane_receipt", "resource_receipt")
+    else:
+        _local_fields(coordination, {"lane_receipt", "n6_receipt", "n6_completed"}, "coordination")
+        if coordination["n6_completed"] is not True:
+            raise ValueError("coordination.n6_completed must be true before collection")
+        receipt_keys = ("lane_receipt", "n6_receipt")
+    for key in receipt_keys:
         _local_receipt(coordination[key], "coordination." + key)
     watchdog = document["watchdog"]
     _local_fields(watchdog, {"seconds", "max_log_bytes", "cleanup"}, "watchdog")
@@ -414,6 +429,8 @@ def validate_local_plan(document):
         raise ValueError("watchdog.max_log_bytes: expected integer 1..64 MiB combined")
     if not isinstance(watchdog["cleanup"], str) or watchdog["cleanup"] not in {"windows-job", "posix-process-group"}:
         raise ValueError("watchdog.cleanup: unsupported owned process-tree cleanup")
+    if independent and watchdog["cleanup"] != "posix-process-group":
+        raise ValueError("independent-linux requires posix-process-group cleanup")
     captures = document["captures"]
     if not isinstance(captures, list) or not 1 <= len(captures) <= 6:
         raise ValueError("captures: expected 1..6 entries")
@@ -462,6 +479,15 @@ def validate_local_plan(document):
         previous = lanes.setdefault(capture["lane"], binding)
         if previous != binding:
             raise ValueError("same lane has mismatched workload, command, environment or cache declarations")
+    if independent:
+        pairs = {(capture["side"], capture["workload"]) for capture in captures}
+        expected_pairs = {(side, workload) for side in ("baseline", "current")
+                          for workload in ("native", "sample")}
+        native_lanes = {capture["lane"] for capture in captures if capture["workload"] == "native"}
+        sample_lanes = {capture["lane"] for capture in captures if capture["workload"] == "sample"}
+        if (len(captures) != 4 or pairs != expected_pairs or len(native_lanes) != 1
+                or len(sample_lanes) != 1 or native_lanes == sample_lanes):
+            raise ValueError("independent-linux requires exactly native and sample baseline/current pairs on two distinct lanes")
     return copy.deepcopy(document)
 
 
@@ -527,6 +553,123 @@ def _local_receipt_file(receipt):
     if actual["sha256"] != receipt["sha256"]:
         raise ValueError("coordination/cache receipt SHA256 mismatch")
     return actual
+
+
+def _local_receipt_document(receipt):
+    """Snapshot bounded receipt bytes once; the hash is not issuer authentication."""
+    started = _local_utc()
+    path = Path(receipt["path"])
+    with path.open("rb") as stream:
+        raw = stream.read(65537)
+    ended = _local_utc()
+    if len(raw) > 65536 or hashlib.sha256(raw).hexdigest() != receipt["sha256"]:
+        raise ValueError("bounded coordination receipt SHA256 mismatch")
+    try:
+        def unique_object(items):
+            value = {}
+            for key, item in items:
+                if key in value:
+                    raise ValueError("duplicate coordination receipt JSON key")
+                value[key] = item
+            return value
+        def reject_constant(value):
+            raise ValueError("nonfinite receipt JSON")
+        document = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object,
+                              parse_constant=reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValueError("invalid bounded coordination receipt JSON") from exc
+    return {"path": str(path.resolve()), "bytes": len(raw), "sha256": receipt["sha256"],
+            "read_started_utc": started, "read_completed_utc": ended, "document": document}
+
+
+def _local_resource_id(value, path):
+    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value)
+            or set(re.split(r"[_-]", value.casefold())) & {"unknown", "unverified", "unset", "none", "null", "placeholder", "tbd"}):
+        raise ValueError(path + ": expected known safe resource identifier")
+
+
+def _local_linux_machine_identity():
+    started = _local_utc()
+    with Path("/etc/machine-id").open("rb") as stream:
+        raw = stream.read(129)
+    ended = _local_utc()
+    identity = raw.strip()
+    if (len(raw) > 128 or not re.fullmatch(rb"[0-9a-f]{32}", identity)
+            or identity in {b"0" * 32, b"f" * 32}):
+        raise ValueError("Linux machine-id is absent, malformed or a placeholder")
+    return {"path": "/etc/machine-id", "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+            "read_started_utc": started, "read_completed_utc": ended,
+            "scope": "observed OS installation identifier; not physical resource isolation"}
+
+
+def _local_independent_admission(coordination, runner):
+    if platform.system() != "Linux" or runner["os"] != "Linux" or runner["arch"] != platform.machine():
+        raise ValueError("independent-linux actual runner OS/arch mismatch")
+    receipts = {key: _local_receipt_document(coordination[key])
+                for key in ("resource_receipt", "lane_receipt")}
+    resource, lane = (receipts[key]["document"] for key in ("resource_receipt", "lane_receipt"))
+    _local_fields(resource, {"schema", "owner", "runner_id", "n6_runner_id", "runner_machine_id_sha256",
+                             "runner_os", "runner_arch", "separate_resources"}, "resource receipt")
+    if (resource["schema"] != LOCAL_RESOURCE_SCHEMA or resource["owner"] != "su"
+            or resource["separate_resources"] is not True):
+        raise ValueError("resource receipt requires explicit su owner-attested separate resources")
+    for key in ("runner_id", "n6_runner_id"):
+        _local_resource_id(resource[key], "resource receipt." + key)
+    if resource["runner_id"].casefold() == resource["n6_runner_id"].casefold():
+        raise ValueError("independent-linux and N6 resource identifiers must differ")
+    _local_digest(resource["runner_machine_id_sha256"], 64, "resource receipt.runner_machine_id_sha256")
+    if resource["runner_os"] != runner["os"] or resource["runner_arch"] != runner["arch"]:
+        raise ValueError("resource receipt runner OS/arch mismatch")
+    _local_fields(lane, {"schema", "runner_id", "observed_at_utc", "quiet", "active_related_pids"}, "lane receipt")
+    if (lane["schema"] != LOCAL_ADMISSION_SCHEMA or lane["runner_id"] != resource["runner_id"]
+            or lane["quiet"] is not True or lane["active_related_pids"] != []):
+        raise ValueError("lane receipt must identify the same quiet runner with no related PID")
+    _local_text(lane["observed_at_utc"], "lane receipt.observed_at_utc")
+    try:
+        observed = datetime.fromisoformat(lane["observed_at_utc"].replace("Z", "+00:00"))
+        admitted = datetime.fromisoformat(_local_utc())
+        if observed.tzinfo is None or observed.utcoffset().total_seconds() != 0:
+            raise ValueError("lane receipt needs an aware UTC observation")
+        age = (admitted - observed).total_seconds()
+    except (ValueError, OverflowError) as exc:
+        raise ValueError("lane receipt needs an aware UTC observation") from exc
+    if not 0 <= age <= 120:
+        raise ValueError("lane receipt must be observed within the previous 120 seconds; future clocks refused")
+    identity = _local_linux_machine_identity()
+    if identity["sha256"] != resource["runner_machine_id_sha256"]:
+        raise ValueError("actual Linux machine-id differs from resource receipt")
+    return {"receipts": receipts, "admitted_at_utc": admitted.isoformat(), "lane_age_seconds": age,
+            "actual_machine_identity": identity,
+            "verification": "receipt hashes bind observed bytes, not authenticated issuer; distinct N6 association and resources are owner-attested; no physical isolation or future quiet guarantee"}
+
+
+def _local_linux_census():
+    started = _local_utc()
+    text = _local_probe(["ps", "-eo", "pid=,comm="])
+    ended = _local_utc()
+    seen, related = set(), []
+    build_names = {"cargo", "rustc", "rustdoc", "rustup", "cc", "c++", "gcc", "g++", "clang", "clang++",
+                   "ld", "ld.lld", "lld", "link", "cl", "cc1", "cc1plus", "collect2", "lto-wrapper", "lto1",
+                   "physics", "physics3d", "arena", "ccache", "sccache", "ninja", "make", "cmake"}
+    for line in text.splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if (len(fields) != 2 or not re.fullmatch(r"[0-9]+", fields[0]) or int(fields[0]) <= 0
+                or int(fields[0]) in seen or len(fields[1]) > 255
+                or any(ord(char) < 32 for char in fields[1])):
+            raise ValueError("malformed or duplicate PID/name census")
+        pid, name = int(fields[0]), fields[1]
+        seen.add(pid)
+        lowered = name.casefold()
+        compiler_name = re.fullmatch(r"(?:.*-)?(?:gcc|g\+\+|clang(?:\+\+)?|cc|c\+\+|ld)(?:-[0-9.]+)?", lowered)
+        if compiler_name or lowered in build_names or lowered.startswith(("orr_", "rustc", "rustdoc", "cargo", "cc1", "gcc-", "g++-", "clang-", "ld.")):
+            related.append({"pid": pid, "name": name})
+    if not seen:
+        raise ValueError("empty PID/name census cannot establish current admission evidence")
+    raw = text.encode("utf-8")
+    return {"observed_started_utc": started, "observed_completed_utc": ended,
+            "collector_pid": os.getpid(), "process_count": len(seen), "related_processes": related,
+            "observed_text_bytes": len(raw), "observed_text_sha256": hashlib.sha256(raw).hexdigest(),
+            "scope": "point-in-time PID/comm names; normalized metadata probe text; comm is mutable/truncated; no argv/environment, isolation or future quiet guarantee"}
 
 
 def _local_cache(capture):
@@ -895,6 +1038,10 @@ def _local_write(path, value):
         stream.write("\n")
 
 
+def _local_cleanup_mode():
+    return "windows-job" if os.name == "nt" else "posix-process-group" if os.name == "posix" else None
+
+
 def collect_local(document, output_dir):
     """Collect an explicit plan once; do not manufacture stage-1 CI provenance."""
     plan = validate_local_plan(document)
@@ -903,12 +1050,14 @@ def collect_local(document, output_dir):
     if directory.exists() or any((once_dir / (plan["plan_id"] + suffix)).exists()
                                  for suffix in (".started.json", ".completed.json")):
         raise ValueError("completed/partial plan or output exists; capture rerun refused before metadata probes")
-    expected_cleanup = "windows-job" if os.name == "nt" else "posix-process-group" if os.name == "posix" else None
+    expected_cleanup = _local_cleanup_mode()
     if plan["watchdog"]["cleanup"] != expected_cleanup:
         raise ValueError("owned cleanup unsupported on this platform")
     runner = plan["runner"]
     if runner["os"] != platform.system() or runner["arch"] != platform.machine():
         raise ValueError("actual platform differs from declared runner")
+    independent = plan["coordination"].get("mode") == "independent-linux"
+    admission = _local_independent_admission(plan["coordination"], runner) if independent else None
     toolchain = runner["toolchain"]
     actual_tools = {}
     parents = set()
@@ -928,7 +1077,8 @@ def collect_local(document, output_dir):
         actual_tools[name] = dict(binary, version=version)
     if len(parents) != 1:
         raise ValueError("Cargo, rustc and rustdoc must share an installed toolchain bin directory")
-    receipts = {key: _local_receipt_file(plan["coordination"][key]) for key in ("lane_receipt", "n6_receipt")}
+    receipts = admission["receipts"] if independent else {
+        key: _local_receipt_file(plan["coordination"][key]) for key in ("lane_receipt", "n6_receipt")}
     for capture in plan["captures"]:
         _local_source(capture["checkout"], plan[capture["side"]])
         _local_cache(capture)
@@ -951,7 +1101,9 @@ def collect_local(document, output_dir):
               "plan_id": plan["plan_id"], "plan_sha256": hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest(),
               "runner": runner, "actual_platform": {"os": platform.system(), "arch": platform.machine(), "release": platform.release()},
               "actual_toolchain": actual_tools, "coordination_receipts": receipts,
-              "coordination_verification": "receipt bytes verified; N6 completion, lane, cache and isolation are caller-declared",
+              "coordination_verification": admission["verification"] if independent else "receipt bytes verified; N6 completion, lane, cache and isolation are caller-declared",
+              "resource_admission": admission,
+              "capture_bound_scope": "per-plan maximum only; cross-machine capture allocation requires external owner coordination",
               "captures": [], "status": "completed", "comparisons": [],
               "comparison_reason": "local measurements have no CI identities; cache/isolation equivalence and separate compile/runtime walls are not attested"}
     for capture in plan["captures"]:
@@ -962,9 +1114,14 @@ def collect_local(document, output_dir):
         try:
             record["source_before"] = _local_source(capture["checkout"], plan[capture["side"]])
             record["cache_before"] = _local_cache(capture)
-            for key in ("lane_receipt", "n6_receipt"):
-                _local_receipt_file(plan["coordination"][key])
+            if not independent:
+                for key in ("lane_receipt", "n6_receipt"):
+                    _local_receipt_file(plan["coordination"][key])
             environment = _local_environment(capture, toolchain)
+            if independent:
+                record["launch_census"] = _local_linux_census()
+                if record["launch_census"]["related_processes"]:
+                    raise ValueError("current Linux PID/name census contains related processes; launch refused")
             _local_write(capture_dir / "started.json", {"local_capture_id": record["local_capture_id"], "utc": _local_utc()})
             command = [toolchain["cargo_path"], *capture["command"][1:]]
             record["execution"] = _local_run(command, capture["checkout"], environment, capture_dir, plan["watchdog"])
