@@ -308,6 +308,8 @@ struct HostOptions {
     hold_first_notice: bool,
     #[cfg(test)]
     held_notice_progress: Option<mpsc::Sender<()>>,
+    #[cfg(test)]
+    reconnect_probe: Option<tests::HostReconnectProbe>,
 }
 impl Default for HostOptions {
     fn default() -> Self {
@@ -320,6 +322,8 @@ impl Default for HostOptions {
             hold_first_notice: false,
             #[cfg(test)]
             held_notice_progress: None,
+            #[cfg(test)]
+            reconnect_probe: None,
         }
     }
 }
@@ -414,6 +418,8 @@ fn run_host_with_options(
     let mut reference = Reference::initial();
     #[cfg(test)]
     let mut held_notice_progress = options.held_notice_progress;
+    #[cfg(test)]
+    let mut reconnect_probe = options.reconnect_probe;
     let mut waiting_since = Instant::now();
     // Readiness is possible after successful transport enqueue, even if no ORRI arrives.
     let mut final_notice_queued = false;
@@ -497,6 +503,10 @@ fn run_host_with_options(
                         println!("HOST_SNAPSHOT tick={} first_input={} backlog_records={} target={target}", raw.snapshot_tick, raw.first_input_tick, driver.pending().0);
                         reference.gameplay.push((raw.first_input_tick, None));
                         grant = Some((raw.snapshot_tick, raw.first_input_tick, target));
+                        #[cfg(test)]
+                        if let Some(probe) = &mut reconnect_probe {
+                            probe.granted(&peer, generation, grant.unwrap());
+                        }
                         last_progress = Instant::now();
                     }
                     P2pRoutedEvent::Forward(ServerEvent::Message {
@@ -511,7 +521,11 @@ fn run_host_with_options(
                             return Err("wrong host input connection/channel".into());
                         }
                         if data.starts_with(b"ORRI") {
-                            driver.receive(conn, channel, &data)?;
+                            let _accepted = driver.receive(conn, channel, &data)?;
+                            #[cfg(test)]
+                            if let Some(probe) = &mut reconnect_probe {
+                                probe.admitted(&peer, &driver, &data, _accepted);
+                            }
                         } else {
                             let report = read_report(&data, generation, 1)?;
                             if remote_report.is_some_and(|old| old != report) {
@@ -550,10 +564,18 @@ fn run_host_with_options(
                             // owns accepted input, including records not polled by Session.
                             let target = driver.fence_host_continuation(&peer, conn)?;
                             driver.verify_host_continuation(&mut peer)?;
+                            #[cfg(test)]
+                            if let Some(probe) = &mut reconnect_probe {
+                                probe.verified(&peer, target, &reference);
+                            }
                             let replacement = driver.replace_fenced_host_rolling(
                                 &mut peer,
                                 context(fresh_generation)?,
                             )?;
+                            #[cfg(test)]
+                            if let Some(probe) = &mut reconnect_probe {
+                                probe.replaced(&peer, &driver);
+                            }
                             reference.depart(target);
                             continuation_count += 1;
                             println!("HOST_CONTINUED target={target} cutoff={} accepted_inputs_only=true continuations_remaining={}", target + 1, options.host_continuations - continuation_count);
@@ -581,6 +603,16 @@ fn run_host_with_options(
                         peer.poll_confirmed();
                         driver.check()?;
                         generation = fresh_generation;
+                        #[cfg(test)]
+                        if let Some(probe) = &mut reconnect_probe {
+                            probe.continued(
+                                &peer,
+                                &driver,
+                                &reference,
+                                generation,
+                                continuation_count,
+                            );
+                        }
                         final_notice_queued = false;
                         grant = None;
                         own_report = None;
@@ -640,13 +672,27 @@ fn run_host_with_options(
             if pending_disconnect.is_some() {
                 continue;
             }
-            peer.poll_confirmed();
+            // Tests can pause Session consumption while the ordinary route admits
+            // a tail, then observe its recovery through the real disconnect path.
+            let consume = true;
+            #[cfg(test)]
+            let consume = consume
+                && !reconnect_probe
+                    .as_ref()
+                    .is_some_and(|probe| probe.hold_session);
+            if consume {
+                peer.poll_confirmed();
+            }
             driver.check()?;
-            if Instant::now() >= next_tick {
+            if consume && Instant::now() >= next_tick {
                 if grant.is_none_or(|(_, _, target)| peer.head_tick() < target) {
                     drive(&mut peer, &driver)?;
                 }
                 next_tick = Instant::now() + Duration::from_millis(16);
+            }
+            #[cfg(test)]
+            if let Some(probe) = &mut reconnect_probe {
+                probe.progress(&peer, &driver);
             }
             #[cfg(test)]
             if options.hold_first_notice
@@ -711,6 +757,28 @@ fn run_join(
     generation: u64,
     live_ticks: u64,
 ) -> Result<Report> {
+    run_join_with_options(
+        addr,
+        fingerprint,
+        generation,
+        live_ticks,
+        JoinOptions::default(),
+    )
+}
+#[derive(Default)]
+struct JoinOptions {
+    #[cfg(test)]
+    reconnect_probe: Option<tests::JoinReconnectProbe>,
+}
+fn run_join_with_options(
+    addr: SocketAddr,
+    fingerprint: [u8; 32],
+    generation: u64,
+    live_ticks: u64,
+    _options: JoinOptions,
+) -> Result<Report> {
+    #[cfg(test)]
+    let mut reconnect_probe = _options.reconnect_probe;
     let mut opts = ConnectOptions::new(
         addr.to_string(),
         TransportKind::Quic,
@@ -887,7 +955,19 @@ fn run_join(
                 }
             }
             if let Some((snapshot, first_input, target)) = grant {
+                let author = true;
+                #[cfg(test)]
+                let author = match &mut reconnect_probe {
+                    Some(probe) => probe.author(
+                        bootstrap.session().unwrap(),
+                        &driver,
+                        first_input,
+                        report_sent,
+                    )?,
+                    None => author,
+                };
                 if ready
+                    && author
                     && Instant::now() >= next_tick
                     && bootstrap.session().unwrap().head_tick() < target
                 {
@@ -991,6 +1071,324 @@ fn main() -> Result<()> {
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    const PLAYED_INPUTS: u64 = 24;
+    const UNPOLLED_TAIL: u64 = 4;
+    const SCRIPT_DISCONNECT: &str = "test joiner closed after host driver admitted gameplay";
+
+    enum JoinStep {
+        SendTail,
+        Disconnect,
+    }
+    pub(super) struct JoinReconnectProbe {
+        steps: mpsc::Receiver<JoinStep>,
+        tail_released: bool,
+    }
+    impl JoinReconnectProbe {
+        pub(super) fn author(
+            &mut self,
+            peer: &Peer,
+            driver: &P2pInputDriver<Arena, ArenaCodec>,
+            first: u64,
+            report_sent: bool,
+        ) -> Result<bool> {
+            if let Ok(step) = self.steps.try_recv() {
+                assert!(!report_sent, "disconnect must precede completion reporting");
+                match step {
+                    JoinStep::SendTail => {
+                        assert!(!self.tail_released);
+                        assert_eq!(peer.next_send_tick(), first + PLAYED_INPUTS);
+                        assert!(driver.rolling_progress().unwrap().1 > first);
+                        self.tail_released = true;
+                    }
+                    JoinStep::Disconnect => {
+                        assert!(self.tail_released);
+                        assert_eq!(peer.next_send_tick(), first + PLAYED_INPUTS + UNPOLLED_TAIL);
+                        assert_eq!(driver.pending().0, 0);
+                        // The caller's ordinary cleanup cancels this abandoned Session
+                        // and closes its owned real QUIC link. No report is forged.
+                        return Err(SCRIPT_DISCONNECT.into());
+                    }
+                }
+            }
+            let count = PLAYED_INPUTS + if self.tail_released { UNPOLLED_TAIL } else { 0 };
+            Ok(peer.next_send_tick() < first + count)
+        }
+    }
+
+    #[derive(Debug)]
+    struct Continued {
+        generation: u64,
+        consumed_budget: u32,
+        preserved: u64,
+        default_through: u64,
+    }
+    pub(super) struct HostReconnectProbe {
+        clients: VecDeque<mpsc::Sender<JoinStep>>,
+        active: Option<mpsc::Sender<JoinStep>>,
+        observations: mpsc::Sender<Continued>,
+        generation: u64,
+        grant: (u64, u64, u64),
+        admitted: u64,
+        pub(super) hold_session: bool,
+        session_identity: Option<usize>,
+        head: u64,
+        next_send: u64,
+        preserved_world: Vec<u8>,
+    }
+    impl HostReconnectProbe {
+        pub(super) fn granted(&mut self, peer: &Peer, generation: u64, grant: (u64, u64, u64)) {
+            let identity = peer as *const Peer as usize;
+            assert_eq!(*self.session_identity.get_or_insert(identity), identity);
+            self.active = self.clients.pop_front();
+            self.generation = generation;
+            self.grant = grant;
+            self.admitted = 0;
+            assert!(!self.hold_session);
+        }
+        pub(super) fn admitted(
+            &mut self,
+            peer: &Peer,
+            driver: &P2pInputDriver<Arena, ArenaCodec>,
+            bytes: &[u8],
+            accepted: orr_relay_net::P2pInputAccepted,
+        ) {
+            let Some(client) = &self.active else { return };
+            assert_eq!(accepted, orr_relay_net::P2pInputAccepted::New);
+            let tick = self.grant.1 + self.admitted;
+            // Check the actual admitted bytes, including command order/repetition,
+            // rather than interpreting a transport enqueue as successful delivery.
+            let record = orr_session::RemoteInput {
+                tick,
+                slot: JOINER,
+                input: input(JOINER, tick),
+                commands: commands(JOINER),
+                disconnected: false,
+            };
+            assert_eq!(
+                bytes,
+                orr_relay_net::encode_p2p_input::<Arena, ArenaCodec>(
+                    &context(self.generation).unwrap(),
+                    &record,
+                    &limits(),
+                )
+                .unwrap()
+            );
+            self.admitted += 1;
+            assert!(self.admitted <= PLAYED_INPUTS + UNPOLLED_TAIL);
+            if self.admitted == PLAYED_INPUTS + UNPOLLED_TAIL {
+                assert!(self.hold_session);
+                let polled = self.grant.1 + PLAYED_INPUTS - 1;
+                assert_eq!(peer.last_remote_tick(JOINER), Some(polled));
+                assert_eq!(peer.verified_tick(), polled);
+                assert!(driver.rolling_progress().unwrap().1 > self.grant.0 + RECENT_TICKS);
+                assert!(tick < self.grant.2, "cannot reach normal completion");
+                client.send(JoinStep::Disconnect).unwrap();
+            }
+        }
+        pub(super) fn progress(&mut self, peer: &Peer, driver: &P2pInputDriver<Arena, ArenaCodec>) {
+            let Some(client) = &self.active else { return };
+            let target = self.grant.1 + PLAYED_INPUTS + UNPOLLED_TAIL - 1;
+            if !self.hold_session
+                && self.admitted == PLAYED_INPUTS
+                && peer.verified_tick() == self.grant.1 + PLAYED_INPUTS - 1
+                && peer.head_tick() > target
+            {
+                // Let the actual host author beyond the intended tail first. Then
+                // freeze all Session consumption, while normal network routing runs.
+                assert!(driver.rolling_progress().unwrap().1 > self.grant.0 + RECENT_TICKS);
+                self.hold_session = true;
+                self.head = peer.head_tick();
+                self.next_send = peer.next_send_tick();
+                client.send(JoinStep::SendTail).unwrap();
+            }
+        }
+        pub(super) fn verified(&mut self, peer: &Peer, target: u64, reference: &Reference) {
+            assert!(self.hold_session);
+            assert_eq!(self.admitted, PLAYED_INPUTS + UNPOLLED_TAIL);
+            assert_eq!(target, self.grant.1 + self.admitted - 1);
+            assert_eq!(peer.head_tick(), self.head);
+            assert_eq!(peer.next_send_tick(), self.next_send);
+            assert_eq!(peer.verified_tick(), target);
+            assert_eq!(
+                peer.verified_frame().unwrap().checksum(),
+                reference.checksums(target).unwrap()[&target]
+            );
+            self.preserved_world = peer.predicted_frame().to_bytes();
+        }
+        pub(super) fn replaced(&self, peer: &Peer, retired: &P2pInputDriver<Arena, ArenaCodec>) {
+            assert_eq!(peer as *const Peer as usize, self.session_identity.unwrap());
+            assert_eq!(peer.head_tick(), self.head);
+            assert_eq!(peer.next_send_tick(), self.next_send);
+            assert_eq!(peer.predicted_frame().to_bytes(), self.preserved_world);
+            assert_eq!(
+                retired.check(),
+                Err(orr_relay_net::P2pInputError::Cancelled)
+            );
+        }
+        pub(super) fn continued(
+            &mut self,
+            peer: &Peer,
+            driver: &P2pInputDriver<Arena, ArenaCodec>,
+            reference: &Reference,
+            generation: u64,
+            consumed_budget: u32,
+        ) {
+            let preserved = self.grant.1 + self.admitted - 1;
+            assert_eq!(generation, self.generation + 1);
+            assert_eq!(peer.head_tick(), self.head);
+            assert_eq!(peer.next_send_tick(), self.next_send);
+            assert!(
+                peer.verified_tick() > preserved,
+                "vacant defaults must verify after preserved commands"
+            );
+            let report = verified_report(
+                peer,
+                driver,
+                self.grant.0,
+                self.grant.1,
+                peer.verified_tick(),
+                reference,
+            )
+            .unwrap();
+            self.observations
+                .send(Continued {
+                    generation,
+                    consumed_budget,
+                    preserved,
+                    default_through: report.tick,
+                })
+                .unwrap();
+            self.hold_session = false;
+            self.active = None;
+        }
+    }
+
+    fn runner_reconnect_scenario(budget: u32, finish_normally: bool) {
+        let (announce, announcements) = mpsc::channel();
+        let (observations, observed) = mpsc::channel();
+        let mut clients = VecDeque::new();
+        let mut returning = Vec::new();
+        for _ in 0..2 {
+            let (send, steps) = mpsc::channel();
+            clients.push_back(send);
+            returning.push(JoinReconnectProbe {
+                steps,
+                tail_released: false,
+            });
+        }
+        let host = thread::spawn(move || {
+            run_host_with_options(
+                "127.0.0.1:0".parse().unwrap(),
+                501,
+                LIVE_TICKS,
+                Some(announce),
+                HostOptions {
+                    host_continuations: budget,
+                    initial_ticks: 96,
+                    reconnect_probe: Some(HostReconnectProbe {
+                        clients,
+                        active: None,
+                        observations,
+                        generation: 0,
+                        grant: (0, 0, 0),
+                        admitted: 0,
+                        hold_session: false,
+                        session_identity: None,
+                        head: 0,
+                        next_send: 0,
+                        preserved_world: Vec::new(),
+                    }),
+                    ..HostOptions::default()
+                },
+            )
+        });
+        let initial = announcements.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(initial.verified_tick > FUTURE_TICKS);
+        let mut next = initial;
+        let mut last_default = initial.verified_tick;
+        for (index, probe) in returning.into_iter().enumerate() {
+            assert_eq!(next.generation, initial.generation + index as u64);
+            assert_eq!(
+                (next.address, next.fingerprint),
+                (initial.address, initial.fingerprint)
+            );
+            let result = run_join_with_options(
+                next.address,
+                next.fingerprint,
+                next.generation,
+                LIVE_TICKS,
+                JoinOptions {
+                    reconnect_probe: Some(probe),
+                },
+            );
+            assert_eq!(result.unwrap_err().to_string(), SCRIPT_DISCONNECT);
+            if index as u32 == budget {
+                let error = host.join().unwrap().unwrap_err().to_string();
+                assert!(
+                    error.contains("explicit host-continuation budget exhausted"),
+                    "{error}"
+                );
+                assert!(observed.try_recv().is_err());
+                assert!(
+                    announcements.try_recv().is_err(),
+                    "exhaustion cannot advertise another generation"
+                );
+                assert!(!finish_normally);
+                return;
+            }
+            let continued = observed.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_eq!(continued.consumed_budget, index as u32 + 1);
+            assert_eq!(continued.generation, next.generation + 1);
+            assert!(continued.preserved > last_default + PLAYED_INPUTS);
+            assert!(continued.default_through > continued.preserved);
+            last_default = continued.default_through;
+            next = announcements.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_eq!(next.generation, continued.generation);
+            assert_eq!(next.verified_tick, last_default);
+        }
+        assert!(finish_normally);
+        let joined = run_join(next.address, next.fingerprint, next.generation, LIVE_TICKS);
+        let hosted = host.join().unwrap().unwrap();
+        let joined = joined.unwrap();
+        assert_eq!(
+            (
+                hosted.tick,
+                hosted.checksum,
+                hosted.snapshot,
+                hosted.first_input
+            ),
+            (
+                joined.tick,
+                joined.checksum,
+                joined.snapshot,
+                joined.first_input
+            )
+        );
+        assert!(hosted.snapshot >= last_default);
+        assert!(hosted.first_input > last_default);
+        assert!(hosted.checked > joined.checked);
+        assert!(joined.checked >= LIVE_TICKS as usize);
+        assert!(hosted.retired_through > hosted.snapshot + RECENT_TICKS);
+        assert!(joined.retired_through > joined.snapshot + RECENT_TICKS);
+        assert!(observed.try_recv().is_err());
+        assert!(
+            announcements.try_recv().is_err(),
+            "normal completion consumes no continuation"
+        );
+    }
+
+    #[test]
+    fn real_quic_runner_reconnects_twice_after_admitted_gameplay_and_finishes() {
+        runner_reconnect_scenario(2, true);
+    }
+    #[test]
+    fn real_quic_runner_reconnect_budget_exhaustion_after_admitted_gameplay() {
+        runner_reconnect_scenario(1, false);
+    }
+
     #[test]
     fn real_quic_late_join_ordered_commands() {
         super::smoke(super::LIVE_TICKS).unwrap();
