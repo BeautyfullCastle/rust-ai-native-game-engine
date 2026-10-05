@@ -1,5 +1,6 @@
 //! Fixed three-peer Arena over three real, pinned direct QUIC connections.
 //! `cargo run -p orr_relay_net --release --example p2p_mesh_arena -- smoke [live_ticks]`
+//! `cargo run -p orr_relay_net --release --example p2p_mesh_arena -- rolling [live_ticks] [prelude_ticks]`
 //! Local orchestration supplies the trusted identities. There is no discovery,
 //! production client authentication, relay forwarding, reconnection or roster shrink.
 
@@ -25,7 +26,8 @@ use orr_testgame::{Arena, ArenaConfig, ArenaInput, SpawnBulletCmd};
 
 // Driver imports are deliberately separate from the unchanged two-peer API.
 use orr_relay_net::p2p_mesh_input::{
-    P2pMeshEdge, P2pMeshInputDriver, P2pMeshInputLimits, P2pMeshInputSource,
+    P2pMeshDelivery, P2pMeshEdge, P2pMeshInputDriver, P2pMeshInputLimits, P2pMeshInputSource,
+    P2pMeshRollingWindow,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -41,12 +43,23 @@ const GENERATION: u64 = 0x4d45534800000001;
 const BUILD_ID: u64 = 0x5032504d45534831;
 const PRELUDE: u64 = 24;
 const LIVE_TICKS: u64 = 120;
-const END_TICK: u64 = 513; // exclusive: the complete run is restricted to ticks 1..=512.
+const END_TICK: u64 = 513; // Exclusive finite-mode limit.
+const ROLLING_PRELUDE: u64 = 640;
+const ROLLING_LIVE_TICKS: u64 = 2048;
+const RECENT_TICKS: u64 = 4;
+const FUTURE_TICKS: u64 = 32;
 const AUTHOR_AHEAD: u64 = 8;
 const SNAPSHOT_LIMIT: usize = 64 * 1024;
 const NOTICE_LIMIT: usize = 4096;
 const CONTROL_QUEUE_LIMIT: usize = 2 * SNAPSHOT_LIMIT + 2 * NOTICE_LIMIT;
-const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+const PHASE_TIMEOUT: Duration = Duration::from_secs(30);
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Finite,
+    Rolling,
+}
 
 /// Arena mesh schema v1: i64 LE raw Q48.16 x/y, then u32 LE buttons.
 /// Input is exactly 20 bytes; axes in [-1,1], FIRE is the only allowed bit.
@@ -106,8 +119,20 @@ fn config(slot: PlayerSlot) -> SessionConfig {
     }
     cfg
 }
-fn limits() -> P2pMeshInputLimits {
-    P2pMeshInputLimits::default()
+fn limits(mode: Mode) -> P2pMeshInputLimits {
+    let mut limits = P2pMeshInputLimits::default();
+    if mode == Mode::Rolling {
+        // Fixed encoded-storage caps, independent of requested run duration.
+        limits.max_logical_records = 96;
+        limits.max_incoming_records = 96;
+        limits.max_destination_records = 128;
+        limits.max_edge_pending_records = 64;
+        limits.max_logical_encoded_bytes = 96 * 256;
+        limits.max_incoming_encoded_bytes = 96 * 256;
+        limits.max_pending_encoded_bytes = 128 * 256;
+        limits.max_edge_pending_encoded_bytes = 64 * 256;
+    }
+    limits
 }
 fn net_config() -> NetConfig {
     NetConfig {
@@ -121,7 +146,7 @@ fn net_config() -> NetConfig {
 }
 fn input(slot: PlayerSlot, tick: u64) -> ArenaInput {
     ArenaInput::new(
-        FP::from_int(((tick + u64::from(slot.0)) % 3) as i32 - 1),
+        FP::from_int(((tick % 3 + u64::from(slot.0)) % 3) as i32 - 1),
         FP::from_int(i32::from(slot.0) - 1),
         true,
     )
@@ -204,7 +229,7 @@ impl Network {
         let mut accepted = None;
         let mut connected = false;
         while accepted.is_none() || !connected {
-            if started.elapsed() > RUN_TIMEOUT {
+            if started.elapsed() > PHASE_TIMEOUT {
                 return Err("pinned QUIC connection timed out".into());
             }
             if let Some(event) = endpoint.poll() {
@@ -360,11 +385,18 @@ struct Grant {
     target: u64,
 }
 impl Grant {
-    fn new(snapshot: u64, first: u64, live_ticks: u64) -> Result<Self> {
-        let target = first.checked_add(live_ticks - 1).ok_or("target overflow")?;
+    fn new(snapshot: u64, first: u64, live_ticks: u64, mode: Mode) -> Result<Self> {
+        let target = first
+            .checked_add(live_ticks.checked_sub(1).ok_or("empty live run")?)
+            .ok_or("target overflow")?;
+        // Reserve the input-delay tail, the Session send-cursor increment and
+        // the rolling driver's checked future horizon before simulation work.
+        target
+            .checked_add(FUTURE_TICKS + 2)
+            .ok_or("tick horizon overflow")?;
         // Session authors input_delay ticks ahead of its head, even on a stalled
         // advance. Check before advancing; never rely only on max_prediction.
-        if target.checked_add(2).is_none_or(|tick| tick >= END_TICK) {
+        if mode == Mode::Finite && target.checked_add(2).is_none_or(|tick| tick >= END_TICK) {
             return Err("requested live run exceeds finite 512-tick input window".into());
         }
         Ok(Self {
@@ -374,8 +406,31 @@ impl Grant {
         })
     }
 }
+#[derive(Clone, Copy, Debug, Default)]
+struct DriverStats {
+    evidence: (usize, usize),
+    incoming: (usize, usize),
+    pending: (usize, usize),
+    edge_pending: (usize, usize),
+    destinations: usize,
+    floor: u64,
+    floor_advances: u64,
+}
+fn high_water(high: &mut (usize, usize), now: (usize, usize)) {
+    high.0 = high.0.max(now.0);
+    high.1 = high.1.max(now.1);
+}
+fn check_usage(now: (usize, usize), records: usize, bytes: usize) -> Result<()> {
+    if now.0 > records || now.1 > bytes {
+        return Err("mesh driver exceeded its record/encoded-byte cap".into());
+    }
+    Ok(())
+}
 struct Node {
     slot: PlayerSlot,
+    mode: Mode,
+    input_connections: Vec<ConnId>,
+    stats: DriverStats,
     driver: Driver,
     members: P2pMembership,
     attempt: Option<P2pAttempt>,
@@ -390,8 +445,19 @@ struct Node {
     direct_inputs: BTreeMap<PlayerSlot, usize>,
 }
 impl Node {
-    fn new(slot: PlayerSlot) -> Result<Self> {
-        let (driver, source) = Driver::new(slot, context()?, limits())?;
+    fn new(slot: PlayerSlot, mode: Mode) -> Result<Self> {
+        let (driver, source) = match mode {
+            Mode::Finite => Driver::new(slot, context()?, limits(mode))?,
+            Mode::Rolling => Driver::new_rolling(
+                slot,
+                context()?,
+                limits(mode),
+                P2pMeshRollingWindow {
+                    recent_ticks: RECENT_TICKS,
+                    future_ticks: FUTURE_TICKS,
+                },
+            )?,
+        };
         let mut members = P2pMembership::new(3, slot, CONTROL_QUEUE_LIMIT)?;
         let (peer, bootstrap, source) = if slot == JOINER {
             assert!(members.commit_vacant(JOINER)?.is_empty());
@@ -415,6 +481,9 @@ impl Node {
         };
         Ok(Self {
             slot,
+            mode,
+            input_connections: Vec::new(),
+            stats: DriverStats::default(),
             driver,
             members,
             attempt: None,
@@ -434,7 +503,7 @@ impl Node {
             .as_ref()
             .or_else(|| self.bootstrap.as_ref().and_then(Bootstrap::session))
     }
-    fn admit_input(&self, route: Route) -> Result<()> {
+    fn admit_input(&mut self, route: Route) -> Result<()> {
         if route.owner != self.slot {
             return Err("edge belongs to another local adapter".into());
         }
@@ -448,6 +517,62 @@ impl Node {
             remote: route.remote,
             generation: GENERATION + u64::from(low) * 3 + u64::from(high),
         })?;
+        self.input_connections.push(route.unique);
+        self.observe_driver()?;
+        Ok(())
+    }
+    fn observe_driver(&mut self) -> Result<()> {
+        self.driver.check()?;
+        let cap = limits(self.mode);
+        let evidence = self.driver.retained_evidence();
+        let incoming = self.driver.incoming();
+        let pending = self.driver.pending();
+        let destinations = self.driver.destination_records();
+        check_usage(
+            evidence,
+            cap.max_logical_records,
+            cap.max_logical_encoded_bytes,
+        )?;
+        check_usage(
+            incoming,
+            cap.max_incoming_records,
+            cap.max_incoming_encoded_bytes,
+        )?;
+        check_usage(
+            pending,
+            cap.max_destination_records,
+            cap.max_pending_encoded_bytes,
+        )?;
+        if destinations > cap.max_destination_records {
+            return Err("mesh driver exceeded destination cap".into());
+        }
+        high_water(&mut self.stats.evidence, evidence);
+        high_water(&mut self.stats.incoming, incoming);
+        high_water(&mut self.stats.pending, pending);
+        self.stats.destinations = self.stats.destinations.max(destinations);
+        for &conn in &self.input_connections {
+            let edge = self.driver.edge_pending(conn)?;
+            check_usage(
+                edge,
+                cap.max_edge_pending_records,
+                cap.max_edge_pending_encoded_bytes,
+            )?;
+            high_water(&mut self.stats.edge_pending, edge);
+        }
+        if let Some((progress, floor)) = self.driver.rolling_progress() {
+            if floor < self.stats.floor
+                || floor > progress
+                || self
+                    .session()
+                    .is_some_and(|peer| progress > peer.verified_tick())
+            {
+                return Err("rolling progress/floor is not local verified progress".into());
+            }
+            if floor > self.stats.floor {
+                self.stats.floor_advances += 1;
+                self.stats.floor = floor;
+            }
+        }
         Ok(())
     }
     fn poll_confirmed(&mut self) -> Result<()> {
@@ -457,7 +582,7 @@ impl Node {
         } else if let Some(bootstrap) = &mut self.bootstrap {
             bootstrap.poll_confirmed();
         }
-        self.driver.check()?;
+        self.observe_driver()?;
         Ok(())
     }
     fn advance_to(&mut self, target: u64) -> Result<()> {
@@ -470,10 +595,14 @@ impl Node {
             return Ok(());
         }
         let tick = peer.next_send_tick();
-        if peer.head_tick() >= target || tick > peer.verified_tick() + AUTHOR_AHEAD {
+        let author_limit = peer
+            .verified_tick()
+            .checked_add(AUTHOR_AHEAD)
+            .ok_or("author-ahead bound overflow")?;
+        if peer.head_tick() >= target || tick > author_limit {
             return Ok(());
         }
-        if tick >= END_TICK {
+        if self.mode == Mode::Finite && tick >= END_TICK {
             return Err("finite input window exhausted before completion".into());
         }
         if let Some(peer) = &mut self.peer {
@@ -486,7 +615,7 @@ impl Node {
                 return Err("bootstrap cannot advance".into());
             }
         }
-        self.driver.check()?;
+        self.observe_driver()?;
         Ok(())
     }
     fn check_reference(&mut self, reference: &BTreeMap<u64, u64>) -> Result<()> {
@@ -604,12 +733,17 @@ fn receive_control(
             if snapshot.len() > SNAPSHOT_LIMIT {
                 return Err("snapshot exceeds separate wire limit".into());
             }
+            let before_ticket = node.driver.rolling_progress();
             node.driver.install_ticket(&ticket)?;
+            if node.driver.rolling_progress() != before_ticket {
+                return Err("checked ticket improperly advanced existing-peer progress".into());
+            }
             let raw = ticket.ticket();
             node.grant = Some(Grant::new(
                 raw.snapshot_tick,
                 raw.first_input_tick,
                 live_ticks,
+                node.mode,
             )?);
             let notice = node.members.backlog_notice(&attempt, peer, &ticket)?;
             node.driver.check()?;
@@ -630,12 +764,17 @@ fn receive_control(
             let ticket = node
                 .members
                 .import_ticket(&attempt, conn, peer, data, SNAPSHOT_LIMIT)?;
+            let before_ticket = node.driver.rolling_progress();
             node.driver.install_ticket(&ticket)?;
+            if node.driver.rolling_progress() != before_ticket {
+                return Err("checked ticket improperly advanced existing-peer progress".into());
+            }
             let raw = ticket.ticket();
             node.grant = Some(Grant::new(
                 raw.snapshot_tick,
                 raw.first_input_tick,
                 live_ticks,
+                node.mode,
             )?);
             let notice = node.members.backlog_notice(&attempt, peer, &ticket)?;
             node.driver.check()?;
@@ -657,10 +796,18 @@ fn receive_control(
             // before any advance, source polling, or non-donor edge delivery.
             node.driver.install_joiner_snapshot(bootstrap)?;
             let peer = bootstrap.session().ok_or("missing accepted snapshot")?;
+            if node
+                .driver
+                .rolling_progress()
+                .is_some_and(|(progress, _)| progress != peer.verified_tick())
+            {
+                return Err("joiner rolling progress did not bind to its accepted snapshot".into());
+            }
             node.grant = Some(Grant::new(
                 peer.verified_tick(),
                 peer.next_send_tick(),
                 live_ticks,
+                node.mode,
             )?);
             node.admit_input(network.route(JOINER, DONOR)?)?;
             node.admit_input(network.route(JOINER, EXISTING)?)?;
@@ -672,7 +819,7 @@ fn receive_control(
         }
         _ => return Err("unexpected or oversized checked mesh control".into()),
     }
-    node.driver.check()?;
+    node.observe_driver()?;
     if let Some(bootstrap) = &node.bootstrap {
         let status = bootstrap.status()?;
         if matches!(status, JoinBootstrapStatus::InputGap { .. }) {
@@ -766,7 +913,7 @@ fn receive_events(nodes: &mut [Node], network: &mut Network, live_ticks: u64) ->
                 }
                 other => return Err(format!("unexpected membership event: {other:?}").into()),
             }
-            node.driver.check()?;
+            node.observe_driver()?;
         }
     }
     Ok(())
@@ -774,6 +921,8 @@ fn receive_events(nodes: &mut [Node], network: &mut Network, live_ticks: u64) ->
 
 #[derive(Clone)]
 struct Options {
+    mode: Mode,
+    prelude_ticks: u64,
     live_ticks: u64,
     hold_peer_one_backlog: bool,
     drop_live_edge: bool,
@@ -783,12 +932,79 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            mode: Mode::Finite,
+            prelude_ticks: PRELUDE,
             live_ticks: LIVE_TICKS,
             hold_peer_one_backlog: false,
             drop_live_edge: false,
             missing_report: None,
             report_timeout: Duration::from_secs(5),
         }
+    }
+}
+impl Options {
+    fn rolling() -> Self {
+        Self {
+            mode: Mode::Rolling,
+            prelude_ticks: ROLLING_PRELUDE,
+            live_ticks: ROLLING_LIVE_TICKS,
+            hold_peer_one_backlog: true,
+            ..Self::default()
+        }
+    }
+    fn validate(&self) -> Result<()> {
+        match self.mode {
+            Mode::Finite
+                if !(LIVE_TICKS..=484).contains(&self.live_ticks)
+                    || self.prelude_ticks != PRELUDE =>
+            {
+                return Err(
+                    "live_ticks must be in 120..=484 within the finite 512-tick run".into(),
+                );
+            }
+            Mode::Rolling
+                if self.prelude_ticks < END_TICK || self.live_ticks < ROLLING_LIVE_TICKS =>
+            {
+                return Err("rolling requires a prelude >512 and at least 2048 live ticks".into());
+            }
+            _ => {}
+        }
+        let first = self
+            .prelude_ticks
+            .checked_add(3)
+            .ok_or("prelude overflow")?;
+        Grant::new(self.prelude_ticks, first, self.live_ticks, self.mode)?;
+        usize::try_from(self.live_ticks)
+            .map_err(|_| "live tick count cannot fit input counters")?;
+        Ok(())
+    }
+}
+/// A healthy long run has no total-duration deadline. Each phase must either
+/// make local verified progress or finish its bounded join/report exchange.
+struct ProgressWatch {
+    ticks: [u64; 3],
+    changed: Instant,
+}
+impl ProgressWatch {
+    fn new() -> Self {
+        Self {
+            ticks: [0; 3],
+            changed: Instant::now(),
+        }
+    }
+    fn observe(&mut self, nodes: &[Node], phase: &str) -> Result<()> {
+        let ticks = SLOTS.map(|slot| {
+            nodes[usize::from(slot.0)]
+                .session()
+                .map_or(0, Peer::verified_tick)
+        });
+        if ticks != self.ticks {
+            self.ticks = ticks;
+            self.changed = Instant::now();
+        } else if self.changed.elapsed() > STALL_TIMEOUT {
+            return Err(format!("{phase} made no verified progress before stall timeout").into());
+        }
+        Ok(())
     }
 }
 #[derive(Debug)]
@@ -798,7 +1014,9 @@ struct Outcome {
     direct_one_to_two: usize,
     direct_two_to_one: usize,
     delayed_ready: bool,
+    delayed_retirement: bool,
     hold_cleanups: usize,
+    stats: [DriverStats; 3],
 }
 fn flush_nodes(nodes: &mut [Node], network: &mut Network, hold_peer_one: bool) -> Result<()> {
     for node in nodes {
@@ -828,7 +1046,7 @@ fn flush_nodes(nodes: &mut [Node], network: &mut Network, hold_peer_one: bool) -
                 }
             })?;
         }
-        node.driver.check()?;
+        node.observe_driver()?;
     }
     Ok(())
 }
@@ -888,60 +1106,70 @@ fn release_and_promote(nodes: &mut [Node]) -> Result<usize> {
     Ok(released)
 }
 fn run(options: Options) -> Result<Outcome> {
-    if !(LIVE_TICKS..=484).contains(&options.live_ticks) {
-        return Err("live_ticks must be in 120..=484 within the finite 512-tick run".into());
-    }
-    let mut nodes: Vec<Node> = SLOTS.into_iter().map(Node::new).collect::<Result<_>>()?;
+    options.validate()?;
+    let mut nodes: Vec<Node> = SLOTS
+        .into_iter()
+        .map(|slot| Node::new(slot, options.mode))
+        .collect::<Result<_>>()?;
     let mut network = Network::default();
     network.add_pair(DONOR, EXISTING)?;
     admit_membership(&mut nodes, &network, false)?;
-    let start = Instant::now();
+    let mut progress = ProgressWatch::new();
     while nodes[..2]
         .iter()
-        .any(|node| node.session().unwrap().verified_tick() < PRELUDE)
+        .any(|node| node.session().unwrap().verified_tick() < options.prelude_ticks)
     {
-        if start.elapsed() > RUN_TIMEOUT {
-            return Err("two-active-peer prelude stalled".into());
-        }
         receive_events(&mut nodes, &mut network, options.live_ticks)?;
         flush_nodes(&mut nodes, &mut network, false)?;
         for node in &mut nodes[..2] {
             node.poll_confirmed()?;
-            node.advance_to(PRELUDE)?;
+            node.advance_to(options.prelude_ticks)?;
         }
+        progress.observe(&nodes, "two-active-peer prelude")?;
         thread::sleep(Duration::from_millis(1));
     }
-    let prelude_reference = reference(END_TICK, PRELUDE);
+    let prelude_reference = reference(u64::MAX, options.prelude_ticks);
     for node in &mut nodes[..2] {
         node.check_reference(&prelude_reference)?;
-        if node.session().unwrap().head_tick() != PRELUDE {
+        if node.session().unwrap().head_tick() != options.prelude_ticks {
             return Err("prelude head was not bounded".into());
         }
+        if options.mode == Mode::Rolling && node.stats.floor == 0 {
+            return Err("rolling prelude did not retire any old evidence".into());
+        }
     }
-    println!("MESH_PRELUDE active=0,1 vacant=2 verified={PRELUDE}");
+    println!(
+        "MESH_PRELUDE active=0,1 vacant=2 verified={} mode={:?}",
+        options.prelude_ticks, options.mode
+    );
     network.add_pair(DONOR, JOINER)?;
     network.add_pair(EXISTING, JOINER)?;
     if network.ports.len() != 6 || network.registry.len() != 6 {
         return Err("expected exactly three direct QUIC pairs".into());
     }
     begin_join(&mut nodes, &network)?;
-    let start = Instant::now();
+    let join_started = Instant::now();
+    let mut progress = ProgressWatch::new();
     let mut delayed = options.hold_peer_one_backlog;
     let mut delayed_ready = false;
+    let mut delayed_retirement = false;
     let mut dropped = false;
     let mut report_start = None;
     let mut baseline = None;
     loop {
-        if start.elapsed() > RUN_TIMEOUT {
-            return Err("fixed mesh stalled before all three verified reports".into());
+        if !nodes[2].ready && join_started.elapsed() > PHASE_TIMEOUT {
+            return Err("checked join phase timed out before both peer notices".into());
         }
         receive_events(&mut nodes, &mut network, options.live_ticks)?;
         flush_nodes(&mut nodes, &mut network, delayed)?;
         for node in &mut nodes {
             node.poll_confirmed()?;
-            let target = node.grant.map_or(PRELUDE, |grant| grant.target);
+            let target = node
+                .grant
+                .map_or(options.prelude_ticks, |grant| grant.target);
             node.advance_to(target)?;
         }
+        progress.observe(&nodes, "fixed mesh live run")?;
         if baseline.is_none() {
             if let Some(grant) = nodes[0].grant {
                 baseline = Some(reference(grant.first, grant.target));
@@ -957,11 +1185,43 @@ fn run(options: Options) -> Result<Outcome> {
             let first = nodes[2].grant.ok_or("Ready without grant")?.first;
             let donor_verified = nodes[0].session().unwrap().verified_tick();
             let joiner_verified = nodes[2].session().unwrap().verified_tick();
-            if donor_verified >= first + 4 && joiner_verified < first {
+            let release_tick = first.checked_add(4).ok_or("delay probe overflow")?;
+            let grant = nodes[2].grant.ok_or("Ready without grant")?;
+            let backlog_tick = grant
+                .snapshot
+                .checked_add(1)
+                .ok_or("backlog tick overflow")?;
+            let crossed_retirement = nodes[1]
+                .driver
+                .rolling_progress()
+                .is_some_and(|(_, floor)| floor >= backlog_tick);
+            if donor_verified >= release_tick
+                && joiner_verified < first
+                && (options.mode == Mode::Finite || crossed_retirement)
+            {
                 // Ready only advertises coverage. Peer1's direct stream must
                 // actually arrive before peer2 can verify these same ticks.
                 if nodes[2].direct_inputs.get(&EXISTING).copied().unwrap_or(0) != 0 {
                     return Err("delayed edge leaked a peer1 input".into());
+                }
+                if options.mode == Mode::Rolling {
+                    let direct = network.route(EXISTING, JOINER)?.unique;
+                    let other = network.route(EXISTING, DONOR)?.unique;
+                    if nodes[1].driver.delivery(direct, backlog_tick, EXISTING)
+                        != Some(P2pMeshDelivery::Pending)
+                        || nodes[1]
+                            .driver
+                            .delivery(other, backlog_tick, EXISTING)
+                            .is_some()
+                    {
+                        return Err(
+                            "retirement lost delayed backlog or retained old accepted metadata"
+                                .into(),
+                        );
+                    }
+                    delayed_retirement = true;
+                    println!("MESH_RETIREMENT_DELAY_PROVED backlog_tick={backlog_tick} retired_through={} pending_1_to_2=true accepted_1_to_0_retired=true",
+                        nodes[1].stats.floor);
                 }
                 delayed_ready = true;
                 delayed = false;
@@ -970,12 +1230,15 @@ fn run(options: Options) -> Result<Outcome> {
         }
         if options.drop_live_edge
             && !dropped
-            && nodes[2].grant.is_some_and(|grant| {
-                nodes.iter().all(|node| {
-                    node.session()
-                        .is_some_and(|peer| peer.verified_tick() >= grant.first + 4)
+            && nodes[2]
+                .grant
+                .and_then(|grant| grant.first.checked_add(4))
+                .is_some_and(|probe_tick| {
+                    nodes.iter().all(|node| {
+                        node.session()
+                            .is_some_and(|peer| peer.verified_tick() >= probe_tick)
+                    })
                 })
-            })
         {
             network
                 .ports
@@ -1036,13 +1299,39 @@ fn run(options: Options) -> Result<Outcome> {
             if hold_cleanups != 2 {
                 return Err("missing existing-peer hold cleanup".into());
             }
+            let stats = SLOTS.map(|slot| nodes[usize::from(slot.0)].stats);
+            if options.mode == Mode::Rolling {
+                if !delayed_retirement
+                    || stats
+                        .iter()
+                        .any(|s| s.floor_advances < 100 || s.floor <= options.prelude_ticks)
+                {
+                    return Err(
+                        "rolling run did not prove repeated retirement and delayed obligations"
+                            .into(),
+                    );
+                }
+                let cap = limits(Mode::Rolling);
+                println!("MESH_DRIVER_CAPS logical_records={} logical_bytes={} incoming_records={} incoming_bytes={} destination_records={} pending_bytes={} edge_pending_records={} edge_pending_bytes={}",
+                    cap.max_logical_records, cap.max_logical_encoded_bytes, cap.max_incoming_records,
+                    cap.max_incoming_encoded_bytes, cap.max_destination_records, cap.max_pending_encoded_bytes,
+                    cap.max_edge_pending_records, cap.max_edge_pending_encoded_bytes);
+                for (slot, stats) in SLOTS.into_iter().zip(stats) {
+                    println!("MESH_DRIVER_STATS peer={} retired_through={} floor_advances={} max_logical_records={} max_logical_bytes={} max_incoming_records={} max_incoming_bytes={} max_destination_records={} max_pending_records={} max_pending_bytes={} max_edge_pending_records={} max_edge_pending_bytes={}",
+                        slot.0, stats.floor, stats.floor_advances, stats.evidence.0, stats.evidence.1,
+                        stats.incoming.0, stats.incoming.1, stats.destinations, stats.pending.0,
+                        stats.pending.1, stats.edge_pending.0, stats.edge_pending.1);
+                }
+            }
             return Ok(Outcome {
                 reports,
                 first_input: grant.first,
                 direct_one_to_two: one_to_two,
                 direct_two_to_one: two_to_one,
                 delayed_ready,
+                delayed_retirement,
                 hold_cleanups,
+                stats,
             });
         }
         thread::sleep(Duration::from_millis(1));
@@ -1050,21 +1339,33 @@ fn run(options: Options) -> Result<Outcome> {
 }
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().is_some_and(|mode| mode != "smoke") || args.len() > 2 {
-        return Err("usage: p2p_mesh_arena [smoke [live_ticks (120..=484)]]".into());
+    let mut options = match args.first().map(String::as_str) {
+        None | Some("smoke") if args.len() <= 2 => Options::default(),
+        Some("rolling") if args.len() <= 3 => Options::rolling(),
+        _ => return Err("usage: p2p_mesh_arena [smoke [live_ticks (120..=484)] | rolling [live_ticks (>=2048)] [prelude_ticks (>512)]]".into()),
+    };
+    if let Some(ticks) = args.get(1) {
+        options.live_ticks = ticks.parse()?;
     }
-    let live_ticks = args
-        .get(1)
-        .map(|s| s.parse())
-        .transpose()?
-        .unwrap_or(LIVE_TICKS);
-    let result = run(Options {
-        live_ticks,
-        ..Options::default()
-    })?;
-    println!("MESH_SMOKE_OK peers=3 direct_edges=3 tick={} checksum={:016x} live_ticks={} first_input={} input_1_to_2={} input_2_to_1={} hold_cleanups={} delayed_ready={}",
-        result.reports[0].tick, result.reports[0].checksum, live_ticks, result.first_input,
-        result.direct_one_to_two, result.direct_two_to_one, result.hold_cleanups, result.delayed_ready);
+    if let Some(ticks) = args.get(2) {
+        options.prelude_ticks = ticks.parse()?;
+    }
+    let result = run(options.clone())?;
+    let label = if options.mode == Mode::Rolling {
+        "MESH_ROLLING_OK"
+    } else {
+        "MESH_SMOKE_OK"
+    };
+    let min_retired = result
+        .stats
+        .iter()
+        .map(|stats| stats.floor)
+        .min()
+        .unwrap_or(0);
+    println!("{label} peers=3 direct_edges=3 tick={} checksum={:016x} live_ticks={} first_input={} input_1_to_2={} input_2_to_1={} hold_cleanups={} delayed_ready={} delayed_retirement={} min_retired_through={}",
+        result.reports[0].tick, result.reports[0].checksum, options.live_ticks, result.first_input,
+        result.direct_one_to_two, result.direct_two_to_one, result.hold_cleanups, result.delayed_ready,
+        result.delayed_retirement, min_retired);
     Ok(())
 }
 
@@ -1125,6 +1426,103 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("missing fixed-peer report"), "{error}");
+    }
+    #[test]
+    fn rolling_late_join_retains_delayed_backlog_across_retirement() {
+        let _lock = SOCKET_TEST.lock().unwrap();
+        let result = run(Options::rolling()).unwrap();
+        assert!(result.first_input > END_TICK);
+        assert_eq!(
+            result.reports[0].tick,
+            result.first_input + ROLLING_LIVE_TICKS - 1
+        );
+        assert!(result
+            .reports
+            .iter()
+            .all(|report| report.tick == result.reports[0].tick
+                && report.checksum == result.reports[0].checksum));
+        assert!(result.direct_one_to_two >= ROLLING_LIVE_TICKS as usize);
+        assert!(result.direct_two_to_one >= ROLLING_LIVE_TICKS as usize);
+        assert!(result.delayed_ready && result.delayed_retirement);
+        assert_eq!(result.hold_cleanups, 2);
+        let caps = limits(Mode::Rolling);
+        for stats in result.stats {
+            assert!(stats.floor > ROLLING_PRELUDE && stats.floor_advances >= 100);
+            assert!(stats.evidence.0 <= caps.max_logical_records);
+            assert!(stats.destinations <= caps.max_destination_records);
+            assert!(stats.edge_pending.0 <= caps.max_edge_pending_records);
+        }
+    }
+    #[test]
+    fn rolling_losing_one_live_edge_fails_the_fixed_mesh() {
+        let _lock = SOCKET_TEST.lock().unwrap();
+        let error = run(Options {
+            drop_live_edge: true,
+            ..Options::rolling()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("disconnected") || error.contains("UnknownConnection"),
+            "{error}"
+        );
+    }
+    #[test]
+    fn rolling_missing_report_cannot_shrink_completion_roster() {
+        let _lock = SOCKET_TEST.lock().unwrap();
+        let error = run(Options {
+            missing_report: Some(JOINER),
+            report_timeout: Duration::from_millis(150),
+            ..Options::rolling()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("missing fixed-peer report"), "{error}");
+    }
+    #[test]
+    fn mode_windows_and_tick_math_are_checked_before_starting() {
+        assert!(Options::default().validate().is_ok());
+        assert!(Options::rolling().validate().is_ok());
+        assert!(Options {
+            live_ticks: 485,
+            ..Options::default()
+        }
+        .validate()
+        .is_err());
+        assert!(Options {
+            prelude_ticks: 512,
+            ..Options::rolling()
+        }
+        .validate()
+        .is_err());
+        assert!(Options {
+            live_ticks: 2047,
+            ..Options::rolling()
+        }
+        .validate()
+        .is_err());
+        assert!(Options {
+            live_ticks: u64::MAX,
+            ..Options::rolling()
+        }
+        .validate()
+        .is_err());
+        assert!(Options {
+            prelude_ticks: u64::MAX,
+            ..Options::rolling()
+        }
+        .validate()
+        .is_err());
+        assert!(Grant::new(24, 27, 0, Mode::Finite).is_err());
+        assert!(Grant::new(u64::MAX - 10, u64::MAX - 7, 3, Mode::Rolling).is_err());
+        assert!(Grant::new(u64::MAX - 39, u64::MAX - 36, 3, Mode::Rolling).is_ok());
+        assert!(Grant::new(u64::MAX - 38, u64::MAX - 35, 3, Mode::Rolling).is_err());
+        assert!(Options {
+            prelude_ticks: 513,
+            ..Options::rolling()
+        }
+        .validate()
+        .is_ok());
     }
     #[test]
     fn report_identity_context_and_exact_length_are_checked() {

@@ -1,4 +1,4 @@
-//! Finite, application-admitted three-peer reliable input mesh (`ORRM` v1).
+//! Application-admitted three-peer reliable input mesh (`ORRM` v1).
 //!
 //! This is separate from the two-peer driver, relay and checked control wire.
 //! The application freezes one context: active peers 0/1, donor 0 and joiner 2.
@@ -15,9 +15,12 @@
 //! Logical canonical evidence is independent from destination obligations. A
 //! transport queue accepting one destination does not acknowledge another or
 //! prove network delivery. Admission of the joiner's edge creates new obligations
-//! for existing local evidence newer than its snapshot. Local verification never
-//! retires evidence or pending output. All retention is finite and explicitly
-//! bounded in records and encoded bytes, not total allocator/decoded-object memory.
+//! for existing local evidence newer than its snapshot. The finite constructor
+//! retains all evidence. Opt-in rolling retention uses only local verification
+//! or the exact joiner bootstrap snapshot, with admission-pinned local backlog.
+//! Verification never acknowledges or removes pending output or incoming input.
+//! Retention is bounded in records and encoded bytes, not total allocator,
+//! application codec, Session checksum history, or game-state memory.
 //! Check the driver before and after every Session/bootstrap operation: legacy
 //! InputSource methods cannot return errors. Errors are terminal and preserve
 //! inert accounting for inspection; no buffered input is delivered after failure.
@@ -31,7 +34,7 @@ use orr_net::SendError;
 use orr_proto::{Channel, ConnId};
 use orr_session::{
     CheckedJoinContext, CheckedJoinTicket, Game, InputSource, JoinBootstrap, JoinBootstrapStatus,
-    PlayerSlot, RemoteInput,
+    LocallyVerifiedTick, PlayerSlot, RemoteInput,
 };
 
 use crate::P2pInputCodec;
@@ -43,9 +46,10 @@ const LOGICAL_HEADER: usize = 15;
 const HEADER: usize = ENVELOPE + LOGICAL_HEADER;
 type Key = (u64, PlayerSlot);
 
-/// Configurable downward bounds within the finite tick 1..=512 foundation.
-/// Canonical, incoming and pending bytes have separate caps. Delivery metadata
-/// includes both pending and queue-accepted obligations for the whole lifetime.
+/// Configurable downward bounds. `first_tick`/`end_tick` apply only to the
+/// finite constructor (within tick 1..=512). Canonical, incoming and pending
+/// bytes have separate caps. Rolling mode retires only old queue-accepted
+/// delivery metadata; pending obligations always retain their independent caps.
 #[derive(Clone, Debug)]
 pub struct P2pMeshInputLimits {
     pub first_tick: u64,
@@ -85,10 +89,13 @@ impl Default for P2pMeshInputLimits {
 }
 impl P2pMeshInputLimits {
     fn validate(&self) -> Result<(), P2pMeshInputError> {
-        if self.first_tick == 0
-            || self.first_tick >= self.end_tick
-            || self.end_tick > 513
-            || !(HEADER..=256).contains(&self.max_packet_bytes)
+        if self.first_tick == 0 || self.first_tick >= self.end_tick || self.end_tick > 513 {
+            return Err(P2pMeshInputError::InvalidConfig);
+        }
+        self.validate_caps()
+    }
+    fn validate_caps(&self) -> Result<(), P2pMeshInputError> {
+        if !(HEADER..=256).contains(&self.max_packet_bytes)
             || self.max_input_bytes > self.max_packet_bytes
             || self.max_commands > 3
             || self.max_command_bytes > self.max_packet_bytes
@@ -114,6 +121,34 @@ impl P2pMeshInputLimits {
     }
 }
 
+/// Opt-in rolling mesh policy. Both distances must be nonzero. Exact evidence
+/// normally retires at `progress - recent_ticks`; new inputs may be at most
+/// `progress + future_ticks`. Only the local verification hook advances progress,
+/// except the joiner's exact checked bootstrap snapshot. Existing peers' imported
+/// tickets never advance it. The inclusive horizon reserves two further ticks
+/// for Session's pre-incremented send cursor, including the first rejected send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct P2pMeshRollingWindow {
+    pub recent_ticks: u64,
+    pub future_ticks: u64,
+}
+impl P2pMeshRollingWindow {
+    fn last(self, progress: u64) -> Result<u64, P2pMeshInputError> {
+        progress
+            .checked_add(self.future_ticks)
+            .and_then(|last| last.checked_add(2))
+            .map(|reserved| reserved - 2)
+            .ok_or(P2pMeshInputError::TickExhausted)
+    }
+}
+#[derive(Clone, Copy)]
+struct Rolling {
+    window: P2pMeshRollingWindow,
+    progress: u64,
+    retired_through: u64,
+    discarded_local_through: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum P2pMeshInputError {
     InvalidConfig,
@@ -131,13 +166,20 @@ pub enum P2pMeshInputError {
     InvalidVacancy,
     InvalidSnapshot,
     TickRange,
+    /// The rolling horizon cannot reserve Session's send cursor increments.
+    TickExhausted,
+    /// A new admission cannot cover already discarded locally authored history.
+    SnapshotTooOld,
     Malformed,
     PacketLimit,
     InputLimit,
     CommandLimit,
     RecordLimit,
     ByteLimit,
-    ConflictingDuplicate { tick: u64, slot: PlayerSlot },
+    ConflictingDuplicate {
+        tick: u64,
+        slot: PlayerSlot,
+    },
     Disconnected,
     Cancelled,
     ReentrantFlush,
@@ -163,6 +205,9 @@ pub struct P2pMeshEdge {
 pub enum P2pMeshInputAccepted {
     New,
     Duplicate,
+    /// Authorized, fully framed input below the irreversible retirement floor.
+    /// This does not assert byte equality with discarded canonical evidence.
+    IgnoredRetired,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct P2pMeshInputFlush {
@@ -195,6 +240,9 @@ struct State<G: Game, C: P2pInputCodec<G>> {
     local: PlayerSlot,
     context: CheckedJoinContext,
     limits: P2pMeshInputLimits,
+    rolling: Option<Rolling>,
+    // Authority evidence must outlive canonical retirement.
+    highest_vacancy: Option<u64>,
     grant: Option<Grant>,
     default_input: Vec<u8>,
     edges: BTreeMap<ConnId, Edge>,
@@ -227,7 +275,6 @@ fn encode<G: Game, C: P2pInputCodec<G>>(
     r: &RemoteInput<G>,
     l: &P2pMeshInputLimits,
 ) -> Result<Vec<u8>, P2pMeshInputError> {
-    l.tick(r.tick)?;
     if r.disconnected || r.slot.0 >= 3 {
         return Err(P2pMeshInputError::WrongAuthority);
     }
@@ -305,13 +352,85 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
     fn fail(&mut self, error: P2pMeshInputError) -> P2pMeshInputError {
         self.error.get_or_insert(error).clone()
     }
+    fn tick(&self, tick: u64) -> Result<(), P2pMeshInputError> {
+        if let Some(r) = self.rolling {
+            if tick == 0 || tick > r.window.last(r.progress)? {
+                return Err(P2pMeshInputError::TickRange);
+            }
+            Ok(())
+        } else {
+            self.limits.tick(tick)
+        }
+    }
+    fn retired(&self, tick: u64) -> bool {
+        self.rolling.is_some_and(|r| tick <= r.retired_through)
+    }
+    fn progress(&mut self, tick: u64) -> Result<(), P2pMeshInputError> {
+        self.check()?;
+        let Some(mut r) = self.rolling else {
+            return Ok(());
+        };
+        r.progress = r.progress.max(tick);
+        r.window.last(r.progress)?;
+        r.retired_through = r
+            .retired_through
+            .max(r.progress.saturating_sub(r.window.recent_ticks));
+        self.rolling = Some(r);
+        self.prune();
+        Ok(())
+    }
+    fn prune(&mut self) {
+        let Some(mut r) = self.rolling else {
+            return;
+        };
+        // A checked fresh snapshot covers earlier discarded local history. Until
+        // the joiner's edge exists, every later local record is pinned, including
+        // records authored after ticket installation. These share the seen caps.
+        let pin = (self.local != PlayerSlot(2)
+            && !self
+                .edges
+                .values()
+                .any(|e| e.admitted.remote == PlayerSlot(2)))
+        .then_some(self.grant)
+        .flatten();
+        self.seen.retain(|&(tick, _), e| {
+            if tick > r.retired_through
+                || (e.author == self.local && pin.is_some_and(|g| tick > g.snapshot))
+            {
+                return true;
+            }
+            self.seen_bytes -= e.bytes.len();
+            if e.author == self.local {
+                r.discarded_local_through = r.discarded_local_through.max(tick);
+            }
+            false
+        });
+        for edge in self.edges.values_mut() {
+            edge.delivery.retain(|&(tick, _), delivery| {
+                if tick <= r.retired_through && *delivery == P2pMeshDelivery::QueueAccepted {
+                    self.destination_records -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        // Neither pending FIFOs/ledgers nor incoming delivery are verification
+        // acknowledgements. They remain intact, including a flush callback's head.
+        self.rolling = Some(r);
+    }
+    fn accepted_vacancy(&mut self, author: PlayerSlot, slot: PlayerSlot, tick: u64) {
+        if author == PlayerSlot(0) && slot == PlayerSlot(2) {
+            self.highest_vacancy = Some(self.highest_vacancy.map_or(tick, |old| old.max(tick)));
+        }
+    }
     fn authority(
         &self,
         author: PlayerSlot,
         slot: PlayerSlot,
         tick: u64,
     ) -> Result<(), P2pMeshInputError> {
-        self.limits.tick(tick)?;
+        self.tick(tick)?;
         let allowed = match author.0 {
             0 => {
                 slot == PlayerSlot(0)
@@ -404,7 +523,7 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         let bytes = encode::<G, C>(&record, &self.limits)?;
         self.vacancy(self.local, &record, &bytes)?;
         let key = (record.tick, record.slot);
-        if self.duplicate(key, &bytes)? {
+        if self.duplicate(key, &bytes)? || self.retired(record.tick) {
             return Ok(());
         }
         self.evidence_budget(bytes.len())?;
@@ -432,6 +551,7 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
             self.destination_records += 1;
             self.pending_bytes += packet_bytes;
         }
+        self.accepted_vacancy(self.local, record.slot, record.tick);
         self.seen_bytes += bytes.len();
         self.seen.insert(
             key,
@@ -457,14 +577,27 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
                 Err(P2pMeshInputError::AlreadyBound)
             };
         }
-        self.limits.tick(grant.first)?;
-        if grant.snapshot >= grant.first || grant.snapshot + 1 < self.limits.first_tick {
+        if grant.snapshot >= grant.first {
             return Err(P2pMeshInputError::InvalidSnapshot);
         }
-        // Installing a cutoff must not retroactively bless prior unauthorized inputs.
-        if self.seen.iter().any(|(&(tick, slot), e)| {
-            slot == PlayerSlot(2) && (e.author != PlayerSlot(0) || tick >= grant.first)
-        }) {
+        if let Some(r) = self.rolling {
+            // A checked imported ticket can be ahead of this verifier. Validate
+            // its own range without moving the local acceptance horizon.
+            if grant.first > r.window.last(r.progress.max(grant.snapshot))? {
+                return Err(P2pMeshInputError::TickRange);
+            }
+            if grant.snapshot < r.discarded_local_through {
+                return Err(P2pMeshInputError::SnapshotTooOld);
+            }
+        } else {
+            self.limits.tick(grant.first)?;
+            if grant.snapshot + 1 < self.limits.first_tick {
+                return Err(P2pMeshInputError::InvalidSnapshot);
+            }
+        }
+        // This scalar survives canonical pruning. A cutoff may not retroactively
+        // authorize peer 2 over an already accepted/authored vacant-slot record.
+        if self.highest_vacancy.is_some_and(|tick| tick >= grant.first) {
             return Err(P2pMeshInputError::WrongAuthority);
         }
         self.grant = Some(grant);
@@ -492,6 +625,10 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         let snapshot = if self.local == PlayerSlot(2) || admitted.remote == PlayerSlot(2) {
             Some(self.grant.ok_or(P2pMeshInputError::NotBound)?.snapshot)
         } else {
+            // Unlike peer 2, the original edge has no covering snapshot.
+            if self.rolling.is_some_and(|r| r.discarded_local_through > 0) {
+                return Err(P2pMeshInputError::SnapshotTooOld);
+            }
             None
         };
         let backlog: Vec<_> = self
@@ -518,6 +655,8 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         self.destination_records += edge.delivery.len();
         self.pending_bytes += bytes;
         self.edges.insert(admitted.connection, edge);
+        // Only after every obligation exists may admission release its pin.
+        self.prune();
         Ok(())
     }
     fn receive(
@@ -557,7 +696,10 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         let tick = r.u64()?;
         let slot = PlayerSlot(r.u8()?);
         self.authority(edge.remote, slot, tick)?;
-        if self.local == PlayerSlot(2) && self.grant.is_some_and(|g| tick <= g.snapshot) {
+        if self.rolling.is_none()
+            && self.local == PlayerSlot(2)
+            && self.grant.is_some_and(|g| tick <= g.snapshot)
+        {
             return Err(P2pMeshInputError::TickRange);
         }
         let input_len = r.u32()? as usize;
@@ -580,7 +722,18 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         if !r.0.is_empty() {
             return Err(P2pMeshInputError::Malformed);
         }
+        // Vacancy restrictions are wire-level and must hold even for retired
+        // packets; no application decode is needed to compare the default bytes.
+        if edge.remote == PlayerSlot(0)
+            && slot == PlayerSlot(2)
+            && (command_count != 0 || input != self.default_input)
+        {
+            return Err(P2pMeshInputError::InvalidVacancy);
+        }
         let key = (tick, slot);
+        if self.retired(tick) {
+            return Ok(P2pMeshInputAccepted::IgnoredRetired);
+        }
         if self.duplicate(key, canonical)? {
             return Ok(P2pMeshInputAccepted::Duplicate);
         }
@@ -615,6 +768,7 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
             return Err(P2pMeshInputError::Malformed);
         }
         self.vacancy(edge.remote, &record, canonical)?;
+        self.accepted_vacancy(edge.remote, slot, tick);
         self.seen.insert(
             key,
             Evidence {
@@ -643,6 +797,40 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
         limits: P2pMeshInputLimits,
     ) -> Result<(Self, P2pMeshInputSource<G, C>), P2pMeshInputError> {
         limits.validate()?;
+        Self::create(local, context, limits, None)
+    }
+    /// Explicit rolling mode; finite tick limits are ignored, all memory caps
+    /// still apply. The source belongs to one Session lifetime. Do not restore
+    /// or replace that Session while retaining this driver/source generation.
+    pub fn new_rolling(
+        local: PlayerSlot,
+        context: CheckedJoinContext,
+        limits: P2pMeshInputLimits,
+        window: P2pMeshRollingWindow,
+    ) -> Result<(Self, P2pMeshInputSource<G, C>), P2pMeshInputError> {
+        limits.validate_caps()?;
+        if window.recent_ticks == 0 || window.future_ticks == 0 {
+            return Err(P2pMeshInputError::InvalidConfig);
+        }
+        window.last(0)?;
+        Self::create(
+            local,
+            context,
+            limits,
+            Some(Rolling {
+                window,
+                progress: 0,
+                retired_through: 0,
+                discarded_local_through: 0,
+            }),
+        )
+    }
+    fn create(
+        local: PlayerSlot,
+        context: CheckedJoinContext,
+        limits: P2pMeshInputLimits,
+        rolling: Option<Rolling>,
+    ) -> Result<(Self, P2pMeshInputSource<G, C>), P2pMeshInputError> {
         let r = context.roster();
         if local.0 >= 3
             || r.player_count() != 3
@@ -661,6 +849,8 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
             local,
             context,
             limits,
+            rolling,
+            highest_vacancy: None,
             grant: None,
             default_input,
             edges: BTreeMap::new(),
@@ -734,7 +924,13 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
                     snapshot: session.verified_tick(),
                     first: session.next_send_tick(),
                 },
-            )
+            )?;
+            if let Some(r) = &mut s.rolling {
+                // Exact validated source/snapshot only, never an imported ticket.
+                r.retired_through = r.retired_through.max(session.verified_tick());
+                s.progress(session.verified_tick())?;
+            }
+            Ok(())
         })();
         result.map_err(|e| s.fail(e))
     }
@@ -783,9 +979,27 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
             s.pending_bytes,
         )
     }
+    /// Independent record/byte accounting for an admitted destination, including
+    /// inert retained accounting after terminal failure.
+    pub fn edge_pending(&self, connection: ConnId) -> Result<(usize, usize), P2pMeshInputError> {
+        let s = self.0.borrow();
+        let edge = s
+            .edges
+            .get(&connection)
+            .ok_or(P2pMeshInputError::WrongConnection)?;
+        Ok((edge.pending.len(), edge.pending_bytes))
+    }
     pub fn retained_evidence(&self) -> (usize, usize) {
         let s = self.0.borrow();
         (s.seen.len(), s.seen_bytes)
+    }
+    /// Local verification/bootstrap watermark and irreversible retirement floor.
+    /// None for the unchanged finite constructor.
+    pub fn rolling_progress(&self) -> Option<(u64, u64)> {
+        self.0
+            .borrow()
+            .rolling
+            .map(|r| (r.progress, r.retired_through))
     }
     pub fn destination_records(&self) -> usize {
         self.0.borrow().destination_records
@@ -841,11 +1055,20 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
                     s.check()?;
                     match result {
                         Ok(()) => {
+                            let floor = s.rolling.map(|r| r.retired_through);
                             let edge = s.edges.get_mut(&id).unwrap();
                             let (key, bytes) =
                                 edge.pending.pop_front().expect("head survives callback");
                             edge.pending_bytes -= bytes.len();
-                            edge.delivery.insert(key, P2pMeshDelivery::QueueAccepted);
+                            if floor.is_some_and(|floor| key.0 <= floor) {
+                                // Verification during the callback kept this
+                                // Pending entry. Complete it exactly once without
+                                // resurrecting already-retired acceptance metadata.
+                                edge.delivery.remove(&key);
+                                s.destination_records -= 1;
+                            } else {
+                                edge.delivery.insert(key, P2pMeshDelivery::QueueAccepted);
+                            }
                             s.pending_bytes -= bytes.len();
                             out.sent += 1;
                         }
@@ -904,5 +1127,10 @@ impl<G: Game, C: P2pInputCodec<G>> InputSource<G> for P2pMeshInputSource<G, C> {
         s.incoming_bytes = 0;
         s.incoming.drain(..).map(|(r, _)| r).collect()
     }
-    // Finite retention deliberately ignores local verification. It is not an ACK.
+    fn on_locally_verified(&mut self, tick: LocallyVerifiedTick<'_, G>) {
+        let mut s = self.0.borrow_mut();
+        if let Err(e) = s.progress(tick.simulated.tick()) {
+            s.fail(e);
+        }
+    }
 }
