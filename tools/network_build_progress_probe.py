@@ -82,12 +82,44 @@ def save(path, value):
     temp.replace(path)
 
 
+def canonical_sha256(value):
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def preparation_identity(source, profile, parent_environment, toolchain):
+    return {"source": source, "profile": profile, "parent_environment": parent_environment,
+            "toolchain": toolchain}
+
+
+def preparation_once_key(source, profile, parent_environment, toolchain):
+    return canonical_sha256(preparation_identity(source, profile, parent_environment, toolchain))
+
+
+def reserve_marker(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive creation burns the identity even if the owner later fails.
+    with path.open("x", encoding="utf-8", newline="\n") as marker:
+        marker.write(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+
+
+def finalize_marker(path, value):
+    # Retain the exclusive reservation; only replace its owned contents.
+    save(Path(path), value)
+
+
+def once_marker_root(root):
+    return Path(root).resolve() / "target" / "n6-probe-once"
+
+
 def git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args], stderr=subprocess.PIPE).decode().strip()
 
 
 def source_identity(root):
-    require(not git(root, "status", "--porcelain", "--untracked-files=no"), "tracked source tree is dirty")
+    require(not git(root, "status", "--porcelain", "--untracked-files=all"),
+            "source tree has tracked or untracked changes")
     paths = set(git(root, "ls-files").splitlines()) | set(CLAIMED)
     require(all((root / p).is_file() for p in paths), "source manifest contains a missing file")
     files = {p: digest(root / p) for p in sorted(paths)}
@@ -587,6 +619,7 @@ class Capture:
         self.folder, self.argv, self.watchdog = folder, list(argv), watchdog
         self.record = {"argv": self.argv, "cwd": str(root), "started_at": utc(), "start": time.monotonic(),
                        "watchdog_seconds": watchdog, "watchdog_triggered": False, "failure": None,
+                       "secondary_failures": [],
                        "streams": {}, "samples": [], "actual_exit": None, "cleanup_complete": False}
         self.child, self.readers, writers = None, [], []
         gate = threading.Event()
@@ -608,15 +641,15 @@ class Capture:
                     raise
                 state = {"observed_bytes": 0, "saved_bytes": 0, "sha256": None, "eof": False}
                 self.record["streams"][stream] = state
-                def drain(reader, raw, state):
+                def drain(reader, raw, state, stream=stream):
                     gate.wait()
-                    h = hashlib.sha256()
                     try:
                         for block in iter(lambda: reader.read(8192), b""):
                             state["observed_bytes"] += len(block)
                             keep = block[:max(0, MAX_STREAM - state["saved_bytes"])]
-                            raw.write(keep)
-                            h.update(keep)
+                            written = raw.write(keep)
+                            if written != len(keep):
+                                raise OSError("partial raw write")
                             state["saved_bytes"] += len(keep)
                             if len(keep) != len(block):
                                 self.fail("raw_output_cap_exceeded")
@@ -625,14 +658,26 @@ class Capture:
                         self.fail("stream_capture_error: " + repr(exc))
                         # Keep draining after a storage failure to avoid backpressure.
                         try:
-                            for _ in iter(lambda: reader.read(8192), b""):
-                                pass
+                            for block in iter(lambda: reader.read(8192), b""):
+                                state["observed_bytes"] += len(block)
+                            state["eof"] = True
                         except BaseException:
                             pass
                     finally:
-                        raw.close()
-                        reader.close()
-                        state["sha256"] = h.hexdigest()
+                        try:
+                            raw.close()
+                        except BaseException as exc:
+                            self.fail("raw_close_error: " + repr(exc))
+                        try:
+                            reader.close()
+                        except BaseException as exc:
+                            self.fail("pipe_reader_close_error: " + repr(exc))
+                        try:
+                            saved_path = self.folder / (stream + ".txt")
+                            state["sha256"] = digest(saved_path)
+                            state["saved_bytes"] = saved_path.stat().st_size
+                        except BaseException as exc:
+                            self.fail("saved_stream_hash_error: " + repr(exc))
 
                 # Before a drain worker starts, every pipe/file remains owned
                 # by this stack. Never join an unstarted thread after setup fails.
@@ -658,9 +703,14 @@ class Capture:
             else:
                 raise
         finally:
-            for writer in writers:
-                writer.close()
-            gate.set()
+            try:
+                for writer in writers:
+                    try:
+                        writer.close()
+                    except BaseException as exc:
+                        self.fail("pipe_writer_close_error: " + repr(exc))
+            finally:
+                gate.set()
             if self.child is None:
                 for reader in self.readers:
                     reader.join()
@@ -670,6 +720,9 @@ class Capture:
         with self.record_lock:
             if self.record["failure"] is None:
                 self.record["failure"] = reason
+            elif reason != self.record["failure"] and reason not in self.record["secondary_failures"]:
+                if len(self.record["secondary_failures"]) < 32:
+                    self.record["secondary_failures"].append(reason)
 
     def sample(self):
         now = time.monotonic()
@@ -697,6 +750,8 @@ class Capture:
         self.record["actual_exit"] = self.child.wait()
         self.record["end"] = time.monotonic()
         self.record["exited_at"] = utc()
+        if self.record["actual_exit"] != 0:
+            self.fail("child_exit_nonzero")
         sample = self.sample()
         # On Windows wait for every descendant, including post-parent survivors.
         while sample.get("active") not in (0, None):
@@ -709,8 +764,6 @@ class Capture:
             s["eof"] for s in self.record["streams"].values())
         if not self.record["cleanup_complete"]:
             self.fail("descendant_cleanup_unverified")
-        if self.record["actual_exit"] != 0:
-            self.fail("child_exit_nonzero")
         try:
             self.child.close()
             self.record["handles_closed"] = True
@@ -727,64 +780,184 @@ def launch(argv, root, folder, watchdog, env):
 
 def validate_plan(plan, root):
     require(type(plan.get("version")) is int and plan["version"] == 1, "unsupported plan version")
-    require(plan.get("source") == source_identity(root), "source identity changed")
+    require(plan.get("status") == "prepared" and not plan.get("failure"), "preparation is not complete")
+    source = source_identity(root)
+    require(plan.get("source") == source, "source identity changed")
     require(type(plan.get("repeats")) is int and 1 <= plan["repeats"] <= 3, "repeats must be 1..3")
     require(plan.get("profile") == "release-default-features", "unexpected profile/features")
-    require(plan.get("environment") == environment_identity(), "build environment changed")
+    parent_environment = environment_identity()
+    require(plan.get("parent_environment") == parent_environment, "parent build environment changed")
     require(plan.get("toolchain") == toolchain_identity(), "toolchain identity changed")
+    root_target = (Path(root).resolve() / "target").resolve()
+    target_dir = Path(plan.get("target_dir", "")).resolve()
+    preparation_dir = Path(plan.get("preparation_dir", "")).resolve()
+    require(target_dir != root_target and target_dir.is_relative_to(root_target), "preparation target must be under root/target")
+    require(preparation_dir != root_target and preparation_dir.is_relative_to(root_target), "preparation output must be under root/target")
+    marker_root = once_marker_root(root)
+    require(not target_dir.is_relative_to(marker_root) and not marker_root.is_relative_to(target_dir),
+            "preparation target overlaps the persistent marker directory")
+    expected_child_environment = dict(parent_environment)
+    expected_child_environment["CARGO_TARGET_DIR"] = str(target_dir)
+    require(plan.get("child_environment") == expected_child_environment, "preparation child environment changed")
+    require(plan.get("child_environment_overrides") == {
+        "CARGO_TARGET_DIR": str(target_dir), "CARGO_TERM_COLOR": "never"}, "preparation child overrides changed")
+    key = preparation_once_key(source, plan["profile"], parent_environment, plan["toolchain"])
+    require(plan.get("once_key") == key, "preparation once-key mismatch")
+    marker_path = marker_root / ("prepare-" + key + ".json")
+    require(plan.get("preparation_marker") == str(marker_path.resolve()), "preparation marker path mismatch")
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    require(marker.get("status") == "prepared" and marker.get("once_key") == key,
+            "preparation marker is missing or unfinished")
+    require(marker.get("identity") == preparation_identity(source, plan["profile"], parent_environment, plan["toolchain"]),
+            "preparation marker identity mismatch")
+    require(marker.get("origin") == {"preparation_dir": str(preparation_dir), "target_dir": str(target_dir)},
+            "preparation marker origin mismatch")
+    require(marker.get("plan_sha256") == canonical_sha256(plan), "prepared plan differs from its once marker")
     cases = plan.get("cases", [])
     require(1 <= len(cases) <= 4, "case count must be 1..4")
     require(len({(c["binary"], c["name"]) for c in cases}) == len(cases), "duplicate case")
+    require(set(plan.get("binaries", {})) == set(SAFE_CASES), "prepared binary inventory is incomplete")
+    require(len(plan.get("preparation", [])) == len(SAFE_CASES), "prepared build receipts are incomplete")
+    for rec in plan["preparation"]:
+        require(rec.get("actual_exit") == 0 and rec.get("cleanup_complete") is True and
+                rec.get("handles_closed") is True and rec.get("failure") is None,
+                "preparation build receipt is incomplete or failed")
+    for target, (_, names) in SAFE_CASES.items():
+        binary = plan["binaries"][target]
+        listing = binary.get("listing", {})
+        require(listing.get("actual_exit") == 0 and listing.get("cleanup_complete") is True and
+                listing.get("handles_closed") is True and listing.get("failure") is None,
+                "test-list receipt is incomplete or failed")
+        listed = binary.get("listed_tests", [])
+        require(isinstance(listed, list) and listed and all(isinstance(name, str) and name for name in listed) and
+                len(set(listed)) == len(listed), "invalid/duplicate prepared test inventory")
+        require(all(listed.count(name) == 1 for name in names), "approved case missing/duplicated in prepared inventory")
+        artifact = binary.get("artifact", {})
+        artifact_path = Path(artifact.get("executable", "")).resolve()
+        binary_path = Path(binary.get("path", "")).resolve()
+        require(artifact_path == binary_path and binary_path.is_relative_to(target_dir),
+                "prepared executable is outside the isolated target")
+        require(digest(binary_path) == binary.get("sha256"), "prepared executable hash mismatch")
     for case in cases:
         require(case["binary"] in SAFE_CASES and case["name"] in SAFE_CASES[case["binary"]][1], "unapproved case")
-        require(type(case["watchdog_seconds"]) is int and 10 <= case["watchdog_seconds"] <= 300, "invalid test watchdog")
+        maximum = 300 if case["binary"] == "client_session" else 90
+        require(type(case["watchdog_seconds"]) is int and 10 <= case["watchdog_seconds"] <= maximum,
+                "invalid test watchdog")
         binary = plan["binaries"][case["binary"]]
         require(digest(binary["path"]) == binary["sha256"], "prebuilt executable changed")
         require(binary["listed_tests"].count(case["name"]) == 1, "exact case missing/duplicated in binary")
-    require(type(plan.get("build_watchdog_seconds")) is int and 30 <= plan["build_watchdog_seconds"] <= 1800, "invalid build watchdog")
-    require(type(plan.get("campaign_watchdog_seconds")) is int and 30 <= plan["campaign_watchdog_seconds"] <= 3600, "invalid campaign watchdog")
+    require(type(plan.get("build_watchdog_seconds")) is int and 30 <= plan["build_watchdog_seconds"] <= 900,
+            "invalid build watchdog")
+    require(type(plan.get("campaign_watchdog_seconds")) is int and 30 <= plan["campaign_watchdog_seconds"] <= 1800,
+            "invalid campaign watchdog")
 
 
-def prepare(root, output, head):
+def prepare(root, output, head, target_dir=None):
     require_runtime_platform()
     require(git(root, "rev-parse", "HEAD") == head and re.fullmatch("[0-9a-f]{40}", head), "expected-head mismatch")
+    root = Path(root).resolve()
+    output = Path(output).resolve()
+    target_dir = Path(target_dir if target_dir is not None else output / "prepare-target").resolve()
     before = source_identity(root)
-    output.mkdir(parents=True, exist_ok=False)
-    env = dict(os.environ, CARGO_TERM_COLOR="never")
-    plan = {"version": 1, "source": before, "profile": "release-default-features", "repeats": 1,
+    profile = "release-default-features"
+    parent_environment = environment_identity()
+    toolchain = toolchain_identity()
+    key = preparation_once_key(before, profile, parent_environment, toolchain)
+    root_target = root / "target"
+    marker_root = once_marker_root(root)
+    require(output != root_target and output.is_relative_to(root_target), "preparation output must be under root/target")
+    require(target_dir != root_target and target_dir.is_relative_to(root_target), "preparation target must be under root/target")
+    require(output != target_dir and not output.is_relative_to(target_dir), "preparation output overlaps the target directory")
+    require(not target_dir.is_relative_to(marker_root) and not marker_root.is_relative_to(target_dir),
+            "preparation target overlaps the persistent marker directory")
+    require(not output.is_relative_to(marker_root) and not marker_root.is_relative_to(output),
+            "preparation output overlaps the persistent marker directory")
+    require(not output.exists(), "preparation output must be fresh")
+    require(not target_dir.exists(), "preparation target must not preexist or contain artifacts")
+    marker_path = marker_root / ("prepare-" + key + ".json")
+    origin = {"preparation_dir": str(output), "target_dir": str(target_dir)}
+    identity = preparation_identity(before, profile, parent_environment, toolchain)
+    reservation = {"version": 1, "kind": "preparation", "status": "preparing", "once_key": key,
+                   "identity": identity, "origin": origin, "created_at": utc()}
+    reserve_marker(marker_path, reservation)
+    child_environment = dict(parent_environment)
+    child_environment["CARGO_TARGET_DIR"] = str(target_dir)
+    child_overrides = {"CARGO_TARGET_DIR": str(target_dir), "CARGO_TERM_COLOR": "never"}
+    env = dict(os.environ, **child_overrides)
+    plan = {"version": 1, "source": before, "profile": profile, "repeats": 1,
             "build_watchdog_seconds": 900, "campaign_watchdog_seconds": 1800,
-            "environment": environment_identity(), "binaries": {}, "cases": [],
+            "parent_environment": parent_environment, "child_environment": child_environment,
+            "child_environment_overrides": child_overrides, "target_dir": str(target_dir),
+            "preparation_dir": str(output), "preparation_marker": str(marker_path.resolve()),
+            "once_key": key, "binaries": {}, "cases": [],
             "os": platform.platform(), "cpu": platform.processor(), "python": platform.python_version(),
-            "toolchain": toolchain_identity(),
-            "preparation": [], "status": "preparing"}
-    save(output / "prepared.json", plan)
+            "toolchain": toolchain, "preparation": [], "status": "preparing"}
+    failure = None
+    output_created = False
     try:
+        output.mkdir(parents=True, exist_ok=False)
+        output_created = True
+        target_dir.mkdir(parents=True, exist_ok=False)
+        save(output / "prepared.json", plan)
         for target, (crate, names) in SAFE_CASES.items():
             argv = ["cargo", "test", "--release", "--locked", "--offline", "-p", crate, "--test", target,
-                    "--no-run", "--message-format=json"]
+                    "--no-run", "--message-format=json", "--target-dir", str(target_dir)]
             rec = launch(argv, root, output / ("prepare-" + target), 900, env).finish()
             plan["preparation"].append(rec)
-            require(rec["failure"] is None, "preparation failed: " + str(rec["failure"]))
+            require(rec.get("failure") is None and rec.get("actual_exit") == 0 and
+                    rec.get("cleanup_complete") is True and rec.get("handles_closed") is True,
+                    "preparation failed or cleanup is unverified: " + str(rec.get("failure")))
             rows = [json.loads(line) for line in (output / ("prepare-" + target) / "stdout.txt").read_text(encoding="utf-8").splitlines() if line.startswith("{")]
             artifacts = [r for r in rows if r.get("reason") == "compiler-artifact" and r.get("target", {}).get("name") == target and r.get("executable")]
             require(len(artifacts) == 1, "ambiguous/missing compiler artifact")
             path = str(Path(artifacts[0]["executable"]).resolve())
+            require(Path(path).is_relative_to(target_dir), "compiler artifact escaped isolated target")
             listing = launch([path, "--list"], root, output / ("list-" + target), 30, env).finish()
-            require(listing["failure"] is None, "binary listing failed")
+            require(listing.get("failure") is None and listing.get("actual_exit") == 0 and
+                    listing.get("cleanup_complete") is True and listing.get("handles_closed") is True,
+                    "binary listing failed or cleanup is unverified")
             text = (output / ("list-" + target) / "stdout.txt").read_text(encoding="utf-8")
             listed = re.findall(r"^(.+): test$", text, re.M)
+            require(listed and len(set(listed)) == len(listed) and all(name for name in listed),
+                    "empty or invalid prepared test inventory")
             require(all(listed.count(n) == 1 for n in names), "missing/duplicate named case")
             plan["binaries"][target] = {"path": path, "sha256": digest(path), "listed_tests": listed,
                                         "artifact": artifacts[0], "listing": listing}
             for name in names:
-                plan["cases"].append({"binary": target, "name": name, "watchdog_seconds": 300 if target == "client_session" else 90})
+                plan["cases"].append({"binary": target, "name": name,
+                                      "watchdog_seconds": 300 if target == "client_session" else 90})
         require(source_identity(root) == before, "source changed during preparation")
         plan["status"] = "prepared"
     except BaseException as exc:
         plan["status"], plan["failure"] = "preparation_failed", repr(exc)
-        raise
+        failure = exc
     finally:
-        save(output / "prepared.json", plan)
+        if output_created:
+            try:
+                save(output / "prepared.json", plan)
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+                    plan["status"], plan["failure"] = "preparation_failed", repr(exc)
+                else:
+                    plan.setdefault("secondary_failures", []).append("prepared receipt save: " + repr(exc))
+        final_marker = {**reservation, "status": plan["status"], "plan_sha256": canonical_sha256(plan),
+                        "failure": plan.get("failure")}
+        try:
+            finalize_marker(marker_path, final_marker)
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+                plan["status"], plan["failure"] = "preparation_failed", repr(exc)
+            else:
+                plan.setdefault("secondary_failures", []).append("preparation marker finalize: " + repr(exc))
+            if output_created:
+                try:
+                    save(output / "prepared.json", plan)
+                except BaseException:
+                    pass
+    if failure is not None:
+        raise failure
     return plan
 
 
@@ -801,6 +974,11 @@ def campaign(plan, root, output, mode="paired"):
         require_runtime_platform()
         validate_plan(plan, root)
         require(mode in ("paired", "idle-only"), "unsupported campaign mode")
+        campaign_marker = once_marker_root(root) / ("campaign-" + plan["once_key"] + ".json")
+        reserve_marker(campaign_marker, {"version": 1, "kind": "campaign", "status": "reserved",
+                                         "once_key": plan["once_key"],
+                                         "plan_sha256": canonical_sha256(plan), "mode": mode,
+                                         "output_dir": str(Path(output).resolve()), "created_at": utc()})
         deadline = time.monotonic() + plan["campaign_watchdog_seconds"]
         for condition in (("idle",) if mode == "idle-only" else ("idle", "build")):
             if condition == "build":
@@ -828,6 +1006,8 @@ def campaign(plan, root, output, mode="paired"):
                     argv = [binary["path"], case["name"], "--exact", "--nocapture", "--test-threads=1"]
                     if builder:
                         builder.sample()
+                        require(builder.record["failure"] is None and builder.child.poll() is None,
+                                "build stopped or observation failed before probe launch")
                     probe = launch(argv, root, output / f"{condition}-{repeat}-{case['binary']}-{case['name'].replace(':', '_')}", case["watchdog_seconds"], env)
                     attempt = {"condition": condition, "repeat": repeat, "case": case, "process": probe.record, "compiler_overlap": None}
                     report["attempts"].append(attempt)
@@ -872,6 +1052,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--expected-head")
+    parser.add_argument("--target-dir", type=Path)
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--mode", choices=("paired", "idle-only"), default="paired")
     args = parser.parse_args()
@@ -879,8 +1060,9 @@ def main():
     require(output.is_relative_to(root / "target") and output != root / "target", "output must be a fresh path under own target")
     require(not output.exists(), "output already exists; preserve it")
     if args.prepare:
-        require(args.expected_head and args.plan is None, "prepare needs --expected-head and no --plan")
-        prepare(root, output, args.expected_head)
+        require(args.expected_head and args.plan is None,
+                "prepare needs --expected-head and no --plan")
+        prepare(root, output, args.expected_head, args.target_dir)
     else:
         require(args.plan is not None, "run needs --plan")
         report = campaign(json.loads(args.plan.read_text(encoding="utf-8")), root, output, args.mode)

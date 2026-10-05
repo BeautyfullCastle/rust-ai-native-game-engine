@@ -187,38 +187,56 @@ class CompilerOverlapTests(unittest.TestCase):
 
 
 class PlanValidationTests(unittest.TestCase):
+    def prepared(self):
+        helper = PreparationAndReservationTests("test_prepare_uses_fresh_isolated_target_and_explicit_target_dir_argv")
+        fixture = helper.prepare_fixture()
+        self.addCleanup(helper.doCleanups)
+        return helper, fixture
+
     def test_unsupported_inherited_build_override_is_rejected(self):
         with mock.patch.dict(probe.os.environ, {"CARGO_TARGET_X86_64_CUSTOM_LINKER": "synthetic"}, clear=True):
             with self.assertRaisesRegex(ValueError, "unsupported inherited build override"):
                 probe.environment_identity()
 
-    def validate(self, plan, *, current_source=None, current_toolchain=None, binary_digest="binary"):
+    def validate(self, plan, root, *, current_source=None, current_toolchain=None, binary_digest=None):
         current_source = current_source if current_source is not None else plan["source"]
         with mock.patch.object(probe, "source_identity", return_value=current_source), mock.patch.object(
-            probe, "digest", return_value=binary_digest
-        ), mock.patch.object(probe, "environment_identity", return_value=plan.get("environment", {})), mock.patch.object(
+            probe, "digest", wraps=probe.digest if binary_digest is None else None
+        ) as digest_mock, mock.patch.object(probe, "environment_identity", return_value=plan.get("parent_environment", {})), mock.patch.object(
             probe, "toolchain_identity", return_value=current_toolchain if current_toolchain is not None else plan.get("toolchain", {})
         ):
-            probe.validate_plan(plan, Path("unused-root"))
+            if binary_digest is not None:
+                digest_mock.return_value = binary_digest
+            probe.validate_plan(plan, root)
+
+    def resigned(self, helper, plan):
+        helper.resign_plan_marker(plan)
+        return plan
 
     def test_valid_prebuilt_plan_is_accepted(self):
-        self.validate(valid_plan())
+        _, (root, _, _, plan, _) = self.prepared()
+        self.validate(plan, root)
 
     def test_repeat_count_zero_and_four_are_rejected(self):
+        helper, (root, _, _, original, _) = self.prepared()
         for repeats in (0, 4):
             with self.subTest(repeats=repeats):
-                plan = valid_plan()
+                plan = copy.deepcopy(original)
                 plan["repeats"] = repeats
+                self.resigned(helper, plan)
                 with self.assertRaises(ValueError):
-                    self.validate(plan)
+                    self.validate(plan, root)
 
     def test_boolean_repeat_count_is_rejected_even_though_bool_is_an_int_subclass(self):
-        plan = valid_plan()
+        helper, (root, _, _, original, _) = self.prepared()
+        plan = copy.deepcopy(original)
         plan["repeats"] = True
+        self.resigned(helper, plan)
         with self.assertRaises(ValueError):
-            self.validate(plan)
+            self.validate(plan, root)
 
     def test_boolean_case_build_and_campaign_watchdogs_are_rejected(self):
+        helper, (root, _, _, original, _) = self.prepared()
         mutations = (
             lambda p: p["cases"][0].__setitem__("watchdog_seconds", True),
             lambda p: p.__setitem__("build_watchdog_seconds", True),
@@ -226,45 +244,348 @@ class PlanValidationTests(unittest.TestCase):
         )
         for mutate in mutations:
             with self.subTest(mutate=mutate):
-                plan = valid_plan()
+                plan = copy.deepcopy(original)
                 mutate(plan)
+                self.resigned(helper, plan)
                 with self.assertRaises(ValueError):
-                    self.validate(plan)
+                    self.validate(plan, root)
 
     def test_duplicate_case_is_rejected(self):
-        plan = valid_plan()
+        helper, (root, _, _, original, _) = self.prepared()
+        plan = copy.deepcopy(original)
         plan["cases"].append(copy.deepcopy(plan["cases"][0]))
+        self.resigned(helper, plan)
         with self.assertRaises(ValueError):
-            self.validate(plan)
+            self.validate(plan, root)
 
     def test_unapproved_c_client_case_is_rejected(self):
-        plan = valid_plan()
+        helper, (root, _, _, original, _) = self.prepared()
+        plan = copy.deepcopy(original)
         plan["cases"] = [{"binary": "c_client", "name": "c_program_sees_what_the_rust_bridge_sees", "watchdog_seconds": 90}]
+        self.resigned(helper, plan)
         with self.assertRaises(ValueError):
-            self.validate(plan)
+            self.validate(plan, root)
 
     def test_source_revision_or_manifest_drift_is_rejected(self):
-        plan = valid_plan()
+        _, (root, _, _, plan, _) = self.prepared()
         changed = dict(plan["source"], head="d" * 40)
         with self.assertRaises(ValueError):
-            self.validate(plan, current_source=changed)
+            self.validate(plan, root, current_source=changed)
 
     def test_toolchain_drift_is_rejected(self):
-        plan = valid_plan()
-        plan["toolchain"] = {"rustc": "rustc A", "cargo": "cargo A"}
+        helper, (root, _, _, plan, _) = self.prepared()
         changed = {"rustc": "rustc B", "cargo": "cargo A"}
         with self.assertRaises(ValueError):
-            self.validate(plan, current_toolchain=changed)
+            self.validate(plan, root, current_toolchain=changed)
 
     def test_prebuilt_binary_hash_drift_is_rejected(self):
+        _, (root, _, _, plan, _) = self.prepared()
         with self.assertRaises(ValueError):
-            self.validate(valid_plan(), binary_digest="changed-binary")
+            self.validate(plan, root, binary_digest="changed-binary")
 
     def test_selector_not_listed_by_prebuilt_binary_is_rejected(self):
-        plan = valid_plan()
+        helper, (root, _, _, original, _) = self.prepared()
+        plan = copy.deepcopy(original)
         plan["binaries"]["loopback"]["listed_tests"] = ["idle_timeout_detected::quic"]
+        self.resigned(helper, plan)
         with self.assertRaises(ValueError):
-            self.validate(plan)
+            self.validate(plan, root)
+
+
+class PreparationAndReservationTests(unittest.TestCase):
+    HEAD = "a" * 40
+    SOURCE = {"head": HEAD, "tree": "b" * 40, "files": {}, "manifest_sha256": "manifest"}
+    PARENT_ENV = {key: None for key in probe.ENV_KEYS}
+    TOOLCHAIN = {"cargo": {"path": "cargo.exe", "sha256": "c" * 64, "version": "cargo 1"},
+                 "rustc": {"path": "rustc.exe", "sha256": "d" * 64, "version": "rustc 1"}}
+
+    class FinishedCapture:
+        def __init__(self, folder, stdout=""):
+            self.folder = Path(folder)
+            self.folder.mkdir(parents=True, exist_ok=False)
+            (self.folder / "stdout.txt").write_text(stdout, encoding="utf-8")
+
+        def finish(self):
+            return {"actual_exit": 0, "cleanup_complete": True, "handles_closed": True,
+                    "failure": None, "start": 1.0, "end": 2.0}
+
+    def prepare_fixture(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name) / "repo"
+        target_root = root / "target"
+        target_root.mkdir(parents=True)
+        output = target_root / "prepare-once"
+        target_dir = target_root / "isolated-build"
+        build_argv = []
+
+        def fake_launch(argv, cwd, folder, watchdog, env):
+            argv = list(argv)
+            if argv[0] == "cargo":
+                target = argv[argv.index("--test") + 1]
+                build_argv.append((argv, dict(env)))
+                exe = target_dir / (target + ".exe")
+                exe.write_bytes((target + " prebuilt").encode())
+                artifact = {"reason": "compiler-artifact", "target": {"name": target},
+                            "executable": str(exe)}
+                return self.FinishedCapture(folder, probe.json.dumps(artifact) + "\n")
+            target = Path(argv[0]).stem
+            listed = list(probe.SAFE_CASES[target][1]) + ["unrelated_prepared_test"]
+            return self.FinishedCapture(folder, "".join(name + ": test\n" for name in listed))
+
+        with mock.patch.object(probe, "require_runtime_platform"), mock.patch.object(
+            probe, "git", return_value=self.HEAD
+        ), mock.patch.object(probe, "source_identity", return_value=copy.deepcopy(self.SOURCE)), mock.patch.object(
+            probe, "environment_identity", return_value=copy.deepcopy(self.PARENT_ENV)
+        ), mock.patch.object(probe, "toolchain_identity", return_value=copy.deepcopy(self.TOOLCHAIN)), mock.patch.object(
+            probe, "launch", side_effect=fake_launch
+        ):
+            plan = probe.prepare(root, output, self.HEAD, target_dir)
+        return root, output, target_dir, plan, build_argv
+
+    def validate(self, root, plan):
+        with mock.patch.object(probe, "source_identity", return_value=copy.deepcopy(self.SOURCE)), mock.patch.object(
+            probe, "environment_identity", return_value=copy.deepcopy(self.PARENT_ENV)
+        ), mock.patch.object(probe, "toolchain_identity", return_value=copy.deepcopy(self.TOOLCHAIN)):
+            probe.validate_plan(plan, root)
+
+    def resign_plan_marker(self, plan):
+        marker_path = Path(plan["preparation_marker"])
+        marker = probe.json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["plan_sha256"] = probe.canonical_sha256(plan)
+        probe.save(marker_path, marker)
+
+    def test_prepare_uses_fresh_isolated_target_and_explicit_target_dir_argv(self):
+        root, output, target, plan, build_argv = self.prepare_fixture()
+        self.assertTrue(target.is_dir())
+        self.assertEqual(plan["status"], "prepared")
+        self.assertEqual(plan["target_dir"], str(target.resolve()))
+        self.assertEqual(plan["child_environment"]["CARGO_TARGET_DIR"], str(target.resolve()))
+        self.assertEqual(plan["child_environment_overrides"], {
+            "CARGO_TARGET_DIR": str(target.resolve()), "CARGO_TERM_COLOR": "never"})
+        self.assertEqual(len(build_argv), len(probe.SAFE_CASES))
+        for argv, env in build_argv:
+            target_name = argv[argv.index("--test") + 1]
+            crate = probe.SAFE_CASES[target_name][0]
+            self.assertEqual(argv, ["cargo", "test", "--release", "--locked", "--offline", "-p", crate,
+                                    "--test", target_name, "--no-run", "--message-format=json",
+                                    "--target-dir", str(target.resolve())])
+            self.assertEqual(env["CARGO_TARGET_DIR"], str(target.resolve()))
+        self.validate(root, plan)
+
+    def test_preparation_once_marker_blocks_same_identity_in_another_output(self):
+        root, _, _, _, first_argv = self.prepare_fixture()
+        other_output = root / "target" / "prepare-second"
+        other_target = root / "target" / "isolated-build-second"
+        launches = mock.Mock()
+        with mock.patch.object(probe, "require_runtime_platform"), mock.patch.object(
+            probe, "git", return_value=self.HEAD
+        ), mock.patch.object(probe, "source_identity", return_value=copy.deepcopy(self.SOURCE)), mock.patch.object(
+            probe, "environment_identity", return_value=copy.deepcopy(self.PARENT_ENV)
+        ), mock.patch.object(probe, "toolchain_identity", return_value=copy.deepcopy(self.TOOLCHAIN)), mock.patch.object(
+            probe, "launch", launches
+        ):
+            with self.assertRaises((FileExistsError, OSError)):
+                probe.prepare(root, other_output, self.HEAD, other_target)
+        launches.assert_not_called()
+        self.assertFalse(other_output.exists())
+        self.assertFalse(other_target.exists())
+        self.assertEqual(len(first_argv), len(probe.SAFE_CASES))
+
+    def test_preparation_rejects_existing_target_before_any_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            target_root = root / "target"
+            target_root.mkdir(parents=True)
+            output, target = target_root / "prepare", target_root / "occupied"
+            target.mkdir()
+            (target / "old-artifact").write_text("keep", encoding="utf-8")
+            launch = mock.Mock()
+            with mock.patch.object(probe, "require_runtime_platform"), mock.patch.object(
+                probe, "git", return_value=self.HEAD
+            ), mock.patch.object(probe, "source_identity", return_value=copy.deepcopy(self.SOURCE)), mock.patch.object(
+                probe, "environment_identity", return_value=copy.deepcopy(self.PARENT_ENV)
+            ), mock.patch.object(probe, "toolchain_identity", return_value=copy.deepcopy(self.TOOLCHAIN)), mock.patch.object(
+                probe, "launch", launch
+            ):
+                with self.assertRaisesRegex(ValueError, "target must not preexist"):
+                    probe.prepare(root, output, self.HEAD, target)
+            launch.assert_not_called()
+            self.assertEqual((target / "old-artifact").read_text(encoding="utf-8"), "keep")
+
+    def test_tracked_and_untracked_source_changes_are_rejected(self):
+        for status in (" M crates/orr_server/src/lib.rs", "?? scratch-created-by-user"):
+            with self.subTest(status=status), mock.patch.object(
+                probe, "git", return_value=status
+            ) as git:
+                with self.assertRaisesRegex(ValueError, "tracked or untracked changes"):
+                    probe.source_identity(Path("synthetic-repo"))
+                git.assert_called_once_with(Path("synthetic-repo"), "status", "--porcelain", "--untracked-files=all")
+
+    def test_prepared_status_failure_and_partial_receipts_are_rejected(self):
+        root, _, _, original, _ = self.prepare_fixture()
+        mutations = (
+            ("incomplete status", lambda plan: plan.__setitem__("status", "preparing")),
+            ("recorded failure", lambda plan: plan.__setitem__("failure", "synthetic prior failure")),
+            ("partial build receipt", lambda plan: plan["preparation"][0].__setitem__("cleanup_complete", False)),
+            ("partial listing receipt", lambda plan: plan["binaries"]["loopback"]["listing"].__setitem__("handles_closed", False)),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                plan = copy.deepcopy(original)
+                mutate(plan)
+                self.resign_plan_marker(plan)
+                with self.assertRaises(ValueError):
+                    self.validate(root, plan)
+
+    def test_watchdog_caps_are_enforced_for_cases_build_and_campaign(self):
+        root, _, _, original, _ = self.prepare_fixture()
+        cases = (
+            ("native case", lambda p: p["cases"][0].__setitem__("watchdog_seconds", 91)),
+            ("FFI case", lambda p: next(c for c in p["cases"] if c["binary"] == "client_session").__setitem__("watchdog_seconds", 301)),
+            ("build", lambda p: p.__setitem__("build_watchdog_seconds", 901)),
+            ("campaign", lambda p: p.__setitem__("campaign_watchdog_seconds", 1801)),
+        )
+        for label, mutate in cases:
+            with self.subTest(label=label):
+                plan = copy.deepcopy(original)
+                mutate(plan)
+                self.resign_plan_marker(plan)
+                with self.assertRaises(ValueError):
+                    self.validate(root, plan)
+
+    def test_campaign_once_marker_blocks_new_output_and_modified_plan_before_launch(self):
+        root, _, _, plan, _ = self.prepare_fixture()
+        launch_count = []
+
+        class CompletedProbe:
+            def __init__(self, folder, argv):
+                self.folder = Path(folder)
+                self.folder.mkdir(parents=True, exist_ok=False)
+                name = argv[1]
+                binary_name = Path(argv[0]).stem
+                listed = plan["binaries"][binary_name]["listed_tests"]
+                filtered = len(listed) - 1
+                output = (f"test {name} ... ok\n"
+                          f"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; {filtered} filtered out;\n")
+                (self.folder / "stdout.txt").write_text(output, encoding="utf-8")
+                self.record = {"failure": None, "start": 1.0, "end": 2.0}
+                self.child = type("Child", (), {"poll": lambda self: 0})()
+
+            def finish(self):
+                return {"failure": None, "start": 1.0, "end": 2.0, "actual_exit": 0,
+                        "cleanup_complete": True, "handles_closed": True}
+
+        def fake_launch(argv, cwd, folder, watchdog, env):
+            launch_count.append(list(argv))
+            return CompletedProbe(folder, argv)
+
+        with mock.patch.object(probe, "require_runtime_platform"), mock.patch.object(
+            probe, "source_identity", return_value=copy.deepcopy(self.SOURCE)
+        ), mock.patch.object(probe, "environment_identity", return_value=copy.deepcopy(self.PARENT_ENV)), mock.patch.object(
+            probe, "toolchain_identity", return_value=copy.deepcopy(self.TOOLCHAIN)
+        ), mock.patch.object(probe, "launch", side_effect=fake_launch), tempfile.TemporaryDirectory() as temp:
+            first = probe.campaign(plan, root, Path(temp) / "campaign-one", mode="idle-only")
+            self.assertEqual(first["status"], "idle_passed")
+            launched_after_first = len(launch_count)
+            second = probe.campaign(plan, root, Path(temp) / "campaign-two", mode="idle-only")
+            self.assertEqual(second["status"], "failed_stop")
+            self.assertEqual(len(launch_count), launched_after_first)
+
+        root2, _, _, modified, _ = self.prepare_fixture()
+        modified["os"] = str(modified.get("os", "")) + " changed"
+        with mock.patch.object(probe, "require_runtime_platform"), mock.patch.object(
+            probe, "source_identity", return_value=copy.deepcopy(self.SOURCE)
+        ), mock.patch.object(probe, "environment_identity", return_value=copy.deepcopy(self.PARENT_ENV)), mock.patch.object(
+            probe, "toolchain_identity", return_value=copy.deepcopy(self.TOOLCHAIN)
+        ), mock.patch.object(probe, "launch") as launch, tempfile.TemporaryDirectory() as temp:
+            report = probe.campaign(modified, root2, Path(temp) / "modified-plan", mode="idle-only")
+            self.assertEqual(report["status"], "failed_stop")
+            launch.assert_not_called()
+
+    @unittest.skipUnless(probe.os.name == "nt", "paired compiler sampling is Windows-only")
+    def test_builder_sample_failure_stops_before_probe_launch(self):
+        root, _, _, plan, _ = self.prepare_fixture()
+        launches = []
+
+        class Builder:
+            def __init__(self, folder):
+                self.folder = Path(folder)
+                self.record = {"failure": None, "samples": [], "start": 1.0}
+                self.child = type("Child", (), {"poll": lambda self: None})()
+                self.calls = 0
+                self.finished = False
+
+            def sample(self):
+                self.calls += 1
+                if self.calls == 1:
+                    self.record["samples"].append({"monotonic": 0.0, "compilers": [
+                        {"pid": 11, "creation_100ns": 22, "cpu_100ns": 100}]})
+                    return
+                if self.calls == 2:
+                    self.record["samples"].append({"monotonic": 1.0, "compilers": [
+                        {"pid": 11, "creation_100ns": 22, "cpu_100ns": 200}]})
+                    return
+                self.record["failure"] = "process_observation_failed: synthetic builder sample failure"
+                return
+
+            def finish(self):
+                self.finished = True
+                return {"failure": "synthetic builder sample failure", "cleanup_complete": True,
+                        "handles_closed": True, "actual_exit": 0}
+
+        builder = None
+
+        def fake_launch(argv, cwd, folder, watchdog, env):
+            nonlocal builder
+            launches.append(list(argv))
+            if argv[0] == "cargo":
+                builder = Builder(folder)
+                return builder
+            # Idle cases precede the paired build condition by contract.
+            self.assertIsNone(builder)
+            case_name = argv[1]
+            binary_name = Path(argv[0]).stem
+            filtered = len(plan["binaries"][binary_name]["listed_tests"]) - 1
+            folder = Path(folder)
+            folder.mkdir(parents=True, exist_ok=False)
+            (folder / "stdout.txt").write_text(
+                f"test {case_name} ... ok\n"
+                f"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; {filtered} filtered out;\n",
+                encoding="utf-8",
+            )
+
+            class CompletedIdleProbe:
+                record = {"failure": None, "start": 1.0, "end": 2.0, "actual_exit": 0,
+                          "cleanup_complete": True, "handles_closed": True}
+                child = type("Child", (), {"poll": lambda self: 0})()
+
+                def __init__(self, output_folder):
+                    self.folder = output_folder
+
+                def finish(self):
+                    return dict(self.record)
+
+            return CompletedIdleProbe(folder)
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            probe, "require_runtime_platform"
+        ), mock.patch.object(probe, "validate_plan"), mock.patch.object(probe, "launch", side_effect=fake_launch), mock.patch.object(
+            probe.time, "sleep", return_value=None
+        ):
+            result = probe.campaign(plan, root, Path(temp) / "campaign", mode="paired")
+
+        build_indices = [i for i, argv in enumerate(launches) if argv[:2] == ["cargo", "build"]]
+        self.assertEqual(len(build_indices), 1)
+        self.assertEqual(build_indices[0], len(plan["cases"]))
+        self.assertEqual(len(launches), len(plan["cases"]) + 1)
+        self.assertTrue(all(attempt["condition"] == "idle" and attempt["status"] == "passed"
+                            for attempt in result["attempts"]))
+        self.assertEqual(len(result["attempts"]), len(plan["cases"]))
+        self.assertIn("observation failed before probe launch", result["failure"])
+        self.assertIn("synthetic builder sample failure", result["build"]["failure"])
+        self.assertEqual(result["status"], "failed_stop")
+        self.assertTrue(builder.finished)
 
 
 class CaptureLifecycleTests(unittest.TestCase):
@@ -308,6 +629,150 @@ class CaptureLifecycleTests(unittest.TestCase):
             self.assertEqual((folder / "stderr.txt").read_bytes(), b"warning\n")
             self.assertTrue(capture.child.closed)
 
+    def test_writer_close_error_releases_gate_and_preserves_first_error(self):
+        class CloseRaisesAfterClosing:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.raised = False
+
+            def write(self, data):
+                return self.wrapped.write(data)
+
+            def flush(self):
+                return self.wrapped.flush()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.close()
+                return False
+
+            def close(self):
+                self.wrapped.close()
+                if not self.raised:
+                    self.raised = True
+                    raise OSError("synthetic writer close failure")
+
+        original_fdopen = probe.os.fdopen
+        writers = []
+
+        def fdopen_with_close_error(fd, mode="r", *args, **kwargs):
+            stream = original_fdopen(fd, mode, *args, **kwargs)
+            if mode == "wb" and not writers:
+                stream = CloseRaisesAfterClosing(stream)
+                writers.append(stream)
+            return stream
+
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "capture"
+            with mock.patch.object(probe.os, "fdopen", side_effect=fdopen_with_close_error):
+                capture = self.capture(folder, child_options={"out": b"drained stdout\n", "err": b"drained stderr\n"})
+                record = capture.finish()
+
+            self.assertIn("pipe_writer_close_error:", record["failure"])
+            self.assertIn("synthetic writer close failure", record["failure"])
+            self.assertEqual(record["actual_exit"], 0)
+            self.assertTrue(record["cleanup_complete"])
+            self.assertTrue(all(stream["eof"] for stream in record["streams"].values()))
+            self.assertEqual((folder / "stdout.txt").read_bytes(), b"drained stdout\n")
+            self.assertEqual((folder / "stderr.txt").read_bytes(), b"drained stderr\n")
+            self.assertEqual(record["streams"]["stdout"]["sha256"], hashlib.sha256(b"drained stdout\n").hexdigest())
+            self.assertEqual(record["streams"]["stderr"]["sha256"], hashlib.sha256(b"drained stderr\n").hexdigest())
+
+    def test_raw_close_error_fails_capture_and_hashes_saved_file(self):
+        class CloseRaisesAfterClosing:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.raised = False
+
+            def write(self, data):
+                return self.wrapped.write(data)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.close()
+                return False
+
+            def close(self):
+                self.wrapped.close()
+                if not self.raised:
+                    self.raised = True
+                    raise OSError("synthetic raw close failure")
+
+        original_open = Path.open
+
+        def open_with_raw_close_error(path, mode="r", *args, **kwargs):
+            stream = original_open(path, mode, *args, **kwargs)
+            if path.name == "stdout.txt" and mode == "wb":
+                return CloseRaisesAfterClosing(stream)
+            return stream
+
+        data = b"saved before close failure\n"
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "capture"
+            with mock.patch.object(Path, "open", new=open_with_raw_close_error):
+                capture = self.capture(folder, child_options={"out": data})
+                record = capture.finish()
+
+            saved = (folder / "stdout.txt").read_bytes()
+            self.assertEqual(saved, data)
+            self.assertIn("raw_close_error:", record["failure"])
+            self.assertIn("synthetic raw close failure", record["failure"])
+            self.assertEqual(record["actual_exit"], 0)
+            self.assertTrue(record["cleanup_complete"])
+            self.assertEqual(record["streams"]["stdout"]["sha256"], hashlib.sha256(saved).hexdigest())
+            self.assertEqual(record["streams"]["stdout"]["saved_bytes"], len(saved))
+
+    def test_partial_raw_write_fails_but_drains_and_hashes_persisted_prefix(self):
+        class ShortWrite:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.first = True
+
+            def write(self, data):
+                if self.first:
+                    self.first = False
+                    return self.wrapped.write(data[:4])
+                return 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.wrapped.close()
+                return False
+
+            def close(self):
+                self.wrapped.close()
+
+        original_open = Path.open
+
+        def open_with_short_raw_write(path, mode="r", *args, **kwargs):
+            stream = original_open(path, mode, *args, **kwargs)
+            if path.name == "stdout.txt" and mode == "wb":
+                return ShortWrite(stream)
+            return stream
+
+        payload = b"persist-only-the-first-four-bytes"
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "capture"
+            with mock.patch.object(Path, "open", new=open_with_short_raw_write):
+                capture = self.capture(folder, child_options={"out": payload})
+                record = capture.finish()
+
+            saved = (folder / "stdout.txt").read_bytes()
+            stream = record["streams"]["stdout"]
+            self.assertEqual(saved, payload[:4])
+            self.assertIn("partial raw write", record["failure"])
+            self.assertEqual(stream["observed_bytes"], len(payload))
+            self.assertEqual(stream["saved_bytes"], len(saved))
+            self.assertEqual(stream["sha256"], hashlib.sha256(saved).hexdigest())
+            self.assertTrue(stream["eof"])
+            self.assertTrue(record["cleanup_complete"])
+
     def test_watchdog_marks_timeout_but_waits_for_natural_exit(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(probe.time, "sleep", return_value=None):
             folder = Path(temp) / "capture"
@@ -320,12 +785,9 @@ class CaptureLifecycleTests(unittest.TestCase):
             self.assertTrue(record["handles_closed"])
 
     def test_campaign_stops_after_first_failed_case_and_preserves_report(self):
-        plan = valid_plan()
-        second_name = "two_clients_over_websocket"
-        plan["binaries"]["net_e2e"] = {
-            "path": "prebuilt-net-e2e.exe", "sha256": "binary", "listed_tests": [second_name]
-        }
-        plan["cases"].append({"binary": "net_e2e", "name": second_name, "watchdog_seconds": 90})
+        helper = PreparationAndReservationTests("test_prepare_uses_fresh_isolated_target_and_explicit_target_dir_argv")
+        root, _, _, plan, _ = helper.prepare_fixture()
+        self.addCleanup(helper.doCleanups)
 
         class FailedCapture:
             def __init__(self, folder):
@@ -349,11 +811,11 @@ class CaptureLifecycleTests(unittest.TestCase):
                 return FailedCapture(Path(folder))
 
             with mock.patch.object(probe, "require_runtime_platform", return_value=None), mock.patch.object(
-                probe, "validate_plan", return_value=None
-            ), mock.patch.object(
-                probe, "launch", side_effect=fake_launch
-            ):
-                result = probe.campaign(plan, Path("fake-root"), output, mode="idle-only")
+                probe, "source_identity", return_value=copy.deepcopy(helper.SOURCE)
+            ), mock.patch.object(probe, "environment_identity", return_value=copy.deepcopy(helper.PARENT_ENV)), mock.patch.object(
+                probe, "toolchain_identity", return_value=copy.deepcopy(helper.TOOLCHAIN)
+            ), mock.patch.object(probe, "launch", side_effect=fake_launch):
+                result = probe.campaign(plan, root, output, mode="idle-only")
 
             self.assertEqual(result["status"], "failed_stop")
             self.assertIn("probe failed", result["failure"])
@@ -386,6 +848,31 @@ class CaptureLifecycleTests(unittest.TestCase):
             self.assertEqual(record["failure"], "child_exit_nonzero")
             self.assertTrue(record["cleanup_complete"])
             self.assertTrue(record["handles_closed"])
+
+    def test_nonzero_exit_remains_first_failure_when_final_sample_errors(self):
+        class LateSampleErrorChild(FakeChild):
+            def sample(self):
+                raise OSError("synthetic final observation failure")
+
+        with tempfile.TemporaryDirectory() as temp:
+            capture = probe.Capture(
+                ["fake-test-executable", "case", "--exact"],
+                Path("fake-root"),
+                Path(temp) / "capture",
+                90,
+                {},
+                factory=lambda argv, cwd, stdout, stderr, env: LateSampleErrorChild(
+                    argv, cwd, stdout, stderr, env, exit_code=7, polls=[7]
+                ),
+            )
+            record = capture.finish()
+
+            self.assertEqual(record["actual_exit"], 7)
+            self.assertEqual(record["failure"], "child_exit_nonzero")
+            self.assertFalse(record["cleanup_complete"])
+            self.assertTrue(record["handles_closed"])
+            self.assertTrue(any("synthetic final observation failure" in reason
+                                for reason in record["secondary_failures"]))
 
     def test_raw_output_cap_truncates_and_first_failure_is_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
