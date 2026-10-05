@@ -506,9 +506,15 @@ fn wss_tls_and_http_handshakes_share_the_connect_timeout() {
         MockResponse::CumulativeDelay,
     ] {
         let MockServer { addr, cert, alpn, .. } = mock_tls_server(mode);
-        let target = url("localhost", addr, "/timeout");
-        let mut client =
-            Endpoint::connect_wss(&target, None, QuicTrust::CertDer(cert), timeout_cfg()).unwrap();
+        // Match the IPv4 listener so localhost's IPv6 fallback cannot consume the timeout budget.
+        let target = url("127.0.0.1", addr, "/timeout");
+        let mut client = Endpoint::connect_wss(
+            &target,
+            Some("localhost"),
+            QuicTrust::CertDer(cert),
+            timeout_cfg(),
+        )
+        .unwrap();
         let error = connect_failed(&mut client);
         assert!(
             error.contains("timed out"),
