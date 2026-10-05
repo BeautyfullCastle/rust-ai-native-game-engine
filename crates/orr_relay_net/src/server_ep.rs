@@ -99,6 +99,26 @@ impl NetEndpoint {
         self.to_net.get(&conn.0).and_then(|&c| self.t.stats(c))
     }
 
+    /// Try to enqueue one complete reliable message without blocking.
+    ///
+    /// Unlike the legacy [`Endpoint::send`], this preserves errors returned by
+    /// the installed [`Transport`], including backpressure. Unknown/retired
+    /// adapter connections return [`SendError::UnknownConnection`]. `Ok(())`
+    /// means accepted by that immediate transport, not delivered or acknowledged
+    /// by the peer. An error means no bytes were queued there, so callers may
+    /// retain the message. Use as the callback for `P2pMembership::flush`.
+    ///
+    /// Wrappers retain their own semantics: the optional network conditioner
+    /// accepts into its simulated queue and may hide later underlying send
+    /// errors. This method does not strengthen a wrapper's delivery guarantees.
+    pub fn try_send_reliable(&mut self, conn: ConnId, data: &[u8]) -> Result<(), SendError> {
+        let net = *self
+            .to_net
+            .get(&conn.0)
+            .ok_or(SendError::UnknownConnection)?;
+        self.t.send(net, orr_net::Channel::Reliable, data)
+    }
+
     /// Claim a live connection for exclusive join cleanup. Connections are
     /// shared/unowned by default. The application must establish that no other
     /// consumer needs this link before claiming it. Unknown/already-owned
@@ -256,6 +276,9 @@ impl Endpoint for NetEndpoint {
         }
     }
 }
+
+#[cfg(test)]
+mod p2p_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

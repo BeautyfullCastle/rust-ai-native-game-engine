@@ -3317,6 +3317,7 @@ dependencies = [
  "orr_proto",
  "orr_session",
  "orr_sim",
+ "orr_testgame",
 ]
 
 [[package]]
