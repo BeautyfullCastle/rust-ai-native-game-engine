@@ -1201,5 +1201,210 @@ class CaptureLifecycleTests(unittest.TestCase):
             self.assertTrue(record["handles_closed"])
 
 
+@unittest.skipUnless(probe.os.name == "nt", "Windows query-handle ownership is Windows-only")
+class WindowsQueryHandleRetentionTests(unittest.TestCase):
+    @unittest.skipUnless(probe.os.name == "nt", "Windows query-handle ownership is Windows-only")
+    def make_windows_child(self, job=707):
+        child = object.__new__(probe.WindowsChild)
+        child._assigned, child._closed, child._job = True, False, job
+        child._process, child._thread, child._stdin = 101, None, None
+        child._parent_natural_exit, child._cleanup_zero_verified = True, False
+        child._attr_list = child._attr_storage = None
+        child._query_handles = []
+        return child
+
+    @staticmethod
+    def observation(active, *, errors=(), identities=(), compilers=()):
+        return {"active": active, "cpu_100ns": 100, "compilers": list(compilers),
+                "process_identities": list(identities), "observation_errors": list(errors)}
+
+    class FakeKernel:
+        def __init__(self, *, active=1, allow_query_close=False):
+            self.active = active
+            self.allow_query_close = allow_query_close
+            self.open_process_calls = []
+            self.close_handle_calls = []
+            self.api_order = []
+
+        def QueryInformationJobObject(self, job, info_class, buffer, size, returned):
+            self.api_order.append("job_accounting")
+            if info_class != probe._JOB_BASIC_ACCOUNTING:
+                raise AssertionError("unexpected job information class")
+            acct = probe.ctypes.cast(buffer, probe.ctypes.POINTER(probe._JOB_ACCOUNTING)).contents
+            acct.ActiveProcesses = self.active
+            acct.TotalUserTime = 30
+            acct.TotalKernelTime = 40
+            return 1
+
+        def OpenProcess(self, access, inherit, pid):
+            self.api_order.append("open_process")
+            self.open_process_calls.append(pid)
+            return 501
+
+        def IsProcessInJob(self, handle, job, member_ptr):
+            self.api_order.append("membership")
+            probe.ctypes.cast(member_ptr, probe.ctypes.POINTER(probe.wintypes.BOOL))[0] = 1
+            return 1
+
+        def GetProcessTimes(self, handle, created_ptr, exited_ptr, kernel_ptr, user_ptr):
+            self.api_order.append("process_times")
+            created = probe.ctypes.cast(created_ptr, probe.ctypes.POINTER(probe._FILETIME)).contents
+            created.dwLowDateTime, created.dwHighDateTime = 123, 0
+            return 1
+
+        def QueryFullProcessImageNameW(self, handle, flags, image, needed_ptr):
+            self.api_order.append("image_query")
+            image.value = "C:\\Rust\\rustc.exe"
+            return 1
+
+        def CloseHandle(self, handle):
+            self.api_order.append("close_handle")
+            self.close_handle_calls.append(handle)
+            if handle == 501 and not self.allow_query_close:
+                probe.ctypes.set_last_error(5)
+                return 0
+            return 1
+
+    def test_sample_retains_failed_query_handle_and_blocks_pid_reopen_until_retry(self):
+        child = self.make_windows_child()
+        kernel = self.FakeKernel()
+        with mock.patch.object(probe, "_api", return_value=kernel), mock.patch.object(
+            probe, "_job_pids", return_value=[51]
+        ):
+            first = child.sample()
+            self.assertEqual(first["active"], 1)
+            self.assertEqual(first["query_handles_pending"], 1)
+            self.assertEqual(first["query_handle_identities"][0]["pid"], 51)
+            self.assertEqual(first["query_handle_identities"][0]["creation_100ns"], 123)
+            self.assertIn("close_error", first["query_handle_identities"][0])
+            self.assertNotIn("handle", first["query_handle_identities"][0])
+            self.assertEqual(len(child._query_handles), 1)
+            retained = child._query_handles[0]
+            self.assertEqual(retained["handle"], 501)
+            self.assertEqual(retained["identity"]["pid"], 51)
+
+            second = child.sample()
+            self.assertEqual(second["query_handles_pending"], 1)
+            self.assertEqual(second["query_handle_identities"][0]["pid"], 51)
+            self.assertEqual(kernel.open_process_calls, [51])
+            self.assertEqual(len(child._query_handles), 1)
+            self.assertIs(child._query_handles[0], retained)
+            self.assertTrue(child._query_handles[0]["identity"]["member"])
+
+            kernel.allow_query_close = True
+            retry_errors = child._retry_query_handle_closes(kernel)
+
+        self.assertEqual(retry_errors, [])
+        self.assertEqual(child._query_handles, [])
+        self.assertEqual(kernel.open_process_calls, [51])
+        self.assertEqual(kernel.close_handle_calls, [501, 501, 501])
+
+    def test_close_keeps_parent_and_job_owned_until_retained_query_handle_closes(self):
+        child = self.make_windows_child()
+        child._query_handles = [{"handle": 501,
+                                 "identity": {"pid": 52, "member": True, "creation_100ns": 456},
+                                 "close_error": "previous synthetic close failure"}]
+        kernel = self.FakeKernel(active=0)
+        with mock.patch.object(child, "poll", return_value=0), mock.patch.object(
+            child, "job_accounting", return_value={"active": 0, "cpu_100ns": 70, "compilers": []}
+        ), mock.patch.object(probe, "_api", return_value=kernel):
+            with self.assertRaisesRegex(RuntimeError, "query handle closure pending"):
+                child.close()
+            self.assertEqual(child._process, 101)
+            self.assertEqual(child._job, 707)
+            self.assertEqual(kernel.close_handle_calls, [501])
+            self.assertEqual(len(child._query_handles), 1)
+
+            kernel.allow_query_close = True
+            child.close()
+
+        self.assertTrue(child._closed)
+        self.assertEqual(child._query_handles, [])
+        self.assertEqual(kernel.close_handle_calls, [501, 501, 101, 707])
+
+    @unittest.skipUnless(probe.os.name == "nt", "Windows process cleanup is Windows-only")
+    def test_capture_saves_pending_query_identity_and_campaign_stops_after_cleanup(self):
+        helper = PreparationAndReservationTests("test_prepare_uses_fresh_isolated_target_and_explicit_target_dir_argv")
+        root, _, _, plan, _ = helper.prepare_fixture()
+        self.addCleanup(helper.doCleanups)
+        kernel = self.FakeKernel(active=1)
+        launches, children, process_snapshots, pending_ownership = [], [], [], []
+
+        def fake_launch(argv, cwd, folder, watchdog, env):
+            launches.append(list(argv))
+
+            def factory(_child_argv, _child_cwd, _stdout, _stderr, _child_env):
+                child = self.make_windows_child()
+                child.pid = 88
+                child._process = 101
+                child._parent_natural_exit = False
+
+                def natural_parent_exit():
+                    child._parent_natural_exit = True
+                    return 0
+
+                child.poll = natural_parent_exit
+                child.wait = lambda: 0
+                children.append(child)
+                return child
+
+            return probe.Capture(argv, cwd, folder, watchdog, env, factory=factory)
+
+        real_save = probe.save
+
+        def save_with_snapshots(path, value):
+            real_save(path, value)
+            if Path(path).name == "process.json":
+                process_snapshots.append(copy.deepcopy(value))
+                if value.get("samples") and value["samples"][-1].get("query_handles_pending") == 1:
+                    child = children[0]
+                    pending_ownership.append({"process": child._process, "job": child._job,
+                                              "query_handles": copy.deepcopy(child._query_handles)})
+                    # Let the next bounded sample prove zero, retry the same
+                    # query handle, and finish naturally without more opens.
+                    kernel.active = 0
+                    kernel.allow_query_close = True
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            probe, "require_runtime_platform"
+        ), mock.patch.object(probe, "source_identity", return_value=copy.deepcopy(helper.SOURCE)), mock.patch.object(
+            probe, "environment_identity", return_value=copy.deepcopy(helper.PARENT_ENV)
+        ), mock.patch.object(probe, "toolchain_identity", return_value=copy.deepcopy(helper.TOOLCHAIN)), mock.patch.object(
+            probe, "launch", side_effect=fake_launch
+        ), mock.patch.object(probe, "_api", return_value=kernel), mock.patch.object(
+            probe, "_job_pids", return_value=[88]
+        ), mock.patch.object(probe, "save", side_effect=save_with_snapshots), mock.patch.object(
+            probe.time, "sleep", return_value=None
+        ):
+            result = probe.campaign(plan, root, Path(temp) / "campaign", mode="idle-only")
+
+        self.assertEqual(result["status"], "failed_stop")
+        self.assertEqual(len(result["attempts"]), 1)
+        self.assertEqual(len(launches), 1)
+        self.assertIn("process_observation_error", result["failure"])
+        self.assertTrue(children[0]._closed)
+        pending_snapshots = [snapshot for snapshot in process_snapshots
+                             if snapshot.get("handles_closed") is False and
+                             snapshot.get("cleanup_complete") is False and snapshot["samples"] and
+                             snapshot["samples"][-1].get("query_handles_pending") == 1]
+        self.assertTrue(pending_snapshots)
+        saved = pending_snapshots[0]
+        self.assertEqual(saved["actual_exit"], 0)
+        self.assertIn("CloseHandle", saved["failure"])
+        self.assertEqual(saved["samples"][-1]["query_handle_identities"][0]["pid"], 88)
+        self.assertIn("CloseHandle", saved["samples"][-1]["query_handle_identities"][0]["close_error"])
+        final_process = result["attempts"][0]["process"]
+        self.assertEqual(final_process["failure"], saved["failure"])
+        self.assertTrue(final_process["handles_closed"])
+        self.assertTrue(final_process["cleanup_complete"])
+        self.assertEqual(len(pending_ownership), 1)
+        self.assertEqual(pending_ownership[0]["process"], 101)
+        self.assertEqual(pending_ownership[0]["job"], 707)
+        self.assertEqual(len(pending_ownership[0]["query_handles"]), 1)
+        self.assertEqual(pending_ownership[0]["query_handles"][0]["handle"], 501)
+        self.assertEqual(kernel.open_process_calls, [88])
+        self.assertEqual(kernel.close_handle_calls, [501, 501, 101, 707])
+
+
 if __name__ == "__main__":
     unittest.main()

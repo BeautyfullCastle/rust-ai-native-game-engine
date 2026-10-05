@@ -348,6 +348,7 @@ class WindowsChild:
         self._attr_storage = None
         self._attr_list = None
         self._owned_after_failure = False
+        self._query_handles = []
 
         job = k.CreateJobObjectW(None, None)
         _check(job, "CreateJobObjectW")
@@ -530,12 +531,42 @@ class WindowsChild:
                     _close(k, ph)
                 except BaseException as exc:
                     result["errors"].append(repr(exc))
+                    # A failed CloseHandle still owns this exact opened handle.
+                    # Keep its bound identity; reopening the PID cannot prove close.
+                    if not hasattr(self, "_query_handles"):
+                        self._query_handles = []
+                    self._query_handles.append({"handle": ph, "identity": dict(identity),
+                                                "close_error": repr(exc)})
         return result
+
+    def _retry_query_handle_closes(self, k):
+        errors = []
+        for owned in tuple(getattr(self, "_query_handles", ())):
+            try:
+                _close(k, owned["handle"])
+            except BaseException as exc:
+                owned["close_error"] = repr(exc)
+                errors.append(repr(exc))
+            else:
+                self._query_handles.remove(owned)
+        return errors
+
+    def _query_handle_receipt(self):
+        owned = getattr(self, "_query_handles", ())
+        return {"query_handles_pending": len(owned),
+                "query_handle_identities": [{**entry["identity"],
+                                             "close_error": entry["close_error"]}
+                                            for entry in owned]}
 
     def sample(self):
         """An image failure invalidates measurement, not known Job accounting."""
         sample = self.job_accounting()
-        sample.update(observation_errors=[], process_identities=[])
+        sample.update(observation_errors=[], process_identities=[], **self._query_handle_receipt())
+        if sample["query_handles_pending"]:
+            sample["observation_errors"].extend(self._retry_query_handle_closes(_api()))
+            sample.update(self._query_handle_receipt())
+            if sample["query_handles_pending"]:
+                return sample  # Do not accumulate more query handles while held.
         if sample["active"] == 0:
             return sample
         k = _api()
@@ -550,6 +581,9 @@ class WindowsChild:
             if observed["compiler"] is not None:
                 sample["compilers"].append(observed["compiler"])
             sample["observation_errors"].extend(observed["errors"])
+            sample.update(self._query_handle_receipt())
+            if sample["query_handles_pending"]:
+                break
         return sample
 
     def close(self):
@@ -569,6 +603,9 @@ class WindowsChild:
         elif not self._cleanup_zero_verified:
             raise RuntimeError("Job zero was not verified before closing its handle")
         k = _api()
+        errors = self._retry_query_handle_closes(k)
+        if getattr(self, "_query_handles", ()):
+            raise RuntimeError("query handle closure pending: " + "; ".join(errors))
         self._delete_attributes()
         for attr in ("_thread", "_process", "_job", "_stdin"):
             handle = getattr(self, attr)
@@ -789,7 +826,7 @@ class Capture:
 
     def _cleanup_pending(self, sample):
         if getattr(self.child, "requires_job_cleanup", False):
-            return sample.get("active") != 0
+            return sample.get("active") != 0 or sample.get("query_handles_pending", 0) != 0
         return sample.get("active") not in (0, None)
 
     def finish(self):
@@ -822,6 +859,8 @@ class Capture:
         sample = self.sample()
         # On Windows wait for every descendant, including post-parent survivors.
         while self._cleanup_pending(sample):
+            if sample.get("query_handles_pending", 0):
+                self.record["handles_closed"] = False
             save(self.folder / "process.json", self.record)
             time.sleep(POLL)
             sample = self.sample()
