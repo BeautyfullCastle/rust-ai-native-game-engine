@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Bound;
+use std::sync::{Arc, Weak};
 
 use orr_ecs::{Frame, FrameRing};
 use orr_sim::{EventKey, Game, PlayerFlags, PlayerSlot, SimCommand, SimEvent, Simulation, TickInputs};
@@ -192,6 +193,44 @@ struct Grant {
     confirmed: bool,
 }
 
+/// Opaque capability for one local input-retention installation. Clones identify
+/// the same installation, but keep neither the Session nor its hold alive. Every
+/// installation, even of an identical ticket, gets a fresh identity. This token
+/// is process-local, never serialized, and cannot release another Session's hold.
+#[derive(Clone, Debug)]
+pub struct JoinHoldLease {
+    slot: PlayerSlot,
+    identity: Weak<()>,
+}
+impl JoinHoldLease {
+    pub(crate) fn is_live(&self) -> bool {
+        self.identity.strong_count() != 0
+    }
+    pub(crate) fn same_installation(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.identity, &other.identity)
+    }
+}
+
+/// Outcome of retiring one exact local hold. Releasing retention does not undo
+/// inputs, reopen a slot, retire links, or remove a donor's assignment.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinHoldRelease {
+    /// Already retired, replaced, or owned by another Session.
+    NoMatchingHold,
+    /// Retention released; this Session has no donor assignment for the slot.
+    Released,
+    /// Retention released, but this Session retains the donor assignment. An
+    /// unconfirmed grant can still accept a higher attempt of the same join;
+    /// a confirmed grant requires the separate departure protocol.
+    ReleasedAssignmentRetained,
+}
+
+struct JoinHold {
+    ticket: JoinTicket,
+    identity: Arc<()>,
+}
+
 /// Where a joiner stands on the input check of its backlogs.
 enum JoinState {
     /// Backlog notices are still missing.
@@ -280,7 +319,7 @@ pub struct Session<G: Game, S: InputSource<G>> {
     grants: BTreeMap<PlayerSlot, Grant>,
     /// Joins in transfer, by slot: `authored` keeps every tick after the
     /// ticket's `snapshot_tick` until the join is confirmed or dropped.
-    holds: BTreeMap<PlayerSlot, JoinTicket>,
+    holds: BTreeMap<PlayerSlot, JoinHold>,
     /// Highest tick of an input received from a remote peer, by slot.
     last_remote_tick: BTreeMap<PlayerSlot, u64>,
     /// Set on a joiner that checks its backlogs.
@@ -571,7 +610,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             span.until = ticket.first_input_tick;
         }
         self.grants.insert(slot, Grant { joiner_id: req.joiner_id, ticket, confirmed: false });
-        self.holds.insert(slot, ticket);
+        self.hold_inputs_for_join(ticket);
         Ok(message)
     }
 
@@ -588,12 +627,58 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// of the slot at `first_input_tick` or later arrives (the joiner is
     /// caught up), or on [`release_join_hold`](Self::release_join_hold).
     pub fn hold_inputs_for_join(&mut self, ticket: JoinTicket) {
-        self.holds.insert(ticket.slot, ticket);
+        let _ = self.hold_inputs_for_join_owned(ticket);
+    }
+
+    /// Installs the same retention as `hold_inputs_for_join`, returning ownership
+    /// of this exact installation for delayed cleanup. Reinstalling an identical
+    /// ticket replaces the previous lease. No donor assignment is changed.
+    pub fn hold_inputs_for_join_owned(&mut self, ticket: JoinTicket) -> JoinHoldLease {
+        let identity = Arc::new(());
+        let lease = JoinHoldLease {
+            slot: ticket.slot,
+            identity: Arc::downgrade(&identity),
+        };
+        self.holds.insert(ticket.slot, JoinHold { ticket, identity });
+        lease
+    }
+
+    /// Captures the current local installation, including a hold installed by
+    /// `serve_join`. The returned capability is not ticket or wire identity.
+    pub fn join_hold_lease(&self, slot: PlayerSlot) -> Option<JoinHoldLease> {
+        self.holds.get(&slot).map(|hold| JoinHoldLease {
+            slot,
+            identity: Arc::downgrade(&hold.identity),
+        })
+    }
+
+    pub(crate) fn owns_join_hold(&self, lease: &JoinHoldLease) -> bool {
+        self.join_hold_lease(lease.slot)
+            .is_some_and(|current| current.same_installation(lease))
+    }
+
+    /// Releases only the retention owned by `lease`. Foreign, stale and repeated
+    /// calls are harmless, including after replacement with an identical ticket.
+    /// Authored history is pruned by ordinary `poll_confirmed` according to the
+    /// configured log window and any other holds. The donor grant is retained so
+    /// pre-Ready cancellation can retry without losing assignment ownership.
+    pub fn release_owned_join_hold(&mut self, lease: &JoinHoldLease) -> JoinHoldRelease {
+        if !self.owns_join_hold(lease) {
+            return JoinHoldRelease::NoMatchingHold;
+        }
+        self.holds.remove(&lease.slot);
+        if self.grants.contains_key(&lease.slot) {
+            JoinHoldRelease::ReleasedAssignmentRetained
+        } else {
+            JoinHoldRelease::Released
+        }
     }
 
     /// Ends the hold of `slot` (the join was given up), and drops this
     /// host's pending grant for it. Does not vacate the slot; see
-    /// [`mark_slot_vacant`](Self::mark_slot_vacant).
+    /// [`mark_slot_vacant`](Self::mark_slot_vacant). This legacy slot-based API
+    /// is not safe for delayed generation cleanup and removes retry ownership;
+    /// use `release_owned_join_hold` with the original lease instead.
     pub fn release_join_hold(&mut self, slot: PlayerSlot) {
         self.holds.remove(&slot);
         self.grants.remove(&slot);
@@ -655,7 +740,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// same link as the backlog; the joiner reads it with
     /// [`receive_backlog`](Self::receive_backlog).
     pub fn backlog_notice(&self, slot: PlayerSlot) -> Option<Vec<u8>> {
-        let ticket = self.holds.get(&slot)?;
+        let ticket = &self.holds.get(&slot)?.ticket;
         // Ticks are visited in order, so each slot's ticks form runs.
         let mut runs: BTreeMap<PlayerSlot, (u64, u64)> = BTreeMap::new();
         let mut spans = Vec::new();
@@ -1159,9 +1244,13 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             *seen = (*seen).max(remote.tick);
             // The joiner is caught up once it sends input of its own: the
             // hold on our inputs is over.
-            if self.holds.get(&remote.slot).is_some_and(|t| remote.tick >= t.first_input_tick) {
+            if self.holds.get(&remote.slot).is_some_and(|h| remote.tick >= h.ticket.first_input_tick) {
                 self.holds.remove(&remote.slot);
-                if let Some(g) = self.grants.get_mut(&remote.slot) {
+            }
+            // Retention may already have been retired while this input was in
+            // flight. Assignment confirmation must not depend on a live hold.
+            if let Some(g) = self.grants.get_mut(&remote.slot) {
+                if remote.tick >= g.ticket.first_input_tick {
                     g.confirmed = true;
                 }
             }
@@ -1189,8 +1278,8 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             self.local_pending = self.local_pending.split_off(&(self.verified_tick + 1));
         }
         let mut keep_from = self.verified_tick.saturating_sub(self.cfg.input_log_ticks as u64);
-        for ticket in self.holds.values() {
-            keep_from = keep_from.min(ticket.snapshot_tick + 1);
+        for hold in self.holds.values() {
+            keep_from = keep_from.min(hold.ticket.snapshot_tick + 1);
         }
         self.authored = self.authored.split_off(&keep_from);
         (batch, rollback)

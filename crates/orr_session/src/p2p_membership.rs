@@ -13,9 +13,13 @@
 //!
 //! Every membership mutation invalidates all frozen attempts conservatively.
 //! Returned cleanup obligations must be coordinated before retry/promotion:
-//! release local/remote holds, invalidate join bootstraps and retire old input
-//! links. No cleanup wire protocol or input codec is introduced here. In
-//! particular, cancellation cannot undo inputs already authored after Ready.
+//! retire exact local holds with `P2pCleanup::release_local_hold`, coordinate
+//! remote retention, invalidate join bootstraps and retire old input links.
+//! Input-link retirement is a later integration: `InputSource` has no close or
+//! remove operation, and the returned connection list includes shared links,
+//! not just links exclusively owned by this join. Never blindly close that list.
+//! No cleanup wire protocol or input codec is introduced here. Cancellation
+//! cannot undo inputs already authored after Ready or reopen an assigned slot.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -25,7 +29,7 @@ use orr_proto::{Channel, ConnId, ServerEvent};
 use crate::{
     checked_backlog_notice, import_checked_join_ticket, serve_checked_join, CheckedJoinContext,
     CheckedJoinError, CheckedJoinTicket, Game, InputSource, JoinBootstrap, JoinBootstrapError,
-    JoinBootstrapStatus, JoinRoster, PlayerSlot, Session,
+    JoinBootstrapStatus, JoinHoldLease, JoinHoldRelease, JoinRoster, PlayerSlot, Session,
 };
 
 /// Room classification, independent of any local default-input authorship.
@@ -62,15 +66,34 @@ impl P2pAttempt {
 
 /// Explicit obligations, including all former links, even if no control message
 /// was successfully queued to the transport. A send success is not delivery.
-/// This value never mutates a bootstrap or session. The application must track
-/// which retired attempt owns each resource and clean it before replacement;
-/// equal wire context alone cannot identify a bootstrap instance.
+/// `release_local_hold` can retire only the exact Session retention captured
+/// during this attempt. It is idempotent and safe after local replacement, even
+/// with equal tickets. The private lease is never reconstructed from the public
+/// wire context. This value does not own or invalidate a bootstrap or input link;
+/// those still require caller coordination and instance ownership.
 #[must_use = "coordinate hold, bootstrap and input-link cleanup before retrying"]
 #[derive(Debug)]
 pub struct P2pCleanup {
     pub context: CheckedJoinContext,
     pub connections: Vec<(PlayerSlot, ConnId)>,
     pub discarded_outbound_bytes: usize,
+    local_hold: Option<JoinHoldLease>,
+}
+impl P2pCleanup {
+    /// Retires this attempt's local retention if it is still installed in this
+    /// Session. Keeps the donor assignment and all input and membership state.
+    /// Does not consume the obligation: applying it to a foreign Session first
+    /// cannot prevent later cleanup of the correct owner. Bootstrap invalidation,
+    /// remote cleanup and exclusive input-link retirement remain separate work.
+    pub fn release_local_hold<G: Game, S: InputSource<G>>(
+        &self,
+        session: &mut Session<G, S>,
+    ) -> JoinHoldRelease {
+        self.local_hold.as_ref().map_or(
+            JoinHoldRelease::NoMatchingHold,
+            |lease| session.release_owned_join_hold(lease),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -83,6 +106,9 @@ pub enum P2pMembershipError {
     IncompleteMembership,
     AttemptExists(PlayerSlot),
     AttemptMismatch,
+    /// This attempt already owns a live hold in a different Session. Cancel and
+    /// retire it first, or drop the old Session before installing a replacement.
+    LocalSessionMismatch,
     Invalidated,
     RevisionExhausted,
     WrongSender,
@@ -146,7 +172,12 @@ pub struct P2pFlush<E> {
 }
 
 /// Fixed-size slot and attempt tables; no more than `player_count` bindings or
-/// pending attempts. Retained outbound payloads share an explicit byte budget.
+/// pending attempts. Each attempt records at most one weak local hold lease;
+/// a second live Session is rejected before mutation. Dropping a Session or
+/// replacing its hold expires the lease, and repeated installations reuse the
+/// same entry. Attempt-handle clones carry no lease bookkeeping. Capturing holds
+/// requires exclusive `&mut self`, with no locks or interior synchronization.
+/// Retained outbound payloads share an explicit byte budget.
 /// No transport Connected events are stored. The local identity is immutable.
 ///
 /// The existing abstract `Endpoint::send` cannot report backpressure and may
@@ -159,6 +190,7 @@ pub struct P2pMembership {
     slots: Vec<Slot>,
     revision: u64,
     attempts: Vec<Option<P2pAttempt>>,
+    local_holds: Vec<Option<JoinHoldLease>>,
     outbound: VecDeque<Outbound>,
     outbound_bytes: usize,
     outbound_budget: usize,
@@ -186,6 +218,7 @@ impl P2pMembership {
             ],
             revision: 0,
             attempts: vec![None; player_count as usize],
+            local_holds: vec![None; player_count as usize],
             outbound: VecDeque::new(),
             outbound_bytes: 0,
             outbound_budget,
@@ -250,6 +283,7 @@ impl P2pMembership {
                 .filter_map(|(i, s)| s.conn.map(|c| (PlayerSlot(i as u8), c)))
                 .collect(),
             discarded_outbound_bytes: discarded,
+            local_hold: self.local_holds[joiner.0 as usize].take(),
         }
     }
     fn change(
@@ -397,7 +431,8 @@ impl P2pMembership {
     /// Complete prior cleanup before calling. Increase attempt for retries in
     /// one generation and use a fresh join_id after membership changes. Never
     /// reuse a wire (join_id, attempt) pair for a replacement bootstrap; local
-    /// handle serials do not fence delayed wire traffic or old cleanup objects.
+    /// handle serials do not fence delayed wire traffic or bootstrap instances.
+    /// Exact local hold cleanup is safe even after a replacement is installed.
     pub fn begin_attempt(
         &mut self,
         joiner: PlayerSlot,
@@ -465,8 +500,36 @@ impl P2pMembership {
         }
         Ok(())
     }
-    pub fn serve_request<G: Game, S: InputSource<G>>(
+    fn check_local_session<G: Game, S: InputSource<G>>(
         &self,
+        a: &P2pAttempt,
+        session: &Session<G, S>,
+    ) -> Result<(), P2pMembershipError> {
+        if self.local_holds[a.context.roster().joiner().0 as usize]
+            .as_ref()
+            .is_some_and(|lease| lease.is_live() && !session.owns_join_hold(lease))
+        {
+            return Err(P2pMembershipError::LocalSessionMismatch);
+        }
+        Ok(())
+    }
+    fn capture_local_hold<G: Game, S: InputSource<G>>(
+        &mut self,
+        a: &P2pAttempt,
+        session: &Session<G, S>,
+        before: Option<JoinHoldLease>,
+    ) {
+        let slot = a.context.roster().joiner();
+        if let Some(after) = session.join_hold_lease(slot) {
+            if !before.as_ref().is_some_and(|old| old.same_installation(&after)) {
+                self.local_holds[slot.0 as usize] = Some(after);
+            }
+        }
+    }
+    /// Serves and captures a fresh local retention lease before the caller can
+    /// queue control bytes. A later queue/enqueue failure cannot lose ownership.
+    pub fn serve_request<G: Game, S: InputSource<G>>(
+        &mut self,
         a: &P2pAttempt,
         conn: ConnId,
         donor: &mut Session<G, S>,
@@ -478,7 +541,12 @@ impl P2pMembership {
         {
             return Err(P2pMembershipError::WrongSender);
         }
-        Ok(serve_checked_join(donor, &a.context, request)?)
+        self.check_local_session(a, donor)?;
+        let before = donor.join_hold_lease(a.context.roster().joiner());
+        let result = serve_checked_join(donor, &a.context, request);
+        // Capture even if checked wrapping fails after the Session mutation.
+        self.capture_local_hold(a, donor, before);
+        Ok(result?)
     }
     pub fn import_ticket<G: Game, S: InputSource<G>>(
         &self,
@@ -500,8 +568,10 @@ impl P2pMembership {
             wire_limit,
         )?)
     }
+    /// Installs and captures one exact retention lease, independently of later
+    /// queuing. Repeated calls replace the prior installation in this Session.
     pub fn backlog_notice<G: Game, S: InputSource<G>>(
-        &self,
+        &mut self,
         a: &P2pAttempt,
         peer: &mut Session<G, S>,
         ticket: &CheckedJoinTicket,
@@ -510,7 +580,11 @@ impl P2pMembership {
         if peer.config().local_slot != self.local {
             return Err(P2pMembershipError::WrongSender);
         }
-        Ok(checked_backlog_notice(peer, &a.context, ticket)?)
+        self.check_local_session(a, peer)?;
+        let before = peer.join_hold_lease(a.context.roster().joiner());
+        let result = checked_backlog_notice(peer, &a.context, ticket);
+        self.capture_local_hold(a, peer, before);
+        Ok(result?)
     }
     pub fn receive_notice<G: Game, S: InputSource<G>>(
         &self,
@@ -659,5 +733,86 @@ fn control_magic(data: &[u8]) -> Option<&'static [u8; 4]> {
         b"ORRJ" => Some(b"ORRJ"),
         b"ORRB" => Some(b"ORRB"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+    use crate::{LocalInputSource, SessionConfig};
+    use orr_testgame::{Arena, ArenaConfig};
+
+    fn session(slot: u8) -> Session<Arena, LocalInputSource> {
+        let mut config = SessionConfig::new(3, PlayerSlot(slot), 42, 60);
+        config.join_id = 7;
+        if slot == 0 {
+            config.vacant_slots.push(PlayerSlot(2));
+        }
+        Session::new(ArenaConfig { player_count: 3 }, config, LocalInputSource)
+    }
+
+    #[test]
+    fn local_hold_bookkeeping_is_fixed_under_repeated_replaced_and_foreign_sessions() {
+        let mut m = P2pMembership::new(3, PlayerSlot(1), 1 << 20).unwrap();
+        assert!(m.admit_local().unwrap().is_empty());
+        assert!(m
+            .admit_active(PlayerSlot(0), ConnId(10))
+            .unwrap()
+            .is_empty());
+        assert!(m.commit_vacant(PlayerSlot(2)).unwrap().is_empty());
+        assert!(m
+            .admit_joiner(PlayerSlot(2), ConnId(12))
+            .unwrap()
+            .is_empty());
+        let a = m.begin_attempt(PlayerSlot(2), PlayerSlot(0), 7, 1).unwrap();
+        let mut config = SessionConfig::new(3, PlayerSlot(2), 42, 60);
+        config.join_id = 7;
+        let mut join = JoinBootstrap::<Arena, LocalInputSource>::new(
+            config,
+            a.context.roster().clone(),
+            4096,
+            1 << 20,
+        )
+        .unwrap();
+        let mut donor = session(0);
+        let (_, ticket) =
+            serve_checked_join(&mut donor, a.context(), &join.next_request().unwrap()).unwrap();
+        let mut owner = session(1);
+        for _ in 0..128 {
+            // Same-Session reinstalls use a fresh lease and the same table cell.
+            m.backlog_notice(&a.clone(), &mut owner, &ticket).unwrap();
+            let first = owner.join_hold_lease(PlayerSlot(2)).unwrap();
+            m.backlog_notice(&a, &mut owner, &ticket).unwrap();
+            assert!(!first.is_live());
+            let current = owner.join_hold_lease(PlayerSlot(2)).unwrap();
+            let mut foreign = session(1);
+            assert!(matches!(
+                m.backlog_notice(&a, &mut foreign, &ticket),
+                Err(P2pMembershipError::LocalSessionMismatch)
+            ));
+            assert!(foreign.join_hold_lease(PlayerSlot(2)).is_none());
+            assert!(owner.owns_join_hold(&current));
+            assert_eq!(m.local_holds.len(), 3);
+            assert_eq!(m.local_holds.iter().flatten().count(), 1);
+            assert!(m.local_holds[2]
+                .as_ref()
+                .unwrap()
+                .same_installation(&current));
+            // Dropping the owning Session expires the only weak entry. No list
+            // accumulates old or foreign Session identities.
+            owner = session(1);
+            assert!(!current.is_live());
+        }
+        m.backlog_notice(&a, &mut owner, &ticket).unwrap();
+        let cleanup = m.cancel_attempt(&a).unwrap();
+        assert_eq!(m.local_holds.iter().flatten().count(), 0);
+        assert_eq!(
+            cleanup.release_local_hold(&mut owner),
+            JoinHoldRelease::Released
+        );
+        assert_eq!(
+            cleanup.release_local_hold(&mut owner),
+            JoinHoldRelease::NoMatchingHold
+        );
     }
 }

@@ -47,8 +47,8 @@ pub use replay::{
     VerifyReport,
 };
 pub use session::{
-    compare_checksums, require_same_build_hash, AdvanceResult, Anchor, BuildHashMismatch, Desync, JoinStatus, RollbackInfo, Session,
-    SessionConfig,
+    compare_checksums, require_same_build_hash, AdvanceResult, Anchor, BuildHashMismatch, Desync,
+    JoinHoldLease, JoinHoldRelease, JoinStatus, RollbackInfo, Session, SessionConfig,
 };
 
 pub use orr_sim::{DebugCommand, DebugError, EventKey, Game, PlayerSlot, SimEvent};
