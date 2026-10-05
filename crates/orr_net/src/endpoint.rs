@@ -7,7 +7,7 @@ use crate::{
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
@@ -399,9 +399,7 @@ impl Endpoint {
                     }
                     if cs.link == Link::Wt {
                         let n = bytes.len().max(1);
-                        if st.queued.fetch_update(Relaxed, Relaxed, |v| v.checked_add(n).filter(|&v| v <= cfg.max_queued_send_bytes)).is_err() {
-                            return Err(SendError::Backpressure);
-                        }
+                        reserve_queued(&st.queued, n, cfg.max_queued_send_bytes)?;
                         return cs.tx.send(Out::Datagram(Bytes::copy_from_slice(bytes))).map_err(|_| {
                             st.queued.fetch_sub(n, Relaxed);
                             SendError::UnknownConnection
@@ -425,9 +423,7 @@ impl Endpoint {
     fn push_stream(&self, cs: &ConnShared, tag: u8, bytes: &[u8]) -> Result<(), SendError> {
         let st = &cs.stats;
         let n = if cs.link == Link::Wt { bytes.len().max(1) } else { bytes.len() };
-        if st.queued.fetch_update(Relaxed, Relaxed, |v| v.checked_add(n).filter(|&v| v <= self.shared.cfg.max_queued_send_bytes)).is_err() {
-            return Err(SendError::Backpressure);
-        }
+        reserve_queued(&st.queued, n, self.shared.cfg.max_queued_send_bytes)?;
         cs.tx
             .send(Out::Stream { tag, data: Bytes::copy_from_slice(bytes) })
             .map_err(|_| {
@@ -482,6 +478,21 @@ impl Endpoint {
     }
 }
 
+/// Atomically reserves queue bytes without exceeding the budget or wrapping.
+/// Relaxed ordering is sufficient: the channel publishes the actual message.
+/// Keep this CAS loop compatible with Rust 1.85 (fetch_update is deprecated on
+/// newer Rust, while its replacement is newer than our MSRV).
+fn reserve_queued(queued: &AtomicUsize, bytes: usize, budget: usize) -> Result<(), SendError> {
+    let mut current = queued.load(Relaxed);
+    loop {
+        let next = current.checked_add(bytes).filter(|&n| n <= budget).ok_or(SendError::Backpressure)?;
+        match queued.compare_exchange_weak(current, next, Relaxed, Relaxed) {
+            Ok(_) => return Ok(()),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 impl Drop for Endpoint {
     fn drop(&mut self) {
         self.shutdown_inner();
@@ -500,5 +511,68 @@ impl Transport for Endpoint {
     }
     fn stats(&self, conn: ConnId) -> Option<ConnStats> {
         Endpoint::stats(self, conn)
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+
+    #[test]
+    fn exact_capacity_and_rejection_leave_counter_correct() {
+        let queued = AtomicUsize::new(6);
+        assert_eq!(reserve_queued(&queued, 4, 10), Ok(()));
+        assert_eq!(queued.load(Relaxed), 10);
+        assert_eq!(reserve_queued(&queued, 1, 10), Err(SendError::Backpressure));
+        assert_eq!(queued.load(Relaxed), 10);
+        assert_eq!(reserve_queued(&queued, 0, 10), Ok(()));
+        assert_eq!(queued.load(Relaxed), 10);
+    }
+
+    #[test]
+    fn overflow_and_reduced_budget_do_not_mutate_counter() {
+        let queued = AtomicUsize::new(usize::MAX - 1);
+        assert_eq!(reserve_queued(&queued, 2, usize::MAX), Err(SendError::Backpressure));
+        assert_eq!(queued.load(Relaxed), usize::MAX - 1);
+        assert_eq!(reserve_queued(&queued, 0, 0), Err(SendError::Backpressure));
+        assert_eq!(queued.load(Relaxed), usize::MAX - 1);
+        assert_eq!(reserve_queued(&queued, 1, usize::MAX), Ok(()));
+        assert_eq!(queued.load(Relaxed), usize::MAX);
+    }
+
+    #[test]
+    fn concurrent_reservations_never_overbook() {
+        let queued = AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(8);
+        let successes: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8).map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    let mut successes = 0;
+                    for _ in 0..100 {
+                        successes += usize::from(reserve_queued(&queued, 1, 257).is_ok());
+                        assert!(queued.load(Relaxed) <= 257);
+                    }
+                    successes
+                })
+            }).collect();
+            handles.into_iter().map(|handle| handle.join().unwrap()).sum()
+        });
+        assert_eq!(successes, 257);
+        assert_eq!(queued.load(Relaxed), successes);
+    }
+
+    #[test]
+    fn failed_channel_send_rolls_back_wt_stream_and_datagram_reservations() {
+        let (ep, _) = Endpoint::new(NetConfig::default(), false).unwrap();
+        let (cs, rx) = ep.shared.register(1, Link::Wt, 1200, true);
+        drop(rx);
+        for channel in [Channel::Reliable, Channel::Unreliable] {
+            for payload in [b"".as_slice(), b"message".as_slice()] {
+                assert_eq!(ep.send(1, channel, payload), Err(SendError::UnknownConnection));
+                assert_eq!(cs.stats.queued.load(Relaxed), 0);
+            }
+        }
+        ep.shared.conns.write().unwrap().clear();
     }
 }
