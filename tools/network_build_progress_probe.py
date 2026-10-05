@@ -169,6 +169,7 @@ def compiler_overlap(samples, start, end):
 
 class PosixChild:
     """Natural-exit process group; compiler attribution is unavailable here."""
+    requires_job_cleanup = False
     def __init__(self, argv, cwd, stdout, stderr, env):
         self.p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                   stdout=stdout, stderr=stderr, start_new_session=True)
@@ -331,6 +332,7 @@ class WindowsChild:
     writers with ready readers). Only their handles and NUL stdin are inherited.
     Closing is allowed only after this process exited naturally and job Active=0.
     """
+    requires_job_cleanup = True
 
     def __init__(self, argv, cwd, outfile, errfile, env=None):
         k = _configure_api()
@@ -341,6 +343,8 @@ class WindowsChild:
         self._process = self._thread = self._job = self._stdin = None
         self._assigned = False
         self._closed = False
+        self._parent_natural_exit = False
+        self._cleanup_zero_verified = False
         self._attr_storage = None
         self._attr_list = None
         self._owned_after_failure = False
@@ -466,6 +470,7 @@ class WindowsChild:
             raise ctypes.WinError(ctypes.get_last_error(), "WaitForSingleObject")
         code = wintypes.DWORD()
         _check(k.GetExitCodeProcess(self._process, ctypes.byref(code)), "GetExitCodeProcess")
+        self._parent_natural_exit = True
         return int(code.value)
 
     def wait(self):
@@ -476,8 +481,8 @@ class WindowsChild:
             raise ctypes.WinError(ctypes.get_last_error(), "WaitForSingleObject")
         return self.poll()
 
-    def sample(self):
-        """Sample job CPU/active count and currently listed rustc process identities."""
+    def job_accounting(self):
+        """Cleanup evidence independent of optional compiler image metadata."""
         if not self._assigned or self._closed:
             raise RuntimeError("job containment is unverified or handles are closed")
         k = _api()
@@ -485,45 +490,84 @@ class WindowsChild:
         _check(k.QueryInformationJobObject(self._job, _JOB_BASIC_ACCOUNTING,
                                            ctypes.byref(acct), ctypes.sizeof(acct), None),
                "QueryInformationJobObject(accounting)")
-        pids = _job_pids(k, self._job, int(acct.ActiveProcesses))
-        compilers = []
-        for pid in pids:
-            ph = k.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-            if not ph:
-                if ctypes.get_last_error() == _ERROR_INVALID_PARAMETER:
-                    continue  # The job-listed process exited between the two samples.
-                raise ctypes.WinError(ctypes.get_last_error(), f"OpenProcess({pid})")
-            try:
-                needed = wintypes.DWORD(32768)
-                image = ctypes.create_unicode_buffer(needed.value)
-                _check(k.QueryFullProcessImageNameW(ph, 0, image, ctypes.byref(needed)),
-                       f"QueryFullProcessImageNameW({pid})")
-                if os.path.basename(image.value).lower() not in ("rustc.exe", "rustc"):
-                    continue
-                member = wintypes.BOOL()
-                _check(k.IsProcessInJob(ph, self._job, ctypes.byref(member)),
-                       f"IsProcessInJob({pid})")
-                if not member.value:
-                    continue  # A PID may have exited and been reused after job enumeration.
-                created, exited, user, kernel = _FILETIME(), _FILETIME(), _FILETIME(), _FILETIME()
-                _check(k.GetProcessTimes(ph, ctypes.byref(created), ctypes.byref(exited),
-                                         ctypes.byref(kernel), ctypes.byref(user)),
-                       f"GetProcessTimes({pid})")
-                compilers.append({"pid": int(pid), "creation_100ns": _ft(created),
-                                  "image": image.value, "cpu_100ns": _ft(user) + _ft(kernel)})
-            finally:
-                _close(k, ph)
         return {"active": int(acct.ActiveProcesses),
                 "cpu_100ns": int(acct.TotalUserTime + acct.TotalKernelTime),
-                "compilers": compilers}
+                "compilers": []}
+
+    def _process_sample(self, k, pid):
+        """Bind membership/creation before image lookup on the same query handle."""
+        identity = {"pid": int(pid), "member": None, "creation_100ns": None}
+        result = {"identity": identity, "compiler": None, "errors": []}
+        ph = None
+        try:
+            ph = k.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            _check(ph, f"OpenProcess({pid})")
+            member = wintypes.BOOL()
+            _check(k.IsProcessInJob(ph, self._job, ctypes.byref(member)),
+                   f"IsProcessInJob({pid})")
+            identity["member"] = bool(member.value)
+            if not member.value:
+                return result  # No image attribution for a reopened non-member PID.
+            created, exited, user, kernel = _FILETIME(), _FILETIME(), _FILETIME(), _FILETIME()
+            _check(k.GetProcessTimes(ph, ctypes.byref(created), ctypes.byref(exited),
+                                     ctypes.byref(kernel), ctypes.byref(user)),
+                   f"GetProcessTimes({pid})")
+            identity["creation_100ns"] = _ft(created)
+            identity["exit_100ns"] = _ft(exited)
+            needed = wintypes.DWORD(32768)
+            image = ctypes.create_unicode_buffer(needed.value)
+            _check(k.QueryFullProcessImageNameW(ph, 0, image, ctypes.byref(needed)),
+                   f"QueryFullProcessImageNameW({pid})")
+            identity["image"] = image.value
+            if os.path.basename(image.value).lower() in ("rustc.exe", "rustc"):
+                result["compiler"] = {"pid": int(pid), "creation_100ns": _ft(created),
+                                      "image": image.value, "cpu_100ns": _ft(user) + _ft(kernel)}
+        except BaseException as exc:
+            result["errors"].append(repr(exc))
+        finally:
+            if ph:
+                try:
+                    _close(k, ph)
+                except BaseException as exc:
+                    result["errors"].append(repr(exc))
+        return result
+
+    def sample(self):
+        """An image failure invalidates measurement, not known Job accounting."""
+        sample = self.job_accounting()
+        sample.update(observation_errors=[], process_identities=[])
+        if sample["active"] == 0:
+            return sample
+        k = _api()
+        try:
+            pids = _job_pids(k, self._job, sample["active"])
+        except BaseException as exc:
+            sample["observation_errors"].append(repr(exc))
+            return sample
+        for pid in pids:
+            observed = self._process_sample(k, pid)
+            sample["process_identities"].append(observed["identity"])
+            if observed["compiler"] is not None:
+                sample["compilers"].append(observed["compiler"])
+            sample["observation_errors"].extend(observed["errors"])
+        return sample
 
     def close(self):
         if self._closed:
             return
-        if self.poll() is None:
-            raise RuntimeError("refusing to close a live process; allow natural exit")
-        if not self._assigned or self.sample()["active"] != 0:
+        if self._process:
+            if self.poll() is None:
+                raise RuntimeError("refusing to close a live process; allow natural exit")
+        elif not self._parent_natural_exit:
+            raise RuntimeError("parent natural exit is unverified")
+        if not self._assigned:
             raise RuntimeError("refusing cleanup: job is uncontained or still has active processes")
+        if self._job:
+            if self.job_accounting()["active"] != 0:
+                raise RuntimeError("refusing cleanup: job still has active processes")
+            self._cleanup_zero_verified = True
+        elif not self._cleanup_zero_verified:
+            raise RuntimeError("Job zero was not verified before closing its handle")
         k = _api()
         self._delete_attributes()
         for attr in ("_thread", "_process", "_job", "_stdin"):
@@ -731,6 +775,8 @@ class Capture:
             self.fail("watchdog_expired_natural_exit_pending")
         try:
             sample = {**self.child.sample(), "monotonic": now, "utc": utc()}
+            for error in sample.get("observation_errors", []):
+                self.fail("process_observation_error: " + error)
             # Bound metadata even if a child violates its natural-exit contract.
             if len(self.record["samples"]) < 10000:
                 self.record["samples"].append(sample)
@@ -739,22 +785,43 @@ class Capture:
             return sample
         except BaseException as exc:
             self.fail("process_observation_error: " + repr(exc))
-            return {"active": None}
+            return {"active": None, "observation_error": True}
+
+    def _cleanup_pending(self, sample):
+        if getattr(self.child, "requires_job_cleanup", False):
+            return sample.get("active") != 0
+        return sample.get("active") not in (0, None)
 
     def finish(self):
         """No termination path: retain ownership, drain and await natural exit."""
-        while self.child.poll() is None:
+        windows_cleanup = getattr(self.child, "requires_job_cleanup", False)
+        while True:
+            try:
+                exited = self.child.poll() is not None
+            except BaseException as exc:
+                self.fail("parent_exit_observation_error: " + repr(exc))
+                if not windows_cleanup:
+                    raise
+                exited = False
+            if exited:
+                try:
+                    self.record["actual_exit"] = self.child.wait()
+                except BaseException as exc:
+                    self.fail("parent_exit_wait_error: " + repr(exc))
+                    if not windows_cleanup:
+                        raise
+                else:
+                    break
             self.sample()
             save(self.folder / "process.json", self.record)
             time.sleep(POLL)
-        self.record["actual_exit"] = self.child.wait()
         self.record["end"] = time.monotonic()
         self.record["exited_at"] = utc()
         if self.record["actual_exit"] != 0:
             self.fail("child_exit_nonzero")
         sample = self.sample()
         # On Windows wait for every descendant, including post-parent survivors.
-        while sample.get("active") not in (0, None):
+        while self._cleanup_pending(sample):
             save(self.folder / "process.json", self.record)
             time.sleep(POLL)
             sample = self.sample()
@@ -764,12 +831,26 @@ class Capture:
             s["eof"] for s in self.record["streams"].values())
         if not self.record["cleanup_complete"]:
             self.fail("descendant_cleanup_unverified")
-        try:
-            self.child.close()
-            self.record["handles_closed"] = True
-        except BaseException as exc:
-            self.record["handles_closed"] = False
-            self.fail("handle_closure_unverified: " + repr(exc))
+        while True:
+            try:
+                self.child.close()
+                self.record["handles_closed"] = True
+                self.record["handles_closed_at"] = utc()
+                if windows_cleanup:
+                    self.record["cleanup_complete"] = all(
+                        s["eof"] for s in self.record["streams"].values())
+                break
+            except BaseException as exc:
+                self.record["handles_closed"] = False
+                self.record["cleanup_complete"] = False
+                self.fail("handle_closure_unverified: " + repr(exc))
+                if not windows_cleanup:
+                    break
+                # Remain the owner of any unclosed handles. No new child or
+                # campaign attempt occurs while cleanup/close is pending.
+                self.sample()  # Preserve watchdog/observation failures while held.
+                save(self.folder / "process.json", self.record)
+                time.sleep(POLL)
         save(self.folder / "process.json", self.record)
         return self.record
 

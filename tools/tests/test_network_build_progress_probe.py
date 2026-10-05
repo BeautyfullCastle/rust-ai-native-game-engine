@@ -69,6 +69,33 @@ class FakeChild:
         self.closed = True
 
 
+class FakeJobChild(FakeChild):
+    """Windows-like cleanup contract driven by finite in-memory samples."""
+
+    requires_job_cleanup = True
+
+    def __init__(self, argv, cwd, stdout, stderr, env, *, observations):
+        super().__init__(argv, cwd, stdout, stderr, env, polls=[0], out=b"", err=b"")
+        self.observations = list(observations)
+        self.current_observation = {"active": None, "cpu_100ns": None, "compilers": []}
+        self.closed_at_active = None
+
+    def sample(self):
+        if self.observations:
+            self.current_observation = self.observations.pop(0)
+        return copy.deepcopy(self.current_observation)
+
+    def job_accounting(self):
+        return {"active": self.current_observation.get("active"),
+                "cpu_100ns": self.current_observation.get("cpu_100ns"), "compilers": []}
+
+    def close(self):
+        self.closed_at_active = self.current_observation.get("active")
+        if self.closed_at_active != 0:
+            raise AssertionError("job-backed child closed before accounting reached zero")
+        self.closed = True
+
+
 class ResultGateTests(unittest.TestCase):
     def test_exact_result_accepts_one_exact_pass_and_observes_filtered_count(self):
         text = (
@@ -589,6 +616,285 @@ class PreparationAndReservationTests(unittest.TestCase):
 
 
 class CaptureLifecycleTests(unittest.TestCase):
+    def capture_job_child(self, folder, observations):
+        child = None
+
+        def factory(argv, cwd, stdout, stderr, env):
+            nonlocal child
+            child = FakeJobChild(argv, cwd, stdout, stderr, env, observations=observations)
+            return child
+
+        capture = probe.Capture(
+            ["fake-test-executable", "case", "--exact"], Path("fake-root"), folder, 90, {}, factory=factory
+        )
+        return capture, lambda: child
+
+    @staticmethod
+    def observation(active, *, errors=(), identities=(), compilers=()):
+        return {"active": active, "cpu_100ns": 100, "compilers": list(compilers),
+                "process_identities": list(identities), "observation_errors": list(errors)}
+
+    def test_accounting_survives_image_error_and_waits_for_zero_before_close(self):
+        rows = [
+            self.observation(2, errors=("rustc image query failed for PID 51",)),
+            self.observation(0),
+        ]
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(probe.time, "sleep", return_value=None):
+            capture, get_child = self.capture_job_child(Path(temp) / "capture", rows)
+            record = capture.finish()
+
+        child = get_child()
+        self.assertEqual(record["actual_exit"], 0)
+        self.assertIn("rustc image query failed for PID 51", record["failure"])
+        self.assertEqual([row["active"] for row in record["samples"]], [2, 0])
+        self.assertTrue(record["cleanup_complete"])
+        self.assertTrue(record["handles_closed"])
+        self.assertTrue(child.closed)
+        self.assertEqual(child.closed_at_active, 0)
+
+    def test_unknown_accounting_waits_through_one_and_zero_without_hanging(self):
+        rows = [
+            self.observation(None, errors=("job accounting temporarily unavailable",)),
+            self.observation(None, errors=("job accounting still unavailable",)),
+            self.observation(1),
+            self.observation(0),
+        ]
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(probe.time, "sleep", return_value=None):
+            capture, get_child = self.capture_job_child(Path(temp) / "capture", rows)
+            record = capture.finish()
+
+        child = get_child()
+        self.assertEqual([row["active"] for row in record["samples"]], [None, None, 1, 0])
+        self.assertIn("job accounting temporarily unavailable", record["failure"])
+        self.assertIn("job accounting still unavailable", record["secondary_failures"][0])
+        self.assertTrue(record["cleanup_complete"])
+        self.assertTrue(record["handles_closed"])
+        self.assertEqual(child.closed_at_active, 0)
+        self.assertTrue(capture._cleanup_pending({"active": None}))
+        self.assertTrue(capture._cleanup_pending({"active": 1}))
+        self.assertFalse(capture._cleanup_pending({"active": 0}))
+
+    def test_zero_accounting_allows_close_despite_independent_image_error(self):
+        rows = [self.observation(0, errors=("rustc image lookup failed after job reached zero",))]
+        with tempfile.TemporaryDirectory() as temp:
+            capture, get_child = self.capture_job_child(Path(temp) / "capture", rows)
+            record = capture.finish()
+
+        child = get_child()
+        self.assertIn("rustc image lookup failed after job reached zero", record["failure"])
+        self.assertEqual(record["samples"][0]["active"], 0)
+        self.assertTrue(record["cleanup_complete"])
+        self.assertTrue(record["handles_closed"])
+        self.assertEqual(child.closed_at_active, 0)
+
+    def test_membership_race_keeps_active_count_without_compiler_attribution(self):
+        # PID 51 disappeared/recycled before its image could be identified.
+        # The authoritative job accounting still says one process remains.
+        rows = [self.observation(1, identities=(), compilers=()), self.observation(0)]
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(probe.time, "sleep", return_value=None):
+            capture, _ = self.capture_job_child(Path(temp) / "capture", rows)
+            record = capture.finish()
+
+        self.assertEqual(record["samples"][0]["active"], 1)
+        self.assertEqual(record["samples"][0]["compilers"], [])
+        self.assertEqual(record["samples"][0]["process_identities"], [])
+        self.assertEqual(record["samples"][-1]["active"], 0)
+        self.assertTrue(record["cleanup_complete"])
+
+    def test_reopened_nonmember_pid_is_not_image_queried_or_attributed(self):
+        class FakeKernel:
+            def __init__(self):
+                self.calls = []
+
+            def OpenProcess(self, access, inherit, pid):
+                self.calls.append(("open", pid))
+                return 501
+
+            def IsProcessInJob(self, handle, job, member_ptr):
+                self.calls.append(("membership", handle, job))
+                probe.ctypes.cast(member_ptr, probe.ctypes.POINTER(probe.wintypes.BOOL))[0] = 0
+                return 1
+
+            def CloseHandle(self, handle):
+                self.calls.append(("close", handle))
+                return 1
+
+            def QueryFullProcessImageNameW(self, *args):
+                raise AssertionError("a PID reused outside the job must not be image queried")
+
+            def GetProcessTimes(self, *args):
+                raise AssertionError("a non-member PID must not receive compiler identity attribution")
+
+            def QueryInformationJobObject(self, job, info_class, buffer, size, returned):
+                if info_class == probe._JOB_BASIC_ACCOUNTING:
+                    acct = probe.ctypes.cast(buffer, probe.ctypes.POINTER(probe._JOB_ACCOUNTING)).contents
+                    acct.ActiveProcesses = 1
+                    return 1
+                raise AssertionError("unexpected job query")
+
+        child = object.__new__(probe.WindowsChild)
+        child._assigned, child._closed, child._job = True, False, 77
+        kernel = FakeKernel()
+        with mock.patch.object(probe, "_api", return_value=kernel), mock.patch.object(
+            probe, "_job_pids", return_value=[51]
+        ):
+            sample = child.sample()
+
+        self.assertEqual(sample["active"], 1)
+        self.assertEqual(sample["compilers"], [])
+        self.assertEqual(sample["observation_errors"], [])
+        self.assertEqual(sample["process_identities"], [
+            {"pid": 51, "member": False, "creation_100ns": None}
+        ])
+        self.assertEqual(kernel.calls, [("open", 51), ("membership", 501, 77), ("close", 501)])
+
+    def test_authoritative_active_survives_member_image_error_after_creation_identity(self):
+        class FakeKernel:
+            def __init__(self):
+                self.calls = []
+
+            def QueryInformationJobObject(self, job, info_class, buffer, size, returned):
+                self.calls.append("job_accounting")
+                acct = probe.ctypes.cast(buffer, probe.ctypes.POINTER(probe._JOB_ACCOUNTING)).contents
+                acct.ActiveProcesses = 2
+                acct.TotalUserTime = 30
+                acct.TotalKernelTime = 40
+                return 1
+
+            def OpenProcess(self, access, inherit, pid):
+                self.calls.append("open_process")
+                return 502
+
+            def IsProcessInJob(self, handle, job, member_ptr):
+                self.calls.append("membership")
+                probe.ctypes.cast(member_ptr, probe.ctypes.POINTER(probe.wintypes.BOOL))[0] = 1
+                return 1
+
+            def GetProcessTimes(self, handle, created_ptr, exited_ptr, kernel_ptr, user_ptr):
+                self.calls.append("process_times")
+                creation = probe.ctypes.cast(created_ptr, probe.ctypes.POINTER(probe._FILETIME)).contents
+                creation.dwLowDateTime = 123
+                creation.dwHighDateTime = 0
+                return 1
+
+            def QueryFullProcessImageNameW(self, *args):
+                self.calls.append("image_query")
+                raise OSError("synthetic image access denied")
+
+            def CloseHandle(self, handle):
+                self.calls.append("close_process")
+                return 1
+
+        child = object.__new__(probe.WindowsChild)
+        child._assigned, child._closed, child._job = True, False, 88
+        kernel = FakeKernel()
+        with mock.patch.object(probe, "_api", return_value=kernel), mock.patch.object(
+            probe, "_job_pids", return_value=[52, 53]
+        ):
+            sample = child.sample()
+
+        self.assertEqual(sample["active"], 2)
+        self.assertEqual(sample["cpu_100ns"], 70)
+        self.assertEqual(sample["compilers"], [])
+        self.assertEqual(len(sample["process_identities"]), 2)
+        identity = sample["process_identities"][0]
+        self.assertEqual(identity["pid"], 52)
+        self.assertTrue(identity["member"])
+        self.assertEqual(identity["creation_100ns"], 123)
+        self.assertNotIn("image", identity)
+        self.assertEqual(sample["observation_errors"], ["OSError('synthetic image access denied')"] * 2)
+        self.assertEqual(kernel.calls.count("job_accounting"), 1)
+        self.assertLess(kernel.calls.index("job_accounting"), kernel.calls.index("open_process"))
+        self.assertLess(kernel.calls.index("process_times"), kernel.calls.index("image_query"))
+        self.assertEqual(kernel.calls.count("close_process"), 2)
+
+    def test_windows_child_close_uses_accounting_without_image_enumeration(self):
+        child = object.__new__(probe.WindowsChild)
+        child._closed, child._assigned = False, True
+        child._parent_natural_exit, child._cleanup_zero_verified = True, False
+        child._process, child._thread, child._job, child._stdin = 101, None, 202, None
+        child._attr_list = child._attr_storage = None
+        kernel = type("Kernel", (), {"CloseHandle": lambda self, handle: True})()
+        with mock.patch.object(child, "poll", return_value=0), mock.patch.object(
+            child, "job_accounting", return_value={"active": 0, "cpu_100ns": 9, "compilers": []}
+        ) as accounting, mock.patch.object(child, "sample", side_effect=AssertionError("close must not enumerate images")), mock.patch.object(
+            probe, "_api", return_value=kernel
+        ):
+            child.close()
+
+        accounting.assert_called_once_with()
+        self.assertTrue(child._closed)
+
+    def test_close_accounting_retry_keeps_failure_and_blocks_next_attempt(self):
+        helper = PreparationAndReservationTests("test_prepare_uses_fresh_isolated_target_and_explicit_target_dir_argv")
+        root, _, _, plan, _ = helper.prepare_fixture()
+        self.addCleanup(helper.doCleanups)
+        launches = []
+        children = []
+        process_snapshots = []
+
+        class IntermittentAccountingChild(FakeJobChild):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.accounting_calls = 0
+
+            def job_accounting(self):
+                self.accounting_calls += 1
+                if self.accounting_calls == 1:
+                    raise OSError("synthetic close-time job accounting failure")
+                return super().job_accounting()
+
+            def close(self):
+                accounting = self.job_accounting()
+                if accounting["active"] != 0:
+                    raise RuntimeError("fake job still active")
+                self.closed_at_active = accounting["active"]
+                self.closed = True
+
+        def fake_launch(argv, cwd, folder, watchdog, env):
+            launches.append(list(argv))
+
+            def factory(child_argv, child_cwd, stdout, stderr, child_env):
+                child = IntermittentAccountingChild(
+                    child_argv, child_cwd, stdout, stderr, child_env, observations=[self.observation(0)]
+                )
+                children.append(child)
+                return child
+
+            return probe.Capture(argv, cwd, folder, watchdog, env, factory=factory)
+
+        real_save = probe.save
+
+        def saving_with_snapshots(path, value):
+            real_save(path, value)
+            if Path(path).name == "process.json":
+                process_snapshots.append(copy.deepcopy(value))
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            probe, "require_runtime_platform"
+        ), mock.patch.object(probe, "source_identity", return_value=copy.deepcopy(helper.SOURCE)), mock.patch.object(
+            probe, "environment_identity", return_value=copy.deepcopy(helper.PARENT_ENV)
+        ), mock.patch.object(probe, "toolchain_identity", return_value=copy.deepcopy(helper.TOOLCHAIN)), mock.patch.object(
+            probe, "launch", side_effect=fake_launch
+        ), mock.patch.object(probe, "save", side_effect=saving_with_snapshots), mock.patch.object(
+            probe.time, "sleep", return_value=None
+        ):
+            result = probe.campaign(plan, root, Path(temp) / "campaign", mode="idle-only")
+
+        self.assertEqual(result["status"], "failed_stop")
+        self.assertEqual(len(result["attempts"]), 1)
+        self.assertEqual(len(launches), 1)
+        self.assertIn("handle_closure_unverified", result["failure"])
+        self.assertIn("synthetic close-time job accounting failure", result["failure"])
+        self.assertEqual(len(children), 1)
+        self.assertTrue(children[0].closed)
+        self.assertEqual(children[0].closed_at_active, 0)
+        failed_close = next(snapshot for snapshot in process_snapshots
+                            if snapshot.get("handles_closed") is False and snapshot.get("cleanup_complete") is False)
+        self.assertIn("synthetic close-time job accounting failure", failed_close["failure"])
+        self.assertTrue(process_snapshots[-1]["handles_closed"])
+        self.assertTrue(process_snapshots[-1]["cleanup_complete"])
+
     def test_reader_start_failure_before_child_preserves_setup_receipt(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp) / "capture"
