@@ -391,7 +391,32 @@ Focused checks:
 ```sh
 cargo test -p orr_relay_net --release --all-targets
 cargo clippy -p orr_relay_net --release --all-targets -- -D warnings
+# Actual host/join runner: two gameplay disconnects and fresh returns, plus budget exhaustion:
+cargo test -p orr_relay_net --release --example p2p_arena real_quic_runner_ -- --test-threads=1 --nocapture
 ```
+
+The shipped two-peer runner milestone is covered end to end by those last two
+tests. The actual host loop starts beyond the initial rolling horizon, accepts
+24 live records carrying `[1,0,1]` commands, and retires multiple evidence windows.
+An application-event gate lets that same host author ahead before its Session
+consumption pauses. The actual join loop then sends four more records. Only the
+host driver's successful admission of every exact encoded record releases the
+joiner to close its owned QUIC link, before normal completion reporting. Neither
+elapsed sleeps nor successful transport enqueue stand in for delivery.
+
+The ordinary disconnect branch must preserve all four admitted-but-unpolled
+records, verify their exact maximum against the host's independent reference,
+replace the retired source without replacing the Session or changing its world,
+head or send cursor, and verify a nonempty vacant-default interval. The next join
+uses the newly advertised generation, address and unchanged certificate pin to
+bootstrap a fresh Session. The scenario repeats this complete gameplay/departure
+cycle once, then runs a third join to the normal report/ack/close handshake.
+Final host and returning-peer checkpoints match their separate references and
+each other; generation increments, consumed continuation budget and fresh
+snapshot boundaries are asserted. A companion allows only one continuation and
+proves the second gameplay disconnect fails explicitly without another join
+announcement. All pacing/observation hooks are example-local and test-only;
+the tests add no protocol, engine API or production admission behavior.
 
 Rolling regressions compare both peers against independent simulation for 4300
 ticks, exercise checked late join after 4300 pre-admission ticks with the exact
