@@ -65,7 +65,64 @@ pub(crate) enum Inbound {
 pub(crate) enum Out {
     Text(String),
     Binary(Arc<Vec<u8>>),
+    /// A negotiated-mode output admitted and charged as one FIFO item.
+    Codec(CodecOut),
     Close,
+}
+
+/// Exact queue charge for the new mode. The charge lives with the queued
+/// item, so channel refusal, receiver drop and dequeue all reclaim it once.
+struct CodecQueueCharge {
+    pending: Arc<AtomicUsize>,
+    bytes: usize,
+}
+
+impl CodecQueueCharge {
+    fn reserve(pending: &Arc<AtomicUsize>, bytes: usize, limit: usize) -> Option<Self> {
+        if limit == 0 || limit > MAX_CONN_QUEUE_BYTES {
+            return None;
+        }
+        let mut current = pending.load(Relaxed);
+        loop {
+            let next = current.checked_add(bytes).filter(|next| *next <= limit)?;
+            match pending.compare_exchange_weak(current, next, Relaxed, Relaxed) {
+                Ok(_) => {
+                    return Some(Self {
+                        pending: Arc::clone(pending),
+                        bytes,
+                    })
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+impl Drop for CodecQueueCharge {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(self.bytes, Relaxed);
+    }
+}
+
+/// At most one control/reset text and one frame, in that exact order. Neither
+/// message can be interleaved with another queue item by the socket writer.
+pub(crate) struct CodecOut {
+    text: Option<String>,
+    binary: Option<Arc<Vec<u8>>>,
+    charge: CodecQueueCharge,
+}
+
+#[cfg(test)]
+impl CodecOut {
+    pub(crate) fn test_messages(self) -> (Option<String>, Option<Arc<Vec<u8>>>) {
+        let Self {
+            text,
+            binary,
+            charge,
+        } = self;
+        drop(charge);
+        (text, binary)
+    }
 }
 
 /// Where the messages of one connection go: to a socket writer task, or
@@ -90,6 +147,23 @@ pub(crate) struct ConnTx {
 }
 
 impl ConnTx {
+    #[cfg(test)]
+    pub(crate) fn codec_test_channel() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<Out>,
+        Arc<AtomicUsize>,
+    ) {
+        let (tx, rx) = unbounded_channel();
+        let pending = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                sink: Sink::Net(tx),
+                pending: pending.clone(),
+            },
+            rx,
+            pending,
+        )
+    }
     /// The writing end of an in-process connection (its reading end is the client's).
     pub(crate) fn bounded_local(tx: IncomingSender) -> Self {
         Self {
@@ -168,6 +242,54 @@ impl ConnTx {
             self.pending.fetch_sub(cost, Relaxed);
         }
         sent
+    }
+
+    /// Exact checked admission for an acknowledged codec control message.
+    /// This does not alter the historical control-response bypass.
+    pub(crate) fn try_send_codec_text(&self, text: String, queue_limit: usize) -> bool {
+        self.try_send_codec_output(Some(text), None, queue_limit)
+    }
+
+    /// Exact checked admission for one negotiated frame record.
+    pub(crate) fn try_send_codec_binary(&self, bytes: Arc<Vec<u8>>, queue_limit: usize) -> bool {
+        self.try_send_codec_output(None, Some(bytes), queue_limit)
+    }
+
+    /// Atomically admit the reset announcement and its first Full record.
+    pub(crate) fn try_send_codec_reset(
+        &self,
+        text: String,
+        bytes: Arc<Vec<u8>>,
+        queue_limit: usize,
+    ) -> bool {
+        self.try_send_codec_output(Some(text), Some(bytes), queue_limit)
+    }
+
+    fn try_send_codec_output(
+        &self,
+        text: Option<String>,
+        binary: Option<Arc<Vec<u8>>>,
+        queue_limit: usize,
+    ) -> bool {
+        let Sink::Net(tx) = &self.sink else {
+            return false;
+        };
+        let Some(bytes) = text
+            .as_ref()
+            .map_or(0, String::len)
+            .checked_add(binary.as_ref().map_or(0, |bytes| bytes.len()))
+        else {
+            return false;
+        };
+        let Some(charge) = CodecQueueCharge::reserve(&self.pending, bytes, queue_limit) else {
+            return false;
+        };
+        tx.send(Out::Codec(CodecOut {
+            text,
+            binary,
+            charge,
+        }))
+        .is_ok()
     }
 
     pub(crate) fn try_send_local_frame(&self, f: Arc<LocalFrame>) -> bool {
@@ -253,7 +375,7 @@ impl ConnTx {
             Sink::TestLocal(_) => self.pending.load(Relaxed),
         }
     }
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         match &self.sink {
             Sink::Net(tx) => {
                 let _ = tx.send(Out::Close);
@@ -787,6 +909,34 @@ async fn ws_conn(shared: Arc<NetShared>, stream: TcpStream) {
                     pending.fetch_sub(b.len(), Relaxed);
                     Message::Binary(b.as_slice().to_vec().into())
                 }
+                Out::Codec(out) => {
+                    let CodecOut {
+                        text,
+                        binary,
+                        charge,
+                    } = out;
+                    // Queue admission counts queued items, not the writer's
+                    // currently owned socket message (the legacy boundary).
+                    drop(charge);
+                    if let Some(text) = text {
+                        match timeout(WRITE_TIMEOUT, sink.send(Message::Text(text.into()))).await {
+                            Ok(Ok(())) => {}
+                            _ => return,
+                        }
+                    }
+                    if let Some(bytes) = binary {
+                        match timeout(
+                            WRITE_TIMEOUT,
+                            sink.send(Message::Binary(bytes.as_slice().to_vec().into())),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            _ => return,
+                        }
+                    }
+                    continue;
+                }
                 Out::Close => break,
             };
             match timeout(WRITE_TIMEOUT, sink.send(msg)).await {
@@ -843,6 +993,9 @@ async fn ndjson_conn(shared: Arc<NetShared>, stream: TcpStream) {
                 Out::Binary(b) => {
                     pending.fetch_sub(b.len(), Relaxed);
                 }
+                // Negotiated Frame records are WebSocket-only. A routing
+                // violation closes this writer and drops/reclaims the batch.
+                Out::Codec(_) => return,
                 Out::Close => break,
             }
         }
@@ -1239,5 +1392,58 @@ mod tests {
         assert_eq!(query_param("x=1", "token"), None);
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn codec_batch_exact_admission_and_fifo_charge() {
+        let (tx, mut rx, pending) = ConnTx::codec_test_channel();
+        assert!(!tx.try_send_codec_reset("rst".into(), Arc::new(vec![1; 5]), 7));
+        assert_eq!(pending.load(Relaxed), 0);
+        assert!(rx.try_recv().is_err());
+        assert!(tx.try_send_codec_reset("rst".into(), Arc::new(vec![1; 5]), 8));
+        assert_eq!(pending.load(Relaxed), 8);
+        assert!(!tx.try_send_codec_binary(Arc::new(vec![2]), 8));
+        let Out::Codec(item) = rx.try_recv().unwrap() else {
+            panic!("codec batch")
+        };
+        assert_eq!(
+            pending.load(Relaxed),
+            8,
+            "taking the queue item still owns its charge"
+        );
+        let (text, binary) = item.test_messages();
+        assert_eq!(text.as_deref(), Some("rst"));
+        assert_eq!(binary.as_deref().unwrap().as_slice(), &[1; 5]);
+        assert_eq!(pending.load(Relaxed), 0);
+        assert!(rx.try_recv().is_err(), "both messages were one FIFO item");
+    }
+
+    #[test]
+    fn codec_channel_refusal_and_receiver_drop_reclaim_once() {
+        let (tx, rx, pending) = ConnTx::codec_test_channel();
+        assert!(tx.try_send_codec_text("ack".into(), 10));
+        assert!(tx.try_send_codec_binary(Arc::new(vec![4; 7]), 10));
+        assert_eq!(pending.load(Relaxed), 10);
+        drop(rx);
+        assert_eq!(pending.load(Relaxed), 0);
+        assert!(!tx.try_send_codec_reset("rst".into(), Arc::new(vec![1; 5]), 8));
+        assert_eq!(pending.load(Relaxed), 0);
+    }
+
+    #[test]
+    fn codec_charge_rejects_invalid_caps_and_checked_overflow() {
+        let pending = Arc::new(AtomicUsize::new(usize::MAX - 1));
+        assert!(CodecQueueCharge::reserve(&pending, 2, MAX_CONN_QUEUE_BYTES).is_none());
+        assert_eq!(pending.load(Relaxed), usize::MAX - 1);
+        pending.store(0, Relaxed);
+        assert!(CodecQueueCharge::reserve(&pending, 1, 0).is_none());
+        assert!(CodecQueueCharge::reserve(&pending, 1, MAX_CONN_QUEUE_BYTES + 1).is_none());
+        let charge =
+            CodecQueueCharge::reserve(&pending, MAX_CONN_QUEUE_BYTES, MAX_CONN_QUEUE_BYTES)
+                .unwrap();
+        assert_eq!(pending.load(Relaxed), MAX_CONN_QUEUE_BYTES);
+        assert!(CodecQueueCharge::reserve(&pending, 1, MAX_CONN_QUEUE_BYTES).is_none());
+        drop(charge);
+        assert_eq!(pending.load(Relaxed), 0);
     }
 }

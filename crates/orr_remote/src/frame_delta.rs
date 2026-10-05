@@ -1,10 +1,11 @@
 //! In-memory prototype for delta encoding serialized ECS frames.
 //!
-//! This module is deliberately not connected to ERP or the ORRS wire format.
-//! It splices the ORRF v2 body after normalizing away the encoded tick and
-//! trailing checksum, then restores those fields from the target stamp. It
-//! keeps at most one complete baseline. The current frame decoder remains the
-//! authority for schema and checksum validation after reconstruction.
+//! This module provides the stateful codec used by the negotiated ORRS v2
+//! frame-record path. It splices the ORRF v2 body after normalizing away the
+//! encoded tick and trailing checksum, then restores those fields from the
+//! target stamp. It keeps at most one complete baseline. The current frame
+//! decoder remains the authority for schema and checksum validation after
+//! reconstruction.
 
 use std::fmt;
 use std::sync::Arc;
@@ -67,6 +68,33 @@ pub struct Encoder {
     baseline: Option<Baseline>,
 }
 
+/// A prepared encoder step. The current baseline is unchanged until the
+/// caller admits one candidate and commits this object.
+pub struct PreparedEncode {
+    expected_base: Option<FrameStamp>,
+    baseline: Option<Baseline>,
+    full_record: FrameRecord,
+    delta_record: Option<FrameRecord>,
+    target_stamp: FrameStamp,
+}
+
+impl PreparedEncode {
+    /// Complete reset candidate for this target frame.
+    pub fn full_record(&self) -> &FrameRecord {
+        &self.full_record
+    }
+
+    /// Compatible splice candidate, if a forward same-scope baseline exists.
+    pub fn delta_record(&self) -> Option<&FrameRecord> {
+        self.delta_record.as_ref()
+    }
+
+    /// Stamp installed if this preparation is committed.
+    pub fn target_stamp(&self) -> FrameStamp {
+        self.target_stamp
+    }
+}
+
 impl Encoder {
     /// Creates an encoder with separate frame and retained-baseline limits.
     pub fn new(max_frame_bytes: usize, max_baseline_bytes: usize) -> Self {
@@ -77,9 +105,10 @@ impl Encoder {
         }
     }
 
-    /// Encodes a frame, using a delta only against a compatible strictly older
-    /// baseline and only when its estimated uncompressed record is smaller.
-    pub fn encode(&mut self, frame: &Frame, scope: FrameScope) -> Result<FrameRecord, EncodeError> {
+    /// Prepares both reset and, when possible, delta candidates without
+    /// advancing the retained baseline. A transport can compare complete
+    /// compressed messages and commit only after successful queue admission.
+    pub fn prepare(&self, frame: &Frame, scope: FrameScope) -> Result<PreparedEncode, EncodeError> {
         let bytes = frame.to_bytes();
         if bytes.len() > self.max_frame_bytes {
             return Err(EncodeError::FrameTooLarge {
@@ -97,39 +126,70 @@ impl Encoder {
         let normalized_target =
             normalize_orff_v2(&target).ok_or(EncodeError::InvalidOrffV2Frame)?;
 
-        let record = match self.baseline.as_ref() {
+        let full_record = FrameRecord::Full {
+            target: stamp,
+            bytes: Arc::clone(&target),
+        };
+        let delta_record = match self.baseline.as_ref() {
             Some(base) if base.stamp.scope == stamp.scope && base.stamp.tick < stamp.tick => {
                 let normalized_base =
                     normalize_orff_v2(&base.bytes).ok_or(EncodeError::InvalidOrffV2Frame)?;
                 let (prefix_len, suffix_len) = common_edges(&normalized_base, &normalized_target);
                 let insert_end = normalized_target.len() - suffix_len;
                 let inserted = normalized_target[prefix_len..insert_end].to_vec();
-                let delta_size = DELTA_RECORD_OVERHEAD.saturating_add(inserted.len());
-                let full_size = FULL_RECORD_OVERHEAD.saturating_add(target.len());
-
-                if delta_size < full_size {
-                    FrameRecord::Delta {
-                        base: base.stamp,
-                        target: stamp,
-                        target_len: usize_as_u64(target.len())?,
-                        prefix_len: usize_as_u64(prefix_len)?,
-                        suffix_len: usize_as_u64(suffix_len)?,
-                        inserted,
-                    }
-                } else {
-                    FrameRecord::Full {
-                        target: stamp,
-                        bytes: Arc::clone(&target),
-                    }
-                }
+                Some(FrameRecord::Delta {
+                    base: base.stamp,
+                    target: stamp,
+                    target_len: usize_as_u64(target.len())?,
+                    prefix_len: usize_as_u64(prefix_len)?,
+                    suffix_len: usize_as_u64(suffix_len)?,
+                    inserted,
+                })
             }
-            _ => FrameRecord::Full {
-                target: stamp,
-                bytes: Arc::clone(&target),
-            },
+            _ => None,
         };
 
-        self.retain_or_clear(stamp, target);
+        Ok(PreparedEncode {
+            expected_base: self.baseline.as_ref().map(|base| base.stamp),
+            baseline: (target.len() <= self.max_baseline_bytes).then_some(Baseline {
+                stamp,
+                bytes: target,
+            }),
+            full_record,
+            delta_record,
+            target_stamp: stamp,
+        })
+    }
+
+    /// Commits a prepared target baseline if no intervening encoder operation
+    /// changed the base it was prepared against. This operation only moves
+    /// already-allocated values.
+    pub fn commit(&mut self, prepared: PreparedEncode) -> Result<(), EncodeError> {
+        let actual_base = self.baseline.as_ref().map(|base| base.stamp);
+        if actual_base != prepared.expected_base {
+            return Err(EncodeError::PreparedBaseChanged {
+                expected: prepared.expected_base,
+                actual: actual_base,
+            });
+        }
+        self.baseline = prepared.baseline;
+        Ok(())
+    }
+
+    /// Encodes a frame using the historical uncompressed-size heuristic.
+    /// Negotiated transport callers should use `prepare`, compare complete
+    /// compressed candidate messages, and call `commit` after admission.
+    pub fn encode(&mut self, frame: &Frame, scope: FrameScope) -> Result<FrameRecord, EncodeError> {
+        let prepared = self.prepare(frame, scope)?;
+        let record = match prepared.delta_record() {
+            Some(delta)
+                if estimated_record_size(delta) < estimated_record_size(prepared.full_record()) =>
+            {
+                delta.clone()
+            }
+            _ => prepared.full_record().clone(),
+        };
+        self.commit(prepared)?;
         Ok(record)
     }
 
@@ -147,14 +207,6 @@ impl Encoder {
     pub fn reset(&mut self) {
         self.baseline = None;
     }
-
-    fn retain_or_clear(&mut self, stamp: FrameStamp, bytes: Arc<[u8]>) {
-        if bytes.len() <= self.max_baseline_bytes {
-            self.baseline = Some(Baseline { stamp, bytes });
-        } else {
-            self.baseline = None;
-        }
-    }
 }
 
 /// Stateful decoder with one bounded full-frame baseline.
@@ -163,6 +215,27 @@ pub struct Decoder {
     max_frame_bytes: usize,
     max_baseline_bytes: usize,
     baseline: Option<Baseline>,
+}
+
+/// A fully validated decoded frame and its prospective baseline. No decoder
+/// state changes until `Decoder::commit` succeeds.
+pub struct PreparedDecode {
+    expected_base: Option<FrameStamp>,
+    baseline: Option<Baseline>,
+    frame: Frame,
+    target_stamp: FrameStamp,
+}
+
+impl PreparedDecode {
+    /// Reconstructed frame available for outer delivery/mailbox validation.
+    pub fn frame(&self) -> &Frame {
+        &self.frame
+    }
+
+    /// Stamp to be installed if this preparation is committed.
+    pub fn target_stamp(&self) -> FrameStamp {
+        self.target_stamp
+    }
 }
 
 impl Decoder {
@@ -180,16 +253,23 @@ impl Decoder {
         }
     }
 
-    /// Decodes a full reset or applies a delta to the exact retained base.
-    ///
-    /// Failed records never replace or partially mutate the current baseline.
-    pub fn decode(&mut self, record: &FrameRecord) -> Result<Frame, DecodeError> {
+    /// Validates and reconstructs a full reset or exact-base delta without
+    /// changing the current baseline.
+    pub fn prepare_decode(&self, record: &FrameRecord) -> Result<PreparedDecode, DecodeError> {
+        let expected_base = self.baseline.as_ref().map(|base| base.stamp);
         match record {
             FrameRecord::Full { target, bytes } => {
                 self.check_frame_size(bytes.len())?;
                 let frame = self.decode_and_check_stamp(*target, bytes)?;
-                self.retain_or_clear(*target, Arc::clone(bytes));
-                Ok(frame)
+                Ok(PreparedDecode {
+                    expected_base,
+                    baseline: (bytes.len() <= self.max_baseline_bytes).then(|| Baseline {
+                        stamp: *target,
+                        bytes: Arc::clone(bytes),
+                    }),
+                    frame,
+                    target_stamp: *target,
+                })
             }
             FrameRecord::Delta {
                 base,
@@ -258,10 +338,39 @@ impl Decoder {
                 let rebuilt = restore_orff_v2_stamp(&normalized, target_len, *target)?;
 
                 let frame = self.decode_and_check_stamp(*target, &rebuilt)?;
-                self.retain_or_clear(*target, Arc::from(rebuilt));
-                Ok(frame)
+                let baseline = (rebuilt.len() <= self.max_baseline_bytes).then(|| Baseline {
+                    stamp: *target,
+                    bytes: Arc::from(rebuilt),
+                });
+                Ok(PreparedDecode {
+                    expected_base,
+                    baseline,
+                    frame,
+                    target_stamp: *target,
+                })
             }
         }
+    }
+
+    /// Commits a prepared decode if its captured base is still current. The
+    /// returned Frame is moved out of the preparation; no allocation occurs.
+    pub fn commit(&mut self, prepared: PreparedDecode) -> Result<Frame, DecodeError> {
+        let actual_base = self.baseline.as_ref().map(|base| base.stamp);
+        if actual_base != prepared.expected_base {
+            return Err(DecodeError::PreparedBaseChanged {
+                expected: prepared.expected_base,
+                actual: actual_base,
+            });
+        }
+        self.baseline = prepared.baseline;
+        Ok(prepared.frame)
+    }
+
+    /// Decodes and commits in one operation. Failed records never replace or
+    /// partially mutate the current baseline.
+    pub fn decode(&mut self, record: &FrameRecord) -> Result<Frame, DecodeError> {
+        let prepared = self.prepare_decode(record)?;
+        self.commit(prepared)
     }
 
     /// Returns the exact stamp of the currently retained baseline, if any.
@@ -312,13 +421,12 @@ impl Decoder {
         }
         Ok(frame)
     }
+}
 
-    fn retain_or_clear(&mut self, stamp: FrameStamp, bytes: Arc<[u8]>) {
-        if bytes.len() <= self.max_baseline_bytes {
-            self.baseline = Some(Baseline { stamp, bytes });
-        } else {
-            self.baseline = None;
-        }
+fn estimated_record_size(record: &FrameRecord) -> usize {
+    match record {
+        FrameRecord::Full { bytes, .. } => FULL_RECORD_OVERHEAD.saturating_add(bytes.len()),
+        FrameRecord::Delta { inserted, .. } => DELTA_RECORD_OVERHEAD.saturating_add(inserted.len()),
     }
 }
 
@@ -331,6 +439,11 @@ pub enum EncodeError {
     LengthOutOfRange,
     /// `Frame::to_bytes()` did not have the ORRF v2 layout required here.
     InvalidOrffV2Frame,
+    /// The encoder base changed after this record was prepared.
+    PreparedBaseChanged {
+        expected: Option<FrameStamp>,
+        actual: Option<FrameStamp>,
+    },
 }
 
 impl fmt::Display for EncodeError {
@@ -343,6 +456,10 @@ impl fmt::Display for EncodeError {
             Self::InvalidOrffV2Frame => {
                 f.write_str("serialized frame is not a complete ORRF v2 frame")
             }
+            Self::PreparedBaseChanged { expected, actual } => write!(
+                f,
+                "encoder base changed while record was prepared: expected {expected:?}, got {actual:?}"
+            ),
         }
     }
 }
@@ -395,6 +512,11 @@ pub enum DecodeError {
     },
     /// A u64 record length cannot fit this process's address space.
     LengthOutOfRange,
+    /// The decoder base changed after a record was prepared.
+    PreparedBaseChanged {
+        expected: Option<FrameStamp>,
+        actual: Option<FrameStamp>,
+    },
 }
 
 impl fmt::Display for DecodeError {
@@ -419,6 +541,10 @@ impl fmt::Display for DecodeError {
                 expected.tick, expected.frame_checksum, actual_tick, actual_checksum
             ),
             Self::LengthOutOfRange => f.write_str("delta length does not fit this process"),
+            Self::PreparedBaseChanged { expected, actual } => write!(
+                f,
+                "decoder base changed while record was prepared: expected {expected:?}, got {actual:?}"
+            ),
         }
     }
 }
