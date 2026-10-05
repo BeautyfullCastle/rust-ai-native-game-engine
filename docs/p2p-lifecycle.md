@@ -70,3 +70,158 @@ Run the focused scenario with:
 ```sh
 cargo test -p orr_relay_net --release --lib server_ep::p2p_lifecycle_tests
 ```
+
+## Runnable, bounded two-peer direct QUIC slice
+
+The headless `orr_relay_net` example now exercises a usable direct-socket path:
+
+```sh
+cargo run -p orr_relay_net --release --example p2p_arena -- smoke
+cargo run -p orr_relay_net --release --example p2p_arena -- host 127.0.0.1:7000
+# In another terminal, use the address, SHA-256 fingerprint and generation the host prints:
+cargo run -p orr_relay_net --release --example p2p_arena -- join <address> <fingerprint> <generation>
+```
+
+`host [bind] [generation]` starts Arena with active slot 0 and committed vacant
+slot 1, advances 24 ticks before advertising, and keeps advancing while waiting.
+The host generates a fresh nonzero generation by default. For a remote machine,
+supply its reachable host address to the joiner; no address discovery, NAT
+traversal or relay is attempted. Do not copy a wildcard bind address as a remote
+destination. The direct client retains the existing QUIC SHA-256 certificate-pin
+verification, including normal TLS handshake failure on a wrong fingerprint.
+
+This development example admits its first actual connected client into slot 1.
+The address, fingerprint and expected generation are application-supplied; the
+host's admission policy is intentionally simple. A generation is not a secret,
+and a server certificate pin is not client authentication. Do not expose this
+admission policy as production authentication or an open public game service.
+
+The two sides independently freeze the two-slot roster and generation/attempt
+(the example uses attempt 1). Public checked-v3 ORRQ/ORRJ/ORRB messages handle
+request, snapshot and notice. The accepted transport connection is registered
+with `P2pMembership`, not inferred from the slot claimed by an input packet.
+Host controls use `NetEndpoint::try_send_reliable`; client controls use the new
+`NetLink::try_send_reliable`. Both expose immediate queue errors, leaving legacy
+`Endpoint::send` and `Link::send` unchanged. A successful enqueue is not a delivery
+acknowledgment; optional conditioner wrappers retain their documented weaker
+acceptance semantics. The example deliberately uses direct, unconditioned QUIC.
+
+After the checked grant, the driver drops pre-snapshot outbound records and
+sends the actual remaining authored backlog, including host-authored vacant
+slot inputs. Live input then follows on that same reliable ordered connection.
+Every scripted active-player tick carries ordered commands with repeated owners
+(`[0,1,0]` or `[1,0,1]`), including the nonempty snapshot backlog. Input delay 2
+ensures the host has an actual retained tail beyond its verified snapshot.
+
+The joiner prints `JOIN_READY caught_up=false` when coverage is advertised; it
+continues receiving inputs and advancing before printing `JOIN_CAUGHT_UP` at the
+verified target (120 ticks beyond the checked first-input tick). Each side
+checks every locally available verified checkpoint against an independently
+stepped Arena baseline. The final checksum is also exchanged with an
+example-only, generation-fenced report/ack; the host waits for peer closure
+after acknowledgment. `SMOKE_OK` therefore requires real loopback QUIC and
+matching verified simulation results, not merely successful control exchange.
+The example's `ORRA` v1 report format is documented beside its encoder; it is
+neither an input packet nor a general repair/consensus protocol.
+
+### Public input API and wire v1
+
+`orr_relay_net::p2p_input` exports `P2pInputDriver`, `P2pInputSource`,
+`P2pInputCodec`, `P2pInputLimits`, `encode_p2p_input` and explicit result/error
+types. Construct one driver/source pair for one Session lifetime. The host can
+author into the bounded pre-admission queue. Bind once to the actual admitted
+connection, the independently agreed `CheckedJoinContext`, the accepted
+snapshot tick and first-input tick. The host derives these from its checked
+ticket; the joiner derives them from its accepted bootstrap Session. Do not use
+unvalidated incoming header fields as binding authority.
+
+This format is separate from both relay traffic and checked-v3 controls:
+
+```text
+ORRI[4] | version:u16=1 | schema:u64 | generation:u64 | attempt:u32 |
+slot:u8 | tick:u64 | input_len:u32 | command_count:u16 | input[input_len] |
+(command_len:u32 | command[command_len]) * command_count
+```
+
+Every integer is little-endian. The fixed header is 41 bytes. Exact complete
+consumption is required; trailing bytes, truncation, unsupported version/schema,
+and malformed counts/lengths fail. The packet uses transport integrity rather
+than claiming that a noncryptographic packet checksum authenticates a sender.
+Commands retain their original order and repetitions.
+
+`P2pInputCodec<G>` supplies a stable schema ID and explicit input/command
+encoders and decoders. The application must specify widths, endianness, valid
+values and canonical encoding, consume each complete payload slice, and change
+the schema ID when that contract changes. The framing validates all counts,
+lengths, tick/context/connection authority and retained capacity before invoking
+application decoders or allocating decoded commands. Codecs are trusted code;
+the driver cannot bound allocations a malicious codec chooses to make.
+
+The example Arena schema `0x4152454e41000001` encodes raw Q48.16 axes as two i64
+LE values followed by a u32 LE buttons word: 20 bytes. Axes are within
+`[-65536,65536]` raw, only button bit 0 is valid. Rust `_pad` is omitted and
+reconstructed as zero. A command is exactly one u32 LE owner in `0..=1`.
+No generic raw-`Pod` portability promise is made. Existing snapshot and
+`SimCommand` encodings retain their own compatibility requirements; this input
+codec does not redefine them.
+
+### Authority, backpressure, bounded failure and cleanup
+
+Only two peers are supported: host 0 and joiner 1. After binding, records must be
+strictly after the snapshot. Host 0 may supply its own slot at any allowed tick,
+and slot 1 only before the ticket's `first_input_tick`. Joiner 1 may author slot
+1 starting exactly at that tick. Neither side may claim any other slot. The
+pre-admission host backlog is revalidated against that cutoff during binding.
+Each receive validates the actual admitted connection, reliable channel,
+generation, attempt and application schema before Session can see the record.
+Equal numeric connection IDs from a different adapter are not authentication;
+applications must preserve the demonstrated one-adapter namespace or remap IDs.
+
+Exact duplicate wire records are harmless; a differing record for an already
+seen `(tick, slot)` fails explicitly, including changed command order. The
+ledger covers this driver's whole finite lifetime, so it does not silently
+forget conflict evidence after a tick becomes verified. Outbound FIFO records
+remain queued when the real transport reports `Backpressure`. A retry processes
+only the queue length present at flush start; appended callback work waits for
+the next flush. Callback inspection is safe, cancellation halts the flush, and
+recursive flushing is an explicit terminal error.
+
+The default window is ticks `1..4097`, with at most 8192 retained records and
+2 MiB of encoded bytes in each of the duplicate ledger, outbound queue and
+incoming queue. Packet/input/command/count limits are independent. The example
+narrows those to a 256-byte packet, 20-byte input, at most three commands and
+four bytes per command. These bounds include still-unconsumed and duplicate
+bookkeeping; no queue silently drops input and carries on. Exhaustion,
+conflicting duplicates, unauthorized traffic or a non-backpressure send error
+make failure sticky, clear buffered input and require terminating the session.
+`InputSource` has legacy void methods, so the caller must check `driver.check()`
+before and after Session/bootstrap calls, as the example does. This is a finite
+slice, not a rolling-history implementation suitable for indefinite play.
+
+The example also bounds transport message size, connection count, event queue,
+outbound transport bytes, control queues and wait time. A too-late join or the
+finite tick limit exits visibly instead of wrapping or discarding input.
+Snapshot controls retain existing checked wire/decompression bounds, distinct
+from the much smaller input-packet limit.
+
+Bootstrap disconnect/error uses the existing owned cleanup: cancel or invalidate
+the bootstrap, release the donor's exact local hold, retire only its registered
+exclusive transport lease, and cancel the driver's application buffers.
+`NetLink` now supports the same identity-owned retirement as `NetEndpoint`;
+foreign, stale or relinquished leases cannot close another link with the same
+numeric ID. Retirement fences late buffered input immediately. It cannot retract
+already enqueued remote bytes. No canceled slot is automatically reopened and
+no retry/reassignment is attempted by this demo.
+
+Focused checks:
+
+```sh
+cargo test -p orr_relay_net --release --all-targets
+cargo clippy -p orr_relay_net --release --all-targets -- -D warnings
+```
+
+Remaining scope includes production admission/authentication, discovery/full
+mesh, reconnect or vacancy recovery coordination, a repair wire protocol,
+long-running bounded-history rollover and datagram redundancy. No simulation
+was added to the TUI. This real two-peer path advances issue #12 but does not
+claim that the complete P2P feature is finished.
