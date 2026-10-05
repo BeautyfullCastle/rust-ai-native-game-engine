@@ -6,7 +6,7 @@
 
 #![allow(clippy::disallowed_types)] // Wall clocks and sockets stay outside simulation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,6 +49,7 @@ const ROLLING_LIVE_TICKS: u64 = 2048;
 const RECENT_TICKS: u64 = 4;
 const FUTURE_TICKS: u64 = 32;
 const AUTHOR_AHEAD: u64 = 8;
+const DIAGNOSTIC_WINDOW: usize = 64;
 const SNAPSHOT_LIMIT: usize = 64 * 1024;
 const NOTICE_LIMIT: usize = 4096;
 const CONTROL_QUEUE_LIMIT: usize = 2 * SNAPSHOT_LIMIT + 2 * NOTICE_LIMIT;
@@ -378,6 +379,324 @@ fn reference(first_input: u64, target: u64) -> BTreeMap<u64, u64> {
     checksums
 }
 
+/// Only rolling mode opts into checksum retirement. This independent simulation
+/// starts at tick zero and never restores a peer frame, including at the join.
+struct RollingReference {
+    sim: Simulation<Arena>,
+    snapshot: u64,
+    snapshot_checksum: Option<u64>,
+    snapshot_checked: bool,
+    grant: Option<Grant>,
+    window: usize,
+    pending: VecDeque<ReferenceCheckpoint>,
+    checked_through: [u64; 3],
+    final_actual: [Option<u64>; 3],
+    final_expected: Option<u64>,
+    stats: DiagnosticStats,
+}
+#[derive(Clone, Copy, Debug)]
+struct ReferenceCheckpoint {
+    tick: u64,
+    checksum: u64,
+    required: u8,
+    compared: u8,
+}
+#[derive(Clone, Copy, Debug, Default)]
+struct DiagnosticStats {
+    reference_high_water: usize,
+    session_high_water: [usize; 3],
+    checked: [u64; 3],
+    retired_through: u64,
+}
+impl RollingReference {
+    fn new(snapshot: u64, window: usize) -> Result<Self> {
+        if snapshot == 0
+            || window == 0
+            || SLOTS
+                .iter()
+                .any(|&slot| config(slot).checksum_interval != 1)
+        {
+            return Err(
+                "rolling diagnostics require a nonempty window and interval-one checkpoints".into(),
+            );
+        }
+        u64::try_from(window).map_err(|_| "diagnostic window cannot fit tick arithmetic")?;
+        Ok(Self {
+            sim: Simulation::<Arena>::with_build_id(game(), 60, 42, BUILD_ID),
+            snapshot,
+            snapshot_checksum: None,
+            snapshot_checked: false,
+            grant: None,
+            window,
+            pending: VecDeque::with_capacity(window),
+            checked_through: [0, 0, snapshot],
+            final_actual: [None; 3],
+            final_expected: None,
+            stats: DiagnosticStats::default(),
+        })
+    }
+    fn head_limit(&self, target: u64) -> Result<u64> {
+        let floor = self.stats.retired_through;
+        if target <= floor {
+            return Ok(target);
+        }
+        // Cap the increment first: a representable target near u64::MAX must
+        // not fail just because an unused full window would overflow.
+        floor
+            .checked_add((target - floor).min(self.window as u64))
+            .ok_or_else(|| "diagnostic head bound overflow".into())
+    }
+    fn set_grant(&mut self, grant: Grant) -> Result<()> {
+        if grant.snapshot != self.snapshot
+            || grant.first <= self.snapshot
+            || grant.target < grant.first
+        {
+            return Err("rolling reference cutoff disagrees with checked grant".into());
+        }
+        if let Some(old) = self.grant {
+            if old != grant {
+                return Err("rolling reference received conflicting checked grants".into());
+            }
+            return Ok(());
+        }
+        if self.sim.tick() != self.snapshot
+            || self.stats.retired_through != self.snapshot
+            || !self.pending.is_empty()
+        {
+            return Err("rolling reference grant before complete prelude comparison".into());
+        }
+        // This sets F before the one independent simulation crosses the snapshot.
+        self.grant = Some(grant);
+        Ok(())
+    }
+    fn check_snapshot(&mut self, tick: u64, actual: u64) -> Result<()> {
+        if self.grant.is_none() || tick != self.snapshot || Some(actual) != self.snapshot_checksum {
+            return Err("joiner snapshot differs from independent tick-zero reference".into());
+        }
+        self.snapshot_checked = true;
+        Ok(())
+    }
+    fn accept_join(&mut self, nodes: &[Node]) -> Result<()> {
+        for node in nodes {
+            if let Some(grant) = node.grant {
+                self.set_grant(grant)?;
+            }
+        }
+        if let Some((tick, checksum)) = nodes[usize::from(JOINER.0)].accepted_snapshot {
+            if !self.snapshot_checked {
+                self.check_snapshot(tick, checksum)?;
+            }
+        }
+        Ok(())
+    }
+    fn advance_reference(&mut self, through: u64) -> Result<()> {
+        if through > self.head_limit(self.grant.map_or(self.snapshot, |grant| grant.target))? {
+            return Err("reference advance exceeds bounded diagnostic admission".into());
+        }
+        while self.sim.tick() < through {
+            if self.pending.len() >= self.window {
+                return Err("reference window full; unchecked evidence cannot be evicted".into());
+            }
+            let tick = self
+                .sim
+                .tick()
+                .checked_add(1)
+                .ok_or("reference tick overflow")?;
+            let first = match self.grant {
+                Some(grant) => grant.first,
+                None if tick <= self.snapshot => u64::MAX,
+                None => return Err("reference crossed snapshot without checked activation".into()),
+            };
+            let mut inputs = TickInputs::new(tick, 3);
+            for slot in SLOTS {
+                if tick > 2 && (slot != JOINER || tick >= first) {
+                    inputs.set_input(slot, input(slot, tick));
+                    for command in commands(slot) {
+                        inputs.push_command(slot, command);
+                    }
+                }
+            }
+            self.sim.step(&inputs);
+            let checksum = self.sim.frame().checksum();
+            if tick == self.snapshot {
+                self.snapshot_checksum = Some(checksum);
+            }
+            if self.grant.is_some_and(|grant| tick == grant.target) {
+                self.final_expected = Some(checksum);
+            }
+            self.pending.push_back(ReferenceCheckpoint {
+                tick,
+                checksum,
+                required: if tick <= self.snapshot { 0b011 } else { 0b111 },
+                compared: 0,
+            });
+            self.stats.reference_high_water =
+                self.stats.reference_high_water.max(self.pending.len());
+        }
+        self.check_coverage()
+    }
+    fn compare_peer(
+        &mut self,
+        slot: PlayerSlot,
+        verified: u64,
+        checksums: &[(u64, u64)],
+    ) -> Result<()> {
+        let index = usize::from(slot.0);
+        if index >= SLOTS.len() || checksums.len() > self.window {
+            return Err("rolling peer diagnostic window exceeded".into());
+        }
+        self.stats.session_high_water[index] =
+            self.stats.session_high_water[index].max(checksums.len());
+        if slot == JOINER && !self.snapshot_checked {
+            return Err("joiner advanced before independent snapshot comparison".into());
+        }
+        if verified < self.checked_through[index] {
+            return Err("rolling comparison cursor regressed".into());
+        }
+        // The retained prefix may already be compared locally while another fixed
+        // peer lags. Search only this bounded window; compare each new tick once.
+        let start = checksums.partition_point(|&(tick, _)| tick <= self.checked_through[index]);
+        for &(tick, actual) in &checksums[start..] {
+            let next = self.checked_through[index]
+                .checked_add(1)
+                .ok_or("comparison tick overflow")?;
+            if tick != next || tick > verified {
+                return Err(format!(
+                    "peer {} missing exact checkpoint {next}; received {tick}",
+                    slot.0
+                )
+                .into());
+            }
+            let offset = tick
+                .checked_sub(self.stats.retired_through)
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or("missing independent reference checkpoint")?;
+            let checkpoint = self
+                .pending
+                .get_mut(offset)
+                .filter(|checkpoint| checkpoint.tick == tick)
+                .ok_or("missing independent reference checkpoint")?;
+            if checkpoint.required & (1 << index) == 0 || checkpoint.compared & (1 << index) != 0 {
+                return Err("unexpected or repeated reference comparison".into());
+            }
+            if actual != checkpoint.checksum {
+                return Err(
+                    format!("peer {} reference checksum mismatch at tick {tick}", slot.0).into(),
+                );
+            }
+            // Actual comparison precedes the bit, cursor, count and final cache.
+            checkpoint.compared |= 1 << index;
+            self.checked_through[index] = tick;
+            self.stats.checked[index] = self.stats.checked[index]
+                .checked_add(1)
+                .ok_or("comparison count overflow")?;
+            if self.grant.is_some_and(|grant| tick == grant.target) {
+                self.final_actual[index] = Some(actual);
+            }
+        }
+        if self.checked_through[index] != verified {
+            return Err(format!(
+                "peer {} missing exact checkpoint {} through verified {verified}",
+                slot.0,
+                self.checked_through[index] + 1
+            )
+            .into());
+        }
+        self.check_coverage()
+    }
+    fn retire_compared(&mut self) -> Result<()> {
+        while let Some(checkpoint) = self.pending.front() {
+            if checkpoint.tick
+                != self
+                    .stats
+                    .retired_through
+                    .checked_add(1)
+                    .ok_or("retirement overflow")?
+            {
+                return Err("noncontiguous reference retirement".into());
+            }
+            if checkpoint.compared != checkpoint.required {
+                break;
+            }
+            self.stats.retired_through = checkpoint.tick;
+            self.pending.pop_front();
+        }
+        self.check_coverage()
+    }
+    fn check_coverage(&self) -> Result<()> {
+        for (index, start) in [0, 0, self.snapshot].into_iter().enumerate() {
+            if self.checked_through[index].checked_sub(start) != Some(self.stats.checked[index]) {
+                return Err("rolling checkpoint comparison coverage has a gap".into());
+            }
+        }
+        if self.pending.len() > self.window
+            || self.stats.reference_high_water > self.window
+            || self
+                .stats
+                .session_high_water
+                .iter()
+                .any(|&len| len > self.window)
+            || self.sim.tick().checked_sub(self.stats.retired_through)
+                != Some(self.pending.len() as u64)
+        {
+            return Err("rolling diagnostic retention bound violated".into());
+        }
+        Ok(())
+    }
+    fn process(&mut self, nodes: &mut [Node]) -> Result<()> {
+        let needed = nodes
+            .iter()
+            .filter_map(Node::session)
+            .map(Peer::verified_tick)
+            .max()
+            .unwrap_or(0);
+        self.advance_reference(needed)?;
+        for node in nodes.iter() {
+            if let Some(peer) = node.session() {
+                if peer.head_tick()
+                    > self.head_limit(self.grant.map_or(self.snapshot, |grant| grant.target))?
+                {
+                    return Err("peer predicted head exceeds diagnostic admission".into());
+                }
+                self.compare_peer(node.slot, peer.verified_tick(), peer.checksums())?;
+            }
+        }
+        // No peer log or reference entry is discarded until all comparisons pass.
+        self.retire_compared()?;
+        for node in nodes {
+            node.retire_checksums(self.stats.retired_through)?;
+            node.checked = usize::try_from(self.stats.checked[usize::from(node.slot.0)])
+                .map_err(|_| "comparison count cannot fit report")?;
+        }
+        Ok(())
+    }
+    fn report_checksum(&self, slot: PlayerSlot) -> Option<u64> {
+        self.grant
+            .filter(|grant| self.stats.retired_through == grant.target)
+            .and_then(|_| self.final_actual[usize::from(slot.0)])
+    }
+    fn finish(&self, nodes: &[Node]) -> Result<u64> {
+        let grant = self.grant.ok_or("missing final reference grant")?;
+        self.check_coverage()?;
+        if !self.snapshot_checked
+            || self.stats.retired_through != grant.target
+            || !self.pending.is_empty()
+            || self.checked_through != [grant.target; 3]
+            || self.stats.checked != [grant.target, grant.target, grant.target - self.snapshot]
+            || self.final_actual.iter().any(Option::is_none)
+            || nodes.iter().any(|node| {
+                node.session()
+                    .is_none_or(|peer| !peer.checksums().is_empty())
+            })
+        {
+            return Err("incomplete rolling comparison coverage or final retirement".into());
+        }
+        self.final_expected
+            .ok_or_else(|| "missing independent final checksum".into())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Grant {
     snapshot: u64,
@@ -439,6 +758,7 @@ struct Node {
     source: Option<Source>,
     grant: Option<Grant>,
     ready: bool,
+    accepted_snapshot: Option<(u64, u64)>,
     checked: usize,
     reports: BTreeMap<PlayerSlot, Report>,
     sent_reports: BTreeSet<PlayerSlot>,
@@ -492,6 +812,7 @@ impl Node {
             source,
             grant: None,
             ready: false,
+            accepted_snapshot: None,
             checked: 0,
             reports: BTreeMap::new(),
             sent_reports: BTreeSet::new(),
@@ -639,7 +960,17 @@ impl Node {
         self.checked = checked;
         Ok(())
     }
-    fn make_report(&mut self) -> Result<()> {
+    fn retire_checksums(&mut self, through: u64) -> Result<()> {
+        if let Some(peer) = &mut self.peer {
+            peer.retire_checksums_through(through)?;
+        } else if let Some(bootstrap) = &mut self.bootstrap {
+            if let Some(result) = bootstrap.retire_checksums_through(through) {
+                result?;
+            }
+        }
+        Ok(())
+    }
+    fn make_report(&mut self, rolling_checksum: Option<u64>) -> Result<()> {
         let Some(grant) = self.grant else {
             return Ok(());
         };
@@ -647,12 +978,21 @@ impl Node {
         if peer.verified_tick() < grant.target || self.reports.contains_key(&self.slot) {
             return Ok(());
         }
-        let checksum = peer
-            .checksums()
-            .iter()
-            .find(|&&(tick, _)| tick == grant.target)
-            .ok_or("missing verified target checksum")?
-            .1;
+        let checksum = if self.mode == Mode::Rolling {
+            let Some(actual) = rolling_checksum else {
+                return Ok(());
+            };
+            if !peer.checksums().is_empty() {
+                return Err("rolling final report preceded common checksum retirement".into());
+            }
+            actual
+        } else {
+            peer.checksums()
+                .iter()
+                .find(|&&(tick, _)| tick == grant.target)
+                .ok_or("missing verified target checksum")?
+                .1
+        };
         let report = Report {
             slot: self.slot,
             tick: grant.target,
@@ -796,6 +1136,12 @@ fn receive_control(
             // before any advance, source polling, or non-donor edge delivery.
             node.driver.install_joiner_snapshot(bootstrap)?;
             let peer = bootstrap.session().ok_or("missing accepted snapshot")?;
+            node.accepted_snapshot = Some((
+                peer.verified_tick(),
+                peer.verified_frame()
+                    .ok_or("missing accepted snapshot frame")?
+                    .checksum(),
+            ));
             if node
                 .driver
                 .rolling_progress()
@@ -1017,6 +1363,7 @@ struct Outcome {
     delayed_retirement: bool,
     hold_cleanups: usize,
     stats: [DriverStats; 3],
+    diagnostics: Option<DiagnosticStats>,
 }
 fn flush_nodes(nodes: &mut [Node], network: &mut Network, hold_peer_one: bool) -> Result<()> {
     for node in nodes {
@@ -1111,6 +1458,9 @@ fn run(options: Options) -> Result<Outcome> {
         .into_iter()
         .map(|slot| Node::new(slot, options.mode))
         .collect::<Result<_>>()?;
+    let mut rolling = (options.mode == Mode::Rolling)
+        .then(|| RollingReference::new(options.prelude_ticks, DIAGNOSTIC_WINDOW))
+        .transpose()?;
     let mut network = Network::default();
     network.add_pair(DONOR, EXISTING)?;
     admit_membership(&mut nodes, &network, false)?;
@@ -1121,16 +1471,28 @@ fn run(options: Options) -> Result<Outcome> {
     {
         receive_events(&mut nodes, &mut network, options.live_ticks)?;
         flush_nodes(&mut nodes, &mut network, false)?;
+        let head_limit = rolling
+            .as_ref()
+            .map_or(Ok(options.prelude_ticks), |reference| {
+                reference.head_limit(options.prelude_ticks)
+            })?;
         for node in &mut nodes[..2] {
             node.poll_confirmed()?;
-            node.advance_to(options.prelude_ticks)?;
+            node.advance_to(head_limit)?;
+        }
+        if let Some(reference) = &mut rolling {
+            reference.process(&mut nodes)?;
         }
         progress.observe(&nodes, "two-active-peer prelude")?;
         thread::sleep(Duration::from_millis(1));
     }
-    let prelude_reference = reference(u64::MAX, options.prelude_ticks);
+    if options.mode == Mode::Finite {
+        let prelude_reference = reference(u64::MAX, options.prelude_ticks);
+        for node in &mut nodes[..2] {
+            node.check_reference(&prelude_reference)?;
+        }
+    }
     for node in &mut nodes[..2] {
-        node.check_reference(&prelude_reference)?;
         if node.session().unwrap().head_tick() != options.prelude_ticks {
             return Err("prelude head was not bounded".into());
         }
@@ -1161,16 +1523,24 @@ fn run(options: Options) -> Result<Outcome> {
             return Err("checked join phase timed out before both peer notices".into());
         }
         receive_events(&mut nodes, &mut network, options.live_ticks)?;
+        if let Some(reference) = &mut rolling {
+            // Capture/check the accepted snapshot before bootstrap source polling
+            // or prediction can replace that exact snapshot frame.
+            reference.accept_join(&nodes)?;
+        }
         flush_nodes(&mut nodes, &mut network, delayed)?;
         for node in &mut nodes {
             node.poll_confirmed()?;
             let target = node
                 .grant
                 .map_or(options.prelude_ticks, |grant| grant.target);
-            node.advance_to(target)?;
+            let head_limit = rolling
+                .as_ref()
+                .map_or(Ok(target), |reference| reference.head_limit(target))?;
+            node.advance_to(head_limit)?;
         }
         progress.observe(&nodes, "fixed mesh live run")?;
-        if baseline.is_none() {
+        if options.mode == Mode::Finite && baseline.is_none() {
             if let Some(grant) = nodes[0].grant {
                 baseline = Some(reference(grant.first, grant.target));
             }
@@ -1178,7 +1548,15 @@ fn run(options: Options) -> Result<Outcome> {
         if let Some(reference) = &baseline {
             for node in &mut nodes {
                 node.check_reference(reference)?;
-                node.make_report()?;
+                node.make_report(None)?;
+            }
+        }
+        if let Some(reference) = &mut rolling {
+            reference.process(&mut nodes)?;
+            for node in &mut nodes {
+                // All target entries have already been retired. Reports use
+                // separately cached actual peer checksums, never the oracle.
+                node.make_report(reference.report_checksum(node.slot))?;
             }
         }
         if delayed && nodes[2].ready {
@@ -1205,6 +1583,18 @@ fn run(options: Options) -> Result<Outcome> {
                     return Err("delayed edge leaked a peer1 input".into());
                 }
                 if options.mode == Mode::Rolling {
+                    let reference = rolling.as_ref().ok_or("missing rolling diagnostics")?;
+                    if reference.stats.retired_through != grant.snapshot
+                        || reference.pending.front().is_none_or(|checkpoint| {
+                            checkpoint.tick != backlog_tick
+                                || checkpoint.required != 0b111
+                                || checkpoint.compared & 0b100 != 0
+                        })
+                    {
+                        return Err(
+                            "delayed fixed peer did not pin the diagnostic comparison floor".into(),
+                        );
+                    }
                     let direct = network.route(EXISTING, JOINER)?.unique;
                     let other = network.route(EXISTING, DONOR)?.unique;
                     if nodes[1].driver.delivery(direct, backlog_tick, EXISTING)
@@ -1267,10 +1657,14 @@ fn run(options: Options) -> Result<Outcome> {
             && nodes.iter().all(|node| node.driver.pending().0 == 0)
         {
             let grant = nodes[0].grant.ok_or("missing donor grant")?;
-            let expected = *baseline
-                .as_ref()
-                .and_then(|r| r.get(&grant.target))
-                .ok_or("missing independent final checksum")?;
+            let expected = if let Some(reference) = &rolling {
+                reference.finish(&nodes)?
+            } else {
+                *baseline
+                    .as_ref()
+                    .and_then(|r| r.get(&grant.target))
+                    .ok_or("missing independent final checksum")?
+            };
             for node in &nodes {
                 if node.grant != Some(grant) {
                     return Err("peer cutoff disagreement".into());
@@ -1323,6 +1717,12 @@ fn run(options: Options) -> Result<Outcome> {
                         stats.pending.1, stats.edge_pending.0, stats.edge_pending.1);
                 }
             }
+            let diagnostics = rolling.as_ref().map(|reference| reference.stats);
+            if let Some(stats) = diagnostics {
+                println!("MESH_DIAGNOSTICS window={} retired_through={} max_reference_checkpoints={} max_peer_checkpoints={:?} compared_checkpoints={:?} final_logs_empty=true",
+                    DIAGNOSTIC_WINDOW, stats.retired_through, stats.reference_high_water,
+                    stats.session_high_water, stats.checked);
+            }
             return Ok(Outcome {
                 reports,
                 first_input: grant.first,
@@ -1332,6 +1732,7 @@ fn run(options: Options) -> Result<Outcome> {
                 delayed_retirement,
                 hold_cleanups,
                 stats,
+                diagnostics,
             });
         }
         thread::sleep(Duration::from_millis(1));
@@ -1362,6 +1763,9 @@ fn main() -> Result<()> {
         .map(|stats| stats.floor)
         .min()
         .unwrap_or(0);
+    if options.mode == Mode::Rolling && result.diagnostics.is_none() {
+        return Err("missing bounded rolling diagnostic result".into());
+    }
     println!("{label} peers=3 direct_edges=3 tick={} checksum={:016x} live_ticks={} first_input={} input_1_to_2={} input_2_to_1={} hold_cleanups={} delayed_ready={} delayed_retirement={} min_retired_through={}",
         result.reports[0].tick, result.reports[0].checksum, options.live_ticks, result.first_input,
         result.direct_one_to_two, result.direct_two_to_one, result.hold_cleanups, result.delayed_ready,
@@ -1376,6 +1780,202 @@ mod tests {
 
     // Keep actual socket scenarios independent of test-harness thread scheduling.
     static SOCKET_TEST: Mutex<()> = Mutex::new(());
+
+    fn reference_fixture(
+        snapshot: u64,
+        target: u64,
+        window: usize,
+    ) -> (RollingReference, BTreeMap<u64, u64>) {
+        let first = snapshot + 3;
+        let oracle = reference(first, target);
+        let mut stream = RollingReference::new(snapshot, window).unwrap();
+        for tick in 1..=snapshot {
+            stream.advance_reference(tick).unwrap();
+            for slot in [DONOR, EXISTING] {
+                stream
+                    .compare_peer(slot, tick, &[(tick, oracle[&tick])])
+                    .unwrap();
+            }
+            stream.retire_compared().unwrap();
+        }
+        stream
+            .set_grant(Grant::new(snapshot, first, target - first + 1, Mode::Rolling).unwrap())
+            .unwrap();
+        stream.check_snapshot(snapshot, oracle[&snapshot]).unwrap();
+        (stream, oracle)
+    }
+
+    #[test]
+    fn rolling_stream_matches_finite_oracle_with_tiny_and_long_windows() {
+        // Both phases exceed even the production window. The finite oracle is
+        // test-only; production rolling mode creates no whole-run map.
+        for window in [1, 3, DIAGNOSTIC_WINDOW] {
+            let snapshot = 137;
+            let target = 401;
+            let (mut stream, oracle) = reference_fixture(snapshot, target, window);
+            while stream.stats.retired_through < target {
+                let through = stream.head_limit(target).unwrap();
+                stream.advance_reference(through).unwrap();
+                let batch: Vec<_> = (stream.stats.retired_through + 1..=through)
+                    .map(|tick| (tick, oracle[&tick]))
+                    .collect();
+                for slot in SLOTS {
+                    stream.compare_peer(slot, through, &batch).unwrap();
+                }
+                stream.retire_compared().unwrap();
+                assert!(stream.pending.is_empty());
+                stream.check_coverage().unwrap();
+            }
+            assert_eq!(stream.stats.checked, [target, target, target - snapshot]);
+            assert_eq!(stream.checked_through, [target; 3]);
+            assert_eq!(stream.final_expected, Some(oracle[&target]));
+            assert_eq!(stream.final_actual, [Some(oracle[&target]); 3]);
+            assert!(stream.stats.reference_high_water <= window);
+            assert!(stream
+                .stats
+                .session_high_water
+                .iter()
+                .all(|&len| len <= window));
+        }
+    }
+
+    #[test]
+    fn rolling_delayed_fixed_peer_pins_full_window_and_head_admission() {
+        let (mut stream, oracle) = reference_fixture(5, 23, 3);
+        stream.advance_reference(8).unwrap();
+        let batch: Vec<_> = (6..=8).map(|tick| (tick, oracle[&tick])).collect();
+        for slot in [DONOR, EXISTING] {
+            stream.compare_peer(slot, 8, &batch).unwrap();
+        }
+        stream.retire_compared().unwrap();
+        assert_eq!(stream.stats.retired_through, 5);
+        assert_eq!(stream.head_limit(23).unwrap(), 8);
+        assert_eq!(stream.pending.len(), 3);
+        assert!(stream
+            .pending
+            .iter()
+            .all(|point| point.required == 0b111 && point.compared == 0b011));
+        assert!(stream.advance_reference(9).is_err());
+        assert_eq!(stream.sim.tick(), 8);
+        // Backlog ticks 6 and 7 precede F=8, but still require the joiner's
+        // independently compared actual checkpoints before any eviction.
+        stream.compare_peer(JOINER, 6, &batch[..1]).unwrap();
+        stream.retire_compared().unwrap();
+        assert_eq!(stream.stats.retired_through, 6);
+        assert_eq!(stream.pending.front().unwrap().tick, 7);
+        stream.compare_peer(JOINER, 8, &batch[1..]).unwrap();
+        stream.retire_compared().unwrap();
+        assert_eq!(stream.stats.retired_through, 8);
+        assert!(stream.pending.is_empty());
+    }
+
+    #[test]
+    fn rolling_old_checkpoint_mismatch_fails_before_eviction() {
+        let (mut stream, oracle) = reference_fixture(5, 23, 3);
+        stream.advance_reference(8).unwrap();
+        let mut batch: Vec<_> = (6..=8).map(|tick| (tick, oracle[&tick])).collect();
+        for slot in [DONOR, EXISTING] {
+            stream.compare_peer(slot, 8, &batch).unwrap();
+        }
+        batch[0].1 ^= 1;
+        let error = stream
+            .compare_peer(JOINER, 8, &batch)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mismatch at tick 6"), "{error}");
+        stream.retire_compared().unwrap();
+        assert_eq!(stream.stats.retired_through, 5);
+        assert_eq!(stream.checked_through[2], 5);
+        assert_eq!(stream.pending.len(), 3);
+        assert_eq!(stream.pending.front().unwrap().compared, 0b011);
+        assert_eq!(stream.final_actual, [None; 3]);
+    }
+
+    #[test]
+    fn rolling_missing_peer_checkpoint_is_never_skipped() {
+        for omit_first in [false, true] {
+            let (mut stream, oracle) = reference_fixture(5, 23, 3);
+            stream.advance_reference(8).unwrap();
+            let batch: Vec<_> = (6..=8).map(|tick| (tick, oracle[&tick])).collect();
+            let incomplete = if omit_first { &batch[1..] } else { &batch[..2] };
+            let error = stream
+                .compare_peer(DONOR, 8, incomplete)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("missing exact checkpoint"), "{error}");
+            stream.retire_compared().unwrap();
+            assert_eq!(stream.stats.retired_through, 5);
+            assert_eq!(stream.pending.len(), 3);
+        }
+    }
+
+    #[test]
+    fn rolling_missing_reference_is_never_skipped() {
+        let (mut stream, oracle) = reference_fixture(5, 23, 3);
+        stream.advance_reference(7).unwrap();
+        let batch: Vec<_> = (6..=8).map(|tick| (tick, oracle[&tick])).collect();
+        let error = stream
+            .compare_peer(DONOR, 8, &batch)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("missing independent reference checkpoint"),
+            "{error}"
+        );
+        stream.retire_compared().unwrap();
+        assert_eq!(stream.stats.retired_through, 5);
+        assert_eq!(stream.pending.len(), 2);
+    }
+
+    #[test]
+    fn rolling_final_actual_caches_survive_complete_retirement() {
+        let (mut stream, oracle) = reference_fixture(5, 8, 3);
+        stream.advance_reference(8).unwrap();
+        let batch: Vec<_> = (6..=8).map(|tick| (tick, oracle[&tick])).collect();
+        for slot in SLOTS {
+            stream.compare_peer(slot, 8, &batch).unwrap();
+            assert!(stream.report_checksum(slot).is_none());
+        }
+        stream.retire_compared().unwrap();
+        assert!(stream.pending.is_empty());
+        assert_eq!(stream.stats.retired_through, 8);
+        assert_eq!(stream.final_expected, Some(oracle[&8]));
+        // The reports read the peer cache, not the independent final scalar.
+        stream.final_expected = Some(oracle[&8] ^ 1);
+        for slot in SLOTS {
+            assert_eq!(stream.report_checksum(slot), Some(oracle[&8]));
+        }
+    }
+
+    #[test]
+    fn rolling_head_admission_caps_before_near_max_tick_addition() {
+        let mut stream = RollingReference::new(5, DIAGNOSTIC_WINDOW).unwrap();
+        stream.stats.retired_through = u64::MAX - 40;
+        assert_eq!(stream.head_limit(u64::MAX - 34).unwrap(), u64::MAX - 34);
+        assert_eq!(stream.head_limit(u64::MAX).unwrap(), u64::MAX);
+        assert_eq!(stream.head_limit(u64::MAX - 50).unwrap(), u64::MAX - 50);
+        stream.stats.retired_through = 5;
+        assert_eq!(
+            stream.head_limit(100).unwrap(),
+            5 + DIAGNOSTIC_WINDOW as u64
+        );
+    }
+
+    #[test]
+    fn rolling_requires_checked_activation_and_independent_snapshot() {
+        let mut stream = RollingReference::new(5, 8).unwrap();
+        assert!(stream.advance_reference(6).is_err());
+        assert_eq!(stream.sim.tick(), 0);
+        let grant = Grant::new(5, 8, 16, Mode::Rolling).unwrap();
+        assert!(stream.set_grant(grant).is_err());
+        let (mut stream, oracle) = reference_fixture(5, 23, 3);
+        stream.snapshot_checked = false;
+        assert!(stream.check_snapshot(5, oracle[&5] ^ 1).is_err());
+        assert!(!stream.snapshot_checked);
+        assert!(stream.compare_peer(JOINER, 5, &[]).is_err());
+        stream.check_snapshot(5, oracle[&5]).unwrap();
+        assert!(stream.set_grant(Grant { first: 9, ..grant }).is_err());
+    }
 
     #[test]
     fn pinned_three_edge_quic_matches_independent_arena() {
@@ -1445,6 +2045,18 @@ mod tests {
         assert!(result.direct_two_to_one >= ROLLING_LIVE_TICKS as usize);
         assert!(result.delayed_ready && result.delayed_retirement);
         assert_eq!(result.hold_cleanups, 2);
+        let diagnostics = result.diagnostics.unwrap();
+        let target = result.reports[0].tick;
+        assert_eq!(diagnostics.retired_through, target);
+        assert_eq!(
+            diagnostics.checked,
+            [target, target, target - ROLLING_PRELUDE]
+        );
+        assert!(diagnostics.reference_high_water <= DIAGNOSTIC_WINDOW);
+        assert!(diagnostics
+            .session_high_water
+            .iter()
+            .all(|&len| len <= DIAGNOSTIC_WINDOW));
         let caps = limits(Mode::Rolling);
         for stats in result.stats {
             assert!(stats.floor > ROLLING_PRELUDE && stats.floor_advances >= 100);

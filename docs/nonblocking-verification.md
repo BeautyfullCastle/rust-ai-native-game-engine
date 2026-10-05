@@ -12,6 +12,17 @@ existing client-mode rejection), a second verification returns
 `LIMIT_EXCEEDED` / `verify_busy` before copying frames or inputs, parsing checks,
 or decoding a recording. There is no verification queue.
 
+For `replay` and `last_play` inputs, an explicit top-level `ticks` above
+`max_verify_ticks` returns `LIMIT_EXCEEDED` / `verify_limit` with the existing
+`max` metadata during preparation, after checking the top-level options and
+proposal identity but before copying input JSON, either frame, or `last_play`,
+and before creating a worker. This refusal takes precedence over decoding or
+validating replay content and looking up the last recording. The document,
+proposal, revisions and history remain unchanged. Omitted or within-limit
+recorded tick caps keep their existing behavior, including capping a longer
+recording. `bot` and `idle` retain their separate `inputs.ticks` limit and
+top-level tick clamping behavior.
+
 Admission captures the current document's base and candidate frames together
 with the proposal's `verified_state`, the type registry, game hooks, options,
 checks, and input specification. `last_play` captures the recording that exists
@@ -57,8 +68,28 @@ a blocked custom hook, replay decoder, or individual simulation tick. Hard
 preemption, absolute replay allocation limits, replay-format hardening and
 general RPC/transport queue bounds are separate work. A client call timeout
 alone does not disconnect its transport and therefore does not cancel a job.
+Early refusal avoids admission copies for an already over-limit recorded
+request; it does not bound upstream request parsing or preparation allocations
+for accepted recordings.
 
 No simulation arithmetic, recording format, or golden checksums change.
+
+## Recorded admission regression coverage (2026-10-05)
+
+Six normal-input unit tests use a three-tick recording made by `PlayController`
+and an existing host limit of two ticks. Before the admission change, all four
+`replay` / `last_play` and self / proposal refusal cases failed because
+preparation succeeded. Afterward they reject at preparation with the unchanged
+error contract. The compatibility tests preserve complete reports, checksums,
+state stamps and document/proposal state for omitted and within-limit caps,
+including the existing zero-to-one clamp, and preserve scripted top-level
+clamping. No malformed recording or panic fixture was added.
+
+The release `orr_remote` library suite passes all 80 tests, the existing
+`nonblocking_verify` and `proposals` integration suites pass 9 and 13 tests,
+and release library Clippy passes with `-D warnings` on Rust 1.97.1. This is
+focused regression coverage, not a full workspace or cross-platform validation
+claim.
 
 ## Verification of this slice (2026-10-02)
 

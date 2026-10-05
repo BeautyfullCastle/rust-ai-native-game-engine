@@ -482,6 +482,17 @@ impl<G: Game, S: InputSource<G>> JoinBootstrap<G, S> {
         self.session.as_mut().map(Session::source_mut)
     }
 
+    /// Forward explicit diagnostic retirement to the owned direct-P2P session.
+    /// Compare/export needed checksums first; see [`Session::retire_checksums_through`].
+    /// Returns `None` when no session is owned (before snapshot acceptance or
+    /// after cancellation). Notice validation and session ownership are unchanged.
+    pub fn retire_checksums_through(
+        &mut self,
+        through: u64,
+    ) -> Option<Result<usize, crate::ChecksumRetireError>> {
+        self.session.as_mut().map(|session| session.retire_checksums_through(through))
+    }
+
     /// Advance the accepted session using its unchanged local-input handoff.
     /// `None` means no snapshot has been accepted or the attempt failed/cleared.
     pub fn advance(

@@ -531,3 +531,57 @@ fn accepted_gap_is_a_terminal_outcome_not_a_transactional_rejection() {
     join.next_request().unwrap();
     assert_eq!(join.notice_usage(), (0, 0));
 }
+
+#[test]
+fn checksum_retirement_forwarder_preserves_bootstrap_validation_and_session_ownership() {
+    let mut env = Env::new(512);
+    let mut join = bootstrap::<Mesh>(4096);
+    assert_eq!(join.retire_checksums_through(u64::MAX), None);
+    assert_eq!(join.status().unwrap(), Status::Idle);
+    let (snapshot, notices, source) = env.snapshot(&mut join, false);
+    join.receive_notice(PlayerSlot(0), &notices[0]).unwrap();
+    let staged = join.notice_usage();
+    assert_eq!(join.retire_checksums_through(0), None);
+    assert_eq!(join.notice_usage(), staged);
+    join.receive_snapshot(PlayerSlot(0), game(), source, &snapshot).unwrap();
+    // Retirement is independent of Ready: the checked notice gate remains shut.
+    let snapshot_tick = join.session().unwrap().verified_tick();
+    assert_eq!(join.retire_checksums_through(snapshot_tick), Some(Ok(0)));
+    assert_eq!(join.status().unwrap(), Status::Syncing { received: 1, expected: 2 });
+    assert!(join.session().unwrap().source().sent.is_empty());
+    join.receive_notice(PlayerSlot(1), &notices[1]).unwrap();
+    env.assert_converged(&mut join);
+    let peer = join.session().unwrap();
+    let tick = peer.verified_tick();
+    let through = tick - 3;
+    let head = peer.head_tick();
+    let next_send = peer.next_send_tick();
+    let frame = peer.predicted_frame().to_bytes();
+    let sent = peer.source().sent.clone();
+    let links = peer.source().links.len();
+    let checksums = peer.checksums().to_vec();
+    let removed = checksums.iter().filter(|&&(t, _)| t <= through).count();
+    let remaining = checksums.iter().copied().filter(|&(t, _)| t > through).collect::<Vec<_>>();
+    let notice_usage = join.notice_usage();
+    assert_eq!(join.retire_checksums_through(tick + 1), Some(Err(
+        orr_session::ChecksumRetireError::BeyondVerified { through: tick + 1, verified: tick }
+    )));
+    assert_eq!(join.session().unwrap().checksums(), checksums);
+    assert_eq!(join.retire_checksums_through(through), Some(Ok(removed)));
+    assert_eq!(join.retire_checksums_through(through), Some(Ok(0)));
+    assert_eq!(join.status().unwrap(), Status::Ready);
+    assert_eq!(join.notice_usage(), notice_usage);
+    // Checked validation cannot be bypassed through the narrow forwarder.
+    assert!(matches!(join.receive_notice(PlayerSlot(0), &notice(1, 0, &[])), Err(Error::ConflictingNotice(_))));
+    let returned = join.cancel().expect("retirement must not consume the owned session");
+    assert_eq!(returned.checksums(), remaining);
+    assert_eq!(returned.head_tick(), head);
+    assert_eq!(returned.verified_tick(), tick);
+    assert_eq!(returned.next_send_tick(), next_send);
+    assert_eq!(returned.predicted_frame().to_bytes(), frame);
+    assert_eq!(returned.source().sent, sent);
+    assert_eq!(returned.source().links.len(), links);
+    assert_eq!(join.retire_checksums_through(u64::MAX), None);
+    assert_eq!(join.status().unwrap(), Status::Cancelled);
+    assert!(join.session().is_none());
+}
