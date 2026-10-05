@@ -1074,3 +1074,60 @@ fn failed_checked_calls_never_adopt_unrelated_preexisting_holds() {
     );
     assert_eq!(env.b.release_owned_join_hold(&old), Release::Released);
 }
+
+#[test]
+fn exclusive_connection_registration_keeps_hold_and_queue_cleanup_independent() {
+    use orr_session::{JoinHoldRelease, P2pConnectionIssuer};
+    let mut env = Env::new(512);
+    let mut membership = members(0, 1 << 20);
+    let attempt = attempt(&mut membership);
+    let mut join = bootstrap::<Mesh>(4096);
+    let (snapshot, ticket) = membership
+        .serve_request(&attempt, conn(2), &mut env.a, &join.next_request().unwrap())
+        .unwrap();
+    let issuer = P2pConnectionIssuer::default();
+    let (ownership, lease) = issuer.issue(conn(2));
+    membership
+        .register_exclusive_connection(&attempt, lease)
+        .unwrap();
+    membership
+        .queue_control(&attempt, JOINER, &snapshot)
+        .unwrap();
+    let queued = membership.outbound_usage();
+    let mut foreign_membership = members(0, 1 << 20);
+    let foreign_attempt = foreign_membership
+        .begin_attempt(JOINER, PlayerSlot(0), 7, 1)
+        .unwrap();
+    let (other_owner, other_lease) = issuer.issue(conn(1));
+    let error = membership
+        .register_exclusive_connection(&foreign_attempt, other_lease)
+        .unwrap_err();
+    assert!(matches!(error.error, Error::AttemptMismatch));
+    assert!(error.lease.is_live());
+    assert_eq!(membership.outbound_usage(), queued);
+    assert!(env.a.backlog_notice(JOINER).is_some());
+    assert_eq!(membership.exclusive_connections(&attempt).unwrap().len(), 1);
+    let result = membership.flush(|_, _, _| Err("queue full"));
+    assert_eq!(result.queued, 0);
+    assert_eq!(membership.outbound_usage(), queued);
+    let cleanup = membership.cancel_attempt(&attempt).unwrap();
+    assert_eq!(cleanup.discarded_outbound_bytes, snapshot.len());
+    assert_eq!(membership.outbound_usage(), (0, 0));
+    assert_eq!(cleanup.exclusive_connections().len(), 1);
+    assert!(issuer.matches(&ownership, &cleanup.exclusive_connections()[0]));
+    assert_eq!(
+        cleanup.release_local_hold(&mut env.a),
+        JoinHoldRelease::ReleasedAssignmentRetained
+    );
+    assert_eq!(env.a.pending_join(JOINER), Some(ticket.ticket()));
+    assert!(cleanup.exclusive_connections()[0].is_live());
+    // Custom input links are outside this transport capability and untouched.
+    assert_eq!(env.a.source().links.len(), 1);
+    drop(ownership);
+    assert!(!cleanup.exclusive_connections()[0].is_live());
+    assert_eq!(
+        cleanup.release_local_hold(&mut env.a),
+        JoinHoldRelease::NoMatchingHold
+    );
+    assert!(issuer.matches(&other_owner, &error.lease));
+}
