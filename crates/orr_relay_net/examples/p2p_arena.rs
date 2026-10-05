@@ -1,7 +1,7 @@
-//! Finite two-peer Arena over pinned direct QUIC. No relay, TUI, discovery or mesh.
-//! `p2p_arena host [bind] [generation]` prints the exact join command.
-//! `p2p_arena join <address> <sha256> <generation>` joins slot 1.
-//! `p2p_arena smoke` runs both peers over real loopback sockets and checks every
+//! Rolling two-peer Arena over pinned direct QUIC. No relay, TUI, discovery or mesh.
+//! `p2p_arena host [bind] [generation] [live_ticks]` prints the exact join command.
+//! `p2p_arena join <address> <sha256> <generation> [live_ticks]` joins slot 1.
+//! `p2p_arena smoke [live_ticks]` runs both peers over real loopback sockets and checks every
 //! available verified checksum against an independently stepped simulation.
 //! The host admits the first connected client for this local-development demo;
 //! a generation is a fence, not a credential or production client authentication.
@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use orr_net::SendError;
 use orr_proto::{Channel, Endpoint, Link, LinkEvent, ServerEvent};
+use orr_relay_net::p2p_input::P2pRollingWindow;
 use orr_relay_net::{
     connect, format_fingerprint, fresh_seed, listen, parse_fingerprint, ConnectOptions,
     ListenOptions, NetConfig, P2pInputCodec, P2pInputDriver, P2pInputLimits, P2pInputSource,
@@ -36,7 +37,9 @@ const HOST: PlayerSlot = PlayerSlot(0);
 const JOINER: PlayerSlot = PlayerSlot(1);
 const CONTROL_LIMIT: usize = 256 * 1024;
 const LIVE_TICKS: u64 = 120;
-const WINDOW_END: u64 = 4097;
+const RECENT_TICKS: u64 = 8;
+const FUTURE_TICKS: u64 = 64;
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 const BUILD_ID: u64 = 0x5032504152454e31; // P2P Arena v1 demo build contract
 
 /// Arena wire schema v1: i64 LE raw Q48.16 x, i64 LE y, u32 LE buttons.
@@ -103,8 +106,15 @@ fn limits() -> P2pInputLimits {
         max_input_bytes: 20,
         max_commands: 3,
         max_command_bytes: 4,
-        end_tick: WINDOW_END,
+        max_records: 192,
+        max_retained_bytes: 192 * 256,
         ..P2pInputLimits::default()
+    }
+}
+fn window() -> P2pRollingWindow {
+    P2pRollingWindow {
+        recent_ticks: RECENT_TICKS,
+        future_ticks: FUTURE_TICKS,
     }
 }
 fn net_config() -> NetConfig {
@@ -158,6 +168,8 @@ struct Report {
     snapshot: u64,
     first_input: u64,
     checked: usize,
+    retired_through: u64,
+    evidence_records: usize,
 }
 fn reference(target: u64, first_input: u64) -> Vec<u64> {
     let mut sim = Simulation::<Arena>::with_build_id(game(), 60, 42, BUILD_ID);
@@ -177,7 +189,13 @@ fn reference(target: u64, first_input: u64) -> Vec<u64> {
     }
     out
 }
-fn verified_report(peer: &Peer, snapshot: u64, first_input: u64, target: u64) -> Result<Report> {
+fn verified_report(
+    peer: &Peer,
+    driver: &P2pInputDriver<Arena, ArenaCodec>,
+    snapshot: u64,
+    first_input: u64,
+    target: u64,
+) -> Result<Report> {
     if peer.verified_tick() < target {
         return Err("target is not verified".into());
     }
@@ -203,6 +221,11 @@ fn verified_report(peer: &Peer, snapshot: u64, first_input: u64, target: u64) ->
         snapshot,
         first_input,
         checked,
+        retired_through: driver
+            .rolling_progress()
+            .ok_or("expected rolling source")?
+            .1,
+        evidence_records: driver.retained_evidence().0,
     })
 }
 // Example-only application completion handshake, not part of ORRI or checked controls:
@@ -235,13 +258,15 @@ fn read_report(bytes: &[u8], generation: u64, kind: u8) -> Result<(u64, u64)> {
 fn run_host(
     bind: SocketAddr,
     generation: u64,
+    live_ticks: u64,
     announce: Option<mpsc::Sender<(SocketAddr, [u8; 32])>>,
 ) -> Result<Report> {
     let mut opts = ListenOptions::new(bind, TransportKind::Quic);
     opts.net = net_config();
     let mut endpoint = listen(&opts)?;
     let ctx = context(generation)?;
-    let (driver, source) = P2pInputDriver::<Arena, ArenaCodec>::new(HOST, ctx, limits())?;
+    let (driver, source) =
+        P2pInputDriver::<Arena, ArenaCodec>::new_rolling(HOST, ctx, limits(), window())?;
     let mut peer = Peer::new(game(), config(HOST, generation), source);
     let mut members = P2pMembership::new(2, HOST, CONTROL_LIMIT * 2)?;
     assert!(members.admit_local()?.is_empty());
@@ -260,7 +285,7 @@ fn run_host(
         peer.verified_tick()
     );
     println!(
-        "JOIN_COMMAND p2p_arena join {addr} {} {generation}",
+        "JOIN_COMMAND p2p_arena join {addr} {} {generation} {live_ticks}",
         format_fingerprint(&fp)
     );
     if let Some(announce) = announce {
@@ -272,12 +297,15 @@ fn run_host(
     let mut own_report: Option<Report> = None;
     let mut remote_report = None;
     let mut ack_sent = false;
-    let start = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut verified_progress = 0;
     let mut next_tick = Instant::now();
     let result = (|| -> Result<Report> {
         loop {
-            if start.elapsed() > Duration::from_secs(60) {
-                return Err("host timed out waiting for bounded join/completion".into());
+            if last_progress.elapsed() > PROGRESS_TIMEOUT {
+                return Err(
+                    "host stalled waiting for verified progress/bootstrap/completion".into(),
+                );
             }
             driver.check()?;
             for _ in 0..256 {
@@ -298,6 +326,7 @@ fn run_host(
                     members.register_exclusive_connection(&a, lease)?;
                     connection = Some(conn);
                     attempt = Some(a);
+                    last_progress = Instant::now();
                     continue;
                 }
                 if let ServerEvent::Disconnected(conn) = &event {
@@ -319,11 +348,11 @@ fn run_host(
                         let raw = ticket.ticket();
                         let target = raw
                             .first_input_tick
-                            .checked_add(LIVE_TICKS)
+                            .checked_add(live_ticks)
                             .ok_or("tick overflow")?;
-                        if target + 64 >= WINDOW_END {
-                            return Err("join arrived too late for finite tick window".into());
-                        }
+                        target
+                            .checked_add(FUTURE_TICKS)
+                            .ok_or("tick horizon overflow")?;
                         driver.bind(
                             conn,
                             ticket.context(),
@@ -335,6 +364,7 @@ fn run_host(
                         members.queue_control(a, JOINER, &notice)?;
                         println!("HOST_SNAPSHOT tick={} first_input={} backlog_records={} target={target}", raw.snapshot_tick, raw.first_input_tick, driver.pending().0);
                         grant = Some((raw.snapshot_tick, raw.first_input_tick, target));
+                        last_progress = Instant::now();
                     }
                     P2pRoutedEvent::Forward(ServerEvent::Message {
                         conn,
@@ -391,9 +421,13 @@ fn run_host(
                 }
                 next_tick = Instant::now() + Duration::from_millis(16);
             }
+            if peer.verified_tick() > verified_progress {
+                verified_progress = peer.verified_tick();
+                last_progress = Instant::now();
+            }
             if let Some((snapshot, first_input, target)) = grant {
                 if peer.verified_tick() >= target && own_report.is_none() {
-                    let report = verified_report(&peer, snapshot, first_input, target)?;
+                    let report = verified_report(&peer, &driver, snapshot, first_input, target)?;
                     println!(
                         "HOST_VERIFIED tick={target} checksum={:016x} reference_checkpoints={}",
                         report.checksum, report.checked
@@ -410,6 +444,7 @@ fn run_host(
                     match endpoint.try_send_reliable(conn, &report_bytes(generation, 2, ours)) {
                         Ok(()) => {
                             ack_sent = true;
+                            last_progress = Instant::now();
                             println!(
                                 "HOST_AGREED tick={} checksum={:016x}",
                                 ours.tick, ours.checksum
@@ -433,7 +468,12 @@ fn run_host(
     result
 }
 
-fn run_join(addr: SocketAddr, fingerprint: [u8; 32], generation: u64) -> Result<Report> {
+fn run_join(
+    addr: SocketAddr,
+    fingerprint: [u8; 32],
+    generation: u64,
+    live_ticks: u64,
+) -> Result<Report> {
     let mut opts = ConnectOptions::new(
         addr.to_string(),
         TransportKind::Quic,
@@ -445,20 +485,27 @@ fn run_join(addr: SocketAddr, fingerprint: [u8; 32], generation: u64) -> Result<
     let mut members = P2pMembership::new(2, JOINER, CONTROL_LIMIT * 2)?;
     assert!(members.commit_vacant(JOINER)?.is_empty());
     let mut bootstrap = Bootstrap::new(config(JOINER, generation), roster(), 4096, CONTROL_LIMIT)?;
-    let (driver, source) =
-        P2pInputDriver::<Arena, ArenaCodec>::new(JOINER, context(generation)?, limits())?;
+    let (driver, source) = P2pInputDriver::<Arena, ArenaCodec>::new_rolling(
+        JOINER,
+        context(generation)?,
+        limits(),
+        window(),
+    )?;
     let mut source = Some(source);
     let mut attempt = None;
     let mut grant = None;
     let mut ready = false;
     let mut own_report = None;
     let mut report_sent = false;
-    let start = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut verified_progress = 0;
     let mut next_tick = Instant::now();
     let result = (|| -> Result<Report> {
         loop {
-            if start.elapsed() > Duration::from_secs(60) {
-                return Err("join timed out waiting for bootstrap/completion".into());
+            if last_progress.elapsed() > PROGRESS_TIMEOUT {
+                return Err(
+                    "join stalled waiting for verified progress/bootstrap/completion".into(),
+                );
             }
             driver.check()?;
             for _ in 0..256 {
@@ -503,12 +550,13 @@ fn run_join(addr: SocketAddr, fingerprint: [u8; 32], generation: u64) -> Result<
                             let snapshot = peer.verified_tick();
                             let first_input = peer.next_send_tick();
                             let target =
-                                first_input.checked_add(LIVE_TICKS).ok_or("tick overflow")?;
-                            if target + 64 >= WINDOW_END {
-                                return Err("snapshot outside finite tick window".into());
-                            }
+                                first_input.checked_add(live_ticks).ok_or("tick overflow")?;
+                            target
+                                .checked_add(FUTURE_TICKS)
+                                .ok_or("tick horizon overflow")?;
                             driver.bind(conn, a.context(), snapshot, first_input)?;
                             grant = Some((snapshot, first_input, target));
+                            last_progress = Instant::now();
                         } else if data.starts_with(b"ORRB") {
                             members.receive_notice(a, conn, &mut bootstrap, &data)?;
                         } else {
@@ -516,6 +564,7 @@ fn run_join(addr: SocketAddr, fingerprint: [u8; 32], generation: u64) -> Result<
                         }
                         if bootstrap.status()? == JoinBootstrapStatus::Ready && !ready {
                             ready = true;
+                            last_progress = Instant::now();
                             let (_, _, target) = grant.ok_or("Ready without accepted snapshot")?;
                             println!(
                                 "JOIN_READY caught_up={} target={target}",
@@ -592,6 +641,12 @@ fn run_join(addr: SocketAddr, fingerprint: [u8; 32], generation: u64) -> Result<
             }
             bootstrap.poll_confirmed();
             driver.check()?;
+            if let Some(peer) = bootstrap.session() {
+                if peer.verified_tick() > verified_progress {
+                    verified_progress = peer.verified_tick();
+                    last_progress = Instant::now();
+                }
+            }
             if let Some((snapshot, first_input, target)) = grant {
                 if ready
                     && Instant::now() >= next_tick
@@ -607,6 +662,7 @@ fn run_join(addr: SocketAddr, fingerprint: [u8; 32], generation: u64) -> Result<
                 if bootstrap.caught_up_to(target)? && own_report.is_none() {
                     let report = verified_report(
                         bootstrap.session().unwrap(),
+                        &driver,
                         snapshot,
                         first_input,
                         target,
@@ -618,7 +674,10 @@ fn run_join(addr: SocketAddr, fingerprint: [u8; 32], generation: u64) -> Result<
             if let Some(ours) = &own_report {
                 if !report_sent && driver.pending().0 == 0 {
                     match link.try_send_reliable(&report_bytes(generation, 1, ours)) {
-                        Ok(()) => report_sent = true,
+                        Ok(()) => {
+                            report_sent = true;
+                            last_progress = Instant::now();
+                        }
                         Err(SendError::Backpressure) => {}
                         Err(e) => return Err(e.into()),
                     }
@@ -636,11 +695,12 @@ fn run_join(addr: SocketAddr, fingerprint: [u8; 32], generation: u64) -> Result<
     driver.cancel();
     result
 }
-fn smoke() -> Result<()> {
+fn smoke(live_ticks: u64) -> Result<()> {
     let (send, recv) = mpsc::channel();
-    let host = thread::spawn(move || run_host("127.0.0.1:0".parse().unwrap(), 77, Some(send)));
+    let host =
+        thread::spawn(move || run_host("127.0.0.1:0".parse().unwrap(), 77, live_ticks, Some(send)));
     let (addr, fingerprint) = recv.recv_timeout(Duration::from_secs(10))?;
-    let joined = run_join(addr, fingerprint, 77);
+    let joined = run_join(addr, fingerprint, 77, live_ticks);
     let hosted = host.join().map_err(|_| "host thread panicked")?;
     let join = joined?;
     let host = hosted?;
@@ -649,16 +709,38 @@ fn smoke() -> Result<()> {
     {
         return Err("loopback reports disagree".into());
     }
-    println!("SMOKE_OK real_quic=true backlog_commands=nonempty live_commands=ordered_and_repeated verified_tick={} checksum={:016x}", host.tick, host.checksum);
+    if live_ticks > 2 * RECENT_TICKS
+        && (host.retired_through <= host.snapshot + RECENT_TICKS
+            || join.retired_through <= join.snapshot + RECENT_TICKS)
+    {
+        return Err("rolling source did not retire multiple evidence windows".into());
+    }
+    println!("SMOKE_OK real_quic=true backlog_commands=nonempty live_commands=ordered_and_repeated verified_tick={} checksum={:016x} recent_ticks={RECENT_TICKS} host_floor={} join_floor={} evidence_records={}/{}", host.tick, host.checksum, host.retired_through, join.retired_through, host.evidence_records, join.evidence_records);
     Ok(())
+}
+fn live_ticks(value: Option<&String>) -> Result<u64> {
+    let ticks = value.map(|s| s.parse()).transpose()?.unwrap_or(LIVE_TICKS);
+    if ticks == 0 {
+        return Err("live_ticks must be positive".into());
+    }
+    Ok(ticks)
 }
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("host") if args.len() <= 3 => { run_host(args.get(1).map_or("127.0.0.1:7000", String::as_str).parse()?, args.get(2).map(|s| s.parse()).transpose()?.unwrap_or_else(|| fresh_seed().max(1)), None)?; }
-        Some("join") if args.len() == 4 => { run_join(args[1].parse()?, parse_fingerprint(&args[2])?, args[3].parse()?)?; }
-        Some("smoke") if args.len() == 1 => smoke()?,
-        _ => return Err("usage: p2p_arena host [bind] [generation] | join <addr> <fingerprint> <generation> | smoke".into()),
+        Some("host") if args.len() <= 4 => {
+            run_host(
+                args.get(1).map_or("127.0.0.1:7000", String::as_str).parse()?,
+                args.get(2).map(|s| s.parse()).transpose()?.unwrap_or_else(|| fresh_seed().max(1)),
+                live_ticks(args.get(3))?,
+                None,
+            )?;
+        }
+        Some("join") if (4..=5).contains(&args.len()) => {
+            run_join(args[1].parse()?, parse_fingerprint(&args[2])?, args[3].parse()?, live_ticks(args.get(4))?)?;
+        }
+        Some("smoke") if args.len() <= 2 => smoke(live_ticks(args.get(1))?)?,
+        _ => return Err("usage: p2p_arena host [bind] [generation] [live_ticks] | join <addr> <fingerprint> <generation> [live_ticks] | smoke [live_ticks]".into()),
     }
     Ok(())
 }
@@ -666,7 +748,7 @@ fn main() -> Result<()> {
 mod tests {
     #[test]
     fn real_quic_late_join_ordered_commands() {
-        super::smoke().unwrap();
+        super::smoke(super::LIVE_TICKS).unwrap();
     }
     #[test]
     fn arena_wire_is_explicit_little_endian_and_rejects_invalid_values() {
