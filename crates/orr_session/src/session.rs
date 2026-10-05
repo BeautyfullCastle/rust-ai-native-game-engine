@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Bound;
+use std::sync::{Arc, Weak};
 
 use orr_ecs::{Frame, FrameRing};
 use orr_sim::{EventKey, Game, PlayerFlags, PlayerSlot, SimCommand, SimEvent, Simulation, TickInputs};
 
 use crate::events::{EventBatch, EventStatus};
-use crate::input_source::{InputSource, RemoteInput};
+use crate::input_source::{InputSource, LocallyVerifiedTick, RemoteInput};
 use crate::join::{self, JoinError, JoinTicket};
 
 /// `Session` configuration.
@@ -192,6 +193,44 @@ struct Grant {
     confirmed: bool,
 }
 
+/// Opaque capability for one local input-retention installation. Clones identify
+/// the same installation, but keep neither the Session nor its hold alive. Every
+/// installation, even of an identical ticket, gets a fresh identity. This token
+/// is process-local, never serialized, and cannot release another Session's hold.
+#[derive(Clone, Debug)]
+pub struct JoinHoldLease {
+    slot: PlayerSlot,
+    identity: Weak<()>,
+}
+impl JoinHoldLease {
+    pub(crate) fn is_live(&self) -> bool {
+        self.identity.strong_count() != 0
+    }
+    pub(crate) fn same_installation(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.identity, &other.identity)
+    }
+}
+
+/// Outcome of retiring one exact local hold. Releasing retention does not undo
+/// inputs, reopen a slot, retire links, or remove a donor's assignment.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinHoldRelease {
+    /// Already retired, replaced, or owned by another Session.
+    NoMatchingHold,
+    /// Retention released; this Session has no donor assignment for the slot.
+    Released,
+    /// Retention released, but this Session retains the donor assignment. An
+    /// unconfirmed grant can still accept a higher attempt of the same join;
+    /// a confirmed grant requires the separate departure protocol.
+    ReleasedAssignmentRetained,
+}
+
+struct JoinHold {
+    ticket: JoinTicket,
+    identity: Arc<()>,
+}
+
 /// Where a joiner stands on the input check of its backlogs.
 enum JoinState {
     /// Backlog notices are still missing.
@@ -231,7 +270,7 @@ struct TickRecord<G: Game> {
     inputs: TickInputs<G::Input, G::Command>,
     predicted: Vec<bool>,
     events: Vec<SimEvent<G::Event>>,
-    /// Encoded commands the tick was simulated with (relay mode only).
+    /// Encoded commands the tick was simulated with, in submission order.
     cmds: Vec<(PlayerSlot, Vec<u8>)>,
 }
 
@@ -280,7 +319,7 @@ pub struct Session<G: Game, S: InputSource<G>> {
     grants: BTreeMap<PlayerSlot, Grant>,
     /// Joins in transfer, by slot: `authored` keeps every tick after the
     /// ticket's `snapshot_tick` until the join is confirmed or dropped.
-    holds: BTreeMap<PlayerSlot, JoinTicket>,
+    holds: BTreeMap<PlayerSlot, JoinHold>,
     /// Highest tick of an input received from a remote peer, by slot.
     last_remote_tick: BTreeMap<PlayerSlot, u64>,
     /// Set on a joiner that checks its backlogs.
@@ -465,6 +504,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// `tick` may be older than the current verified tick (the reliable
     /// correction can lag the unreliable bundles); the caller must then feed
     /// the confirmed bundles of `tick + 1..` again.
+    ///
+    /// Sources observing locally verified history must invalidate that archive
+    /// or install a fresh generation before restoring, even to a newer tick.
     pub fn restore_confirmed(
         &mut self,
         tick: u64,
@@ -568,7 +610,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             span.until = ticket.first_input_tick;
         }
         self.grants.insert(slot, Grant { joiner_id: req.joiner_id, ticket, confirmed: false });
-        self.holds.insert(slot, ticket);
+        self.hold_inputs_for_join(ticket);
         Ok(message)
     }
 
@@ -585,12 +627,58 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// of the slot at `first_input_tick` or later arrives (the joiner is
     /// caught up), or on [`release_join_hold`](Self::release_join_hold).
     pub fn hold_inputs_for_join(&mut self, ticket: JoinTicket) {
-        self.holds.insert(ticket.slot, ticket);
+        let _ = self.hold_inputs_for_join_owned(ticket);
+    }
+
+    /// Installs the same retention as `hold_inputs_for_join`, returning ownership
+    /// of this exact installation for delayed cleanup. Reinstalling an identical
+    /// ticket replaces the previous lease. No donor assignment is changed.
+    pub fn hold_inputs_for_join_owned(&mut self, ticket: JoinTicket) -> JoinHoldLease {
+        let identity = Arc::new(());
+        let lease = JoinHoldLease {
+            slot: ticket.slot,
+            identity: Arc::downgrade(&identity),
+        };
+        self.holds.insert(ticket.slot, JoinHold { ticket, identity });
+        lease
+    }
+
+    /// Captures the current local installation, including a hold installed by
+    /// `serve_join`. The returned capability is not ticket or wire identity.
+    pub fn join_hold_lease(&self, slot: PlayerSlot) -> Option<JoinHoldLease> {
+        self.holds.get(&slot).map(|hold| JoinHoldLease {
+            slot,
+            identity: Arc::downgrade(&hold.identity),
+        })
+    }
+
+    pub(crate) fn owns_join_hold(&self, lease: &JoinHoldLease) -> bool {
+        self.join_hold_lease(lease.slot)
+            .is_some_and(|current| current.same_installation(lease))
+    }
+
+    /// Releases only the retention owned by `lease`. Foreign, stale and repeated
+    /// calls are harmless, including after replacement with an identical ticket.
+    /// Authored history is pruned by ordinary `poll_confirmed` according to the
+    /// configured log window and any other holds. The donor grant is retained so
+    /// pre-Ready cancellation can retry without losing assignment ownership.
+    pub fn release_owned_join_hold(&mut self, lease: &JoinHoldLease) -> JoinHoldRelease {
+        if !self.owns_join_hold(lease) {
+            return JoinHoldRelease::NoMatchingHold;
+        }
+        self.holds.remove(&lease.slot);
+        if self.grants.contains_key(&lease.slot) {
+            JoinHoldRelease::ReleasedAssignmentRetained
+        } else {
+            JoinHoldRelease::Released
+        }
     }
 
     /// Ends the hold of `slot` (the join was given up), and drops this
     /// host's pending grant for it. Does not vacate the slot; see
-    /// [`mark_slot_vacant`](Self::mark_slot_vacant).
+    /// [`mark_slot_vacant`](Self::mark_slot_vacant). This legacy slot-based API
+    /// is not safe for delayed generation cleanup and removes retry ownership;
+    /// use `release_owned_join_hold` with the original lease instead.
     pub fn release_join_hold(&mut self, slot: PlayerSlot) {
         self.holds.remove(&slot);
         self.grants.remove(&slot);
@@ -652,7 +740,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// same link as the backlog; the joiner reads it with
     /// [`receive_backlog`](Self::receive_backlog).
     pub fn backlog_notice(&self, slot: PlayerSlot) -> Option<Vec<u8>> {
-        let ticket = self.holds.get(&slot)?;
+        let ticket = &self.holds.get(&slot)?.ticket;
         // Ticks are visited in order, so each slot's ticks form runs.
         let mut runs: BTreeMap<PlayerSlot, (u64, u64)> = BTreeMap::new();
         let mut spans = Vec::new();
@@ -912,27 +1000,23 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 self.last_disconnected[slot] = inputs.flags(PlayerSlot(slot as u8)).disconnected;
             }
         }
-        let cmds = if self.cfg.relay {
-            inputs
-                .commands()
-                .iter()
-                .map(|(slot, c)| {
-                    let mut bytes = Vec::new();
-                    c.encode(&mut bytes);
-                    (*slot, bytes)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let cmds = inputs
+            .commands()
+            .iter()
+            .map(|(slot, c)| {
+                let mut bytes = Vec::new();
+                c.encode(&mut bytes);
+                (*slot, bytes)
+            })
+            .collect();
         self.history.insert(tick, TickRecord { inputs, predicted, events, cmds });
     }
 
-    /// Relay mode: whether the confirmed bundle of `tick` differs from what
-    /// the tick was simulated with, in any slot that was only predicted:
+    /// Whether the confirmed input of `tick` differs from what the tick
+    /// was simulated with, in any slot that was only predicted:
     /// its input, or its commands (a confirmed slot that had commands the
     /// prediction lacked, or the reverse).
-    fn relay_tick_mismatch(&self, tick: u64, rec: &TickRecord<G>) -> bool {
+    fn tick_mismatch(&self, tick: u64, rec: &TickRecord<G>) -> bool {
         let Some(confirmed) = self.confirmed_input.get(&tick) else { return false };
         let commands = self.confirmed_commands.get(&tick);
         for (&slot, &val) in confirmed {
@@ -942,7 +1026,11 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             if *rec.inputs.input(slot) != val {
                 return true;
             }
-            if rec.inputs.flags(slot).disconnected != self.confirmed_absent.contains(&(tick, slot.0)) {
+            // Relay bundles authoritatively carry presence; retain P2P's
+            // existing presence handling while reconciling commands in both modes.
+            if self.cfg.relay
+                && rec.inputs.flags(slot).disconnected != self.confirmed_absent.contains(&(tick, slot.0))
+            {
                 return true;
             }
             let used = rec.cmds.iter().filter(|(s, _)| *s == slot).map(|(_, b)| b);
@@ -989,26 +1077,16 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         info
     }
 
-    /// Finds the earliest tick in `(verified_tick, head]` whose used input
-    /// (recorded as `predicted`) disagrees with an input that has since
-    /// been confirmed.
+    /// Finds the earliest tick in `(verified_tick, head]` whose predicted
+    /// input or commands disagree with a slot that has since been confirmed.
     fn earliest_mismatch(&self) -> Option<u64> {
         let mut earliest = None;
         if self.verified_tick >= self.sim.tick() {
             return None;
         }
         for (&tick, rec) in self.history.range((self.verified_tick + 1)..=self.sim.tick()) {
-            let Some(confirmed) = self.confirmed_input.get(&tick) else { continue };
-            if self.cfg.relay {
-                if self.relay_tick_mismatch(tick, rec) {
-                    earliest = Some(earliest.map_or(tick, |e: u64| e.min(tick)));
-                }
-                continue;
-            }
-            for (&slot, &val) in confirmed {
-                if rec.predicted[slot.0 as usize] && *rec.inputs.input(slot) != val {
-                    earliest = Some(earliest.map_or(tick, |e: u64| e.min(tick)));
-                }
+            if self.tick_mismatch(tick, rec) {
+                earliest = Some(earliest.map_or(tick, |e: u64| e.min(tick)));
             }
         }
         earliest
@@ -1032,7 +1110,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             let matches = (0..self.cfg.player_count).all(|slot| {
                 let ps = PlayerSlot(slot);
                 confirmed.get(&ps) == Some(rec.inputs.input(ps))
-            }) && !(self.cfg.relay && self.relay_tick_mismatch(t, rec));
+            }) && !self.tick_mismatch(t, rec);
             if !matches {
                 // A mismatch here means `earliest_mismatch`/resim above
                 // should already have corrected it earlier this call; if
@@ -1048,6 +1126,13 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 batch.push(e.key, EventStatus::Verified(e.payload));
             }
             self.verified_tick = t;
+            self.source.on_locally_verified(LocallyVerifiedTick {
+                simulated: &rec.inputs,
+                simulated_commands: &rec.cmds,
+                confirmed_inputs: confirmed,
+                confirmed_commands: self.confirmed_commands.get(&t),
+                confirmed_absent: &self.confirmed_absent,
+            });
             self.confirmed_input.remove(&t);
             self.confirmed_commands.remove(&t);
             if !self.confirmed_absent.is_empty() {
@@ -1159,9 +1244,13 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             *seen = (*seen).max(remote.tick);
             // The joiner is caught up once it sends input of its own: the
             // hold on our inputs is over.
-            if self.holds.get(&remote.slot).is_some_and(|t| remote.tick >= t.first_input_tick) {
+            if self.holds.get(&remote.slot).is_some_and(|h| remote.tick >= h.ticket.first_input_tick) {
                 self.holds.remove(&remote.slot);
-                if let Some(g) = self.grants.get_mut(&remote.slot) {
+            }
+            // Retention may already have been retired while this input was in
+            // flight. Assignment confirmation must not depend on a live hold.
+            if let Some(g) = self.grants.get_mut(&remote.slot) {
+                if remote.tick >= g.ticket.first_input_tick {
                     g.confirmed = true;
                 }
             }
@@ -1189,8 +1278,8 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             self.local_pending = self.local_pending.split_off(&(self.verified_tick + 1));
         }
         let mut keep_from = self.verified_tick.saturating_sub(self.cfg.input_log_ticks as u64);
-        for ticket in self.holds.values() {
-            keep_from = keep_from.min(ticket.snapshot_tick + 1);
+        for hold in self.holds.values() {
+            keep_from = keep_from.min(hold.ticket.snapshot_tick + 1);
         }
         self.authored = self.authored.split_off(&keep_from);
         (batch, rollback)
