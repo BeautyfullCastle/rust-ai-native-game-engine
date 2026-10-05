@@ -1,5 +1,5 @@
 //! Rolling two-peer Arena over pinned direct QUIC. No relay, TUI, discovery or mesh.
-//! `p2p_arena host [bind] [generation] [live_ticks]` prints the exact join command.
+//! `p2p_arena host [bind] [generation] [live_ticks] [pre_activation_retries]` prints the exact join command.
 //! `p2p_arena join <address> <sha256> <generation> [live_ticks]` joins slot 1.
 //! `p2p_arena smoke [live_ticks]` runs both peers over real loopback sockets and checks every
 //! available verified checksum against an independently stepped simulation.
@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use orr_net::SendError;
-use orr_proto::{Channel, Endpoint, Link, LinkEvent, ServerEvent};
+use orr_proto::{Channel, ConnId, Endpoint, Link, LinkEvent, ServerEvent};
 use orr_relay_net::p2p_input::P2pRollingWindow;
 use orr_relay_net::{
     connect, format_fingerprint, fresh_seed, listen, parse_fingerprint, ConnectOptions,
@@ -255,23 +255,98 @@ fn read_report(bytes: &[u8], generation: u64, kind: u8) -> Result<(u64, u64)> {
         u64::from_le_bytes(bytes[26..34].try_into()?),
     ))
 }
+/// Retrying means explicitly allowing another first-connected development client.
+/// It does not authenticate that client as the previous user.
+struct HostOptions {
+    pre_activation_retries: u32,
+    join_wait: Duration,
+    initial_ticks: u64,
+    #[cfg(test)]
+    hold_first_notice: bool,
+    #[cfg(test)]
+    held_notice_progress: Option<mpsc::Sender<()>>,
+}
+impl Default for HostOptions {
+    fn default() -> Self {
+        Self {
+            pre_activation_retries: 0,
+            join_wait: PROGRESS_TIMEOUT,
+            initial_ticks: 24,
+            #[cfg(test)]
+            hold_first_notice: false,
+            #[cfg(test)]
+            held_notice_progress: None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
+struct HostAnnouncement {
+    address: SocketAddr,
+    fingerprint: [u8; 32],
+    generation: u64,
+    verified_tick: u64,
+}
+fn announce_host(
+    info: HostAnnouncement,
+    live_ticks: u64,
+    announce: &Option<mpsc::Sender<HostAnnouncement>>,
+) -> Result<()> {
+    println!(
+        "HOST_RUNNING verified={} vacant_slot=1 address={} generation={}",
+        info.verified_tick, info.address, info.generation
+    );
+    println!(
+        "JOIN_COMMAND p2p_arena join {} {} {} {live_ticks}",
+        info.address,
+        format_fingerprint(&info.fingerprint),
+        info.generation
+    );
+    if let Some(announce) = announce {
+        announce.send(info)?;
+    }
+    Ok(())
+}
+// Fence every old-link event, including non-control input which membership forwards.
+fn current_host_event(event: &ServerEvent, connection: Option<ConnId>) -> bool {
+    match event {
+        ServerEvent::Disconnected(conn) | ServerEvent::Message { conn, .. } => {
+            Some(*conn) == connection
+        }
+        ServerEvent::Connected(_) => true,
+    }
+}
 fn run_host(
     bind: SocketAddr,
     generation: u64,
     live_ticks: u64,
-    announce: Option<mpsc::Sender<(SocketAddr, [u8; 32])>>,
+    announce: Option<mpsc::Sender<HostAnnouncement>>,
+) -> Result<Report> {
+    run_host_with_options(
+        bind,
+        generation,
+        live_ticks,
+        announce,
+        HostOptions::default(),
+    )
+}
+fn run_host_with_options(
+    bind: SocketAddr,
+    mut generation: u64,
+    live_ticks: u64,
+    announce: Option<mpsc::Sender<HostAnnouncement>>,
+    options: HostOptions,
 ) -> Result<Report> {
     let mut opts = ListenOptions::new(bind, TransportKind::Quic);
     opts.net = net_config();
     let mut endpoint = listen(&opts)?;
     let ctx = context(generation)?;
-    let (driver, source) =
+    let (mut driver, source) =
         P2pInputDriver::<Arena, ArenaCodec>::new_rolling(HOST, ctx, limits(), window())?;
     let mut peer = Peer::new(game(), config(HOST, generation), source);
     let mut members = P2pMembership::new(2, HOST, CONTROL_LIMIT * 2)?;
     assert!(members.admit_local()?.is_empty());
     assert!(members.commit_vacant(JOINER)?.is_empty());
-    for _ in 0..24 {
+    for _ in 0..options.initial_ticks {
         drive(&mut peer, &driver)?;
     }
     peer.poll_confirmed();
@@ -280,17 +355,23 @@ fn run_host(
     let fp = endpoint
         .cert_sha256()
         .ok_or("missing generated fingerprint")?;
-    println!(
-        "HOST_RUNNING verified={} vacant_slot=1 address={addr} generation={generation}",
-        peer.verified_tick()
-    );
-    println!(
-        "JOIN_COMMAND p2p_arena join {addr} {} {generation} {live_ticks}",
-        format_fingerprint(&fp)
-    );
-    if let Some(announce) = announce {
-        announce.send((addr, fp))?;
-    }
+    announce_host(
+        HostAnnouncement {
+            address: addr,
+            fingerprint: fp,
+            generation,
+            verified_tick: peer.verified_tick(),
+        },
+        live_ticks,
+        &announce,
+    )?;
+    let mut retry_count = 0;
+    #[cfg(test)]
+    let mut held_notice_progress = options.held_notice_progress;
+    let mut waiting_since = Instant::now();
+    // Readiness is possible after successful transport enqueue, even if no ORRI arrives.
+    let mut final_notice_queued = false;
+    let mut pending_disconnect = None;
     let mut attempt: Option<P2pAttempt> = None;
     let mut connection = None;
     let mut grant = None;
@@ -302,6 +383,9 @@ fn run_host(
     let mut next_tick = Instant::now();
     let result = (|| -> Result<Report> {
         loop {
+            if !final_notice_queued && waiting_since.elapsed() > options.join_wait {
+                return Err("host pre-activation wait expired; no further clients admitted".into());
+            }
             if last_progress.elapsed() > PROGRESS_TIMEOUT {
                 return Err(
                     "host stalled waiting for verified progress/bootstrap/completion".into(),
@@ -309,7 +393,11 @@ fn run_host(
             }
             driver.check()?;
             for _ in 0..256 {
-                let Some(event) = endpoint.poll() else {
+                let Some(event) = pending_disconnect
+                    .take()
+                    .map(ServerEvent::Disconnected)
+                    .or_else(|| endpoint.poll())
+                else {
                     break;
                 };
                 if let ServerEvent::Connected(conn) = event {
@@ -329,10 +417,8 @@ fn run_host(
                     last_progress = Instant::now();
                     continue;
                 }
-                if let ServerEvent::Disconnected(conn) = &event {
-                    if Some(*conn) != connection {
-                        continue;
-                    }
+                if !current_host_event(&event, connection) {
+                    continue;
                 }
                 match members.route_event(event) {
                     P2pRoutedEvent::Control { conn, data } => {
@@ -388,30 +474,101 @@ fn run_host(
                         }
                     }
                     P2pRoutedEvent::Disconnected { cleanup, .. } => {
+                        // route_event already removed the old route and cancelled its
+                        // attempt. Fence application traffic before releasing anything.
+                        connection = None;
+                        attempt = None;
                         for clean in cleanup {
                             let _ = clean.release_local_hold(&mut peer);
                             clean.retire_exclusive_connections(&mut endpoint);
                         }
-                        attempt = None;
                         driver.cancel();
                         if ack_sent {
                             return own_report
                                 .clone()
                                 .ok_or_else(|| "missing host report".into());
                         }
-                        return Err(
-                            "joiner disconnected; owned holds, link and input buffers retired"
-                                .into(),
-                        );
+                        if final_notice_queued {
+                            return Err("joiner disconnected after final readiness notice was queued; established-player reconnect is unsupported".into());
+                        }
+                        if retry_count >= options.pre_activation_retries {
+                            return Err("pre-activation retry budget exhausted; owned holds, link and input buffers retired".into());
+                        }
+                        let fresh_generation =
+                            generation.checked_add(1).ok_or("generation exhausted")?;
+                        // All validation, including capacity for resumed defaults, precedes
+                        // the source swap. Never reset or replace this Session/world.
+                        let replacement = driver.replace_cancelled_host_rolling(
+                            &mut peer,
+                            context(fresh_generation)?,
+                        )?;
+                        if let Some((_, first_input, _)) = grant {
+                            peer.mark_slot_vacant(JOINER, first_input)?;
+                        }
+                        replacement.check()?;
+                        driver = replacement;
+                        assert!(members.commit_vacant(JOINER)?.is_empty());
+                        peer.poll_confirmed();
+                        driver.check()?;
+                        retry_count += 1;
+                        generation = fresh_generation;
+                        grant = None;
+                        own_report = None;
+                        remote_report = None;
+                        last_progress = Instant::now();
+                        waiting_since = Instant::now();
+                        println!("HOST_RETRY generation={generation} retries_remaining={} head={} verified={}", options.pre_activation_retries - retry_count, peer.head_tick(), peer.verified_tick());
+                        announce_host(
+                            HostAnnouncement {
+                                address: addr,
+                                fingerprint: fp,
+                                generation,
+                                verified_tick: peer.verified_tick(),
+                            },
+                            live_ticks,
+                            &announce,
+                        )?;
                     }
                     other => return Err(format!("unexpected host event: {other:?}").into()),
                 }
             }
-            let controls_done = check_flush(
-                members.flush(|conn, _, bytes| endpoint.try_send_reliable(conn, bytes)),
-            )?;
+            let controls_done = check_flush(members.flush(|conn, _, bytes| {
+                #[cfg(test)]
+                if options.hold_first_notice && retry_count == 0 && bytes.starts_with(b"ORRB") {
+                    return Err(SendError::Backpressure);
+                }
+                match endpoint.try_send_reliable(conn, bytes) {
+                    Ok(()) => {
+                        if bytes.starts_with(b"ORRB") {
+                            final_notice_queued = true;
+                        }
+                        Ok(())
+                    }
+                    Err(SendError::UnknownConnection) => {
+                        // A transport may report loss before its queued disconnect event.
+                        // Retain controls until the ordinary fenced cleanup path runs.
+                        pending_disconnect = Some(conn);
+                        Err(SendError::Backpressure)
+                    }
+                    Err(error) => Err(error),
+                }
+            }))?;
+            if pending_disconnect.is_some() {
+                continue;
+            }
             if grant.is_some() && controls_done {
-                driver.flush(|conn, bytes| endpoint.try_send_reliable(conn, bytes))?;
+                driver.flush(
+                    |conn, bytes| match endpoint.try_send_reliable(conn, bytes) {
+                        Err(SendError::UnknownConnection) => {
+                            pending_disconnect = Some(conn);
+                            Err(SendError::Backpressure)
+                        }
+                        result => result,
+                    },
+                )?;
+            }
+            if pending_disconnect.is_some() {
+                continue;
             }
             peer.poll_confirmed();
             driver.check()?;
@@ -421,12 +578,21 @@ fn run_host(
                 }
                 next_tick = Instant::now() + Duration::from_millis(16);
             }
+            #[cfg(test)]
+            if options.hold_first_notice
+                && retry_count == 0
+                && grant.is_some_and(|(_, first, _)| peer.head_tick() >= first + 4)
+            {
+                if let Some(progress) = held_notice_progress.take() {
+                    progress.send(())?;
+                }
+            }
             if peer.verified_tick() > verified_progress {
                 verified_progress = peer.verified_tick();
                 last_progress = Instant::now();
             }
             if let Some((snapshot, first_input, target)) = grant {
-                if peer.verified_tick() >= target && own_report.is_none() {
+                if final_notice_queued && peer.verified_tick() >= target && own_report.is_none() {
                     let report = verified_report(&peer, &driver, snapshot, first_input, target)?;
                     println!(
                         "HOST_VERIFIED tick={target} checksum={:016x} reference_checkpoints={}",
@@ -699,8 +865,8 @@ fn smoke(live_ticks: u64) -> Result<()> {
     let (send, recv) = mpsc::channel();
     let host =
         thread::spawn(move || run_host("127.0.0.1:0".parse().unwrap(), 77, live_ticks, Some(send)));
-    let (addr, fingerprint) = recv.recv_timeout(Duration::from_secs(10))?;
-    let joined = run_join(addr, fingerprint, 77, live_ticks);
+    let info = recv.recv_timeout(Duration::from_secs(10))?;
+    let joined = run_join(info.address, info.fingerprint, info.generation, live_ticks);
     let hosted = host.join().map_err(|_| "host thread panicked")?;
     let join = joined?;
     let host = hosted?;
@@ -728,19 +894,20 @@ fn live_ticks(value: Option<&String>) -> Result<u64> {
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("host") if args.len() <= 4 => {
-            run_host(
+        Some("host") if args.len() <= 5 => {
+            run_host_with_options(
                 args.get(1).map_or("127.0.0.1:7000", String::as_str).parse()?,
                 args.get(2).map(|s| s.parse()).transpose()?.unwrap_or_else(|| fresh_seed().max(1)),
                 live_ticks(args.get(3))?,
                 None,
+                HostOptions { pre_activation_retries: args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(0), ..HostOptions::default() },
             )?;
         }
         Some("join") if (4..=5).contains(&args.len()) => {
             run_join(args[1].parse()?, parse_fingerprint(&args[2])?, args[3].parse()?, live_ticks(args.get(4))?)?;
         }
         Some("smoke") if args.len() <= 2 => smoke(live_ticks(args.get(1))?)?,
-        _ => return Err("usage: p2p_arena host [bind] [generation] [live_ticks] | join <addr> <fingerprint> <generation> [live_ticks] | smoke [live_ticks]".into()),
+        _ => return Err("usage: p2p_arena host [bind] [generation] [live_ticks] [pre_activation_retries] | join <addr> <fingerprint> <generation> [live_ticks] | smoke [live_ticks]".into()),
     }
     Ok(())
 }
@@ -749,6 +916,286 @@ mod tests {
     #[test]
     fn real_quic_late_join_ordered_commands() {
         super::smoke(super::LIVE_TICKS).unwrap();
+    }
+    // A real checked bootstrap consumes the snapshot (and optionally final notice),
+    // but deliberately never advances or emits joiner input before closing its link.
+    fn disconnect_during_bootstrap(
+        info: super::HostAnnouncement,
+        after_notice: bool,
+        host_progress: Option<super::mpsc::Receiver<()>>,
+    ) -> super::Result<(u64, u64)> {
+        use super::*;
+        let mut opts = ConnectOptions::new(
+            info.address.to_string(),
+            TransportKind::Quic,
+            Trust::Fingerprint(info.fingerprint),
+        );
+        opts.net = net_config();
+        let mut link = connect(&opts)?;
+        let conn = link.connection_id();
+        let mut members = P2pMembership::new(2, JOINER, CONTROL_LIMIT * 2)?;
+        members.commit_vacant(JOINER)?;
+        let mut bootstrap = Bootstrap::new(
+            config(JOINER, info.generation),
+            roster(),
+            4096,
+            CONTROL_LIMIT,
+        )?;
+        let (driver, source) = P2pInputDriver::<Arena, ArenaCodec>::new_rolling(
+            JOINER,
+            context(info.generation)?,
+            limits(),
+            window(),
+        )?;
+        let mut source = Some(source);
+        let mut attempt = None;
+        let mut grant = None;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            while let Some(event) = link.poll() {
+                let event = match event {
+                    LinkEvent::Connected => {
+                        members.admit_active(HOST, conn)?;
+                        let a = members.begin_attempt(JOINER, HOST, info.generation, 1)?;
+                        members.register_exclusive_connection(
+                            &a,
+                            link.claim_exclusive_connection().ok_or("missing lease")?,
+                        )?;
+                        members.queue_control(&a, HOST, &bootstrap.next_request()?)?;
+                        attempt = Some(a);
+                        continue;
+                    }
+                    LinkEvent::Message { channel, data } => ServerEvent::Message {
+                        conn,
+                        channel,
+                        data,
+                    },
+                    LinkEvent::Disconnected => {
+                        return Err("donor disconnected before test cutoff".into())
+                    }
+                };
+                match members.route_event(event) {
+                    P2pRoutedEvent::Control { conn, data } => {
+                        let a = attempt.as_ref().ok_or("missing attempt")?;
+                        if data.starts_with(b"ORRJ") {
+                            members.receive_snapshot(
+                                a,
+                                conn,
+                                &mut bootstrap,
+                                game(),
+                                source.take().ok_or("duplicate snapshot")?,
+                                &data,
+                            )?;
+                            let peer = bootstrap.session().ok_or("snapshot not accepted")?;
+                            grant = Some((peer.verified_tick(), peer.next_send_tick()));
+                            driver.bind(
+                                conn,
+                                a.context(),
+                                peer.verified_tick(),
+                                peer.next_send_tick(),
+                            )?;
+                        } else if data.starts_with(b"ORRB") {
+                            members.receive_notice(a, conn, &mut bootstrap, &data)?;
+                        } else {
+                            return Err("unexpected test control".into());
+                        }
+                        if grant.is_some()
+                            && (!after_notice || bootstrap.status()? == JoinBootstrapStatus::Ready)
+                        {
+                            if !after_notice {
+                                assert_ne!(bootstrap.status()?, JoinBootstrapStatus::Ready);
+                            }
+                            if let Some(progress) = &host_progress {
+                                progress.recv_timeout(Duration::from_secs(10))?;
+                            }
+                            bootstrap.cancel();
+                            let clean = members.cancel_attempt(a)?;
+                            clean.retire_exclusive_connections(&mut link);
+                            driver.cancel();
+                            link.close();
+                            let close_deadline = Instant::now() + Duration::from_secs(2);
+                            while Instant::now() < close_deadline {
+                                if matches!(link.poll(), Some(LinkEvent::Disconnected)) {
+                                    break;
+                                }
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                            return Ok(grant.unwrap());
+                        }
+                    }
+                    P2pRoutedEvent::Forward(ServerEvent::Message {
+                        conn,
+                        channel,
+                        data,
+                    }) => {
+                        driver.receive(conn, channel, &data)?;
+                    }
+                    other => return Err(format!("unexpected test event: {other:?}").into()),
+                }
+            }
+            check_flush(members.flush(|_, _, bytes| link.try_send_reliable(bytes)))?;
+            thread::sleep(Duration::from_millis(1));
+        }
+        Err("bootstrap test timed out".into())
+    }
+    #[test]
+    fn real_quic_pre_activation_retry_preserves_running_world() {
+        use super::*;
+        let (send, recv) = mpsc::channel();
+        let (progress_send, progress_recv) = mpsc::channel();
+        let host = thread::spawn(move || {
+            run_host_with_options(
+                "127.0.0.1:0".parse().unwrap(),
+                91,
+                LIVE_TICKS,
+                Some(send),
+                HostOptions {
+                    pre_activation_retries: 1,
+                    initial_ticks: 96,
+                    hold_first_notice: true,
+                    held_notice_progress: Some(progress_send),
+                    ..HostOptions::default()
+                },
+            )
+        });
+        let initial = recv.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(initial.verified_tick > FUTURE_TICKS);
+        let (abandoned_snapshot, abandoned_first) =
+            disconnect_during_bootstrap(initial, false, Some(progress_recv)).unwrap();
+        let retry = recv.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            (retry.address, retry.fingerprint),
+            (initial.address, initial.fingerprint)
+        );
+        assert_eq!(retry.generation, initial.generation + 1);
+        assert!(
+            retry.verified_tick > abandoned_first,
+            "defaults must verify the formerly abandoned suffix"
+        );
+        let joined = run_join(
+            retry.address,
+            retry.fingerprint,
+            retry.generation,
+            LIVE_TICKS,
+        );
+        let hosted = host.join().unwrap();
+        let joined = joined.unwrap();
+        let hosted = hosted.unwrap();
+        assert_eq!(
+            (
+                hosted.tick,
+                hosted.checksum,
+                hosted.snapshot,
+                hosted.first_input
+            ),
+            (
+                joined.tick,
+                joined.checksum,
+                joined.snapshot,
+                joined.first_input
+            )
+        );
+        assert!(hosted.snapshot >= abandoned_snapshot);
+        assert!(
+            hosted.first_input > abandoned_first,
+            "host must keep authoring after vacancy recovery"
+        );
+        // Both reports were independently compared at every available checkpoint,
+        // using only the successful grant as the joiner's activation boundary.
+        assert!(hosted.checked > LIVE_TICKS as usize);
+        assert!(joined.checked >= LIVE_TICKS as usize);
+    }
+    #[test]
+    fn real_quic_final_notice_disconnect_without_input_is_not_retryable() {
+        use super::*;
+        let (send, recv) = mpsc::channel();
+        let host = thread::spawn(move || {
+            run_host_with_options(
+                "127.0.0.1:0".parse().unwrap(),
+                101,
+                LIVE_TICKS,
+                Some(send),
+                HostOptions {
+                    pre_activation_retries: 2,
+                    initial_ticks: 96,
+                    ..HostOptions::default()
+                },
+            )
+        });
+        let info = recv.recv_timeout(Duration::from_secs(10)).unwrap();
+        disconnect_during_bootstrap(info, true, None).unwrap();
+        let error = host.join().unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains("after final readiness notice was queued"),
+            "{error}"
+        );
+        assert!(
+            recv.try_recv().is_err(),
+            "must not announce a replacement identity after activation became possible"
+        );
+    }
+    #[test]
+    fn real_quic_pre_activation_retry_requires_explicit_budget() {
+        use super::*;
+        let (send, recv) = mpsc::channel();
+        let host = thread::spawn(move || {
+            run_host_with_options(
+                "127.0.0.1:0".parse().unwrap(),
+                111,
+                LIVE_TICKS,
+                Some(send),
+                HostOptions {
+                    hold_first_notice: true,
+                    ..HostOptions::default()
+                },
+            )
+        });
+        let info = recv.recv_timeout(Duration::from_secs(10)).unwrap();
+        disconnect_during_bootstrap(info, false, None).unwrap();
+        let error = host.join().unwrap().unwrap_err().to_string();
+        assert!(error.contains("retry budget exhausted"), "{error}");
+        assert!(recv.try_recv().is_err());
+    }
+    #[test]
+    fn pre_activation_wait_is_bounded_despite_continuing_verified_progress() {
+        use super::*;
+        let error = run_host_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            121,
+            LIVE_TICKS,
+            None,
+            HostOptions {
+                pre_activation_retries: 2,
+                join_wait: Duration::from_millis(50),
+                ..HostOptions::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("pre-activation wait expired"), "{error}");
+    }
+    #[test]
+    fn retired_host_route_ignores_late_input_control_and_disconnect() {
+        use super::*;
+        let old = ConnId(7);
+        let fresh = ConnId(8);
+        for bytes in [b"ORRI".to_vec(), b"ORRQ".to_vec(), b"ORRB".to_vec()] {
+            let event = ServerEvent::Message {
+                conn: old,
+                channel: Channel::Reliable,
+                data: bytes,
+            };
+            assert!(!current_host_event(&event, None));
+            assert!(!current_host_event(&event, Some(fresh)));
+        }
+        assert!(!current_host_event(
+            &ServerEvent::Disconnected(old),
+            Some(fresh)
+        ));
+        assert!(current_host_event(
+            &ServerEvent::Disconnected(fresh),
+            Some(fresh)
+        ));
     }
     #[test]
     fn arena_wire_is_explicit_little_endian_and_rejects_invalid_values() {

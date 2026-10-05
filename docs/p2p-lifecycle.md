@@ -80,14 +80,21 @@ cargo run -p orr_relay_net --release --example p2p_arena -- smoke
 # Optional longer run, crossing the former 4096-tick lifetime:
 cargo run -p orr_relay_net --release --example p2p_arena -- smoke 5000
 cargo run -p orr_relay_net --release --example p2p_arena -- host 127.0.0.1:7000
+# Explicitly allow at most two replacement development clients before activation:
+cargo run -p orr_relay_net --release --example p2p_arena -- host 127.0.0.1:7000 77 120 2
 # In another terminal, use the address, SHA-256 fingerprint and generation the host prints:
 cargo run -p orr_relay_net --release --example p2p_arena -- join <address> <fingerprint> <generation>
 ```
 
-`host [bind] [generation] [live_ticks]` starts Arena with active slot 0 and committed vacant
+`host [bind] [generation] [live_ticks] [pre_activation_retries]` starts Arena
+with active slot 0 and committed vacant
 slot 1, advances 24 ticks before advertising, and keeps advancing while waiting.
 The host generates a fresh nonzero generation by default. `live_ticks` defaults
 to 120, must be positive, and is printed in the matching join command.
+`pre_activation_retries` defaults to zero: recovery admission is opt-in, with
+an explicit maximum number of replacement first-connected development clients.
+Each initial/retry generation has a 30-second pre-activation wait limit,
+independent of continuing verified progress; resource or tick limits can fail sooner.
 `join <address> <fingerprint> <generation> [live_ticks]` must use the same run
 length; `smoke [live_ticks]` supplies it to both peers. For a remote machine,
 supply its reachable host address to the joiner; no address discovery, NAT
@@ -197,7 +204,9 @@ There are two explicit source modes, sharing unchanged ORRI v1 framing:
   The standalone `encode_p2p_input` helper retains its finite range checks
 
 Rolling progress starts at zero. Only Session's `on_locally_verified` callback
-or the application's validated snapshot binding may advance it. Packet maxima,
+or the application's validated snapshot binding may advance it. The narrow
+cancelled-host replacement helper below also seeds it from the continuing
+Session's own verified checkpoint. Packet maxima,
 predicted head ticks and peer progress reports do not move it. Allowed future
 ticks are at most `progress + future_ticks`, inclusive. Both this addition and
 two ticks of cursor headroom are checked; `TickExhausted` terminates rather
@@ -245,7 +254,7 @@ three four-byte commands, eight recent ticks and a 64-tick future horizon.
 These are source-memory bounds, not a whole-session or process bound. In
 particular, the example's independent reference checksum vector and Session's
 checksum log grow with run length. Long-running bounded whole-session history,
-replay guarantees, reconnect, acknowledgments of individual inputs and repair
+replay guarantees, established-player reconnect, acknowledgments of individual inputs and repair
 remain separate work; the rolling source adds no new wire messages.
 
 Exhaustion, recent conflicts, unauthorized traffic or a non-backpressure send
@@ -258,9 +267,11 @@ including a forward restore; a lower callback cannot lower its floor.
 The example bounds transport message size, connections, event/send/control
 queues and stalled progress. Its 30-second watchdog is reset by verified progress
 or actual bootstrap/completion transitions, not arbitrary incoming traffic;
-there is no total 60-second run deadline. An advancing pre-admission host can
-wait for a late join beyond the former fixed lifetime. Snapshot controls retain
-existing checked wire/decompression bounds, distinct from the input-packet limit.
+there is no total 60-second run deadline. Separately, each initial/retry generation
+has a fixed 30-second pre-activation wait cap, even while the vacant host advances.
+Rolling sources still support joins after the former fixed tick horizon; the
+bounded example wait is an application policy. Snapshot controls retain existing
+checked wire/decompression bounds, distinct from the input-packet limit.
 
 Bootstrap disconnect/error uses the existing owned cleanup: cancel or invalidate
 the bootstrap, release the donor's exact local hold, retire only its registered
@@ -268,8 +279,46 @@ exclusive transport lease, and cancel the driver's application buffers.
 `NetLink` now supports the same identity-owned retirement as `NetEndpoint`;
 foreign, stale or relinquished leases cannot close another link with the same
 numeric ID. Retirement fences late buffered input immediately. It cannot retract
-already enqueued remote bytes. No canceled slot is automatically reopened and
-no retry/reassignment is attempted by this demo.
+already enqueued remote bytes.
+
+### Explicit pre-activation retry, preserving the host world
+
+With a nonzero `pre_activation_retries` argument, the host can recover a lost
+joining link only before its final checked ORRB notice was successfully enqueued
+by `try_send_reliable`. This exact enqueue is latched in the flush callback.
+Creating a grant, queueing a control in membership, or receiving no joiner input
+is not evidence that the joiner is still unready: a successfully enqueued notice
+may already let it become Ready and author inputs. After that boundary the demo
+fails closed on disconnect, even when the host received no ORRI. Normal completed
+report/ack shutdown remains successful.
+
+Before recovery the host fences all events from the old ConnId, cancels the
+membership attempt, releases its exact owned hold, retires its exclusive link,
+and cancels its old input driver. `replace_cancelled_host_rolling` verifies that
+the driver is the continuing Session's cancelled rolling host source, that no
+remote input was ever admitted (including input not yet polled into Session),
+and that the generation is fresh. It validates the retained pending grant and
+vacancy cutoff, seeds progress from `Session::verified_tick()`, and reconstructs
+all required unverified locally authored records using `authored_since`.
+Missing history, incorrect authority, stale context/cutoff, tick exhaustion or
+insufficient queue capacity fails before replacing the source or resuming defaults.
+The capacity preflight includes the exact default records `mark_slot_vacant`
+will immediately emit. The helper cannot prove the transport/readiness policy;
+its caller must enforce the no-successful-final-notice boundary and old-link fencing.
+
+Only after this transactional preflight is the fresh source installed in the
+same live Session. The host then marks the former grant vacant at its original
+first-input tick and resumes default inputs. Its world, checksums, authored
+commands and send cursor are not reset. If no request had reached the host, the
+same helper preserves both slots' already-authored tail without re-vacating it.
+The endpoint and certificate fingerprint stay unchanged, the generation increases
+with checked arithmetic, and a fresh `JOIN_COMMAND` is printed. Run that new
+command to join through a fresh link; the failed client is not silently re-used.
+No additional client identity is admitted beyond the explicit retry budget.
+
+This deliberately excludes established-player reconnect. Accepted unverified
+remote tails can carry commands that defaults cannot replace; they need a separate
+agreement/repair policy. The example never silently drops them to reopen a slot.
 
 Focused checks:
 
@@ -282,12 +331,22 @@ Rolling regressions compare both peers against independent simulation for 4300
 ticks, exercise checked late join after 4300 pre-admission ticks with the exact
 post-snapshot FIFO tail, and test stalled verification, recent conflicts, retired
 framing/authority checks, queue budgets, cancellation and cursor exhaustion.
-The real QUIC `smoke 5000` run also verified tick 5028 with matching independent
+New source-replacement regressions cover retained ordered/repeated commands,
+missing history, exact record/byte preflight (including vacancy defaults), stale
+handles, and both polled and unpolled remote input rejection. Real-QUIC tests
+accept a first snapshot after host progress beyond the initial rolling horizon,
+disconnect before its final notice, and join the same continuing world over a
+second fresh link. Both peers match independently simulated checkpoints using
+only the successful grant's activation boundary. A separate real-QUIC test closes
+a Ready joiner before sending any input and proves that retry remains forbidden.
+Old input/control/disconnect routing is fenced, and retry admission/wait is bounded.
+
+The earlier real QUIC `smoke 5000` run also verified tick 5028 with matching independent
 checkpoints and eight-tick-window retirement floors at 5020. These results do
 not imply bounded Session checksum/reference history.
 
 Remaining scope includes production admission/authentication, discovery/full
-mesh, reconnect or vacancy recovery coordination, a repair wire protocol,
+mesh, established-player reconnect or multi-peer vacancy recovery coordination, a repair wire protocol,
 whole-session bounded history and datagram redundancy. No simulation
 was added to the TUI. This real two-peer path advances issue #12 but does not
 claim that the complete P2P feature is finished.
