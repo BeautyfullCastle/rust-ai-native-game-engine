@@ -40,8 +40,7 @@ impl Proxy {
                     Err(e) => panic!("accept: {e}"),
                 }
             };
-            tcp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            tcp.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+            prepare_blocking_socket(&tcp).unwrap();
             let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(Arc::new(config)).unwrap(), tcp);
             while tls.conn.is_handshaking() {
                 if tls.conn.complete_io(&mut tls.sock).is_err() { return; }
@@ -81,6 +80,32 @@ impl Drop for Proxy {
     }
 }
 
+/// Accepted sockets can inherit nonblocking mode from the listener on some OSes.
+/// rustls::complete_io needs blocking I/O here; timeouts still bound every wait.
+fn prepare_blocking_socket(tcp: &TcpStream) -> std::io::Result<()> {
+    tcp.set_nonblocking(false)?;
+    tcp.set_read_timeout(Some(Duration::from_secs(2)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(2)))
+}
+
+#[test]
+fn accepted_nonblocking_socket_is_reset_before_waiting_for_peer_data() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut tcp, _) = listener.accept().unwrap();
+    // Force the inherited state on every platform, including Linux.
+    tcp.set_nonblocking(true).unwrap();
+    prepare_blocking_socket(&tcp).unwrap();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        peer.write_all(&[42]).unwrap();
+    });
+    let mut byte = [0];
+    tcp.read_exact(&mut byte).expect("a prepared socket must wait for data instead of returning WouldBlock");
+    assert_eq!(byte, [42]);
+    writer.join().unwrap();
+}
+
 /// A failed TLS handshake may never connect to the backend. Do not leave a peer
 /// blocked in accept (or subsequent I/O) while the test waits in join.
 fn accept_peer(listener: &TcpListener, timeout: Duration) -> std::io::Result<TcpStream> {
@@ -92,9 +117,7 @@ fn accept_peer(listener: &TcpListener, timeout: Duration) -> std::io::Result<Tcp
         }
         match listener.accept() {
             Ok((tcp, _)) => {
-                tcp.set_nonblocking(false)?;
-                tcp.set_read_timeout(Some(Duration::from_secs(2)))?;
-                tcp.set_write_timeout(Some(Duration::from_secs(2)))?;
+                prepare_blocking_socket(&tcp)?;
                 return Ok(tcp);
             }
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {
