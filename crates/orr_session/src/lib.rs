@@ -18,6 +18,7 @@ mod events;
 mod input_source;
 mod join;
 mod join_bootstrap;
+mod join_checked;
 mod play;
 mod relay;
 mod replay;
@@ -30,6 +31,7 @@ pub use relay::{
     RelayUpdate, SourceStats,
 };
 pub use events::{EventBatch, EventStatus};
+pub use join_checked::{checked_backlog_notice, import_checked_join_ticket, serve_checked_join, CheckedJoinContext, CheckedJoinError, CheckedJoinTicket};
 pub use join_bootstrap::{JoinBootstrap, JoinBootstrapError, JoinBootstrapStatus, JoinRoster};
 pub use join::{join_request, JoinAttempts, JoinError, JoinTicket};
 pub use input_source::{InputSource, LocalInputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RemoteInput};
