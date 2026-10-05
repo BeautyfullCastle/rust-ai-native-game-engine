@@ -1,15 +1,21 @@
 # Fixed three-peer direct-QUIC input mesh
 
-This is an opt-in, finite foundation alongside the existing two-peer
-`p2p_input` driver. It runs exactly three Arena participants over three direct
+This is an opt-in fixed-roster foundation alongside the existing two-peer
+`p2p_input` driver. The original finite constructor and smoke run remain the
+default; an explicit rolling mode retires old driver bookkeeping under fixed
+record and encoded-byte caps. It runs exactly three Arena participants over three direct
 QUIC connections: **0–1, 0–2, and 1–2**. It does not forward participant 1's
 inputs through participant 0. The older two-peer example and wire remain
 unchanged.
 
 ```sh
 cargo run -p orr_relay_net --release --example p2p_mesh_arena -- smoke
+cargo run -p orr_relay_net --release --example p2p_mesh_arena -- rolling
+# Optional: 4,096 live ticks, following a 768-tick two-peer prelude.
+cargo run -p orr_relay_net --release --example p2p_mesh_arena -- rolling 4096 768
 cargo test -p orr_relay_net --release --example p2p_mesh_arena
 cargo test -p orr_relay_net --release --test p2p_mesh_input
+cargo test -p orr_relay_net --release --test p2p_mesh_rolling
 ```
 
 The runner is a single-process, headless local demonstration. Each participant
@@ -25,7 +31,9 @@ lookup, NAT traversal, rendezvous, relay, or network-wide admission protocol.
 
 1. Participants 0 and 1 begin active with a three-slot Arena configuration.
    Only participant 0 authors default inputs for vacant slot 2. They exchange
-   inputs over 0–1 and verify a 24-tick prelude.
+   inputs over 0–1 and verify a 24-tick finite prelude, or a 640-tick rolling
+   prelude by default. The rolling prelude retires old evidence before peer 2
+   or its two direct connections are admitted.
 2. Two new pinned connections complete the topology. Every participant freezes
    the same checked-v3 manifest: three slots, active peers `[0,1]`, donor 0,
    joiner 2, one generation and attempt 1. Transport/membership admission is
@@ -47,7 +55,8 @@ lookup, NAT traversal, rendezvous, relay, or network-wide admission protocol.
    `first_input_tick`. The default owner stops authoring slot 2 at that
    boundary. With the current prelude and input delay 2, the snapshot is tick
    24 and first joiner input is tick 27, so the retained backlog is nonempty.
-6. All three participants verify at least 120 live ticks from that handoff.
+6. All three participants verify at least 120 finite-mode live ticks, or at
+   least 2,048 rolling-mode live ticks, from that handoff.
    Every available verified checksum is compared to a separate three-player
    Arena simulation scripted from tick zero; the reference never copies the
    donor snapshot. Every active input tick carries three ordered commands,
@@ -75,16 +84,72 @@ finite demonstration, not rolling retention. All authored input must remain
 in ticks 1 through 512, and authoring is limited to eight ticks ahead of local
 verification, independently of the predicted-head limit. The simulation stops
 advancing at the common target; input delay may produce a two-tick tail.
+Each connection and checked-join phase has its own 30-second deadline. A
+30-second absence of local verified progress fails the prelude or live phase;
+there is no total-run duration deadline. Once all three local target reports
+exist, the direct report exchange has a separate five-second deadline.
 Any failed edge, hard send error, capacity exhaustion, malformed/unauthorized
 input, missing peer, missing report, or timeout fails the run. There is no
 roster shrink, survivor election, disconnect default takeover, or reconnect.
+
+
+## Explicit rolling run and scope of the memory bound
+
+`rolling [live_ticks] [prelude_ticks]` defaults to 2,048 live ticks after a
+640-tick prelude. It requires at least 2,048 live ticks and a prelude greater
+than 512. Target, input-delay tail, future horizon, and author-ahead arithmetic
+are checked before starting. The author remains at most eight ticks ahead of
+its local verification, even during delayed catch-up. For the default rolling
+run, the snapshot is tick 640, first joiner input is tick 643, and the common
+verified target is tick 2690.
+
+The runner uses a deliberately small four-tick recent window and a 32-tick
+future allowance. Its fixed per-driver caps are:
+
+- 96 canonical records and `96 * 256` canonical encoded bytes
+- 96 incoming records and `96 * 256` incoming encoded bytes
+- 128 destination obligations, including pending and queue-accepted records
+- At most 128 pending packets globally and `128 * 256` pending encoded bytes
+- 64 pending packets and `64 * 256` pending encoded bytes per direct edge
+
+The runner samples and asserts these aggregate and per-edge caps during
+admission, receive, flush, polling, and authoring. It prints `MESH_DRIVER_CAPS`
+and one `MESH_DRIVER_STATS` line per peer with observed high-water marks,
+retirement floors, and floor-advance counts. Successful completion requires at
+least 100 observed floor advances per peer and final floors beyond the
+prelude; reaching a long target without retirement cannot pass.
+
+Rolling mode always delays participant 1's authored backlog on 1–2 while 1–0
+continues normally. It releases that delay only after participant 1's
+retirement floor covers its first post-snapshot backlog tick. The exact 1–2
+obligation must still be Pending, while the old queue-accepted 1–0 metadata
+for that same logical record must already be gone. Participant 2 is Ready but
+cannot verify the missing ticks until the actual direct 1–2 stream is
+released. `MESH_RETIREMENT_DELAY_PROVED` records this check. The run still
+requires three independent final reports, live traffic in both directions of
+1–2, ordered repeated commands, and the tick-zero independent reference.
+Only then may it print `MESH_ROLLING_OK`.
+
+This proves a **bounded rolling mesh driver**, not a duration-independent
+whole-process or Session memory bound. The generic Session checksum vector and
+the example's independent reference `BTreeMap` retain checkpoints and grow
+with run duration; reference checking also scans retained Session history.
+No generic Session/bootstrap checksum-drain API is added. Simulation/game
+state, decoded objects, allocator overhead, and native transport queues are
+outside the driver's encoded-retention caps. The separate transport and
+checked-control limits below still apply. This is not a long-lived production
+memory certification.
 
 ## Transport identity and the public input API
 
 The public module is `orr_relay_net::p2p_mesh_input`:
 
-- `P2pMeshInputDriver<G,C>` and `P2pMeshInputSource<G,C>` share one finite
-  lifetime with one Session
+- `P2pMeshInputDriver<G,C>` and `P2pMeshInputSource<G,C>` share one lifetime
+  with one Session; do not replace or restore the Session/source generation
+- `new(local, context, limits)` preserves the finite 1-through-512 behavior
+- `new_rolling(local, context, limits, P2pMeshRollingWindow { recent_ticks,
+  future_ticks })` explicitly enables rolling retention; finite `first_tick`
+  and `end_tick` do not set its tick horizon
 - `P2pMeshInputLimits` gives separate canonical, incoming, destination and
   per-edge bounds
 - `P2pMeshEdge` registers `connection`, `adapter_id`, `raw_connection`,
@@ -95,6 +160,11 @@ The public module is `orr_relay_net::p2p_mesh_input`:
   snapshot and exact source identity for participant 2
 - `admit_edge`, `resolve_connection`, `receive`, `flush`, `check`,
   `disconnected`, and accounting methods expose explicit application control
+- `rolling_progress()` returns `Some((locally_verified_tick, retired_through))`
+  in rolling mode and `None` in finite mode
+- `retained_evidence()`, `incoming()`, `pending()`, and `edge_pending(conn)`
+  return independent record/encoded-byte usage; `destination_records()` counts
+  retained destination obligations
 
 A `NetLink`'s raw connection ID is always 1, scoped to that adapter. The
 runner therefore has an explicit injective `(adapter_id, raw ConnId)` registry
@@ -110,6 +180,46 @@ to or from participant 2 requires the checked cutoff first. Calling
 `admit_edge` for a new destination atomically schedules eligible local backlog;
 calling `send_local` with that backlog again is unnecessary and does not
 create another destination obligation.
+
+### Rolling verification, retirement, and late admission
+
+Only the exact source's `on_locally_verified` callback advances existing-peer
+rolling progress. Prediction, input arrival, duplicate traffic, and successful
+sends do not. Importing a checked donor ticket on participant 1 establishes
+its immutable authority cutoff; it is not proof of that participant's local
+verification and must not slide its future horizon. Only participant 2's
+`install_joiner_snapshot` can initialize progress from the exact accepted
+bootstrap/source snapshot. Both rules are asserted by the example.
+
+The irreversible retirement floor advances from local verification and the
+recent window. Old canonical duplicate evidence and queue-accepted destination
+metadata may retire. Pending per-destination packets retain their immutable
+encoded bytes until that exact destination accepts the send, even when their
+ticks are already retired. Verification does not remove undelivered incoming
+records. If verification occurs during a flush callback, the in-flight FIFO
+head and its Pending obligation remain valid; successful late acceptance must
+not resurrect permanent old delivery metadata.
+
+A fresh checked snapshot must cover every locally authored tick whose
+canonical evidence has already been discarded. A stale first ticket fails
+with `SnapshotTooOld`; the application does not silently shorten backlog or
+reconstruct it from Session history. After a valid ticket is installed,
+post-snapshot locally authored evidence is pinned inside the same driver
+budgets until admitting peer 2 atomically creates that edge's obligations.
+The runner has no second backlog archive, copy, or re-authoring loop. The
+original 0–1 edge must be admitted before its uncovered local history is
+forgotten. A persisted vacancy high-water mark prevents a retroactive cutoff
+from becoming valid merely because old slot-2 evidence was retired.
+
+An authorized retired packet returns `P2pMeshInputAccepted::IgnoredRetired`,
+not `Duplicate`. Context, transport identity, recipient, edge generation,
+authority, framing, lengths, command counts, and vacant-slot restrictions are
+still checked before that outcome; retired packets are not decoded by the
+application codec or reinserted. Recent conflicts still fail. New future input
+must remain within `locally_verified_tick + future_ticks`; arithmetic
+exhaustion fails terminally rather than wrapping. The existing ORRM v1 wire
+format is unchanged. Code matching the accepted enum exhaustively must handle
+the new result variant.
 
 Call `check` before and after every Session/bootstrap mutation. The legacy
 `InputSource` trait has void methods, so it cannot directly return transport
@@ -158,8 +268,10 @@ Logical duplicate evidence and destination delivery state are distinct. Queue
 acceptance for one destination does not discharge another destination's
 obligation, acknowledge network delivery, or permit evidence pruning. A
 backpressured FIFO head remains unchanged, while the other edge still receives
-its own flush opportunity. The driver retains exact finite duplicate evidence;
-local verification does not retire pending output or destination records.
+its own flush opportunity. In finite mode the driver retains exact lifetime duplicate evidence and
+local verification does not retire destination records. In rolling mode,
+old evidence and queue-accepted metadata retire under the rules above; pending
+output never retires merely because of local verification.
 Budgets describe encoded retention, not total allocator or decoded-object
 memory. Codecs are trusted application code.
 
@@ -189,15 +301,21 @@ completion check, not a general consensus, repair, or authentication protocol.
 
 The example tests exercise actual pinned loopback QUIC for:
 
-- The three-edge late join and independent Arena reference
-- Delayed direct 1–2 backlog, proving Ready differs from verified catch-up
-- Loss of one live 1–2 edge, which must fail the entire fixed mesh
-- A missing participant 2 report, which must not reduce the completion roster
+- The finite three-edge late join and independent Arena reference
+- Rolling late join after tick 512, followed by at least 2,048 live ticks and
+  repeated retirements under asserted small driver caps
+- Delayed direct 1–2 backlog, proving Ready differs from verified catch-up,
+  including a rolling delay held across retirement
+- Loss of one live 1–2 edge in both modes, which must fail the entire fixed mesh
+- A missing participant 2 report in both modes, which must not reduce the
+  completion roster
 
 Additional example tests check exact report framing/context/identity and
 portable Arena codec values, command order and repetition. Public-driver tests
 cover authority, cutoffs, duplicate/conflict handling, bounded accounting,
 per-destination FIFO/backpressure, malformed input, adapter isolation and
-terminal errors. These checks are scoped to a fixed three-peer finite room;
-they do not claim arbitrary-N membership, discovery, distributed consensus,
+terminal errors. Rolling-driver tests separately cover checked verification,
+retirement, admission pins, stale snapshots, delayed obligations, reentrant
+flushes, retired framing/authority, and exhausted budgets/horizons. These checks
+are scoped to a fixed three-peer room; they do not claim arbitrary-N membership, discovery, distributed consensus,
 repair, production security, or completion of the broader P2P feature.
