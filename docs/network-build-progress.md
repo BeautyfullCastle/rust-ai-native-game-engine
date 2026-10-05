@@ -1,0 +1,68 @@
+# Paired WebSocket progress under native build load
+
+This procedure addresses the intermittent `orr_net` loopback failure reported in [#6's diagnostic](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/31#issuecomment-5968464302): `idle_timeout_detected::ws` expected `TimedOut` but observed `RemoteClose`. It also addresses the separate open question in [the progress queue](progress.md): whether selected network/FFI integration cases remain reliable while a native build is actively compiling. That failure signature is historical evidence, not proof the current source still reproduces it. This is a bounded diagnostic, not a benchmark, a general network soak, or proof that the engine is immune to build contention.
+
+## What is already covered
+
+The current `crates/orr_server/tests/net_e2e.rs` has a real loopback WebSocket scenario, `two_clients_over_websocket`. It runs two clients without an injected conditioner, expects both to reach `Playing`, checks progress beyond 90 verified ticks, compares shared checksums, and requires zero server desyncs. `build_hash_mismatch_is_rejected` checks the explicit mismatch path over both QUIC and WebSocket. `disconnect_and_rejoin_over_quic` now waits for verified tick progress and shared checkpoints rather than relying on fixed play windows; its existing leave/join and checksum checks remain part of that test.
+
+The progress history records the QUIC rejoin-progress work (including `1381d3cb`) separately from the WebSocket timeout report. It also records the FFI polling buffer validation-order correction (`90c0e332`) and its focused/CI coverage. Those fixes are not evidence of sustained-build-load testing. The exact approved default cases are `orr_net` test `idle_timeout_detected::ws`, `orr_server` test `disconnect_and_rejoin_over_quic`, `orr_server` test `two_clients_over_websocket`, and `orr_ffi` test `two_c_abi_clients_and_a_rust_client_play_with_prediction_and_rollback`. The QUIC rejoin, ordinary WebSocket, and Rust-driven C ABI tests are controls for distinct paths; none substitutes for the primary idle-timeout case. Do not run nested C-backed Cargo tests as a case, change transport/timeouts/assertions, or alter the ignored soak to make this probe pass. Keep prior FFI polling success distinct from this sustained-load question.
+
+## Pair definition
+
+Compare the same already-built executable for each selected exact test in two conditions:
+
+1. **Idle:** run the selected exact test with no intentional build workload.
+2. **Build overlap:** run that same executable and arguments while a separate, fresh-target native Cargo build is compiling this same pinned source tree.
+
+The loaded build uses a fresh `CARGO_TARGET_DIR`, distinct from the prepared test binary's target directory. This avoids sharing Cargo artifact locks or mutating the executable under test; it does not isolate machine resources. Require recorded rustc CPU-time increases to overlap the complete test interval before calling a case comparable. A successful Cargo command with no observed compiler activity is a cache-hit/no-load observation, not a loaded pass. If the environment cannot expose compiler identity and CPU-time samples, classify the load measurement as `unknown`; do not report a CPU percentage or performance result.
+
+The prepared manifest records the expected full `HEAD` and tree, raw SHA-256 for each `git ls-files` path plus the three claimed N6 paths, selected executable paths/SHA-256 and test inventory, rustc and Cargo executable paths/SHA-256/version output, platform/processor, profile, repeats, limits, and a fixed environment allowlist. Preparation and each campaign validation reject a tracked dirty worktree and recheck the pinned identities. Other untracked files are not included, except the three claimed paths whose bytes are explicitly hashed. The manifest does not pin a linker identity or store explicit build argv fields. The campaign build argv is fixed in the runner source, so review that source alongside the prepared manifest. Record only allowlisted environment variables and values; do not dump the full process environment or secrets. Reject mismatched identities, changed executables, unsafe/unapproved cases, or unexpected output paths before the affected launch. Operators must separately verify that the pinned worktree contents are the intended reviewed snapshot.
+
+Preparation and execution are separate CLI steps. Both preparation and campaign execution currently require Windows; the runtime containment and compiler attribution needed for a supported result are not implemented on other platforms. Preparation requires the expected full `HEAD`; its `--output` is a fresh record directory under the repository's `target`, not a fresh Cargo target directory. The `cargo test --no-run` commands use the current allowlisted `CARGO_TARGET_DIR` (or Cargo default) and may reuse existing artifacts. The manifest pins each selected executable and checks that each approved exact test appears in its binary inventory:
+
+```text
+python tools/network_build_progress_probe.py --prepare --expected-head <full-head> --output <fresh-runner-owned-target-dir>
+```
+
+Execution consumes the prepared manifest and writes to a different fresh output directory. `paired` is the comparison mode. `idle-only` is permitted for the bounded first reproduction attempt, but is not a paired load comparison:
+
+```text
+python tools/network_build_progress_probe.py --plan <prepare-dir>/prepared.json --output <fresh-output-dir> --mode paired
+python tools/network_build_progress_probe.py --plan <prepare-dir>/prepared.json --output <fresh-output-dir> --mode idle-only
+```
+
+For each selected case the runner invokes its pinned executable with the exact test name followed by `--exact --nocapture --test-threads=1`, and requires exactly one pass, zero failures, and zero ignored or measured tests. Preparation checks that each approved test name appears exactly once in the binary's `--list` inventory. At runtime, the parsed libtest filtered count must equal the prepared inventory size minus the selected test. The build command is fixed in the runner as `cargo build --release --locked --offline -p orr_server -p orr_ffi --target-dir <campaign-output>/load-target --message-format=json`; it targets a fresh load directory. Do not treat this code-defined argv as a build command pinned in the plan. `idle-only` runs every case selected in the plan without a build; it cannot produce an idle-vs-build comparison. It is still subject to the Windows-only runtime requirement.
+
+The default is one repeat of the selected approved case set. A plan may declare one to three repeats before launch; each repeat uses the same cases in both conditions, and the count cannot change after results are seen. Default watchdogs are 900 seconds for the build, 300 seconds for the FFI case, 90 seconds per other case, and 1800 seconds for the whole campaign. The validator accepts build watchdogs from 30–1800 seconds, case watchdogs from 10–300 seconds, and campaign watchdogs from 30–3600 seconds. Record source-test timeouts separately and do not modify them.
+
+## Bounds and stop behavior
+
+Each process has a finite watchdog selected before launch. A watchdog expiry, nonzero exit, missing or malformed libtest summary, unexpected pass/fail/ignored/filtered count, absent compiler overlap, source or executable identity mismatch, output-cap breach, or failed cleanup stops all later launches. Do not retry, extend the deadline, skip the first failing pair, or convert a failure into a pass. If runner self-validation fails, perform only that bounded runner-validation phase and do not claim a reproduction result.
+
+The watchdog is a stop-launching threshold, not permission to kill a process. Never automatically terminate Cargo, rustc, the test binary, or their descendants. On Windows, each child is started suspended, assigned to its own non-killing Job Object, and resumed; the runner samples the job's active-process count and total CPU time, and identifies `rustc` processes by executable path, PID/creation time, and CPU time. These are accounting samples, not CPU percentages, linker attribution, resource isolation, or performance results. The runner does not perform a global zero-active-process preflight or record a complete parent/child tree; coordinate the local lane and any external census separately. On POSIX, preparation and campaign execution are explicitly refused; the fallback process-group wrapper cannot verify descendant cleanup and cannot establish a valid runtime result. Preserve available process IDs/creation identities, exact argv, working directories, start/end UTC, exit status, stdout/stderr byte counts and hashes. Cap each stream at 4 MiB; discard excess while continuing to drain, mark overflow failed/incomplete, and stop later launches.
+
+After timeout, failure, or setup error, stop scheduling work and let every owned child exit naturally. Continue draining stdout/stderr to EOF, wait for and reap every child, and close process handles. On Windows, the runner requires each Job Object's active-process count to reach zero before it marks child cleanup complete. The runner does not take a global post-run census of all owned worktree processes; coordinate that separately before returning a shared lane. If a child will not exit, keep the lane occupied and request coordination; do not kill it or start another heavy job. Preserve the first failure and all raw streams even if later cleanup also reports a problem.
+
+## Required records and classification
+
+Keep a separate immutable record for every child: case/condition, source and executable pins, command/argv, allowlisted environment, available process identity, actual UTC start/end, watchdog, exit code, stdout/stderr observed and saved lengths and SHA-256, parsed libtest summary, compiler-overlap evidence, drain/EOF and reap status. The Windows build record also contains Job Object samples and compiler identities. Record runner validation, setup failures, and each idle/load case distinctly. Raw files and the manifest should support audit without rerunning it.
+
+The runner's literal campaign statuses are `idle_passed`, `pairs_passed`, `failed_stop`, and, when builder cleanup reports a build failure without an earlier campaign exception, `load_build_failed`. Inspect the failure string, individual attempt records, compiler-overlap samples, and cleanup fields to distinguish causes; the same `failed_stop` status can represent different stop reasons. The following labels are conceptual classifications, not additional strings emitted by the runner:
+
+| Outcome | Meaning |
+|---|---|
+| `runner_validation_failed` | Interpret a validation/setup/capture/cleanup stop in `failed_stop` as a runner-validation failure. No WebSocket result is claimed. |
+| `unsupported` | A platform or process-observation requirement is unavailable. The current runtime gate rejects non-Windows preparation/campaigns; this does not emit a separate `unsupported` campaign status. |
+| `idle_failed` | The exact WebSocket case failed in the idle condition. Preserve the failure; no loaded comparison follows. |
+| `load_build_failed` | The build record failed during cleanup without an earlier campaign exception. A missing overlap or other earlier stop may instead leave the literal status `failed_stop`; it is not a loaded WebSocket pass. |
+| `load_measurement_unknown` | Compiler activity or required identity/CPU-time evidence could not be established. Do not infer the amount of load. |
+| `loaded_failed` | The exact WebSocket case failed while verified build activity overlapped. Preserve the first failure and stop. |
+| `pair_passed` | Both test processes produced the expected exact libtest result and the loaded process had verified compiler overlap. This means only that this pair passed. |
+| `campaign_incomplete` | A stop condition, cleanup failure, output cap, or missing record prevented a complete, auditable pair. |
+
+Report each case/repeat and its source/environment conditions; do not pool repeats into a reliability rate, call the result a speedup, or generalize it beyond these cases and this machine. A build failure, cache hit, unavailable compiler counter, WebSocket test failure, and runner failure are different outcomes. Keep the original intermittent-failure record alongside the new result; a green bounded sample does not erase it. Portable Python fake-process tests may validate plan parsing, output caps, summary rejection, and fail-stop decisions, but they do not establish OS process containment, compiler attribution, or runtime support on that platform.
+
+## Scope exclusions
+
+This probe includes the selected QUIC rejoin and Rust-driven C ABI integration case, but does not exercise the ignored 60-second soak, the separate FFI polling-buffer regression, nested C-backed Cargo tests/compiler paths, GPU, or production relay changes. It does not establish idle-vs-build behavior on other operating systems, quantify system-wide CPU use, prove universal WebSocket stability, or authorize changes to transport behavior. Add test-only instrumentation in `crates/orr_server/tests/net_e2e.rs` only if the runner cannot establish the needed observation through the existing exact case; first document the missing observation and claim that file explicitly. Production relay/transport/FFI changes require a concrete reproduced failure and a separate minimal-scope review.
