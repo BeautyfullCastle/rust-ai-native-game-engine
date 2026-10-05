@@ -12,14 +12,14 @@
 //! advancing a failed session. `flush` retries the same FIFO head on Backpressure.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
 use orr_net::SendError;
 use orr_proto::{Channel, ConnId};
 use orr_session::{
-    CheckedJoinContext, Game, InputSource, LocallyVerifiedTick, PlayerSlot, RemoteInput,
+    CheckedJoinContext, Game, InputSource, LocallyVerifiedTick, PlayerSlot, RemoteInput, Session,
 };
 
 pub const P2P_INPUT_VERSION: u16 = 1;
@@ -145,6 +145,13 @@ pub enum P2pInputError {
     TickExhausted,
     /// A pre-bind host already discarded output newer than this snapshot.
     SnapshotTooOld,
+    /// Source replacement is not a safe pre-activation host retry.
+    UnsafeReplacement,
+    /// Required locally authored unverified history is no longer available.
+    MissingHistory {
+        tick: u64,
+        slot: PlayerSlot,
+    },
     Malformed,
     PacketLimit,
     InputLimit,
@@ -292,6 +299,7 @@ struct State<G: Game, C: P2pInputCodec<G>> {
     incoming: VecDeque<(RemoteInput<G>, usize)>,
     incoming_bytes: usize,
     flushing: bool,
+    admitted_remote: bool,
     marker: PhantomData<C>,
 }
 impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
@@ -487,6 +495,7 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         self.seen_bytes += bytes.len();
         self.incoming_bytes += bytes.len();
         self.seen.insert((tick, slot), bytes.to_vec());
+        self.admitted_remote = true;
         self.incoming.push_back((
             RemoteInput {
                 tick,
@@ -548,6 +557,128 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
             }),
         )
     }
+    /// Replace only a cancelled rolling host source, preserving the actual Session/world.
+    /// This is a trusted application boundary, not an established-player reconnect API:
+    /// the caller MUST first fence the old route, cancel its membership attempt, retire
+    /// its owned link/hold, and prove the final readiness notice was never successfully
+    /// enqueued. No received joiner input may have been admitted, even if not yet polled.
+    ///
+    /// The replacement starts at the Session's locally verified checkpoint and rebuilds
+    /// its unverified authored tail under a fresh generation. All coverage, authority and
+    /// queue budgets (including defaults a subsequent `mark_slot_vacant` will emit) are
+    /// checked before changing the Session source. On failure neither source nor world
+    /// changes. After success the caller must immediately vacate the pending grant from
+    /// its original first-input tick, before polling, advancing, or admitting a new peer.
+    /// The old cancelled handle remains inert; no wire format or Session reset is used.
+    pub fn replace_cancelled_host_rolling(
+        &self,
+        session: &mut Session<G, P2pInputSource<G, C>>,
+        context: CheckedJoinContext,
+    ) -> Result<Self, P2pInputError> {
+        let old = self.0.borrow();
+        let host = PlayerSlot(0);
+        let joiner = PlayerSlot(1);
+        let verified = session.verified_tick();
+        let next = session.next_send_tick();
+        if !Rc::ptr_eq(&self.0, &session.source().0)
+            || old.local != host
+            || old.error != Some(P2pInputError::Cancelled)
+            || old.flushing
+            || old.admitted_remote
+            || session.config().local_slot != host
+            || session.config().player_count != 2
+            || session.config().relay
+            || verified < u64::from(session.config().input_delay)
+            || session.verified_frame().is_none()
+            || session.last_remote_tick(joiner).is_some()
+            || context.join_id() == old.context.join_id()
+            || context.roster() != old.context.roster()
+        {
+            return Err(P2pInputError::UnsafeReplacement);
+        }
+        let rolling = old.rolling.ok_or(P2pInputError::UnsafeReplacement)?;
+        let from = match (old.binding, session.pending_join(joiner)) {
+            (Some(binding), Some(ticket))
+                if ticket.snapshot_tick == binding.snapshot_tick
+                    && ticket.first_input_tick == binding.first_input_tick
+                    && ticket.attempt == old.context.attempt()
+                    && verified < ticket.first_input_tick
+                    && ticket.first_input_tick <= next =>
+            {
+                Some(ticket.first_input_tick)
+            }
+            (None, None) => None,
+            _ => return Err(P2pInputError::UnsafeReplacement),
+        };
+        // Bound the coverage pass before iterating or allocating from tick distances.
+        if next > rolling.window.end(verified)? || next <= verified {
+            return Err(P2pInputError::TickRange);
+        }
+        let (replacement, source) =
+            Self::new_rolling(host, context, old.limits.clone(), rolling.window)?;
+        drop(old);
+        {
+            let mut fresh = replacement.0.borrow_mut();
+            let r = fresh.rolling.as_mut().unwrap();
+            r.progress = verified;
+            r.retired_through = verified;
+            r.discarded_output_through = verified;
+            let mut covered = BTreeSet::new();
+            for record in session.authored_since(verified) {
+                if record.tick >= next
+                    || record.disconnected
+                    || (record.slot == joiner && from.is_some_and(|cutoff| record.tick >= cutoff))
+                    || !covered.insert((record.tick, record.slot))
+                {
+                    return Err(P2pInputError::UnsafeReplacement);
+                }
+                fresh.send(record)?;
+            }
+            for tick in verified + 1..next {
+                for slot in [host, joiner] {
+                    if (slot == host || from.is_none_or(|cutoff| tick < cutoff))
+                        && !covered.contains(&(tick, slot))
+                    {
+                        return Err(P2pInputError::MissingHistory { tick, slot });
+                    }
+                }
+            }
+            // Vacancy fills only this missing suffix. Reserve its exact encoded cost
+            // without emitting or changing Session state before the source is installed.
+            let mut reserved_records = 0;
+            let mut reserved_bytes = 0;
+            if let Some(from) = from {
+                for tick in from..next {
+                    fresh.authority(host, joiner, tick)?;
+                    let bytes = encode_payload::<G, C>(
+                        &fresh.context,
+                        &RemoteInput {
+                            tick,
+                            slot: joiner,
+                            input: G::Input::default(),
+                            commands: Vec::new(),
+                            disconnected: false,
+                        },
+                        &fresh.limits,
+                    )?;
+                    fresh.budget(
+                        fresh.seen.len() + reserved_records,
+                        fresh.seen_bytes + reserved_bytes,
+                        bytes.len(),
+                    )?;
+                    fresh.budget(
+                        fresh.outgoing.len() + reserved_records,
+                        fresh.outgoing_bytes + reserved_bytes,
+                        bytes.len(),
+                    )?;
+                    reserved_records += 1;
+                    reserved_bytes += bytes.len();
+                }
+            }
+        }
+        *session.source_mut() = source;
+        Ok(replacement)
+    }
     fn create(
         local: PlayerSlot,
         context: CheckedJoinContext,
@@ -577,6 +708,7 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
             incoming: VecDeque::new(),
             incoming_bytes: 0,
             flushing: false,
+            admitted_remote: false,
             marker: PhantomData,
         }));
         Ok((Self(state.clone()), P2pInputSource(state)))
