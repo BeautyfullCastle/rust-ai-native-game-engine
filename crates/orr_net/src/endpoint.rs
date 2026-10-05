@@ -282,6 +282,22 @@ impl Endpoint {
         Ok(ep)
     }
 
+    /// Starts a verified TLS WebSocket connection. By default the URL DNS/IP
+    /// host is checked; `server_name` explicitly overrides that certificate name.
+    /// Only WebPki, CertDer and PemFile trust are supported. DNS, TCP, TLS and
+    /// HTTP upgrade share `connect_timeout`. Errors omit URL and peer content.
+    pub fn connect_wss(url: &str, server_name: Option<&str>, trust: QuicTrust, cfg: NetConfig) -> Result<Endpoint, NetError> {
+        let target = crate::ws::parse_wss_target(url)?;
+        let name = crate::ws::wss_server_name(&target, server_name)?;
+        let tls = tls::build_client_rustls(&trust, true)
+            .map_err(|_| NetError("WSS TLS configuration failed (use WebPki or a valid certificate CA)".into()))?;
+        let (mut ep, _shutdown) = Endpoint::new(cfg, false)?;
+        let id = ep.shared.alloc_id();
+        ep.client_conn = Some(id);
+        ep.handle().spawn(crate::ws::wss_client_conn(ep.shared.clone(), id, target, name, tls));
+        Ok(ep)
+    }
+
     /// Local socket address (the real port after binding port 0).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr

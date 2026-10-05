@@ -5,7 +5,10 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
+use std::sync::Arc;
+use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
 use std::time::{Duration, Instant};
 
 use orr_viewstream::{message_type, MSG_EVENTS, MSG_FRAME, MSG_FRAME3D, VERSION, VERSION_3D};
@@ -127,7 +130,7 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 enum Wire {
-    Ws(Box<WebSocket<TcpStream>>),
+    Ws(Box<WebSocket<SocketIo>>),
     /// Newline-delimited JSON; `partial` keeps a line that a read timeout cut in two.
     Tcp { reader: BufReader<TcpStream>, partial: Vec<u8> },
 }
@@ -215,37 +218,177 @@ fn rpc_error(msg: &J) -> Option<String> {
     Some(format!("{}: {}", e["code"], e["message"].as_str().unwrap_or("error")))
 }
 
-/// `ws://host:port/path?query` -> (`host:port`, whether it is a WebSocket).
-fn split_url(url: &str) -> Result<(String, bool), String> {
-    let (scheme, rest) = url.split_once("://").ok_or_else(|| format!("{url}: expected ws://host:port or tcp://host:port"))?;
-    let ws = match scheme {
-        "ws" => true,
-        "tcp" => false,
-        other => return Err(format!("unsupported scheme {other}:// (use ws:// or tcp://; wss needs TLS, which this viewer does not have)")),
-    };
-    let authority = rest.split(['/', '?']).next().unwrap_or("");
-    if authority.is_empty() {
-        return Err(format!("{url}: no host"));
+/// TLS uses Mozilla roots by default. An explicit PEM CA file replaces that root set;
+/// chain, validity and hostname verification remain mandatory. No insecure mode exists.
+#[derive(Clone, Debug)]
+pub struct SocketOptions {
+    pub ca_file: Option<PathBuf>,
+    /// Shared TCP/TLS/WebSocket establishment deadline (DNS resolution is OS-managed).
+    pub handshake_timeout: Duration,
+}
+
+impl Default for SocketOptions {
+    fn default() -> Self {
+        Self { ca_file: None, handshake_timeout: Duration::from_secs(10) }
     }
-    Ok((if authority.contains(':') { authority.to_string() } else { format!("{authority}:80") }, ws))
+}
+
+/// Bound every underlying operation, including TLS records and partial HTTP messages.
+struct DeadlineStream {
+    tcp: TcpStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())
+            .ok_or_else(|| std::io::ErrorKind::TimedOut.into())
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            self.tcp.set_read_timeout(Some(self.remaining()?))?;
+            match self.tcp.read(bytes) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        loop {
+            self.tcp.set_write_timeout(Some(self.remaining()?))?;
+            match self.tcp.write(bytes) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> { self.tcp.flush() }
+}
+
+enum SocketIo {
+    Plain(DeadlineStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, DeadlineStream>>),
+}
+
+impl SocketIo {
+    fn set_deadline(&mut self, deadline: Instant) {
+        match self {
+            Self::Plain(s) => s.deadline = deadline,
+            Self::Tls(s) => s.sock.deadline = deadline,
+        }
+    }
+}
+
+impl Read for SocketIo {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        match self { Self::Plain(s) => s.read(bytes), Self::Tls(s) => s.read(bytes) }
+    }
+}
+impl Write for SocketIo {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self { Self::Plain(s) => s.write(bytes), Self::Tls(s) => s.write(bytes) }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self { Self::Plain(s) => s.flush(), Self::Tls(s) => s.flush() }
+    }
+}
+
+struct Endpoint {
+    host: String,
+    port: u16,
+    ws: bool,
+    tls: bool,
+    // Deliberately excludes userinfo, path, query and fragment from all diagnostics.
+    display: String,
+}
+
+fn split_url(url: &str) -> Result<Endpoint, String> {
+    let uri: tungstenite::http::Uri = url.parse().map_err(|_| "invalid endpoint URL")?;
+    let scheme = uri.scheme_str().ok_or("expected ws://, wss:// or tcp:// endpoint")?;
+    if !matches!(scheme, "ws" | "wss" | "tcp") {
+        return Err("unsupported endpoint scheme (use ws://, wss:// or tcp://)".into());
+    }
+    let authority = uri.authority().ok_or("endpoint has no host")?;
+    if authority.as_str().contains('@') || url.contains('#') {
+        return Err("endpoint userinfo and fragments are not supported".into());
+    }
+    let host = uri.host().filter(|s| !s.is_empty()).ok_or("endpoint has no host")?;
+    if authority.as_str() != host && uri.port_u16().is_none() {
+        return Err("invalid endpoint port".into());
+    }
+    let port = uri.port_u16().unwrap_or(if scheme == "wss" { 443 } else { 80 });
+    Ok(Endpoint { host: host.trim_matches(['[', ']']).into(), port, ws: scheme != "tcp", tls: scheme == "wss", display: format!("{scheme}://{host}:{port}") })
+}
+
+fn tls_config(options: &SocketOptions) -> Result<rustls::ClientConfig, String> {
+    let roots = if let Some(path) = &options.ca_file {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in CertificateDer::pem_file_iter(path).map_err(|_| "cannot read CA PEM file")? {
+            roots.add(cert.map_err(|_| "invalid CA PEM file")?).map_err(|_| "invalid CA certificate")?;
+        }
+        if roots.is_empty() { return Err("CA PEM file contains no certificates".into()); }
+        roots
+    } else {
+        rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() }
+    };
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions().map_err(|_| "TLS configuration failed")?
+        .with_root_certificates(roots).with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 impl SocketSource {
     /// Connects, authenticates (`token` as an `auth` message; a `?token=` in the URL also works),
     /// subscribes to the `viewstream` topic and waits for the schema.
     pub fn connect(url: &str, token: Option<&str>, max_fps: u32, session: Session) -> Result<SocketSource, String> {
-        let (authority, ws) = split_url(url)?;
-        let stream = TcpStream::connect(&authority).map_err(|e| format!("cannot connect to {authority}: {e}"))?;
+        Self::connect_with_options(url, token, max_fps, session, &SocketOptions::default())
+    }
+
+    /// Like [`Self::connect`], with explicit CA trust and an establishment deadline.
+    pub fn connect_with_options(url: &str, token: Option<&str>, max_fps: u32, session: Session, options: &SocketOptions) -> Result<SocketSource, String> {
+        let endpoint = split_url(url)?;
+        if options.ca_file.is_some() && !endpoint.tls { return Err("CA trust requires a wss:// endpoint".into()); }
+        let config = if endpoint.tls { Some(tls_config(options)?) } else { None };
+        let end = Instant::now().checked_add(options.handshake_timeout).ok_or("invalid handshake timeout")?;
+        let addresses = (endpoint.host.as_str(), endpoint.port).to_socket_addrs().map_err(|_| "endpoint lookup failed")?;
+        let mut stream = None;
+        for address in addresses {
+            let remaining = end.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or("connection deadline exceeded")?;
+            if let Ok(tcp) = TcpStream::connect_timeout(&address, remaining) { stream = Some(tcp); break; }
+        }
+        let stream = stream.ok_or("cannot connect to endpoint")?;
         let _ = stream.set_nodelay(true);
-        let wire = if ws {
-            let (sock, _) = tungstenite::client(url, stream).map_err(|e| format!("WebSocket handshake with {url} failed: {e}"))?;
+        let wire = if endpoint.ws {
+            let raw = DeadlineStream { tcp: stream, deadline: end };
+            let io = if let Some(config) = config {
+                let name = ServerName::try_from(endpoint.host.clone()).map_err(|_| "invalid TLS server name")?;
+                let connection = rustls::ClientConnection::new(Arc::new(config), name).map_err(|_| "TLS configuration failed")?;
+                SocketIo::Tls(Box::new(rustls::StreamOwned::new(connection, raw)))
+            } else { SocketIo::Plain(raw) };
+            let mut result = tungstenite::client(url, io);
+            let sock = loop {
+                match result {
+                    Ok((sock, _)) => break sock,
+                    Err(tungstenite::HandshakeError::Interrupted(mid)) if Instant::now() < end => result = mid.handshake(),
+                    // The HTTP error can carry a sensitive URI or reflected response. Never display it.
+                    Err(_) => return Err("TLS/WebSocket handshake failed (check trust, hostname, peer and deadline)".into()),
+                }
+            };
             Wire::Ws(Box::new(sock))
         } else {
+            stream.set_write_timeout(Some(Duration::from_secs(30))).map_err(|_| "cannot set write deadline")?;
             Wire::Tcp { reader: BufReader::new(stream), partial: Vec::new() }
         };
-        let mut s = SocketSource { wire, schema: String::new(), next_id: 1, queue: VecDeque::new(), target: url.to_string(), client: None };
+        let mut s = SocketSource { wire, schema: String::new(), next_id: 1, queue: VecDeque::new(), target: endpoint.display, client: None };
         if let Some(t) = token {
-            s.call_wait("auth", json!({"token": t}))?;
+            s.call_wait("auth", json!({"token": t})).map_err(|_| "ERP authentication failed")?;
         }
         if let Session::Ensure { run } = session {
             let state = s.call_wait("sim.state", json!({}))?;
@@ -272,7 +415,10 @@ impl SocketSource {
 
     fn send_text(&mut self, text: String) -> Result<(), String> {
         match &mut self.wire {
-            Wire::Ws(ws) => ws.send(Message::text(text)).map_err(|e| format!("send: {e}")),
+            Wire::Ws(ws) => {
+                ws.get_mut().set_deadline(Instant::now() + Duration::from_secs(30));
+                ws.send(Message::text(text)).map_err(|_| "WebSocket send failed".into())
+            },
             Wire::Tcp { reader, .. } => {
                 let s = reader.get_mut();
                 s.write_all(text.as_bytes()).and_then(|()| s.write_all(b"\n")).map_err(|e| format!("send: {e}"))
@@ -311,7 +457,7 @@ impl SocketSource {
     fn read_text_or_queue(&mut self, timeout: Duration) -> Result<Option<String>, String> {
         match &mut self.wire {
             Wire::Ws(ws) => {
-                let _ = ws.get_ref().set_read_timeout(Some(timeout.max(Duration::from_millis(1))));
+                ws.get_mut().set_deadline(Instant::now() + timeout.max(Duration::from_millis(1)));
                 read_ws_text_or_queue(ws, &mut self.queue)
             }
             Wire::Tcp { reader, partial } => {

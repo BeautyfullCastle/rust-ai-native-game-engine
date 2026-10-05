@@ -3466,8 +3466,11 @@ dependencies = [
  "orr_session",
  "orr_sim",
  "orr_viewstream",
+ "rcgen",
+ "rustls",
  "serde_json",
  "tungstenite",
+ "webpki-roots",
 ]
 
 [[package]]

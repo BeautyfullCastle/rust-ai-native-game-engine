@@ -199,3 +199,28 @@ fn websocket_read_keeps_timeouts_recoverable_and_real_failures_fatal() {
     let mut ws = socket(vec![Ok(message(8, &[]))]);
     assert_eq!(read_ws_text_or_queue(&mut ws, &mut VecDeque::new()).unwrap_err(), "the host closed the connection");
 }
+
+#[test]
+fn endpoint_defaults_ipv6_and_sensitive_url_parts() {
+    let secure = split_url("wss://example.org/private?token=secret").unwrap();
+    assert_eq!(secure.port, 443);
+    assert_eq!(secure.display, "wss://example.org:443");
+    assert!(secure.ws && secure.tls);
+    let ipv6 = split_url("wss://[::1]:8443/path").unwrap();
+    assert_eq!(ipv6.host, "::1");
+    assert_eq!(ipv6.port, 8443);
+    for url in ["secret", "https://host/?token=secret", "ws://user:secret@host", "wss://host/#secret", "wss://host:secret", "wss://host:999999?token=secret"] {
+        let error = split_url(url).err().unwrap();
+        assert!(!error.contains("secret"), "{error}");
+    }
+}
+
+#[test]
+fn deadline_stream_expires_before_another_read_or_write() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let _peer = listener.accept().unwrap();
+    let mut stream = DeadlineStream { tcp, deadline: Instant::now() - Duration::from_millis(1) };
+    assert_eq!(stream.read(&mut [0]).unwrap_err().kind(), ErrorKind::TimedOut);
+    assert_eq!(stream.write(&[1]).unwrap_err().kind(), ErrorKind::TimedOut);
+}

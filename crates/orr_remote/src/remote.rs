@@ -29,10 +29,11 @@
 //!
 //! # Bandwidth
 //!
-//! Every published tick is a full frame (no delta yet), so the cost is
-//! frame size x rate. The server caps the rate per subscriber
-//! ([`RemoteConfig::max_fps`]) and skips frames for a subscriber whose
-//! socket is behind. See `tests/measure.rs` for numbers.
+//! Legacy subscribers receive full frames. Callers may opt into bounded
+//! frame-codec v1 records with [`FrameCodecPolicy`]; that API does not make a
+//! performance or bandwidth claim. The server caps the rate per subscriber
+//! ([`RemoteConfig::max_fps`]) and skips frames for a subscriber whose socket
+//! is behind. See `tests/measure.rs` for measurements of the legacy stream.
 
 //!
 //! # Presentation recovery
@@ -66,12 +67,80 @@ use serde_json::{json, Value as J};
 
 use crate::codec::{hex_decode, hex_encode};
 use crate::error::RpcError;
+use crate::frame_delta::{
+    DecodeError, Decoder, FrameRecord, FrameScope, FrameStamp, NeedFullReason,
+};
 use crate::link::{
     Incoming, PumpedWs, QueueBudget, QueueLimits, QueuePermit, QueueStats, Request, SendError,
     Transport, TransportQueueLimits, TransportQueueStats, TxHandle,
 };
 use crate::remote_view::{note, Stamp, ViewMailbox};
-use crate::wire::{debug_error_from_name, debug_to_json, decode_frame_message, timeline_from_json};
+use crate::wire::{
+    debug_error_from_name, debug_to_json, decode_frame_message, decode_frame_record_message,
+    timeline_from_json, FrameCodecLimits, FrameCodecMeta, DEFAULT_FRAME_CODEC_LIMITS,
+};
+
+/// Whether negotiated frame deltas are optional or required by this client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameCodecMode {
+    /// Use frame deltas when the host advertises and acknowledges the exact limits.
+    Prefer,
+    /// Refuse a host that does not support or exactly acknowledge frame deltas.
+    Require,
+}
+
+/// Finite limits and recovery deadline for opt-in remote frame deltas.
+///
+/// This is passed to additive constructors so existing [`RemoteConfig`]
+/// literals and legacy constructors retain their behavior.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameCodecPolicy {
+    pub mode: FrameCodecMode,
+    pub limits: FrameCodecLimits,
+    pub reset_timeout: Duration,
+}
+
+impl FrameCodecPolicy {
+    pub fn prefer(limits: FrameCodecLimits) -> Self {
+        Self {
+            mode: FrameCodecMode::Prefer,
+            limits,
+            reset_timeout: Duration::from_secs(10),
+        }
+    }
+
+    pub fn require(limits: FrameCodecLimits) -> Self {
+        Self {
+            mode: FrameCodecMode::Require,
+            limits,
+            reset_timeout: Duration::from_secs(10),
+        }
+    }
+
+    pub fn prefer_default() -> Self {
+        Self::prefer(DEFAULT_FRAME_CODEC_LIMITS)
+    }
+
+    pub fn require_default() -> Self {
+        Self::require(DEFAULT_FRAME_CODEC_LIMITS)
+    }
+
+    pub fn with_reset_timeout(mut self, timeout: Duration) -> Self {
+        self.reset_timeout = timeout;
+        self
+    }
+
+    fn validate(&self, source: &str) -> Result<(), String> {
+        if source != "sim" {
+            return Err("frame codec v1 currently supports only the sim frame source".into());
+        }
+        self.limits.validate().map_err(|error| error.to_string())?;
+        if self.reset_timeout.is_zero() || self.reset_timeout > Duration::from_secs(60) {
+            return Err("frame codec limits or reset timeout are invalid".into());
+        }
+        Ok(())
+    }
+}
 
 /// Whether a remote view requires the coherent ERP presentation extension.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -319,6 +388,7 @@ enum Pending {
     Discover,
     Schema,
     Subscribe,
+    ResetSubscribe,
     State,
 }
 
@@ -329,16 +399,19 @@ fn queue_handshake(
     kind: Pending,
     method: &str,
     params: J,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let id = *next_id;
-    *next_id = (*next_id).saturating_add(1);
-    pending.insert(id, kind);
+    *next_id = id
+        .checked_add(1)
+        .ok_or_else(|| "remote handshake request id space exhausted".to_string())?;
     t.send(Request {
         id: Some(id),
         method: method.to_string(),
         params,
     })
-    .map_err(|_| "connection closed during the handshake".to_string())
+    .map_err(|_| "connection closed during the handshake".to_string())?;
+    pending.insert(id, kind);
+    Ok(id)
 }
 
 fn identity_check_error(message: impl core::fmt::Display) -> String {
@@ -395,30 +468,365 @@ fn begin_subscription(
     pending: &mut BTreeMap<u64, Pending>,
     next_id: &mut u64,
     cfg: &RemoteConfig,
+    frame_codec: Option<FrameCodecLimits>,
 ) -> Result<(), String> {
-    let mut subscribe = json!({
-        "topics": ["frames", "events", "notes"],
-        "max_fps": cfg.max_fps.max(1),
-        "source": cfg.source,
-    });
-    if cfg.view_delivery != ViewDeliveryMode::Legacy {
-        subscribe["view_delivery"] = json!(1);
-    }
     queue_handshake(
         t,
         pending,
         next_id,
         Pending::Subscribe,
         "watch.subscribe",
-        subscribe,
+        subscription_params(cfg, frame_codec),
     )?;
-    queue_handshake(t, pending, next_id, Pending::State, "sim.state", J::Null)
+    queue_handshake(t, pending, next_id, Pending::State, "sim.state", J::Null)?;
+    Ok(())
+}
+
+fn subscription_params(cfg: &RemoteConfig, frame_codec: Option<FrameCodecLimits>) -> J {
+    let mut subscribe = json!({
+        "topics": ["frames", "events", "notes"],
+        "max_fps": cfg.max_fps.max(1),
+        "source": cfg.source,
+    });
+    if cfg.view_delivery != ViewDeliveryMode::Legacy || frame_codec.is_some() {
+        subscribe["view_delivery"] = json!(1);
+    }
+    if let Some(limits) = frame_codec {
+        subscribe["frame_codec"] = json!({
+            "version": 1,
+            "max_frame_bytes": limits.max_frame_bytes,
+            "max_baseline_bytes": limits.max_baseline_bytes,
+            "max_message_bytes": limits.max_message_bytes,
+        });
+    }
+    subscribe
+}
+
+fn supports_frame_codec(discovery: &J) -> bool {
+    discovery
+        .get("features")
+        .and_then(|features| features.get("frame_codec"))
+        .and_then(J::as_array)
+        .is_some_and(|versions| versions.iter().any(|v| v.as_u64() == Some(1)))
+}
+
+fn codec_exact(j: &J, key: &str) -> Result<u64, String> {
+    let text = j
+        .get(key)
+        .and_then(J::as_str)
+        .ok_or_else(|| format!("missing frame codec {key}"))?;
+    let value = text
+        .parse::<u64>()
+        .map_err(|_| format!("invalid frame codec {key}"))?;
+    if value.to_string() != text {
+        return Err(format!("frame codec {key} is not canonical decimal"));
+    }
+    Ok(value)
+}
+
+fn queue_frame_codec_recovery<E>(
+    t: &mut dyn Transport,
+    pending: &mut BTreeMap<u64, Pending>,
+    next_id: &mut u64,
+    cfg: &RemoteConfig,
+    codec: &mut FrameCodecClient,
+    shared: &Shared<E>,
+) -> Result<(), String> {
+    if codec.recovery_request.is_some() {
+        return Err("a frame codec reset request is already pending".into());
+    }
+    let deadline = std::time::Instant::now()
+        .checked_add(codec.reset_timeout)
+        .ok_or_else(|| "frame codec reset deadline is out of range".to_string())?;
+    shared
+        .view
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .begin_renewal();
+    let id = queue_handshake(
+        t,
+        pending,
+        next_id,
+        Pending::ResetSubscribe,
+        "watch.subscribe",
+        subscription_params(cfg, Some(codec.limits)),
+    )?;
+    codec.recovery_request = Some(id);
+    codec.recovery_deadline = Some(deadline);
+    Ok(())
 }
 
 struct Info {
     delivery: RemoteViewDelivery,
     tick_rate: u32,
     player_count: u8,
+}
+
+struct CodecResetNotice {
+    generation: u64,
+    next_sequence: u64,
+    scope: FrameScope,
+    delivery: Stamp,
+}
+
+struct PreparedCodecRenewal {
+    subscription: u64,
+    deadline: std::time::Instant,
+}
+
+struct FrameCodecClient {
+    limits: FrameCodecLimits,
+    reset_timeout: Duration,
+    decoder: Decoder,
+    subscription: u64,
+    sequence: u64,
+    reset_generation: u64,
+    scope: Option<FrameScope>,
+    last_target: Option<FrameStamp>,
+    awaiting_full: bool,
+    source_inactive: bool,
+    reset_notice: Option<CodecResetNotice>,
+    recovery_request: Option<u64>,
+    recovery_deadline: Option<std::time::Instant>,
+}
+
+impl FrameCodecClient {
+    fn new(
+        registry: Arc<orr_ecs::ComponentRegistry>,
+        limits: FrameCodecLimits,
+        reset_timeout: Duration,
+        result: &J,
+    ) -> Result<Self, String> {
+        validate_frame_codec_ack(result, limits)?;
+        let deadline = std::time::Instant::now()
+            .checked_add(reset_timeout)
+            .ok_or_else(|| "frame codec reset deadline is out of range".to_string())?;
+        Ok(Self {
+            limits,
+            reset_timeout,
+            decoder: Decoder::new(registry, limits.max_frame_bytes, limits.max_baseline_bytes),
+            subscription: codec_exact(result, "subscription")?,
+            sequence: 0,
+            reset_generation: 1,
+            scope: None,
+            last_target: None,
+            awaiting_full: true,
+            source_inactive: false,
+            reset_notice: None,
+            recovery_request: None,
+            recovery_deadline: Some(deadline),
+        })
+    }
+
+    fn prepare_renewal(&self, result: &J) -> Result<PreparedCodecRenewal, String> {
+        validate_frame_codec_ack(result, self.limits)?;
+        let subscription = codec_exact(result, "subscription")?;
+        if subscription == self.subscription {
+            return Err("frame codec reset did not issue a new subscription".into());
+        }
+        let deadline = std::time::Instant::now()
+            .checked_add(self.reset_timeout)
+            .ok_or_else(|| "frame codec reset deadline is out of range".to_string())?;
+        Ok(PreparedCodecRenewal {
+            subscription,
+            deadline,
+        })
+    }
+
+    fn commit_renewal(
+        &mut self,
+        registry: Arc<orr_ecs::ComponentRegistry>,
+        prepared: PreparedCodecRenewal,
+    ) {
+        self.decoder = Decoder::new(
+            registry,
+            self.limits.max_frame_bytes,
+            self.limits.max_baseline_bytes,
+        );
+        self.subscription = prepared.subscription;
+        self.sequence = 0;
+        self.reset_generation = 1;
+        self.scope = None;
+        self.last_target = None;
+        self.awaiting_full = true;
+        self.source_inactive = false;
+        self.reset_notice = None;
+        self.recovery_request = None;
+        self.recovery_deadline = Some(prepared.deadline);
+    }
+
+    fn accept_reset_notice(&mut self, params: &J) -> Result<(), String> {
+        if self.recovery_request.is_some() {
+            // The notice belongs to the old subscription while replacement is
+            // pending; queued old-subscription traffic is discarded as a unit.
+            return Ok(());
+        }
+        let subscription = codec_exact(params, "subscription")?;
+        if subscription != self.subscription || self.awaiting_full || self.reset_notice.is_some() {
+            return Err("unexpected frame codec reset announcement".into());
+        }
+        let generation = codec_exact(params, "reset_generation")?;
+        let next_generation = self
+            .reset_generation
+            .checked_add(1)
+            .ok_or_else(|| "frame codec reset generation exhausted".to_string())?;
+        let next_sequence = codec_exact(params, "next_sequence")?;
+        let expected_sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "frame codec sequence exhausted".to_string())?;
+        if generation != next_generation || next_sequence != expected_sequence {
+            return Err("frame codec reset announcement is out of order".into());
+        }
+        let scope_value = params
+            .get("scope")
+            .ok_or("frame codec reset announcement is missing scope")?;
+        let scope = FrameScope {
+            stream_generation: codec_exact(scope_value, "stream_generation")?,
+            play_epoch: codec_exact(scope_value, "play_epoch")?,
+            timeline_epoch: codec_exact(scope_value, "timeline_epoch")?,
+        };
+        if scope.stream_generation != subscription || scope.timeline_epoch != generation {
+            return Err("frame codec reset scope does not match its stream identity".into());
+        }
+        let delivery = params
+            .get("delivery")
+            .ok_or("frame codec reset announcement is missing delivery cut")?;
+        let delivery_stamp = Stamp::parse(delivery, true)?;
+        if delivery_stamp.subscription != subscription {
+            return Err("frame codec reset delivery cut has a stale subscription".into());
+        }
+        self.reset_notice = Some(CodecResetNotice {
+            generation,
+            next_sequence,
+            scope,
+            delivery: delivery_stamp,
+        });
+        self.awaiting_full = true;
+        self.source_inactive = false;
+        self.recovery_deadline = Some(
+            std::time::Instant::now()
+                .checked_add(self.reset_timeout)
+                .ok_or_else(|| "frame codec reset deadline is out of range".to_string())?,
+        );
+        Ok(())
+    }
+
+    fn validate_record_identity(
+        &self,
+        metadata: &J,
+        identity: FrameCodecMeta,
+        record: &FrameRecord,
+    ) -> Result<(FrameStamp, bool), String> {
+        if self.recovery_request.is_some() {
+            return Err("frame arrived while a replacement subscription is pending".into());
+        }
+        if identity.subscription != self.subscription {
+            return Err("frame codec record belongs to a stale subscription".into());
+        }
+        let expected_sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "frame codec sequence exhausted".to_string())?;
+        if identity.sequence != expected_sequence {
+            return Err("frame codec record sequence is not the next admitted record".into());
+        }
+        let target = match record {
+            FrameRecord::Full { target, .. } | FrameRecord::Delta { target, .. } => *target,
+        };
+        let play_epoch = codec_exact(metadata, "play_epoch")?;
+        if target.scope.play_epoch != play_epoch {
+            return Err("frame codec stamp disagrees with the host play epoch".into());
+        }
+
+        if self.source_inactive && !matches!(record, FrameRecord::Full { .. }) {
+            return Err("inactive source must resume with a Full".into());
+        }
+        if self.awaiting_full {
+            if !matches!(record, FrameRecord::Full { .. }) {
+                return Err("delta arrived before the required Full reset".into());
+            }
+            if let Some(notice) = &self.reset_notice {
+                if identity.sequence != notice.next_sequence
+                    || identity.reset_generation != notice.generation
+                    || target.scope != notice.scope
+                    || Stamp::parse(
+                        metadata
+                            .get("delivery")
+                            .ok_or("missing negotiated frame metadata")?,
+                        true,
+                    )? != notice.delivery
+                {
+                    return Err("first Full does not match the ordered reset announcement".into());
+                }
+            } else if identity.sequence != 1 || identity.reset_generation != 1 {
+                return Err("initial Full does not match the subscription acknowledgement".into());
+            }
+            return Ok((target, true));
+        }
+
+        if self.reset_notice.is_some() || identity.reset_generation != self.reset_generation {
+            return Err("frame codec reset generation changed without an announcement".into());
+        }
+        if self.scope != Some(target.scope) {
+            return Err("frame codec scope changed without an announced Full reset".into());
+        }
+        if let FrameRecord::Full { .. } = record {
+            // Identity survives a deliberate zero/small retention budget. The
+            // next Full remains ordered without retaining any baseline bytes.
+            let baseline = self
+                .last_target
+                .ok_or("frame codec has no admitted identity before an ordinary Full")?;
+            if target.tick < baseline.tick
+                || (target.tick == baseline.tick
+                    && target.frame_checksum != baseline.frame_checksum)
+            {
+                return Err("stale Full requires an announced reset before admission".into());
+            }
+        }
+        Ok((target, false))
+    }
+
+    fn commit_record_identity(&mut self, identity: FrameCodecMeta, target: FrameStamp) {
+        self.sequence = identity.sequence;
+        self.reset_generation = identity.reset_generation;
+        self.scope = Some(target.scope);
+        self.last_target = Some(target);
+        self.awaiting_full = false;
+        self.source_inactive = false;
+        self.reset_notice = None;
+        self.recovery_deadline = None;
+    }
+}
+
+fn validate_frame_codec_ack(result: &J, requested: FrameCodecLimits) -> Result<(), String> {
+    let accepted = result
+        .get("frame_codec")
+        .and_then(J::as_object)
+        .ok_or("frame codec subscription acknowledgement is missing accepted limits")?;
+    if accepted.len() != 4 || accepted.get("version").and_then(J::as_u64) != Some(1) {
+        return Err("frame codec acknowledgement has an unexpected version or fields".into());
+    }
+    for (key, value) in [
+        ("max_frame_bytes", requested.max_frame_bytes),
+        ("max_baseline_bytes", requested.max_baseline_bytes),
+        ("max_message_bytes", requested.max_message_bytes),
+    ] {
+        if accepted.get(key).and_then(J::as_u64) != Some(value as u64) {
+            return Err(format!("frame codec acknowledgement changed {key}"));
+        }
+    }
+    if codec_exact(result, "sequence")? != 0 || codec_exact(result, "reset_generation")? != 1 {
+        return Err(
+            "frame codec acknowledgement has an invalid initial sequence/generation".into(),
+        );
+    }
+    if codec_exact(result, "subscription")? == 0 {
+        return Err("frame codec acknowledgement has an invalid zero subscription".into());
+    }
+    let _ = codec_exact(result, "cursor")?;
+    let _ = codec_exact(result, "count")?;
+    Ok(())
 }
 
 impl<G: Game> RemoteBridge<G> {
@@ -445,6 +853,21 @@ impl<G: Game> RemoteBridge<G> {
         Self::connect_transport_with_error_limits(Box::new(t), cfg, error_limits)
     }
 
+    /// Connects over WebSocket with the explicitly opted-in v1 Frame codec.
+    pub fn connect_with_frame_codec(
+        cfg: RemoteConfig,
+        policy: FrameCodecPolicy,
+    ) -> Result<Self, String> {
+        policy.validate(&cfg.source)?;
+        let t = PumpedWs::connect_with_queue_limits(
+            &cfg.url,
+            cfg.connect_timeout,
+            TransportQueueLimits::default(),
+        )
+        .map_err(|e| format!("cannot connect to {}: {e}", cfg.url))?;
+        Self::connect_transport_inner(Box::new(t), cfg, DEFAULT_ERROR_QUEUE_LIMITS, Some(policy))
+    }
+
     /// Like [`connect`](Self::connect) on a connection that is already
     /// open, for example an in-process [`LocalTransport`](crate::LocalTransport)
     /// to a host thread of this process: frames then arrive as shared
@@ -462,6 +885,26 @@ impl<G: Game> RemoteBridge<G> {
         cfg: RemoteConfig,
         error_limits: QueueLimits,
     ) -> Result<Self, String> {
+        Self::connect_transport_inner(t, cfg, error_limits, None)
+    }
+
+    /// Connects an existing serialized transport with explicit frame codec
+    /// limits. This is also useful for protocol-failure tests.
+    pub fn connect_transport_with_frame_codec(
+        t: Box<dyn Transport>,
+        cfg: RemoteConfig,
+        policy: FrameCodecPolicy,
+    ) -> Result<Self, String> {
+        policy.validate(&cfg.source)?;
+        Self::connect_transport_inner(t, cfg, DEFAULT_ERROR_QUEUE_LIMITS, Some(policy))
+    }
+
+    fn connect_transport_inner(
+        t: Box<dyn Transport>,
+        cfg: RemoteConfig,
+        error_limits: QueueLimits,
+        frame_codec: Option<FrameCodecPolicy>,
+    ) -> Result<Self, String> {
         let tx = t
             .sender()
             .ok_or_else(|| "this transport cannot send from several threads".to_string())?;
@@ -478,6 +921,7 @@ impl<G: Game> RemoteBridge<G> {
         let (ready_tx, ready_rx) = channel::<Result<Info, String>>();
         let thread_shared = shared.clone();
         let thread_cfg = cfg.clone();
+        let thread_codec = frame_codec;
         let last_input = Arc::new(Mutex::new(None));
         let thread_last_input = last_input.clone();
         let thread = std::thread::Builder::new()
@@ -490,6 +934,7 @@ impl<G: Game> RemoteBridge<G> {
                     &event_tx,
                     ready_tx,
                     thread_last_input,
+                    thread_codec,
                 );
                 thread_shared.alive.store(false, Ordering::Release);
                 thread_shared.tx.close();
@@ -723,6 +1168,7 @@ fn run<G: Game>(
     events: &Sender<BridgeEvent<G::Event>>,
     ready: Sender<Result<Info, String>>,
     last_input: Arc<Mutex<Option<G::Input>>>,
+    frame_codec_policy: Option<FrameCodecPolicy>,
 ) {
     let registry = Simulation::<G>::build_registry();
     let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
@@ -736,6 +1182,8 @@ fn run<G: Game>(
     let mut delivery = None;
     let checked_identity = cfg.expected_identity.is_some();
     let mut identity_validated = false;
+    let mut selected_codec_limits = None;
+    let mut frame_codec: Option<FrameCodecClient> = None;
 
     // Unchecked callers keep the historical handshake. Checked callers gate
     // subscription on an explicit ERP identity and the complete schema from
@@ -744,7 +1192,7 @@ fn run<G: Game>(
     if let Some(tok) = &cfg.token {
         first.push((Pending::Auth, "auth", json!({"token": tok})));
     }
-    if checked_identity {
+    if checked_identity || frame_codec_policy.is_some() {
         if cfg.token.is_none() {
             first.push((Pending::Discover, "rpc.discover", J::Null));
         }
@@ -774,6 +1222,18 @@ fn run<G: Game>(
     }
 
     while !shared.stop.load(Ordering::Acquire) {
+        if frame_codec
+            .as_ref()
+            .and_then(|codec| codec.recovery_deadline)
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            fail(
+                shared,
+                &mut ready,
+                "frame codec reset did not produce a valid Full before its deadline".into(),
+            );
+            return;
+        }
         let msg = match t.recv(POLL) {
             Ok(Some(m)) => m,
             Ok(None) => continue,
@@ -821,13 +1281,23 @@ fn run<G: Game>(
                             }
                             return;
                         }
+                        (Some(Pending::ResetSubscribe), Some(e)) => {
+                            fail(
+                                shared,
+                                &mut ready,
+                                format!("frame codec reset refused: {e}"),
+                            );
+                            return;
+                        }
                         (Some(Pending::Auth | Pending::Subscribe | Pending::State), Some(e)) => {
                             if let Some(r) = ready.take() {
                                 let _ = r.send(Err(format!("{e}")));
                             }
                             return;
                         }
-                        (Some(Pending::Auth), None) if checked_identity => {
+                        (Some(Pending::Auth), None)
+                            if checked_identity || frame_codec_policy.is_some() =>
+                        {
                             if let Err(e) = queue_handshake(
                                 t.as_mut(),
                                 &mut pending,
@@ -844,23 +1314,48 @@ fn run<G: Game>(
                         }
                         (Some(Pending::Discover), None) => {
                             let result = j.get("result").unwrap_or(&J::Null);
-                            let expected = cfg
-                                .expected_identity
-                                .as_ref()
-                                .expect("discover is only requested for a checked bridge");
-                            if let Err(e) = validate_discovery(result, expected) {
-                                fail(shared, &mut ready, e);
-                                return;
+                            if checked_identity {
+                                let expected = cfg
+                                    .expected_identity
+                                    .as_ref()
+                                    .expect("discover is only requested for a checked bridge");
+                                if let Err(e) = validate_discovery(result, expected) {
+                                    fail(shared, &mut ready, e);
+                                    return;
+                                }
                             }
-                            if let Err(e) = queue_handshake(
+                            if let Some(policy) = frame_codec_policy {
+                                if supports_frame_codec(result) {
+                                    selected_codec_limits = Some(policy.limits);
+                                } else if policy.mode == FrameCodecMode::Require {
+                                    fail(
+                                        shared,
+                                        &mut ready,
+                                        "the host did not advertise frame codec v1".into(),
+                                    );
+                                    return;
+                                }
+                            }
+                            if checked_identity {
+                                if let Err(e) = queue_handshake(
+                                    t.as_mut(),
+                                    &mut pending,
+                                    &mut next_id,
+                                    Pending::Schema,
+                                    "registry.schema",
+                                    J::Null,
+                                ) {
+                                    fail(shared, &mut ready, identity_check_error(e));
+                                    return;
+                                }
+                            } else if let Err(e) = begin_subscription(
                                 t.as_mut(),
                                 &mut pending,
                                 &mut next_id,
-                                Pending::Schema,
-                                "registry.schema",
-                                J::Null,
+                                &cfg,
+                                selected_codec_limits,
                             ) {
-                                fail(shared, &mut ready, identity_check_error(e));
+                                fail(shared, &mut ready, e);
                                 return;
                             }
                         }
@@ -875,9 +1370,13 @@ fn run<G: Game>(
                                 return;
                             }
                             identity_validated = true;
-                            if let Err(e) =
-                                begin_subscription(t.as_mut(), &mut pending, &mut next_id, &cfg)
-                            {
+                            if let Err(e) = begin_subscription(
+                                t.as_mut(),
+                                &mut pending,
+                                &mut next_id,
+                                &cfg,
+                                selected_codec_limits,
+                            ) {
                                 fail(shared, &mut ready, e);
                                 return;
                             }
@@ -886,7 +1385,56 @@ fn run<G: Game>(
                             let result = j.get("result").unwrap_or(&J::Null);
                             let acknowledged =
                                 result.get("view_delivery").and_then(J::as_u64) == Some(1);
-                            if acknowledged && cfg.view_delivery != ViewDeliveryMode::Legacy {
+                            if let Some(limits) = selected_codec_limits {
+                                if !acknowledged {
+                                    fail(
+                                        shared,
+                                        &mut ready,
+                                        "frame codec requires acknowledged fenced view delivery v1"
+                                            .into(),
+                                    );
+                                    return;
+                                }
+                                if let Err(e) = validate_frame_codec_ack(result, limits) {
+                                    fail(shared, &mut ready, e);
+                                    return;
+                                }
+                                let negotiated = shared
+                                    .view
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .negotiate(result);
+                                if let Err(e) = negotiated {
+                                    fail(shared, &mut ready, e);
+                                    return;
+                                }
+                                delivery = Some(RemoteViewDelivery::Fenced);
+                                let Some(policy) = frame_codec_policy else {
+                                    fail(shared, &mut ready, "frame codec policy was lost".into());
+                                    return;
+                                };
+                                match FrameCodecClient::new(
+                                    registry.clone(),
+                                    limits,
+                                    policy.reset_timeout,
+                                    result,
+                                ) {
+                                    Ok(codec) => frame_codec = Some(codec),
+                                    Err(e) => {
+                                        fail(shared, &mut ready, e);
+                                        return;
+                                    }
+                                }
+                            } else if result.get("frame_codec").is_some() {
+                                fail(
+                                    shared,
+                                    &mut ready,
+                                    "host acknowledged frame codec without client negotiation"
+                                        .into(),
+                                );
+                                return;
+                            } else if acknowledged && cfg.view_delivery != ViewDeliveryMode::Legacy
+                            {
                                 let negotiated = shared
                                     .view
                                     .lock()
@@ -907,6 +1455,76 @@ fn run<G: Game>(
                             } else {
                                 delivery = Some(RemoteViewDelivery::Legacy);
                             }
+                        }
+                        (Some(Pending::ResetSubscribe), None) => {
+                            let result = j.get("result").unwrap_or(&J::Null);
+                            let Some(codec) = frame_codec.as_mut() else {
+                                fail(
+                                    shared,
+                                    &mut ready,
+                                    "unexpected frame codec reset response".into(),
+                                );
+                                return;
+                            };
+                            if result.get("view_delivery").and_then(J::as_u64) != Some(1) {
+                                fail(
+                                    shared,
+                                    &mut ready,
+                                    "reset subscription lost fenced view delivery".into(),
+                                );
+                                return;
+                            }
+                            if let Err(e) = validate_frame_codec_ack(result, codec.limits) {
+                                fail(shared, &mut ready, e);
+                                return;
+                            }
+                            let old_subscription = codec.subscription;
+                            let new_subscription = match codec_exact(result, "subscription") {
+                                Ok(value) if value != old_subscription => value,
+                                _ => {
+                                    fail(
+                                        shared,
+                                        &mut ready,
+                                        "reset subscription did not change identity".into(),
+                                    );
+                                    return;
+                                }
+                            };
+                            let prepared_codec = match codec.prepare_renewal(result) {
+                                Ok(prepared) if prepared.subscription == new_subscription => {
+                                    prepared
+                                }
+                                Ok(_) => {
+                                    fail(
+                                        shared,
+                                        &mut ready,
+                                        "reset subscription identity changed during prepare".into(),
+                                    );
+                                    return;
+                                }
+                                Err(e) => {
+                                    fail(shared, &mut ready, e);
+                                    return;
+                                }
+                            };
+                            let view_result = {
+                                let mut view =
+                                    shared.view.lock().unwrap_or_else(|p| p.into_inner());
+                                match view.prepare_renewal(result) {
+                                    Ok(prepared) => {
+                                        view.commit_renewal(prepared);
+                                        Ok(())
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            };
+                            if let Err(e) = view_result {
+                                fail(shared, &mut ready, e);
+                                return;
+                            }
+                            codec.commit_renewal(registry.clone(), prepared_codec);
+                            state.last = None;
+                            codec.recovery_request = None;
                         }
                         (Some(Pending::State), None) => {
                             let Some(delivery) = delivery else {
@@ -975,9 +1593,48 @@ fn run<G: Game>(
                         clear_last_input(&last_input);
                     }
                     if delivery == Some(RemoteViewDelivery::Fenced) {
+                        if method == "watch.frame_codec_reset" {
+                            if let Some(codec) = frame_codec.as_mut() {
+                                if let Err(e) = codec.accept_reset_notice(&params) {
+                                    fail(shared, &mut ready, e);
+                                    return;
+                                }
+                            }
+                            continue;
+                        }
+                        if frame_codec
+                            .as_ref()
+                            .is_some_and(|codec| codec.recovery_request.is_some())
+                            && matches!(
+                                method,
+                                "watch.events" | "watch.notes" | "watch.view.inactive"
+                            )
+                        {
+                            continue;
+                        }
+                        // An inactive cut is authoritative only after the mailbox
+                        // validates it. It cannot cancel an announced Full reset.
+                        if method == "watch.view.inactive"
+                            && frame_codec
+                                .as_ref()
+                                .is_some_and(|codec| codec.reset_notice.is_some())
+                        {
+                            fail(
+                                shared,
+                                &mut ready,
+                                "inactive source interrupted an announced Full reset".into(),
+                            );
+                            return;
+                        }
                         if let Err(e) = on_fenced_notification::<G>(method, &params, shared) {
                             fail(shared, &mut ready, e);
                             return;
+                        }
+                        if method == "watch.view.inactive" {
+                            if let Some(codec) = frame_codec.as_mut() {
+                                codec.source_inactive = true;
+                                codec.recovery_deadline = None;
+                            }
                         }
                     } else {
                         on_notification::<G>(method, &params, events);
@@ -989,6 +1646,111 @@ fn run<G: Game>(
                     continue;
                 }
                 let tick_rate = info.as_ref().map_or(60, |i| i.tick_rate);
+                if let Some(codec) = frame_codec.as_mut() {
+                    if codec.recovery_request.is_some() {
+                        // The one correlated replacement subscription is in
+                        // flight. Old-subscription frames cannot affect either
+                        // the decoder or the displayed snapshot.
+                        continue;
+                    }
+                    let started = std::time::Instant::now();
+                    let (meta, identity, record) =
+                        match decode_frame_record_message(&b, codec.limits) {
+                            Ok(decoded) => decoded,
+                            Err(error) => {
+                                fail(
+                                    shared,
+                                    &mut ready,
+                                    format!("malformed negotiated frame record: {error}"),
+                                );
+                                return;
+                            }
+                        };
+                    let (target, is_reset) =
+                        match codec.validate_record_identity(&meta, identity, &record) {
+                            Ok(validated) => validated,
+                            Err(error) => {
+                                fail(shared, &mut ready, error);
+                                return;
+                            }
+                        };
+                    let prepared_decode = match codec.decoder.prepare_decode(&record) {
+                        Ok(prepared) => prepared,
+                        Err(DecodeError::NeedFull(
+                            NeedFullReason::MissingBaseline | NeedFullReason::StaleBase { .. },
+                        )) if !is_reset => {
+                            if let Err(error) = queue_frame_codec_recovery(
+                                t.as_mut(),
+                                &mut pending,
+                                &mut next_id,
+                                &cfg,
+                                codec,
+                                shared,
+                            ) {
+                                fail(shared, &mut ready, error);
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(error) => {
+                            fail(
+                                shared,
+                                &mut ready,
+                                format!("invalid negotiated frame record: {error}"),
+                            );
+                            return;
+                        }
+                    };
+                    if prepared_decode.target_stamp() != target
+                        || prepared_decode.frame().tick() != target.tick
+                        || prepared_decode.frame().checksum() != target.frame_checksum
+                    {
+                        fail(
+                            shared,
+                            &mut ready,
+                            "decoded frame differs from its record stamp".into(),
+                        );
+                        return;
+                    }
+                    let raw_len = match &record {
+                        FrameRecord::Full { bytes, .. } => bytes.len(),
+                        FrameRecord::Delta { target_len, .. } => match usize::try_from(*target_len)
+                        {
+                            Ok(length) => length,
+                            Err(_) => {
+                                fail(
+                                    shared,
+                                    &mut ready,
+                                    "frame record length exceeds address space".into(),
+                                );
+                                return;
+                            }
+                        },
+                    };
+                    let sizes = FrameSizes {
+                        message: b.len() as u64,
+                        raw: raw_len as u64,
+                        decode_us: started.elapsed().as_micros() as u64,
+                    };
+                    if let Err(error) = on_codec_frame(
+                        CodecFramePublication {
+                            meta: &meta,
+                            identity,
+                            target,
+                            is_reset,
+                            prepared_decode,
+                            sizes,
+                        },
+                        tick_rate,
+                        shared,
+                        &mut state,
+                        codec,
+                    ) {
+                        fail(shared, &mut ready, error);
+                        return;
+                    }
+                    continue;
+                }
                 let started = std::time::Instant::now();
                 let Ok((meta, bytes)) = decode_frame_message(&b) else {
                     if delivery == Some(RemoteViewDelivery::Fenced) {
@@ -1027,6 +1789,14 @@ fn run<G: Game>(
             Incoming::Local(lf) => {
                 if checked_identity && !identity_validated {
                     continue;
+                }
+                if frame_codec.is_some() {
+                    fail(
+                        shared,
+                        &mut ready,
+                        "frame codec v1 requires serialized Wire frame records".into(),
+                    );
+                    return;
                 }
                 let tick_rate = info.as_ref().map_or(60, |i| i.tick_rate);
                 if let Err(e) = on_frame(
@@ -1207,16 +1977,22 @@ struct FrameSizes {
     decode_us: u64,
 }
 
-fn on_frame<E>(
+struct PreparedSnapshot {
+    snapshot: Snapshot,
+    last: (u64, u64, Arc<Frame>),
+    seq: u64,
+    frames: u64,
+}
+
+fn prepare_snapshot(
     meta: &J,
     frame: Arc<Frame>,
     tick_rate: u32,
-    shared: &Shared<E>,
-    st: &mut StreamState,
-    sizes: FrameSizes,
-) -> Result<(), String> {
-    let mut view = shared.view.lock().unwrap_or_else(|p| p.into_inner());
-    let fenced = view.negotiated();
+    state: &StreamState,
+    fenced: bool,
+    epoch_override: Option<u64>,
+    force_no_prev: bool,
+) -> Result<PreparedSnapshot, String> {
     let delivery = if fenced {
         Some(
             meta.get("delivery")
@@ -1229,9 +2005,13 @@ fn on_frame<E>(
         .get("tick")
         .and_then(J::as_u64)
         .unwrap_or_else(|| frame.tick());
-    let epoch = match delivery {
-        Some(delivery) => Stamp::parse(delivery, true)?.timeline,
-        None => meta.get("epoch").and_then(J::as_u64).unwrap_or(0),
+    let epoch = if let Some(epoch) = epoch_override {
+        epoch
+    } else {
+        match delivery {
+            Some(delivery) => Stamp::parse(delivery, true)?.timeline,
+            None => meta.get("epoch").and_then(J::as_u64).unwrap_or(0),
+        }
     };
     let timeline = meta.get("timeline").and_then(timeline_from_json);
     if fenced
@@ -1244,14 +2024,24 @@ fn on_frame<E>(
     {
         return Err("negotiated frame metadata does not describe its payload".into());
     }
-    let prev = match &st.last {
-        Some((t, e, f)) if *e == epoch && t.checked_add(1) == Some(tick) => Some(f.clone()),
-        _ => None,
+    let prev = if force_no_prev {
+        None
+    } else {
+        match &state.last {
+            Some((t, e, f)) if *e == epoch && t.checked_add(1) == Some(tick) => Some(f.clone()),
+            _ => None,
+        }
     };
-    st.seq += 1;
-    st.frames += 1;
-    let snap = Snapshot::from_parts(SnapshotParts {
-        seq: st.seq,
+    let seq = state
+        .seq
+        .checked_add(1)
+        .ok_or_else(|| "remote snapshot sequence exhausted".to_string())?;
+    let frames = state
+        .frames
+        .checked_add(1)
+        .ok_or_else(|| "remote frame count exhausted".to_string())?;
+    let snapshot = Snapshot::from_parts(SnapshotParts {
+        seq,
         tick,
         verified_tick: timeline.as_ref().map_or(tick, |t| t.verified_tick),
         tick_rate: meta
@@ -1263,15 +2053,52 @@ fn on_frame<E>(
         predicted_prev: prev,
         verified: Some(frame.clone()),
         stats: BridgeStats {
-            ticks: st.frames,
+            ticks: frames,
             ..BridgeStats::default()
         },
         last_rollback: None,
         timeline,
     });
-    st.last = Some((tick, epoch, frame));
-    if let Some(delivery) = delivery {
-        view.frame(delivery, Some(snap.clone()))?;
+    Ok(PreparedSnapshot {
+        snapshot,
+        last: (tick, epoch, frame),
+        seq,
+        frames,
+    })
+}
+
+fn commit_snapshot(state: &mut StreamState, prepared: PreparedSnapshot) -> Snapshot {
+    state.last = Some(prepared.last);
+    state.seq = prepared.seq;
+    state.frames = prepared.frames;
+    prepared.snapshot
+}
+
+fn on_frame<E>(
+    meta: &J,
+    frame: Arc<Frame>,
+    tick_rate: u32,
+    shared: &Shared<E>,
+    st: &mut StreamState,
+    sizes: FrameSizes,
+) -> Result<(), String> {
+    let mut view = shared.view.lock().unwrap_or_else(|p| p.into_inner());
+    let fenced = view.negotiated();
+    let prepared = prepare_snapshot(meta, frame, tick_rate, st, fenced, None, false)?;
+    let mailbox_frame = if fenced {
+        Some(
+            view.prepare_frame(
+                meta.get("delivery")
+                    .ok_or("missing negotiated frame metadata")?,
+                Some(prepared.snapshot.clone()),
+            )?,
+        )
+    } else {
+        None
+    };
+    let snap = commit_snapshot(st, prepared);
+    if let Some(mailbox_frame) = mailbox_frame {
+        view.commit_frame(mailbox_frame);
     }
     shared.snapshot.store(Some(Arc::new(snap)));
     drop(view);
@@ -1287,4 +2114,148 @@ fn on_frame<E>(
     m.latency_sum_us += latency;
     m.last_decode_us = sizes.decode_us;
     Ok(())
+}
+
+struct CodecFramePublication<'a> {
+    meta: &'a J,
+    identity: FrameCodecMeta,
+    target: FrameStamp,
+    is_reset: bool,
+    prepared_decode: crate::frame_delta::PreparedDecode,
+    sizes: FrameSizes,
+}
+
+fn on_codec_frame<E>(
+    publication: CodecFramePublication<'_>,
+    tick_rate: u32,
+    shared: &Shared<E>,
+    state: &mut StreamState,
+    codec: &mut FrameCodecClient,
+) -> Result<(), String> {
+    let CodecFramePublication {
+        meta,
+        identity,
+        target,
+        is_reset,
+        prepared_decode,
+        sizes,
+    } = publication;
+    let frame = Arc::new(prepared_decode.frame().clone());
+    if frame.tick() != target.tick || frame.checksum() != target.frame_checksum {
+        return Err("prepared frame differs from its validated record stamp".into());
+    }
+    let prepared_snapshot = prepare_snapshot(
+        meta,
+        frame,
+        tick_rate,
+        state,
+        true,
+        Some(target.scope.timeline_epoch),
+        is_reset,
+    )?;
+    let mut view = shared.view.lock().unwrap_or_else(|p| p.into_inner());
+    let delivery = meta
+        .get("delivery")
+        .ok_or("missing negotiated frame metadata")?;
+    let prepared_view = view.prepare_frame(delivery, Some(prepared_snapshot.snapshot.clone()))?;
+
+    // Everything that can reject this publication has been preflighted. The
+    // decoder, mailbox, stream counters and visible snapshot now commit as one
+    // worker-thread transaction.
+    let committed_frame = codec
+        .decoder
+        .commit(prepared_decode)
+        .map_err(|error| error.to_string())?;
+    drop(committed_frame);
+    view.commit_frame(prepared_view);
+    let snapshot = commit_snapshot(state, prepared_snapshot);
+    shared.snapshot.store(Some(Arc::new(snapshot)));
+    codec.commit_record_identity(identity, target);
+    drop(view);
+
+    let sent = meta.get("sent_at_us").and_then(J::as_u64).unwrap_or(0);
+    let latency = now_us().saturating_sub(sent);
+    let mut metrics = shared.metrics.lock().unwrap_or_else(|p| p.into_inner());
+    metrics.frames = metrics.frames.saturating_add(1);
+    metrics.frame_bytes = metrics.frame_bytes.saturating_add(sizes.message);
+    metrics.last_frame_bytes = sizes.message;
+    metrics.last_frame_raw_bytes = sizes.raw;
+    metrics.last_latency_us = latency;
+    metrics.max_latency_us = metrics.max_latency_us.max(latency);
+    metrics.latency_sum_us = metrics.latency_sum_us.saturating_add(latency);
+    metrics.last_decode_us = sizes.decode_us;
+    Ok(())
+}
+
+#[cfg(test)]
+mod codec_contract_tests {
+    use super::*;
+    use crate::frame_delta::Encoder;
+
+    #[test]
+    fn rejected_reset_cut_preserves_decoder_and_identity_before_publication() {
+        let limits = FrameCodecPolicy::require_default().limits;
+        let registry = orr_ecs::ComponentRegistryBuilder::new().build();
+        let ack = json!({"subscription":"7","cursor":"0","count":"0","sequence":"0","reset_generation":"1",
+            "frame_codec":{"version":1,"max_frame_bytes":limits.max_frame_bytes,
+            "max_baseline_bytes":limits.max_baseline_bytes,"max_message_bytes":limits.max_message_bytes}});
+        let mut codec =
+            FrameCodecClient::new(registry.clone(), limits, Duration::from_secs(1), &ack).unwrap();
+        let mut frame = Frame::new(registry);
+        frame.set_tick(10);
+        let first_scope = FrameScope {
+            stream_generation: 7,
+            play_epoch: 1,
+            timeline_epoch: 1,
+        };
+        let mut encoder = Encoder::new(limits.max_frame_bytes, limits.max_baseline_bytes);
+        let first = encoder.encode(&frame, first_scope).unwrap();
+        let identity = FrameCodecMeta {
+            subscription: 7,
+            sequence: 1,
+            reset_generation: 1,
+        };
+        let (target, _) = codec
+            .validate_record_identity(&json!({"play_epoch":"1"}), identity, &first)
+            .unwrap();
+        codec.decoder.decode(&first).unwrap();
+        codec.commit_record_identity(identity, target);
+        let baseline = codec.decoder.baseline_stamp();
+        let cut = json!({"subscription":"7","timeline":"2","through_cursor":"1","count":"1"});
+        codec.accept_reset_notice(&json!({"subscription":"7","reset_generation":"2","next_sequence":"2",
+            "scope":{"stream_generation":"7","play_epoch":"1","timeline_epoch":"2"},"delivery":cut})).unwrap();
+        frame.set_tick(20);
+        let record = encoder
+            .encode(
+                &frame,
+                FrameScope {
+                    timeline_epoch: 2,
+                    ..first_scope
+                },
+            )
+            .unwrap();
+        let identity = FrameCodecMeta {
+            subscription: 7,
+            sequence: 2,
+            reset_generation: 2,
+        };
+        for key in ["timeline", "through_cursor", "count"] {
+            let mut forged = cut.clone();
+            forged[key] = json!("3");
+            assert!(codec
+                .validate_record_identity(
+                    &json!({"play_epoch":"1","delivery":forged}),
+                    identity,
+                    &record
+                )
+                .is_err());
+            assert_eq!(codec.decoder.baseline_stamp(), baseline);
+            assert_eq!(codec.sequence, 1);
+            assert_eq!(codec.last_target, Some(target));
+            assert!(codec.reset_notice.is_some());
+        }
+        assert!(codec
+            .validate_record_identity(&json!({"play_epoch":"1","delivery":cut}), identity, &record)
+            .is_ok());
+    }
 }

@@ -50,6 +50,77 @@ pub(crate) fn parse_target(url: &str) -> Result<Target, NetError> {
     })
 }
 
+/// Strict WSS URL parsing; never include the URL or parser diagnostics in errors.
+pub(crate) fn parse_wss_target(url: &str) -> Result<Target, NetError> {
+    let invalid = || NetError("invalid wss:// URL".into());
+    if !url.starts_with("wss://") || url.contains('#') {
+        return Err(invalid());
+    }
+    let uri: http::Uri = url.parse().map_err(|_| invalid())?;
+    let authority = uri.authority().ok_or_else(invalid)?;
+    if authority.as_str().contains('@') {
+        return Err(invalid());
+    }
+    let raw_host = authority.host();
+    // Authority::port() returns None for invalid ports too; distinguish an
+    // absent suffix from an explicit malformed/out-of-range one.
+    let suffix = &authority.as_str()[raw_host.len()..];
+    let port = if suffix.is_empty() {
+        443
+    } else {
+        let digits = suffix.strip_prefix(':').ok_or_else(invalid)?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        digits.parse::<u16>().map_err(|_| invalid())?
+    };
+    let host = raw_host.trim_matches(['[', ']']).to_string();
+    if host.is_empty() { return Err(invalid()); }
+    Ok(Target { host, port, uri: url.to_string() })
+}
+
+pub(crate) fn wss_server_name(target: &Target, override_name: Option<&str>) -> Result<rustls::pki_types::ServerName<'static>, NetError> {
+    rustls::pki_types::ServerName::try_from(override_name.unwrap_or(&target.host).to_string())
+        .map_err(|_| NetError("invalid WSS TLS server name".into()))
+}
+
+pub(crate) async fn wss_client_conn(
+    shared: Arc<Shared>, id: ConnId, target: Target,
+    name: rustls::pki_types::ServerName<'static>, config: rustls::ClientConfig,
+) {
+    // DNS, TCP, TLS and the HTTP upgrade share one absolute budget.
+    let setup = timeout(shared.cfg.connect_timeout, async {
+        let stream = TcpStream::connect((target.host.as_str(), target.port)).await
+            .map_err(|_| "WSS TCP connection failed")?;
+        let _ = stream.set_nodelay(true);
+        let peer = stream.peer_addr().ok();
+        let stream = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, stream).await
+            .map_err(|_| "WSS TLS handshake failed")?;
+        let uri: http::Uri = target.uri.parse().map_err(|_| "invalid WSS URL")?;
+        let req = http::Request::builder()
+            .header("Host", uri.authority().ok_or("invalid WSS authority")?.as_str())
+            .uri(uri)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", generate_key())
+            .header("Sec-WebSocket-Protocol", PROTOCOL)
+            .body(()).map_err(|_| "invalid WSS request")?;
+        let (ws, response) = tokio_tungstenite::client_async_with_config(req, stream, Some(ws_config(shared.cfg.max_message_size)))
+            .await.map_err(|_| "WSS HTTP upgrade failed")?;
+        let protocols = response.headers().get_all("sec-websocket-protocol");
+        if protocols.iter().count() != 1 || protocols.iter().next().is_none_or(|p| p.as_bytes() != PROTOCOL.as_bytes()) {
+            return Err("WSS server did not select orrery/1");
+        }
+        Ok((ws, peer))
+    }).await;
+    match setup {
+        Ok(Ok((ws, peer))) => run(shared, id, ws, peer).await,
+        Ok(Err(e)) => shared.finish(id, DisconnectReason::ConnectFailed(e.into())).await,
+        Err(_) => shared.finish(id, DisconnectReason::ConnectFailed("WSS connect timed out".into())).await,
+    }
+}
+
 fn ws_config(max_message: usize) -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(max_message + 1))
@@ -301,6 +372,24 @@ where
                     return DisconnectReason::TimedOut;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod wss_target_tests {
+    use super::parse_wss_target;
+
+    #[test]
+    fn explicit_ports_are_validated_including_ipv6() {
+        for authority in ["relay.example:bad", "relay.example:65536", "relay.example:", "[::1]:bad", "[::1]:65536", "[::1]:"] {
+            assert!(parse_wss_target(&format!("wss://{authority}/secret?token=secret")).is_err(), "accepted {authority}");
+        }
+        for (url, host, port) in [("wss://relay.example/", "relay.example", 443), ("wss://[::1]/", "::1", 443), ("wss://[::1]:4443/p?q=x", "::1", 4443)] {
+            let target = parse_wss_target(url).unwrap();
+            assert_eq!(target.host, host);
+            assert_eq!(target.port, port);
+            assert_eq!(target.uri, url);
         }
     }
 }
