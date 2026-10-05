@@ -19,7 +19,8 @@ use std::rc::Rc;
 use orr_net::SendError;
 use orr_proto::{Channel, ConnId};
 use orr_session::{
-    CheckedJoinContext, Game, InputSource, LocallyVerifiedTick, PlayerSlot, RemoteInput, Session,
+    CheckedJoinContext, DepartureBarrier, DepartureFence, Game, InputSource, LocallyVerifiedTick,
+    PlayerSlot, RemoteInput, Session,
 };
 
 pub const P2P_INPUT_VERSION: u16 = 1;
@@ -145,9 +146,13 @@ pub enum P2pInputError {
     TickExhausted,
     /// A pre-bind host already discarded output newer than this snapshot.
     SnapshotTooOld,
-    /// Source replacement is not a safe pre-activation host retry.
+    /// Source replacement does not meet the chosen host recovery policy.
     UnsafeReplacement,
-    /// Required locally authored unverified history is no longer available.
+    /// Ingress/output is fenced; previously admitted input can still be drained.
+    Fenced,
+    /// The fenced target has not yet been verified by this exact source/Session.
+    UnverifiedContinuation,
+    /// Required unverified host-authored or admitted remote history is unavailable.
     MissingHistory {
         tick: u64,
         slot: PlayerSlot,
@@ -285,6 +290,12 @@ struct Binding {
     first_input_tick: u64,
 }
 
+#[derive(Clone, Copy)]
+struct Continuation {
+    target: u64,
+    next_send: u64,
+}
+
 struct State<G: Game, C: P2pInputCodec<G>> {
     local: PlayerSlot,
     context: CheckedJoinContext,
@@ -300,6 +311,9 @@ struct State<G: Game, C: P2pInputCodec<G>> {
     incoming_bytes: usize,
     flushing: bool,
     admitted_remote: bool,
+    accepted_remote_max: Option<u64>,
+    fenced: bool,
+    continuation: Option<Continuation>,
     marker: PhantomData<C>,
 }
 impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
@@ -409,6 +423,9 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
     }
     fn send(&mut self, record: RemoteInput<G>) -> Result<(), P2pInputError> {
         self.check()?;
+        if self.fenced {
+            return Err(P2pInputError::Fenced);
+        }
         self.authority(self.local, record.slot, record.tick)?;
         // Never resurrect retired local records, even after their evidence is gone.
         if self.retired(record.tick) {
@@ -496,6 +513,7 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         self.incoming_bytes += bytes.len();
         self.seen.insert((tick, slot), bytes.to_vec());
         self.admitted_remote = true;
+        self.accepted_remote_max = Some(self.accepted_remote_max.map_or(tick, |old| old.max(tick)));
         self.incoming.push_back((
             RemoteInput {
                 tick,
@@ -512,7 +530,8 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
 
 /// Application-side handle. Keep it outside Session to pump admitted input
 /// packets, retry outbound FIFO, observe failures and retire all buffered input.
-/// A driver is single-session/single-connection; no reconnect or repair protocol.
+/// A driver is single-session/single-connection. Explicit host continuation can
+/// replace it with a fresh generation; there is no general repair protocol.
 pub struct P2pInputDriver<G: Game, C: P2pInputCodec<G>>(Rc<RefCell<State<G, C>>>);
 /// Session-side half, created exactly once together with its driver.
 pub struct P2pInputSource<G: Game, C: P2pInputCodec<G>>(Rc<RefCell<State<G, C>>>);
@@ -533,7 +552,8 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
     /// each pending queue retain independent record/byte limits. A stalled
     /// verifier cannot advance the future horizon by receiving newer packets.
     /// This source belongs to one Session lifetime: cancel/replace it before
-    /// restoring or replacing that Session. It is not reconnect/replay support.
+    /// restoring or replacing that Session. Explicit continuation below preserves
+    /// the Session; arbitrary restore/replay is unsupported.
     pub fn new_rolling(
         local: PlayerSlot,
         context: CheckedJoinContext,
@@ -561,7 +581,9 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
     /// This is a trusted application boundary, not an established-player reconnect API:
     /// the caller MUST first fence the old route, cancel its membership attempt, retire
     /// its owned link/hold, and prove the final readiness notice was never successfully
-    /// enqueued. No received joiner input may have been admitted, even if not yet polled.
+    /// enqueued. No joiner input may have been admitted by this source, even if
+    /// not yet polled or already verified. Older-generation remote history is
+    /// allowed only at or below the actual verified checkpoint.
     ///
     /// The replacement starts at the Session's locally verified checkpoint and rebuilds
     /// its unverified authored tail under a fresh generation. All coverage, authority and
@@ -590,7 +612,9 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
             || session.config().relay
             || verified < u64::from(session.config().input_delay)
             || session.verified_frame().is_none()
-            || session.last_remote_tick(joiner).is_some()
+            || session
+                .last_remote_tick(joiner)
+                .is_some_and(|tick| tick > verified)
             || context.join_id() == old.context.join_id()
             || context.roster() != old.context.roster()
         {
@@ -679,6 +703,248 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
         *session.source_mut() = source;
         Ok(replacement)
     }
+    /// Explicit two-player host-continuation policy: only input already admitted
+    /// by this healthy driver survives the lost connection. Fence the application
+    /// route first; do NOT call `cancel`/`disconnected` before this operation.
+    /// Never-received transport bytes are not acknowledged or reconstructed.
+    ///
+    /// The stable maximum includes accepted-but-unpolled records. Every required
+    /// tick through it must already have exact driver evidence, with host-owned
+    /// defaults before the accepted grant's boundary. Gaps, failed sources and
+    /// targets beyond the host's authored horizon are unrecoverable here. A failed
+    /// coverage check leaves ingress fenced, never authorizes filling a gap.
+    /// After success use `verify_host_continuation`, without authoring new input.
+    /// Calling `advance`/`send_local` while fenced is terminal misuse: it changes
+    /// the frozen authored horizon and poisons recovery, requiring teardown.
+    pub fn fence_host_continuation(
+        &self,
+        session: &Session<G, P2pInputSource<G, C>>,
+        conn: ConnId,
+    ) -> Result<u64, P2pInputError> {
+        let mut old = self.0.borrow_mut();
+        old.check()?;
+        let host = PlayerSlot(0);
+        let joiner = PlayerSlot(1);
+        let verified = session.verified_tick();
+        let next = session.next_send_tick();
+        let binding = old.binding.ok_or(P2pInputError::UnsafeReplacement)?;
+        let rolling = old.rolling.ok_or(P2pInputError::UnsafeReplacement)?;
+        if !Rc::ptr_eq(&self.0, &session.source().0)
+            || old.local != host
+            || binding.conn != conn
+            || old.flushing
+            || old.fenced
+            || session.config().local_slot != host
+            || session.config().player_count != 2
+            || session.config().relay
+            || verified < binding.snapshot_tick
+            || rolling.progress != verified
+            || session.verified_frame().is_none()
+        {
+            return Err(P2pInputError::UnsafeReplacement);
+        }
+        old.fenced = true;
+        // Defaults already authored before the grant cannot be overwritten either.
+        let target = verified
+            .max(u64::from(session.config().input_delay))
+            .max(binding.first_input_tick - 1)
+            .max(old.accepted_remote_max.unwrap_or(0));
+        target.checked_add(1).ok_or(P2pInputError::TickExhausted)?;
+        if target >= next || next > rolling.window.end(verified)? {
+            return Err(P2pInputError::TickRange);
+        }
+        // This loop is bounded by the rolling horizon, never a packet-supplied span.
+        for tick in verified + 1..=target {
+            for slot in [host, joiner] {
+                // Initial delay ticks are Session-preconfirmed, not authored records.
+                if tick <= u64::from(session.config().input_delay) {
+                    continue;
+                }
+                if !old.seen.contains_key(&(tick, slot)) {
+                    return Err(P2pInputError::MissingHistory { tick, slot });
+                }
+            }
+        }
+        // Session's polled maximum must never exceed the actual driver admissions.
+        if session
+            .last_remote_tick(joiner)
+            .is_some_and(|tick| tick > verified && Some(tick) > old.accepted_remote_max)
+        {
+            return Err(P2pInputError::UnsafeReplacement);
+        }
+        old.continuation = Some(Continuation {
+            target,
+            next_send: next,
+        });
+        Ok(target)
+    }
+
+    /// Drain retained records and simulate/verify the exact fenced target in the
+    /// same Session. `step` advances simulation only, never authors new input.
+    /// No caller-reported maximum/checksum can stand in for this verification.
+    pub fn verify_host_continuation(
+        &self,
+        session: &mut Session<G, P2pInputSource<G, C>>,
+    ) -> Result<u64, P2pInputError> {
+        let fence = {
+            let old = self.0.borrow();
+            old.check()?;
+            if !old.fenced || !Rc::ptr_eq(&self.0, &session.source().0) {
+                return Err(P2pInputError::UnsafeReplacement);
+            }
+            old.continuation.ok_or(P2pInputError::UnsafeReplacement)?
+        };
+        if session.next_send_tick() != fence.next_send || session.verified_tick() > fence.target {
+            return Err(P2pInputError::UnsafeReplacement);
+        }
+        session.poll_confirmed();
+        self.check()?;
+        while session.head_tick() < fence.target {
+            let head = session.head_tick();
+            session.step();
+            self.check()?;
+            if session.head_tick() <= head {
+                return Err(P2pInputError::UnverifiedContinuation);
+            }
+        }
+        session.poll_confirmed();
+        self.check()?;
+        if session.verified_tick() != fence.target || !self.0.borrow().incoming.is_empty() {
+            return Err(P2pInputError::UnverifiedContinuation);
+        }
+        Ok(fence.target)
+    }
+
+    /// Install a fresh unbound generation and immediately commit the unchanged
+    /// one-survivor DepartureBarrier at target+1. The old generation is retired
+    /// permanently. The returner must discard its old speculation and bootstrap
+    /// from a fresh checked snapshot; this is not a general repair protocol.
+    /// All host-tail/default budgets are checked before swapping the source.
+    pub fn replace_fenced_host_rolling(
+        &self,
+        session: &mut Session<G, P2pInputSource<G, C>>,
+        context: CheckedJoinContext,
+    ) -> Result<Self, P2pInputError> {
+        let old = self.0.borrow();
+        old.check()?;
+        let fence = old.continuation.ok_or(P2pInputError::UnsafeReplacement)?;
+        let host = PlayerSlot(0);
+        let joiner = PlayerSlot(1);
+        let verified = session.verified_tick();
+        let next = session.next_send_tick();
+        let rolling = old.rolling.ok_or(P2pInputError::UnsafeReplacement)?;
+        if !old.fenced
+            || !Rc::ptr_eq(&self.0, &session.source().0)
+            || old.local != host
+            || old.flushing
+            || session.config().local_slot != host
+            || session.config().player_count != 2
+            || session.config().relay
+            || next != fence.next_send
+            || context.join_id() <= old.context.join_id()
+            || context.roster() != old.context.roster()
+        {
+            return Err(P2pInputError::UnsafeReplacement);
+        }
+        if !old.incoming.is_empty()
+            || verified != fence.target
+            || rolling.progress != verified
+            || session.verified_frame().is_none()
+        {
+            return Err(P2pInputError::UnverifiedContinuation);
+        }
+        let cutoff = verified
+            .checked_add(1)
+            .ok_or(P2pInputError::TickExhausted)?;
+        if cutoff > next || next > rolling.window.end(verified)? {
+            return Err(P2pInputError::TickRange);
+        }
+        let mut barrier = DepartureBarrier::new(
+            context.join_id(),
+            0,
+            joiner,
+            host,
+            vec![host],
+            &[],
+            session.config(),
+        )
+        .map_err(|_| P2pInputError::UnsafeReplacement)?;
+        barrier
+            .report_fence(DepartureFence {
+                recovery_id: context.join_id(),
+                revision: 0,
+                survivor: host,
+                verified_tick: verified,
+                departed_max: old.accepted_remote_max,
+            })
+            .map_err(|_| P2pInputError::UnsafeReplacement)?;
+        let ack = barrier
+            .acknowledgment(session)
+            .map_err(|_| P2pInputError::UnverifiedContinuation)?;
+        barrier
+            .acknowledge(ack)
+            .map_err(|_| P2pInputError::UnsafeReplacement)?;
+        let (replacement, source) =
+            Self::new_rolling(host, context, old.limits.clone(), rolling.window)?;
+        drop(old);
+        {
+            let mut fresh = replacement.0.borrow_mut();
+            let r = fresh.rolling.as_mut().unwrap();
+            r.progress = verified;
+            r.retired_through = verified;
+            r.discarded_output_through = verified;
+            let mut covered = BTreeSet::new();
+            for record in session.authored_since(verified) {
+                if record.tick >= next
+                    || record.slot != host
+                    || record.disconnected
+                    || !covered.insert(record.tick)
+                {
+                    return Err(P2pInputError::UnsafeReplacement);
+                }
+                fresh.send(record)?;
+            }
+            for tick in cutoff..next {
+                if !covered.contains(&tick) {
+                    return Err(P2pInputError::MissingHistory { tick, slot: host });
+                }
+            }
+            let mut reserved_bytes = 0;
+            for (reserved_records, tick) in (cutoff..next).enumerate() {
+                let bytes = encode_payload::<G, C>(
+                    &fresh.context,
+                    &RemoteInput {
+                        tick,
+                        slot: joiner,
+                        input: G::Input::default(),
+                        commands: Vec::new(),
+                        disconnected: false,
+                    },
+                    &fresh.limits,
+                )?;
+                fresh.authority(host, joiner, tick)?;
+                fresh.budget(
+                    fresh.seen.len() + reserved_records,
+                    fresh.seen_bytes + reserved_bytes,
+                    bytes.len(),
+                )?;
+                fresh.budget(
+                    fresh.outgoing.len() + reserved_records,
+                    fresh.outgoing_bytes + reserved_bytes,
+                    bytes.len(),
+                )?;
+                reserved_bytes += bytes.len();
+            }
+        }
+        let prior = std::mem::replace(session.source_mut(), source);
+        if barrier.commit(session, 0, &[host]).is_err() {
+            *session.source_mut() = prior;
+            return Err(P2pInputError::UnsafeReplacement);
+        }
+        self.cancel();
+        replacement.check()?;
+        Ok(replacement)
+    }
     fn create(
         local: PlayerSlot,
         context: CheckedJoinContext,
@@ -709,6 +975,9 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
             incoming_bytes: 0,
             flushing: false,
             admitted_remote: false,
+            accepted_remote_max: None,
+            fenced: false,
+            continuation: None,
             marker: PhantomData,
         }));
         Ok((Self(state.clone()), P2pInputSource(state)))
@@ -728,8 +997,11 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
         first_input_tick: u64,
     ) -> Result<(), P2pInputError> {
         let mut s = self.0.borrow_mut();
+        s.check()?;
+        if s.fenced {
+            return Err(P2pInputError::Fenced);
+        }
         let result = (|| {
-            s.check()?;
             if s.binding.is_some() {
                 return Err(P2pInputError::AlreadyBound);
             }
@@ -813,6 +1085,10 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
         bytes: &[u8],
     ) -> Result<P2pInputAccepted, P2pInputError> {
         let mut s = self.0.borrow_mut();
+        s.check()?;
+        if s.fenced {
+            return Err(P2pInputError::Fenced);
+        }
         s.receive(conn, channel, bytes).map_err(|e| s.fail(e))
     }
     /// Retry without removing a Backpressure-blocked head. Other transport
@@ -824,6 +1100,9 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
         let (b, initial) = {
             let mut s = self.0.borrow_mut();
             s.check()?;
+            if s.fenced {
+                return Err(P2pInputError::Fenced);
+            }
             if s.flushing {
                 return Err(s.fail(P2pInputError::ReentrantFlush));
             }
@@ -877,6 +1156,10 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
     }
     pub fn disconnected(&self, conn: ConnId) -> Result<(), P2pInputError> {
         let mut s = self.0.borrow_mut();
+        s.check()?;
+        if s.fenced {
+            return Err(P2pInputError::Fenced);
+        }
         let e = if s.binding.is_some_and(|b| b.conn == conn) {
             P2pInputError::Disconnected
         } else {

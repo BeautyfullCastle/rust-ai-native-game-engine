@@ -1,5 +1,5 @@
 //! Rolling two-peer Arena over pinned direct QUIC. No relay, TUI, discovery or mesh.
-//! `p2p_arena host [bind] [generation] [live_ticks] [pre_activation_retries]` prints the exact join command.
+//! `p2p_arena host [bind] [generation] [live_ticks] [pre_activation_retries] [host_continuations]` prints the exact join command.
 //! `p2p_arena join <address> <sha256> <generation> [live_ticks]` joins slot 1.
 //! `p2p_arena smoke [live_ticks]` runs both peers over real loopback sockets and checks every
 //! available verified checksum against an independently stepped simulation.
@@ -8,6 +8,7 @@
 
 #![allow(clippy::disallowed_types)] // Wall clock belongs to this transport driver, never the simulation.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::mpsc;
@@ -171,23 +172,62 @@ struct Report {
     retired_through: u64,
     evidence_records: usize,
 }
-fn reference(target: u64, first_input: u64) -> Vec<u64> {
-    let mut sim = Simulation::<Arena>::with_build_id(game(), 60, 42, BUILD_ID);
-    let mut out = vec![sim.frame().checksum()];
-    for tick in 1..=target {
-        let mut inputs = TickInputs::new(tick, 2);
-        for slot in [HOST, JOINER] {
-            if tick > 2 && (slot == HOST || tick >= first_input) {
-                inputs.set_input(slot, input(slot, tick));
-                for command in commands(slot) {
-                    inputs.push_command(slot, command);
-                }
+// Host reference covers every gameplay interval, including preserved departed
+// input and the default gap. Returners instead start from their validated fresh
+// snapshot: their abandoned speculative timeline is never used as a baseline.
+struct Reference {
+    baseline: Simulation<Arena>,
+    gameplay: Vec<(u64, Option<u64>)>,
+}
+impl Reference {
+    fn initial() -> Self {
+        Self {
+            baseline: Simulation::with_build_id(game(), 60, 42, BUILD_ID),
+            gameplay: Vec::new(),
+        }
+    }
+    fn from_snapshot(peer: &Peer, first_input: u64) -> Result<Self> {
+        Ok(Self {
+            baseline: Simulation::from_frame(
+                peer.verified_frame().ok_or("missing snapshot")?,
+                60,
+                BUILD_ID,
+            )?,
+            gameplay: vec![(first_input, None)],
+        })
+    }
+    fn depart(&mut self, target: u64) {
+        if let Some((first, end)) = self.gameplay.last_mut() {
+            if target < *first {
+                self.gameplay.pop();
+            } else {
+                *end = Some(target);
             }
         }
-        sim.step(&inputs);
-        out.push(sim.frame().checksum());
     }
-    out
+    fn checksums(&self, target: u64) -> Result<BTreeMap<u64, u64>> {
+        let mut sim = Simulation::<Arena>::from_frame(self.baseline.frame(), 60, BUILD_ID)?;
+        let mut out = BTreeMap::from([(sim.tick(), sim.frame().checksum())]);
+        for tick in sim.tick() + 1..=target {
+            let mut inputs = TickInputs::new(tick, 2);
+            for slot in [HOST, JOINER] {
+                let active = slot == HOST
+                    || self
+                        .gameplay
+                        .iter()
+                        .any(|&(from, until)| tick >= from && until.is_none_or(|end| tick <= end));
+                if tick > 2 && active {
+                    inputs.set_input(slot, input(slot, tick));
+                    for command in commands(slot) {
+                        inputs.push_command(slot, command);
+                    }
+                }
+            }
+            sim.step(&inputs);
+            out.insert(tick, sim.frame().checksum());
+        }
+        Ok(out)
+    }
 }
 fn verified_report(
     peer: &Peer,
@@ -195,15 +235,16 @@ fn verified_report(
     snapshot: u64,
     first_input: u64,
     target: u64,
+    reference: &Reference,
 ) -> Result<Report> {
     if peer.verified_tick() < target {
         return Err("target is not verified".into());
     }
-    let reference = reference(target, first_input);
+    let reference = reference.checksums(target)?;
     let mut checked = 0;
     for &(tick, checksum) in peer.checksums() {
-        if tick <= target {
-            if checksum != reference[tick as usize] {
+        if let Some(expected) = reference.get(&tick) {
+            if checksum != *expected {
                 return Err(format!("reference checksum mismatch at tick {tick}").into());
             }
             checked += 1;
@@ -259,6 +300,8 @@ fn read_report(bytes: &[u8], generation: u64, kind: u8) -> Result<(u64, u64)> {
 /// It does not authenticate that client as the previous user.
 struct HostOptions {
     pre_activation_retries: u32,
+    /// Explicitly accept only driver-admitted departed input and fresh return snapshots.
+    host_continuations: u32,
     join_wait: Duration,
     initial_ticks: u64,
     #[cfg(test)]
@@ -270,6 +313,7 @@ impl Default for HostOptions {
     fn default() -> Self {
         Self {
             pre_activation_retries: 0,
+            host_continuations: 0,
             join_wait: PROGRESS_TIMEOUT,
             initial_ticks: 24,
             #[cfg(test)]
@@ -366,6 +410,8 @@ fn run_host_with_options(
         &announce,
     )?;
     let mut retry_count = 0;
+    let mut continuation_count = 0;
+    let mut reference = Reference::initial();
     #[cfg(test)]
     let mut held_notice_progress = options.held_notice_progress;
     let mut waiting_since = Instant::now();
@@ -449,6 +495,7 @@ fn run_host_with_options(
                         members.queue_control(a, JOINER, &snapshot)?;
                         members.queue_control(a, JOINER, &notice)?;
                         println!("HOST_SNAPSHOT tick={} first_input={} backlog_records={} target={target}", raw.snapshot_tick, raw.first_input_tick, driver.pending().0);
+                        reference.gameplay.push((raw.first_input_tick, None));
                         grant = Some((raw.snapshot_tick, raw.first_input_tick, target));
                         last_progress = Instant::now();
                     }
@@ -473,7 +520,7 @@ fn run_host_with_options(
                             remote_report = Some(report);
                         }
                     }
-                    P2pRoutedEvent::Disconnected { cleanup, .. } => {
+                    P2pRoutedEvent::Disconnected { event, cleanup } => {
                         // route_event already removed the old route and cancelled its
                         // attempt. Fence application traffic before releasing anything.
                         connection = None;
@@ -482,36 +529,59 @@ fn run_host_with_options(
                             let _ = clean.release_local_hold(&mut peer);
                             clean.retire_exclusive_connections(&mut endpoint);
                         }
-                        driver.cancel();
                         if ack_sent {
+                            driver.cancel();
                             return own_report
                                 .clone()
                                 .ok_or_else(|| "missing host report".into());
                         }
-                        if final_notice_queued {
-                            return Err("joiner disconnected after final readiness notice was queued; established-player reconnect is unsupported".into());
-                        }
-                        if retry_count >= options.pre_activation_retries {
-                            return Err("pre-activation retry budget exhausted; owned holds, link and input buffers retired".into());
-                        }
                         let fresh_generation =
                             generation.checked_add(1).ok_or("generation exhausted")?;
-                        // All validation, including capacity for resumed defaults, precedes
-                        // the source swap. Never reset or replace this Session/world.
-                        let replacement = driver.replace_cancelled_host_rolling(
-                            &mut peer,
-                            context(fresh_generation)?,
-                        )?;
-                        if let Some((_, first_input, _)) = grant {
-                            peer.mark_slot_vacant(JOINER, first_input)?;
-                        }
+                        let replacement = if final_notice_queued {
+                            if continuation_count >= options.host_continuations {
+                                driver.cancel();
+                                return Err("joiner disconnected after final readiness notice was queued; explicit host-continuation budget exhausted or disabled".into());
+                            }
+                            let conn = match event {
+                                ServerEvent::Disconnected(conn) => conn,
+                                _ => return Err("invalid disconnect event".into()),
+                            };
+                            // Route and transport are fenced, but the healthy driver still
+                            // owns accepted input, including records not polled by Session.
+                            let target = driver.fence_host_continuation(&peer, conn)?;
+                            driver.verify_host_continuation(&mut peer)?;
+                            let replacement = driver.replace_fenced_host_rolling(
+                                &mut peer,
+                                context(fresh_generation)?,
+                            )?;
+                            reference.depart(target);
+                            continuation_count += 1;
+                            println!("HOST_CONTINUED target={target} cutoff={} accepted_inputs_only=true continuations_remaining={}", target + 1, options.host_continuations - continuation_count);
+                            replacement
+                        } else {
+                            driver.cancel();
+                            if retry_count >= options.pre_activation_retries {
+                                return Err("pre-activation retry budget exhausted; owned holds, link and input buffers retired".into());
+                            }
+                            // The stricter no-final-notice/no-admitted-input path is unchanged.
+                            let replacement = driver.replace_cancelled_host_rolling(
+                                &mut peer,
+                                context(fresh_generation)?,
+                            )?;
+                            if let Some((_, first_input, _)) = grant {
+                                peer.mark_slot_vacant(JOINER, first_input)?;
+                                reference.gameplay.pop();
+                            }
+                            retry_count += 1;
+                            replacement
+                        };
                         replacement.check()?;
                         driver = replacement;
                         assert!(members.commit_vacant(JOINER)?.is_empty());
                         peer.poll_confirmed();
                         driver.check()?;
-                        retry_count += 1;
                         generation = fresh_generation;
+                        final_notice_queued = false;
                         grant = None;
                         own_report = None;
                         remote_report = None;
@@ -593,7 +663,8 @@ fn run_host_with_options(
             }
             if let Some((snapshot, first_input, target)) = grant {
                 if final_notice_queued && peer.verified_tick() >= target && own_report.is_none() {
-                    let report = verified_report(&peer, &driver, snapshot, first_input, target)?;
+                    let report =
+                        verified_report(&peer, &driver, snapshot, first_input, target, &reference)?;
                     println!(
                         "HOST_VERIFIED tick={target} checksum={:016x} reference_checkpoints={}",
                         report.checksum, report.checked
@@ -661,6 +732,7 @@ fn run_join(
     let mut attempt = None;
     let mut grant = None;
     let mut ready = false;
+    let mut reference = None;
     let mut own_report = None;
     let mut report_sent = false;
     let mut last_progress = Instant::now();
@@ -721,6 +793,7 @@ fn run_join(
                                 .checked_add(FUTURE_TICKS)
                                 .ok_or("tick horizon overflow")?;
                             driver.bind(conn, a.context(), snapshot, first_input)?;
+                            reference = Some(Reference::from_snapshot(peer, first_input)?);
                             grant = Some((snapshot, first_input, target));
                             last_progress = Instant::now();
                         } else if data.starts_with(b"ORRB") {
@@ -832,6 +905,7 @@ fn run_join(
                         snapshot,
                         first_input,
                         target,
+                        reference.as_ref().ok_or("missing snapshot baseline")?,
                     )?;
                     println!("JOIN_CAUGHT_UP verified={target} checksum={:016x} reference_checkpoints={}", report.checksum, report.checked);
                     own_report = Some(report);
@@ -894,20 +968,24 @@ fn live_ticks(value: Option<&String>) -> Result<u64> {
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("host") if args.len() <= 5 => {
+        Some("host") if args.len() <= 6 => {
             run_host_with_options(
                 args.get(1).map_or("127.0.0.1:7000", String::as_str).parse()?,
                 args.get(2).map(|s| s.parse()).transpose()?.unwrap_or_else(|| fresh_seed().max(1)),
                 live_ticks(args.get(3))?,
                 None,
-                HostOptions { pre_activation_retries: args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(0), ..HostOptions::default() },
+                HostOptions {
+                    pre_activation_retries: args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(0),
+                    host_continuations: args.get(5).map(|s| s.parse()).transpose()?.unwrap_or(0),
+                    ..HostOptions::default()
+                },
             )?;
         }
         Some("join") if (4..=5).contains(&args.len()) => {
             run_join(args[1].parse()?, parse_fingerprint(&args[2])?, args[3].parse()?, live_ticks(args.get(4))?)?;
         }
         Some("smoke") if args.len() <= 2 => smoke(live_ticks(args.get(1))?)?,
-        _ => return Err("usage: p2p_arena host [bind] [generation] [live_ticks] [pre_activation_retries] | join <addr> <fingerprint> <generation> [live_ticks] | smoke [live_ticks]".into()),
+        _ => return Err("usage: p2p_arena host [bind] [generation] [live_ticks] [pre_activation_retries] [host_continuations] | join <addr> <fingerprint> <generation> [live_ticks] | smoke [live_ticks]".into()),
     }
     Ok(())
 }
@@ -1104,6 +1182,329 @@ mod tests {
         // using only the successful grant as the joiner's activation boundary.
         assert!(hosted.checked > LIVE_TICKS as usize);
         assert!(joined.checked >= LIVE_TICKS as usize);
+    }
+    // Real pinned QUIC moves requests, snapshots, notices and every input. These
+    // helpers deliberately control polling so a nonempty admitted tail stays in
+    // the driver's queue at disconnect, rather than merely in the transport.
+    fn server_message(
+        endpoint: &mut orr_relay_net::NetEndpoint,
+        expected: super::ConnId,
+    ) -> Vec<u8> {
+        use super::*;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match endpoint.poll() {
+                Some(ServerEvent::Message {
+                    conn,
+                    channel: Channel::Reliable,
+                    data,
+                }) => {
+                    assert_eq!(conn, expected);
+                    return data;
+                }
+                Some(other) => panic!("unexpected server event: {other:?}"),
+                None => thread::sleep(Duration::from_millis(1)),
+            }
+        }
+        panic!("server receive timed out");
+    }
+    fn client_message(link: &mut orr_relay_net::NetLink) -> Vec<u8> {
+        use super::*;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match link.poll() {
+                Some(LinkEvent::Message {
+                    channel: Channel::Reliable,
+                    data,
+                }) => return data,
+                Some(other) => panic!("unexpected client event: {other:?}"),
+                None => thread::sleep(Duration::from_millis(1)),
+            }
+        }
+        panic!("client receive timed out");
+    }
+    fn socket_link(
+        endpoint: &mut orr_relay_net::NetEndpoint,
+    ) -> (orr_relay_net::NetLink, super::ConnId) {
+        use super::*;
+        let mut options = ConnectOptions::new(
+            endpoint.local_addr().to_string(),
+            TransportKind::Quic,
+            Trust::Fingerprint(endpoint.cert_sha256().unwrap()),
+        );
+        options.net = net_config();
+        let mut link = connect(&options).unwrap();
+        let mut server = None;
+        let mut client = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Some(event) = endpoint.poll() {
+                match event {
+                    ServerEvent::Connected(conn) => server = Some(conn),
+                    other => panic!("{other:?}"),
+                }
+            }
+            if let Some(event) = link.poll() {
+                match event {
+                    LinkEvent::Connected => client = true,
+                    other => panic!("{other:?}"),
+                }
+            }
+            if client && server.is_some() {
+                return (link, server.unwrap());
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        panic!("connect timed out");
+    }
+    fn socket_bootstrap(
+        endpoint: &mut orr_relay_net::NetEndpoint,
+        link: &mut orr_relay_net::NetLink,
+        conn: super::ConnId,
+        host: &mut super::Peer,
+        driver: &super::P2pInputDriver<super::Arena, super::ArenaCodec>,
+        generation: u64,
+    ) -> (
+        super::Bootstrap,
+        super::P2pInputDriver<super::Arena, super::ArenaCodec>,
+        super::Reference,
+        u64,
+    ) {
+        use super::*;
+        let ctx = context(generation).unwrap();
+        let mut bootstrap =
+            Bootstrap::new(config(JOINER, generation), roster(), 4096, CONTROL_LIMIT).unwrap();
+        let (joined, source) =
+            P2pInputDriver::new_rolling(JOINER, ctx.clone(), limits(), window()).unwrap();
+        link.try_send_reliable(&bootstrap.next_request().unwrap())
+            .unwrap();
+        let request = server_message(endpoint, conn);
+        let (snapshot, ticket) = orr_session::serve_checked_join(host, &ctx, &request).unwrap();
+        let raw = ticket.ticket();
+        driver
+            .bind(conn, &ctx, raw.snapshot_tick, raw.first_input_tick)
+            .unwrap();
+        let notice = orr_session::checked_backlog_notice(host, &ctx, &ticket).unwrap();
+        endpoint.try_send_reliable(conn, &snapshot).unwrap();
+        bootstrap
+            .receive_snapshot(HOST, game(), source, &client_message(link))
+            .unwrap();
+        joined
+            .bind(
+                link.connection_id(),
+                &ctx,
+                raw.snapshot_tick,
+                raw.first_input_tick,
+            )
+            .unwrap();
+        let baseline =
+            Reference::from_snapshot(bootstrap.session().unwrap(), raw.first_input_tick).unwrap();
+        let sent = driver
+            .flush(|id, bytes| endpoint.try_send_reliable(id, bytes))
+            .unwrap()
+            .sent;
+        for _ in 0..sent {
+            let bytes = client_message(link);
+            joined
+                .receive(link.connection_id(), Channel::Reliable, &bytes)
+                .unwrap();
+        }
+        bootstrap.poll_confirmed();
+        endpoint.try_send_reliable(conn, &notice).unwrap();
+        bootstrap
+            .receive_notice(HOST, &client_message(link))
+            .unwrap();
+        assert_eq!(bootstrap.status().unwrap(), JoinBootstrapStatus::Ready);
+        (bootstrap, joined, baseline, raw.first_input_tick)
+    }
+    #[test]
+    fn real_quic_admitted_unpolled_commands_continue_and_fresh_snapshot_reconnects() {
+        use super::*;
+        use orr_relay_net::{P2pInputAccepted, P2pInputError};
+        let mut options = ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Quic);
+        options.net = net_config();
+        let mut endpoint = listen(&options).unwrap();
+        let (old, source) =
+            P2pInputDriver::new_rolling(HOST, context(301).unwrap(), limits(), window()).unwrap();
+        let mut host = Peer::new(game(), config(HOST, 301), source);
+        let mut reference = Reference::initial();
+        for _ in 0..96 {
+            drive(&mut host, &old).unwrap();
+        }
+        host.poll_confirmed();
+        let (mut link, conn) = socket_link(&mut endpoint);
+        let (mut abandoned, departed, _, first) =
+            socket_bootstrap(&mut endpoint, &mut link, conn, &mut host, &old, 301);
+        reference.gameplay.push((first, None));
+        let target = first + 5;
+        while host.next_send_tick() < target + 5 {
+            drive(&mut host, &old).unwrap();
+        }
+        for tick in first..=target {
+            abandoned
+                .advance(input(JOINER, tick), commands(JOINER))
+                .unwrap();
+        }
+        let sent = departed
+            .flush(|_, bytes| link.try_send_reliable(bytes))
+            .unwrap()
+            .sent;
+        assert_eq!(sent, 6);
+        let mut retained_packet = Vec::new();
+        for n in 0..sent {
+            let bytes = server_message(&mut endpoint, conn);
+            assert_eq!(
+                old.receive(conn, Channel::Reliable, &bytes),
+                Ok(P2pInputAccepted::New)
+            );
+            if n < 2 {
+                host.poll_confirmed();
+            }
+            retained_packet = bytes;
+        }
+        assert_eq!(host.last_remote_tick(JOINER), Some(first + 1));
+        assert_eq!(host.verified_tick(), first + 1);
+        // No speculative returning state survives: close the actual old socket
+        // before fencing, but do not call old.cancel/disconnected on healthy input.
+        abandoned.cancel();
+        departed.cancel();
+        link.close();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(event) = endpoint.poll() {
+                assert!(matches!(event, ServerEvent::Disconnected(id) if id == conn));
+                break;
+            }
+            assert!(Instant::now() < deadline, "disconnect timed out");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(old.fence_host_continuation(&host, conn), Ok(target));
+        assert_eq!(
+            old.receive(conn, Channel::Reliable, &retained_packet),
+            Err(P2pInputError::Fenced)
+        );
+        assert_eq!(old.disconnected(conn), Err(P2pInputError::Fenced));
+        assert_eq!(old.verify_host_continuation(&mut host), Ok(target));
+        reference.depart(target);
+        assert_eq!(
+            host.verified_frame().unwrap().checksum(),
+            reference.checksums(target).unwrap()[&target]
+        );
+        let world = host.predicted_frame().to_bytes();
+        let head = host.head_tick();
+        let fresh = old
+            .replace_fenced_host_rolling(&mut host, context(302).unwrap())
+            .unwrap();
+        assert_eq!(host.head_tick(), head);
+        assert_eq!(host.predicted_frame().to_bytes(), world);
+        assert_eq!(old.check(), Err(P2pInputError::Cancelled));
+        assert_eq!(
+            old.receive(conn, Channel::Reliable, &retained_packet),
+            Err(P2pInputError::Cancelled)
+        );
+        for _ in 0..8 {
+            drive(&mut host, &fresh).unwrap();
+        }
+        host.poll_confirmed();
+        let checkpoint = host.verified_tick();
+        assert!(checkpoint > target);
+        assert_eq!(
+            host.verified_frame().unwrap().checksum(),
+            reference.checksums(checkpoint).unwrap()[&checkpoint]
+        );
+        let (mut returned_link, returned_conn) = socket_link(&mut endpoint);
+        assert_ne!(returned_conn, conn);
+        let (mut returned, returned_driver, baseline, returned_first) = socket_bootstrap(
+            &mut endpoint,
+            &mut returned_link,
+            returned_conn,
+            &mut host,
+            &fresh,
+            302,
+        );
+        assert_eq!(returned.session().unwrap().verified_tick(), checkpoint);
+        reference.gameplay.push((returned_first, None));
+        for _ in 0..24 {
+            drive(&mut host, &fresh).unwrap();
+            let tick = returned.session().unwrap().next_send_tick();
+            returned
+                .advance(input(JOINER, tick), commands(JOINER))
+                .unwrap();
+            let sent = fresh
+                .flush(|id, bytes| endpoint.try_send_reliable(id, bytes))
+                .unwrap()
+                .sent;
+            for _ in 0..sent {
+                let bytes = client_message(&mut returned_link);
+                returned_driver
+                    .receive(returned_link.connection_id(), Channel::Reliable, &bytes)
+                    .unwrap();
+            }
+            let sent = returned_driver
+                .flush(|_, bytes| returned_link.try_send_reliable(bytes))
+                .unwrap()
+                .sent;
+            for _ in 0..sent {
+                let bytes = server_message(&mut endpoint, returned_conn);
+                fresh
+                    .receive(returned_conn, Channel::Reliable, &bytes)
+                    .unwrap();
+            }
+            host.poll_confirmed();
+            returned.poll_confirmed();
+            fresh.check().unwrap();
+            returned_driver.check().unwrap();
+        }
+        let target = host
+            .verified_tick()
+            .min(returned.session().unwrap().verified_tick());
+        let hosted = verified_report(
+            &host,
+            &fresh,
+            checkpoint,
+            returned_first,
+            target,
+            &reference,
+        )
+        .unwrap();
+        let joined = verified_report(
+            returned.session().unwrap(),
+            &returned_driver,
+            checkpoint,
+            returned_first,
+            target,
+            &baseline,
+        )
+        .unwrap();
+        assert_eq!(hosted.checksum, joined.checksum);
+        assert!(hosted.checked > joined.checked);
+        assert!(joined.checked >= 20);
+    }
+    #[test]
+    fn real_quic_explicit_continuation_policy_reopens_same_running_host() {
+        use super::*;
+        let (send, recv) = mpsc::channel();
+        let host = thread::spawn(move || {
+            run_host_with_options(
+                "127.0.0.1:0".parse().unwrap(),
+                401,
+                24,
+                Some(send),
+                HostOptions {
+                    host_continuations: 1,
+                    ..HostOptions::default()
+                },
+            )
+        });
+        let initial = recv.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (_, old_first) = disconnect_during_bootstrap(initial, true, None).unwrap();
+        let next = recv.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(next.generation, initial.generation + 1);
+        assert!(next.verified_tick >= old_first - 1);
+        let joined = run_join(next.address, next.fingerprint, next.generation, 24).unwrap();
+        let hosted = host.join().unwrap().unwrap();
+        assert_eq!(joined.checksum, hosted.checksum);
+        assert!(hosted.snapshot >= old_first - 1);
     }
     #[test]
     fn real_quic_final_notice_disconnect_without_input_is_not_retryable() {
