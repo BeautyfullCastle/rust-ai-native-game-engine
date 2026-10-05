@@ -19,6 +19,7 @@ mod input_source;
 mod join;
 mod join_bootstrap;
 mod join_checked;
+mod p2p_membership;
 mod play;
 mod relay;
 mod replay;
@@ -48,3 +49,5 @@ pub use session::{
 };
 
 pub use orr_sim::{DebugCommand, DebugError, EventKey, Game, PlayerSlot, SimEvent};
+
+pub use p2p_membership::{P2pAttempt, P2pCleanup, P2pFlush, P2pMembership, P2pMembershipError, P2pRoutedEvent, P2pSlotState};
