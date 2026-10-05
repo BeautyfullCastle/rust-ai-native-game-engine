@@ -59,9 +59,9 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
     }
 
     /// The ticks to run, given the tick the frames are at.
-    fn tick_list(&self, start: u64, max: Option<u32>) -> Result<Vec<u64>, EditError> {
-        let mut ticks: Vec<u64> = match self {
-            VerifyInputs::Scripted { ticks, .. } => (start + 1..=start + u64::from(*ticks)).collect(),
+    fn tick_list(&self, start: u64, max: Option<u32>, cancel: &AtomicBool) -> Result<Vec<u64>, EditError> {
+        match self {
+            VerifyInputs::Scripted { ticks, .. } => collect_ticks(start + 1..=start + u64::from(*ticks), max, cancel),
             VerifyInputs::Recorded(r) => {
                 if r.tick_count() == 0 {
                     return Err(EditError::Verify("the recording has no ticks".into()));
@@ -73,16 +73,9 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
                         start + 1
                     )));
                 }
-                (r.first_tick()..=r.last_tick()).take_while(|&t| r.tick(t).is_some()).collect()
+                collect_ticks((r.first_tick()..=r.last_tick()).take_while(|&t| r.tick(t).is_some()), max, cancel)
             }
-        };
-        if let Some(m) = max {
-            ticks.truncate(m as usize);
         }
-        if ticks.is_empty() {
-            return Err(EditError::Verify("no ticks to run".into()));
-        }
-        Ok(ticks)
     }
 
     fn tick_rate(&self, default: u32) -> u32 {
@@ -120,6 +113,25 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
     }
 }
 
+// Bound iteration before collection; never reserve storage from the uncapped
+// iterator's size hint. Check on both sides of next() so cancellation during
+// the final visit (including exhaustion) cannot return a partial tick list.
+fn collect_ticks(mut source: impl Iterator<Item = u64>, max: Option<u32>, cancel: &AtomicBool) -> Result<Vec<u64>, EditError> {
+    let mut ticks = Vec::new();
+    check_cancelled(cancel)?;
+    while max.is_none_or(|limit| ticks.len() < limit as usize) {
+        check_cancelled(cancel)?;
+        let next = source.next();
+        check_cancelled(cancel)?;
+        let Some(tick) = next else { break };
+        ticks.push(tick);
+    }
+    if ticks.is_empty() {
+        return Err(EditError::Verify("no ticks to run".into()));
+    }
+    Ok(ticks)
+}
+
 /// Settings of a verification run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifyOptions {
@@ -129,6 +141,10 @@ pub struct VerifyOptions {
     /// compared every tick; events entirely within a tick are not sampled.
     pub sample_every: u32,
     /// Run at most this many ticks (of a recording or of a script).
+    /// Also caps tick-list preparation to at most this many iterator visits
+    /// and O(max_ticks) storage; `None` leaves that preparation uncapped.
+    /// This does not bound replay parsing/decompression, snapshot or report
+    /// allocations, game/metric hooks, or the work of a single simulation tick.
     pub max_ticks: Option<u32>,
     /// Tick rate of a scripted run (a recording brings its own).
     pub tick_rate: u32,
@@ -350,13 +366,17 @@ pub fn verify_frames<G: Game>(
 
 /// Runs `base` and `candidate` like [`verify_frames`], returning
 /// [`EditError::VerifyCancelled`] if `cancel` is set before a complete report
-/// is ready. The flag is checked before setup, before each simulation tick,
-/// between sequential sides, and before report assembly. In parallel mode,
+/// is ready. The flag is checked before setup, during tick-list collection,
+/// before each simulation tick, between sequential sides, and before report
+/// assembly. In parallel mode,
 /// both scoped workers observe the same flag and are joined before returning.
 ///
 /// The flag may be shared with another thread and set with
 /// [`AtomicBool::store`](AtomicBool::store). Cancellation never returns a
-/// successful partial report.
+/// successful partial report. Tick-list collection checks before and after
+/// each iterator visit. Cancellation is cooperative: parsing/decompression,
+/// snapshot/report allocations, hooks and a single simulation tick are not
+/// preempted; there is no hard preemption or wall-clock latency guarantee.
 pub fn verify_frames_cancellable<G: Game>(
     base: &Frame,
     candidate: &Frame,
@@ -370,7 +390,7 @@ pub fn verify_frames_cancellable<G: Game>(
         return Err(EditError::Verify(format!("frames are at different ticks ({} and {})", base.tick(), candidate.tick())));
     }
     let start = base.tick();
-    let ticks = inputs.tick_list(start, opts.max_ticks)?;
+    let ticks = inputs.tick_list(start, opts.max_ticks, cancel)?;
     check_cancelled(cancel)?;
     let rate = inputs.tick_rate(opts.tick_rate);
     let (b, c) = if opts.parallel && ticks.len() >= 16 {
@@ -585,5 +605,56 @@ impl Metrics for ReflectMetrics<'_> {
         let mut out = vec![("entities".to_string(), MetricValue::Int(i64::from(frame.alive_count())))];
         out.extend(counts.into_iter().map(|(n, c)| (format!("components.{n}"), MetricValue::Int(c))));
         out
+    }
+}
+
+#[cfg(test)]
+mod tick_budget_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn collection_caps_iterator_visits_before_allocating() {
+        for (max, expected, visits_expected) in [(None, 8, 9), (Some(0), 0, 0), (Some(3), 3, 3), (Some(8), 8, 8), (Some(12), 8, 9)] {
+            let visits = Cell::new(0);
+            let mut finite = 1..=8;
+            let source = std::iter::from_fn(|| {
+                visits.set(visits.get() + 1);
+                finite.next()
+            });
+            let result = collect_ticks(source, max, &AtomicBool::new(false));
+            if expected == 0 {
+                assert!(matches!(result, Err(EditError::Verify(message)) if message == "no ticks to run"));
+            } else {
+                assert_eq!(result.unwrap(), (1..=expected).collect::<Vec<_>>());
+            }
+            assert_eq!(visits.get(), visits_expected);
+            if let Some(limit) = max {
+                assert!(visits.get() <= limit);
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_during_collection_never_returns_a_partial_list() {
+        // Exercise a middle visit, the last capped visit, and exhaustion.
+        for cancel_at in [2, 4, 5] {
+            let cancel = AtomicBool::new(false);
+            let visits = Cell::new(0);
+            let mut finite = 1..=4;
+            let source = std::iter::from_fn(|| {
+                visits.set(visits.get() + 1);
+                if visits.get() == cancel_at {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                finite.next()
+            });
+            let max = if cancel_at == 5 { None } else { Some(4) };
+            assert!(matches!(collect_ticks(source, max, &cancel), Err(EditError::VerifyCancelled)));
+            assert_eq!(visits.get(), cancel_at);
+        }
+        let cancel = AtomicBool::new(true);
+        let source = std::iter::from_fn(|| panic!("pre-cancelled collection must not visit the iterator"));
+        assert!(matches!(collect_ticks(source, Some(0), &cancel), Err(EditError::VerifyCancelled)));
     }
 }
