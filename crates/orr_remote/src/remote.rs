@@ -1176,11 +1176,7 @@ fn run<G: Game>(
     if let Some(tok) = &cfg.token {
         first.push((Pending::Auth, "auth", json!({"token": tok})));
     }
-    if checked_identity {
-        if cfg.token.is_none() {
-            first.push((Pending::Discover, "rpc.discover", J::Null));
-        }
-    } else if frame_codec_policy.is_some() {
+    if checked_identity || frame_codec_policy.is_some() {
         if cfg.token.is_none() {
             first.push((Pending::Discover, "rpc.discover", J::Null));
         }
@@ -1701,16 +1697,18 @@ fn run<G: Game>(
                         decode_us: started.elapsed().as_micros() as u64,
                     };
                     if let Err(error) = on_codec_frame(
-                        &meta,
-                        identity,
-                        target,
-                        is_reset,
-                        prepared_decode,
+                        CodecFramePublication {
+                            meta: &meta,
+                            identity,
+                            target,
+                            is_reset,
+                            prepared_decode,
+                            sizes,
+                        },
                         tick_rate,
                         shared,
                         &mut state,
                         codec,
-                        sizes,
                     ) {
                         fail(shared, &mut ready, error);
                         return;
@@ -2082,18 +2080,30 @@ fn on_frame<E>(
     Ok(())
 }
 
-fn on_codec_frame<E>(
-    meta: &J,
+struct CodecFramePublication<'a> {
+    meta: &'a J,
     identity: FrameCodecMeta,
     target: FrameStamp,
     is_reset: bool,
     prepared_decode: crate::frame_delta::PreparedDecode,
+    sizes: FrameSizes,
+}
+
+fn on_codec_frame<E>(
+    publication: CodecFramePublication<'_>,
     tick_rate: u32,
     shared: &Shared<E>,
     state: &mut StreamState,
     codec: &mut FrameCodecClient,
-    sizes: FrameSizes,
 ) -> Result<(), String> {
+    let CodecFramePublication {
+        meta,
+        identity,
+        target,
+        is_reset,
+        prepared_decode,
+        sizes,
+    } = publication;
     let frame = Arc::new(prepared_decode.frame().clone());
     if frame.tick() != target.tick || frame.checksum() != target.frame_checksum {
         return Err("prepared frame differs from its validated record stamp".into());

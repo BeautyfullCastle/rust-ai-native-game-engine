@@ -172,6 +172,9 @@ impl Encoder {
                 actual: actual_base,
             });
         }
+        if let Some(baseline) = &prepared.baseline {
+            debug_assert_eq!(baseline.stamp, prepared.target_stamp());
+        }
         self.baseline = prepared.baseline;
         Ok(())
     }
@@ -362,6 +365,11 @@ impl Decoder {
                 actual: actual_base,
             });
         }
+        debug_assert_eq!(prepared.frame().tick(), prepared.target_stamp().tick);
+        debug_assert_eq!(
+            prepared.frame().checksum(),
+            prepared.target_stamp().frame_checksum
+        );
         self.baseline = prepared.baseline;
         Ok(prepared.frame)
     }

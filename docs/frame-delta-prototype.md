@@ -186,22 +186,46 @@ boundaries, explicit reset, and frame-size refusal. Byte-for-byte reconstructed
 Frames and original checksums are the correctness oracles. Existing test
 assertions, golden checksums, and required CI gates are unchanged.
 
-The fixed NEXT-14-1 codec test binary ran on native ARM CI with
-16 passed, 0 failed, and 0 ignored. That result belongs to source 3d3; it does
-not establish success for the later transport changes. A separate local run of
-the new transport integration target passed 11 tests with no failures or ignored
-tests. It exercised negotiated WebSocket reconstruction and host checksums,
-independent subscribers, backward seek, legacy Full+LZ4, old-host Prefer/Require,
-independent limits, zero retention, strict ACK identity, and rejected commits.
-That run used the type-corrected working source. A subsequent test-only wrapper
-attribute change and the affected unit, existing delivery, and strict Clippy
-checks remain pending. The transport-focused command is:
+The native ARM NEXT-14-1 result (16 passed) and the first published-source
+transport result (11 passed at 4d022e0cd74df7e932efdaf25f2d8ec4c142791e) are historical receipts. The latter
+predates the test-only registry correction and the later remote.rs and
+frame_delta.rs Clippy corrections; neither historical count is summed into
+the final source results.
 
-```sh
-cargo test -p orr_remote --test frame_delta_transport --release --locked --offline
-```
+On the corrected final Rust source, the combined transport/legacy command
+reported targets and counts in this verified order: client_queue_bounds=7, frame_delta=16, frame_delta_transport=11, remote_delivery=13, remote_identity=7.
+Codec/server/queue selection passed 10.
+The mailbox selection passed 16 in its earlier run. Its remote.rs SHA
+1f6ccec1df7df5b0cb89065c251556cf5bb39cc88e3a20db755788fd2d07daa3 and frame_delta.rs SHA
+8f4f50a1fa6d2a580939e59662d216dc4d2a44cf9b2845d6b61fa57984578869 are separately mapped to final hashes
+17ed92df96ecc7d6b061bcf93137643791200487eadf1c7b883c7cbc345025e1 and 10cf4b3ca9ca64daa3c0e907e2878d4eb061f3cd7268682650a5f7e1343c34bf by
+their retained refactor deltas; the other seven Rust-file pins match
+the final checks. This mailbox result is reported with both provenance
+exceptions, not as a full all-Rust-pins-identical run. Strict all-target
+orr_remote Clippy exited 0 with
+warnings denied. Exact commands and per-run source/stdout/stderr hashes are in
+the local selected-check receipt. All current-source runs completed naturally
+with saved stdout/stderr EOF. The original E0282 and E0599 compile failures,
+the two remote.rs lints and subsequent four frame_delta.rs test-crate
+dead-code lints, and resource-related first-failure receipts remain
+preserved separately; any unmeasured process ownership or cause remains
+unmeasured. Three SU review findings remain unresolved: watch.subscribe can
+mutate active codec state before validation; an inactive healthy host retains
+the Full-frame deadline and can disconnect; reset-announcement delivery cut
+is not bound to exactly the next Full. New-head CI and review follow-up remain
+with SU. These focused results do not establish whole #14 acceptance or
+performance.
 
-That command must use a fresh execution contract and available local lane.
+Current-source command record:
+- transport and existing legacy targets: `C:\Users\hot41\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe test -p orr_remote --test frame_delta --test frame_delta_transport --test remote_delivery --test remote_identity --test client_queue_bounds --release --locked --offline -- --test-threads=1 --nocapture`
+- codec/server/queue: `C:\Users\hot41\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe test -p orr_remote --lib codec_ --release --locked --offline -- --test-threads=1 --nocapture`
+- mailbox prior-source run: `C:\Users\hot41\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe test -p orr_remote --lib remote_view::tests --release --locked --offline -- --test-threads=1 --nocapture`
+- strict Clippy: `C:\Users\hot41\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe clippy -p orr_remote --all-targets --release --locked --offline -- -D warnings`
+- remote.rs refactor delta: `E:\Projects\Fork\rust-ai-native-game-engine\target\haneul-9-equivalent-ci-20261005T0452Z\newrefactor-delta-root.json sha256=42ca25f0dca600d977d0f8aa729eaa54dd51141be2a97427f66745d7a33f1055`
+- frame_delta.rs refactor delta: `E:\Projects\Fork\rust-ai-native-game-engine\target\haneul-9-equivalent-ci-20261005T0452Z\frame_delta-delta-root.json sha256=3e236b0822dcced24bb705f33f0fc8fe2875a1124aa7e3e0e3bccd7d7389d9b4`
+- preserved second Clippy failure receipt: `E:\Projects\Fork\rust-ai-native-game-engine\target\haneul-9-equivalent-ci-20261005T0452Z\next14-2-clippy-20261005T120416018294Z\completion-proof.json sha256=427af4cd9985e8c719125ff85dbb7c4f259e3e412b0240dc1bc20e9dd477bc9a`
+
+These commands must use a fresh execution contract and available local lane.
 Code review is assigned to
 su under REVIEW-SU-1. The prototype does not require a renewed Haneul/Ddang
 cross-review wait.

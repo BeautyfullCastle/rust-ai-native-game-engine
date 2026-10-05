@@ -3763,7 +3763,7 @@ mod negotiated_frame_codec_tests {
     use std::sync::atomic::Ordering::Relaxed;
 
     fn blank_frame(tick: u64) -> orr_ecs::Frame {
-        let mut frame = orr_ecs::Frame::new(Arc::new(orr_ecs::ComponentRegistry::new()));
+        let mut frame = orr_ecs::Frame::new(orr_ecs::ComponentRegistryBuilder::new().build());
         frame.set_tick(tick);
         frame
     }
