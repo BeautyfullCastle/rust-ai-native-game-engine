@@ -213,6 +213,12 @@ evidence; command wall time alone does not measure compiler CPU time or CI cost.
    it never automatically terminates Cargo or its descendants. Keep the lane
    held until the owned process naturally exits, streams reach EOF, and the
    owned Job/process-group census is empty. A timeout is not completed cleanup.
+   Both pipe readers start before the child. Reader startup failure launches
+   no command. A raw storage failure preserves the first failure and continues
+   discard-draining to EOF; hashes cover only bytes actually saved. If Windows
+   cannot resume a created child, the collector retains its process, thread,
+   Job and pipe handles plus the pending lane receipt while awaiting external
+   resolution and natural exit. A suspended child is never reported as cleanup.
 
 Use the `orr.ci-cost-local-plan/1` schema documented by
 `validate_local_plan` in the tool. `--validate-plan PLAN.json` validates its
@@ -243,9 +249,11 @@ The six-slot plan consists of baseline/current Windows native, Linux native,
 and Linux sample. On 2026-10-05, the available local environment is Windows 11
 build 26200, i7-14700 (20 cores/28 logical processors), with installed
 Rust/Cargo 1.97.1 on `x86_64-pc-windows-msvc`. The read-only WSL inventory reports
-that WSL is not installed. A usable Linux runner has not been established.
-The four Linux slots therefore remain explicitly inaccessible unless a current
-authorized runner is separately verified. Do not install WSL, buy resources,
+that WSL is not installed. The Linux native/sample execution owner is su;
+the collector's three source files remain owned by Haneul. Su must verify the
+Linux environment, installed toolchain and frozen four-capture plan before
+execution. Those results are pending and cannot be inferred from Windows.
+Do not install WSL, buy resources,
 add credentials, trigger CI manually, replace those slots with Windows runs,
 or count old completed CI as new paired captures. Linux/native/GPU results
 cannot be inferred from the Windows environment.

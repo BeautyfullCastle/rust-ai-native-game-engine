@@ -14,6 +14,7 @@ from unittest import mock
 import os
 import platform
 import hashlib
+import threading
 
 import ci_cost_report as report
 
@@ -642,6 +643,7 @@ class LocalCollectorExecutionTests(unittest.TestCase):
             receipt["sha256"] = digest
         self.output = self.root / "output"
         self.probe = mock.patch.object(report, "_local_probe", side_effect=lambda command, *args:
+                                      "" if command == ["ps", "-eo", "pid=,pgid="] else
                                       tools[Path(command[0]).stem + "_version"])
         self.source = mock.patch.object(report, "_local_source", side_effect=lambda checkout, expected:
                                        dict(expected, clean=True))
@@ -720,6 +722,45 @@ class LocalCollectorExecutionTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         self.assertFalse(Path(self.plan["once_dir"]).exists())
 
+    def test_posix_census_fixture_does_not_lookup_a_toolchain_version(self):
+        self.assertEqual(report._local_probe(["ps", "-eo", "pid=,pgid="]), "")
+
+
+class LocalCollectorLaunchFailureTests(unittest.TestCase):
+    def test_resume_failure_retains_owned_thread_and_other_handles(self):
+        process = object.__new__(report._WindowsOwnedProcess)
+        process.kernel = mock.Mock()
+        process.kernel.ResumeThread.return_value = 0xffffffff
+        process.handle, process.job = 11, 12
+        process.thread = None
+        process._resume_owned_child(13)
+        self.assertTrue(process.resume_pending)
+        self.assertEqual((process.handle, process.job, process.thread), (11, 12, 13))
+        self.assertEqual(process.kernel.ResumeThread.call_count, 2)
+        process.kernel.CloseHandle.assert_not_called()
+
+    def test_reader_start_failure_launches_no_child_and_releases_waiting_reader(self):
+        original = threading.Thread.start
+        calls = []
+        def start(thread):
+            calls.append(thread)
+            if len(calls) == 2:
+                raise RuntimeError("injected reader startup failure")
+            return original(thread)
+        with tempfile.TemporaryDirectory() as temporary, \
+             mock.patch.object(threading.Thread, "start", start), \
+             mock.patch.object(report, "_WindowsOwnedProcess") as windows, \
+             mock.patch.object(report.subprocess, "Popen") as posix:
+            directory = Path(temporary)
+            result = report._local_run([sys.executable, "-c", "pass"], temporary,
+                dict(os.environ), directory, {"seconds": 1, "max_log_bytes": 1024,
+                    "cleanup": "windows-job" if os.name == "nt" else "posix-process-group"})
+        windows.assert_not_called()
+        posix.assert_not_called()
+        self.assertIsNone(result["pid"])
+        self.assertIn("RuntimeError", result["failure_reason"])
+        self.assertFalse(any(thread.is_alive() for thread in calls))
+
 
 class LocalCollectorChildTests(unittest.TestCase):
     """Small Python children verify raw capture and natural completion, not CI cost."""
@@ -764,6 +805,34 @@ class LocalCollectorChildTests(unittest.TestCase):
         self.assertTrue(result["owned_process_reaped"])
         self.assertEqual((directory / "stdout.raw").read_bytes(), b"beforenatural-after")
         self.assertGreaterEqual(float(result["total_seconds"]), 1.1)
+
+    def test_raw_storage_failure_keeps_draining_chatty_child_to_natural_eof(self):
+        original = Path.open
+        class BrokenWriter:
+            def __init__(self, stream):
+                self.stream = stream
+            def write(self, value):
+                self.stream.write(value[:7])
+                raise OSError("injected raw storage failure")
+            def flush(self):
+                self.stream.flush()
+            def close(self):
+                self.stream.close()
+        def open_file(path, *args, **kwargs):
+            stream = original(path, *args, **kwargs)
+            return BrokenWriter(stream) if path.name == "stdout.raw" and args and args[0] == "xb" else stream
+        with mock.patch.object(Path, "open", open_file):
+            result, directory = self.capture("import os;os.write(1,b'x'*400000);os.write(2,b'natural-end')")
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(result["drain_complete"])
+        self.assertFalse(result["lane_held"])
+        self.assertEqual(result["streams"]["stdout"]["observed_bytes"], 400000)
+        self.assertEqual((directory / "stdout.raw").read_bytes(), b'x'*7)
+        self.assertEqual(result["streams"]["stdout"]["sha256"], hashlib.sha256(b'x'*7).hexdigest())
+        self.assertIsNone(result["streams"]["stdout"]["original_full_sha256"])
+        self.assertEqual((directory / "stderr.raw").read_bytes(), b'natural-end')
+        self.assertTrue(result["failure_reason"].startswith("raw_storage_write_error"))
 
 
 if __name__ == "__main__":

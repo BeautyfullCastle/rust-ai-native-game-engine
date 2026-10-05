@@ -592,9 +592,11 @@ class _WindowsOwnedProcess:
             getattr(kernel, name).argtypes, getattr(kernel, name).restype = argtypes, restype
         self.job = kernel.CreateJobObjectW(None, None)
         self.handle = None
+        self.thread = None
         self.stdout = self.stderr = None
         self.containment_verified = False
         self.setup_error = None
+        self.resume_pending = False
         if not self.job:
             raise OSError("cannot create owned Windows Job")
         limits = ExtendedLimit()
@@ -629,28 +631,37 @@ class _WindowsOwnedProcess:
             self.containment_verified = bool(kernel.AssignProcessToJobObject(self.job, self.handle))
             if not self.containment_verified:
                 self.setup_error = "Windows Job assignment failed; descendant containment unverified"
-            if kernel.ResumeThread(thread) == 0xffffffff:
-                raise OSError("cannot resume owned Cargo process")
+            self._resume_owned_child(thread)
         except BaseException as exc:
             if self.handle:
                 # A created child must run its approved command and drain
                 # naturally even if accounting setup failed. No termination.
-                if thread and kernel.ResumeThread(thread) != 0xffffffff:
-                    self.setup_error = type(exc).__name__ + ": launch setup failed; natural drain required"
-                    self.containment_verified = False
-                else:
-                    error = OSError(f"Windows launch incomplete; possibly suspended owned PID {self.pid}; lane remains held")
-                    error.owned_pid, error.lane_held = self.pid, True
-                    self.close()
-                    raise error
+                self.setup_error = type(exc).__name__ + ": launch setup failed; natural drain required"
+                self.containment_verified = False
+                self._resume_owned_child(thread)
             else:
                 self.close()
                 raise
         finally:
-            if thread:
+            if thread and not self.resume_pending:
                 kernel.CloseHandle(thread)
             for descriptor in descriptors:
                 os.close(descriptor)
+
+    def _resume_owned_child(self, thread):
+        # If both attempts fail, retain every owned handle and keep the
+        # collector alive until external resolution/natural exit. A PID-only
+        # error followed by closing these handles would lose ownership.
+        if thread and self.kernel.ResumeThread(thread) != 0xffffffff:
+            self.resume_pending = False
+            return
+        if thread and self.kernel.ResumeThread(thread) != 0xffffffff:
+            self.resume_pending = False
+            self.setup_error = "Windows first resume failed; second resumed; natural drain required"
+            return
+        self.thread = thread
+        self.resume_pending = True
+        self.setup_error = "Windows resume failed; possibly suspended owned child; lane remains held"
 
     def poll(self):
         wait_status = self.kernel.WaitForSingleObject(self.handle, 0)
@@ -679,7 +690,7 @@ class _WindowsOwnedProcess:
         return int.from_bytes(bytes(accounting)[40:44], "little")
 
     def close(self):
-        for attribute in ("job", "handle"):
+        for attribute in ("thread", "job", "handle"):
             handle = getattr(self, attribute, None)
             if handle:
                 self.kernel.CloseHandle(handle)
@@ -699,26 +710,56 @@ def _local_group_active(process):
 
 def _local_run(command, checkout, environment, directory, watchdog):
     """Bound saved bytes; failures stop future captures, never a live process."""
-    state = {"saved": 0, "observed": {"stdout": 0, "stderr": 0}, "errors": []}
-    lock, overflow = threading.Lock(), threading.Event()
+    state = {"saved": 0, "observed": {"stdout": 0, "stderr": 0}, "errors": [],
+             "eof": set(), "write_failed": set()}
+    lock, overflow = threading.RLock(), threading.Event()
+    launched = threading.Event()
     process, readers = None, []
     result = {"pid": None, "exit_code": None, "status": "failure", "cleanup": watchdog["cleanup"],
               "automatic_termination": False, "lane_held": True}
-    files = {name: (directory / (name + ".raw")).open("xb") for name in ("stdout", "stderr")}
-    def drain(name, pipe):
+    files = {}
+    try:
+        for name in ("stdout", "stderr"):
+            files[name] = (directory / (name + ".raw")).open("xb", buffering=0)
+    except OSError:
+        for stream in files.values():
+            stream.close()
+        raise
+    def drain(name):
+        launched.wait()
+        if process is None:
+            return
+        pipe = getattr(process, name)
         try:
             while True:
                 chunk = pipe.read(65536)
                 if not chunk:
+                    with lock:
+                        state["eof"].add(name)
                     break
                 with lock:
                     state["observed"][name] += len(chunk)
                     remaining = max(0, watchdog["max_log_bytes"] - state["saved"])
                     accepted = chunk[:remaining]
-                    files[name].write(accepted)
-                    state["saved"] += len(accepted)
+                    if name not in state["write_failed"]:
+                        # Reserve the entire requested prefix before writing;
+                        # partial/failed storage cannot overspend the bound.
+                        state["saved"] += len(accepted)
+                        try:
+                            written = files[name].write(accepted)
+                            if written != len(accepted):
+                                raise OSError("short raw write")
+                            files[name].flush()
+                        except (OSError, ValueError) as exc:
+                            # Continue consuming the pipe after storage fails.
+                            # Only the actual on-disk prefix is later hashed.
+                            state["write_failed"].add(name)
+                            state["errors"].append(name + ": raw write " + type(exc).__name__)
+                            overflow.set()
+                            mark_failure("failure", "raw_storage_write_error; continuing discard drain")
                     if len(accepted) != len(chunk):
                         overflow.set()
+                        mark_failure("failure", "log_limit_or_capture_error")
         except (OSError, ValueError) as exc:
             with lock:
                 state["errors"].append(type(exc).__name__)
@@ -726,14 +767,26 @@ def _local_run(command, checkout, environment, directory, watchdog):
     def mark_failure(status, reason):
         if "failure_reason" not in result:
             result["status"], result["failure_reason"] = status, reason
-            _local_write(directory / "incomplete.json", {"status": status, "reason": reason,
+            try:
+                _local_write(directory / "incomplete.json", {"status": status, "reason": reason,
                           "pid": result["pid"], "utc": _local_utc(), "lane_held": True,
+                          "collector_pid": os.getpid(),
+                          "owned_handles_retained": process is not None,
                           "automatic_termination": False,
                           "natural_exit_pending": result["pid"] is not None and result["exit_code"] is None,
                           "descendant_or_eof_verification_pending": True})
+            except OSError as exc:
+                # A full disk must not turn the observer into a blocked pipe.
+                result["incomplete_receipt_error"] = type(exc).__name__
     try:
         result["utc_started"], result["monotonic_started_ns"] = _local_utc(), time.monotonic_ns()
         deadline = result["monotonic_started_ns"] + watchdog["seconds"] * 1_000_000_000
+        # Start both waiting readers before creating any owned child. A
+        # Thread.start failure therefore cannot strand a chatty process.
+        for name in ("stdout", "stderr"):
+            reader = threading.Thread(target=drain, args=(name,), daemon=True)
+            readers.append(reader)
+            reader.start()
         if os.name == "nt":
             process = _WindowsOwnedProcess(command, checkout, environment)
         else:
@@ -741,14 +794,17 @@ def _local_run(command, checkout, environment, directory, watchdog):
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
                                        start_new_session=True)
         result["pid"] = process.pid
+        launched.set()
         contained = not isinstance(process, _WindowsOwnedProcess) or process.containment_verified
         result["containment_verified"] = contained
         if not contained:
             mark_failure("failure", "containment_failed")
-        for name in ("stdout", "stderr"):
-            reader = threading.Thread(target=drain, args=(name, getattr(process, name)), daemon=True)
-            readers.append(reader)
-            reader.start()
+        if getattr(process, "setup_error", None):
+            mark_failure("failure", process.setup_error)
+        if getattr(process, "resume_pending", False):
+            result["residual_possibly_suspended_pid"] = process.pid
+            result["owned_resume_thread_handle_retained"] = True
+            mark_failure("failure", "resume_failed; owned child and handles retained; awaiting external resolution/natural exit")
         while process.poll() is None:
             if overflow.is_set():
                 mark_failure("failure", "log_limit_or_capture_error")
@@ -764,12 +820,13 @@ def _local_run(command, checkout, environment, directory, watchdog):
         result["monotonic_completed_ns"], result["utc_completed"] = time.monotonic_ns(), _local_utc()
     except KeyboardInterrupt:
         mark_failure("cancelled", "collector_interrupted; awaiting natural exit")
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         if hasattr(exc, "owned_pid"):
             result["pid"] = exc.owned_pid
             result["residual_possibly_suspended_pid"] = exc.owned_pid
         mark_failure("failure", type(exc).__name__ + ": " + str(exc))
     finally:
+        launched.set()
         # Retain the lane while the original owned command and descendants
         # naturally exit. A watchdog is an incomplete observation, not kill
         # authority. Closing the accounting Job has no termination flag.
@@ -792,12 +849,14 @@ def _local_run(command, checkout, environment, directory, watchdog):
                 except (OSError, ValueError) as exc:
                     mark_failure("failure", "owned_descendant_census_unverified")
                     result["census_error"] = type(exc).__name__
-            for reader in readers:
-                while reader.is_alive():
-                    if time.monotonic_ns() >= deadline:
-                        mark_failure("timed_out", "pipe_eof_watchdog_exceeded; awaiting natural EOF")
-                    reader.join(timeout=0.05)
-            result["drain_complete"] = not state["errors"]
+        for reader in readers:
+            while reader.is_alive():
+                if time.monotonic_ns() >= deadline:
+                    mark_failure("timed_out", "pipe_eof_watchdog_exceeded; awaiting natural EOF")
+                reader.join(timeout=0.05)
+        if process is not None:
+            result["drain_complete"] = state["eof"] == {"stdout", "stderr"}
+            result["raw_storage_errors"] = state["errors"]
             result["lane_held"] = not (result.get("owned_process_reaped")
                                        and result.get("active_owned_descendants") == 0
                                        and result["drain_complete"])
@@ -806,8 +865,14 @@ def _local_run(command, checkout, environment, directory, watchdog):
             else:
                 process.stdout.close()
                 process.stderr.close()
+        else:
+            result["lane_held"] = False  # Reader/launch preflight created no child.
         for stream in files.values():
-            stream.close()
+            try:
+                stream.close()
+            except OSError as exc:
+                state["errors"].append("raw close " + type(exc).__name__)
+                mark_failure("failure", "raw_storage_close_error")
         if "monotonic_completed_ns" not in result:
             result["monotonic_completed_ns"], result["utc_completed"] = time.monotonic_ns(), _local_utc()
         result["capture_finalized_utc"] = _local_utc()
@@ -816,9 +881,9 @@ def _local_run(command, checkout, environment, directory, watchdog):
                                     observed_bytes=state["observed"][name]) for name in ("stdout", "stderr")}
     for stream in result["streams"].values():
         stream["discarded_bytes"] = stream["observed_bytes"] - stream["bytes"]
-        stream["sha256_scope"] = "full_drained_stream" if stream["discarded_bytes"] == 0 and result.get("drain_complete") else "saved_binary_prefix"
+        stream["sha256_scope"] = "full_drained_stream" if stream["discarded_bytes"] == 0 and result.get("drain_complete") and not state["errors"] else "saved_binary_prefix"
         stream["original_full_sha256"] = stream["sha256"] if stream["sha256_scope"] == "full_drained_stream" else None
-    result["discarded_bytes"] = sum(state["observed"].values()) - state["saved"]
+    result["discarded_bytes"] = sum(stream["discarded_bytes"] for stream in result["streams"].values())
     if overflow.is_set() or state["errors"]:
         mark_failure("failure", "log_limit_or_capture_error")
     return result
