@@ -1860,6 +1860,41 @@ impl ErpServer {
                 "unknown topic in codec subscription change",
             ));
         }
+        // Prepare every fallible part before touching the active subscription.
+        // In particular, a refused legacy request must not downgrade an
+        // acknowledged codec stream or discard its admitted baseline/cut.
+        if method == "watch.subscribe" && topics.is_empty() {
+            return Err(RpcError::params("'topics' must not be empty"));
+        }
+        let mut viewstream_schema = None;
+        for t in &topics {
+            match t.as_str() {
+                "tick" | "history" | "events" | "notes" | "proposals" | "activity" => {}
+                "frames" if method == "watch.subscribe" && !c.binary => {
+                    return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
+                }
+                "frames" => {}
+                "viewstream" if method == "watch.subscribe" => {
+                    let schema = if let Some(client) = &client_mode {
+                        client.lock().schema().ok_or_else(|| RpcError::state(
+                            "not_ready", "the client is still joining the room (no schema yet)"
+                        ))?.to_json()
+                    } else {
+                        let hook = self.cfg.limits.view_stream.as_ref().ok_or_else(|| RpcError::params(
+                            "this host has no view stream (the game did not configure one)"
+                        ))?;
+                        if matches!(source, FrameSource::Proposal(_)) {
+                            return Err(RpcError::params("'viewstream' shows the play session or the scene (`source`: sim or view), not a proposal"));
+                        }
+                        hook.lock().schema().to_json()
+                    };
+                    viewstream_schema = Some(schema);
+                }
+                "viewstream" => {}
+                other if method == "watch.subscribe" => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames, viewstream)"))),
+                other => return Err(RpcError::params(format!("unknown topic '{other}'"))),
+            }
+        }
         if topics
             .iter()
             .any(|t| matches!(t.as_str(), "frames" | "events" | "notes"))
@@ -1868,9 +1903,6 @@ impl ErpServer {
         }
         let mut initial: Vec<String> = Vec::new();
         if method == "watch.subscribe" {
-            if topics.is_empty() {
-                return Err(RpcError::params("'topics' must not be empty"));
-            }
             for t in &topics {
                 match t.as_str() {
                     "tick" => {
@@ -1890,36 +1922,50 @@ impl ErpServer {
                         if self.prop_watch.is_none() {
                             self.prop_watch = Some(ProposalWatch::capture(target.doc));
                         }
-                        initial.push(notification("watch.proposals", ProposalWatch::state_params(target.doc)));
+                        initial.push(notification(
+                            "watch.proposals",
+                            ProposalWatch::state_params(target.doc),
+                        ));
                     }
-                    "activity" => c.subs.activity = Some(ActivitySub { seen: last_seq, reads: include_reads }),
+                    "activity" => {
+                        c.subs.activity = Some(ActivitySub {
+                            seen: last_seq,
+                            reads: include_reads,
+                        })
+                    }
                     "frames" => {
-                        if !c.binary {
-                            return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
-                        }
-                        c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
-                    }
-                    "viewstream" if client_mode.is_some() => {
-                        let Some(schema) = client_mode.as_ref().and_then(|h| h.lock().schema()) else {
-                            return Err(RpcError::state("not_ready", "the client is still joining the room (no schema yet)"));
-                        };
-                        // Frames wait for their subscriber's rate cap but are never skipped from the host's side:
-                        // events are sent at once, the newest frame goes out as soon as the cap allows.
-                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
-                        initial.push(notification("watch.viewstream.schema", schema.to_json()));
+                        c.subs.frames = Some(FrameSub {
+                            min_interval: Duration::from_micros(1_000_000 / max_fps),
+                            last_sent: None,
+                            last_key: None,
+                            source,
+                            client_reset_pending: false,
+                            client_event_floor: None,
+                            client_clear_event_floor_after_frame: false,
+                        });
                     }
                     "viewstream" => {
-                        let Some(hook) = self.cfg.limits.view_stream.as_ref() else {
-                            return Err(RpcError::params("this host has no view stream (the game did not configure one)"));
-                        };
-                        if matches!(source, FrameSource::Proposal(_)) {
-                            return Err(RpcError::params("'viewstream' shows the play session or the scene (`source`: sim or view), not a proposal"));
-                        }
-                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
-                        // The schema goes out right after the response, before any frame.
-                        initial.push(notification("watch.viewstream.schema", hook.lock().schema().to_json()));
+                        // Relay frames wait for this subscriber's rate cap;
+                        // events are sent immediately and the latest frame follows.
+                        c.subs.viewstream = Some(FrameSub {
+                            min_interval: Duration::from_micros(1_000_000 / max_fps),
+                            last_sent: None,
+                            last_key: None,
+                            source,
+                            client_reset_pending: false,
+                            client_event_floor: None,
+                            client_clear_event_floor_after_frame: false,
+                        });
+                        // Prepared before commit; do not read mutable relay state again.
+                        initial.push(notification(
+                            "watch.viewstream.schema",
+                            viewstream_schema
+                                .as_ref()
+                                .expect("validated viewstream schema")
+                                .clone(),
+                        ));
                     }
-                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames, viewstream)"))),
+                    _ => unreachable!("validated topic"),
                 }
             }
             if fenced {
@@ -1954,7 +2000,7 @@ impl ErpServer {
                     "activity" => c.subs.activity = None,
                     "frames" => c.subs.frames = None,
                     "viewstream" => c.subs.viewstream = None,
-                    other => return Err(RpcError::params(format!("unknown topic '{other}'"))),
+                    _ => unreachable!("validated topic"),
                 }
             }
         }
@@ -3814,6 +3860,183 @@ mod negotiated_frame_codec_tests {
         let mut cfg = ServerConfig::new(Auth::DevNoAuth);
         cfg.listen = false;
         ErpServer::start(cfg).unwrap()
+    }
+
+    fn subscription_snapshot(server: &ErpServer) -> String {
+        let s = &server.conns[&1].subs;
+        let codec = s.frame_codec.as_ref().expect("codec remains negotiated");
+        let d = s.delivery.as_ref().unwrap();
+        let f = s.frames.as_ref().unwrap();
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}",
+            (
+                codec.limits,
+                codec.encoder.baseline_stamp(),
+                codec.encoder.retained_baseline_bytes(),
+                codec.sequence,
+                codec.reset_generation,
+                codec.last_timeline,
+                codec.last_loss_generation,
+                codec.last_stamp,
+                codec.failed
+            ),
+            (d.frame_meta(), d.identity, d.last_cut),
+            (
+                f.min_interval,
+                f.last_sent,
+                f.last_key,
+                f.source,
+                f.client_reset_pending,
+                f.client_event_floor,
+                f.client_clear_event_floor_after_frame
+            ),
+            (
+                s.tick,
+                s.tick_seen,
+                s.history,
+                s.hist_seen,
+                s.events,
+                s.notes,
+                s.proposals,
+                s.activity.as_ref().map(|a| (a.seen, a.reads)),
+                s.viewstream.is_some()
+            ),
+            (server.next_view_subscription, server.prop_watch.is_some()),
+        )
+    }
+
+    #[test]
+    fn failed_legacy_subscription_preserves_negotiated_stream_and_next_v2_frame() {
+        use orr_edit::PlayController;
+        use orr_reflect::TypeRegistry;
+        use orr_sample::physics_game::{register_reflect, PhysGame};
+        use orr_sim::Simulation;
+
+        let mut server = server();
+        let (mut rx, pending) = insert_connection(&mut server, 1, true);
+        let mut types = TypeRegistry::new();
+        register_reflect(&mut types);
+        let mut doc = EditorDoc::from_yaml(
+            include_str!("../../../scenes/physics_demo.scene.yaml"),
+            types,
+            Simulation::<PhysGame>::build_registry(),
+            7,
+        )
+        .unwrap();
+        let mut play: Option<PlayController<PhysGame>> = None;
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        assert!(target.play.is_some());
+        server
+            .watch_codec(1, Caps::ALL, &params(), Some(&json!(10)))
+            .unwrap();
+        take_codec(&mut rx); // Successful negotiation ACK.
+        let now = Instant::now();
+        server.publish(&mut target, now);
+        let (_, bytes) = take_codec(&mut rx);
+        let (_, first, _) =
+            decode_frame_record_message(bytes.as_ref().unwrap(), DEFAULT_FRAME_CODEC_LIMITS)
+                .unwrap();
+        assert_eq!(first.sequence, 1);
+        assert!(server.conns[&1]
+            .subs
+            .frame_codec
+            .as_ref()
+            .unwrap()
+            .encoder
+            .baseline_stamp()
+            .is_some());
+        assert_eq!(pending.load(Relaxed), 0);
+
+        let before = subscription_snapshot(&server);
+        // Cover both topic orders and requests that would mutate unrelated
+        // topics, proposal tracking, and pacing before the late failure.
+        for topics in [
+            json!(["viewstream", "events"]),
+            json!(["events", "viewstream"]),
+            json!([
+                "tick",
+                "history",
+                "proposals",
+                "activity",
+                "frames",
+                "viewstream"
+            ]),
+        ] {
+            let error = server
+                .watch(
+                    &mut target,
+                    1,
+                    Caps::ALL,
+                    "watch.subscribe",
+                    &json!({"topics": topics, "max_fps": 1}),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.message,
+                "this host has no view stream (the game did not configure one)"
+            );
+            assert_eq!(subscription_snapshot(&server), before);
+            assert!(rx.try_recv().is_err());
+        }
+        for method in ["watch.subscribe", "watch.unsubscribe"] {
+            assert!(server
+                .watch(
+                    &mut target,
+                    1,
+                    Caps::ALL,
+                    method,
+                    &json!({"topics": ["events", "unknown"]})
+                )
+                .is_err());
+            assert_eq!(subscription_snapshot(&server), before);
+        }
+
+        // A genuine new output cut must still pass through the v2 codec.
+        server.request(&mut target, 1, None, "sim.step", &json!({"n": 1}));
+        server.publish(&mut target, now + Duration::from_secs(1));
+        let mut next_frame = None;
+        while let Ok(output) = rx.try_recv() {
+            let Out::Codec(output) = output else {
+                panic!("negotiated stream silently downgraded");
+            };
+            let (_, bytes) = output.test_messages();
+            if let Some(bytes) = bytes {
+                next_frame = Some(
+                    decode_frame_record_message(&bytes, DEFAULT_FRAME_CODEC_LIMITS)
+                        .unwrap()
+                        .1,
+                );
+            }
+        }
+        let next = next_frame.expect("next v2 frame");
+        assert_eq!(next.subscription, first.subscription);
+        assert_eq!(next.sequence, 2);
+        assert_eq!(next.reset_generation, first.reset_generation);
+        assert_eq!(pending.load(Relaxed), 0);
+
+        // An explicit successful legacy change still opts out as before.
+        let result = server
+            .watch(
+                &mut target,
+                1,
+                Caps::ALL,
+                "watch.subscribe",
+                &json!({"topics": ["frames", "events", "notes"], "max_fps": 1}),
+            )
+            .unwrap();
+        let subs = &server.conns[&1].subs;
+        assert!(subs.frame_codec.is_none());
+        assert!(subs.delivery.is_none());
+        assert!(subs.events && subs.notes);
+        assert_eq!(
+            subs.frames.as_ref().unwrap().min_interval,
+            Duration::from_secs(1)
+        );
+        assert_eq!(result["topics"], json!(["events", "notes", "frames"]));
     }
 
     #[test]

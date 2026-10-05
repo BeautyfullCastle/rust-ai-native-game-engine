@@ -15,7 +15,7 @@ struct Tally {
     last: Option<Lifecycle>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Stamp {
     pub subscription: u64,
     pub timeline: u64,

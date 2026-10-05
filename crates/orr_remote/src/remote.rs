@@ -566,6 +566,7 @@ struct CodecResetNotice {
     generation: u64,
     next_sequence: u64,
     scope: FrameScope,
+    delivery: Stamp,
 }
 
 struct PreparedCodecRenewal {
@@ -583,6 +584,7 @@ struct FrameCodecClient {
     scope: Option<FrameScope>,
     last_target: Option<FrameStamp>,
     awaiting_full: bool,
+    source_inactive: bool,
     reset_notice: Option<CodecResetNotice>,
     recovery_request: Option<u64>,
     recovery_deadline: Option<std::time::Instant>,
@@ -609,6 +611,7 @@ impl FrameCodecClient {
             scope: None,
             last_target: None,
             awaiting_full: true,
+            source_inactive: false,
             reset_notice: None,
             recovery_request: None,
             recovery_deadline: Some(deadline),
@@ -646,6 +649,7 @@ impl FrameCodecClient {
         self.scope = None;
         self.last_target = None;
         self.awaiting_full = true;
+        self.source_inactive = false;
         self.reset_notice = None;
         self.recovery_request = None;
         self.recovery_deadline = Some(prepared.deadline);
@@ -696,8 +700,10 @@ impl FrameCodecClient {
             generation,
             next_sequence,
             scope,
+            delivery: delivery_stamp,
         });
         self.awaiting_full = true;
+        self.source_inactive = false;
         self.recovery_deadline = Some(
             std::time::Instant::now()
                 .checked_add(self.reset_timeout)
@@ -733,6 +739,9 @@ impl FrameCodecClient {
             return Err("frame codec stamp disagrees with the host play epoch".into());
         }
 
+        if self.source_inactive && !matches!(record, FrameRecord::Full { .. }) {
+            return Err("inactive source must resume with a Full".into());
+        }
         if self.awaiting_full {
             if !matches!(record, FrameRecord::Full { .. }) {
                 return Err("delta arrived before the required Full reset".into());
@@ -741,6 +750,12 @@ impl FrameCodecClient {
                 if identity.sequence != notice.next_sequence
                     || identity.reset_generation != notice.generation
                     || target.scope != notice.scope
+                    || Stamp::parse(
+                        metadata
+                            .get("delivery")
+                            .ok_or("missing negotiated frame metadata")?,
+                        true,
+                    )? != notice.delivery
                 {
                     return Err("first Full does not match the ordered reset announcement".into());
                 }
@@ -778,6 +793,7 @@ impl FrameCodecClient {
         self.scope = Some(target.scope);
         self.last_target = Some(target);
         self.awaiting_full = false;
+        self.source_inactive = false;
         self.reset_notice = None;
         self.recovery_deadline = None;
     }
@@ -1596,9 +1612,29 @@ fn run<G: Game>(
                         {
                             continue;
                         }
+                        // An inactive cut is authoritative only after the mailbox
+                        // validates it. It cannot cancel an announced Full reset.
+                        if method == "watch.view.inactive"
+                            && frame_codec
+                                .as_ref()
+                                .is_some_and(|codec| codec.reset_notice.is_some())
+                        {
+                            fail(
+                                shared,
+                                &mut ready,
+                                "inactive source interrupted an announced Full reset".into(),
+                            );
+                            return;
+                        }
                         if let Err(e) = on_fenced_notification::<G>(method, &params, shared) {
                             fail(shared, &mut ready, e);
                             return;
+                        }
+                        if method == "watch.view.inactive" {
+                            if let Some(codec) = frame_codec.as_mut() {
+                                codec.source_inactive = true;
+                                codec.recovery_deadline = None;
+                            }
                         }
                     } else {
                         on_notification::<G>(method, &params, events);
@@ -2149,4 +2185,77 @@ fn on_codec_frame<E>(
     metrics.latency_sum_us = metrics.latency_sum_us.saturating_add(latency);
     metrics.last_decode_us = sizes.decode_us;
     Ok(())
+}
+
+#[cfg(test)]
+mod codec_contract_tests {
+    use super::*;
+    use crate::frame_delta::Encoder;
+
+    #[test]
+    fn rejected_reset_cut_preserves_decoder_and_identity_before_publication() {
+        let limits = FrameCodecPolicy::require_default().limits;
+        let registry = orr_ecs::ComponentRegistryBuilder::new().build();
+        let ack = json!({"subscription":"7","cursor":"0","count":"0","sequence":"0","reset_generation":"1",
+            "frame_codec":{"version":1,"max_frame_bytes":limits.max_frame_bytes,
+            "max_baseline_bytes":limits.max_baseline_bytes,"max_message_bytes":limits.max_message_bytes}});
+        let mut codec =
+            FrameCodecClient::new(registry.clone(), limits, Duration::from_secs(1), &ack).unwrap();
+        let mut frame = Frame::new(registry);
+        frame.set_tick(10);
+        let first_scope = FrameScope {
+            stream_generation: 7,
+            play_epoch: 1,
+            timeline_epoch: 1,
+        };
+        let mut encoder = Encoder::new(limits.max_frame_bytes, limits.max_baseline_bytes);
+        let first = encoder.encode(&frame, first_scope).unwrap();
+        let identity = FrameCodecMeta {
+            subscription: 7,
+            sequence: 1,
+            reset_generation: 1,
+        };
+        let (target, _) = codec
+            .validate_record_identity(&json!({"play_epoch":"1"}), identity, &first)
+            .unwrap();
+        codec.decoder.decode(&first).unwrap();
+        codec.commit_record_identity(identity, target);
+        let baseline = codec.decoder.baseline_stamp();
+        let cut = json!({"subscription":"7","timeline":"2","through_cursor":"1","count":"1"});
+        codec.accept_reset_notice(&json!({"subscription":"7","reset_generation":"2","next_sequence":"2",
+            "scope":{"stream_generation":"7","play_epoch":"1","timeline_epoch":"2"},"delivery":cut})).unwrap();
+        frame.set_tick(20);
+        let record = encoder
+            .encode(
+                &frame,
+                FrameScope {
+                    timeline_epoch: 2,
+                    ..first_scope
+                },
+            )
+            .unwrap();
+        let identity = FrameCodecMeta {
+            subscription: 7,
+            sequence: 2,
+            reset_generation: 2,
+        };
+        for key in ["timeline", "through_cursor", "count"] {
+            let mut forged = cut.clone();
+            forged[key] = json!("3");
+            assert!(codec
+                .validate_record_identity(
+                    &json!({"play_epoch":"1","delivery":forged}),
+                    identity,
+                    &record
+                )
+                .is_err());
+            assert_eq!(codec.decoder.baseline_stamp(), baseline);
+            assert_eq!(codec.sequence, 1);
+            assert_eq!(codec.last_target, Some(target));
+            assert!(codec.reset_notice.is_some());
+        }
+        assert!(codec
+            .validate_record_identity(&json!({"play_epoch":"1","delivery":cut}), identity, &record)
+            .is_ok());
+    }
 }
