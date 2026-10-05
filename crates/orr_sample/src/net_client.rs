@@ -39,6 +39,10 @@ pub struct NetArgs {
     pub kind: TransportKind,
     pub fingerprint: Option<[u8; 32]>,
     pub insecure_dev: bool,
+    /// Explicit PEM CA trust (otherwise WSS uses the public root set).
+    pub ca_cert: Option<PathBuf>,
+    /// Certificate name override; WSS normally checks its URL host.
+    pub server_name: Option<String>,
     pub room: u64,
     /// Override the sample's frame-format-bound game identity (`--build-id`).
     /// `Some(0)` intentionally preserves the engine's untracked development mode.
@@ -64,6 +68,8 @@ impl Default for NetArgs {
             kind: TransportKind::Quic,
             fingerprint: None,
             insecure_dev: false,
+            ca_cert: None,
+            server_name: None,
             room: 1,
             build_id: None,
             slot: None,
@@ -80,10 +86,12 @@ impl Default for NetArgs {
 
 /// Text of the network options, for the `--help` header of the programs.
 pub const NET_HELP: &str = "\
-  --connect HOST:PORT          play on a relay server instead of the local loopback
-  --transport quic|ws          (default quic)
+  --connect HOST:PORT|WSS_URL  play on a relay server instead of the local loopback
+  --transport quic|ws|wss      (default quic)
   --trust-fingerprint HEX      QUIC: pin the server certificate (the server prints it)
   --insecure-dev               QUIC: accept any certificate (development only)
+  --ca-cert PATH               trust certificates in this PEM CA file (WSS/QUIC)
+  --server-name NAME           override certificate DNS/IP name (WSS defaults to URL host)
   --room N                     room id (default 1)
   --build-id N                 override the game's frame-format-bound build id (exact decimal u64)
   --slot N                     ask for this slot (default: any free slot)
@@ -111,6 +119,8 @@ impl NetArgs {
             "--transport" => self.kind = next(arg)?.parse()?,
             "--trust-fingerprint" => self.fingerprint = Some(parse_fingerprint(&next(arg)?)?),
             "--insecure-dev" => self.insecure_dev = true,
+            "--ca-cert" => self.ca_cert = Some(PathBuf::from(next(arg)?)),
+            "--server-name" => self.server_name = Some(next(arg)?),
             "--room" => self.room = num(arg, next(arg)?)?,
             "--build-id" => self.build_id = Some(num(arg, next(arg)?)?),
             "--slot" => self.slot = Some(num(arg, next(arg)?)?),
@@ -129,15 +139,26 @@ impl NetArgs {
 
     fn connect_options(&self) -> Result<ConnectOptions, String> {
         let addr = self.connect.clone().ok_or("--connect is not set")?;
-        let trust = match (self.fingerprint, self.insecure_dev, self.kind) {
-            (Some(fp), _, _) => Trust::Fingerprint(fp),
-            (None, true, _) => Trust::InsecureDev,
-            (None, false, TransportKind::Ws) => Trust::InsecureDev, // unused by WebSocket
-            (None, false, TransportKind::Quic) => {
-                return Err("QUIC needs --trust-fingerprint HEX (printed by the server) or --insecure-dev".into())
+        if self.ca_cert.is_some() && (self.fingerprint.is_some() || self.insecure_dev) {
+            return Err("--ca-cert cannot be combined with --trust-fingerprint or --insecure-dev".into());
+        }
+        let trust = if let Some(path) = &self.ca_cert {
+            Trust::PemFile(path.clone())
+        } else {
+            match (self.fingerprint, self.insecure_dev, self.kind) {
+                (Some(fp), _, _) => Trust::Fingerprint(fp),
+                (None, true, _) => Trust::InsecureDev,
+                (None, false, TransportKind::Ws) => Trust::InsecureDev, // unused by WebSocket
+                (None, false, TransportKind::Wss) => Trust::WebPki,
+                (None, false, TransportKind::Quic) => {
+                    return Err("QUIC needs --trust-fingerprint HEX (printed by the server), --ca-cert PATH or --insecure-dev".into())
+                }
             }
         };
         let mut o = ConnectOptions::new(addr, self.kind, trust);
+        if let Some(name) = &self.server_name {
+            o.server_name = name.clone();
+        }
         let mut sim = self.sim;
         if sim.is_active() {
             sim.seed = self.sim_seed.unwrap_or_else(fresh_seed);
@@ -372,5 +393,33 @@ pub fn log_view_resync(reset: &orr_bridge::ViewResync) {
             "  coalesced {} lifecycle notifications; latest: {:?}",
             note.count, note.last
         );
+    }
+}
+
+#[cfg(test)]
+mod wss_options_tests {
+    use super::*;
+
+    #[test]
+    fn wss_defaults_to_webpki_and_url_name() {
+        let args = NetArgs { connect: Some("wss://relay.example/game?room=1".into()), kind: TransportKind::Wss, ..NetArgs::default() };
+        let options = args.connect_options().unwrap();
+        assert!(matches!(options.trust, Trust::WebPki));
+        assert!(options.server_name.is_empty());
+        assert_eq!(options.addr, "wss://relay.example/game?room=1");
+    }
+
+    #[test]
+    fn cli_parses_wss_ca_and_name_without_changing_quic_default() {
+        let mut args = NetArgs::default();
+        for (key, value) in [("--transport", "wss"), ("--connect", "localhost:443"), ("--ca-cert", "ca.pem"), ("--server-name", "relay.example")] {
+            assert!(args.parse_option(key, &mut |_| Ok(value.into())).unwrap());
+        }
+        let options = args.connect_options().unwrap();
+        assert!(matches!(options.trust, Trust::PemFile(ref path) if path == &PathBuf::from("ca.pem")));
+        assert_eq!(options.server_name, "relay.example");
+        args.insecure_dev = true;
+        assert!(args.connect_options().is_err());
+        assert_eq!(ConnectOptions::new("localhost:443", TransportKind::Quic, Trust::WebPki).server_name, "localhost");
     }
 }
