@@ -81,6 +81,47 @@ impl Drop for Proxy {
     }
 }
 
+/// A failed TLS handshake may never connect to the backend. Do not leave a peer
+/// blocked in accept (or subsequent I/O) while the test waits in join.
+fn accept_peer(listener: &TcpListener, timeout: Duration) -> std::io::Result<TcpStream> {
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "test backend was not reached"));
+        }
+        match listener.accept() {
+            Ok((tcp, _)) => {
+                tcp.set_nonblocking(false)?;
+                tcp.set_read_timeout(Some(Duration::from_secs(2)))?;
+                tcp.set_write_timeout(Some(Duration::from_secs(2)))?;
+                return Ok(tcp);
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[test]
+fn backend_teardown_is_bounded_when_tls_never_reaches_http() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let backend_url = format!("ws://{}", listener.local_addr().unwrap());
+    let (done, result) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        done.send(accept_peer(&listener, Duration::from_millis(100)).map(|_| ())).unwrap();
+    });
+    let proxy = Proxy::new(&backend_url, "127.0.0.1");
+    // Deliberately reject TLS before the proxy can open its backend connection.
+    let error = SocketSource::connect(&proxy.url, None, 30, Session::Leave).err().unwrap();
+    assert!(error.contains("handshake"), "{error}");
+    let error = result.recv_timeout(Duration::from_secs(1)).expect("backend teardown must finish without a connection").unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    peer.join().unwrap();
+}
+
 #[test]
 fn wss_authenticated_headless_checksum_equals_existing_rust_bridge() {
     use orr_remote::{Auth, Caps, ServerConfig, TokenEntry};
@@ -139,7 +180,7 @@ fn stalled_tls_handshake_has_a_deadline_and_redacted_error() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("wss://{}/secret-path?token=secret-query", listener.local_addr().unwrap());
     let peer = std::thread::spawn(move || {
-        let (_tcp, _) = listener.accept().unwrap();
+        let _tcp = accept_peer(&listener, Duration::from_secs(2)).expect("test peer must be reached");
         std::thread::sleep(Duration::from_millis(300));
     });
     let start = Instant::now();
@@ -165,7 +206,7 @@ fn wss_query_auth_is_redacted_read_deadline_and_close_are_preserved() {
     let backend_url = format!("ws://{}", listener.local_addr().unwrap());
     let (close, closed) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        let (tcp, _) = listener.accept().unwrap();
+        let tcp = accept_peer(&listener, Duration::from_secs(2)).expect("test peer must be reached");
         let mut ws = tungstenite::accept_hdr(tcp, check_query_token).unwrap();
         let request: serde_json::Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(request["method"], "watch.subscribe");
@@ -196,7 +237,9 @@ fn tls_succeeds_but_stalled_http_upgrade_still_obeys_shared_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let backend_url = format!("ws://{}", listener.local_addr().unwrap());
     let peer = std::thread::spawn(move || {
-        let (_tcp, _) = listener.accept().unwrap();
+        let mut tcp = accept_peer(&listener, Duration::from_secs(2)).expect("HTTP backend must be reached after TLS");
+        let mut request = [0u8; 4096];
+        assert!(tcp.read(&mut request).unwrap() > 0, "HTTP upgrade request must reach the backend");
         std::thread::sleep(Duration::from_millis(300));
     });
     let proxy = Proxy::new(&backend_url, "127.0.0.1");
@@ -238,7 +281,7 @@ fn peer_reflected_secrets_are_not_in_http_or_auth_errors() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let backend_url = format!("ws://{}", listener.local_addr().unwrap());
         let peer = std::thread::spawn(move || {
-            let (mut tcp, _) = listener.accept().unwrap();
+            let mut tcp = accept_peer(&listener, Duration::from_secs(2)).expect("test peer must be reached");
             if http_error {
                 let mut request = [0u8; 4096];
                 assert!(tcp.read(&mut request).unwrap() > 0);
@@ -264,7 +307,7 @@ fn slow_drip_http_upgrade_cannot_extend_the_tls_connection_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let backend_url = format!("ws://{}", listener.local_addr().unwrap());
     let peer = std::thread::spawn(move || {
-        let (mut tcp, _) = listener.accept().unwrap();
+        let mut tcp = accept_peer(&listener, Duration::from_secs(2)).expect("test peer must be reached");
         let mut request = [0u8; 4096];
         assert!(tcp.read(&mut request).unwrap() > 0);
         for byte in b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" {
