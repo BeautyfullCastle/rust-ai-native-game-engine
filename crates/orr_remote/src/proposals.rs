@@ -454,23 +454,24 @@ pub(crate) fn reject<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, 
 
 // ---- verification ----
 
-fn build_inputs<G: Game>(lim: &HostLimits, last_play: Option<&orr_edit::StoppedPlay>, spec: &J, top_ticks: Option<u64>) -> Result<(VerifyInputs<'static, G>, J), RpcError> {
+fn verify_limit(n: u64, limit: u32) -> RpcError {
+    RpcError::new(LIMIT_EXCEEDED, "verify_limit", format!("{n} ticks requested; this server verifies at most {limit} ticks per call")).with("max", json!(limit))
+}
+
+fn build_inputs<G: Game>(lim: &HostLimits, last_play: Option<&orr_edit::StoppedPlay>, spec: &J) -> Result<(VerifyInputs<'static, G>, J), RpcError> {
     let obj = spec
         .as_object()
         .ok_or_else(|| RpcError::params("'inputs' must be an object like {\"kind\":\"bot\",\"ticks\":300} (kinds: last_play, replay, bot, idle)"))?;
     let q = P(obj);
     let kind = q.str("kind")?;
     let limit = u64::from(lim.max_verify_ticks);
-    let too_long = |n: u64| {
-        RpcError::new(LIMIT_EXCEEDED, "verify_limit", format!("{n} ticks requested; this server verifies at most {limit} ticks per call")).with("max", json!(limit))
-    };
     let scripted_ticks = || -> Result<u32, RpcError> {
         let n = q.req_u64("ticks")?;
         if n == 0 {
             return Err(RpcError::params("'inputs.ticks' must be at least 1"));
         }
         if n > limit {
-            return Err(too_long(n));
+            return Err(verify_limit(n, lim.max_verify_ticks));
         }
         Ok(n as u32)
     };
@@ -493,11 +494,6 @@ fn build_inputs<G: Game>(lim: &HostLimits, last_play: Option<&orr_edit::StoppedP
                 &decoded
             };
             let inputs = VerifyInputs::<G>::from_replay(bytes)?;
-            if let Some(n) = top_ticks {
-                if n > limit {
-                    return Err(too_long(n));
-                }
-            }
             Ok((inputs, json!({"kind": kind, "replay_bytes": bytes.len()})))
         }
         "idle" => {
@@ -585,7 +581,6 @@ pub(crate) struct PreparedVerify {
     limits: HostLimits,
     input_spec: J,
     last_play: Option<orr_edit::StoppedPlay>,
-    top_ticks: Option<u64>,
     checks: Vec<Check>,
     series: bool,
     opts: VerifyOptions,
@@ -615,7 +610,7 @@ pub(crate) fn prepare_verify(
         doc.proposal_info(id)?;
     }
     let top_ticks = p.opt_u64("ticks")?;
-    let input_spec = p.req_raw("inputs")?.clone();
+    let input_spec = p.req_raw("inputs")?;
     let checks = match p.raw("checks") {
         None | Some(J::Null) => Vec::new(),
         Some(J::Array(a)) => {
@@ -632,6 +627,16 @@ pub(crate) fn prepare_verify(
     if let Some(n) = p.opt_u64("sample_every")? {
         opts.sample_every = u32::try_from(n).map_err(|_| RpcError::params("'sample_every' is too large"))?;
     }
+    // Refuse recorded tick requests before admission copies or replay decoding.
+    // Scripted inputs keep their separate inputs.ticks limit and top-level clamp.
+    if matches!(input_spec.get("kind").and_then(J::as_str), Some("last_play" | "replay")) {
+        if let Some(n) = top_ticks {
+            if n > u64::from(lim.max_verify_ticks) {
+                return Err(verify_limit(n, lim.max_verify_ticks));
+            }
+        }
+    }
+    let input_spec = input_spec.clone();
     let (base, candidate, state) = match id {
         Some(id) => {
             let state = doc.proposal_state(id)?;
@@ -654,7 +659,7 @@ pub(crate) fn prepare_verify(
         game: lim.game.clone(),
         ..HostLimits::default()
     };
-    Ok(PreparedVerify { base, candidate, state, types: doc.types().clone(), limits, input_spec, last_play, top_ticks, checks, series, opts })
+    Ok(PreparedVerify { base, candidate, state, types: doc.types().clone(), limits, input_spec, last_play, checks, series, opts })
 }
 
 pub(crate) fn verify_cancelled() -> RpcError {
@@ -667,7 +672,7 @@ impl PreparedVerify {
         cancelled()?;
         // Replay base64/decompression/parsing is deliberately off the host thread.
         // The execution tick cap is not a bound on decoded recording memory.
-        let (inputs, described) = build_inputs::<G>(&self.limits, self.last_play.as_ref(), &self.input_spec, self.top_ticks)?;
+        let (inputs, described) = build_inputs::<G>(&self.limits, self.last_play.as_ref(), &self.input_spec)?;
         cancelled()?;
         let metrics = Combined { reflect: ReflectMetrics::new(&self.types), game: self.limits.game.metrics.as_deref() };
         let report = orr_edit::verify_frames_cancellable::<G>(&self.base, &self.candidate, &inputs, &metrics, &self.opts, cancel)?;
@@ -694,6 +699,155 @@ pub(crate) fn verify<G: Game>(t: &ErpTarget<'_, G>, lim: &HostLimits, ctx: &Call
     let result = prepared.run::<G>(&AtomicBool::new(false))?;
     fx.verify = Some(result.detail);
     Ok(result.value)
+}
+
+#[cfg(test)]
+mod recorded_admission_tests {
+    use super::*;
+    use crate::codec::b64_encode;
+    use orr_edit::{PlayController, StoppedPlay};
+    use orr_sample::physics_game::{register_reflect, PhysGame, PhysInput};
+    use orr_session::ControlOp;
+
+    fn fixture() -> (EditorDoc, ProposalId, HostLimits, StoppedPlay) {
+        let mut types = TypeRegistry::new();
+        register_reflect(&mut types);
+        let mut doc = EditorDoc::for_game::<PhysGame>(types, 7).unwrap();
+        let mut play = PlayController::<PhysGame>::start_play(&doc, doc.play_config(2, 60)).unwrap();
+        play.control(ControlOp::Step(3));
+        let stopped = play.stop_play();
+        assert_eq!(stopped.tick, 3);
+        VerifyInputs::<PhysGame>::from_stopped(&stopped).unwrap();
+        let id = doc.propose("one entity", Origin::User).unwrap();
+        doc.proposal_apply(id, Op::SpawnEntity { guid: None, name: Some("candidate".into()), components: Vec::new() }).unwrap();
+        let limits = HostLimits {
+            max_verify_ticks: 2,
+            game: GameHooks::new("PhysGame").with_bot::<PhysInput>(|_, _, _| bytemuck::Zeroable::zeroed()),
+            ..HostLimits::default()
+        };
+        (doc, id, limits, stopped)
+    }
+
+    fn recorded_spec(kind: &str, stopped: &StoppedPlay) -> J {
+        if kind == "replay" {
+            json!({"kind": kind, "base64": b64_encode(&stopped.replay)})
+        } else {
+            json!({"kind": kind})
+        }
+    }
+
+    fn document_state(doc: &EditorDoc, id: ProposalId) -> J {
+        let state = doc.proposal_state(id).unwrap();
+        json!({
+            "scene": doc.to_yaml(), "checksum": checksum_text(doc.checksum()),
+            "document_revision": state.document_revision, "proposal_revision": state.proposal_revision,
+            "proposal": info_json(&doc.proposal_info(id).unwrap()),
+            "diff": doc.proposal_diff(id).unwrap().text, "history_len": doc.history().len(),
+        })
+    }
+
+    fn assert_rejected_at_preparation(kind: &str, with_proposal: bool) {
+        let (doc, id, limits, stopped) = fixture();
+        let before = document_state(&doc, id);
+        let params = json!({"id": id.to_string(), "inputs": recorded_spec(kind, &stopped), "ticks": 3});
+        let error = prepare_verify(&doc, &limits, Some(&stopped), &params, with_proposal)
+            .err().expect("over-limit recording must be refused during preparation");
+        assert_eq!(error.code, LIMIT_EXCEEDED);
+        assert_eq!(error.kind(), Some("verify_limit"));
+        assert_eq!(error.data, Some(json!({"kind": "verify_limit", "max": 2})));
+        assert_eq!(error.message, "3 ticks requested; this server verifies at most 2 ticks per call");
+        assert_eq!(document_state(&doc, id), before);
+    }
+
+    #[test]
+    fn replay_self_rejected_at_preparation() {
+        assert_rejected_at_preparation("replay", false);
+    }
+
+    #[test]
+    fn replay_proposal_rejected_at_preparation() {
+        assert_rejected_at_preparation("replay", true);
+    }
+
+    #[test]
+    fn last_play_self_rejected_at_preparation() {
+        assert_rejected_at_preparation("last_play", false);
+    }
+
+    #[test]
+    fn last_play_proposal_rejected_at_preparation() {
+        assert_rejected_at_preparation("last_play", true);
+    }
+
+    #[test]
+    fn accepted_recordings_preserve_reports_caps_and_state() {
+        let (doc, id, limits, stopped) = fixture();
+        let before = document_state(&doc, id);
+        let state = doc.proposal_state(id).unwrap();
+        let inputs = VerifyInputs::<PhysGame>::from_stopped(&stopped).unwrap();
+        let metrics = Combined::new(&doc, &limits);
+        for with_proposal in [false, true] {
+            for ticks in [None, Some(0u64), Some(1), Some(2)] {
+                let cap = ticks.unwrap_or(2).clamp(1, 2) as u32;
+                let opts = VerifyOptions {
+                    max_ticks: Some(cap), sample_every: 1, tick_rate: limits.tick_rate,
+                    build_id: limits.build_id, ..VerifyOptions::default()
+                };
+                let expected = if with_proposal {
+                    doc.verify_proposal::<PhysGame>(id, &inputs, &metrics, &opts).unwrap()
+                } else {
+                    doc.verify_self::<PhysGame>(&inputs, &metrics, &opts).unwrap()
+                };
+                for kind in ["replay", "last_play"] {
+                    let mut params = json!({"id": id.to_string(), "inputs": recorded_spec(kind, &stopped),
+                        "sample_every": 1, "series": true, "checks": ["recording_matches"]});
+                    if let Some(ticks) = ticks {
+                        params["ticks"] = json!(ticks);
+                    }
+                    let result = prepare_verify(&doc, &limits, Some(&stopped), &params, with_proposal)
+                        .unwrap().run::<PhysGame>(&AtomicBool::new(false)).unwrap();
+                    assert_eq!(result.detail.report, expected);
+                    assert_eq!(result.value["ticks"], cap);
+                    assert_eq!(result.value["recording"], json!({"checked": cap + 1, "mismatches": 0, "first_mismatch": null}));
+                    assert_eq!(result.value["identical"], !with_proposal);
+                    assert_eq!(result.value["passed"], true);
+                    let mut expected_value = report_json(&expected, result.detail.outcome.as_ref(), true);
+                    expected_value["inputs"] = json!({"kind": kind, "replay_bytes": stopped.replay.len()});
+                    if with_proposal {
+                        expected_value["proposal"] = json!(id.to_string());
+                        expected_value["verified_state"] = json!({
+                            "document_id": format!("{:032x}", state.document_id), "id": id.to_string(),
+                            "document_revision": state.document_revision, "proposal_revision": state.proposal_revision,
+                        });
+                    }
+                    assert_eq!(result.value, expected_value);
+                    assert_eq!(document_state(&doc, id), before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scripted_top_level_ticks_still_clamp() {
+        let (doc, id, limits, _) = fixture();
+        let before = document_state(&doc, id);
+        for with_proposal in [false, true] {
+            for kind in ["bot", "idle"] {
+                let params = json!({"id": id.to_string(), "inputs": {"kind": kind, "ticks": 2}});
+                let expected = prepare_verify(&doc, &limits, None, &params, with_proposal)
+                    .unwrap().run::<PhysGame>(&AtomicBool::new(false)).unwrap().value;
+                for ticks in [3, u64::MAX] {
+                    let mut params = params.clone();
+                    params["ticks"] = json!(ticks);
+                    let result = prepare_verify(&doc, &limits, None, &params, with_proposal)
+                        .unwrap().run::<PhysGame>(&AtomicBool::new(false)).unwrap();
+                    assert_eq!(result.value["ticks"], 2);
+                    assert_eq!(result.value, expected);
+                }
+            }
+        }
+        assert_eq!(document_state(&doc, id), before);
+    }
 }
 
 // ---- watch.proposals ----
