@@ -944,9 +944,12 @@ impl Editor {
                 self.sim.last_tick = u("last_tick");
                 self.sim.epoch = epoch;
                 self.sim.playing = params.get("playing").and_then(J::as_bool).unwrap_or(false);
+                // A paused tick can change the checksum within the same
+                // Play epoch. Refresh after ingesting this batch: an older
+                // in-flight State reply may follow these notifications.
+                if changed || !self.sim.playing { self.dirty.state = true; }
                 if changed {
                     self.mark_changed();
-                    self.dirty.state = true;
                 } else if mode == Mode::Play {
                     self.dirty.inspect = true;
                 }
@@ -2410,3 +2413,49 @@ mod gesture_tests;
 mod input_tests;
 #[cfg(test)]
 mod multi_selection_tests;
+
+#[cfg(test)]
+mod tick_state_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn same_epoch_paused_tick_refreshes_state_after_an_older_reply() {
+        let mut editor = Editor::open(&default_scene_path()).unwrap();
+        editor.sync();
+        assert!(editor.start_play());
+        editor.sync();
+        let old = editor.call("sim.state", J::Null).unwrap();
+        assert_eq!(old["mode"], "play");
+        assert_eq!(old["playing"], false);
+        let current = editor.call("sim.step", json!({"n":20})).unwrap();
+        editor.sync();
+        let wanted = parse_capture_state(&current).unwrap();
+        assert_eq!(wanted.epoch, old["epoch"].as_u64().unwrap());
+        assert!(editor.capture_snapshot_matches(wanted));
+        assert_ne!(parse_capture_state(&old).unwrap().checksum, wanted.checksum);
+        editor.apply_state(&old);
+        assert!(!editor.dirty.state);
+        // Reproduce ingest order without a scheduler race: a same-epoch
+        // paused tick arrives, then an older in-flight State reply is drained.
+        editor.on_notification("watch.tick", &json!({
+            "mode":"play", "playing":false, "tick":wanted.tick,
+            "last_tick":wanted.tick, "epoch":wanted.epoch,
+            "checksum":current["checksum"]
+        }));
+        editor.on_answer(Pend::State(editor.state_generation), Ok(old));
+        assert_ne!(editor.capture_view_state(), wanted);
+        assert!(editor.dirty.state, "the old response must not strand capture readiness at an earlier checksum");
+        editor.send_refreshes();
+        assert!(editor.inflight.state);
+        assert!(editor.pending.values().any(|pending| matches!(pending.kind, Pend::State(_))));
+        // Ordinary UI pumping must recover; sync() would hide the regression
+        // by unconditionally making another blocking sim.state call.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.capture_view_state() != wanted || editor.screenshot_waiting_for().is_some() {
+            assert!(Instant::now() < deadline, "state refresh did not settle");
+            editor.pump();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(editor.capture_snapshot_matches(wanted));
+    }
+}

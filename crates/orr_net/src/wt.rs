@@ -147,13 +147,13 @@ async fn keep_session(session: &Session) -> DisconnectReason {
     }
 }
 
-enum FrameError {
+pub(crate) enum FrameError {
     Eof,
     Violation(String),
     Io(String),
 }
 
-async fn read_frame(recv: &mut Recv, max: usize) -> Result<(u8, Vec<u8>), FrameError> {
+pub(crate) async fn read_frame(recv: &mut (impl tokio::io::AsyncRead + Unpin), max: usize) -> Result<(u8, Vec<u8>), FrameError> {
     let mut head = [0u8; 4];
     let mut got = 0;
     while got < 4 {
@@ -211,7 +211,7 @@ async fn reader(shared: &Shared, cs: &ConnShared, conn: &quinn::Connection, mut 
     }
 }
 
-fn count_in(st: &StatsCell, channel: Channel, len: usize) {
+pub(crate) fn count_in(st: &StatsCell, channel: Channel, len: usize) {
     StatsCell::add(&st.messages_received, 1);
     StatsCell::add(&st.payload_received, len as u64);
     if channel == Channel::Unreliable {
@@ -243,7 +243,7 @@ async fn datagrams(
     }
 }
 
-async fn write_frame(send: &mut Send_, tag: u8, payload: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn write_frame(send: &mut (impl tokio::io::AsyncWrite + Unpin), tag: u8, payload: &[u8]) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(payload.len() + 5);
     buf.extend_from_slice(&(payload.len() as u32 + 1).to_le_bytes());
     buf.push(tag);
@@ -267,7 +267,7 @@ async fn writer(
                 Some(Out::Stream { tag, data }) => {
                     let n = data.len();
                     let res = write_frame(&mut send, tag, &data).await;
-                    st.queued.fetch_sub(n, Relaxed);
+                    st.queued.fetch_sub(n.max(1), Relaxed);
                     if let Err(e) = res {
                         return io_reason(conn, e);
                     }
@@ -279,6 +279,7 @@ async fn writer(
                 }
                 Some(Out::Datagram(b)) => {
                     let n = b.len() as u64;
+                    st.queued.fetch_sub(b.len().max(1), Relaxed);
                     match dgrams.send_datagram(b) {
                         Ok(()) => {
                             StatsCell::add(&st.messages_sent, 1);

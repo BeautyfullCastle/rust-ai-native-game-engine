@@ -39,9 +39,9 @@ pub struct NetArgs {
     pub kind: TransportKind,
     pub fingerprint: Option<[u8; 32]>,
     pub insecure_dev: bool,
-    /// Explicit PEM CA trust (otherwise WSS uses the public root set).
+    /// Explicit PEM CA trust (otherwise WSS/WT use the public root set).
     pub ca_cert: Option<PathBuf>,
-    /// Certificate name override; WSS normally checks its URL host.
+    /// Certificate name override; WSS normally checks its URL host; WT rejects overrides.
     pub server_name: Option<String>,
     pub room: u64,
     /// Override the sample's frame-format-bound game identity (`--build-id`).
@@ -86,12 +86,12 @@ impl Default for NetArgs {
 
 /// Text of the network options, for the `--help` header of the programs.
 pub const NET_HELP: &str = "\
-  --connect HOST:PORT|WSS_URL  play on a relay server instead of the local loopback
-  --transport quic|ws|wss      (default quic)
+  --connect HOST:PORT|URL      play (wss:// for WSS, https:// for WT) on a relay server instead of the local loopback
+  --transport quic|ws|wss|wt   (default quic)
   --trust-fingerprint HEX      QUIC: pin the server certificate (the server prints it)
   --insecure-dev               QUIC: accept any certificate (development only)
-  --ca-cert PATH               trust certificates in this PEM CA file (WSS/QUIC)
-  --server-name NAME           override certificate DNS/IP name (WSS defaults to URL host)
+  --ca-cert PATH               trust certificates in this PEM CA file (WSS/WT/QUIC)
+  --server-name NAME           override certificate DNS/IP name (WSS defaults to URL host; WT rejects overrides)
   --room N                     room id (default 1)
   --build-id N                 override the game's frame-format-bound build id (exact decimal u64)
   --slot N                     ask for this slot (default: any free slot)
@@ -149,7 +149,7 @@ impl NetArgs {
                 (Some(fp), _, _) => Trust::Fingerprint(fp),
                 (None, true, _) => Trust::InsecureDev,
                 (None, false, TransportKind::Ws) => Trust::InsecureDev, // unused by WebSocket
-                (None, false, TransportKind::Wss) => Trust::WebPki,
+                (None, false, TransportKind::Wss | TransportKind::Wt) => Trust::WebPki,
                 (None, false, TransportKind::Quic) => {
                     return Err("QUIC needs --trust-fingerprint HEX (printed by the server), --ca-cert PATH or --insecure-dev".into())
                 }
@@ -399,6 +399,18 @@ pub fn log_view_resync(reset: &orr_bridge::ViewResync) {
 #[cfg(test)]
 mod wss_options_tests {
     use super::*;
+
+    #[test]
+    fn wt_cli_defaults_to_webpki_and_url_host() {
+        let mut args = NetArgs::default();
+        for (key, value) in [("--transport", "wt"), ("--connect", "https://relay.example/game?room=1")] {
+            assert!(args.parse_option(key, &mut |_| Ok(value.into())).unwrap());
+        }
+        let options = args.connect_options().unwrap();
+        assert_eq!(options.kind, TransportKind::Wt);
+        assert!(matches!(options.trust, Trust::WebPki));
+        assert!(options.server_name.is_empty());
+    }
 
     #[test]
     fn wss_defaults_to_webpki_and_url_name() {

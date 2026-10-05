@@ -33,10 +33,10 @@ h3-datagram = "0.0.2"
 http = "1"
 time = { version = "0.3", default-features = false, features = ["std"] }
 
+wtransport = { version = "=0.7.2", default-features = false, features = ["ring", "quinn"] }
+
 [dev-dependencies]
 orr_net = { path = ".", features = ["conditioner"] }
-wtransport = "0.7"
-
 
 [[example]]
 name = "bench"
