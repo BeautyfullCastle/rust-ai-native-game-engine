@@ -23,6 +23,7 @@ mod connect;
 pub mod driver;
 mod link;
 pub mod p2p_input;
+pub mod p2p_mesh_input;
 mod server_ep;
 
 pub use connect::{
