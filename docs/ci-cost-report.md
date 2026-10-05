@@ -161,3 +161,95 @@ This parser is stage 1 only. It does not supply real paired Windows/Linux
 measurements or establish a CI speedup. Keep #9 open until its full acceptance
 conditions, including platform-specific paired results or explicit access
 limits, are handled.
+
+## Opt-in local collection
+
+N9-1 adds a separate local collector to the same tool. The offline v1 parser
+above retains its input and comparison rules. A local capture has a local ID
+and actual process provenance; it does not invent GitHub run, job, or artifact
+IDs to satisfy the CI parser. Its local report omits ratios. Collection is
+opt-in and requires a frozen plan and the coordinated resource lane; validating
+a plan does not launch Cargo.
+
+The selected workload is an entire existing Cargo command, including its
+normal unit, integration, and documentation tests. For the current development
+source, the recipes in `.github/workflows/determinism.yml` are:
+
+```sh
+cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu
+cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings
+```
+
+These are selected native and sample commands, not the entire CI job. The
+collector does not remove tests, change profiles, loosen assertions or test
+timeouts, disable required platform/GPU/browser gates, or dispatch CI. It
+records command wall time with a monotonic clock and keeps the original binary
+stdout and stderr plus their sizes and SHA256 hashes. UTC start/end timestamps
+and monotonic duration are separate evidence. Build and test execution time
+remain `null`: `cargo test` schedules builds and suites together, and subtracting
+Cargo HTML or a `Finished` duration from total would not establish an independent
+test execution interval. Keep any Cargo timing artifacts as separate build
+evidence; command wall time alone does not measure compiler CPU time or CI cost.
+
+### Freeze the plan before collecting
+
+1. Pin exact baseline/current commit and tree IDs, clean checkouts, the native
+   or sample recipe, and an equivalent workload. Compare the relevant Cargo
+   manifests, lockfile, source and fixtures as well as the test inventory. A
+   changed suite is a workload difference, even if the command text is equal.
+2. Record installed real Cargo/Rust executables and versions, OS/architecture,
+   hardware, all supported build environment values, and cache preparation.
+   Each capture uses its own target directory. A fresh target does not establish
+   a cold registry, filesystem, or operating-system cache. Unknown cache inputs
+   remain unknown; inherited dependency caches are not an optimization result.
+3. Bind the plan to actual lane and N6-1 completion receipt files by SHA256.
+   Read current #28 reservations and live processes immediately before taking
+   the lane. N6-1 runs first. A previously idle machine is not a future guarantee,
+   and a coordinated local lane is not complete isolation from desktop services.
+4. Declare one attempt per selected capture, at most six captures total, a
+   finite watchdog and output bound, and the owned process-tree cleanup method.
+   No automatic retries or cleanup of other owners' processes is permitted.
+   Crossing the watchdog or log limit marks failure and stops later captures;
+   it never automatically terminates Cargo or its descendants. Keep the lane
+   held until the owned process naturally exits, streams reach EOF, and the
+   owned Job/process-group census is empty. A timeout is not completed cleanup.
+
+Use the `orr.ci-cost-local-plan/1` schema documented by
+`validate_local_plan` in the tool. `--validate-plan PLAN.json` validates its
+structure without launching a process. `--collect PLAN.json --output NEW_DIR`
+performs live preflight before executing the declared commands. The output
+directory and capture markers are never reused. The first failure, timeout,
+output limit, source change, or missing condition stops further captures and
+preserves the outcome and raw evidence. Do not restart a completed collection
+to obtain a more favorable observation.
+
+### N9-1 revision and access boundaries
+
+The starting development revision is
+`ef61e959306e71b186b9355f237b458392be073f`. The historical optimization pair
+`d54f26ddfdb37b6d5b6303fa9824611706cc6b10` to
+`7047f412c9e17dceda58235b6a4df9fc4077891e` also adds guard tests. It is not an
+equivalent full-suite pair merely because it includes empty-harness removal.
+An old source revision versus the current engine also includes many added
+features and tests. Neither difference establishes an optimization speedup.
+
+A controlled current-source pair can use EF as baseline and a collector-only
+revision as current, after proving that Cargo/workflow/runtime inputs and suite
+inventory are identical. Such a pair measures repeated current workload cost;
+it does not measure the benefit of the historical optimization. Record that
+distinction and retain unchanged or slower observations.
+
+The six-slot plan consists of baseline/current Windows native, Linux native,
+and Linux sample. On 2026-10-05, the available local environment is Windows 11
+build 26200, i7-14700 (20 cores/28 logical processors), with installed
+Rust/Cargo 1.97.1 on `x86_64-pc-windows-msvc`. The read-only WSL inventory reports
+that WSL is not installed. A usable Linux runner has not been established.
+The four Linux slots therefore remain explicitly inaccessible unless a current
+authorized runner is separately verified. Do not install WSL, buy resources,
+add credentials, trigger CI manually, replace those slots with Windows runs,
+or count old completed CI as new paired captures. Linux/native/GPU results
+cannot be inferred from the Windows environment.
+
+Collector validation and static source preparation may proceed while N6-1
+owns the heavy lane. Neither a plan, a synthetic child regression, nor a local
+collector report closes #9 or establishes full Windows/Linux paired results.

@@ -10,6 +10,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import os
+import platform
+import hashlib
 
 import ci_cost_report as report
 
@@ -477,6 +481,289 @@ class CiCostReportTests(unittest.TestCase):
         self.assertIn("\\`", rendered)
         self.assertIn("\\#", rendered)
         self.assertEqual(len(rendered.splitlines()), len(safe.splitlines()))
+
+
+def local_plan(root):
+    """Synthetic plan metadata; no source checkout or capture is executed."""
+    root = Path(root).resolve()
+    bin_dir = root / "installed-bin"
+    suffix = ".exe" if os.name == "nt" else ""
+    toolchain = {
+        "cargo_path": str(bin_dir / ("cargo" + suffix)),
+        "rustc_path": str(bin_dir / ("rustc" + suffix)),
+        "rustdoc_path": str(bin_dir / ("rustdoc" + suffix)),
+        "cargo_version": "cargo 1.97.1 (synthetic)",
+        "rustc_version": "rustc 1.97.1 (synthetic)",
+        "rustdoc_version": "rustdoc 1.97.1 (synthetic)",
+    }
+    receipt = {"path": str(root / "receipt.json"), "sha256": "a" * 64}
+    command = ["cargo", "test", "--workspace", "--release", "--timings",
+               "--exclude", "orr_sample", "--exclude", "orr_editor", "--exclude", "orr_web_gpu"]
+    captures = []
+    for side in ("baseline", "current"):
+        target = str(root / (side + "-target"))
+        environment = {
+            "CARGO_NET_OFFLINE": "true", "CARGO_TARGET_DIR": target,
+            "RUSTC": toolchain["rustc_path"], "RUSTDOC": toolchain["rustdoc_path"],
+            "RUSTFLAGS": None, "CARGO_ENCODED_RUSTFLAGS": None,
+        }
+        captures.append({"id": side + "-native", "side": side,
+                         "lane": "test-native", "workload": "native",
+                         "checkout": str(root / side), "command": command[:],
+                         "environment": environment,
+                         "cache": {"state": "unverified", "key": "same-preparation-v1",
+                                   "target_dir": target, "prepared": True, "receipt": copy.deepcopy(receipt)}})
+    return {"schema": "orr.ci-cost-local-plan/1", "plan_id": "synthetic-plan-v1",
+            "once_dir": str(root / "once"),
+            "baseline": {"sha": "1" * 40, "tree_sha": "3" * 40},
+            "current": {"sha": "2" * 40, "tree_sha": "4" * 40},
+            "runner": {"os": platform.system(), "arch": platform.machine(),
+                       "class": "coordinated-local", "hardware": "synthetic-test-runner",
+                       "isolation": "coordinated", "toolchain": toolchain},
+            "coordination": {"lane_receipt": copy.deepcopy(receipt),
+                             "n6_receipt": copy.deepcopy(receipt), "n6_completed": True},
+            "watchdog": {"seconds": 10, "max_log_bytes": 1048576,
+                         "cleanup": "windows-job" if os.name == "nt" else "posix-process-group"},
+            "captures": captures}
+
+
+class LocalCollectorPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="ci-local-plan-tests-")
+        self.addCleanup(self.temp.cleanup)
+        self.plan = local_plan(self.temp.name)
+
+    def test_validation_is_offline_and_keeps_local_identity_separate(self):
+        with mock.patch.object(report.subprocess, "Popen", side_effect=AssertionError("no process")), \
+             mock.patch.object(report.subprocess, "run", side_effect=AssertionError("no process")):
+            validated = report.validate_local_plan(self.plan)
+        self.assertEqual(validated, self.plan)
+        self.assertIsNot(validated, self.plan)
+        self.assertNotIn("run_id", validated)
+        validated["captures"][0]["command"].append("mutated")
+        self.assertNotIn("mutated", self.plan["captures"][0]["command"])
+
+    def test_n6_completion_and_actual_receipt_bindings_cannot_be_omitted(self):
+        for change in (
+            lambda p: p["coordination"].__setitem__("n6_completed", False),
+            lambda p: p["coordination"].__setitem__("n6_completed", 1),
+            lambda p: p["coordination"]["lane_receipt"].__setitem__("sha256", "not-a-digest"),
+            lambda p: p["coordination"].__setitem__("n6_receipt", None),
+        ):
+            candidate = copy.deepcopy(self.plan); change(candidate)
+            with self.subTest(candidate=candidate["coordination"]), self.assertRaises(ValueError):
+                report.validate_local_plan(candidate)
+
+    def test_seventh_capture_and_duplicate_identity_are_rejected_before_execution(self):
+        too_many = copy.deepcopy(self.plan)
+        too_many["captures"] = [dict(copy.deepcopy(self.plan["captures"][0]), id=f"capture-{n}") for n in range(7)]
+        duplicate = copy.deepcopy(self.plan)
+        duplicate["captures"][1]["id"] = duplicate["captures"][0]["id"]
+        for candidate in (too_many, duplicate):
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                report.validate_local_plan(candidate)
+
+    def test_exact_full_workload_cannot_be_replaced_with_check_or_filtered_tests(self):
+        for command in (["cargo", "check"], self.plan["captures"][0]["command"] + ["--", "only_one_test"],
+                        self.plan["captures"][0]["command"] + ["--no-run"]):
+            candidate = copy.deepcopy(self.plan)
+            candidate["captures"][0]["command"] = command
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                report.validate_local_plan(candidate)
+
+    def test_environment_secrets_and_changed_pair_conditions_are_not_silently_accepted(self):
+        mutations = (
+            lambda p: p["captures"][0]["environment"].__setitem__("ORR_ERP_TOKEN", "secret"),
+            lambda p: p["captures"][1]["environment"].__setitem__("RUSTFLAGS", "-C opt-level=1"),
+            lambda p: p["captures"][1]["cache"].__setitem__("key", "different-preparation"),
+            lambda p: p["captures"][0]["environment"].__setitem__("CARGO_NET_OFFLINE", "false"),
+            lambda p: p["captures"][0]["environment"].__setitem__("CARGO_TARGET_DIR", str(Path(self.temp.name)/"other")),
+        )
+        for mutate in mutations:
+            candidate = copy.deepcopy(self.plan); mutate(candidate)
+            with self.subTest(candidate=candidate["captures"]), self.assertRaises(ValueError):
+                report.validate_local_plan(candidate)
+
+    def test_watchdog_and_log_bounds_require_finite_positive_limits(self):
+        for field, value in (("seconds", 0), ("seconds", True), ("seconds", float("inf")),
+                             ("max_log_bytes", 0), ("max_log_bytes", True),
+                             ("cleanup", "kill-all-cargo")):
+            candidate = copy.deepcopy(self.plan); candidate["watchdog"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                report.validate_local_plan(candidate)
+
+    def test_revision_paths_and_plan_scope_must_be_explicit(self):
+        mutations = (
+            lambda p: p["baseline"].__setitem__("sha", "abc123"),
+            lambda p: p["captures"][0].__setitem__("checkout", "relative-checkout"),
+            lambda p: p.__setitem__("once_dir", "relative-markers"),
+            lambda p: p.__setitem__("automatic_retries", 10),
+        )
+        for mutate in mutations:
+            candidate = copy.deepcopy(self.plan); mutate(candidate)
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                report.validate_local_plan(candidate)
+
+    def test_malformed_enum_shapes_fail_validation_instead_of_crashing(self):
+        for mutate in (
+            lambda p: p["runner"].__setitem__("isolation", []),
+            lambda p: p["watchdog"].__setitem__("cleanup", {}),
+            lambda p: p["captures"][0].__setitem__("side", []),
+            lambda p: p["captures"][0]["cache"].__setitem__("state", {}),
+        ):
+            candidate = copy.deepcopy(self.plan); mutate(candidate)
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                report.validate_local_plan(candidate)
+
+    def test_each_capture_requires_a_distinct_target_directory(self):
+        self.plan["captures"][1]["cache"]["target_dir"] = self.plan["captures"][0]["cache"]["target_dir"]
+        self.plan["captures"][1]["environment"]["CARGO_TARGET_DIR"] = self.plan["captures"][0]["cache"]["target_dir"]
+        with self.assertRaises(ValueError):
+            report.validate_local_plan(self.plan)
+
+
+class LocalCollectorExecutionTests(unittest.TestCase):
+    """Exercise collection orchestration with synthetic metadata, never Cargo."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="ci-local-execution-tests-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.plan = local_plan(self.root)
+        tools = self.plan["runner"]["toolchain"]
+        for name in ("cargo", "rustc", "rustdoc"):
+            path = Path(tools[name + "_path"])
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(("synthetic-" + name).encode("ascii"))
+        receipt_path = self.root / "receipt.json"
+        receipt_path.write_bytes(b'{"synthetic":true}\n')
+        digest = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        for receipt in (self.plan["coordination"]["lane_receipt"], self.plan["coordination"]["n6_receipt"],
+                        *(capture["cache"]["receipt"] for capture in self.plan["captures"])):
+            receipt["sha256"] = digest
+        self.output = self.root / "output"
+        self.probe = mock.patch.object(report, "_local_probe", side_effect=lambda command, *args:
+                                      tools[Path(command[0]).stem + "_version"])
+        self.source = mock.patch.object(report, "_local_source", side_effect=lambda checkout, expected:
+                                       dict(expected, clean=True))
+        self.environment = mock.patch.object(report, "_local_environment", return_value={})
+        for patch in (self.probe, self.source, self.environment):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def execution(self, status="success"):
+        def run(command, checkout, environment, directory, watchdog):
+            # Binary bytes deliberately include invalid UTF-8 and line endings.
+            (directory / "stdout.raw").write_bytes(b"suite-output\r\n\xff\x00")
+            (directory / "stderr.raw").write_bytes(b"diagnostic\r\n")
+            return {"status": status, "exit_code": 0 if status == "success" else 101,
+                    "total_seconds": "1.25", "owned_process_reaped": True,
+                    "streams": {name: report._local_sha(directory / (name + ".raw"))
+                                for name in ("stdout", "stderr")}}
+        return run
+
+    def test_first_failure_preserves_binary_raw_and_refuses_a_second_plan_attempt(self):
+        with mock.patch.object(report, "_local_run", side_effect=self.execution("failure")) as execution:
+            result = report.collect_local(self.plan, str(self.output))
+        self.assertEqual(execution.call_count, 1)
+        self.assertEqual(result["status"], "failed_stop")
+        self.assertEqual((result["planned_captures"], result["attempted_captures"]), (2, 1))
+        raw = self.output / "baseline-native" / "stdout.raw"
+        self.assertEqual(raw.read_bytes(), b"suite-output\r\n\xff\x00")
+        self.assertEqual(result["captures"][0]["execution"]["streams"]["stdout"]["sha256"],
+                         hashlib.sha256(raw.read_bytes()).hexdigest())
+        self.assertFalse((self.output / "current-native").exists())
+        with mock.patch.object(report, "_local_probe", side_effect=AssertionError("no probe after marker")), \
+             self.assertRaisesRegex(ValueError, "rerun refused"):
+            report.collect_local(self.plan, str(self.root / "second-output"))
+        self.assertFalse((self.root / "second-output").exists())
+
+    def test_local_success_has_no_ci_identity_ratio_or_derived_compile_runtime(self):
+        with mock.patch.object(report, "_local_run", side_effect=self.execution()) as execution:
+            result = report.collect_local(self.plan, str(self.output))
+        self.assertEqual(execution.call_count, 2)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["comparisons"], [])
+        self.assertEqual(result["schema"], report.LOCAL_REPORT_SCHEMA)
+        for capture in result["captures"]:
+            self.assertTrue(capture["local_capture_id"].startswith("local-"))
+            self.assertNotIn("run_id", capture)
+            self.assertNotIn("job_id", capture)
+            self.assertEqual(capture["measurements"]["total"]["seconds"], "1.25")
+            self.assertIsNone(capture["measurements"]["compile"]["seconds"])
+            self.assertIsNone(capture["measurements"]["runtime"]["seconds"])
+        saved = json.loads((self.output / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved, result)
+
+    def test_changed_source_after_execution_stops_future_captures(self):
+        def source(checkout, expected):
+            source.calls += 1
+            if source.calls == 4:  # two preflights, first before, first after
+                raise ValueError("source changed after execution")
+            return dict(expected, clean=True)
+        source.calls = 0
+        with mock.patch.object(report, "_local_source", side_effect=source), \
+             mock.patch.object(report, "_local_run", side_effect=self.execution()) as execution:
+            result = report.collect_local(self.plan, str(self.output))
+        self.assertEqual(execution.call_count, 1)
+        self.assertEqual(result["status"], "failed_stop")
+        capture = result["captures"][0]
+        self.assertEqual(capture["status"], "failure")
+        self.assertIn("source changed", capture["failure_reason"])
+        self.assertEqual(capture["execution"]["status"], "success")
+        self.assertIsNone(capture["source_after"])
+
+    def test_tampered_receipt_fails_before_workload_or_capture_marker(self):
+        (self.root / "receipt.json").write_bytes(b"changed\n")
+        with mock.patch.object(report, "_local_run", side_effect=AssertionError("no workload")), \
+             self.assertRaisesRegex(ValueError, "receipt SHA256 mismatch"):
+            report.collect_local(self.plan, str(self.output))
+        self.assertFalse(self.output.exists())
+        self.assertFalse(Path(self.plan["once_dir"]).exists())
+
+
+class LocalCollectorChildTests(unittest.TestCase):
+    """Small Python children verify raw capture and natural completion, not CI cost."""
+    def capture(self, code, *, seconds=5, max_log_bytes=1048576):
+        self.temp = tempfile.TemporaryDirectory(prefix="ci-local-child-tests-")
+        self.addCleanup(self.temp.cleanup)
+        directory = Path(self.temp.name)
+        result = report._local_run([sys.executable, "-c", code], str(directory), dict(os.environ), directory,
+                                   {"seconds": seconds, "max_log_bytes": max_log_bytes,
+                                    "cleanup": "windows-job" if os.name == "nt" else "posix-process-group"})
+        return result, directory
+
+    def test_raw_binary_streams_and_nonzero_exit_are_preserved(self):
+        result, directory = self.capture(
+            "import os,sys;os.write(1,b'raw\\x00\\xff\\r\\n');os.write(2,b'err\\xfe');sys.exit(7)")
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(result["exit_code"], 7)
+        self.assertTrue(result["owned_process_reaped"])
+        self.assertEqual((directory / "stdout.raw").read_bytes(), b"raw\x00\xff\r\n")
+        self.assertEqual((directory / "stderr.raw").read_bytes(), b"err\xfe")
+        self.assertEqual(result["discarded_bytes"], 0)
+        for name in ("stdout", "stderr"):
+            raw = (directory / (name + ".raw")).read_bytes()
+            self.assertEqual(result["streams"][name]["sha256"], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(result["streams"][name]["observed_bytes"], len(raw))
+
+    def test_output_limit_keeps_bounded_prefix_and_waits_for_natural_exit(self):
+        result, directory = self.capture("import os,time;os.write(1,b'x'*40000);time.sleep(.08);os.write(2,b'natural-end')",
+                                         max_log_bytes=1024)
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(result["owned_process_reaped"])
+        self.assertEqual(sum((directory / (name + ".raw")).stat().st_size for name in ("stdout", "stderr")), 1024)
+        self.assertEqual(sum(result["streams"][name]["observed_bytes"] for name in ("stdout", "stderr")), 40011)
+        self.assertEqual(result["discarded_bytes"], 38987)
+
+    def test_watchdog_marks_failure_without_terminating_the_owned_child(self):
+        result, directory = self.capture("import os,time;os.write(1,b'before');time.sleep(1.1);os.write(1,b'natural-after')",
+                                         seconds=1)
+        self.assertEqual(result["status"], "timed_out")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(result["owned_process_reaped"])
+        self.assertEqual((directory / "stdout.raw").read_bytes(), b"beforenatural-after")
+        self.assertGreaterEqual(float(result["total_seconds"]), 1.1)
 
 
 if __name__ == "__main__":
