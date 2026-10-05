@@ -643,8 +643,11 @@ fn fair_flush_retains_per_connection_fifo_and_sent_bytes_cannot_be_recalled() {
     assert_eq!(cleanup.discarded_outbound_bytes, 0);
     assert_eq!(endpoint.queued.len(), 3); // queued-to-transport is not delivery or recall
     assert!(cleanup.connections.contains(&(JOINER, conn(2))));
-    env.a.release_join_hold(cleanup.context.roster().joiner());
-    assert!(env.a.pending_join(JOINER).is_none());
+    assert_eq!(
+        cleanup.release_local_hold(&mut env.a),
+        orr_session::JoinHoldRelease::ReleasedAssignmentRetained
+    );
+    assert!(env.a.pending_join(JOINER).is_some());
 }
 
 #[test]
@@ -690,4 +693,384 @@ fn connection_bound_snapshot_and_notice_rejections_do_not_advance_join() {
             expected: 2
         }
     );
+}
+
+// The fixture retains the two existing peers' shared input link. Only a new
+// attempt's exclusive links are attached here; cleanup never closes the mesh.
+fn attach_join_backlogs(env: &mut Env, snapshot_tick: u64) -> Mesh {
+    let mut source = Mesh::default();
+    for (i, peer) in [&mut env.a, &mut env.b].into_iter().enumerate() {
+        let (mut outgoing, incoming) =
+            LoopbackNetwork::with_clock::<Arena>(&env.clock, 2, 1, 301 + i as u64);
+        for r in peer.authored_since(snapshot_tick) {
+            outgoing.send_local(r.tick, r.slot, r.input, r.commands);
+        }
+        peer.source_mut().links.push(outgoing);
+        source.links.push(incoming);
+    }
+    source
+}
+
+#[test]
+fn cancelled_slow_transfer_releases_real_retention_on_ordinary_poll() {
+    use orr_session::JoinHoldRelease as Release;
+    let mut env = Env::new(4);
+    // Existing-peer input is delayed while the donor authors ahead. This gives
+    // a real verified snapshot older than the defaults already in flight.
+    for _ in 0..80 {
+        drive(&mut env.a);
+    }
+    let mut a = members(0, 1 << 20);
+    let mut b = members(1, 1 << 20);
+    let aa = attempt(&mut a);
+    let ba = attempt(&mut b);
+    let mut join = bootstrap::<Mesh>(4096);
+    let request = join.next_request().unwrap();
+    let (snapshot, ticket) = a.serve_request(&aa, conn(2), &mut env.a, &request).unwrap();
+    let peer_ticket = b
+        .import_ticket(&ba, conn(0), &env.b, &snapshot, 1 << 20)
+        .unwrap();
+    b.backlog_notice(&ba, &mut env.b, &peer_ticket).unwrap();
+    let start = ticket.ticket().snapshot_tick;
+    for _ in 0..120 {
+        env.round(None);
+    }
+    for peer in [&env.a, &env.b] {
+        assert!(peer.verified_tick() > start + 40);
+        assert_eq!(peer.authored_since(start).first().unwrap().tick, start + 1);
+    }
+    let a_before = (
+        env.a.source().sent.clone(),
+        env.a.next_send_tick(),
+        env.a.predicted_frame().checksum(),
+    );
+    let cleanup_a = a.cancel_attempt(&aa).unwrap();
+    let cleanup_b = b.cancel_attempt(&ba).unwrap();
+    assert_eq!(
+        cleanup_a.release_local_hold(&mut env.a),
+        Release::ReleasedAssignmentRetained
+    );
+    assert_eq!(cleanup_b.release_local_hold(&mut env.b), Release::Released);
+    assert_eq!(env.a.pending_join(JOINER), Some(ticket.ticket()));
+    assert_eq!(
+        a_before,
+        (
+            env.a.source().sent.clone(),
+            env.a.next_send_tick(),
+            env.a.predicted_frame().checksum()
+        )
+    );
+    assert_eq!(a.connection(PlayerSlot(1)).unwrap(), Some(conn(1)));
+    for peer in [&mut env.a, &mut env.b] {
+        // The lease only releases retention; normal polling performs the prune.
+        assert_eq!(peer.authored_since(start).first().unwrap().tick, start + 1);
+        peer.poll_confirmed();
+        assert!(peer.authored_since(start).first().unwrap().tick >= peer.verified_tick() - 4);
+        assert!(peer.backlog_notice(JOINER).is_none());
+        assert_eq!(peer.source().links.len(), 1);
+    }
+    assert_eq!(
+        cleanup_a.release_local_hold(&mut env.a),
+        Release::NoMatchingHold
+    );
+}
+
+#[test]
+fn delayed_cleanup_cannot_release_equal_ticket_replacement_or_foreign_session() {
+    use orr_session::JoinHoldRelease as Release;
+    let mut env = Env::new(512);
+    let mut donor = members(0, 1 << 20);
+    let da = attempt(&mut donor);
+    let mut join = bootstrap::<Mesh>(4096);
+    let (_, ticket) = donor
+        .serve_request(&da, conn(2), &mut env.a, &join.next_request().unwrap())
+        .unwrap();
+    let mut b = members(1, 1 << 20);
+    let old = attempt(&mut b);
+    b.backlog_notice(&old, &mut env.b, &ticket).unwrap();
+    let cleanup_old = b.cancel_attempt(&old).unwrap();
+    // Deliberately reuse equal control metadata to prove local identity fencing.
+    // Real wire retries still require a fresh attempt or generation.
+    let new = attempt(&mut b);
+    b.backlog_notice(&new, &mut env.b, &ticket).unwrap();
+    let mut foreign = Session::new(game(), cfg(1, 512), Mesh::default());
+    foreign.hold_inputs_for_join(ticket.ticket());
+    assert_eq!(
+        cleanup_old.release_local_hold(&mut foreign),
+        Release::NoMatchingHold
+    );
+    assert_eq!(
+        cleanup_old.release_local_hold(&mut env.b),
+        Release::NoMatchingHold
+    );
+    assert!(env.b.backlog_notice(JOINER).is_some());
+    assert!(foreign.backlog_notice(JOINER).is_some());
+    let cleanup_new = b.cancel_attempt(&new).unwrap();
+    assert_eq!(
+        cleanup_new.release_local_hold(&mut foreign),
+        Release::NoMatchingHold
+    );
+    assert_eq!(
+        cleanup_new.release_local_hold(&mut env.b),
+        Release::Released
+    );
+    assert_eq!(
+        cleanup_new.release_local_hold(&mut env.b),
+        Release::NoMatchingHold
+    );
+    // Replacing the entire Session with the same config/ticket is also fenced.
+    env.b = Session::new(game(), cfg(1, 512), Mesh::default());
+    env.b.hold_inputs_for_join(ticket.ticket());
+    assert_eq!(
+        cleanup_new.release_local_hold(&mut env.b),
+        Release::NoMatchingHold
+    );
+    assert!(env.b.backlog_notice(JOINER).is_some());
+}
+
+#[test]
+fn queue_budget_and_enqueue_failure_preserve_exact_cleanup_ownership() {
+    use orr_session::JoinHoldRelease as Release;
+    let mut env = Env::new(512);
+    let mut a = members(0, 1);
+    let aa = attempt(&mut a);
+    let mut join = bootstrap::<Mesh>(4096);
+    let (snapshot, ticket) = a
+        .serve_request(&aa, conn(2), &mut env.a, &join.next_request().unwrap())
+        .unwrap();
+    assert!(matches!(
+        a.queue_control(&aa, JOINER, &snapshot),
+        Err(Error::OutboundBudget { .. })
+    ));
+    let cleanup_a = a.cancel_attempt(&aa).unwrap();
+    assert_eq!(cleanup_a.discarded_outbound_bytes, 0);
+    assert_eq!(
+        cleanup_a.release_local_hold(&mut env.a),
+        Release::ReleasedAssignmentRetained
+    );
+    assert_eq!(env.a.pending_join(JOINER), Some(ticket.ticket()));
+
+    let mut b = members(1, 1 << 20);
+    let ba = attempt(&mut b);
+    let notice = b.backlog_notice(&ba, &mut env.b, &ticket).unwrap();
+    b.queue_control(&ba, JOINER, &notice).unwrap();
+    let result = b.flush(|_, _, _| Err("queue full"));
+    assert_eq!(result.queued, 0);
+    assert_eq!(result.blocked.len(), 1);
+    let cleanup_b = b.cancel_attempt(&ba).unwrap();
+    assert_eq!(cleanup_b.discarded_outbound_bytes, notice.len());
+    assert_eq!(cleanup_b.release_local_hold(&mut env.b), Release::Released);
+}
+
+#[test]
+fn pre_ready_cancel_retains_assignment_and_higher_attempt_converges() {
+    use orr_session::JoinHoldRelease as Release;
+    let mut env = Env::new(512);
+    let mut a = members(0, 1 << 20);
+    let mut b = members(1, 1 << 20);
+    let mut j = members(2, 1 << 20);
+    let aa = attempt(&mut a);
+    let ba = attempt(&mut b);
+    let ja = attempt(&mut j);
+    let mut join = bootstrap::<Mesh>(4096);
+    let (snapshot, ticket) = a
+        .serve_request(&aa, conn(2), &mut env.a, &join.next_request().unwrap())
+        .unwrap();
+    let notice = a.backlog_notice(&aa, &mut env.a, &ticket).unwrap();
+    b.backlog_notice(&ba, &mut env.b, &ticket).unwrap();
+    j.receive_snapshot(&ja, conn(0), &mut join, game(), Mesh::default(), &snapshot)
+        .unwrap();
+    j.receive_notice(&ja, conn(0), &mut join, &notice).unwrap();
+    for _ in 0..25 {
+        env.round(Some(&mut join));
+    }
+    assert!(matches!(join.status().unwrap(), Status::Syncing { .. }));
+    assert!(join.session().unwrap().source().sent.is_empty());
+    let ca = a.cancel_attempt(&aa).unwrap();
+    let cb = b.cancel_attempt(&ba).unwrap();
+    let _cj = j.cancel_attempt(&ja).unwrap();
+    assert_eq!(
+        ca.release_local_hold(&mut env.a),
+        Release::ReleasedAssignmentRetained
+    );
+    assert_eq!(cb.release_local_hold(&mut env.b), Release::Released);
+    drop(join.cancel());
+    assert_eq!(env.a.pending_join(JOINER), Some(ticket.ticket()));
+    let aa = a.begin_attempt(JOINER, PlayerSlot(0), 7, 2).unwrap();
+    let ba = b.begin_attempt(JOINER, PlayerSlot(0), 7, 2).unwrap();
+    let ja = j.begin_attempt(JOINER, PlayerSlot(0), 7, 2).unwrap();
+    let (snapshot, ticket) = a
+        .serve_request(&aa, conn(2), &mut env.a, &join.next_request().unwrap())
+        .unwrap();
+    assert_eq!(ticket.ticket().attempt, 2);
+    let notices = [
+        a.backlog_notice(&aa, &mut env.a, &ticket).unwrap(),
+        b.backlog_notice(&ba, &mut env.b, &ticket).unwrap(),
+    ];
+    let source = attach_join_backlogs(&mut env, ticket.ticket().snapshot_tick);
+    j.receive_snapshot(&ja, conn(0), &mut join, game(), source, &snapshot)
+        .unwrap();
+    for (i, notice) in notices.iter().enumerate() {
+        j.receive_notice(&ja, conn(i as u8), &mut join, notice)
+            .unwrap();
+    }
+    assert_eq!(join.status().unwrap(), Status::Ready);
+    // Delayed duplicates from the abandoned attempt cannot damage this retry.
+    assert_eq!(ca.release_local_hold(&mut env.a), Release::NoMatchingHold);
+    assert_eq!(cb.release_local_hold(&mut env.b), Release::NoMatchingHold);
+    env.assert_converged(&mut join);
+}
+
+#[test]
+fn input_arrival_after_ready_cleanup_confirms_assignment_and_prohibits_retry() {
+    use orr_session::{CheckedJoinError, JoinError, JoinHoldRelease as Release};
+    let mut env = Env::new(512);
+    let mut a = members(0, 1 << 20);
+    let mut b = members(1, 1 << 20);
+    let aa = attempt(&mut a);
+    let ba = attempt(&mut b);
+    let mut join = bootstrap::<Mesh>(4096);
+    let (snapshot, ticket) = a
+        .serve_request(&aa, conn(2), &mut env.a, &join.next_request().unwrap())
+        .unwrap();
+    let notices = [
+        a.backlog_notice(&aa, &mut env.a, &ticket).unwrap(),
+        b.backlog_notice(&ba, &mut env.b, &ticket).unwrap(),
+    ];
+    let source = attach_join_backlogs(&mut env, ticket.ticket().snapshot_tick);
+    join.receive_snapshot(PlayerSlot(0), game(), source, &snapshot)
+        .unwrap();
+    for (i, notice) in notices.iter().enumerate() {
+        join.receive_notice(PlayerSlot(i as u8), notice).unwrap();
+    }
+    assert_eq!(join.status().unwrap(), Status::Ready);
+    assert!(env.a.pending_join(JOINER).is_some()); // input not delivered yet
+    let sent = env.a.source().sent.clone();
+    let next = env.a.next_send_tick();
+    let ca = a.cancel_attempt(&aa).unwrap();
+    let cb = b.cancel_attempt(&ba).unwrap();
+    assert_eq!(
+        ca.release_local_hold(&mut env.a),
+        Release::ReleasedAssignmentRetained
+    );
+    assert_eq!(cb.release_local_hold(&mut env.b), Release::Released);
+    assert_eq!(env.a.source().sent, sent);
+    assert_eq!(env.a.next_send_tick(), next);
+    assert_eq!(env.a.source().links.len(), 2);
+    env.assert_converged(&mut join);
+    assert!(env.a.pending_join(JOINER).is_none()); // retained grant was confirmed
+    let existing_input = env.a.last_remote_tick(JOINER).unwrap();
+    let authored = env.a.source().sent.clone();
+    // Retry must not author defaults over the active joiner's input.
+    drop(join.cancel());
+    let aa2 = a.begin_attempt(JOINER, PlayerSlot(0), 7, 2).unwrap();
+    let retry = join.next_request().unwrap();
+    assert!(matches!(
+        a.serve_request(&aa2, conn(2), &mut env.a, &retry),
+        Err(Error::Checked(CheckedJoinError::Join(
+            JoinError::SlotNotVacant(JOINER)
+        )))
+    ));
+    assert_eq!(env.a.last_remote_tick(JOINER), Some(existing_input));
+    assert_eq!(env.a.source().sent, authored);
+    assert_eq!(ca.release_local_hold(&mut env.a), Release::NoMatchingHold);
+    assert!(env.a.backlog_notice(JOINER).is_none());
+}
+
+#[test]
+fn cloned_owned_lease_is_idempotent_and_legacy_release_remains_compatible() {
+    use orr_session::JoinHoldRelease as Release;
+    let mut env = Env::new(512);
+    let mut a = members(0, 1 << 20);
+    let aa = attempt(&mut a);
+    let mut join = bootstrap::<Mesh>(4096);
+    let (_, ticket) = a
+        .serve_request(&aa, conn(2), &mut env.a, &join.next_request().unwrap())
+        .unwrap();
+    let old = env.a.join_hold_lease(JOINER).unwrap();
+    let fresh = env.a.hold_inputs_for_join_owned(ticket.ticket());
+    assert_eq!(env.a.release_owned_join_hold(&old), Release::NoMatchingHold);
+    assert_eq!(
+        env.a.release_owned_join_hold(&fresh.clone()),
+        Release::ReleasedAssignmentRetained
+    );
+    assert_eq!(
+        env.a.release_owned_join_hold(&fresh),
+        Release::NoMatchingHold
+    );
+    assert!(env.a.pending_join(JOINER).is_some());
+    env.a.hold_inputs_for_join(ticket.ticket());
+    env.a.release_join_hold(JOINER);
+    assert!(env.a.backlog_notice(JOINER).is_none());
+    assert!(env.a.pending_join(JOINER).is_none());
+}
+
+#[test]
+fn donor_rejects_live_foreign_session_and_accepts_expired_owner_replacement() {
+    use orr_session::JoinHoldRelease as Release;
+    let mut env = Env::new(512);
+    let mut m = members(0, 1 << 20);
+    let a = attempt(&mut m);
+    let mut join = bootstrap::<Mesh>(4096);
+    let request = join.next_request().unwrap();
+    m.serve_request(&a, conn(2), &mut env.a, &request).unwrap();
+    let mut config = cfg(0, 512);
+    config.vacant_slots.push(JOINER);
+    let mut foreign = Session::new(game(), config.clone(), Mesh::default());
+    assert!(matches!(
+        m.serve_request(&a, conn(2), &mut foreign, &request),
+        Err(Error::LocalSessionMismatch)
+    ));
+    assert!(foreign.pending_join(JOINER).is_none());
+    assert!(foreign.join_hold_lease(JOINER).is_none());
+    // Replace the whole owner, expiring the registry's weak lease. The same
+    // attempt can now capture the new Session without accumulating identities.
+    env.a = Session::new(game(), config, Mesh::default());
+    m.serve_request(&a, conn(2), &mut env.a, &request).unwrap();
+    let cleanup = m.cancel_attempt(&a).unwrap();
+    assert_eq!(
+        cleanup.release_local_hold(&mut foreign),
+        Release::NoMatchingHold
+    );
+    assert_eq!(
+        cleanup.release_local_hold(&mut env.a),
+        Release::ReleasedAssignmentRetained
+    );
+}
+
+#[test]
+fn failed_checked_calls_never_adopt_unrelated_preexisting_holds() {
+    use orr_session::{CheckedJoinContext, JoinHoldRelease as Release};
+    let mut env = Env::new(512);
+    let mut a = members(0, 1 << 20);
+    let aa = attempt(&mut a);
+    let mut join = bootstrap::<Mesh>(4096);
+    let request = join.next_request().unwrap();
+    // An independently installed donor hold/grant, not created by the router.
+    let (_, ticket) = orr_session::serve_checked_join(&mut env.a, aa.context(), &request).unwrap();
+    let old = env.a.join_hold_lease(JOINER).unwrap();
+    assert!(a.serve_request(&aa, conn(2), &mut env.a, &request).is_err());
+    let cleanup_a = a.cancel_attempt(&aa).unwrap();
+    assert_eq!(
+        cleanup_a.release_local_hold(&mut env.a),
+        Release::NoMatchingHold
+    );
+    assert!(env.a.join_hold_lease(JOINER).is_some());
+    assert_eq!(
+        env.a.release_owned_join_hold(&old),
+        Release::ReleasedAssignmentRetained
+    );
+
+    let context = CheckedJoinContext::new(7, 1, roster()).unwrap();
+    orr_session::checked_backlog_notice(&mut env.b, &context, &ticket).unwrap();
+    let old = env.b.join_hold_lease(JOINER).unwrap();
+    let mut b = members(1, 1 << 20);
+    let ba = b.begin_attempt(JOINER, PlayerSlot(0), 8, 1).unwrap();
+    assert!(b.backlog_notice(&ba, &mut env.b, &ticket).is_err());
+    let cleanup_b = b.cancel_attempt(&ba).unwrap();
+    assert_eq!(
+        cleanup_b.release_local_hold(&mut env.b),
+        Release::NoMatchingHold
+    );
+    assert_eq!(env.b.release_owned_join_hold(&old), Release::Released);
 }
