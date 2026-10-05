@@ -153,6 +153,27 @@ pub struct Desync {
     pub remote: u64,
 }
 
+/// Rejection of an explicit diagnostic-checksum retirement request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChecksumRetireError {
+    /// Relay consumers use positional cursors into append-only checksum history.
+    RelaySession,
+    /// The requested inclusive boundary has not been locally verified.
+    BeyondVerified { through: u64, verified: u64 },
+}
+
+impl core::fmt::Display for ChecksumRetireError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RelaySession => write!(f, "checksum retirement is only supported for direct-P2P sessions"),
+            Self::BeyondVerified { through, verified } => {
+                write!(f, "checksum retirement tick {through} exceeds verified tick {verified}")
+            }
+        }
+    }
+}
+impl std::error::Error for ChecksumRetireError {}
+
 /// Compares two `(tick, checksum)` lists (as produced by
 /// [`Session::checksums`]) and returns every tick present in both where the
 /// checksums differ.
@@ -923,8 +944,39 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     pub fn last_rollback(&self) -> Option<RollbackInfo> {
         self.last_rollback
     }
+    /// Retained verified checkpoints in append order. Full history is kept by
+    /// default, subject to correction via [`Self::restore_confirmed`]. Direct-P2P
+    /// callers may explicitly retire diagnostics after comparing/exporting them.
     pub fn checksums(&self) -> &[(u64, u64)] {
         &self.checksums
+    }
+
+    /// Retire diagnostic checksums at ticks `<= through`, returning how many
+    /// entries were removed. The caller must compare/export any needed evidence
+    /// first. Repeating a boundary with no matching entries removes zero.
+    /// Retirement changes slice positions; callers must adjust their comparison
+    /// cursors, and reset them after a restore or Session replacement.
+    ///
+    /// This opt-in operation only changes [`Self::checksums`]: simulation,
+    /// rollback frames, anchors, authored inputs and verified-history callbacks
+    /// are untouched. It is not recovery-archive retention or a bound on the
+    /// whole Session; the checksum Vec may retain its high-water capacity.
+    ///
+    /// Relay sessions are rejected before any mutation because relay consumers
+    /// depend on positional checksum cursors. A boundary beyond the current
+    /// verified tick is also rejected without mutation. No permanent retirement
+    /// floor is installed: future verification appends checkpoints normally,
+    /// including reverified ticks after [`Self::restore_confirmed`].
+    pub fn retire_checksums_through(&mut self, through: u64) -> Result<usize, ChecksumRetireError> {
+        if self.cfg.relay {
+            return Err(ChecksumRetireError::RelaySession);
+        }
+        if through > self.verified_tick {
+            return Err(ChecksumRetireError::BeyondVerified { through, verified: self.verified_tick });
+        }
+        let before = self.checksums.len();
+        self.checksums.retain(|&(tick, _)| tick > through);
+        Ok(before - self.checksums.len())
     }
     /// Verified frames kept for desync diagnostics, oldest first (see
     /// `SessionConfig::keep_anchors`).

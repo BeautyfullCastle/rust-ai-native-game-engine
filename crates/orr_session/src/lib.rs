@@ -47,7 +47,7 @@ pub use replay::{
     VerifyReport,
 };
 pub use session::{
-    compare_checksums, require_same_build_hash, AdvanceResult, Anchor, BuildHashMismatch, Desync,
+    compare_checksums, require_same_build_hash, AdvanceResult, Anchor, BuildHashMismatch, ChecksumRetireError, Desync,
     JoinHoldLease, JoinHoldRelease, JoinStatus, RollbackInfo, Session, SessionConfig,
 };
 

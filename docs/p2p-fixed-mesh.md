@@ -130,15 +130,63 @@ requires three independent final reports, live traffic in both directions of
 1–2, ordered repeated commands, and the tick-zero independent reference.
 Only then may it print `MESH_ROLLING_OK`.
 
-This proves a **bounded rolling mesh driver**, not a duration-independent
-whole-process or Session memory bound. The generic Session checksum vector and
-the example's independent reference `BTreeMap` retain checkpoints and grow
-with run duration; reference checking also scans retained Session history.
-No generic Session/bootstrap checksum-drain API is added. Simulation/game
-state, decoded objects, allocator overhead, and native transport queues are
-outside the driver's encoded-retention caps. The separate transport and
-checked-control limits below still apply. This is not a long-lived production
-memory certification.
+Rolling mode also bounds retained **checksum diagnostics**. It uses one
+independent `Simulation<Arena>` from tick zero across both phases, with at
+most 64 pending reference checkpoints. It never seeds that simulation from
+the donor or joiner frame. Through the snapshot, every checkpoint requires
+actual comparisons from participants 0 and 1. The accepted participant-2
+snapshot is separately compared against the independently computed snapshot
+checksum before bootstrap polling or prediction. The checked grant sets the
+joiner's first-input tick before the reference advances past that snapshot.
+Every later checkpoint requires all three fixed participants, including
+post-snapshot backlog ticks before the joiner's first authored input.
+
+Each participant has an exact next-checkpoint cursor and comparison count.
+The runner requires interval-one checkpoints: a missing peer checkpoint,
+missing reference, mismatch, or gap is an error, never a skipped comparison.
+It marks a participant only after comparing its actual checksum. It evicts
+only a contiguous prefix compared by every required participant, and retires
+all retained Session checksum logs through that same common floor. A delayed
+or absent participant cannot be removed from this requirement. The delayed
+1–2 probe also checks that participant 2 pins the diagnostic floor while the
+mesh driver's independent floor advances past its still-pending backlog.
+
+Prediction is admitted only through `min(target, common_floor + 64)`, in
+addition to the existing author-ahead limit. Receive, polling and flushing
+continue while authoring is gated. This bounds a later verification batch,
+not just the reference queue: each participating Session retains at most 64
+checksum entries. Reference generation and new-checkpoint comparison per
+loop are bounded in checkpoint count independently of run duration. Both
+reference and Session high-water marks are asserted throughout the prelude
+and live phase. `MESH_DIAGNOSTICS` reports those marks, the common retirement
+floor, and exact coverage: ticks `1..=target` for participants 0/1 and
+`snapshot+1..=target` for participant 2. Final reports are formed only after
+the target entries have been retired, using separately cached actual peer
+checksums. The independently computed final checksum remains a separate
+scalar used to validate all three reports at every recipient.
+
+`Session::retire_checksums_through(through)` is opt-in diagnostic retirement
+for direct P2P sessions. It inclusively removes retained entries through an
+already-verified tick and returns the number removed. Relay sessions and
+requests beyond local verification are rejected without mutation. Repeated
+calls are harmless; default retention remains unchanged without calls.
+`JoinBootstrap` forwards only this operation, returning `None` before it owns
+a Session or after cancellation; it does not expose unchecked mutable Session
+access. Callers must finish required comparisons or exports before retiring.
+Retirement is not a permanent floor: restore/re-verification keeps its usual
+behavior and may record those ticks again. Consumers must reset their own
+comparison state after restore or replacement; this fixed-mesh runner does
+neither. Relay consumers retain their original checksum-history semantics.
+
+These are bounded rolling mesh-driver ledgers and bounded retained diagnostic
+records, not a duration-independent whole-process, arbitrary Game, or generic
+Session memory bound. Retired `Vec` allocations may retain their high-water
+capacity; allocator/RSS reclamation is not promised. Simulation/game state,
+decoded objects, allocator overhead, and native transport queues remain
+outside these bounds. The separate transport and checked-control limits
+below still apply. This is not a long-lived production memory certification.
+Finite smoke mode preserves its existing complete checksum logs and finite
+independent reference map.
 
 ## Transport identity and the public input API
 
