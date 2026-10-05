@@ -665,8 +665,12 @@ class CaptureLifecycleTests(unittest.TestCase):
 
         child = get_child()
         self.assertEqual([row["active"] for row in record["samples"]], [None, None, 1, 0])
-        self.assertIn("job accounting temporarily unavailable", record["failure"])
-        self.assertIn("job accounting still unavailable", record["secondary_failures"][0])
+        self.assertEqual(record["failure"], "process_observation_error: job accounting temporarily unavailable")
+        # Unknown accounting is independently mandatory; retain both secondary
+        # reasons once, without replacing the first failure after recovery.
+        self.assertCountEqual(record["secondary_failures"], [
+            "job_accounting_unknown", "process_observation_error: job accounting still unavailable",
+        ])
         self.assertTrue(record["cleanup_complete"])
         self.assertTrue(record["handles_closed"])
         self.assertEqual(child.closed_at_active, 0)
@@ -1580,6 +1584,7 @@ class AttributionClassificationTests(unittest.TestCase):
                         self.assertTrue(all(r["failure"] is None and r["cleanup_complete"] and r["handles_closed"]
                                             and not r["attribution_complete"] for r in receipts))
 
+    @unittest.skipUnless(probe.os.name == "nt", "paired compiler sampling is Windows-only")
     def test_loaded_builder_gap_latches_before_probe_and_later_clean_samples_cannot_clear_it(self):
         helper = PreparationAndReservationTests("test_prepare_uses_fresh_isolated_target_and_explicit_target_dir_argv")
         root, _, _, plan, _ = helper.prepare_fixture()
