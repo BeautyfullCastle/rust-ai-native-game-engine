@@ -435,6 +435,15 @@ fn disconnect_and_rejoin_over_quic() {
 /// Native WSS uses the existing QUIC identity/listener and explicit PEM trust.
 #[test]
 fn two_clients_over_native_wss() {
+    two_clients_over_verified_transport(TransportKind::Wss);
+}
+
+#[test]
+fn two_clients_over_native_wt() {
+    two_clients_over_verified_transport(TransportKind::Wt);
+}
+
+fn two_clients_over_verified_transport(kind: TransportKind) {
     // Public, test-only identity valid 2020–2120; never use outside loopback tests.
     const CERT: &str = r#"-----BEGIN CERTIFICATE-----
 MIIBQzCB66ADAgECAgEBMAoGCCqGSM49BAMCMBsxGTAXBgNVBAMMEG9ycmVyeSB0
@@ -456,7 +465,7 @@ KhgEUZm40iitRLwtR5mKSfFekKGhRANCAAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK
     impl Drop for Fixture {
         fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
     }
-    let fixture = Fixture(std::env::temp_dir().join(format!("orr-native-wss-{}", std::process::id())));
+    let fixture = Fixture(std::env::temp_dir().join(format!("orr-native-{kind:?}-{}", std::process::id())));
     std::fs::create_dir(&fixture.0).unwrap();
     let cert = fixture.0.join("cert.pem");
     let key = fixture.0.join("key.pem");
@@ -464,9 +473,10 @@ KhgEUZm40iitRLwtR5mKSfFekKGhRANCAAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK
     std::fs::write(&key, KEY).unwrap();
     let mut options = ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Quic);
     options.tls = orr_relay_net::Tls::Pem { cert_chain: cert.clone(), private_key: key };
-    options.wss_bind = Some("127.0.0.1:0".parse().unwrap());
+    if kind == TransportKind::Wss { options.wss_bind = Some("127.0.0.1:0".parse().unwrap()); }
+    options.webtransport = kind == TransportKind::Wt;
     let ep = listen(&options).unwrap();
-    let addr = ep.wss_addr().unwrap();
+    let addr = if kind == TransportKind::Wt { ep.local_addr() } else { ep.wss_addr().unwrap() };
     let mut server = RelayServer::new(ep, 7);
     server.create_room(ROOM, arena_room(2));
     let stop = Arc::new(AtomicBool::new(false));
@@ -478,7 +488,7 @@ KhgEUZm40iitRLwtR5mKSfFekKGhRANCAAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK
     let handles: Vec<_> = (0..2).map(|i| {
         let cert = cert.clone();
         thread::spawn(move || {
-            let options = ConnectOptions::new(format!("wss://{addr}/relay?case=native"), TransportKind::Wss, Trust::PemFile(cert));
+            let options = ConnectOptions::new(format!("{}://{addr}/relay?case=native", if kind == TransportKind::Wt { "https" } else { "wss" }), kind, Trust::PemFile(cert));
             let link = connect(&options).unwrap();
             let mut client: RelayClient<Arena, _> = RelayClient::new(
                 RelayClientConfig::new(ROOM, 1), link,
@@ -495,7 +505,7 @@ KhgEUZm40iitRLwtR5mKSfFekKGhRANCAAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK
     let (room, bad_messages) = server_thread.join().unwrap();
     let reports: Vec<_> = reports.into_iter().map(Result::unwrap).collect();
     for r in &reports {
-        eprintln!("native WSS: {}", r.summary());
+        eprintln!("native {kind:?}: {}", r.summary());
         assert_eq!(r.state, ClientState::Playing);
         assert_eq!(r.desyncs, 0);
         assert_eq!(r.decode_errors, 0);

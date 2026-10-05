@@ -272,6 +272,25 @@ impl Endpoint {
         Ok(ep)
     }
 
+    /// Starts verified native WebTransport to an `https://` URL. The URL host
+    /// is checked against WebPki or explicit CA trust; bypass/pin-only trust
+    /// is unsupported. DNS, QUIC, HTTP/3, stream opening and hello share one
+    /// `connect_timeout`. Diagnostic errors never contain URL or peer text.
+    pub fn connect_wt(url: &str, trust: QuicTrust, cfg: NetConfig) -> Result<Endpoint, NetError> {
+        let target = crate::wt_client::target(url)?;
+        let config = crate::wt_client::config(&trust, &cfg)?;
+        let (mut ep, _) = Endpoint::new(cfg, false)?;
+        let handle = ep.handle();
+        let _guard = handle.enter();
+        let wt = wtransport::Endpoint::client(config)
+            .map_err(|_| NetError("WT endpoint initialization failed".into()))?;
+        ep.local_addr = wt.local_addr().map_err(|_| NetError("WT local address unavailable".into()))?;
+        let id = ep.shared.alloc_id();
+        ep.client_conn = Some(id);
+        handle.spawn(crate::wt_client::client_conn(wt, ep.shared.clone(), id, target));
+        Ok(ep)
+    }
+
     /// Starts connecting over WebSocket to `ws://host:port/path`. Returns at once.
     pub fn connect_ws(url: &str, cfg: NetConfig) -> Result<Endpoint, NetError> {
         let (mut ep, _shutdown) = Endpoint::new(cfg, false)?;
@@ -359,6 +378,9 @@ impl Endpoint {
             .get(&conn)
             .cloned()
             .ok_or(SendError::UnknownConnection)?;
+        if cs.link == Link::Wt && cs.closing.load(Relaxed) {
+            return Err(SendError::UnknownConnection);
+        }
         if bytes.len() > cfg.max_message_size {
             return Err(SendError::TooLarge { max: cfg.max_message_size });
         }
@@ -370,7 +392,20 @@ impl Endpoint {
                 if cs.link.datagram_capable() && st.native_datagrams.load(Relaxed) {
                     let max = st.max_unreliable.load(Relaxed);
                     if bytes.len() > max {
+                        if cs.link == Link::Wt && cfg.datagram_fallback {
+                            return self.push_stream(&cs, TAG_UNRELIABLE, bytes);
+                        }
                         return Err(SendError::TooLarge { max });
+                    }
+                    if cs.link == Link::Wt {
+                        let n = bytes.len().max(1);
+                        if st.queued.fetch_update(Relaxed, Relaxed, |v| v.checked_add(n).filter(|&v| v <= cfg.max_queued_send_bytes)).is_err() {
+                            return Err(SendError::Backpressure);
+                        }
+                        return cs.tx.send(Out::Datagram(Bytes::copy_from_slice(bytes))).map_err(|_| {
+                            st.queued.fetch_sub(n, Relaxed);
+                            SendError::UnknownConnection
+                        });
                     }
                     cs.tx
                         .send(Out::Datagram(Bytes::copy_from_slice(bytes)))
@@ -389,14 +424,14 @@ impl Endpoint {
 
     fn push_stream(&self, cs: &ConnShared, tag: u8, bytes: &[u8]) -> Result<(), SendError> {
         let st = &cs.stats;
-        if st.queued.load(Relaxed) + bytes.len() > self.shared.cfg.max_queued_send_bytes {
+        let n = if cs.link == Link::Wt { bytes.len().max(1) } else { bytes.len() };
+        if st.queued.fetch_update(Relaxed, Relaxed, |v| v.checked_add(n).filter(|&v| v <= self.shared.cfg.max_queued_send_bytes)).is_err() {
             return Err(SendError::Backpressure);
         }
-        st.queued.fetch_add(bytes.len(), Relaxed);
         cs.tx
             .send(Out::Stream { tag, data: Bytes::copy_from_slice(bytes) })
             .map_err(|_| {
-                st.queued.fetch_sub(bytes.len(), Relaxed);
+                st.queued.fetch_sub(n, Relaxed);
                 SendError::UnknownConnection
             })
     }
@@ -404,6 +439,7 @@ impl Endpoint {
     /// Starts a graceful close of one connection.
     pub fn close(&self, conn: ConnId) {
         if let Some(cs) = self.shared.conns.read().unwrap().get(&conn) {
+            if cs.link == Link::Wt && cs.closing.swap(true, Relaxed) { return; }
             cs.closing.store(true, Relaxed);
             let _ = cs.tx.send(Out::Close);
         }

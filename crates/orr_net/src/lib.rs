@@ -5,7 +5,7 @@
 //!
 //! * [`Endpoint`] is the concrete type. Build a server with
 //!   [`Endpoint::listen_quic`] or [`Endpoint::listen_ws`], and a client with
-//!   [`Endpoint::connect_quic`] or [`Endpoint::connect_ws`].
+//!   [`Endpoint::connect_quic`], [`Endpoint::connect_ws`] or [`Endpoint::connect_wt`].
 //! * The caller's view is synchronous and never blocks: call
 //!   [`Endpoint::poll_event`] / [`Endpoint::drain_events`] from the game loop
 //!   and [`Endpoint::send`] to queue messages. Async I/O runs on a private
@@ -20,7 +20,7 @@
 //! | Backend   | `Reliable`                                  | `Unreliable`                                      |
 //! |-----------|---------------------------------------------|---------------------------------------------------|
 //! | QUIC      | one ordered bidirectional stream, framed    | QUIC datagrams (no retransmit, may reorder/drop)  |
-//! | WebTransport (server only) | one bidirectional stream, framed as QUIC | WebTransport datagrams                       |
+//! | WebTransport | one bidirectional stream, framed as QUIC | WebTransport datagrams                       |
 //! | WebSocket | the WS stream                               | best effort over the same ordered stream          |
 //!
 //! Over WebSocket the unreliable channel cannot lose or reorder messages on
@@ -71,6 +71,7 @@ mod stats;
 mod tls;
 mod ws;
 mod wt;
+mod wt_client;
 
 pub mod timesync;
 
