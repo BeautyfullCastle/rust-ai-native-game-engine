@@ -231,7 +231,7 @@ struct TickRecord<G: Game> {
     inputs: TickInputs<G::Input, G::Command>,
     predicted: Vec<bool>,
     events: Vec<SimEvent<G::Event>>,
-    /// Encoded commands the tick was simulated with (relay mode only).
+    /// Encoded commands the tick was simulated with, in submission order.
     cmds: Vec<(PlayerSlot, Vec<u8>)>,
 }
 
@@ -912,27 +912,23 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 self.last_disconnected[slot] = inputs.flags(PlayerSlot(slot as u8)).disconnected;
             }
         }
-        let cmds = if self.cfg.relay {
-            inputs
-                .commands()
-                .iter()
-                .map(|(slot, c)| {
-                    let mut bytes = Vec::new();
-                    c.encode(&mut bytes);
-                    (*slot, bytes)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let cmds = inputs
+            .commands()
+            .iter()
+            .map(|(slot, c)| {
+                let mut bytes = Vec::new();
+                c.encode(&mut bytes);
+                (*slot, bytes)
+            })
+            .collect();
         self.history.insert(tick, TickRecord { inputs, predicted, events, cmds });
     }
 
-    /// Relay mode: whether the confirmed bundle of `tick` differs from what
-    /// the tick was simulated with, in any slot that was only predicted:
+    /// Whether the confirmed input of `tick` differs from what the tick
+    /// was simulated with, in any slot that was only predicted:
     /// its input, or its commands (a confirmed slot that had commands the
     /// prediction lacked, or the reverse).
-    fn relay_tick_mismatch(&self, tick: u64, rec: &TickRecord<G>) -> bool {
+    fn tick_mismatch(&self, tick: u64, rec: &TickRecord<G>) -> bool {
         let Some(confirmed) = self.confirmed_input.get(&tick) else { return false };
         let commands = self.confirmed_commands.get(&tick);
         for (&slot, &val) in confirmed {
@@ -942,7 +938,11 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             if *rec.inputs.input(slot) != val {
                 return true;
             }
-            if rec.inputs.flags(slot).disconnected != self.confirmed_absent.contains(&(tick, slot.0)) {
+            // Relay bundles authoritatively carry presence; retain P2P's
+            // existing presence handling while reconciling commands in both modes.
+            if self.cfg.relay
+                && rec.inputs.flags(slot).disconnected != self.confirmed_absent.contains(&(tick, slot.0))
+            {
                 return true;
             }
             let used = rec.cmds.iter().filter(|(s, _)| *s == slot).map(|(_, b)| b);
@@ -989,26 +989,16 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         info
     }
 
-    /// Finds the earliest tick in `(verified_tick, head]` whose used input
-    /// (recorded as `predicted`) disagrees with an input that has since
-    /// been confirmed.
+    /// Finds the earliest tick in `(verified_tick, head]` whose predicted
+    /// input or commands disagree with a slot that has since been confirmed.
     fn earliest_mismatch(&self) -> Option<u64> {
         let mut earliest = None;
         if self.verified_tick >= self.sim.tick() {
             return None;
         }
         for (&tick, rec) in self.history.range((self.verified_tick + 1)..=self.sim.tick()) {
-            let Some(confirmed) = self.confirmed_input.get(&tick) else { continue };
-            if self.cfg.relay {
-                if self.relay_tick_mismatch(tick, rec) {
-                    earliest = Some(earliest.map_or(tick, |e: u64| e.min(tick)));
-                }
-                continue;
-            }
-            for (&slot, &val) in confirmed {
-                if rec.predicted[slot.0 as usize] && *rec.inputs.input(slot) != val {
-                    earliest = Some(earliest.map_or(tick, |e: u64| e.min(tick)));
-                }
+            if self.tick_mismatch(tick, rec) {
+                earliest = Some(earliest.map_or(tick, |e: u64| e.min(tick)));
             }
         }
         earliest
@@ -1032,7 +1022,7 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             let matches = (0..self.cfg.player_count).all(|slot| {
                 let ps = PlayerSlot(slot);
                 confirmed.get(&ps) == Some(rec.inputs.input(ps))
-            }) && !(self.cfg.relay && self.relay_tick_mismatch(t, rec));
+            }) && !self.tick_mismatch(t, rec);
             if !matches {
                 // A mismatch here means `earliest_mismatch`/resim above
                 // should already have corrected it earlier this call; if
