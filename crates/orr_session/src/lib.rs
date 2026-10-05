@@ -13,6 +13,7 @@
 #![deny(clippy::disallowed_types)]
 #![deny(clippy::float_arithmetic)]
 
+mod departure;
 mod dump;
 mod events;
 mod input_source;
@@ -27,6 +28,7 @@ mod session;
 mod wire;
 mod verified_history;
 
+pub use departure::{DepartureAck, DepartureBarrier, DepartureError, DepartureFence, DepartureTarget};
 pub use dump::{DesyncDump, DumpError};
 pub use relay::{
     ClientEvent, ClientState, ClientStats, DumpCollector, DumpSink, RelayClient, RelayClientConfig, RelaySource,
