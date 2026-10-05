@@ -150,6 +150,10 @@ def compiler_overlap(samples, start, end):
     """
     spans = []
     for a, b in zip(samples, samples[1:]):
+        # A metadata gap invalidates both adjacent spans, even when the same
+        # rustc identity appears again later. Never bridge missing evidence.
+        if a.get("attribution_complete") is False or b.get("attribution_complete") is False:
+            continue
         old = {(p["pid"], p["creation_100ns"]): p["cpu_100ns"] for p in a.get("compilers", [])}
         moving = any(p["cpu_100ns"] > old.get((p["pid"], p["creation_100ns"]), p["cpu_100ns"])
                      for p in b.get("compilers", []))
@@ -498,18 +502,23 @@ class WindowsChild:
     def _process_sample(self, k, pid):
         """Bind membership/creation before image lookup on the same query handle."""
         identity = {"pid": int(pid), "member": None, "creation_100ns": None}
-        result = {"identity": identity, "compiler": None, "errors": []}
+        result = {"identity": identity, "compiler": None, "errors": [], "attribution_complete": True,
+                  "attribution_errors": [], "containment_errors": []}
         ph = None
+        stage = "OpenProcess"
         try:
             ph = k.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             _check(ph, f"OpenProcess({pid})")
             member = wintypes.BOOL()
+            stage = "IsProcessInJob"
             _check(k.IsProcessInJob(ph, self._job, ctypes.byref(member)),
                    f"IsProcessInJob({pid})")
             identity["member"] = bool(member.value)
             if not member.value:
+                result["attribution_complete"] = False
                 return result  # No image attribution for a reopened non-member PID.
             created, exited, user, kernel = _FILETIME(), _FILETIME(), _FILETIME(), _FILETIME()
+            stage = "GetProcessTimes"
             _check(k.GetProcessTimes(ph, ctypes.byref(created), ctypes.byref(exited),
                                      ctypes.byref(kernel), ctypes.byref(user)),
                    f"GetProcessTimes({pid})")
@@ -517,20 +526,25 @@ class WindowsChild:
             identity["exit_100ns"] = _ft(exited)
             needed = wintypes.DWORD(32768)
             image = ctypes.create_unicode_buffer(needed.value)
+            stage = "QueryFullProcessImageNameW"
             _check(k.QueryFullProcessImageNameW(ph, 0, image, ctypes.byref(needed)),
                    f"QueryFullProcessImageNameW({pid})")
             identity["image"] = image.value
             if os.path.basename(image.value).lower() in ("rustc.exe", "rustc"):
                 result["compiler"] = {"pid": int(pid), "creation_100ns": _ft(created),
                                       "image": image.value, "cpu_100ns": _ft(user) + _ft(kernel)}
-        except BaseException as exc:
+        except Exception as exc:
+            result["attribution_complete"] = False
             result["errors"].append(repr(exc))
+            result["attribution_errors"].append({"stage": stage, "utc": utc(),
+                                                  **identity, "error": repr(exc)})
         finally:
             if ph:
                 try:
                     _close(k, ph)
                 except BaseException as exc:
                     result["errors"].append(repr(exc))
+                    result["containment_errors"].append(repr(exc))
                     # A failed CloseHandle still owns this exact opened handle.
                     # Keep its bound identity; reopening the PID cannot prove close.
                     if not hasattr(self, "_query_handles"):
@@ -559,21 +573,29 @@ class WindowsChild:
                                             for entry in owned]}
 
     def sample(self):
-        """An image failure invalidates measurement, not known Job accounting."""
+        """Keep required containment failures separate from compiler metadata."""
         sample = self.job_accounting()
-        sample.update(observation_errors=[], process_identities=[], **self._query_handle_receipt())
+        sample.update(observation_errors=[], containment_errors=[], attribution_errors=[],
+                      attribution_complete=True, process_identities=[], **self._query_handle_receipt())
         if sample["query_handles_pending"]:
-            sample["observation_errors"].extend(self._retry_query_handle_closes(_api()))
+            errors = self._retry_query_handle_closes(_api())
+            sample["observation_errors"].extend(errors)
+            sample["containment_errors"].extend(errors)
             sample.update(self._query_handle_receipt())
             if sample["query_handles_pending"]:
+                sample["attribution_complete"] = False
                 return sample  # Do not accumulate more query handles while held.
         if sample["active"] == 0:
             return sample
         k = _api()
         try:
             pids = _job_pids(k, self._job, sample["active"])
-        except BaseException as exc:
+        except Exception as exc:
             sample["observation_errors"].append(repr(exc))
+            sample["attribution_errors"].append({"stage": "job_process_ids", "utc": utc(),
+                                                 "pid": None, "member": None,
+                                                 "creation_100ns": None, "error": repr(exc)})
+            sample["attribution_complete"] = False
             return sample
         for pid in pids:
             observed = self._process_sample(k, pid)
@@ -581,9 +603,18 @@ class WindowsChild:
             if observed["compiler"] is not None:
                 sample["compilers"].append(observed["compiler"])
             sample["observation_errors"].extend(observed["errors"])
+            sample["containment_errors"].extend(observed["containment_errors"])
+            sample["attribution_errors"].extend(observed["attribution_errors"])
+            if not observed["attribution_complete"]:
+                sample["attribution_complete"] = False
             sample.update(self._query_handle_receipt())
             if sample["query_handles_pending"]:
+                sample["attribution_complete"] = False
                 break
+        if not pids:
+            # Known nonzero accounting with no listed identity is incomplete
+            # attribution; it does not establish why the identities are absent.
+            sample["attribution_complete"] = False
         return sample
 
     def close(self):
@@ -698,9 +729,12 @@ class Capture:
     def __init__(self, argv, root, folder, watchdog, env, factory=None):
         folder.mkdir(exist_ok=False)
         self.folder, self.argv, self.watchdog = folder, list(argv), watchdog
+        self.attribution_required = False  # prep/list/idle do not assert load.
         self.record = {"argv": self.argv, "cwd": str(root), "started_at": utc(), "start": time.monotonic(),
                        "watchdog_seconds": watchdog, "watchdog_triggered": False, "failure": None,
                        "secondary_failures": [],
+                       "attribution_required": False, "attribution_complete": True,
+                       "attribution_first_error": None, "attribution_secondary_errors": [],
                        "streams": {}, "samples": [], "actual_exit": None, "cleanup_complete": False}
         self.child, self.readers, writers = None, [], []
         gate = threading.Event()
@@ -812,8 +846,31 @@ class Capture:
             self.fail("watchdog_expired_natural_exit_pending")
         try:
             sample = {**self.child.sample(), "monotonic": now, "utc": utc()}
-            for error in sample.get("observation_errors", []):
+            self.record["attribution_required"] = self.attribution_required
+            # Unclassified legacy observations remain mandatory failures. Only
+            # explicitly classified Windows samples may use optional metadata.
+            errors = sample.get("containment_errors", sample.get("observation_errors", []))
+            for error in errors:
                 self.fail("process_observation_error: " + error)
+            if getattr(self.child, "requires_job_cleanup", False) and sample.get("active") is None:
+                self.fail("job_accounting_unknown")
+            if sample.get("query_handles_pending", 0):
+                self.fail("query_handle_closure_pending")
+            attribution_errors = sample.get("attribution_errors", [])
+            if attribution_errors or sample.get("attribution_complete") is False:
+                sample["attribution_complete"] = False
+                self.record["attribution_complete"] = False  # First gap stays latched.
+                for error in attribution_errors or [{"stage": "attribution_incomplete",
+                                                      "utc": sample["utc"], "pid": None,
+                                                      "member": None, "creation_100ns": None,
+                                                      "error": "compiler attribution incomplete"}]:
+                    if self.record["attribution_first_error"] is None:
+                        self.record["attribution_first_error"] = error
+                    elif error not in self.record["attribution_secondary_errors"]:
+                        if len(self.record["attribution_secondary_errors"]) < 32:
+                            self.record["attribution_secondary_errors"].append(error)
+                if self.attribution_required:
+                    self.fail("compiler_attribution_incomplete: " + repr(self.record["attribution_first_error"]))
             # Bound metadata even if a child violates its natural-exit contract.
             if len(self.record["samples"]) < 10000:
                 self.record["samples"].append(sample)
@@ -822,7 +879,12 @@ class Capture:
             return sample
         except BaseException as exc:
             self.fail("process_observation_error: " + repr(exc))
-            return {"active": None, "observation_error": True}
+            sample = {"active": None, "observation_error": True, "attribution_complete": False,
+                      "containment_errors": [repr(exc)], "compilers": [], "monotonic": now, "utc": utc()}
+            self.record["attribution_complete"] = False
+            if len(self.record["samples"]) < 10000:
+                self.record["samples"].append(sample)
+            return sample
 
     def _cleanup_pending(self, sample):
         if getattr(self.child, "requires_job_cleanup", False):
@@ -1108,11 +1170,15 @@ def campaign(plan, root, output, mode="paired"):
                 argv = ["cargo", "build", "--release", "--locked", "--offline", "-p", "orr_server", "-p", "orr_ffi",
                         "--target-dir", str(target), "--message-format=json"]
                 builder = launch(argv, root, output / "build", plan["build_watchdog_seconds"], env)
+                # Enable before the first sample, including the admission wait.
+                builder.attribution_required = True
+                builder.record["attribution_required"] = True
                 # One bounded wait for observed compiler work, no build retry.
                 until = time.monotonic() + 60
                 while True:
                     builder.sample()
                     samples = builder.record["samples"]
+                    require(builder.record["failure"] is None, "load builder observation failed")
                     if len(samples) >= 2 and compiler_overlap(samples[-2:], samples[-2]["monotonic"], samples[-1]["monotonic"]):
                         break
                     require(builder.child.poll() is None and builder.record["failure"] is None and time.monotonic() < until,

@@ -1406,5 +1406,269 @@ class WindowsQueryHandleRetentionTests(unittest.TestCase):
         self.assertEqual(kernel.close_handle_calls, [501, 501, 101, 707])
 
 
+class AttributionClassificationTests(unittest.TestCase):
+    """Focused production-Capture/WindowsChild coverage with fake OS APIs only."""
+
+    @staticmethod
+    def observation(active, *, attribution=(), containment=(), compilers=(), complete=True):
+        return {"active": active, "cpu_100ns": 70, "compilers": list(compilers),
+                "containment_errors": list(containment), "attribution_errors": list(attribution),
+                "attribution_complete": complete, "query_handles_pending": 0,
+                "observation_errors": list(containment) + [e["error"] for e in attribution]}
+
+    @staticmethod
+    def gap(stage="OpenProcess"):
+        return {"stage": stage, "utc": "2026-10-05T10:00:00+00:00", "pid": 21088,
+                "member": None, "creation_100ns": None,
+                "error": "OSError(22, 'OpenProcess(21088)', None, 87)"}
+
+    def capture(self, folder, rows, *, out=b"ok\n", exit_code=0):
+        def factory(argv, cwd, stdout, stderr, env):
+            child = FakeJobChild(argv, cwd, stdout, stderr, env, observations=rows)
+            child.exit_code = exit_code
+            stdout.write(out)
+            return child
+        return probe.Capture(["fake"], folder.parent, folder, 90, {}, factory=factory)
+
+    def test_windows_optional_stages_keep_known_accounting_and_unconfirmed_identity(self):
+        helper = WindowsQueryHandleRetentionTests()
+        for stage in ("OpenProcess", "IsProcessInJob", "GetProcessTimes", "QueryFullProcessImageNameW",
+                      "job_process_ids"):
+            with self.subTest(stage=stage):
+                child = helper.make_windows_child()
+                kernel = helper.FakeKernel(allow_query_close=True)
+                expected_member = None if stage in ("OpenProcess", "IsProcessInJob", "job_process_ids") else True
+                expected_creation = 123 if stage == "QueryFullProcessImageNameW" else None
+                with mock.patch.object(probe, "_api", return_value=kernel), mock.patch.object(
+                    probe, "_job_pids", side_effect=OSError("enumeration unavailable") if stage == "job_process_ids" else None,
+                    return_value=[21088]
+                ), mock.patch.object(kernel, stage, side_effect=OSError(22, stage, None, 87)) if stage != "job_process_ids" else mock.patch.object(
+                    kernel, "active", 1
+                ):
+                    sample = child.sample()
+                self.assertEqual(sample["active"], 1)
+                self.assertEqual(sample["cpu_100ns"], 70)
+                self.assertEqual(sample["containment_errors"], [])
+                self.assertFalse(sample["attribution_complete"])
+                error = sample["attribution_errors"][0]
+                self.assertEqual(error["stage"], stage)
+                self.assertEqual(error["member"], expected_member)
+                self.assertEqual(error["creation_100ns"], expected_creation)
+                self.assertEqual(error["pid"], None if stage == "job_process_ids" else 21088)
+                self.assertIn("utc", error)
+                self.assertIn("OSError", error["error"])
+                self.assertEqual(sample["query_handles_pending"], 0)
+                self.assertEqual(kernel.close_handle_calls, [] if stage in ("OpenProcess", "job_process_ids") else [501])
+
+    def test_optional_gap_preserves_raw_receipts_and_cleanup_without_prep_failure(self):
+        gap = self.gap()
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(probe.time, "sleep", return_value=None):
+            capture = self.capture(Path(temp) / "capture", [
+                self.observation(1, attribution=[gap], complete=False), self.observation(0)])
+            record = capture.finish()
+            saved = probe.json.loads((capture.folder / "process.json").read_text())
+            self.assertEqual(saved, record)
+            self.assertEqual((capture.folder / "stdout.txt").read_bytes(), b"ok\n")
+        self.assertIsNone(record["failure"])
+        self.assertEqual(record["attribution_first_error"], gap)
+        self.assertFalse(record["attribution_complete"])
+        self.assertFalse(record["attribution_required"])
+        self.assertEqual(record["actual_exit"], 0)
+        self.assertTrue(record["cleanup_complete"])
+        self.assertTrue(record["handles_closed"])
+        self.assertEqual(record["samples"][0]["active"], 1)
+        self.assertEqual(record["streams"]["stdout"]["sha256"], hashlib.sha256(b"ok\n").hexdigest())
+        self.assertTrue(all(s["eof"] for s in record["streams"].values()))
+
+    def test_required_errors_stay_failed_after_optional_gap_and_natural_cleanup(self):
+        for required in ("accounting", "query_close", "nonzero", "watchdog"):
+            with self.subTest(required=required), tempfile.TemporaryDirectory() as temp, mock.patch.object(
+                probe.time, "sleep", return_value=None
+            ):
+                rows = [self.observation(None if required == "accounting" else 1,
+                                         attribution=[self.gap()], complete=False,
+                                         containment=["CloseHandle denied"] if required == "query_close" else []),
+                        self.observation(0)]
+                capture = self.capture(Path(temp) / "capture", rows, exit_code=1 if required == "nonzero" else 0)
+                if required == "watchdog":
+                    capture.record["start"] -= 91
+                capture.sample()
+                record = capture.finish()
+            self.assertIsNotNone(record["failure"])
+            expected = {"accounting": "job_accounting_unknown", "query_close": "CloseHandle denied",
+                        "nonzero": "child_exit_nonzero", "watchdog": "watchdog_expired"}[required]
+            self.assertIn(expected, record["failure"])
+            self.assertEqual(record["attribution_first_error"], self.gap())
+            self.assertTrue(record["cleanup_complete"])
+            self.assertTrue(record["handles_closed"])
+
+    def test_optional_image_error_cannot_demote_query_close_or_release_retained_handle(self):
+        helper = WindowsQueryHandleRetentionTests()
+        child = helper.make_windows_child()
+        kernel = helper.FakeKernel()
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(probe, "_api", return_value=kernel), mock.patch.object(
+            probe, "_job_pids", return_value=[51, 52]
+        ), mock.patch.object(kernel, "QueryFullProcessImageNameW", side_effect=OSError("image unavailable")):
+            child.pid = 88
+            child.poll = lambda: 0
+            child.wait = lambda: 0
+            capture = probe.Capture(["fake"], Path(temp), Path(temp) / "capture", 90, {},
+                                    factory=lambda *args: child)
+            sample = capture.sample()
+            first_failure = capture.record["failure"]
+            self.assertIn("CloseHandle", first_failure)
+            self.assertEqual(sample["attribution_errors"][0]["stage"], "QueryFullProcessImageNameW")
+            retained = child._query_handles[0]
+            capture.sample()
+            self.assertIs(child._query_handles[0], retained)
+            self.assertEqual(kernel.open_process_calls, [51])
+            self.assertTrue(capture._cleanup_pending(sample))
+            self.assertEqual(child._process, 101)
+            self.assertEqual(child._job, 707)
+            kernel.active, kernel.allow_query_close = 0, True
+            record = capture.finish()
+        self.assertEqual(record["failure"], first_failure)
+        self.assertEqual(kernel.open_process_calls, [51])
+        self.assertEqual(kernel.close_handle_calls, [501, 501, 501, 101, 707])
+        self.assertTrue(record["cleanup_complete"])
+        self.assertTrue(record["handles_closed"])
+        self.assertTrue(child._closed)
+
+    def test_preparation_and_listing_accept_only_optional_gap_with_complete_cleanup(self):
+        helper = PreparationAndReservationTests()
+        for mandatory in (False, True):
+            with self.subTest(mandatory=mandatory), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp) / "repo"
+                (root / "target").mkdir(parents=True)
+                output = root / "target" / "prep"
+                target_dir = output / "prepare-target"
+                launches = []
+
+                def fake_launch(argv, cwd, folder, watchdog, env):
+                    launches.append(list(argv))
+                    if argv[0] == "cargo":
+                        target = argv[argv.index("--test") + 1]
+                        binary = target_dir / (target + ".exe")
+                        binary.write_bytes(b"fake executable never launched")
+                        text = probe.json.dumps({"reason": "compiler-artifact", "target": {"name": target},
+                                                "executable": str(binary)}) + "\n"
+                    else:
+                        target = Path(argv[0]).stem
+                        text = "".join(name + ": test\n" for name in probe.SAFE_CASES[target][1])
+                    rows = [self.observation(1, attribution=[self.gap()], complete=False,
+                                             containment=["accounting failed"] if mandatory else []),
+                            self.observation(0)]
+                    return self.capture(folder, rows, out=text.encode())
+
+                with mock.patch.object(probe, "require_runtime_platform"), mock.patch.object(probe, "git", return_value=helper.HEAD), mock.patch.object(
+                    probe, "source_identity", return_value=copy.deepcopy(helper.SOURCE)
+                ), mock.patch.object(probe, "environment_identity", return_value=copy.deepcopy(helper.PARENT_ENV)), mock.patch.object(
+                    probe, "toolchain_identity", return_value=copy.deepcopy(helper.TOOLCHAIN)
+                ), mock.patch.object(probe, "launch", side_effect=fake_launch), mock.patch.object(probe.time, "sleep", return_value=None):
+                    if mandatory:
+                        with self.assertRaisesRegex(ValueError, "preparation failed"):
+                            probe.prepare(root, output, helper.HEAD)
+                        plan = probe.json.loads((output / "prepared.json").read_text())
+                        self.assertEqual(plan["status"], "preparation_failed")
+                        self.assertEqual(len(launches), 1)
+                    else:
+                        plan = probe.prepare(root, output, helper.HEAD)
+                        probe.validate_plan(plan, root)
+                        self.assertEqual(len(launches), 6)
+                        self.assertEqual(plan["status"], "prepared")
+                        receipts = plan["preparation"] + [b["listing"] for b in plan["binaries"].values()]
+                        self.assertTrue(all(r["failure"] is None and r["cleanup_complete"] and r["handles_closed"]
+                                            and not r["attribution_complete"] for r in receipts))
+
+    def test_loaded_builder_gap_latches_before_probe_and_later_clean_samples_cannot_clear_it(self):
+        helper = PreparationAndReservationTests("test_prepare_uses_fresh_isolated_target_and_explicit_target_dir_argv")
+        root, _, _, plan, _ = helper.prepare_fixture()
+        self.addCleanup(helper.doCleanups)
+        launches, builders = [], []
+
+        def fake_launch(argv, cwd, folder, watchdog, env):
+            launches.append(list(argv))
+            if argv[0] == "cargo":
+                rows = [self.observation(1, compilers=[{"pid": 11, "creation_100ns": 22, "cpu_100ns": cpu}])
+                        for cpu in (100, 200)]
+                rows += [self.observation(1, attribution=[self.gap()], complete=False), self.observation(0)]
+                builder = self.capture(folder, rows)
+                builder.child.polls = [None, 0]
+                builders.append(builder)
+                return builder
+            self.assertFalse(builders, "no loaded probe may launch after builder gap")
+            binary = plan["binaries"][Path(argv[0]).stem]
+            filtered = len(binary["listed_tests"]) - 1
+            text = f"test {argv[1]} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; {filtered} filtered out;\n"
+            return self.capture(folder, [self.observation(0)], out=text.encode())
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(probe, "require_runtime_platform"), mock.patch.object(
+            probe, "validate_plan"
+        ), mock.patch.object(probe, "launch", side_effect=fake_launch), mock.patch.object(
+            probe.time, "sleep", return_value=None
+        ):
+            report = probe.campaign(plan, root, Path(temp) / "campaign")
+        self.assertEqual(len(launches), len(plan["cases"]) + 1, report["failure"])
+        self.assertTrue(all(a["condition"] == "idle" for a in report["attempts"]))
+        self.assertEqual(report["status"], "failed_stop")
+        self.assertIn("observation failed before probe launch", report["failure"])
+        build = report["build"]
+        self.assertTrue(build["attribution_required"])
+        self.assertIn("compiler_attribution_incomplete", build["failure"])
+        self.assertEqual(build["attribution_first_error"], self.gap())
+        self.assertFalse(build["attribution_complete"])
+        self.assertTrue(build["samples"][-1]["attribution_complete"])
+        self.assertTrue(build["cleanup_complete"] and build["handles_closed"])
+
+    def test_compiler_overlap_rejects_invalid_adjacent_spans_without_bridging(self):
+        samples = [{"monotonic": i * 0.5, "attribution_complete": i != 2,
+                    "compilers": [{"pid": 11, "creation_100ns": 22, "cpu_100ns": 100 + i * 50}]}
+                   for i in range(5)]
+        self.assertFalse(probe.compiler_overlap(samples, 0, 2))
+        self.assertFalse(probe.compiler_overlap(samples, 0.5, 1.0))
+        self.assertFalse(probe.compiler_overlap(samples, 1.0, 1.5))
+        self.assertTrue(probe.compiler_overlap(samples, 0, 0.5))
+        self.assertTrue(probe.compiler_overlap(samples, 1.5, 2))
+        samples[2]["attribution_complete"] = True
+        self.assertTrue(probe.compiler_overlap(samples, 0, 2))
+
+    def test_loaded_first_sample_gap_is_failure_before_any_activity_admission(self):
+        with tempfile.TemporaryDirectory() as temp:
+            capture = self.capture(Path(temp) / "builder", [
+                self.observation(1, attribution=[self.gap()], complete=False), self.observation(0)])
+            capture.attribution_required = True
+            capture.sample()
+            first = capture.record["failure"]
+            self.assertIn("compiler_attribution_incomplete", first)
+            record = capture.finish()
+        self.assertEqual(record["failure"], first)
+        self.assertEqual(record["attribution_first_error"], self.gap())
+        self.assertTrue(record["attribution_required"])
+        self.assertFalse(record["attribution_complete"])
+        self.assertTrue(record["cleanup_complete"] and record["handles_closed"])
+
+    def test_accounting_exception_is_saved_invalid_and_never_bridged_as_overlap(self):
+        good = self.observation(1, compilers=[{"pid": 11, "creation_100ns": 22, "cpu_100ns": 100}])
+        later = self.observation(1, compilers=[{"pid": 11, "creation_100ns": 22, "cpu_100ns": 200}])
+        with tempfile.TemporaryDirectory() as temp:
+            capture = self.capture(Path(temp) / "builder", [self.observation(0)])
+            capture.attribution_required = True
+            with mock.patch.object(capture.child, "sample", side_effect=[good, OSError("accounting unavailable"), later]), mock.patch.object(
+                probe.time, "monotonic", side_effect=[1.0, 1.2, 1.4]
+            ):
+                for _ in range(3):
+                    capture.sample()
+            samples = copy.deepcopy(capture.record["samples"])
+            first = capture.record["failure"]
+            self.assertIn("accounting unavailable", first)
+            self.assertIsNone(samples[1]["active"])
+            self.assertTrue(capture._cleanup_pending(samples[1]))
+            self.assertFalse(samples[1]["attribution_complete"])
+            self.assertFalse(probe.compiler_overlap(samples, 1.0, 1.4))
+            record = capture.finish()
+        self.assertEqual(record["failure"], first)
+        self.assertTrue(record["cleanup_complete"] and record["handles_closed"])
+
+
 if __name__ == "__main__":
     unittest.main()
