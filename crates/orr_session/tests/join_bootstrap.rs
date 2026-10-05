@@ -1,4 +1,4 @@
-//! Checked P2P bootstrap, using the unchanged v2 wire messages and loopback inputs.
+//! Explicit legacy-v2 P2P bootstrap, using the unchanged v2 wire messages and loopback inputs.
 use orr_fp::FP;
 use orr_session::{
     InputSource, JoinBootstrap, JoinBootstrapError as Error, JoinBootstrapStatus as Status,
@@ -29,7 +29,7 @@ fn game() -> ArenaConfig {
     ArenaConfig { player_count: 3 }
 }
 fn bootstrap<S: InputSource<Arena>>(budget: usize) -> JoinBootstrap<Arena, S> {
-    JoinBootstrap::new(cfg(2, 512), roster(), budget).unwrap()
+    JoinBootstrap::new_legacy_v2(cfg(2, 512), roster(), budget).unwrap()
 }
 fn notice(attempt: u32, sender: u8, spans: &[(u8, u64, u64)]) -> Vec<u8> {
     let mut bytes = b"ORRB".to_vec();
@@ -70,12 +70,12 @@ fn roster_requires_completed_distinct_membership_and_never_uses_zero() {
     assert_eq!(vacant.peers(), &[PlayerSlot(0), PlayerSlot(2)]);
     let mut c = cfg(2, 512);
     c.join_backlog_peers = 999;
-    let b = JoinBootstrap::<Arena, LocalInputSource>::new(c, roster(), 1024).unwrap();
+    let b = JoinBootstrap::<Arena, LocalInputSource>::new_legacy_v2(c, roster(), 1024).unwrap();
     assert_eq!(b.config().join_backlog_peers, 2);
-    assert!(JoinBootstrap::<Arena, LocalInputSource>::new(cfg(2, 512), roster(), 0).is_err());
+    assert!(JoinBootstrap::<Arena, LocalInputSource>::new_legacy_v2(cfg(2, 512), roster(), 0).is_err());
     let mut c = cfg(2, 512);
     c.relay = true;
-    assert!(JoinBootstrap::<Arena, LocalInputSource>::new(c, roster(), 1024).is_err());
+    assert!(JoinBootstrap::<Arena, LocalInputSource>::new_legacy_v2(c, roster(), 1024).is_err());
 }
 
 #[test]
@@ -474,7 +474,7 @@ fn vacant_sender_cannot_count_and_exhaustion_clears_staging() {
     .unwrap();
     let mut config = cfg(2, 512);
     config.max_join_attempts = 1;
-    let mut join = JoinBootstrap::<Arena, LocalInputSource>::new(config, roster, 4096).unwrap();
+    let mut join = JoinBootstrap::<Arena, LocalInputSource>::new_legacy_v2(config, roster, 4096).unwrap();
     join.next_request().unwrap();
     assert_eq!(join.config().join_backlog_peers, 1);
     assert!(matches!(
