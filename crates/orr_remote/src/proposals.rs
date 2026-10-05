@@ -21,7 +21,7 @@ use orr_sim::{Game, PlayerSlot};
 use serde_json::{json, Map, Value as J};
 
 use crate::activity::VerifyDetail;
-use crate::codec::b64_decode;
+use crate::codec::b64_decode_cancellable;
 use crate::dispatch::{
     component_type, get_view, overlay, query_view, scene_form, singleton_type, CallCtx, Effects, ErpTarget, HostLimits, P,
 };
@@ -458,7 +458,7 @@ fn verify_limit(n: u64, limit: u32) -> RpcError {
     RpcError::new(LIMIT_EXCEEDED, "verify_limit", format!("{n} ticks requested; this server verifies at most {limit} ticks per call")).with("max", json!(limit))
 }
 
-fn build_inputs<G: Game>(lim: &HostLimits, last_play: Option<&orr_edit::StoppedPlay>, spec: &J) -> Result<(VerifyInputs<'static, G>, J), RpcError> {
+fn build_inputs<G: Game>(lim: &HostLimits, last_play: Option<&orr_edit::StoppedPlay>, spec: &J, cancel: &AtomicBool) -> Result<(VerifyInputs<'static, G>, J), RpcError> {
     let obj = spec
         .as_object()
         .ok_or_else(|| RpcError::params("'inputs' must be an object like {\"kind\":\"bot\",\"ticks\":300} (kinds: last_play, replay, bot, idle)"))?;
@@ -490,10 +490,12 @@ fn build_inputs<G: Game>(lim: &HostLimits, last_play: Option<&orr_edit::StoppedP
                     .map(|s| s.replay.as_slice())
                     .ok_or_else(|| RpcError::state("no_last_play", "no play session has been stopped in this host yet (sim.start, sim.step, sim.stop first)"))?
             } else {
-                decoded = b64_decode(q.str("base64")?).ok_or_else(|| RpcError::params("'inputs.base64' is not valid base64"))?;
+                decoded = b64_decode_cancellable(q.str("base64")?, cancel)
+                    .map_err(|_| verify_cancelled())?
+                    .ok_or_else(|| RpcError::params("'inputs.base64' is not valid base64"))?;
                 &decoded
             };
-            let inputs = VerifyInputs::<G>::from_replay(bytes)?;
+            let inputs = VerifyInputs::<G>::from_replay_cancellable(bytes, cancel)?;
             Ok((inputs, json!({"kind": kind, "replay_bytes": bytes.len()})))
         }
         "idle" => {
@@ -672,7 +674,7 @@ impl PreparedVerify {
         cancelled()?;
         // Replay base64/decompression/parsing is deliberately off the host thread.
         // The execution tick cap is not a bound on decoded recording memory.
-        let (inputs, described) = build_inputs::<G>(&self.limits, self.last_play.as_ref(), &self.input_spec)?;
+        let (inputs, described) = build_inputs::<G>(&self.limits, self.last_play.as_ref(), &self.input_spec, cancel)?;
         cancelled()?;
         let metrics = Combined { reflect: ReflectMetrics::new(&self.types), game: self.limits.game.metrics.as_deref() };
         let report = orr_edit::verify_frames_cancellable::<G>(&self.base, &self.candidate, &inputs, &metrics, &self.opts, cancel)?;
@@ -821,6 +823,127 @@ mod recorded_admission_tests {
                         });
                     }
                     assert_eq!(result.value, expected_value);
+                    assert_eq!(document_state(&doc, id), before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn precancelled_recordings_return_no_inputs_or_report() {
+        let (doc, id, limits, stopped) = fixture();
+        let before = document_state(&doc, id);
+        let cancel = AtomicBool::new(true);
+        assert!(matches!(VerifyInputs::<PhysGame>::from_replay_cancellable(&stopped.replay, &cancel), Err(orr_edit::EditError::VerifyCancelled)));
+        for kind in ["replay", "last_play"] {
+            let spec = recorded_spec(kind, &stopped);
+            let error = build_inputs::<PhysGame>(&limits, Some(&stopped), &spec, &cancel).err().expect("no prepared inputs");
+            assert_eq!(error.kind(), Some("verify_cancelled"));
+            for with_proposal in [false, true] {
+                let params = json!({"id": id.to_string(), "inputs": spec, "ticks": 2});
+                let error = prepare_verify(&doc, &limits, Some(&stopped), &params, with_proposal)
+                    .unwrap().run::<PhysGame>(&cancel).err().expect("no report or detail");
+                assert_eq!(error.kind(), Some("verify_cancelled"));
+                assert_eq!(error.message, "verification was cancelled");
+            }
+        }
+        assert_eq!(document_state(&doc, id), before);
+    }
+
+    struct DecodeControl {
+        cancel: Arc<AtomicBool>,
+        stop: u32,
+        visits: u32,
+    }
+
+    thread_local! {
+        static DECODE_CONTROL: std::cell::RefCell<Option<DecodeControl>> = const { std::cell::RefCell::new(None) };
+        static SYSTEM_BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    #[derive(Clone)]
+    struct DecodeCommand(u32);
+
+    impl orr_sim::SimCommand for DecodeCommand {
+        fn encode(&self, out: &mut Vec<u8>) {
+            orr_sim::encode_pod(&self.0, out);
+        }
+
+        fn decode(bytes: &[u8]) -> Option<Self> {
+            let value = orr_sim::decode_pod(bytes)?;
+            DECODE_CONTROL.with_borrow_mut(|control| {
+                if let Some(control) = control {
+                    control.visits += 1;
+                    if value == control.stop {
+                        control.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+            Some(Self(value))
+        }
+    }
+
+    // An ordinary empty-system game with a POD command codec. The decoder
+    // requests cancellation on this test thread, with no sleeps or races.
+    struct DecodeGame;
+
+    impl Game for DecodeGame {
+        type Input = u32;
+        type Command = DecodeCommand;
+        type Event = u32;
+        type Config = ();
+
+        fn register(_: &mut orr_ecs::ComponentRegistryBuilder) {}
+        fn setup(_: &mut Frame, _: &()) {}
+        fn systems() -> Vec<Box<dyn orr_sim::System<Self>>> {
+            SYSTEM_BUILDS.set(SYSTEM_BUILDS.get() + 1);
+            Vec::new()
+        }
+    }
+
+    fn decoding_recording() -> StoppedPlay {
+        let mut sim = orr_sim::Simulation::<DecodeGame>::new((), 60, 7);
+        let mut writer = orr_session::ReplayWriter::<DecodeGame>::new(orr_session::ReplayHeader {
+            format_version: 3, game_id: "decode-test".into(), build_hash: sim.build_hash(), seed: 7,
+            player_count: 1, tick_rate: 60, input_size: std::mem::size_of::<u32>() as u32,
+        });
+        writer.record_checksum(0, sim.checksum());
+        for tick in 1..=3 {
+            let commands = vec![(PlayerSlot(0), DecodeCommand(tick as u32))];
+            let mut inputs = orr_sim::TickInputs::new(tick, 1);
+            inputs.set_input(PlayerSlot(0), 0);
+            inputs.set_commands(commands.clone());
+            sim.step(&inputs);
+            writer.record_tick(tick, &[0], &commands);
+            writer.record_checksum(tick, sim.checksum());
+        }
+        StoppedPlay { replay: writer.finish(), tick: 3, checksum: sim.checksum() }
+    }
+
+    #[test]
+    fn decoder_cancellation_maps_through_preparation_without_report() {
+        let mut doc = EditorDoc::for_game::<DecodeGame>(TypeRegistry::new(), 7).unwrap();
+        let id = doc.propose("unchanged", Origin::User).unwrap();
+        let limits = HostLimits { max_verify_ticks: 2, ..HostLimits::default() };
+        let stopped = decoding_recording();
+        let before = document_state(&doc, id);
+        VerifyInputs::<DecodeGame>::from_stopped(&stopped).unwrap();
+        for kind in ["replay", "last_play"] {
+            for with_proposal in [false, true] {
+                let params = json!({"id": id.to_string(), "inputs": recorded_spec(kind, &stopped), "ticks": 2});
+                // Even the final command (past the execution cap) must be
+                // fully parsed normally, and must not yield success if it cancels.
+                for stop in 1..=3 {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    DECODE_CONTROL.set(Some(DecodeControl { cancel: cancel.clone(), stop, visits: 0 }));
+                    SYSTEM_BUILDS.set(0);
+                    let error = prepare_verify(&doc, &limits, Some(&stopped), &params, with_proposal)
+                        .unwrap().run::<DecodeGame>(&cancel).err().expect("no successful report or detail");
+                    assert_eq!(error.kind(), Some("verify_cancelled"));
+                    assert_eq!(error.message, "verify: cancelled");
+                    let control = DECODE_CONTROL.take().unwrap();
+                    assert_eq!(control.visits, stop, "no later command decode");
+                    assert_eq!(SYSTEM_BUILDS.get(), 0, "preparation cancellation never starts simulation");
                     assert_eq!(document_state(&doc, id), before);
                 }
             }

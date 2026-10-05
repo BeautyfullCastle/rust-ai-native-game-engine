@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use orr_ecs::Frame;
 use orr_reflect::TypeRegistry;
-use orr_session::ReplayReader;
+use orr_session::{ReplayParseError, ReplayReader};
 use orr_sim::{DebugCommand, Game, MetricValue, Metrics, PlayerSlot, Simulation, TickInputs};
 
 use crate::doc::EditorDoc;
@@ -44,7 +44,16 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
     /// Parses a `.orrp` recording (for example `StoppedPlay::replay` or a
     /// saved file).
     pub fn from_replay(bytes: &[u8]) -> Result<Self, EditError> {
-        let reader = ReplayReader::<G>::parse(bytes).map_err(|e| EditError::Verify(format!("bad replay: {e}")))?;
+        Self::from_replay_cancellable(bytes, &AtomicBool::new(false))
+    }
+
+    /// Like [`from_replay`](Self::from_replay), with cooperative cancellation
+    /// during replay preparation. No partial inputs are returned on cancellation.
+    pub fn from_replay_cancellable(bytes: &[u8], cancel: &AtomicBool) -> Result<Self, EditError> {
+        let reader = ReplayReader::<G>::parse_cancellable(bytes, cancel).map_err(|error| match error {
+            ReplayParseError::Cancelled => EditError::VerifyCancelled,
+            ReplayParseError::Replay(error) => EditError::Verify(format!("bad replay: {error}")),
+        })?;
         Ok(VerifyInputs::Recorded(reader))
     }
 

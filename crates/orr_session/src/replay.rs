@@ -16,6 +16,7 @@
 //! runs, in file order. The reader accepts all three; the writer always
 //! writes v3.
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use orr_ecs::{Frame, FrameDecodeError};
 use orr_sim::{DebugCommand, Game, PlayerSlot, SimCommand, Simulation};
@@ -82,6 +83,58 @@ impl core::fmt::Display for ReplayError {
     }
 }
 impl std::error::Error for ReplayError {}
+
+/// A cancellable parse either observed cancellation or failed to read a replay.
+/// The ordinary [`ReplayError`] contract is unchanged.
+#[derive(Debug)]
+pub enum ReplayParseError {
+    Cancelled,
+    Replay(ReplayError),
+}
+
+impl From<ReplayError> for ReplayParseError {
+    fn from(error: ReplayError) -> Self {
+        Self::Replay(error)
+    }
+}
+
+impl core::fmt::Display for ReplayParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("replay parsing was cancelled"),
+            Self::Replay(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ReplayParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cancelled => None,
+            Self::Replay(error) => Some(error),
+        }
+    }
+}
+
+// Named boundaries also let tests request cancellation deterministically,
+// without timing a thread against decompression or a particular record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParseCheckpoint {
+    Start,
+    BeforeDecompress,
+    AfterDecompress,
+    BeforeTick,
+    AfterTick,
+    BeforeCommand,
+    AfterCommand,
+    BeforeChecksum,
+    AfterChecksum,
+    BeforeKeyframe,
+    AfterKeyframe,
+    BeforeDebugCommand,
+    AfterDebugCommand,
+    Complete,
+}
 
 fn write_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
@@ -371,16 +424,31 @@ pub struct ReplayReader<G: Game> {
 
 impl<G: Game> ReplayReader<G> {
     pub fn parse(bytes: &[u8]) -> Result<Self, ReplayError> {
+        Self::parse_with_checkpoint(bytes, |_| Ok(()))
+    }
+
+    /// Fully parses a recording, checking `cancel` around decompression and
+    /// each tick, command and suffix-table record. Cancellation never returns
+    /// a partial reader. A single LZ4 call, allocation/copy or command decoder
+    /// is not interruptible; cancellation is observed when it returns.
+    pub fn parse_cancellable(bytes: &[u8], cancel: &AtomicBool) -> Result<Self, ReplayParseError> {
+        Self::parse_with_checkpoint(bytes, |_| {
+            if cancel.load(Ordering::Relaxed) { Err(ReplayParseError::Cancelled) } else { Ok(()) }
+        })
+    }
+
+    fn parse_with_checkpoint<E: From<ReplayError>>(bytes: &[u8], mut checkpoint: impl FnMut(ParseCheckpoint) -> Result<(), E>) -> Result<Self, E> {
+        checkpoint(ParseCheckpoint::Start)?;
         if bytes.len() < 4 {
-            return Err(ReplayError::TooShort);
+            return Err(ReplayError::TooShort.into());
         }
         if &bytes[0..4] != MAGIC {
-            return Err(ReplayError::BadMagic);
+            return Err(ReplayError::BadMagic.into());
         }
         let mut r = Reader::new(&bytes[4..]);
         let format_version = r.u32()?;
         if !(MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&format_version) {
-            return Err(ReplayError::UnsupportedVersion(format_version));
+            return Err(ReplayError::UnsupportedVersion(format_version).into());
         }
         let game_id = r.str()?;
         let build_hash = r.u64()?;
@@ -389,19 +457,23 @@ impl<G: Game> ReplayReader<G> {
         let tick_rate = r.u32()?;
         let input_size = r.u32()?;
         if player_count > 32 {
-            return Err(ReplayError::BadPlayerCount(player_count));
+            return Err(ReplayError::BadPlayerCount(player_count).into());
         }
         let header = ReplayHeader { format_version, game_id, build_hash, seed, player_count, tick_rate, input_size };
 
         let compressed_len = r.u32()? as usize;
         let compressed = r.take(compressed_len)?;
-        let body = crate::wire::decompress_bounded(compressed).map_err(ReplayError::Decompress)?;
+        checkpoint(ParseCheckpoint::BeforeDecompress)?;
+        let body = crate::wire::decompress_bounded(compressed);
+        checkpoint(ParseCheckpoint::AfterDecompress)?;
+        let body = body.map_err(ReplayError::Decompress)?;
 
         let mut br = Reader::new(&body);
         let tick_count = br.u32()?;
         let mut ticks = BTreeMap::new();
         let mut prev: Option<Vec<G::Input>> = None;
         for _ in 0..tick_count {
+            checkpoint(ParseCheckpoint::BeforeTick)?;
             let tick = br.u64()?;
             let mask = br.u32()?;
             let mut inputs = prev.clone().unwrap_or_else(|| vec![G::Input::default(); player_count as usize]);
@@ -416,31 +488,39 @@ impl<G: Game> ReplayReader<G> {
             // remaining input bounds the allocation, not the forged count.
             let mut commands = Vec::with_capacity((cmd_count as usize).min(br.remaining() / 5));
             for _ in 0..cmd_count {
+                checkpoint(ParseCheckpoint::BeforeCommand)?;
                 let slot = PlayerSlot(br.u8()?);
                 let len = br.u32()? as usize;
                 let bytes = br.take(len)?;
-                let cmd = G::Command::decode(bytes).ok_or(ReplayError::BadCommand)?;
+                let cmd = G::Command::decode(bytes);
+                checkpoint(ParseCheckpoint::AfterCommand)?;
+                let cmd = cmd.ok_or(ReplayError::BadCommand)?;
                 commands.push((slot, cmd));
             }
             prev = Some(inputs.clone());
             ticks.insert(tick, (inputs, commands));
+            checkpoint(ParseCheckpoint::AfterTick)?;
         }
 
         let checksum_count = br.u32()?;
         let mut checksums = Vec::with_capacity((checksum_count as usize).min(br.remaining() / 16));
         for _ in 0..checksum_count {
+            checkpoint(ParseCheckpoint::BeforeChecksum)?;
             let tick = br.u64()?;
             let checksum = br.u64()?;
             checksums.push((tick, checksum));
+            checkpoint(ParseCheckpoint::AfterChecksum)?;
         }
 
         let mut keyframes = BTreeMap::new();
         if format_version >= 2 {
             let keyframe_count = br.u32()?;
             for _ in 0..keyframe_count {
+                checkpoint(ParseCheckpoint::BeforeKeyframe)?;
                 let tick = br.u64()?;
                 let len = br.u32()? as usize;
                 keyframes.insert(tick, br.take(len)?.to_vec());
+                checkpoint(ParseCheckpoint::AfterKeyframe)?;
             }
         }
 
@@ -448,15 +528,19 @@ impl<G: Game> ReplayReader<G> {
         if format_version >= 3 {
             let debug_count = br.u32()?;
             for _ in 0..debug_count {
+                checkpoint(ParseCheckpoint::BeforeDebugCommand)?;
                 let tick = br.u64()?;
                 let len = br.u32()? as usize;
-                let cmd = DebugCommand::decode(br.take(len)?).ok_or(ReplayError::BadCommand)?;
+                let cmd = DebugCommand::decode(br.take(len)?);
+                checkpoint(ParseCheckpoint::AfterDebugCommand)?;
+                let cmd = cmd.ok_or(ReplayError::BadCommand)?;
                 debug.entry(tick).or_default().push(cmd);
             }
         }
 
         let first_tick = ticks.keys().next().copied().unwrap_or(1);
         let last_tick = ticks.keys().next_back().copied().unwrap_or(0);
+        checkpoint(ParseCheckpoint::Complete)?;
         Ok(Self { header, ticks, checksums, keyframes, debug, cursor: first_tick, first_tick, last_tick })
     }
 
@@ -563,6 +647,103 @@ impl<G: Game> crate::InputSource<G> for ReplayReader<G> {
         }
         self.cursor += 1;
         out
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use orr_fp::FP;
+    use orr_sim::TickInputs;
+    use orr_testgame::{Arena, ArenaConfig, ArenaInput, Score, SpawnBulletCmd};
+
+    fn recording() -> Vec<u8> {
+        let mut sim = Simulation::<Arena>::new(ArenaConfig { player_count: 2 }, 60, 9);
+        let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
+            format_version: 3, game_id: "arena".into(), build_hash: sim.build_hash(), seed: 9,
+            player_count: 2, tick_rate: 60, input_size: std::mem::size_of::<ArenaInput>() as u32,
+        }).with_keyframe_interval(1);
+        writer.record_checksum(0, sim.checksum());
+        writer.record_keyframe(sim.frame());
+        for tick in 1..=3 {
+            // Tick 2 repeats tick 1; tick 3 changes one slot, exercising deltas.
+            let inputs = [ArenaInput::new(FP::ONE, FP::ZERO, false), ArenaInput::new(FP::from_int((tick / 3) as i32), FP::ZERO, false)];
+            let commands = vec![(PlayerSlot(0), SpawnBulletCmd { owner: 0 }), (PlayerSlot(1), SpawnBulletCmd { owner: 1 })];
+            let score = sim.frame().registry().singleton_id::<Score>().unwrap();
+            let debug = vec![
+                DebugCommand::SetSingletonField { singleton: score, offset: 0, bytes: (tick as u32).to_le_bytes().to_vec() },
+                DebugCommand::SetSingletonField { singleton: score, offset: 0, bytes: (tick as u32 + 10).to_le_bytes().to_vec() },
+            ];
+            let mut ti = TickInputs::new(tick, 2);
+            for (slot, input) in inputs.iter().enumerate() {
+                ti.set_input(PlayerSlot(slot as u8), *input);
+            }
+            ti.set_commands(commands.clone());
+            sim.step_with_debug(&ti, &debug);
+            writer.record_tick(tick, &inputs, &commands);
+            writer.record_checksum(tick, sim.checksum());
+            writer.maybe_record_keyframe(sim.frame());
+            for command in debug {
+                writer.record_debug(tick, command);
+            }
+        }
+        writer.finish()
+    }
+
+    #[test]
+    fn unset_cancellation_preserves_full_reader() {
+        let bytes = recording();
+        let ordinary = ReplayReader::<Arena>::parse(&bytes).unwrap();
+        let cancellable = ReplayReader::<Arena>::parse_cancellable(&bytes, &AtomicBool::new(false)).unwrap();
+        let header = |h: &ReplayHeader| (h.format_version, h.game_id.clone(), h.build_hash, h.seed, h.player_count, h.tick_rate, h.input_size);
+        assert_eq!(header(&ordinary.header), header(&cancellable.header));
+        assert_eq!(ordinary.ticks, cancellable.ticks);
+        assert_eq!(ordinary.checksums, cancellable.checksums);
+        assert_eq!(ordinary.keyframes, cancellable.keyframes);
+        assert_eq!(ordinary.debug, cancellable.debug);
+        assert_eq!((ordinary.cursor, ordinary.first_tick, ordinary.last_tick), (cancellable.cursor, cancellable.first_tick, cancellable.last_tick));
+        assert_eq!(ordinary.tick_count(), 3);
+        assert_eq!(ordinary.checksums.len(), 4);
+        assert_eq!(ordinary.keyframe_count(), 4);
+        assert_eq!(ordinary.debug_commands(3).len(), 2);
+        assert_eq!(ordinary.to_writer().finish(), bytes);
+        assert_eq!(cancellable.to_writer().finish(), bytes);
+    }
+
+    #[test]
+    fn cancellation_discards_reader_at_every_checkpoint() {
+        let bytes = recording();
+        assert!(matches!(ReplayReader::<Arena>::parse_cancellable(&bytes, &AtomicBool::new(true)), Err(ReplayParseError::Cancelled)));
+        let mut checkpoints = Vec::new();
+        ReplayReader::<Arena>::parse_with_checkpoint(&bytes, |point| {
+            checkpoints.push(point);
+            Ok::<(), ReplayParseError>(())
+        }).unwrap();
+        for (point, count) in [
+            (ParseCheckpoint::Start, 1), (ParseCheckpoint::BeforeDecompress, 1), (ParseCheckpoint::AfterDecompress, 1),
+            (ParseCheckpoint::BeforeTick, 3), (ParseCheckpoint::AfterTick, 3),
+            (ParseCheckpoint::BeforeCommand, 6), (ParseCheckpoint::AfterCommand, 6),
+            (ParseCheckpoint::BeforeChecksum, 4), (ParseCheckpoint::AfterChecksum, 4),
+            (ParseCheckpoint::BeforeKeyframe, 4), (ParseCheckpoint::AfterKeyframe, 4),
+            (ParseCheckpoint::BeforeDebugCommand, 6), (ParseCheckpoint::AfterDebugCommand, 6), (ParseCheckpoint::Complete, 1),
+        ] {
+            assert_eq!(checkpoints.iter().filter(|&&p| p == point).count(), count, "{point:?}");
+        }
+        // Visit every occurrence, including the middle and final record of
+        // each table, the final decoder and the last successful-return boundary.
+        for stop in 0..checkpoints.len() {
+            let cancel = AtomicBool::new(false);
+            let mut visited = Vec::new();
+            let result = ReplayReader::<Arena>::parse_with_checkpoint(&bytes, |point| {
+                visited.push(point);
+                if visited.len() == stop + 1 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                if cancel.load(Ordering::Relaxed) { Err(ReplayParseError::Cancelled) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(ReplayParseError::Cancelled)), "checkpoint {stop}: {visited:?}");
+            assert_eq!(visited, checkpoints[..=stop], "no later work after cancellation");
+        }
     }
 }
 
