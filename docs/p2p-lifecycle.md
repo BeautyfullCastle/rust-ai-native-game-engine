@@ -71,20 +71,25 @@ Run the focused scenario with:
 cargo test -p orr_relay_net --release --lib server_ep::p2p_lifecycle_tests
 ```
 
-## Runnable, bounded two-peer direct QUIC slice
+## Runnable two-peer direct QUIC with bounded rolling input history
 
 The headless `orr_relay_net` example now exercises a usable direct-socket path:
 
 ```sh
 cargo run -p orr_relay_net --release --example p2p_arena -- smoke
+# Optional longer run, crossing the former 4096-tick lifetime:
+cargo run -p orr_relay_net --release --example p2p_arena -- smoke 5000
 cargo run -p orr_relay_net --release --example p2p_arena -- host 127.0.0.1:7000
 # In another terminal, use the address, SHA-256 fingerprint and generation the host prints:
 cargo run -p orr_relay_net --release --example p2p_arena -- join <address> <fingerprint> <generation>
 ```
 
-`host [bind] [generation]` starts Arena with active slot 0 and committed vacant
+`host [bind] [generation] [live_ticks]` starts Arena with active slot 0 and committed vacant
 slot 1, advances 24 ticks before advertising, and keeps advancing while waiting.
-The host generates a fresh nonzero generation by default. For a remote machine,
+The host generates a fresh nonzero generation by default. `live_ticks` defaults
+to 120, must be positive, and is printed in the matching join command.
+`join <address> <fingerprint> <generation> [live_ticks]` must use the same run
+length; `smoke [live_ticks]` supplies it to both peers. For a remote machine,
 supply its reachable host address to the joiner; no address discovery, NAT
 traversal or relay is attempted. Do not copy a wildcard bind address as a remote
 destination. The direct client retains the existing QUIC SHA-256 certificate-pin
@@ -115,14 +120,16 @@ ensures the host has an actual retained tail beyond its verified snapshot.
 
 The joiner prints `JOIN_READY caught_up=false` when coverage is advertised; it
 continues receiving inputs and advancing before printing `JOIN_CAUGHT_UP` at the
-verified target (120 ticks beyond the checked first-input tick). Each side
+verified target (`live_ticks` beyond the checked first-input tick). Each side
 checks every locally available verified checkpoint against an independently
 stepped Arena baseline. The final checksum is also exchanged with an
 example-only, generation-fenced report/ack; the host waits for peer closure
 after acknowledgment. `SMOKE_OK` therefore requires real loopback QUIC and
 matching verified simulation results, not merely successful control exchange.
 The example's `ORRA` v1 report format is documented beside its encoder; it is
-neither an input packet nor a general repair/consensus protocol.
+neither an input packet nor a general repair/consensus protocol. The default
+short smoke uses only eight recent evidence ticks and asserts both peers retire
+multiple windows; its `SMOKE_OK` reports the floors and retained record counts.
 
 ### Public input API and wire v1
 
@@ -133,7 +140,9 @@ author into the bounded pre-admission queue. Bind once to the actual admitted
 connection, the independently agreed `CheckedJoinContext`, the accepted
 snapshot tick and first-input tick. The host derives these from its checked
 ticket; the joiner derives them from its accepted bootstrap Session. Do not use
-unvalidated incoming header fields as binding authority.
+unvalidated incoming header fields as binding authority. This API accepts scalar
+ticks, so the application must establish that validated-snapshot precondition;
+context equality and structural checks alone do not authenticate a snapshot.
 
 This format is separate from both relay traffic and checked-v3 controls:
 
@@ -168,7 +177,7 @@ codec does not redefine them.
 ### Authority, backpressure, bounded failure and cleanup
 
 Only two peers are supported: host 0 and joiner 1. After binding, records must be
-strictly after the snapshot. Host 0 may supply its own slot at any allowed tick,
+strictly after the snapshot to enter Session. Host 0 may supply its own slot at any allowed tick,
 and slot 1 only before the ticket's `first_input_tick`. Joiner 1 may author slot
 1 starting exactly at that tick. Neither side may claim any other slot. The
 pre-admission host backlog is revalidated against that cutoff during binding.
@@ -177,32 +186,81 @@ generation, attempt and application schema before Session can see the record.
 Equal numeric connection IDs from a different adapter are not authentication;
 applications must preserve the demonstrated one-adapter namespace or remap IDs.
 
-Exact duplicate wire records are harmless; a differing record for an already
-seen `(tick, slot)` fails explicitly, including changed command order. The
-ledger covers this driver's whole finite lifetime, so it does not silently
-forget conflict evidence after a tick becomes verified. Outbound FIFO records
-remain queued when the real transport reports `Backpressure`. A retry processes
-only the queue length present at flush start; appended callback work waits for
-the next flush. Callback inspection is safe, cancellation halts the flush, and
-recursive flushing is an explicit terminal error.
+There are two explicit source modes, sharing unchanged ORRI v1 framing:
 
-The default window is ticks `1..4097`, with at most 8192 retained records and
-2 MiB of encoded bytes in each of the duplicate ledger, outbound queue and
-incoming queue. Packet/input/command/count limits are independent. The example
-narrows those to a 256-byte packet, 20-byte input, at most three commands and
-four bytes per command. These bounds include still-unconsumed and duplicate
-bookkeeping; no queue silently drops input and carries on. Exhaustion,
-conflicting duplicates, unauthorized traffic or a non-backpressure send error
-make failure sticky, clear buffered input and require terminating the session.
-`InputSource` has legacy void methods, so the caller must check `driver.check()`
-before and after Session/bootstrap calls, as the example does. This is a finite
-slice, not a rolling-history implementation suitable for indefinite play.
+- `P2pInputDriver::new` preserves the finite window (`first_tick..end_tick`,
+  default `1..4097`) and exact duplicate evidence for that entire lifetime
+- `P2pInputDriver::new_rolling` takes
+  `orr_relay_net::p2p_input::P2pRollingWindow { recent_ticks, future_ticks }`.
+  Both distances must be positive. In this mode `P2pInputLimits.first_tick` and
+  `end_tick` are ignored; its packet, field, record and byte budgets still apply.
+  The standalone `encode_p2p_input` helper retains its finite range checks
 
-The example also bounds transport message size, connection count, event queue,
-outbound transport bytes, control queues and wait time. A too-late join or the
-finite tick limit exits visibly instead of wrapping or discarding input.
-Snapshot controls retain existing checked wire/decompression bounds, distinct
-from the much smaller input-packet limit.
+Rolling progress starts at zero. Only Session's `on_locally_verified` callback
+or the application's validated snapshot binding may advance it. Packet maxima,
+predicted head ticks and peer progress reports do not move it. Allowed future
+ticks are at most `progress + future_ticks`, inclusive. Both this addition and
+two ticks of cursor headroom are checked; `TickExhausted` terminates rather
+than wrapping or saturating the future horizon. The inclusive horizon cannot
+exceed `u64::MAX - 2`: even with stalled verification, Session can pre-increment
+its send cursor for the first rejected send before the required driver check.
+`future_ticks` values of `u64::MAX` and `u64::MAX - 1` are therefore invalid at
+construction.
+Out-of-window future traffic fails with `TickRange`, even if individually valid.
+
+The irreversible retirement floor is the maximum of the accepted snapshot tick,
+its previous value, and `progress.saturating_sub(recent_ticks)`. Thus a window of
+one retains the current verified tick's evidence. At or below the floor,
+otherwise valid traffic yields `IgnoredRetired`, explicitly distinct from an
+exact duplicate. Connection, channel, version/schema, generation/attempt,
+origin/cutoff authority, complete framing, and packet/field byte bounds are all
+checked first. Retired traffic never calls application decoders, enters Session,
+or recreates duplicate evidence. It may contain different bytes than the old
+record; after retirement the source makes no equality or conflict claim.
+
+Above the floor, exact duplicate wire records are harmless, including after
+polling. A differing record for a seen `(tick, slot)` fails explicitly, including
+changed command order. The source exposes `retained_evidence()` as record/byte
+counts and `rolling_progress()` as `(watermark, retired_through)` for diagnostics.
+These are observations, not a way to externally advance the window.
+
+Before admission, the rolling host may discard verified outbound records because
+a fresh checked snapshot covers them. Binding with a snapshot older than any
+such discarded record fails `SnapshotTooOld`. Required post-snapshot output is
+retained in FIFO order and revalidated against the checked cutoff. After binding,
+local verification never discards unsent output, even when its duplicate evidence
+has retired: verification is not peer receipt. A blocked FIFO head survives
+`Backpressure`; a retry processes only the queue length at flush start. Callback
+inspection and verification are safe, cancellation halts the flush, and recursive
+flushing is terminal. Capacity exhaustion fails visibly rather than losing output.
+
+Each of the duplicate ledger, outbound queue and incoming queue has independent
+`max_records` and `max_retained_bytes` limits (default 8192 records and 2 MiB).
+Packet/input/command/count limits are independent. Encoded retained payload is
+at most three times that byte budget, excluding temporary codec/transport copies;
+decoded commands use at most `max_records * max_commands` objects. The example
+uses 192 records / 48 KiB per structure, a 256-byte packet, 20-byte input, at most
+three four-byte commands, eight recent ticks and a 64-tick future horizon.
+
+These are source-memory bounds, not a whole-session or process bound. In
+particular, the example's independent reference checksum vector and Session's
+checksum log grow with run length. Long-running bounded whole-session history,
+replay guarantees, reconnect, acknowledgments of individual inputs and repair
+remain separate work; the rolling source adds no new wire messages.
+
+Exhaustion, recent conflicts, unauthorized traffic or a non-backpressure send
+error make failure sticky, clear buffers and require terminating the session.
+Check `driver.check()` before and after Session/bootstrap calls because the
+legacy InputSource methods return no error. A driver/source belongs to one
+Session lifetime: cancel and replace it before restoring/replacing the Session,
+including a forward restore; a lower callback cannot lower its floor.
+
+The example bounds transport message size, connections, event/send/control
+queues and stalled progress. Its 30-second watchdog is reset by verified progress
+or actual bootstrap/completion transitions, not arbitrary incoming traffic;
+there is no total 60-second run deadline. An advancing pre-admission host can
+wait for a late join beyond the former fixed lifetime. Snapshot controls retain
+existing checked wire/decompression bounds, distinct from the input-packet limit.
 
 Bootstrap disconnect/error uses the existing owned cleanup: cancel or invalidate
 the bootstrap, release the donor's exact local hold, retire only its registered
@@ -220,8 +278,16 @@ cargo test -p orr_relay_net --release --all-targets
 cargo clippy -p orr_relay_net --release --all-targets -- -D warnings
 ```
 
+Rolling regressions compare both peers against independent simulation for 4300
+ticks, exercise checked late join after 4300 pre-admission ticks with the exact
+post-snapshot FIFO tail, and test stalled verification, recent conflicts, retired
+framing/authority checks, queue budgets, cancellation and cursor exhaustion.
+The real QUIC `smoke 5000` run also verified tick 5028 with matching independent
+checkpoints and eight-tick-window retirement floors at 5020. These results do
+not imply bounded Session checksum/reference history.
+
 Remaining scope includes production admission/authentication, discovery/full
 mesh, reconnect or vacancy recovery coordination, a repair wire protocol,
-long-running bounded-history rollover and datagram redundancy. No simulation
+whole-session bounded history and datagram redundancy. No simulation
 was added to the TUI. This real two-peer path advances issue #12 but does not
 claim that the complete P2P feature is finished.

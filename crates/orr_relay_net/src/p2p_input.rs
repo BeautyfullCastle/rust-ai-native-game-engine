@@ -3,8 +3,10 @@
 //! `ORRI` v1 uses explicit little-endian framing and a caller-defined portable
 //! payload codec. It is not a raw-Pod format. A driver binds exactly one admitted
 //! connection to an independently agreed checked context and accepted snapshot.
-//! This deliberately finite source retains duplicate evidence for its entire
-//! tick window. Exhaustion or a conflicting duplicate fails the whole driver.
+//! The finite constructor retains duplicate evidence for its entire tick window.
+//! Opt-in rolling mode retires evidence only behind locally verified progress;
+//! local verification never acknowledges delivery of bound outbound records.
+//! Exhaustion or a recent conflicting duplicate fails the whole driver.
 //! Call `check` before and after each Session/bootstrap operation; InputSource's
 //! legacy void methods cannot return transport failures themselves. Never keep
 //! advancing a failed session. `flush` retries the same FIFO head on Backpressure.
@@ -16,7 +18,9 @@ use std::rc::Rc;
 
 use orr_net::SendError;
 use orr_proto::{Channel, ConnId};
-use orr_session::{CheckedJoinContext, Game, InputSource, PlayerSlot, RemoteInput};
+use orr_session::{
+    CheckedJoinContext, Game, InputSource, LocallyVerifiedTick, PlayerSlot, RemoteInput,
+};
 
 pub const P2P_INPUT_VERSION: u16 = 1;
 const MAGIC: &[u8; 4] = b"ORRI";
@@ -68,8 +72,13 @@ impl Default for P2pInputLimits {
 }
 impl P2pInputLimits {
     fn validate(&self) -> Result<(), P2pInputError> {
-        if self.first_tick >= self.end_tick
-            || self.max_packet_bytes < HEADER
+        if self.first_tick >= self.end_tick {
+            return Err(P2pInputError::InvalidConfig);
+        }
+        self.validate_payload()
+    }
+    fn validate_payload(&self) -> Result<(), P2pInputError> {
+        if self.max_packet_bytes < HEADER
             || self.max_packet_bytes > u32::MAX as usize
             || self.max_input_bytes > self.max_packet_bytes
             || self.max_commands > u16::MAX as usize
@@ -90,6 +99,37 @@ impl P2pInputLimits {
     }
 }
 
+/// Opt-in rolling retention. Both distances must be nonzero. Keep at most
+/// `recent_ticks` verified ticks of exact duplicate evidence; additionally accept
+/// ticks up to `progress + future_ticks` (inclusive). Progress starts at zero and
+/// comes only from Session's local verification callback or a validated binding.
+/// The two ticks beyond the inclusive horizon must also fit. This lets Session
+/// pre-increment its send cursor even for the first rejected send, including
+/// when verification is stalled; the caller then observes a terminal error.
+/// The finite limits' `first_tick`/`end_tick` do not apply in rolling mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct P2pRollingWindow {
+    pub recent_ticks: u64,
+    pub future_ticks: u64,
+}
+impl P2pRollingWindow {
+    fn end(self, progress: u64) -> Result<u64, P2pInputError> {
+        progress
+            .checked_add(self.future_ticks)
+            .and_then(|last| last.checked_add(2))
+            .map(|reserved_end| reserved_end - 1)
+            .ok_or(P2pInputError::TickExhausted)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Rolling {
+    window: P2pRollingWindow,
+    progress: u64,
+    retired_through: u64,
+    discarded_output_through: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum P2pInputError {
     InvalidConfig,
@@ -101,13 +141,20 @@ pub enum P2pInputError {
     WrongSchema,
     WrongAuthority,
     TickRange,
+    /// The rolling future horizon would overflow; the session must terminate.
+    TickExhausted,
+    /// A pre-bind host already discarded output newer than this snapshot.
+    SnapshotTooOld,
     Malformed,
     PacketLimit,
     InputLimit,
     CommandLimit,
     RecordLimit,
     ByteLimit,
-    ConflictingDuplicate { tick: u64, slot: PlayerSlot },
+    ConflictingDuplicate {
+        tick: u64,
+        slot: PlayerSlot,
+    },
     Disconnected,
     Cancelled,
     ReentrantFlush,
@@ -120,11 +167,14 @@ impl core::fmt::Display for P2pInputError {
 }
 impl std::error::Error for P2pInputError {}
 
-/// Whether an accepted packet added a record or was an exact duplicate.
+/// Outcome after identity, authority, framing and byte-bound validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum P2pInputAccepted {
     New,
     Duplicate,
+    /// Too old to compare: no application decode, enqueue or ledger insertion.
+    /// This is not an assertion that the retired bytes were an exact duplicate.
+    IgnoredRetired,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct P2pInputFlush {
@@ -142,6 +192,14 @@ pub fn encode_p2p_input<G: Game, C: P2pInputCodec<G>>(
 ) -> Result<Vec<u8>, P2pInputError> {
     limits.validate()?;
     limits.tick(record.tick)?;
+    encode_payload::<G, C>(context, record, limits)
+}
+
+fn encode_payload<G: Game, C: P2pInputCodec<G>>(
+    context: &CheckedJoinContext,
+    record: &RemoteInput<G>,
+    limits: &P2pInputLimits,
+) -> Result<Vec<u8>, P2pInputError> {
     if record.disconnected || record.slot.0 >= 2 {
         return Err(P2pInputError::WrongAuthority);
     }
@@ -224,6 +282,7 @@ struct State<G: Game, C: P2pInputCodec<G>> {
     local: PlayerSlot,
     context: CheckedJoinContext,
     limits: P2pInputLimits,
+    rolling: Option<Rolling>,
     binding: Option<Binding>,
     error: Option<P2pInputError>,
     seen: BTreeMap<(u64, PlayerSlot), Vec<u8>>,
@@ -236,6 +295,55 @@ struct State<G: Game, C: P2pInputCodec<G>> {
     marker: PhantomData<C>,
 }
 impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
+    fn tick(&self, tick: u64) -> Result<(), P2pInputError> {
+        if let Some(r) = self.rolling {
+            let end = r.window.end(r.progress)?;
+            if tick == 0 || tick >= end {
+                return Err(P2pInputError::TickRange);
+            }
+            Ok(())
+        } else {
+            self.limits.tick(tick)
+        }
+    }
+    fn retired(&self, tick: u64) -> bool {
+        self.rolling.is_some_and(|r| tick <= r.retired_through)
+    }
+    fn progress(&mut self, tick: u64) -> Result<(), P2pInputError> {
+        self.check()?;
+        let Some(mut r) = self.rolling else {
+            return Ok(());
+        };
+        r.progress = r.progress.max(tick);
+        r.window.end(r.progress)?;
+        r.retired_through = r
+            .retired_through
+            .max(r.progress.saturating_sub(r.window.recent_ticks));
+        while self
+            .seen
+            .first_key_value()
+            .is_some_and(|(&(tick, _), _)| tick <= r.retired_through)
+        {
+            let (_, bytes) = self.seen.pop_first().unwrap();
+            self.seen_bytes -= bytes.len();
+        }
+        // Before admission a fresh snapshot will cover these records. Binding
+        // requires a snapshot at least this fresh. Once bound, verification is
+        // NOT peer receipt: even retired records remain in the outbound FIFO.
+        if self.binding.is_none() && self.local == PlayerSlot(0) {
+            self.outgoing.retain(|(tick, bytes)| {
+                if *tick <= r.progress {
+                    self.outgoing_bytes -= bytes.len();
+                    r.discarded_output_through = r.discarded_output_through.max(*tick);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        self.rolling = Some(r);
+        Ok(())
+    }
     fn check(&self) -> Result<(), P2pInputError> {
         self.error.clone().map_or(Ok(()), Err)
     }
@@ -257,9 +365,9 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         slot: PlayerSlot,
         tick: u64,
     ) -> Result<(), P2pInputError> {
-        self.limits.tick(tick)?;
+        self.tick(tick)?;
         let allowed = match self.binding {
-            Some(b) if tick <= b.snapshot_tick => false,
+            Some(b) if self.rolling.is_none() && tick <= b.snapshot_tick => false,
             Some(b) => {
                 if author == PlayerSlot(0) {
                     slot == PlayerSlot(0) || (slot == PlayerSlot(1) && tick < b.first_input_tick)
@@ -294,7 +402,11 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
     fn send(&mut self, record: RemoteInput<G>) -> Result<(), P2pInputError> {
         self.check()?;
         self.authority(self.local, record.slot, record.tick)?;
-        let bytes = encode_p2p_input::<G, C>(&self.context, &record, &self.limits)?;
+        // Never resurrect retired local records, even after their evidence is gone.
+        if self.retired(record.tick) {
+            return Ok(());
+        }
+        let bytes = encode_payload::<G, C>(&self.context, &record, &self.limits)?;
         if self.duplicate(record.tick, record.slot, &bytes)? {
             return Ok(());
         }
@@ -357,6 +469,9 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         if !r.0.is_empty() {
             return Err(P2pInputError::Malformed);
         }
+        if self.retired(tick) {
+            return Ok(P2pInputAccepted::IgnoredRetired);
+        }
         if self.duplicate(tick, slot, bytes)? {
             return Ok(P2pInputAccepted::Duplicate);
         }
@@ -403,6 +518,42 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
         limits: P2pInputLimits,
     ) -> Result<(Self, P2pInputSource<G, C>), P2pInputError> {
         limits.validate()?;
+        Self::create(local, context, limits, None)
+    }
+    /// Rolling mode has no fixed session end tick. The recent evidence and
+    /// each pending queue retain independent record/byte limits. A stalled
+    /// verifier cannot advance the future horizon by receiving newer packets.
+    /// This source belongs to one Session lifetime: cancel/replace it before
+    /// restoring or replacing that Session. It is not reconnect/replay support.
+    pub fn new_rolling(
+        local: PlayerSlot,
+        context: CheckedJoinContext,
+        limits: P2pInputLimits,
+        window: P2pRollingWindow,
+    ) -> Result<(Self, P2pInputSource<G, C>), P2pInputError> {
+        limits.validate_payload()?;
+        if window.recent_ticks == 0 || window.future_ticks == 0 {
+            return Err(P2pInputError::InvalidConfig);
+        }
+        window.end(0).map_err(|_| P2pInputError::InvalidConfig)?;
+        Self::create(
+            local,
+            context,
+            limits,
+            Some(Rolling {
+                window,
+                progress: 0,
+                retired_through: 0,
+                discarded_output_through: 0,
+            }),
+        )
+    }
+    fn create(
+        local: PlayerSlot,
+        context: CheckedJoinContext,
+        limits: P2pInputLimits,
+        rolling: Option<Rolling>,
+    ) -> Result<(Self, P2pInputSource<G, C>), P2pInputError> {
         let roster = context.roster();
         if local.0 > 1
             || roster.player_count() != 2
@@ -416,6 +567,7 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
             local,
             context,
             limits,
+            rolling,
             binding: None,
             error: None,
             seen: BTreeMap::new(),
@@ -432,7 +584,10 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
     /// Bind the actual admitted connection once. Derive tick bounds from the
     /// accepted checked ticket (host), or the accepted bootstrap Session's
     /// verified_tick/next_send_tick (joiner), never unvalidated packet fields.
-    /// Context equality is checked before queued input can reach Session.
+    /// Context equality is checked before queued input can reach Session. This
+    /// is a trusted application boundary: scalar tick arguments cannot prove
+    /// snapshot validation themselves. The caller must validate the checked
+    /// snapshot/ticket first; never pass a peer's claimed progress directly.
     pub fn bind(
         &self,
         conn: ConnId,
@@ -449,11 +604,19 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
             if &s.context != context {
                 return Err(P2pInputError::WrongContext);
             }
-            if snapshot_tick >= first_input_tick
-                || first_input_tick < s.limits.first_tick
-                || first_input_tick >= s.limits.end_tick
-            {
+            if snapshot_tick >= first_input_tick {
                 return Err(P2pInputError::TickRange);
+            }
+            if let Some(r) = s.rolling {
+                if snapshot_tick < r.discarded_output_through {
+                    return Err(P2pInputError::SnapshotTooOld);
+                }
+                let end = r.window.end(r.progress.max(snapshot_tick))?;
+                if first_input_tick >= end {
+                    return Err(P2pInputError::TickRange);
+                }
+            } else {
+                s.limits.tick(first_input_tick)?;
             }
             s.binding = Some(Binding {
                 conn,
@@ -467,8 +630,9 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
                     s.authority(s.local, slot, tick)?;
                 }
             }
-            // The snapshot already contains these ticks. Retain duplicate evidence,
-            // but never send old records to the freshly bootstrapped Session.
+            // The snapshot already contains these ticks. Never send old records
+            // to the freshly bootstrapped Session. Finite mode keeps their exact
+            // evidence; rolling mode retires it below after all binding checks.
             let mut retained = VecDeque::new();
             while let Some((tick, bytes)) = s.outgoing.pop_front() {
                 if tick > snapshot_tick {
@@ -478,6 +642,12 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
                 }
             }
             s.outgoing = retained;
+            if let Some(r) = &mut s.rolling {
+                // Seed only after all binding checks pass. The caller must
+                // supply a validated checked snapshot, not claimed progress.
+                r.retired_through = r.retired_through.max(snapshot_tick);
+                s.progress(snapshot_tick)?;
+            }
             Ok(())
         })();
         result.map_err(|e| s.fail(e))
@@ -488,6 +658,20 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
     pub fn pending(&self) -> (usize, usize) {
         let s = self.0.borrow();
         (s.outgoing.len(), s.outgoing_bytes)
+    }
+    /// Retained exact duplicate evidence: (records, encoded bytes), excluding
+    /// the independently bounded incoming and outgoing queues.
+    pub fn retained_evidence(&self) -> (usize, usize) {
+        let s = self.0.borrow();
+        (s.seen.len(), s.seen_bytes)
+    }
+    /// Rolling (locally verified/snapshot watermark, irreversible retirement
+    /// floor), or None for the legacy finite constructor.
+    pub fn rolling_progress(&self) -> Option<(u64, u64)> {
+        self.0
+            .borrow()
+            .rolling
+            .map(|r| (r.progress, r.retired_through))
     }
     /// Invalid traffic is terminal: callers must close/retire this admitted link.
     pub fn receive(
@@ -570,6 +754,12 @@ impl<G: Game, C: P2pInputCodec<G>> P2pInputDriver<G, C> {
     }
 }
 impl<G: Game, C: P2pInputCodec<G>> InputSource<G> for P2pInputSource<G, C> {
+    fn on_locally_verified(&mut self, tick: LocallyVerifiedTick<'_, G>) {
+        let mut s = self.0.borrow_mut();
+        if let Err(e) = s.progress(tick.simulated.tick()) {
+            s.fail(e);
+        }
+    }
     fn send_local(
         &mut self,
         tick: u64,
