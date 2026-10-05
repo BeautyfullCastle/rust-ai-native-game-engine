@@ -25,6 +25,7 @@ mod relay;
 mod replay;
 mod session;
 mod wire;
+mod verified_history;
 
 pub use dump::{DesyncDump, DumpError};
 pub use relay::{
@@ -35,7 +36,7 @@ pub use events::{EventBatch, EventStatus};
 pub use join_checked::{checked_backlog_notice, import_checked_join_ticket, serve_checked_join, CheckedJoinContext, CheckedJoinError, CheckedJoinTicket};
 pub use join_bootstrap::{JoinBootstrap, JoinBootstrapError, JoinBootstrapStatus, JoinRoster};
 pub use join::{join_request, JoinAttempts, JoinError, JoinTicket};
-pub use input_source::{InputSource, LocalInputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RemoteInput};
+pub use input_source::{InputSource, LocallyVerifiedTick, LocalInputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RemoteInput};
 pub use play::{
     ControlOp, PlayConfig, PlayError, PlayMode, PlayNote, PlaySession, Speed, Timeline, TIMELINE_CHECKSUM_WINDOW,
 };
@@ -51,3 +52,8 @@ pub use session::{
 pub use orr_sim::{DebugCommand, DebugError, EventKey, Game, PlayerSlot, SimEvent};
 
 pub use p2p_membership::{P2pAttempt, P2pCleanup, P2pFlush, P2pMembership, P2pMembershipError, P2pRoutedEvent, P2pSlotState};
+
+pub use verified_history::{
+    LocallyVerifiedHistory, LocallyVerifiedRecord, VerifiedHistoryEncodeError, VerifiedHistoryEncoder,
+    VerifiedHistoryError, VerifiedHistoryLimits, VerifiedHistorySource,
+};
