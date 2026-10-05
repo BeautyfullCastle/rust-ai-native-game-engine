@@ -7,6 +7,7 @@ lane until its natural exit and all owned descendants have exited.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -593,13 +594,21 @@ class Capture:
         try:
             for stream in ("stdout", "stderr"):
                 rfd, wfd = os.pipe()
-                reader, writer = os.fdopen(rfd, "rb"), os.fdopen(wfd, "wb", buffering=0)
-                writers.append(writer)
-                raw = (folder / (stream + ".txt")).open("wb")
+                reader = writer = None
+                try:
+                    reader = os.fdopen(rfd, "rb")
+                    writer = os.fdopen(wfd, "wb", buffering=0)
+                except BaseException:
+                    if reader is None:
+                        os.close(rfd)
+                    else:
+                        reader.close()
+                    if writer is None:
+                        os.close(wfd)
+                    raise
                 state = {"observed_bytes": 0, "saved_bytes": 0, "sha256": None, "eof": False}
                 self.record["streams"][stream] = state
-
-                def drain(reader=reader, raw=raw, state=state):
+                def drain(reader, raw, state):
                     gate.wait()
                     h = hashlib.sha256()
                     try:
@@ -625,9 +634,17 @@ class Capture:
                         reader.close()
                         state["sha256"] = h.hexdigest()
 
-                thread = threading.Thread(target=drain, daemon=False)
-                self.readers.append(thread)
-                thread.start()
+                # Before a drain worker starts, every pipe/file remains owned
+                # by this stack. Never join an unstarted thread after setup fails.
+                with ExitStack() as setup:
+                    setup.enter_context(reader)
+                    setup.enter_context(writer)
+                    raw = setup.enter_context((folder / (stream + ".txt")).open("wb"))
+                    thread = threading.Thread(target=drain, args=(reader, raw, state), daemon=False)
+                    thread.start()
+                    self.readers.append(thread)
+                    writers.append(writer)
+                    setup.pop_all()  # Drain owns reader/raw; finally owns writer.
             factory = factory or (WindowsChild if os.name == "nt" else PosixChild)
             resolved = shutil.which(self.argv[0]) or self.argv[0]
             self.argv[0] = str(Path(resolved).resolve())

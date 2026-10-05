@@ -268,6 +268,19 @@ class PlanValidationTests(unittest.TestCase):
 
 
 class CaptureLifecycleTests(unittest.TestCase):
+    def test_reader_start_failure_before_child_preserves_setup_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "capture"
+            factory = mock.Mock()
+            with mock.patch.object(probe.threading.Thread, "start", side_effect=RuntimeError("synthetic thread setup")):
+                with self.assertRaisesRegex(RuntimeError, "synthetic thread setup"):
+                    probe.Capture(["fake"], Path("fake-root"), folder, 90, {}, factory=factory)
+            factory.assert_not_called()
+            saved = probe.json.loads((folder / "process.json").read_text(encoding="utf-8"))
+            self.assertIn("synthetic thread setup", saved["failure"])
+            self.assertFalse(saved["cleanup_complete"])
+            self.assertIsNone(saved["actual_exit"])
+
     def capture(self, folder, *, child_options=None, watchdog=90):
         options = child_options or {}
         return probe.Capture(
