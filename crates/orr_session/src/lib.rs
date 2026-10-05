@@ -17,6 +17,7 @@ mod dump;
 mod events;
 mod input_source;
 mod join;
+mod join_bootstrap;
 mod play;
 mod relay;
 mod replay;
@@ -29,6 +30,7 @@ pub use relay::{
     RelayUpdate, SourceStats,
 };
 pub use events::{EventBatch, EventStatus};
+pub use join_bootstrap::{JoinBootstrap, JoinBootstrapError, JoinBootstrapStatus, JoinRoster};
 pub use join::{join_request, JoinAttempts, JoinError, JoinTicket};
 pub use input_source::{InputSource, LocalInputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, RemoteInput};
 pub use play::{
