@@ -15,14 +15,15 @@
 //! Returned cleanup obligations must be coordinated before retry/promotion:
 //! retire exact local holds with `P2pCleanup::release_local_hold`, coordinate
 //! remote retention, invalidate join bootstraps and retire old input links.
-//! Input-link retirement is a later integration: `InputSource` has no close or
-//! remove operation, and the returned connection list includes shared links,
-//! not just links exclusively owned by this join. Never blindly close that list.
+//! `P2pCleanup::retire_exclusive_connections` retires only explicitly registered
+//! transport ownership leases. The informational connection list also includes
+//! shared links; never blindly close that list. This does not remove arbitrary
+//! custom `InputSource` links or retract packets already delivered to the app.
 //! No cleanup wire protocol or input codec is introduced here. Cancellation
 //! cannot undo inputs already authored after Ready or reopen an assigned slot.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use orr_proto::{Channel, ConnId, ServerEvent};
 
@@ -64,13 +65,113 @@ impl P2pAttempt {
     }
 }
 
+/// Local identity of an endpoint that supports exclusive connection ownership.
+/// Transport adapters keep one issuer for their lifetime. No identity or lease
+/// is serializable, reconstructible from a connection ID, or kept alive by a
+/// cleanup obligation.
+#[derive(Debug, Default)]
+pub struct P2pConnectionIssuer {
+    identity: Arc<()>,
+}
+impl P2pConnectionIssuer {
+    /// Adapter implementation hook: issue only for a live, currently shared
+    /// connection. Store the ownership in the endpoint until disconnect,
+    /// retirement or explicit relinquishment. Never issue two live owners for
+    /// the same connection incarnation.
+    pub fn issue(&self, connection: ConnId) -> (P2pConnectionOwnership, P2pConnectionLease) {
+        let identity = Arc::new(());
+        let lease = P2pConnectionLease {
+            endpoint: Arc::downgrade(&self.identity),
+            ownership: Arc::downgrade(&identity),
+            connection,
+        };
+        (
+            P2pConnectionOwnership {
+                identity,
+                connection,
+            },
+            lease,
+        )
+    }
+
+    /// Match both this endpoint and its still-installed ownership. Equal
+    /// numeric connection IDs, including on another endpoint, do not suffice.
+    pub fn matches(&self, owner: &P2pConnectionOwnership, lease: &P2pConnectionLease) -> bool {
+        owner.connection == lease.connection
+            && Weak::ptr_eq(&Arc::downgrade(&self.identity), &lease.endpoint)
+            && Weak::ptr_eq(&Arc::downgrade(&owner.identity), &lease.ownership)
+    }
+}
+
+/// Endpoint-side ownership of one exact connection incarnation. Dropping this
+/// expires its lease without closing the connection (promotion to shared use).
+#[derive(Debug)]
+pub struct P2pConnectionOwnership {
+    identity: Arc<()>,
+    connection: ConnId,
+}
+
+/// Opaque, non-cloneable right to retire one exclusively owned connection.
+/// Issued by a supporting endpoint, then moved into a validated attempt. This
+/// weak token neither keeps the endpoint alive nor closes it when dropped.
+#[derive(Debug)]
+pub struct P2pConnectionLease {
+    endpoint: Weak<()>,
+    ownership: Weak<()>,
+    connection: ConnId,
+}
+impl P2pConnectionLease {
+    pub fn connection(&self) -> ConnId {
+        self.connection
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.endpoint.strong_count() != 0 && self.ownership.strong_count() != 0
+    }
+}
+
+/// Result of exact local transport retirement, not acknowledgement of physical
+/// closure or remote cleanup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum P2pConnectionRetirement {
+    Retired,
+    NoMatchingConnection,
+}
+
+/// Small transport-side integration boundary; no transport dependency enters
+/// the session crate. Implementations must check endpoint identity and live
+/// exclusive ownership, fence local send/receive and discard buffered events
+/// before requesting physical close. Repeated/stale/foreign leases are no-ops.
+pub trait P2pConnectionRetirer {
+    fn retire_exclusive_connection(
+        &mut self,
+        lease: &P2pConnectionLease,
+    ) -> P2pConnectionRetirement;
+}
+
+/// Registration failure returns the original lease, leaving endpoint ownership
+/// and the attempt's cleanup obligations unchanged. It can be retried, retired
+/// directly, or explicitly relinquished by its endpoint.
+#[derive(Debug)]
+pub struct P2pConnectionRegistrationError {
+    pub error: P2pMembershipError,
+    pub lease: P2pConnectionLease,
+}
+impl core::fmt::Display for P2pConnectionRegistrationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+impl std::error::Error for P2pConnectionRegistrationError {}
+
 /// Explicit obligations, including all former links, even if no control message
 /// was successfully queued to the transport. A send success is not delivery.
 /// `release_local_hold` can retire only the exact Session retention captured
 /// during this attempt. It is idempotent and safe after local replacement, even
 /// with equal tickets. The private lease is never reconstructed from the public
-/// wire context. This value does not own or invalidate a bootstrap or input link;
-/// those still require caller coordination and instance ownership.
+/// wire context. Explicit exclusive connection leases are separate from the
+/// informational `connections` list. Bootstrap invalidation, remote cleanup and
+/// arbitrary custom input sources still require caller coordination.
 #[must_use = "coordinate hold, bootstrap and input-link cleanup before retrying"]
 #[derive(Debug)]
 pub struct P2pCleanup {
@@ -78,8 +179,26 @@ pub struct P2pCleanup {
     pub connections: Vec<(PlayerSlot, ConnId)>,
     pub discarded_outbound_bytes: usize,
     local_hold: Option<JoinHoldLease>,
+    exclusive_connections: Vec<P2pConnectionLease>,
 }
 impl P2pCleanup {
+    pub fn exclusive_connections(&self) -> &[P2pConnectionLease] {
+        &self.exclusive_connections
+    }
+
+    /// Retire matching exclusive connections on this endpoint, returning the
+    /// number newly retired. Applying cleanup to a foreign endpoint first does
+    /// not consume it; shared/relinquished/replaced connections are untouched.
+    /// This cannot retract packets already delivered to the application.
+    pub fn retire_exclusive_connections(&self, endpoint: &mut impl P2pConnectionRetirer) -> usize {
+        self.exclusive_connections
+            .iter()
+            .filter(|lease| {
+                endpoint.retire_exclusive_connection(lease) == P2pConnectionRetirement::Retired
+            })
+            .count()
+    }
+
     /// Retires this attempt's local retention if it is still installed in this
     /// Session. Keeps the donor assignment and all input and membership state.
     /// Does not consume the obligation: applying it to a foreign Session first
@@ -89,10 +208,11 @@ impl P2pCleanup {
         &self,
         session: &mut Session<G, S>,
     ) -> JoinHoldRelease {
-        self.local_hold.as_ref().map_or(
-            JoinHoldRelease::NoMatchingHold,
-            |lease| session.release_owned_join_hold(lease),
-        )
+        self.local_hold
+            .as_ref()
+            .map_or(JoinHoldRelease::NoMatchingHold, |lease| {
+                session.release_owned_join_hold(lease)
+            })
     }
 }
 
@@ -109,11 +229,17 @@ pub enum P2pMembershipError {
     /// This attempt already owns a live hold in a different Session. Cancel and
     /// retire it first, or drop the old Session before installing a replacement.
     LocalSessionMismatch,
+    ConnectionLeaseExpired,
+    ExclusiveConnectionLimit {
+        limit: usize,
+    },
     Invalidated,
     RevisionExhausted,
     WrongSender,
     WrongControl,
-    OutboundBudget { limit: usize },
+    OutboundBudget {
+        limit: usize,
+    },
     Checked(CheckedJoinError),
     Bootstrap(JoinBootstrapError),
 }
@@ -177,7 +303,9 @@ pub struct P2pFlush<E> {
 /// replacing its hold expires the lease, and repeated installations reuse the
 /// same entry. Attempt-handle clones carry no lease bookkeeping. Capturing holds
 /// requires exclusive `&mut self`, with no locks or interior synchronization.
-/// Retained outbound payloads share an explicit byte budget.
+/// Each attempt also retains at most `player_count - 1` exclusive connection
+/// leases, one per admitted remote binding. Retained outbound payloads share an
+/// explicit byte budget.
 /// No transport Connected events are stored. The local identity is immutable.
 ///
 /// The existing abstract `Endpoint::send` cannot report backpressure and may
@@ -191,6 +319,7 @@ pub struct P2pMembership {
     revision: u64,
     attempts: Vec<Option<P2pAttempt>>,
     local_holds: Vec<Option<JoinHoldLease>>,
+    exclusive_connections: Vec<Vec<P2pConnectionLease>>,
     outbound: VecDeque<Outbound>,
     outbound_bytes: usize,
     outbound_budget: usize,
@@ -219,6 +348,7 @@ impl P2pMembership {
             revision: 0,
             attempts: vec![None; player_count as usize],
             local_holds: vec![None; player_count as usize],
+            exclusive_connections: (0..player_count).map(|_| Vec::new()).collect(),
             outbound: VecDeque::new(),
             outbound_bytes: 0,
             outbound_budget,
@@ -284,6 +414,9 @@ impl P2pMembership {
                 .collect(),
             discarded_outbound_bytes: discarded,
             local_hold: self.local_holds[joiner.0 as usize].take(),
+            exclusive_connections: std::mem::take(
+                &mut self.exclusive_connections[joiner.0 as usize],
+            ),
         }
     }
     fn change(
@@ -487,6 +620,51 @@ impl P2pMembership {
             .expect("validated attempt");
         Ok(self.cleanup(current))
     }
+
+    /// Register explicit transport ownership only after validating this exact
+    /// attempt. IDs must use the registry's admitted namespace. At most one
+    /// lease per remote slot is retained for each attempt; a lease cannot be
+    /// cloned into another attempt. Any failure returns it unchanged.
+    pub fn register_exclusive_connection(
+        &mut self,
+        a: &P2pAttempt,
+        lease: P2pConnectionLease,
+    ) -> Result<(), P2pConnectionRegistrationError> {
+        let checked = (|| {
+            self.validate(a)?;
+            if !lease.is_live() {
+                return Err(P2pMembershipError::ConnectionLeaseExpired);
+            }
+            let connections = &self.exclusive_connections[a.context.roster().joiner().0 as usize];
+            if connections
+                .iter()
+                .any(|existing| existing.connection == lease.connection)
+            {
+                return Err(P2pMembershipError::ConnectionCollision(lease.connection));
+            }
+            let limit = self.slots.len() - 1;
+            if connections.len() >= limit {
+                return Err(P2pMembershipError::ExclusiveConnectionLimit { limit });
+            }
+            self.sender(lease.connection)?;
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            return Err(P2pConnectionRegistrationError { error, lease });
+        }
+        self.exclusive_connections[a.context.roster().joiner().0 as usize].push(lease);
+        Ok(())
+    }
+
+    /// Borrow registered leases, for example to explicitly relinquish endpoint
+    /// ownership before promoting a joining connection to shared use.
+    pub fn exclusive_connections(
+        &self,
+        a: &P2pAttempt,
+    ) -> Result<&[P2pConnectionLease], P2pMembershipError> {
+        self.validate(a)?;
+        Ok(&self.exclusive_connections[a.context.roster().joiner().0 as usize])
+    }
     fn bootstrap_matches<G: Game, S: InputSource<G>>(
         &self,
         a: &P2pAttempt,
@@ -521,7 +699,10 @@ impl P2pMembership {
     ) {
         let slot = a.context.roster().joiner();
         if let Some(after) = session.join_hold_lease(slot) {
-            if !before.as_ref().is_some_and(|old| old.same_installation(&after)) {
+            if !before
+                .as_ref()
+                .is_some_and(|old| old.same_installation(&after))
+            {
                 self.local_holds[slot.0 as usize] = Some(after);
             }
         }

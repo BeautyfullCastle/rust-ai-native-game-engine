@@ -53,7 +53,12 @@ pub use session::{
 
 pub use orr_sim::{DebugCommand, DebugError, EventKey, Game, PlayerSlot, SimEvent};
 
-pub use p2p_membership::{P2pAttempt, P2pCleanup, P2pFlush, P2pMembership, P2pMembershipError, P2pRoutedEvent, P2pSlotState};
+pub use p2p_membership::{
+    P2pAttempt, P2pCleanup, P2pConnectionIssuer, P2pConnectionLease,
+    P2pConnectionOwnership, P2pConnectionRegistrationError, P2pConnectionRetirer,
+    P2pConnectionRetirement, P2pFlush, P2pMembership, P2pMembershipError,
+    P2pRoutedEvent, P2pSlotState,
+};
 
 pub use verified_history::{
     LocallyVerifiedHistory, LocallyVerifiedRecord, VerifiedHistoryEncodeError, VerifiedHistoryEncoder,
