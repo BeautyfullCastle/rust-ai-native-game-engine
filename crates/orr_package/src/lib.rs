@@ -663,6 +663,16 @@ fn injected_failure(point: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn fixture_dir() -> tempfile::TempDir {
+        // Resolve only the trusted system-temp root before creating any fixture
+        // content. macOS temp paths may traverse /var -> /private/var, while
+        // production deliberately rejects symlinks in every input ancestor.
+        let root = std::env::temp_dir();
+        #[cfg(unix)]
+        let root = fs::canonicalize(root).unwrap();
+        tempfile::tempdir_in(root).unwrap()
+    }
+
     #[test]
     fn sha256_uses_canonical_lowercase_hex() {
         assert_eq!(
@@ -700,7 +710,7 @@ mod tests {
     }
     #[test]
     fn install_load_remove_reinstall_identity_and_source_isolation() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let project_root = tmp.path().join("game");
         fs::create_dir(&project_root).unwrap();
@@ -725,7 +735,7 @@ mod tests {
     }
     #[test]
     fn dependency_conflict_cycle_and_failure_preserve_lock() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let a = source(tmp.path(), "a", &[("b", "1.0.0")]);
         let b = source(tmp.path(), "b", &[]);
         let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
@@ -761,7 +771,7 @@ mod tests {
     }
     #[test]
     fn candidate_dependencies_are_transitive_and_pruned() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let a = source(tmp.path(), "a", &[("b", "1.0.0")]);
         let b = source(tmp.path(), "b", &[]);
         let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
@@ -776,7 +786,7 @@ mod tests {
     }
     #[test]
     fn host_capability_inventory_is_required_for_asset_reads() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         edit(&src, |m| {
             m.capabilities.insert("sprite".into());
@@ -803,7 +813,7 @@ mod tests {
     }
     #[test]
     fn tamper_and_writer_failure_preserve_authority() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
         let lock = p.install(std::slice::from_ref(&src)).unwrap();
@@ -823,7 +833,7 @@ mod tests {
     }
     #[test]
     fn reject_nonportable_colliding_and_hook_manifests() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         for path in [
             "../escape",
@@ -854,7 +864,7 @@ mod tests {
     }
     #[test]
     fn digest_ignores_json_layout_and_source_location() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let a = source(tmp.path(), "art", &[]);
         let first = inspect(&a, &Runtime::content_only()).unwrap();
         let m: Manifest = json(&a.join(MANIFEST)).unwrap();
@@ -866,7 +876,7 @@ mod tests {
     }
     #[test]
     fn exact_versions_and_engine_rejected_before_mutation() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
         edit(&src, |m| {
@@ -882,7 +892,7 @@ mod tests {
     }
     #[test]
     fn staged_object_and_lock_publish_failures_preserve_active_state() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
         let old = p.install(std::slice::from_ref(&src)).unwrap();
@@ -903,7 +913,7 @@ mod tests {
     }
     #[test]
     fn competing_writer_cannot_modify_authority() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
         p.install(std::slice::from_ref(&src)).unwrap();
@@ -918,7 +928,7 @@ mod tests {
     }
     #[test]
     fn forged_lock_digest_file_map_and_unreachable_package_are_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let extra = source(tmp.path(), "unused", &[]);
         let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
@@ -943,7 +953,7 @@ mod tests {
     }
     #[test]
     fn bounds_reject_before_large_reads_and_graph_walks() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let runtime = Runtime::content_only();
         let mut m: Manifest = json(&src.join(MANIFEST)).unwrap();
@@ -1004,7 +1014,7 @@ mod tests {
     #[test]
     fn ancestor_links_and_reserved_manifest_subtrees_are_rejected() {
         use std::os::unix::fs::symlink;
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let alias = tmp.path().join("alias");
         symlink(&src, &alias).unwrap();
@@ -1050,7 +1060,7 @@ mod tests {
             }
             return;
         }
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         for (name, file) in [("fifo-asset", "asset.txt"), ("fifo-manifest", MANIFEST)] {
             let path = source(tmp.path(), name, &[]).join(file);
             fs::remove_file(&path).unwrap();
@@ -1089,7 +1099,7 @@ mod tests {
     #[test]
     fn symlinks_at_source_object_and_lock_are_rejected() {
         use std::os::unix::fs::symlink;
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_dir();
         let src = source(tmp.path(), "art", &[]);
         let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
         let lock = p.install(std::slice::from_ref(&src)).unwrap();
