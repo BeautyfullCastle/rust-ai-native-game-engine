@@ -3220,6 +3220,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_input"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "orr_mcp"
 version = "0.0.1"
 dependencies = [
@@ -3392,6 +3400,7 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_games",
+ "orr_input",
  "orr_package",
  "orr_physics",
  "orr_physics3d",

@@ -20,6 +20,9 @@
 //!   --room N  --slot N  --name TEXT  --sim-latency MS  --sim-jitter MS  --sim-loss P  --sim-seed N
 //!   --desync-dir DIR  --bot  --connect-timeout SECONDS
 //! ```
+//! With `--features input-actions`: `--input-bindings FILE` loads bindings;
+//! `--save-input-bindings NEW_FILE` exports and exits (never overwrites).
+//! P toggles local input blocking; the network simulation continues.
 //! Keys: WASD or arrows move, space fires, Escape quits. In local mode the other player is a bot.
 use std::process::ExitCode;
 
@@ -46,8 +49,12 @@ fn real_main() -> Result<(), String> {
     let mut netargs = NetArgs::default();
     let mut headless = false;
     let mut sprite_project = None;
+    let mut input_bindings = None;
+    let mut save_input_bindings = None;
     let mut opts = Options {
         label: String::new(),
+        #[cfg(feature = "input-actions")]
+        input_map: None,
         vsync: true,
         audio: Default::default(),
         seconds: None,
@@ -62,6 +69,8 @@ fn real_main() -> Result<(), String> {
             continue;
         }
         match arg.as_str() {
+            "--input-bindings" => input_bindings = Some(value("--input-bindings")?),
+            "--save-input-bindings" => save_input_bindings = Some(value("--save-input-bindings")?),
             "--headless" => headless = true,
             "--sprite-project" => sprite_project = Some(std::path::PathBuf::from(value("--sprite-project")?)),
             "--audio" => opts.audio = value("--audio")?.parse()?,
@@ -89,6 +98,22 @@ fn real_main() -> Result<(), String> {
         }
     }
 
+    if input_bindings.is_some() || save_input_bindings.is_some() {
+        #[cfg(not(feature = "input-actions"))]
+        return Err("input binding options require --features input-actions".into());
+        #[cfg(feature = "input-actions")]
+        {
+            let map = if let Some(path) = input_bindings {
+                orr_input::ActionMap::load_file(path)?
+            } else { orr_sample::arena_input::default_map() };
+            orr_sample::arena_input::validate_map(&map)?;
+            if let Some(path) = save_input_bindings {
+                map.save_new(&path)?;
+                return Ok(());
+            }
+            opts.input_map = Some(map);
+        }
+    }
     if sprite_project.is_some() {
         if headless { return Err("--sprite-project requires a window".into()); }
         #[cfg(not(feature = "sprites"))]
