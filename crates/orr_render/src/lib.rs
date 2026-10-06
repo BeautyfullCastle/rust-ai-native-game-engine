@@ -93,4 +93,6 @@ pub use post_process::{PostProcessSettings, PostProcessor, MAX_POST_PROCESS_BYTE
 #[cfg(feature = "irradiance-probes")]
 pub mod irradiance;
 #[cfg(feature = "irradiance-probes")]
+pub mod irradiance_bake;
+#[cfg(feature = "irradiance-probes")]
 pub use irradiance::{IrradianceGrid, IrradianceProvenance, IrradianceSample, IrradianceUniform};

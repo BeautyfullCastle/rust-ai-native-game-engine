@@ -1,9 +1,10 @@
-# Authored/imported diffuse irradiance probes
+# Diffuse irradiance probes
 
 This opt-in view-layer slice of #101 adds a spatial SH9 diffuse irradiance grid
-in the production Yard3D composed viewport. It is **not a baker**, baked-GI
-verification, reflection probe, specular IBL, or replacement for direct lights.
-The baked irradiance and reflection/IBL requirements remain open.
+in the production Yard3D composed viewport. Authored/imported grids are joined
+by a [bounded static sun-only single-bounce baker](static-diffuse-bake.md).
+Reflection probes, specular IBL and broader GI remain open; direct lighting is
+unchanged.
 
 ## Build and author
 
@@ -16,7 +17,8 @@ The Yard inspector's irradiance panel creates/opens an independent
 a node and set constant linear RGB irradiance with intensity, or import full
 signed SH9 JSON. Enable, save/reload, undo/redo and dirty state apply only to this
 sidecar. No scene/model schema changes or simulation writes occur. A provenance
-label describes authored/imported data; it is never proof of a physical bake.
+label distinguishes authored/imported data from an actual static sun bake;
+baked sidecars also require a versioned fingerprint receipt.
 
 Package imports read verified immutable assets through `Project::read_asset`
 and a compiled `irradiance-probes` capability. Editing produces a user-owned

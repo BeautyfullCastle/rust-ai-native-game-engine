@@ -87,4 +87,6 @@ pub mod yard_animation;
 #[cfg(feature = "irradiance-probes")]
 pub mod irradiance_bindings;
 #[cfg(feature = "irradiance-probes")]
+pub mod irradiance_bake;
+#[cfg(feature = "irradiance-probes")]
 pub mod irradiance_panel;
