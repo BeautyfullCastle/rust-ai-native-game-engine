@@ -14,8 +14,11 @@ default = []
 sprites = ["dep:orr_sprite"]
 models = ["dep:orr_model"]
 animation = ["models", "orr_model/animation"]
+imported-scene = ["models", "dep:serde", "dep:serde_json"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 orr_model = { path = "../orr_model", optional = true }
 orr_sprite = { path = "../orr_sprite", optional = true }
 orr_rhi = { path = "../orr_rhi" }
@@ -31,3 +34,7 @@ orr_ecs = { path = "../orr_ecs" }
 [[example]]
 name = "skinned_strip"
 required-features = ["animation"]
+
+[[example]]
+name = "lit_imported_scene"
+required-features = ["imported-scene", "animation"]

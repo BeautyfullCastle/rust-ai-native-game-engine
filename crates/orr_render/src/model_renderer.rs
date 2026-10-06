@@ -51,13 +51,15 @@ struct Vertex {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Globals {
+pub(crate) struct Globals {
     view_proj: [[f32; 4]; 4],
     direction: [f32; 4],
     sun: [f32; 4],
     sky: [f32; 4],
     ground: [f32; 4],
     params: [f32; 4],
+    pub(crate) point_position_range: [f32; 4],
+    pub(crate) point_color_intensity: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -281,21 +283,7 @@ impl<B: Rhi> ModelRenderer<B> {
         {
             return Err(ModelRenderError::InvalidTarget);
         }
-        let view_proj = validate_camera(camera, size)?;
-        let direction = normalize(lighting.direction);
-        if lighting.shadows
-            || !lighting.direction.iter().all(|v| v.is_finite())
-            || dot(direction, direction) < 0.5
-            || !lighting
-                .color
-                .iter()
-                .chain(&lighting.sky)
-                .chain(&lighting.ground)
-                .chain([&lighting.intensity, &lighting.ambient, &lighting.exposure])
-                .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1e4)
-        {
-            return Err(ModelRenderError::InvalidLighting);
-        }
+        let globals = prepare_globals(self.format, size, camera, lighting)?;
         if self.depth.as_ref().is_none_or(|d| d.size != size) {
             let texture = self.rhi.create_texture(&TextureDesc {
                 label: "model depth",
@@ -313,22 +301,43 @@ impl<B: Rhi> ModelRenderer<B> {
                 size,
             });
         }
-        let vector = |v: [f32; 3], w| [v[0], v[1], v[2], w];
-        let globals = Globals {
-            view_proj,
-            direction: vector(direction, 0.0),
-            sun: vector(lighting.color, lighting.intensity),
-            sky: vector(lighting.sky, lighting.ambient),
-            ground: vector(lighting.ground, 0.0),
-            params: [
-                lighting.exposure,
-                if lighting.tonemap { 1.0 } else { 0.0 },
-                if self.format.is_srgb() { 0.0 } else { 1.0 },
-                0.0,
-            ],
-        };
+        self.write_frame(&globals);
+        let mut encoder = self.rhi.create_encoder("model frame");
+        self.encode_frame(
+            &mut encoder,
+            &ColorAttachment {
+                view,
+                clear: Some(self.clear),
+                resolve: None,
+            },
+            &DepthAttachment {
+                view: &self.depth.as_ref().expect("depth allocated").view,
+                clear: Some(1.0),
+                store: false,
+            },
+        );
+        self.rhi.submit(encoder);
+        Ok(())
+    }
+
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn draw_count(&self) -> usize {
+        self.draws.len()
+    }
+
+    /// GPU writes only; the caller has validated the complete frame.
+    pub(crate) fn write_frame(&self, globals: &Globals) {
         self.rhi
-            .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+            .write_buffer(&self.globals, 0, bytemuck::bytes_of(globals));
+    }
+
+    /// Records into caller-owned attachments without allocating private depth.
+    pub(crate) fn encode_frame(
+        &self,
+        encoder: &mut B::Encoder,
+        color: &ColorAttachment<'_, B>,
+        depth: &DepthAttachment<'_, B>,
+    ) {
         let mut commands = vec![Command::SetPipeline(&self.pipeline)];
         for draw in &self.draws {
             commands.extend([
@@ -342,26 +351,50 @@ impl<B: Rhi> ModelRenderer<B> {
                 },
             ]);
         }
-        let mut encoder = self.rhi.create_encoder("model frame");
-        self.rhi.encode_pass(
-            &mut encoder,
-            "static model",
-            Some(&ColorAttachment {
-                view,
-                clear: Some(self.clear),
-                resolve: None,
-            }),
-            Some(&DepthAttachment {
-                view: &self.depth.as_ref().expect("depth allocated").view,
-                clear: Some(1.0),
-                store: false,
-            }),
-            &commands,
-        );
-        self.rhi.submit(encoder);
-        Ok(())
+        self.rhi
+            .encode_pass(encoder, "static model", Some(color), Some(depth), &commands);
     }
 }
+/// Pure validation and uniform preparation, shared by standalone and composed paths.
+pub(crate) fn prepare_globals(
+    format: TextureFormat,
+    size: (u32, u32),
+    camera: &Camera3D,
+    lighting: &Lighting,
+) -> Result<Globals, ModelRenderError> {
+    let view_proj = validate_camera(camera, size)?;
+    let direction = normalize(lighting.direction);
+    if lighting.shadows
+        || !lighting.direction.iter().all(|v| v.is_finite())
+        || dot(direction, direction) < 0.5
+        || !lighting
+            .color
+            .iter()
+            .chain(&lighting.sky)
+            .chain(&lighting.ground)
+            .chain([&lighting.intensity, &lighting.ambient, &lighting.exposure])
+            .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1e4)
+    {
+        return Err(ModelRenderError::InvalidLighting);
+    }
+    let vector = |v: [f32; 3], w| [v[0], v[1], v[2], w];
+    Ok(Globals {
+        view_proj,
+        direction: vector(direction, 0.0),
+        sun: vector(lighting.color, lighting.intensity),
+        sky: vector(lighting.sky, lighting.ambient),
+        ground: vector(lighting.ground, 0.0),
+        params: [
+            lighting.exposure,
+            if lighting.tonemap { 1.0 } else { 0.0 },
+            if format.is_srgb() { 0.0 } else { 1.0 },
+            0.0,
+        ],
+        point_position_range: [0.0; 4],
+        point_color_intensity: [0.0; 4],
+    })
+}
+
 fn validate_camera(camera: &Camera3D, size: (u32, u32)) -> Result<[[f32; 4]; 4], ModelRenderError> {
     let f = sub(camera.target, camera.eye);
     // Match Camera3D::view / Mat4::look_at, which crosses the normalized forward.

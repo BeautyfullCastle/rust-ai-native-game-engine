@@ -67,3 +67,12 @@ pub use model_renderer::{ModelRenderer, ModelRenderError};
 pub mod skinned;
 #[cfg(feature = "animation")]
 pub use skinned::{SkinnedBounds, SkinnedInstance, SkinnedModelRenderer, SkinnedRenderError};
+
+#[cfg(feature = "imported-scene")]
+pub mod point_light;
+#[cfg(feature = "imported-scene")]
+pub mod imported_scene;
+#[cfg(feature = "imported-scene")]
+pub use point_light::{PointLight, PointLightError, PointLightSettings};
+#[cfg(feature = "imported-scene")]
+pub use imported_scene::{ImportedBatch, ImportedSceneError, ImportedSceneRenderer, ImportedSceneTarget};
