@@ -9,7 +9,12 @@ description = "2D and 3D renderer on orr_rhi (view layer)"
 [lints]
 workspace = true
 
+[features]
+default = []
+sprites = ["dep:orr_sprite"]
+
 [dependencies]
+orr_sprite = { path = "../orr_sprite", optional = true }
 orr_rhi = { path = "../orr_rhi" }
 orr_view = { path = "../orr_view" }
 bytemuck = { version = "1", features = ["derive"] }

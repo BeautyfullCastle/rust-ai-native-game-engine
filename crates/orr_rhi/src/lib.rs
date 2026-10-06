@@ -143,6 +143,88 @@ pub struct TextureDesc<'a> {
     pub view_formats: &'a [TextureFormat],
 }
 
+/// A mip-zero RGBA8 upload, with rows ordered top to bottom.
+///
+/// `bytes_per_row` must be a multiple of four and at least `width * 4`.
+/// `data` must contain exactly `(height - 1) * bytes_per_row + width * 4`
+/// bytes: padding is allowed between rows, but not after the last row.
+/// No 256-byte row alignment is required. Bytes are stored unchanged;
+/// an sRGB destination determines how shaders interpret them.
+#[derive(Clone, Copy, Debug)]
+pub struct TextureUpload<'a> {
+    pub origin: [u32; 2],
+    pub width: u32,
+    pub height: u32,
+    pub bytes_per_row: u32,
+    pub data: &'a [u8],
+}
+
+/// CPU-side upload rejection. Invalid requests never enqueue a GPU write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureUploadError {
+    UnsupportedBackend,
+    UnsupportedTexture,
+    UnsupportedFormat,
+    Multisampled,
+    MissingCopyDst,
+    EmptyExtent,
+    OutOfBounds,
+    InvalidRowStride,
+    SizeOverflow,
+    InvalidDataLength { expected: u64, actual: usize },
+}
+
+impl std::fmt::Display for TextureUploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedBackend => f.write_str("backend does not support RGBA8 uploads"),
+            Self::UnsupportedTexture => f.write_str("upload requires a single-layer 2D texture"),
+            Self::UnsupportedFormat => f.write_str("upload requires an RGBA8 unorm or sRGB texture"),
+            Self::Multisampled => f.write_str("upload requires a single-sample texture"),
+            Self::MissingCopyDst => f.write_str("upload requires COPY_DST texture usage"),
+            Self::EmptyExtent => f.write_str("upload and texture dimensions must be nonzero"),
+            Self::OutOfBounds => f.write_str("upload region is outside the texture"),
+            Self::InvalidRowStride => f.write_str("upload row stride must cover the row and be divisible by four"),
+            Self::SizeOverflow => f.write_str("upload layout size overflows"),
+            Self::InvalidDataLength { expected, actual } => {
+                write!(f, "upload needs {expected} bytes, got {actual}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TextureUploadError {}
+
+fn validate_texture_upload(desc: &TextureDesc<'_>, upload: &TextureUpload<'_>) -> Result<(), TextureUploadError> {
+    use TextureUploadError as E;
+    if !matches!(desc.format, TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb) {
+        return Err(E::UnsupportedFormat);
+    }
+    if desc.sample_count != 1 {
+        return Err(E::Multisampled);
+    }
+    if !desc.usage.contains(TextureUsage::COPY_DST) {
+        return Err(E::MissingCopyDst);
+    }
+    if desc.width == 0 || desc.height == 0 || upload.width == 0 || upload.height == 0 {
+        return Err(E::EmptyExtent);
+    }
+    if upload.origin[0].checked_add(upload.width).is_none_or(|end| end > desc.width)
+        || upload.origin[1].checked_add(upload.height).is_none_or(|end| end > desc.height)
+    {
+        return Err(E::OutOfBounds);
+    }
+    let row = upload.width.checked_mul(4).ok_or(E::SizeOverflow)?;
+    if upload.bytes_per_row < row || upload.bytes_per_row % 4 != 0 {
+        return Err(E::InvalidRowStride);
+    }
+    let expected = u64::from(upload.height - 1) * u64::from(upload.bytes_per_row) + u64::from(row);
+    if u64::try_from(upload.data.len()).ok() != Some(expected) {
+        return Err(E::InvalidDataLength { expected, actual: upload.data.len() });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VertexFormat {
     Float32,
@@ -346,6 +428,21 @@ pub trait Rhi: Clone + 'static {
     fn write_buffer(&self, buffer: &Self::Buffer, offset: u64, data: &[u8]);
 
     fn create_texture(&self, desc: &TextureDesc) -> Self::Texture;
+    /// Enqueues a checked upload into mip zero of a single-layer, single-sample
+    /// RGBA8 texture created by this backend with `COPY_DST` usage.
+    /// Validation errors leave the texture unchanged. A successful write is
+    /// ordered before subsequent submissions (including readback); it does not
+    /// wait for GPU completion. As with other RHI handles, the caller must use
+    /// a texture owned by this device; cross-device handles are not validated.
+    /// Other backends may return `UnsupportedBackend`.
+    fn write_texture_rgba8(
+        &self,
+        _texture: &Self::Texture,
+        _upload: &TextureUpload<'_>,
+    ) -> Result<(), TextureUploadError> {
+        Err(TextureUploadError::UnsupportedBackend)
+    }
+
     /// A view of the whole texture. `format: None` uses the texture's format;
     /// `Some(f)` must be the format or one of its `view_formats`.
     fn create_texture_view(&self, texture: &Self::Texture, format: Option<TextureFormat>) -> Self::TextureView;
@@ -406,4 +503,113 @@ pub trait Rhi: Clone + 'static {
     fn read_frame(&self, frame: &Self::Frame) -> Option<Vec<u8>>;
     fn frame_view<'a>(&self, frame: &'a Self::Frame) -> &'a Self::TextureView;
     fn present(&self, frame: Self::Frame);
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    fn desc() -> TextureDesc<'static> {
+        TextureDesc {
+            label: "test",
+            width: 8,
+            height: 8,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsage::COPY_DST,
+            sample_count: 1,
+            view_formats: &[],
+        }
+    }
+
+    fn upload(data: &[u8]) -> TextureUpload<'_> {
+        TextureUpload { origin: [1, 2], width: 2, height: 2, bytes_per_row: 12, data }
+    }
+
+    #[test]
+    fn upload_accepts_tight_padded_and_single_rows() {
+        let bytes = [0; 20];
+        let mut u = upload(&bytes);
+        assert_eq!(validate_texture_upload(&desc(), &u), Ok(()));
+        u.bytes_per_row = 8;
+        u.data = &bytes[..16];
+        assert_eq!(validate_texture_upload(&desc(), &u), Ok(()));
+        u.height = 1;
+        u.bytes_per_row = 256;
+        u.data = &bytes[..8];
+        assert_eq!(validate_texture_upload(&desc(), &u), Ok(()));
+        let mut d = desc();
+        d.format = TextureFormat::Rgba8UnormSrgb;
+        assert_eq!(validate_texture_upload(&d, &u), Ok(()));
+    }
+
+    #[test]
+    fn upload_rejects_format_usage_and_samples() {
+        let bytes = [0; 20];
+        let u = upload(&bytes);
+        for format in [TextureFormat::Bgra8Unorm, TextureFormat::Bgra8UnormSrgb, TextureFormat::Depth32Float] {
+            let mut d = desc();
+            d.format = format;
+            assert_eq!(validate_texture_upload(&d, &u), Err(TextureUploadError::UnsupportedFormat));
+        }
+        let mut d = desc();
+        d.usage = TextureUsage::TEXTURE_BINDING;
+        assert_eq!(validate_texture_upload(&d, &u), Err(TextureUploadError::MissingCopyDst));
+        for samples in [0, 2, 4] {
+            d = desc();
+            d.sample_count = samples;
+            assert_eq!(validate_texture_upload(&d, &u), Err(TextureUploadError::Multisampled));
+        }
+    }
+
+    #[test]
+    fn upload_rejects_zero_outside_and_overflowing_regions() {
+        let bytes = [0; 20];
+        for (width, height) in [(0, 2), (2, 0)] {
+            let mut u = upload(&bytes);
+            u.width = width;
+            u.height = height;
+            assert_eq!(validate_texture_upload(&desc(), &u), Err(TextureUploadError::EmptyExtent));
+        }
+        for origin in [[7, 2], [1, 7], [u32::MAX, 0], [0, u32::MAX]] {
+            let mut u = upload(&bytes);
+            u.origin = origin;
+            assert_eq!(validate_texture_upload(&desc(), &u), Err(TextureUploadError::OutOfBounds));
+        }
+        for (width, height) in [(0, 8), (8, 0)] {
+            let mut d = desc();
+            d.width = width;
+            d.height = height;
+            assert_eq!(validate_texture_upload(&d, &upload(&bytes)), Err(TextureUploadError::EmptyExtent));
+        }
+        let mut d = desc();
+        d.width = u32::MAX;
+        let u = TextureUpload { origin: [0, 0], width: u32::MAX, height: 1, bytes_per_row: u32::MAX, data: &[] };
+        assert_eq!(validate_texture_upload(&d, &u), Err(TextureUploadError::SizeOverflow));
+    }
+
+    #[test]
+    fn upload_rejects_short_misaligned_and_extra_bytes() {
+        let bytes = [0; 24];
+        for stride in [0, 4, 9, 10, 11] {
+            let mut u = upload(&bytes[..20]);
+            u.bytes_per_row = stride;
+            assert_eq!(validate_texture_upload(&desc(), &u), Err(TextureUploadError::InvalidRowStride));
+        }
+        for length in [0, 19, 21, 24] {
+            assert_eq!(
+                validate_texture_upload(&desc(), &upload(&bytes[..length])),
+                Err(TextureUploadError::InvalidDataLength { expected: 20, actual: length })
+            );
+        }
+        let mut d = desc();
+        d.height = u32::MAX;
+        let u = TextureUpload { origin: [0, 0], width: 1, height: u32::MAX, bytes_per_row: u32::MAX - 3, data: &[] };
+        assert_eq!(
+            validate_texture_upload(&d, &u),
+            Err(TextureUploadError::InvalidDataLength {
+                expected: u64::from(u32::MAX - 1) * u64::from(u32::MAX - 3) + 4,
+                actual: 0,
+            })
+        );
+    }
 }
