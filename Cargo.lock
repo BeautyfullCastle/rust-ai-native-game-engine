@@ -3378,9 +3378,11 @@ dependencies = [
  "bytemuck",
  "orr_ecs",
  "orr_model",
+ "orr_package",
  "orr_rhi",
  "orr_sprite",
  "orr_view",
+ "winit",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 default = []
+animation = []
 import = ["dep:png", "dep:base64", "dep:sha2"]
 
 [dependencies]

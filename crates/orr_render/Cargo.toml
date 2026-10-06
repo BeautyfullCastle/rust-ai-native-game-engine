@@ -13,6 +13,7 @@ workspace = true
 default = []
 sprites = ["dep:orr_sprite"]
 models = ["dep:orr_model"]
+animation = ["models", "orr_model/animation"]
 
 [dependencies]
 orr_model = { path = "../orr_model", optional = true }
@@ -22,5 +23,11 @@ orr_view = { path = "../orr_view" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+winit = "0.30"
+orr_package = { path = "../orr_package" }
 orr_model = { path = "../orr_model", features = ["import"] }
 orr_ecs = { path = "../orr_ecs" }
+
+[[example]]
+name = "skinned_strip"
+required-features = ["animation"]

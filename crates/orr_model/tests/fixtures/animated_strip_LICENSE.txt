@@ -1,0 +1,29 @@
+Original Orrery skeletal-animation fixture: CC0-1.0
+
+The asymmetric strip geometry, four-color texture, two-joint hierarchy,
+inverse-bind matrices, animation clips, and authoring script were created
+specifically for Orrery's skeletal-animation tests in October 2026 by the
+OpenAI coding assistant under the repository user's task authorization.
+They were not downloaded, copied from Khronos samples, or generated from
+third-party assets. No external image generator was used.
+
+To the extent copyright applies, these original fixture files and script
+are dedicated to the public domain under CC0 1.0 Universal:
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Files: animated_strip.gltf, animated_strip.glb, animated_strip_generate.py.
+The glTF/GLB schema follows the Khronos glTF 2.0 specification; the geometry
+and animation content are original, not a Khronos sample asset.
+
+Reproduce with Python 3 (standard library only):
+  python3 animated_strip_generate.py
+
+Both formats embed the same mesh, PNG, rig and two named clips (bend/pulse).
+Node 0 is a translated non-joint ancestor; node 1 is the lower joint;
+node 2 is the upper joint at y=1.5; node 3 is the skinned mesh translated
+by x=7. Per glTF the skinned mesh-node transform is ignored. Both inverse
+bind matrices are nonidentity, cancelling the joint bind-world transforms.
+The eight asymmetric mesh-local vertices span y=0..3 and use mixed joint
+weights on the middle two rows. bend uses LINEAR quaternion rotation;
+pulse combines STEP translation of the non-joint ancestor with LINEAR
+scale of the lower joint. The 4x4 RGBA checker texture is asymmetric too.
