@@ -1,9 +1,9 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use orr_fp::FrameRng;
-use orr_sim::{Game, PlayerSlot};
+use orr_sim::{Game, PlayerSlot, TickInputs};
 
 /// One remote player's confirmed input (and any commands they submitted)
 /// for one tick, as delivered by an [`InputSource`].
@@ -16,6 +16,24 @@ pub struct RemoteInput<G: Game> {
     /// `FLAG_ABSENT`): the game sees `PlayerFlags::disconnected`. Always
     /// `false` outside relay sessions.
     pub disconnected: bool,
+}
+
+/// Borrowed evidence for a tick that just passed the local Session verification
+/// gate. Historical `predicted` flags are not evidence of receipt. Consumers
+/// requiring exact payload agreement must independently compare all slots and
+/// ordered commands: the gameplay gate does not reconcile arbitrary conflicting
+/// duplicates for slots that were already confirmed when simulated.
+///
+/// This view is synchronous and never allocates, clones, or encodes. Missing
+/// command-map entries mean an empty command list for that confirmed slot.
+/// This is local verification, not distributed consensus or packet provenance.
+pub struct LocallyVerifiedTick<'a, G: Game> {
+    pub simulated: &'a TickInputs<G::Input, G::Command>,
+    /// Bytes recorded when the tick was simulated, in simulation order.
+    pub simulated_commands: &'a [(PlayerSlot, Vec<u8>)],
+    pub confirmed_inputs: &'a BTreeMap<PlayerSlot, G::Input>,
+    pub confirmed_commands: Option<&'a BTreeMap<PlayerSlot, Vec<G::Command>>>,
+    pub confirmed_absent: &'a BTreeSet<(u64, u8)>,
 }
 
 /// Where a [`crate::Session`] gets other players' confirmed inputs from.
@@ -36,6 +54,16 @@ pub trait InputSource<G: Game> {
     /// "arrived") since the last call. Order is not significant — the
     /// session sorts by tick internally.
     fn poll_remote(&mut self) -> Vec<RemoteInput<G>>;
+
+    /// Once per newly locally verified tick, after the existing verification
+    /// gate and before its simulated/confirmed bookkeeping is pruned. Not
+    /// called for rollback execution or late packets for old verified ticks.
+    /// Default sources pay no additional encoding, cloning, or allocation cost.
+    /// Wrappers must forward this to their inner source. An observer belongs to
+    /// one Session lifetime: replace its generation or explicitly invalidate it
+    /// before restoring/replacing that Session, including forward restores.
+    fn on_locally_verified(&mut self, _tick: LocallyVerifiedTick<'_, G>) {}
+
 }
 
 /// A no-op transport for single-player sessions: there are no remote

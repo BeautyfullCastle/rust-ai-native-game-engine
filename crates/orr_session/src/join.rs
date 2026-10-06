@@ -207,11 +207,11 @@ pub(crate) struct JoinSnapshot {
     pub frame_bytes: Vec<u8>,
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
+pub(crate) struct Reader<'a> {
+    pub(crate) bytes: &'a [u8],
 }
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], JoinError> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], JoinError> {
         if n > self.bytes.len() {
             return Err(JoinError::Truncated);
         }
@@ -219,25 +219,25 @@ impl<'a> Reader<'a> {
         self.bytes = rest;
         Ok(head)
     }
-    fn u8(&mut self) -> Result<u8, JoinError> {
+    pub(crate) fn u8(&mut self) -> Result<u8, JoinError> {
         Ok(self.take(1)?[0])
     }
-    fn u32(&mut self) -> Result<u32, JoinError> {
+    pub(crate) fn u32(&mut self) -> Result<u32, JoinError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
-    fn u64(&mut self) -> Result<u64, JoinError> {
+    pub(crate) fn u64(&mut self) -> Result<u64, JoinError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 }
 
 /// Appends the xxh3 of everything written so far.
-fn seal(out: &mut Vec<u8>) {
+pub(crate) fn seal(out: &mut Vec<u8>) {
     let sum = xxhash_rust::xxh3::xxh3_64(out);
     out.extend_from_slice(&sum.to_le_bytes());
 }
 
 /// Splits off and verifies the trailing checksum, returning the body.
-fn unseal(bytes: &[u8]) -> Result<&[u8], JoinError> {
+pub(crate) fn unseal(bytes: &[u8]) -> Result<&[u8], JoinError> {
     let Some(split) = bytes.len().checked_sub(8) else { return Err(JoinError::Truncated) };
     let (body, tail) = bytes.split_at(split);
     if u64::from_le_bytes(tail.try_into().unwrap()) != xxhash_rust::xxh3::xxh3_64(body) {
@@ -425,6 +425,28 @@ pub(crate) fn encode_snapshot(
     out.extend_from_slice(&attempt.to_le_bytes());
     seal(&mut out);
     out
+}
+
+/// Borrow-only preflight for the checked adapter. In particular, attempt and
+/// exact compressed length are checked before the legacy decoder decompresses.
+pub(crate) fn inspect_snapshot(bytes: &[u8]) -> Result<(JoinHeader, JoinTicket), JoinError> {
+    let mut r = Reader { bytes: unseal(bytes)? };
+    if r.take(4)? != SNAPSHOT_MAGIC { return Err(JoinError::BadMagic); }
+    let header = JoinHeader::read(&mut r)?;
+    let snapshot_tick = r.u64()?;
+    let first_input_tick = r.u64()?;
+    r.u64()?;
+    let len = r.u32()?;
+    if u64::from(len) + 4 != r.bytes.len() as u64 {
+        return Err(JoinError::Corrupt("snapshot length does not match payload"));
+    }
+    r.take(len as usize)?;
+    let attempt = r.u32()?;
+    if first_input_tick <= snapshot_tick {
+        return Err(JoinError::Corrupt("first input tick not after snapshot tick"));
+    }
+    let ticket = JoinTicket { slot: header.slot, attempt, snapshot_tick, first_input_tick };
+    Ok((header, ticket))
 }
 
 pub(crate) fn decode_snapshot(bytes: &[u8]) -> Result<JoinSnapshot, JoinError> {

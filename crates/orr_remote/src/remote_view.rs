@@ -15,7 +15,7 @@ struct Tally {
     last: Option<Lifecycle>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Stamp {
     pub subscription: u64,
     pub timeline: u64,
@@ -128,6 +128,23 @@ pub(crate) struct ViewMailbox<E> {
     started: Option<Lifecycle>,
 }
 
+/// A validated frame cut that can be committed after the caller has also
+/// validated its codec state. Preparing is read-only; committing cannot fail.
+pub(crate) struct PreparedFrame {
+    stamp: Stamp,
+    generation: u64,
+    summaries: [Tally; KINDS],
+    snapshot: Option<Snapshot>,
+    reset_generation: Option<u64>,
+}
+
+pub(crate) struct PreparedRenewal {
+    subscription: u64,
+    cursor: u64,
+    count: u64,
+    generation: u64,
+}
+
 impl<E> ViewMailbox<E> {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -171,6 +188,78 @@ impl<E> ViewMailbox<E> {
         Ok(())
     }
 
+    /// Switches to a newly acknowledged subscription after a correlated
+    /// `watch.subscribe` reset. Old notification history is discarded while
+    /// the last published snapshot remains visible until a covering frame
+    /// arrives on the new subscription.
+    #[cfg(test)]
+    pub fn renew_subscription(&mut self, result: &J) -> Result<u64, String> {
+        let prepared = self.prepare_renewal(result)?;
+        let subscription = prepared.subscription;
+        self.commit_renewal(prepared);
+        Ok(subscription)
+    }
+
+    pub fn prepare_renewal(&self, result: &J) -> Result<PreparedRenewal, String> {
+        let subscription = exact(result, "subscription")?;
+        let cursor = exact(result, "cursor")?;
+        let count = exact(result, "count")?;
+        if self.subscription.is_none() || self.subscription == Some(subscription) {
+            return Err("reset subscribe did not issue a new subscription".into());
+        }
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| "presentation reset generation exhausted".to_string())?;
+        Ok(PreparedRenewal {
+            subscription,
+            cursor,
+            count,
+            generation,
+        })
+    }
+
+    /// Starts a correlated reset without clearing the currently displayed
+    /// snapshot. No old staged or ready notification can escape while the
+    /// replacement subscription is pending.
+    pub fn begin_renewal(&mut self) {
+        self.waiting = Some(self.received_cursor);
+        self.reset_pending = false;
+        self.staged.clear();
+        self.ready.clear();
+        self.retained = 0;
+    }
+
+    pub fn commit_renewal(&mut self, prepared: PreparedRenewal) {
+        let PreparedRenewal {
+            subscription,
+            cursor,
+            count,
+            generation,
+        } = prepared;
+        self.subscription = Some(subscription);
+        self.received_cursor = cursor;
+        self.received_count = count;
+        self.received_timeline = 0;
+        self.required_head = None;
+        self.covered_cursor = cursor;
+        self.covered_count = count;
+        self.covered_timeline = None;
+        self.consumed_count = count;
+        self.covered_lifecycle = [Tally::default(); KINDS];
+        self.observed_lifecycle = [Tally::default(); KINDS];
+        self.history_complete = count == 0;
+        self.consumed_lifecycle = [0; KINDS];
+        self.server_generation = 0;
+        self.generation = generation;
+        self.waiting = Some(cursor);
+        self.reset_pending = false;
+        self.staged.clear();
+        self.ready.clear();
+        self.retained = 0;
+        self.floor = None;
+    }
+
     pub fn negotiated(&self) -> bool {
         self.subscription.is_some()
     }
@@ -200,8 +289,8 @@ impl<E> ViewMailbox<E> {
         Ok(())
     }
 
-    fn require_reset(&mut self, cursor: u64) {
-        self.generation = self.generation.saturating_add(1);
+    fn apply_reset(&mut self, cursor: u64, generation: u64) {
+        self.generation = generation;
         self.waiting = Some(self.waiting.map_or(cursor, |old| old.max(cursor)));
         self.ready.clear();
         self.staged.clear();
@@ -210,41 +299,64 @@ impl<E> ViewMailbox<E> {
 
     pub fn stage(&mut self, stamp: Stamp, events: Vec<BridgeEvent<E>>) -> Result<(), String> {
         self.validate(stamp)?;
-        if stamp.cursor <= self.received_cursor
-            || stamp.count < self.received_count.saturating_add(events.len() as u64)
-        {
+        let next_cursor = self
+            .received_cursor
+            .checked_add(1)
+            .ok_or_else(|| "presentation cursor exhausted".to_string())?;
+        let new_event_count = u64::try_from(events.len())
+            .map_err(|_| "presentation event count exceeds u64".to_string())?;
+        let minimum_count = self
+            .received_count
+            .checked_add(new_event_count)
+            .ok_or_else(|| "presentation event count exhausted".to_string())?;
+        if stamp.cursor <= self.received_cursor || stamp.count < minimum_count {
             return Err("non-monotonic negotiated notification cursor/count".into());
         }
-        if self
-            .required_head
-            .is_some_and(|(timeline, _)| timeline != stamp.timeline)
-        {
-            self.required_head = None;
+        let mut required_head = self.required_head;
+        if required_head.is_some_and(|(timeline, _)| timeline != stamp.timeline) {
+            required_head = None;
         }
-        let order_start = if stamp.cursor == self.received_cursor.saturating_add(1)
-            && stamp.count == self.received_count.saturating_add(events.len() as u64)
-        {
+        let order_start = if stamp.cursor == next_cursor && stamp.count == minimum_count {
             self.received_count
         } else {
-            stamp.count.saturating_sub(events.len() as u64)
+            stamp.count.saturating_sub(new_event_count)
         };
+        let mut observed_lifecycle = self.observed_lifecycle;
         for (index, event) in events.iter().enumerate() {
             if let BridgeEvent::Lifecycle(life) = event {
-                let tally = &mut self.observed_lifecycle[kind(*life)];
-                tally.count = tally.count.saturating_add(1);
-                tally.order = order_start.saturating_add(index as u64).saturating_add(1);
+                let tally = &mut observed_lifecycle[kind(*life)];
+                tally.count = tally
+                    .count
+                    .checked_add(1)
+                    .ok_or_else(|| "presentation lifecycle count exhausted".to_string())?;
+                tally.order = order_start
+                    .checked_add(index as u64)
+                    .and_then(|order| order.checked_add(1))
+                    .ok_or_else(|| "presentation lifecycle order exhausted".to_string())?;
                 tally.last = Some(*life);
             }
             if let BridgeEvent::Sim { key, .. } = event {
-                let head = self
-                    .required_head
-                    .map_or(key.tick, |(_, old)| old.max(key.tick));
-                self.required_head = Some((stamp.timeline, head));
+                let head = required_head.map_or(key.tick, |(_, old)| old.max(key.tick));
+                required_head = Some((stamp.timeline, head));
             }
         }
-        let gap = stamp.cursor != self.received_cursor.saturating_add(1)
-            || stamp.count != self.received_count.saturating_add(events.len() as u64);
+        let gap = stamp.cursor != next_cursor || stamp.count != minimum_count;
         let transition = self.received_timeline != 0 && self.received_timeline != stamp.timeline;
+        let reset_generation = if gap
+            || transition
+            || self.waiting.is_some()
+            || events.len() > self.capacity.saturating_sub(self.retained)
+        {
+            Some(
+                self.generation
+                    .checked_add(1)
+                    .ok_or_else(|| "presentation reset generation exhausted".to_string())?,
+            )
+        } else {
+            None
+        };
+        self.required_head = required_head;
+        self.observed_lifecycle = observed_lifecycle;
         if gap {
             self.history_complete = false;
         }
@@ -256,7 +368,10 @@ impl<E> ViewMailbox<E> {
             || self.waiting.is_some()
             || events.len() > self.capacity.saturating_sub(self.retained)
         {
-            self.require_reset(stamp.cursor);
+            self.apply_reset(
+                stamp.cursor,
+                reset_generation.expect("reset was preflighted"),
+            );
             return Ok(());
         }
         self.retained += events.len();
@@ -266,7 +381,11 @@ impl<E> ViewMailbox<E> {
         Ok(())
     }
 
-    pub fn frame(&mut self, metadata: &J, snapshot: Option<Snapshot>) -> Result<(), String> {
+    pub fn prepare_frame(
+        &self,
+        metadata: &J,
+        snapshot: Option<Snapshot>,
+    ) -> Result<PreparedFrame, String> {
         let stamp = Stamp::parse(metadata, true)?;
         self.validate(stamp)?;
         let generation = exact(metadata, "loss_generation")?;
@@ -398,12 +517,40 @@ impl<E> ViewMailbox<E> {
                 }
             }
         }
-        if stamp.cursor > self.received_cursor
+        let reset_generation = if stamp.cursor > self.received_cursor
             || stamp.count > self.received_count
             || changed
             || generation != self.server_generation
         {
-            self.require_reset(stamp.cursor);
+            Some(
+                self.generation
+                    .checked_add(1)
+                    .ok_or_else(|| "presentation reset generation exhausted".to_string())?,
+            )
+        } else {
+            None
+        };
+        Ok(PreparedFrame {
+            stamp,
+            generation,
+            summaries,
+            snapshot,
+            reset_generation,
+        })
+    }
+
+    /// Commits a frame cut returned by [`Self::prepare_frame`]. There are no
+    /// fallible operations here, so a caller can preflight other state first.
+    pub fn commit_frame(&mut self, prepared: PreparedFrame) {
+        let PreparedFrame {
+            stamp,
+            generation,
+            summaries,
+            snapshot,
+            reset_generation,
+        } = prepared;
+        if let Some(generation) = reset_generation {
+            self.apply_reset(stamp.cursor, generation);
         }
         self.received_cursor = stamp.cursor;
         self.received_count = stamp.count;
@@ -424,7 +571,7 @@ impl<E> ViewMailbox<E> {
             self.staged.clear();
             self.ready.clear();
             self.retained = 0;
-            return Ok(());
+            return;
         }
         if self
             .floor
@@ -442,6 +589,11 @@ impl<E> ViewMailbox<E> {
                 }
             }
         }
+    }
+
+    pub fn frame(&mut self, metadata: &J, snapshot: Option<Snapshot>) -> Result<(), String> {
+        let prepared = self.prepare_frame(metadata, snapshot)?;
+        self.commit_frame(prepared);
         Ok(())
     }
 
@@ -678,6 +830,57 @@ mod tests {
         let mut bad = cut(1, 1, 1, 1);
         bad["subscription"] = json!("8");
         assert!(m.frame(&bad, Some(snapshot(1))).is_err());
+    }
+
+    #[test]
+    fn rejected_frame_preflight_preserves_staged_mailbox_state() {
+        let mut m = mailbox(2);
+        m.stage(stamp(1, 1, 1), vec![event(1)]).unwrap();
+        let mut stale = cut(1, 0, 0, 1);
+        stale["lifecycle"] = json!([]);
+        assert!(m.prepare_frame(&stale, Some(snapshot(0))).is_err());
+        assert_eq!(m.received_cursor, 1);
+        assert_eq!(m.staged.len(), 1);
+        assert_eq!(m.snapshot.as_ref().unwrap().tick(), 0);
+        m.frame(&cut(1, 1, 1, 1), Some(snapshot(1))).unwrap();
+        assert_eq!(m.poll().events, vec![event(1)]);
+    }
+
+    #[test]
+    fn renewal_discards_old_events_but_keeps_display_until_new_full() {
+        let mut m = mailbox(2);
+        m.stage(stamp(1, 1, 1), vec![event(1)]).unwrap();
+        assert_eq!(m.poll().snapshot.unwrap().tick(), 0);
+        m.renew_subscription(&json!({"subscription":"8", "cursor":"4", "count":"5"}))
+            .unwrap();
+        let waiting = m.poll();
+        assert_eq!(waiting.snapshot.unwrap().tick(), 0);
+        assert!(waiting.events.is_empty());
+        assert!(waiting.resync.is_none());
+
+        let mut old = cut(1, 4, 5, 1);
+        old["lifecycle"] = json!([]);
+        assert!(m.prepare_frame(&old, Some(snapshot(1))).is_err());
+        let mut first = cut(1, 4, 5, 0);
+        first["subscription"] = json!("8");
+        let prepared = m.prepare_frame(&first, Some(snapshot(10))).unwrap();
+        m.commit_frame(prepared);
+        let update = m.poll();
+        assert_eq!(update.snapshot.unwrap().tick(), 10);
+        assert!(update.events.is_empty());
+        assert!(update.resync.is_some());
+    }
+
+    #[test]
+    fn renewal_generation_overflow_is_rejected_without_state_change() {
+        let mut m = mailbox(2);
+        m.generation = u64::MAX;
+        let snapshot_tick = m.snapshot.as_ref().unwrap().tick();
+        assert!(m
+            .renew_subscription(&json!({"subscription":"8", "cursor":"4", "count":"5"}))
+            .is_err());
+        assert_eq!(m.subscription, Some(7));
+        assert_eq!(m.snapshot.as_ref().unwrap().tick(), snapshot_tick);
     }
 
     #[test]

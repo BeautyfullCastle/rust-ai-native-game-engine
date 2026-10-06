@@ -431,3 +431,87 @@ fn disconnect_and_rejoin_over_quic() {
     assert!(left >= 1 && joined == 2, "left {left}, joined {joined}: {:?}", server.notes);
     assert_eq!(server.room.desyncs, 0);
 }
+
+/// Native WSS uses the existing QUIC identity/listener and explicit PEM trust.
+#[test]
+fn two_clients_over_native_wss() {
+    two_clients_over_verified_transport(TransportKind::Wss);
+}
+
+#[test]
+fn two_clients_over_native_wt() {
+    two_clients_over_verified_transport(TransportKind::Wt);
+}
+
+fn two_clients_over_verified_transport(kind: TransportKind) {
+    // Public, test-only identity valid 2020–2120; never use outside loopback tests.
+    const CERT: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBQzCB66ADAgECAgEBMAoGCCqGSM49BAMCMBsxGTAXBgNVBAMMEG9ycmVyeSB0
+ZXN0IG9ubHkwIBcNMjAwMTAxMDAwMDAwWhgPMjEyMDAxMDEwMDAwMDBaMBsxGTAX
+BgNVBAMMEG9ycmVyeSB0ZXN0IG9ubHkwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC
+AAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK2Oj+mV2Fg36RPsCdzUMl7OBVP4Nj1YTH
+1btKGBXtcl47dzYPRGk+si7Wox4wHDAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8A
+AAEwCgYIKoZIzj0EAwIDRwAwRAIgZVKoQHqVJ9pmRWDJNfEc8byj33JPvuiCGpsp
+9xf1IKQCIFSsACU0rQzuf53MhHx5gmRiyGaKdcfPJbU9o56eck0G
+-----END CERTIFICATE-----
+"#;
+    const KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg6BgCBClYjDYJYaP9
+KhgEUZm40iitRLwtR5mKSfFekKGhRANCAAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK
+2Oj+mV2Fg36RPsCdzUMl7OBVP4Nj1YTH1btKGBXtcl47dzYPRGk+si7W
+-----END PRIVATE KEY-----
+"#;
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!("orr-native-{kind:?}-{}", std::process::id())));
+    std::fs::create_dir(&fixture.0).unwrap();
+    let cert = fixture.0.join("cert.pem");
+    let key = fixture.0.join("key.pem");
+    std::fs::write(&cert, CERT).unwrap();
+    std::fs::write(&key, KEY).unwrap();
+    let mut options = ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Quic);
+    options.tls = orr_relay_net::Tls::Pem { cert_chain: cert.clone(), private_key: key };
+    if kind == TransportKind::Wss { options.wss_bind = Some("127.0.0.1:0".parse().unwrap()); }
+    options.webtransport = kind == TransportKind::Wt;
+    let ep = listen(&options).unwrap();
+    let addr = if kind == TransportKind::Wt { ep.local_addr() } else { ep.wss_addr().unwrap() };
+    let mut server = RelayServer::new(ep, 7);
+    server.create_room(ROOM, arena_room(2));
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let server_thread = thread::spawn(move || {
+        run_wall_clock(&mut server, &flag, Duration::from_millis(1), |_, _| {});
+        (server.room_stats(ROOM).unwrap(), server.bad_messages())
+    });
+    let handles: Vec<_> = (0..2).map(|i| {
+        let cert = cert.clone();
+        thread::spawn(move || {
+            let options = ConnectOptions::new(format!("{}://{addr}/relay?case=native", if kind == TransportKind::Wt { "https" } else { "wss" }), kind, Trust::PemFile(cert));
+            let link = connect(&options).unwrap();
+            let mut client: RelayClient<Arena, _> = RelayClient::new(
+                RelayClientConfig::new(ROOM, 1), link,
+                |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new(),
+            );
+            drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &DriveOptions {
+                play_for: Some(Duration::from_secs(3)), connect_timeout: Duration::from_secs(10),
+                tag: format!("wss{i}"), ..DriveOptions::default()
+            })
+        })
+    }).collect();
+    let reports: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+    stop.store(true, Ordering::Relaxed);
+    let (room, bad_messages) = server_thread.join().unwrap();
+    let reports: Vec<_> = reports.into_iter().map(Result::unwrap).collect();
+    for r in &reports {
+        eprintln!("native {kind:?}: {}", r.summary());
+        assert_eq!(r.state, ClientState::Playing);
+        assert_eq!(r.desyncs, 0);
+        assert_eq!(r.decode_errors, 0);
+        assert!(r.verified_tick > 90, "verified {}", r.verified_tick);
+    }
+    assert!(assert_checksums_agree(&reports) >= 4);
+    assert_eq!(room.desyncs, 0);
+    assert_eq!(bad_messages, 0);
+}

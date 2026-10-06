@@ -15,9 +15,10 @@
 //! `watch.subscribe` turns on pushes (see [`crate::methods`]). Frame
 //! snapshots are binary WebSocket messages ([`crate::wire`]): the full
 //! `Frame` bytes, lz4-compressed, once per published tick at most
-//! `max_fps` times a second per subscriber. A subscriber whose socket
+//! `max_fps` times a second per subscriber. A legacy subscriber whose socket
 //! is behind (over [`MAX_PENDING_BYTES`] queued) skips frames instead of
-//! making the queue grow.
+//! making the queue grow. Negotiated records use exact retained-byte admission,
+//! per-subscription baselines and ordered reset/Full batches instead.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -25,8 +26,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use orr_edit::{EditorDoc, StoppedPlay};
 use orr_session::PlayNote;
@@ -38,15 +39,24 @@ use crate::caps::{Auth, Caps};
 use crate::codec::hex_encode;
 use crate::dispatch::{authorize, call, CallCtx, Effects, ErpTarget, HostLimits, TxChange};
 use crate::error::*;
+use crate::frame_delta::{Encoder, FrameScope, FrameStamp};
 use crate::link::{LocalConnector, LocalFrame};
 use crate::net::{
     accept_loop, bind, notification, response_err, response_ok, ConnTx, Inbound, NetShared,
 };
 use crate::proposals::{self, ProposalWatch, VerifyResult};
-use crate::wire::{checksum_text, debug_error_name, encode_frame_message, timeline_to_json};
+use crate::wire::{
+    checksum_text, debug_error_name, encode_frame_message, encode_frame_record_message,
+    timeline_to_json, FrameCodecLimits, FrameCodecMeta, DEFAULT_FRAME_CODEC_LIMITS,
+    MAX_FRAME_CODEC_METADATA_BYTES, MAX_FRAME_CODEC_TOTAL_BASELINE_BYTES,
+};
 
-/// Frame data queued to one connection above which frames are skipped for it.
+/// Legacy frame data queued to one connection above which frames are skipped.
 pub const MAX_PENDING_BYTES: usize = 16 << 20;
+
+// Exact retained outbound admission for the negotiated path only. The writer
+// releases the charge at dequeue, as for legacy output; this is not an RSS cap.
+const FRAME_CODEC_QUEUE_BYTES: usize = 64 << 20;
 
 /// Settings of an [`ErpServer`].
 #[derive(Clone, Debug)]
@@ -142,6 +152,176 @@ struct Subs {
     viewstream: Option<FrameSub>,
     /// Opt-in, cursor-fenced presentation delivery. Legacy topics stay unchanged.
     delivery: Option<ViewDelivery>,
+    frame_codec: Option<FrameCodecState>,
+}
+
+struct FrameCodecState {
+    limits: FrameCodecLimits,
+    encoder: Encoder,
+    sequence: u64,
+    reset_generation: u64,
+    last_timeline: u64,
+    last_loss_generation: u64,
+    last_stamp: Option<FrameStamp>,
+    failed: bool,
+}
+
+impl FrameCodecState {
+    fn new(limits: FrameCodecLimits) -> Self {
+        Self {
+            encoder: Encoder::new(limits.max_frame_bytes, limits.max_baseline_bytes),
+            limits,
+            sequence: 0,
+            reset_generation: 1,
+            last_timeline: 0,
+            last_loss_generation: 0,
+            last_stamp: None,
+            failed: false,
+        }
+    }
+
+    // A refused enqueue leaves the encoder, sequence and reset generation at
+    // their last admitted cut. The host thread is the sole state writer.
+    fn send_frame(
+        &mut self,
+        tx: &ConnTx,
+        delivery: &ViewDelivery,
+        meta: &J,
+        frame: &orr_ecs::Frame,
+    ) -> Result<Option<usize>, ()> {
+        let epoch = meta["play_epoch"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or(())?;
+        let base = self.last_stamp;
+        let reset = self.sequence != 0
+            && (self.last_timeline != delivery.timeline
+                || self.last_loss_generation != delivery.loss_generation
+                || base.is_some_and(|b| {
+                    b.scope.play_epoch != epoch
+                        || frame.tick() < b.tick
+                        || (frame.tick() == b.tick && frame.checksum() != b.frame_checksum)
+                }));
+        let generation = if reset {
+            self.reset_generation.checked_add(1).ok_or(())?
+        } else {
+            self.reset_generation
+        };
+        let sequence = self.sequence.checked_add(1).ok_or(())?;
+        let scope = FrameScope {
+            stream_generation: delivery.subscription,
+            play_epoch: epoch,
+            timeline_epoch: generation,
+        };
+        let prepared = self.encoder.prepare(frame, scope).map_err(|_| ())?;
+        let identity = FrameCodecMeta {
+            subscription: delivery.subscription,
+            sequence,
+            reset_generation: generation,
+        };
+        let full =
+            encode_frame_record_message(meta, identity, prepared.full_record(), self.limits).ok();
+        let delta = if !reset {
+            prepared.delta_record().and_then(|record| {
+                encode_frame_record_message(meta, identity, record, self.limits).ok()
+            })
+        } else {
+            None
+        };
+        let bytes = match (full, delta) {
+            (Some(full), Some(delta)) if delta.len() < full.len() => delta,
+            (Some(full), _) => full,
+            (None, Some(delta)) => delta,
+            (None, None) => return Err(()),
+        };
+        let cost = bytes.len();
+        let bytes = Arc::new(bytes);
+        let admitted = if reset {
+            let notice = notification(
+                "watch.frame_codec_reset",
+                json!({
+                    "subscription": delivery.subscription.to_string(),
+                    "reset_generation": generation.to_string(),
+                    "next_sequence": sequence.to_string(),
+                    "scope": {
+                        "stream_generation": scope.stream_generation.to_string(),
+                        "play_epoch": scope.play_epoch.to_string(),
+                        "timeline_epoch": scope.timeline_epoch.to_string(),
+                    },
+                    "delivery": delivery.frame_meta(),
+                }),
+            );
+            notice.len() <= MAX_FRAME_CODEC_METADATA_BYTES
+                && notice.len() <= self.limits.max_message_bytes
+                && tx.try_send_codec_reset(notice, bytes, FRAME_CODEC_QUEUE_BYTES)
+        } else {
+            tx.try_send_codec_binary(bytes, FRAME_CODEC_QUEUE_BYTES)
+        };
+        if !admitted {
+            return Ok(None);
+        }
+        let stamp = prepared.target_stamp();
+        self.encoder.commit(prepared).map_err(|_| ())?;
+        self.sequence = sequence;
+        self.reset_generation = generation;
+        self.last_timeline = delivery.timeline;
+        self.last_loss_generation = delivery.loss_generation;
+        self.last_stamp = Some(stamp);
+        Ok(Some(cost))
+    }
+}
+
+fn frame_codec_limits(value: &J) -> Result<FrameCodecLimits, RpcError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| RpcError::params("frame_codec must be an object"))?;
+    if object.len() != 4
+        || object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "version" | "max_frame_bytes" | "max_baseline_bytes" | "max_message_bytes"
+            )
+        })
+        || object.get("version").and_then(J::as_u64) != Some(1)
+    {
+        return Err(RpcError::params(
+            "frame_codec requires version 1 and exactly three byte caps",
+        ));
+    }
+    let cap = |key: &str, hard: usize| -> Result<usize, RpcError> {
+        let requested = object.get(key).and_then(J::as_u64).ok_or_else(|| {
+            RpcError::params(format!("frame_codec.{key} must be an unsigned integer"))
+        })?;
+        Ok(requested.min(hard as u64) as usize)
+    };
+    let max_frame_bytes = cap(
+        "max_frame_bytes",
+        DEFAULT_FRAME_CODEC_LIMITS.max_frame_bytes,
+    )?;
+    let limits = FrameCodecLimits {
+        max_frame_bytes,
+        max_baseline_bytes: cap(
+            "max_baseline_bytes",
+            DEFAULT_FRAME_CODEC_LIMITS.max_baseline_bytes,
+        )?,
+        max_message_bytes: cap(
+            "max_message_bytes",
+            DEFAULT_FRAME_CODEC_LIMITS.max_message_bytes,
+        )?,
+    };
+    limits
+        .validate()
+        .map_err(|_| RpcError::params("frame_codec caps are too small or invalid"))?;
+    Ok(limits)
+}
+
+fn delivery_text(tx: &ConnTx, codec: Option<&FrameCodecState>, text: String) -> bool {
+    if let Some(codec) = codec {
+        text.len() <= codec.limits.max_message_bytes
+            && tx.try_send_codec_text(text, FRAME_CODEC_QUEUE_BYTES)
+    } else {
+        tx.try_send_text(text)
+    }
 }
 
 const MAX_VIEW_BATCH_EVENTS: usize = 100_000;
@@ -423,7 +603,11 @@ struct PendingScreenshot {
 }
 
 fn verification_panic() -> RpcError {
-    RpcError::new(INTERNAL_ERROR, "panic", "verification panicked (a bug); the live play session was not changed")
+    RpcError::new(
+        INTERNAL_ERROR,
+        "panic",
+        "verification panicked (a bug); the live play session was not changed",
+    )
 }
 
 /// The ERP server. See the module docs.
@@ -565,15 +749,25 @@ impl ErpServer {
     ) where
         G::Input: orr_reflect::Reflect,
     {
-        assert!((1..=16).contains(&max_players), "structured input player limit must be 1..=16");
-        self.structured_input = Some(Box::new(crate::input::StructuredInput::<G>::new(name, max_players, commands)));
+        assert!(
+            (1..=16).contains(&max_players),
+            "structured input player limit must be 1..=16"
+        );
+        self.structured_input = Some(Box::new(crate::input::StructuredInput::<G>::new(
+            name,
+            max_players,
+            commands,
+        )));
     }
 
     /// Enables connection-bound, two-second renewable held-input grants.
     /// Install a structured input adapter first. Legacy writes retain their
     /// existing behavior except while their slot has an active managed grant.
     pub fn enable_managed_input(&mut self) {
-        assert!(self.structured_input.is_some(), "managed input requires a structured adapter");
+        assert!(
+            self.structured_input.is_some(),
+            "managed input requires a structured adapter"
+        );
         self.managed_input.enabled = true;
     }
 
@@ -638,7 +832,11 @@ impl ErpServer {
         }
         // The completion wake is sent just before thread return. If it raced
         // the end of poll, check again soon without joining a running thread.
-        let timeout = if self.verify_task.as_ref().is_some_and(|t| t.notified || t.thread.is_finished()) {
+        let timeout = if self
+            .verify_task
+            .as_ref()
+            .is_some_and(|t| t.notified || t.thread.is_finished())
+        {
             timeout.min(Duration::from_millis(1))
         } else {
             timeout
@@ -910,8 +1108,14 @@ impl ErpServer {
     fn disconnected<G: Game>(&mut self, conn: u64, target: &mut ErpTarget<'_, G>) {
         self.managed_input.disconnect(target, conn);
         self.conns.remove(&conn);
-        if self.pending_screenshot.as_ref().is_some_and(|pending| pending.conn == conn) {
-            if let (Some(service), Some(pending)) = (&self.cfg.screenshot, self.pending_screenshot.take()) {
+        if self
+            .pending_screenshot
+            .as_ref()
+            .is_some_and(|pending| pending.conn == conn)
+        {
+            if let (Some(service), Some(pending)) =
+                (&self.cfg.screenshot, self.pending_screenshot.take())
+            {
                 service.cancel(pending.request.serial);
             }
         }
@@ -938,10 +1142,16 @@ impl ErpServer {
         let authorized = authorize("view.screenshot", caps, target.play.is_some(), params);
         let Some(id) = id else {
             self.stats.requests += 1;
-            if let Some(c) = self.conns.get_mut(&conn) { c.requests += 1; }
+            if let Some(c) = self.conns.get_mut(&conn) {
+                c.requests += 1;
+            }
             return;
         };
-        if self.pending_screenshot.as_ref().is_some_and(|pending| pending.conn == conn && pending.id == id) {
+        if self
+            .pending_screenshot
+            .as_ref()
+            .is_some_and(|pending| pending.conn == conn && pending.id == id)
+        {
             // JSON-RPC IDs are unique per connection while pending; share the
             // original terminal result rather than issuing a second capture.
             return;
@@ -973,16 +1183,29 @@ impl ErpServer {
                     incarnation: self.view_incarnation,
                 });
                 self.stats.requests += 1;
-                if let Some(c) = self.conns.get_mut(&conn) { c.requests += 1; }
+                if let Some(c) = self.conns.get_mut(&conn) {
+                    c.requests += 1;
+                }
             }
-            Err(crate::screenshot::ScreenshotAdmissionError::Busy) => self.respond_screenshot_error(conn, &id, view_busy()),
-            Err(crate::screenshot::ScreenshotAdmissionError::Unavailable) => self.respond_screenshot_error(conn, &id, view_unavailable()),
-            Err(crate::screenshot::ScreenshotAdmissionError::Invalid) => self.respond_screenshot_error(conn, &id, RpcError::params("screenshot limits are invalid")),
+            Err(crate::screenshot::ScreenshotAdmissionError::Busy) => {
+                self.respond_screenshot_error(conn, &id, view_busy())
+            }
+            Err(crate::screenshot::ScreenshotAdmissionError::Unavailable) => {
+                self.respond_screenshot_error(conn, &id, view_unavailable())
+            }
+            Err(crate::screenshot::ScreenshotAdmissionError::Invalid) => self
+                .respond_screenshot_error(
+                    conn,
+                    &id,
+                    RpcError::params("screenshot limits are invalid"),
+                ),
         }
     }
 
     fn poll_screenshot<G: Game>(&mut self, target: &ErpTarget<'_, G>, now: Instant) {
-        let Some(pending) = self.pending_screenshot.as_ref() else { return };
+        let Some(pending) = self.pending_screenshot.as_ref() else {
+            return;
+        };
         let serial = pending.request.serial;
         let conn = pending.conn;
         let id = pending.id.clone();
@@ -993,28 +1216,42 @@ impl ErpServer {
         let service = self.cfg.screenshot.clone();
         let outcome = if !self.conns.contains_key(&conn) {
             None
-        } else if service.as_ref().is_none_or(|service| !service.owner_available()) {
+        } else if service
+            .as_ref()
+            .is_none_or(|service| !service.owner_available())
+        {
             Some(Err(view_unavailable()))
         } else if now >= deadline {
             Some(Err(view_timeout()))
-        } else if self.view_incarnation != incarnation || frame_key(target, FrameSource::View) != view_key || current_view_state(target) != requested {
+        } else if self.view_incarnation != incarnation
+            || frame_key(target, FrameSource::View) != view_key
+            || current_view_state(target) != requested
+        {
             Some(Err(view_stale()))
         } else {
-            service.as_ref().and_then(|service| service.poll_result(serial)).map(|result| match result {
-                Ok(image) if image.captured == requested => Ok(image),
-                Ok(_) => Err(view_stale()),
-                Err(crate::screenshot::CaptureError::Unavailable) => Err(view_unavailable()),
-                Err(crate::screenshot::CaptureError::Stale) => Err(view_stale()),
-                Err(crate::screenshot::CaptureError::Failed) => Err(view_capture_failed()),
-            })
+            service
+                .as_ref()
+                .and_then(|service| service.poll_result(serial))
+                .map(|result| match result {
+                    Ok(image) if image.captured == requested => Ok(image),
+                    Ok(_) => Err(view_stale()),
+                    Err(crate::screenshot::CaptureError::Unavailable) => Err(view_unavailable()),
+                    Err(crate::screenshot::CaptureError::Stale) => Err(view_stale()),
+                    Err(crate::screenshot::CaptureError::Failed) => Err(view_capture_failed()),
+                })
         };
         let Some(outcome) = outcome else { return };
-        if let Some(service) = service { service.cancel(serial); }
+        if let Some(service) = service {
+            service.cancel(serial);
+        }
         self.pending_screenshot = None;
         match outcome {
             Ok(image) => {
                 let state = image.captured;
-                let mode = match state.mode { crate::screenshot::ViewMode::Edit => "edit", crate::screenshot::ViewMode::Play => "play" };
+                let mode = match state.mode {
+                    crate::screenshot::ViewMode::Edit => "edit",
+                    crate::screenshot::ViewMode::Play => "play",
+                };
                 let result = json!({
                     "status": "captured",
                     "source": "editor.app_framebuffer",
@@ -1070,7 +1307,9 @@ impl ErpServer {
             self.screenshot_request(target, conn, id, caps, params);
             return;
         }
-        if matches!(method, "proposal.verify" | "verify.self") && self.cfg.limits.client_session.is_none() {
+        if matches!(method, "proposal.verify" | "verify.self")
+            && self.cfg.limits.client_session.is_none()
+        {
             self.request_verification(target, conn, id, client, caps, method, params);
             return;
         }
@@ -1084,7 +1323,10 @@ impl ErpServer {
         } else {
             Default::default()
         };
-        let result = if method == "activity.list" {
+        let codec_request = method == "watch.subscribe" && params.get("frame_codec").is_some();
+        let result = if codec_request {
+            self.watch_codec(conn, caps, params, id.as_ref())
+        } else if method == "activity.list" {
             authorize(method, caps, false, params)
                 .and_then(|_| activity::list_params(params))
                 .map(|_| self.activity_list(params))
@@ -1105,21 +1347,35 @@ impl ErpServer {
                 tx_check: Some((conn, self.tx_owner.map(|(c, _)| c))),
             };
             match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let input = self.structured_input.as_ref().and_then(|a| a.downcast_ref::<crate::input::StructuredInput<G>>());
+                let input = self
+                    .structured_input
+                    .as_ref()
+                    .and_then(|a| a.downcast_ref::<crate::input::StructuredInput<G>>());
                 authorize(method, caps, target.play.is_some(), params)?;
-                let mut result = if let Some(result) = self.managed_input.handle(target, input, (conn, Instant::now()), method, params) {
+                let mut result = if let Some(result) =
+                    self.managed_input
+                        .handle(target, input, (conn, Instant::now()), method, params)
+                {
                     result
                 } else {
                     call(target, &limits, input, &ctx, &mut fx, method, params)
                 }?;
-                if matches!(method, "sim.start" | "sim.stop" | "sim.pause" | "sim.seek" | "sim.branch") {
+                if matches!(
+                    method,
+                    "sim.start" | "sim.stop" | "sim.pause" | "sim.seek" | "sim.branch"
+                ) {
                     self.managed_input.invalidate(target);
                 }
                 if self.managed_input.enabled && input.is_some() {
                     match method {
                         "sim.state" => result["managed_held"] = self.managed_input.status(conn),
-                        "registry.input" => result["managed_held"] = crate::input::ManagedHeld::descriptor(),
-                        "rpc.discover" => result["engine"]["input"]["managed_held"] = crate::input::ManagedHeld::descriptor(),
+                        "registry.input" => {
+                            result["managed_held"] = crate::input::ManagedHeld::descriptor()
+                        }
+                        "rpc.discover" => {
+                            result["engine"]["input"]["managed_held"] =
+                                crate::input::ManagedHeld::descriptor()
+                        }
                         _ => {}
                     }
                 }
@@ -1149,6 +1405,22 @@ impl ErpServer {
                 .view_incarnation
                 .checked_add(1)
                 .expect("view incarnation exhausted");
+        }
+        if result.is_ok()
+            && matches!(
+                method,
+                "sim.start" | "sim.stop" | "sim.seek" | "sim.branch" | "sim.play"
+            )
+        {
+            for c in self
+                .conns
+                .values_mut()
+                .filter(|c| c.subs.frame_codec.is_some())
+            {
+                if let Some(delivery) = c.subs.delivery.as_mut() {
+                    delivery.lost();
+                }
+            }
         }
         self.observe_view_timelines(target);
         self.publish_delivery_events(&fx.events);
@@ -1218,7 +1490,7 @@ impl ErpServer {
         if result.is_err() {
             self.stats.errors += 1;
         }
-        if let Some(id) = id {
+        if let Some(id) = id.filter(|_| !codec_request || result.is_err()) {
             let response = match result {
                 Ok(r) => response_ok(&id, r),
                 Err(e) => response_err(&id, &e),
@@ -1253,17 +1525,31 @@ impl ErpServer {
             c.requests += 1;
         }
         let request = VerifyRequest {
-            conn, id, client, method: method.to_string(),
+            conn,
+            id,
+            client,
+            method: method.to_string(),
             params: json!({"id": params.get("id").and_then(J::as_str)}),
         };
         let prepared = authorize(method, caps, target.play.is_some(), params).and_then(|_| {
             if self.verify_task.is_some() {
-                return Err(RpcError::new(LIMIT_EXCEEDED, "verify_busy", "this host already has a verification running; retry after it finishes"));
+                return Err(RpcError::new(
+                    LIMIT_EXCEEDED,
+                    "verify_busy",
+                    "this host already has a verification running; retry after it finishes",
+                ));
             }
             // Capture errors/panics are also isolated: this only reads the doc.
             std::panic::catch_unwind(AssertUnwindSafe(|| {
-                proposals::prepare_verify(target.doc, &self.cfg.limits, self.last_play.as_ref(), params, method == "proposal.verify")
-            })).unwrap_or_else(|_| Err(verification_panic()))
+                proposals::prepare_verify(
+                    target.doc,
+                    &self.cfg.limits,
+                    self.last_play.as_ref(),
+                    params,
+                    method == "proposal.verify",
+                )
+            }))
+            .unwrap_or_else(|_| Err(verification_panic()))
         });
         let prepared = match prepared {
             Ok(p) => p,
@@ -1275,35 +1561,77 @@ impl ErpServer {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let serial = self.next_verify_serial;
-        self.next_verify_serial = self.next_verify_serial.checked_add(1).expect("verification serial exhausted");
+        self.next_verify_serial = self
+            .next_verify_serial
+            .checked_add(1)
+            .expect("verification serial exhausted");
         // The worker owns only an inbox sender, never NetShared or ConnTx:
         // dropping the host still closes every connection immediately.
         let wake = self.net.inbox.clone();
-        let spawned = std::thread::Builder::new().name("orr-verify".into()).spawn(move || {
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| prepared.run::<G>(&worker_cancel)))
+        let spawned = std::thread::Builder::new()
+            .name("orr-verify".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    prepared.run::<G>(&worker_cancel)
+                }))
                 .unwrap_or_else(|_| Err(verification_panic()));
-            let _ = wake.send(Inbound::VerificationReady { serial });
-            result
-        });
+                let _ = wake.send(Inbound::VerificationReady { serial });
+                result
+            });
         match spawned {
-            Ok(thread) => self.verify_task = Some(VerifyTask { serial, request, cancel, thread, notified: false }),
-            Err(e) => self.finish_verification(target, request, Err(RpcError::new(INTERNAL_ERROR, "verify_worker", format!("cannot start verification worker: {e}")))),
+            Ok(thread) => {
+                self.verify_task = Some(VerifyTask {
+                    serial,
+                    request,
+                    cancel,
+                    thread,
+                    notified: false,
+                })
+            }
+            Err(e) => self.finish_verification(
+                target,
+                request,
+                Err(RpcError::new(
+                    INTERNAL_ERROR,
+                    "verify_worker",
+                    format!("cannot start verification worker: {e}"),
+                )),
+            ),
         }
     }
 
     fn complete_verification<G: Game>(&mut self, target: &ErpTarget<'_, G>) {
-        if !self.verify_task.as_ref().is_some_and(|t| t.thread.is_finished()) {
+        if !self
+            .verify_task
+            .as_ref()
+            .is_some_and(|t| t.thread.is_finished())
+        {
             return;
         }
-        let task = self.verify_task.take().expect("finished verification exists");
+        let task = self
+            .verify_task
+            .take()
+            .expect("finished verification exists");
         // Join only after actual exit. Cancellation alone must never release
         // capacity: an uncooperative hook could still be using a worker.
-        let result = task.thread.join().unwrap_or_else(|_| Err(verification_panic()));
-        let result = if task.cancel.load(Ordering::Relaxed) { Err(proposals::verify_cancelled()) } else { result };
+        let result = task
+            .thread
+            .join()
+            .unwrap_or_else(|_| Err(verification_panic()));
+        let result = if task.cancel.load(Ordering::Relaxed) {
+            Err(proposals::verify_cancelled())
+        } else {
+            result
+        };
         self.finish_verification(target, task.request, result);
     }
 
-    fn finish_verification<G: Game>(&mut self, target: &ErpTarget<'_, G>, request: VerifyRequest, result: Result<VerifyResult, RpcError>) {
+    fn finish_verification<G: Game>(
+        &mut self,
+        target: &ErpTarget<'_, G>,
+        request: VerifyRequest,
+        result: Result<VerifyResult, RpcError>,
+    ) {
         let (result, detail) = match result {
             Ok(result) => (Ok(result.value), Some(result.detail)),
             Err(e) => (Err(e), None),
@@ -1311,7 +1639,15 @@ impl ErpServer {
         if result.is_err() {
             self.stats.errors += 1;
         }
-        let entry = activity::build(target, &request.client, &request.method, &request.params, &result, Default::default(), detail);
+        let entry = activity::build(
+            target,
+            &request.client,
+            &request.method,
+            &request.params,
+            &result,
+            Default::default(),
+            detail,
+        );
         self.push_activity(entry);
         if let (Some(id), Some(c)) = (request.id, self.conns.get(&request.conn)) {
             let response = match result {
@@ -1336,6 +1672,110 @@ impl ErpServer {
     }
 
     // ---- watch ----
+
+    fn watch_codec(
+        &mut self,
+        conn: u64,
+        caps: Caps,
+        params: &J,
+        id: Option<&J>,
+    ) -> Result<J, RpcError> {
+        authorize("watch.subscribe", caps, false, params)?;
+        let id =
+            id.ok_or_else(|| RpcError::params("frame_codec negotiation requires a request id"))?;
+        let limits = frame_codec_limits(&params["frame_codec"])?;
+        let topics = params["topics"]
+            .as_array()
+            .ok_or_else(|| RpcError::params("topics must be an array"))?;
+        if topics.len() != 3
+            || !["frames", "events", "notes"]
+                .iter()
+                .all(|name| topics.iter().any(|v| v.as_str() == Some(*name)))
+            || params["view_delivery"].as_u64() != Some(1)
+            || frame_source(params)? != FrameSource::Sim
+            || self.cfg.limits.client_session.is_some()
+        {
+            return Err(RpcError::params(
+                "frame_codec 1 requires fenced frames/events/notes and source sim",
+            ));
+        }
+        let max_fps = match params.get("max_fps") {
+            None | Some(J::Null) => 60,
+            Some(value) => value
+                .as_u64()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| RpcError::params("max_fps must be a positive integer"))?
+                .min(1000),
+        };
+        let reserved = self
+            .conns
+            .iter()
+            .filter(|(other, _)| **other != conn)
+            .filter_map(|(_, c)| c.subs.frame_codec.as_ref())
+            .try_fold(0usize, |total, codec| {
+                total.checked_add(codec.limits.max_baseline_bytes)
+            });
+        if reserved
+            .and_then(|total| total.checked_add(limits.max_baseline_bytes))
+            .is_none_or(|total| total > MAX_FRAME_CODEC_TOTAL_BASELINE_BYTES)
+        {
+            return Err(RpcError::state(
+                "frame_codec_budget",
+                "the aggregate frame baseline budget is full",
+            ));
+        }
+        let subscription = self.next_view_subscription;
+        let next_subscription = subscription.checked_add(1).ok_or_else(|| {
+            RpcError::state("frame_codec_exhausted", "subscription ids are exhausted")
+        })?;
+        let c = self
+            .conns
+            .get_mut(&conn)
+            .ok_or_else(|| RpcError::state("gone", "connection is gone"))?;
+        if !c.binary || c.tx.is_local() {
+            return Err(RpcError::params(
+                "frame_codec requires a network WebSocket connection",
+            ));
+        }
+        let result = json!({
+            "topics": ["frames", "events", "notes"], "view_delivery": 1,
+            "subscription": subscription.to_string(), "cursor": "0", "count": "0",
+            "sequence": "0", "reset_generation": "1",
+            "frame_codec": {"version": 1, "max_frame_bytes": limits.max_frame_bytes,
+                "max_baseline_bytes": limits.max_baseline_bytes, "max_message_bytes": limits.max_message_bytes},
+        });
+        let ack = response_ok(id, result.clone());
+        if ack.len() > MAX_FRAME_CODEC_METADATA_BYTES
+            || ack.len() > limits.max_message_bytes
+            || !c.tx.try_send_codec_text(ack, FRAME_CODEC_QUEUE_BYTES)
+        {
+            if let Some(codec) = c.subs.frame_codec.as_mut() {
+                codec.failed = true;
+            }
+            c.tx.close();
+            return Err(RpcError::state(
+                "frame_codec_queue",
+                "negotiation ACK could not be admitted",
+            ));
+        }
+        // No frame is published between the admitted ACK and activation. The
+        // reserved per-subscription capacity also bounds future retained bases.
+        c.subs.events = true;
+        c.subs.notes = true;
+        c.subs.frames = Some(FrameSub {
+            min_interval: Duration::from_micros(1_000_000 / max_fps),
+            last_sent: None,
+            last_key: None,
+            source: FrameSource::Sim,
+            client_reset_pending: false,
+            client_event_floor: None,
+            client_clear_event_floor_after_frame: false,
+        });
+        c.subs.delivery = Some(ViewDelivery::new(subscription));
+        c.subs.frame_codec = Some(FrameCodecState::new(limits));
+        self.next_view_subscription = next_subscription;
+        Ok(result)
+    }
 
     fn watch<G: Game>(
         &mut self,
@@ -1401,11 +1841,68 @@ impl ErpServer {
         let Some(c) = self.conns.get_mut(&conn) else {
             return Err(RpcError::new(INTERNAL_ERROR, "gone", "connection is gone"));
         };
+        if c.subs.frame_codec.is_some()
+            && topics.iter().any(|t| {
+                !matches!(
+                    t.as_str(),
+                    "tick"
+                        | "history"
+                        | "events"
+                        | "notes"
+                        | "proposals"
+                        | "activity"
+                        | "frames"
+                        | "viewstream"
+                )
+            })
+        {
+            return Err(RpcError::params(
+                "unknown topic in codec subscription change",
+            ));
+        }
+        // Prepare every fallible part before touching the active subscription.
+        // In particular, a refused legacy request must not downgrade an
+        // acknowledged codec stream or discard its admitted baseline/cut.
+        if method == "watch.subscribe" && topics.is_empty() {
+            return Err(RpcError::params("'topics' must not be empty"));
+        }
+        let mut viewstream_schema = None;
+        for t in &topics {
+            match t.as_str() {
+                "tick" | "history" | "events" | "notes" | "proposals" | "activity" => {}
+                "frames" if method == "watch.subscribe" && !c.binary => {
+                    return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
+                }
+                "frames" => {}
+                "viewstream" if method == "watch.subscribe" => {
+                    let schema = if let Some(client) = &client_mode {
+                        client.lock().schema().ok_or_else(|| RpcError::state(
+                            "not_ready", "the client is still joining the room (no schema yet)"
+                        ))?.to_json()
+                    } else {
+                        let hook = self.cfg.limits.view_stream.as_ref().ok_or_else(|| RpcError::params(
+                            "this host has no view stream (the game did not configure one)"
+                        ))?;
+                        if matches!(source, FrameSource::Proposal(_)) {
+                            return Err(RpcError::params("'viewstream' shows the play session or the scene (`source`: sim or view), not a proposal"));
+                        }
+                        hook.lock().schema().to_json()
+                    };
+                    viewstream_schema = Some(schema);
+                }
+                "viewstream" => {}
+                other if method == "watch.subscribe" => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames, viewstream)"))),
+                other => return Err(RpcError::params(format!("unknown topic '{other}'"))),
+            }
+        }
+        if topics
+            .iter()
+            .any(|t| matches!(t.as_str(), "frames" | "events" | "notes"))
+        {
+            c.subs.frame_codec = None;
+        }
         let mut initial: Vec<String> = Vec::new();
         if method == "watch.subscribe" {
-            if topics.is_empty() {
-                return Err(RpcError::params("'topics' must not be empty"));
-            }
             for t in &topics {
                 match t.as_str() {
                     "tick" => {
@@ -1425,36 +1922,50 @@ impl ErpServer {
                         if self.prop_watch.is_none() {
                             self.prop_watch = Some(ProposalWatch::capture(target.doc));
                         }
-                        initial.push(notification("watch.proposals", ProposalWatch::state_params(target.doc)));
+                        initial.push(notification(
+                            "watch.proposals",
+                            ProposalWatch::state_params(target.doc),
+                        ));
                     }
-                    "activity" => c.subs.activity = Some(ActivitySub { seen: last_seq, reads: include_reads }),
+                    "activity" => {
+                        c.subs.activity = Some(ActivitySub {
+                            seen: last_seq,
+                            reads: include_reads,
+                        })
+                    }
                     "frames" => {
-                        if !c.binary {
-                            return Err(RpcError::params("frames are binary messages: connect with WebSocket, not plain TCP"));
-                        }
-                        c.subs.frames = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
-                    }
-                    "viewstream" if client_mode.is_some() => {
-                        let Some(schema) = client_mode.as_ref().and_then(|h| h.lock().schema()) else {
-                            return Err(RpcError::state("not_ready", "the client is still joining the room (no schema yet)"));
-                        };
-                        // Frames wait for their subscriber's rate cap but are never skipped from the host's side:
-                        // events are sent at once, the newest frame goes out as soon as the cap allows.
-                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
-                        initial.push(notification("watch.viewstream.schema", schema.to_json()));
+                        c.subs.frames = Some(FrameSub {
+                            min_interval: Duration::from_micros(1_000_000 / max_fps),
+                            last_sent: None,
+                            last_key: None,
+                            source,
+                            client_reset_pending: false,
+                            client_event_floor: None,
+                            client_clear_event_floor_after_frame: false,
+                        });
                     }
                     "viewstream" => {
-                        let Some(hook) = self.cfg.limits.view_stream.as_ref() else {
-                            return Err(RpcError::params("this host has no view stream (the game did not configure one)"));
-                        };
-                        if matches!(source, FrameSource::Proposal(_)) {
-                            return Err(RpcError::params("'viewstream' shows the play session or the scene (`source`: sim or view), not a proposal"));
-                        }
-                        c.subs.viewstream = Some(FrameSub { min_interval: Duration::from_micros(1_000_000 / max_fps), last_sent: None, last_key: None, source, client_reset_pending: false, client_event_floor: None, client_clear_event_floor_after_frame: false });
-                        // The schema goes out right after the response, before any frame.
-                        initial.push(notification("watch.viewstream.schema", hook.lock().schema().to_json()));
+                        // Relay frames wait for this subscriber's rate cap;
+                        // events are sent immediately and the latest frame follows.
+                        c.subs.viewstream = Some(FrameSub {
+                            min_interval: Duration::from_micros(1_000_000 / max_fps),
+                            last_sent: None,
+                            last_key: None,
+                            source,
+                            client_reset_pending: false,
+                            client_event_floor: None,
+                            client_clear_event_floor_after_frame: false,
+                        });
+                        // Prepared before commit; do not read mutable relay state again.
+                        initial.push(notification(
+                            "watch.viewstream.schema",
+                            viewstream_schema
+                                .as_ref()
+                                .expect("validated viewstream schema")
+                                .clone(),
+                        ));
                     }
-                    other => return Err(RpcError::params(format!("unknown topic '{other}' (tick, history, events, notes, proposals, activity, frames, viewstream)"))),
+                    _ => unreachable!("validated topic"),
                 }
             }
             if fenced {
@@ -1489,7 +2000,7 @@ impl ErpServer {
                     "activity" => c.subs.activity = None,
                     "frames" => c.subs.frames = None,
                     "viewstream" => c.subs.viewstream = None,
-                    other => return Err(RpcError::params(format!("unknown topic '{other}'"))),
+                    _ => unreachable!("validated topic"),
                 }
             }
         }
@@ -1549,12 +2060,24 @@ impl ErpServer {
                 continue;
             };
             d.record_notes(&notes);
+            if c.subs.frame_codec.is_some()
+                && notes.iter().any(|note| {
+                    matches!(
+                        note,
+                        PlayNote::Seeked { .. }
+                            | PlayNote::Branched { .. }
+                            | PlayNote::Resumed { .. }
+                    )
+                })
+            {
+                d.lost();
+            }
             let n = notification(
                 "watch.notes",
                 json!({"notes": notes.iter().copied().map(note_json).collect::<Vec<_>>(),
                 "delivery": d.notification_meta()}),
             );
-            if !c.tx.try_send_text(n) {
+            if !delivery_text(&c.tx, c.subs.frame_codec.as_ref(), n) {
                 d.lost();
             }
         }
@@ -1587,10 +2110,14 @@ impl ErpServer {
             }
             d.advance(events.len());
             if oversized
-                || !c.tx.try_send_text(notification(
-                    "watch.events",
-                    json!({"events": list, "delivery": d.notification_meta()}),
-                ))
+                || !delivery_text(
+                    &c.tx,
+                    c.subs.frame_codec.as_ref(),
+                    notification(
+                        "watch.events",
+                        json!({"events": list, "delivery": d.notification_meta()}),
+                    ),
+                )
             {
                 d.lost();
             }
@@ -1599,6 +2126,13 @@ impl ErpServer {
 
     fn publish_delivery_frames<G: Game>(&mut self, target: &ErpTarget<'_, G>, now: Instant) {
         for c in self.conns.values_mut() {
+            if c.subs
+                .frame_codec
+                .as_ref()
+                .is_some_and(|codec| codec.failed)
+            {
+                continue;
+            }
             let (Some(d), Some(f)) = (c.subs.delivery.as_mut(), c.subs.frames.as_mut()) else {
                 continue;
             };
@@ -1609,7 +2143,7 @@ impl ErpServer {
             }
             if f.last_sent
                 .is_some_and(|sent| now.duration_since(sent) < f.min_interval)
-                || c.tx.pending() > MAX_PENDING_BYTES
+                || (c.subs.frame_codec.is_none() && c.tx.pending() > MAX_PENDING_BYTES)
             {
                 self.frame_pending = true;
                 continue;
@@ -1625,7 +2159,23 @@ impl ErpServer {
                 // Fenced metadata is built from this exact frame and output cut.
                 // Never reuse a legacy cache entry carrying an older watermark.
                 self.stats.frames_built += 1;
-                if c.tx.is_local() {
+                if let Some(codec) = c.subs.frame_codec.as_mut() {
+                    meta["play_epoch"] = json!(key.2.to_string());
+                    match codec.send_frame(&c.tx, d, &meta, frame) {
+                        Ok(Some(cost)) => {
+                            self.stats.last_frame_bytes = cost as u64;
+                            true
+                        }
+                        Ok(None) => false,
+                        Err(()) => {
+                            // Invalid/oversize records and exhausted identities
+                            // cannot silently downgrade an acknowledged stream.
+                            codec.failed = true;
+                            c.tx.close();
+                            false
+                        }
+                    }
+                } else if c.tx.is_local() {
                     let cost = 4096 + 160 * frame.alive_count() as usize;
                     c.tx.try_send_local_frame(Arc::new(LocalFrame {
                         meta,
@@ -1638,12 +2188,16 @@ impl ErpServer {
                     c.tx.try_send_binary(bytes)
                 }
             } else {
-                c.tx.try_send_text(notification(
-                    "watch.view.inactive",
-                    json!({
-                        "delivery": d.frame_meta(), "reason": "source_unavailable",
-                    }),
-                ))
+                delivery_text(
+                    &c.tx,
+                    c.subs.frame_codec.as_ref(),
+                    notification(
+                        "watch.view.inactive",
+                        json!({
+                            "delivery": d.frame_meta(), "reason": "source_unavailable",
+                        }),
+                    ),
+                )
             };
             if sent {
                 f.last_sent = Some(now);
@@ -1653,7 +2207,9 @@ impl ErpServer {
                     self.stats.frames_sent += 1;
                 }
             } else {
-                d.lost();
+                if c.subs.frame_codec.is_none() {
+                    d.lost();
+                }
                 self.frame_pending = true;
                 self.stats.frames_skipped += 1;
             }
@@ -2225,11 +2781,20 @@ fn current_view_state<G: Game>(target: &ErpTarget<'_, G>) -> crate::screenshot::
     }
 }
 
-fn parse_screenshot_options(params: &J) -> Result<(crate::screenshot::ScreenshotOptions, Duration), RpcError> {
-    let object = params.as_object().ok_or_else(|| RpcError::params("params must be an object"))?;
+fn parse_screenshot_options(
+    params: &J,
+) -> Result<(crate::screenshot::ScreenshotOptions, Duration), RpcError> {
+    let object = params
+        .as_object()
+        .ok_or_else(|| RpcError::params("params must be an object"))?;
     for key in object.keys() {
-        if !matches!(key.as_str(), "target" | "timeout_ms" | "max_width" | "max_height") {
-            return Err(RpcError::params(format!("unsupported screenshot parameter '{key}'")));
+        if !matches!(
+            key.as_str(),
+            "target" | "timeout_ms" | "max_width" | "max_height"
+        ) {
+            return Err(RpcError::params(format!(
+                "unsupported screenshot parameter '{key}'"
+            )));
         }
     }
     if let Some(target) = object.get("target") {
@@ -2240,7 +2805,9 @@ fn parse_screenshot_options(params: &J) -> Result<(crate::screenshot::Screenshot
     let number = |key: &str, default: u64| -> Result<u64, RpcError> {
         match object.get(key) {
             None => Ok(default),
-            Some(value) => value.as_u64().ok_or_else(|| RpcError::params(format!("'{key}' must be an unsigned integer"))),
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| RpcError::params(format!("'{key}' must be an unsigned integer"))),
         }
     };
     let timeout_ms = number("timeout_ms", 5000)?;
@@ -2250,32 +2817,57 @@ fn parse_screenshot_options(params: &J) -> Result<(crate::screenshot::Screenshot
     let max_width = number("max_width", 2048)?;
     let max_height = number("max_height", 2048)?;
     if max_width == 0 || max_height == 0 || max_width > 2048 || max_height > 2048 {
-        return Err(RpcError::params("'max_width' and 'max_height' must be in 1..=2048"));
+        return Err(RpcError::params(
+            "'max_width' and 'max_height' must be in 1..=2048",
+        ));
     }
     Ok((
-        crate::screenshot::ScreenshotOptions { max_width: max_width as u32, max_height: max_height as u32 },
+        crate::screenshot::ScreenshotOptions {
+            max_width: max_width as u32,
+            max_height: max_height as u32,
+        },
         Duration::from_millis(timeout_ms),
     ))
 }
 
 fn view_unavailable() -> RpcError {
-    RpcError::new(INVALID_STATE, "view_unavailable", "no local editor screenshot owner is available")
+    RpcError::new(
+        INVALID_STATE,
+        "view_unavailable",
+        "no local editor screenshot owner is available",
+    )
 }
 
 fn view_busy() -> RpcError {
-    RpcError::new(LIMIT_EXCEEDED, "view_busy", "the editor screenshot endpoint is busy")
+    RpcError::new(
+        LIMIT_EXCEEDED,
+        "view_busy",
+        "the editor screenshot endpoint is busy",
+    )
 }
 
 fn view_timeout() -> RpcError {
-    RpcError::new(INVALID_STATE, "view_timeout", "the editor screenshot request timed out")
+    RpcError::new(
+        INVALID_STATE,
+        "view_timeout",
+        "the editor screenshot request timed out",
+    )
 }
 
 fn view_stale() -> RpcError {
-    RpcError::new(INVALID_STATE, "view_stale", "the view changed before its screenshot completed")
+    RpcError::new(
+        INVALID_STATE,
+        "view_stale",
+        "the view changed before its screenshot completed",
+    )
 }
 
 fn view_capture_failed() -> RpcError {
-    RpcError::new(INTERNAL_ERROR, "view_capture_failed", "the editor could not capture or encode its framebuffer")
+    RpcError::new(
+        INTERNAL_ERROR,
+        "view_capture_failed",
+        "the editor could not capture or encode its framebuffer",
+    )
 }
 
 /// The metadata and the frame of `key` (as [`frame_key`] named it).
@@ -2320,7 +2912,9 @@ fn frame_parts<'a, G: Game>(
 
 impl Drop for ErpServer {
     fn drop(&mut self) {
-        if let (Some(service), Some(pending)) = (&self.cfg.screenshot, self.pending_screenshot.take()) {
+        if let (Some(service), Some(pending)) =
+            (&self.cfg.screenshot, self.pending_screenshot.take())
+        {
             service.cancel(pending.request.serial);
         }
         if let Some(task) = self.verify_task.take() {
@@ -2517,11 +3111,18 @@ mod fenced_delivery_tests {
         // Unique connection ID: fixture already installed connection 1.
         server.net.next_id.store(2, Relaxed);
         let mut local = connector.connect("local", Caps::ALL).unwrap();
-        let mut target = ErpTarget { doc: &mut doc, play: &mut play };
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
         server.poll(&mut target);
         let queued = server.net.queued.clone();
         let bytes = server.net.queued_bytes.clone();
-        let req = Request { id: Some(1), method: "sim.state".into(), params: J::Null };
+        let req = Request {
+            id: Some(1),
+            method: "sim.state".into(),
+            params: J::Null,
+        };
         let cost = req.to_text().len();
         local.send(req.clone()).unwrap();
         assert_eq!(queued.load(Relaxed), 1);
@@ -2531,7 +3132,11 @@ mod fenced_delivery_tests {
         assert_eq!(queued.load(Relaxed), 1, "stash still owns the permit");
         assert_eq!(bytes.load(Relaxed), cost);
         assert_eq!(server.poll(&mut target).requests, 1);
-        assert_eq!(queued.load(Relaxed), 0, "undrained response owns no request slot");
+        assert_eq!(
+            queued.load(Relaxed),
+            0,
+            "undrained response owns no request slot"
+        );
         assert_eq!(bytes.load(Relaxed), 0);
 
         local.send(req.clone()).unwrap();
@@ -2540,14 +3145,26 @@ mod fenced_delivery_tests {
         assert_eq!(queued.load(Relaxed), 2, "one in stash, one in inbox");
         assert_eq!(bytes.load(Relaxed), cost * 2);
         drop(local);
-        assert_eq!(queued.load(Relaxed), 2, "disconnect does not retract admitted requests");
+        assert_eq!(
+            queued.load(Relaxed),
+            2,
+            "disconnect does not retract admitted requests"
+        );
         assert_eq!(bytes.load(Relaxed), cost * 2);
         drop(server);
-        assert_eq!(queued.load(Relaxed), 0, "both receiver and stash release slots");
+        assert_eq!(
+            queued.load(Relaxed),
+            0,
+            "both receiver and stash release slots"
+        );
         assert_eq!(bytes.load(Relaxed), 0);
         assert!(connector.connect("after-drop", Caps::ALL).is_err());
         // Only this observer and the connector's shared state remain.
-        assert_eq!(Arc::strong_count(&queued), 2, "no permit or sender ownership cycle");
+        assert_eq!(
+            Arc::strong_count(&queued),
+            2,
+            "no permit or sender ownership cycle"
+        );
         assert_eq!(Arc::strong_count(&bytes), 2);
     }
 
@@ -3181,5 +3798,486 @@ mod client_viewstream_recovery_tests {
                 .collect::<Vec<_>>(),
             [88]
         );
+    }
+}
+
+#[cfg(test)]
+mod negotiated_frame_codec_tests {
+    use super::*;
+    use crate::net::Out;
+    use crate::wire::decode_frame_record_message;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    fn blank_frame(tick: u64) -> orr_ecs::Frame {
+        let mut frame = orr_ecs::Frame::new(orr_ecs::ComponentRegistryBuilder::new().build());
+        frame.set_tick(tick);
+        frame
+    }
+
+    fn metadata(delivery: &ViewDelivery, epoch: u64) -> J {
+        json!({"play_epoch": epoch.to_string(), "epoch": epoch, "delivery": delivery.frame_meta()})
+    }
+
+    fn take_codec(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Out>,
+    ) -> (Option<String>, Option<Arc<Vec<u8>>>) {
+        let Out::Codec(output) = rx.try_recv().unwrap() else {
+            panic!("negotiated output")
+        };
+        output.test_messages()
+    }
+
+    fn params() -> J {
+        json!({"topics": ["frames", "events", "notes"], "source": "sim", "view_delivery": 1,
+            "frame_codec": {"version": 1,
+                "max_frame_bytes": DEFAULT_FRAME_CODEC_LIMITS.max_frame_bytes,
+                "max_baseline_bytes": DEFAULT_FRAME_CODEC_LIMITS.max_baseline_bytes,
+                "max_message_bytes": DEFAULT_FRAME_CODEC_LIMITS.max_message_bytes}})
+    }
+
+    fn insert_connection(
+        server: &mut ErpServer,
+        conn: u64,
+        binary: bool,
+    ) -> (tokio::sync::mpsc::UnboundedReceiver<Out>, Arc<AtomicUsize>) {
+        let (tx, rx, pending) = ConnTx::codec_test_channel();
+        server.conns.insert(
+            conn,
+            Conn {
+                tx,
+                client: "codec-test".into(),
+                caps: Caps::ALL,
+                binary,
+                subs: Subs::default(),
+                requests: 0,
+                connected_ms: 0,
+            },
+        );
+        (rx, pending)
+    }
+
+    fn server() -> ErpServer {
+        let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+        cfg.listen = false;
+        ErpServer::start(cfg).unwrap()
+    }
+
+    fn subscription_snapshot(server: &ErpServer) -> String {
+        let s = &server.conns[&1].subs;
+        let codec = s.frame_codec.as_ref().expect("codec remains negotiated");
+        let d = s.delivery.as_ref().unwrap();
+        let f = s.frames.as_ref().unwrap();
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}",
+            (
+                codec.limits,
+                codec.encoder.baseline_stamp(),
+                codec.encoder.retained_baseline_bytes(),
+                codec.sequence,
+                codec.reset_generation,
+                codec.last_timeline,
+                codec.last_loss_generation,
+                codec.last_stamp,
+                codec.failed
+            ),
+            (d.frame_meta(), d.identity, d.last_cut),
+            (
+                f.min_interval,
+                f.last_sent,
+                f.last_key,
+                f.source,
+                f.client_reset_pending,
+                f.client_event_floor,
+                f.client_clear_event_floor_after_frame
+            ),
+            (
+                s.tick,
+                s.tick_seen,
+                s.history,
+                s.hist_seen,
+                s.events,
+                s.notes,
+                s.proposals,
+                s.activity.as_ref().map(|a| (a.seen, a.reads)),
+                s.viewstream.is_some()
+            ),
+            (server.next_view_subscription, server.prop_watch.is_some()),
+        )
+    }
+
+    #[test]
+    fn failed_legacy_subscription_preserves_negotiated_stream_and_next_v2_frame() {
+        use orr_edit::PlayController;
+        use orr_reflect::TypeRegistry;
+        use orr_sample::physics_game::{register_reflect, PhysGame};
+        use orr_sim::Simulation;
+
+        let mut server = server();
+        let (mut rx, pending) = insert_connection(&mut server, 1, true);
+        let mut types = TypeRegistry::new();
+        register_reflect(&mut types);
+        let mut doc = EditorDoc::from_yaml(
+            include_str!("../../../scenes/physics_demo.scene.yaml"),
+            types,
+            Simulation::<PhysGame>::build_registry(),
+            7,
+        )
+        .unwrap();
+        let mut play: Option<PlayController<PhysGame>> = None;
+        let mut target = ErpTarget {
+            doc: &mut doc,
+            play: &mut play,
+        };
+        server.request(&mut target, 1, None, "sim.start", &J::Null);
+        assert!(target.play.is_some());
+        server
+            .watch_codec(1, Caps::ALL, &params(), Some(&json!(10)))
+            .unwrap();
+        take_codec(&mut rx); // Successful negotiation ACK.
+        let now = Instant::now();
+        server.publish(&mut target, now);
+        let (_, bytes) = take_codec(&mut rx);
+        let (_, first, _) =
+            decode_frame_record_message(bytes.as_ref().unwrap(), DEFAULT_FRAME_CODEC_LIMITS)
+                .unwrap();
+        assert_eq!(first.sequence, 1);
+        assert!(server.conns[&1]
+            .subs
+            .frame_codec
+            .as_ref()
+            .unwrap()
+            .encoder
+            .baseline_stamp()
+            .is_some());
+        assert_eq!(pending.load(Relaxed), 0);
+
+        let before = subscription_snapshot(&server);
+        // Cover both topic orders and requests that would mutate unrelated
+        // topics, proposal tracking, and pacing before the late failure.
+        for topics in [
+            json!(["viewstream", "events"]),
+            json!(["events", "viewstream"]),
+            json!([
+                "tick",
+                "history",
+                "proposals",
+                "activity",
+                "frames",
+                "viewstream"
+            ]),
+        ] {
+            let error = server
+                .watch(
+                    &mut target,
+                    1,
+                    Caps::ALL,
+                    "watch.subscribe",
+                    &json!({"topics": topics, "max_fps": 1}),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.message,
+                "this host has no view stream (the game did not configure one)"
+            );
+            assert_eq!(subscription_snapshot(&server), before);
+            assert!(rx.try_recv().is_err());
+        }
+        for method in ["watch.subscribe", "watch.unsubscribe"] {
+            assert!(server
+                .watch(
+                    &mut target,
+                    1,
+                    Caps::ALL,
+                    method,
+                    &json!({"topics": ["events", "unknown"]})
+                )
+                .is_err());
+            assert_eq!(subscription_snapshot(&server), before);
+        }
+
+        // A genuine new output cut must still pass through the v2 codec.
+        server.request(&mut target, 1, None, "sim.step", &json!({"n": 1}));
+        server.publish(&mut target, now + Duration::from_secs(1));
+        let mut next_frame = None;
+        while let Ok(output) = rx.try_recv() {
+            let Out::Codec(output) = output else {
+                panic!("negotiated stream silently downgraded");
+            };
+            let (_, bytes) = output.test_messages();
+            if let Some(bytes) = bytes {
+                next_frame = Some(
+                    decode_frame_record_message(&bytes, DEFAULT_FRAME_CODEC_LIMITS)
+                        .unwrap()
+                        .1,
+                );
+            }
+        }
+        let next = next_frame.expect("next v2 frame");
+        assert_eq!(next.subscription, first.subscription);
+        assert_eq!(next.sequence, 2);
+        assert_eq!(next.reset_generation, first.reset_generation);
+        assert_eq!(pending.load(Relaxed), 0);
+
+        // An explicit successful legacy change still opts out as before.
+        let result = server
+            .watch(
+                &mut target,
+                1,
+                Caps::ALL,
+                "watch.subscribe",
+                &json!({"topics": ["frames", "events", "notes"], "max_fps": 1}),
+            )
+            .unwrap();
+        let subs = &server.conns[&1].subs;
+        assert!(subs.frame_codec.is_none());
+        assert!(subs.delivery.is_none());
+        assert!(subs.events && subs.notes);
+        assert_eq!(
+            subs.frames.as_ref().unwrap().min_interval,
+            Duration::from_secs(1)
+        );
+        assert_eq!(result["topics"], json!(["events", "notes", "frames"]));
+    }
+
+    #[test]
+    fn codec_rejected_queue_preserves_baseline_sequence_and_reset_cut() {
+        let (tx, mut rx, pending) = ConnTx::codec_test_channel();
+        let mut codec = FrameCodecState::new(DEFAULT_FRAME_CODEC_LIMITS);
+        let delivery = ViewDelivery::new(7);
+        let first = blank_frame(1);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 5), &first)
+            .unwrap()
+            .is_some());
+        take_codec(&mut rx);
+        let base = codec.encoder.baseline_stamp();
+        let stamp = codec.last_stamp;
+        pending.store(FRAME_CODEC_QUEUE_BYTES, Relaxed);
+        let next = blank_frame(2);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 5), &next)
+            .unwrap()
+            .is_none());
+        assert_eq!(codec.encoder.baseline_stamp(), base);
+        assert_eq!(codec.last_stamp, stamp);
+        assert_eq!((codec.sequence, codec.reset_generation), (1, 1));
+        assert!(rx.try_recv().is_err());
+        pending.store(0, Relaxed);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 5), &next)
+            .unwrap()
+            .is_some());
+        assert_eq!(codec.sequence, 2);
+        assert_eq!(codec.encoder.baseline_stamp().unwrap().tick, 2);
+        take_codec(&mut rx);
+        assert_eq!(pending.load(Relaxed), 0);
+    }
+
+    #[test]
+    fn codec_host_reset_is_one_ordered_batch_and_sequence_never_restarts() {
+        let (tx, mut rx, pending) = ConnTx::codec_test_channel();
+        let mut codec = FrameCodecState::new(DEFAULT_FRAME_CODEC_LIMITS);
+        let mut delivery = ViewDelivery::new(9);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 3), &blank_frame(8))
+            .unwrap()
+            .is_some());
+        take_codec(&mut rx);
+        delivery.lost();
+        pending.store(FRAME_CODEC_QUEUE_BYTES, Relaxed);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 3), &blank_frame(4))
+            .unwrap()
+            .is_none());
+        assert_eq!((codec.sequence, codec.reset_generation), (1, 1));
+        pending.store(0, Relaxed);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 3), &blank_frame(4))
+            .unwrap()
+            .is_some());
+        let (text, bytes) = take_codec(&mut rx);
+        let notice: J = serde_json::from_str(text.as_ref().unwrap()).unwrap();
+        assert_eq!(notice["method"], "watch.frame_codec_reset");
+        assert_eq!(notice["params"]["next_sequence"], "2");
+        assert_eq!(notice["params"]["reset_generation"], "2");
+        let (_, identity, record) =
+            decode_frame_record_message(bytes.as_ref().unwrap(), DEFAULT_FRAME_CODEC_LIMITS)
+                .unwrap();
+        assert_eq!(
+            (
+                identity.subscription,
+                identity.sequence,
+                identity.reset_generation
+            ),
+            (9, 2, 2)
+        );
+        let crate::frame_delta::FrameRecord::Full { target, .. } = record else {
+            panic!("reset must be Full")
+        };
+        assert_eq!(
+            target.scope,
+            FrameScope {
+                stream_generation: 9,
+                play_epoch: 3,
+                timeline_epoch: 2
+            }
+        );
+        assert_eq!((codec.sequence, codec.reset_generation), (2, 2));
+        assert_eq!(pending.load(Relaxed), 0);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn codec_no_retained_base_still_fences_backward_ticks() {
+        let (tx, mut rx, _) = ConnTx::codec_test_channel();
+        let limits = FrameCodecLimits {
+            max_baseline_bytes: 0,
+            ..DEFAULT_FRAME_CODEC_LIMITS
+        };
+        let mut codec = FrameCodecState::new(limits);
+        let delivery = ViewDelivery::new(2);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 4), &blank_frame(7))
+            .unwrap()
+            .is_some());
+        take_codec(&mut rx);
+        assert_eq!(codec.encoder.retained_baseline_bytes(), 0);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 4), &blank_frame(7))
+            .unwrap()
+            .is_some());
+        assert!(
+            take_codec(&mut rx).0.is_none(),
+            "unchanged paused tick is ordinary Full"
+        );
+        assert_eq!(codec.reset_generation, 1);
+        assert!(codec
+            .send_frame(&tx, &delivery, &metadata(&delivery, 4), &blank_frame(6))
+            .unwrap()
+            .is_some());
+        assert!(take_codec(&mut rx).0.is_some());
+        assert_eq!((codec.sequence, codec.reset_generation), (3, 2));
+    }
+
+    #[test]
+    fn codec_caps_are_exact_typed_finite_and_clamped() {
+        let mut p = params();
+        let accepted = frame_codec_limits(&p["frame_codec"]).unwrap();
+        assert_eq!(accepted, DEFAULT_FRAME_CODEC_LIMITS);
+        for key in [
+            "version",
+            "max_frame_bytes",
+            "max_baseline_bytes",
+            "max_message_bytes",
+        ] {
+            let mut invalid = p["frame_codec"].clone();
+            invalid[key] = json!(true);
+            assert!(frame_codec_limits(&invalid).is_err());
+        }
+        p["frame_codec"]["unknown"] = json!(1);
+        assert!(frame_codec_limits(&p["frame_codec"]).is_err());
+        p["frame_codec"].as_object_mut().unwrap().remove("unknown");
+        p["frame_codec"]["max_frame_bytes"] = json!(u64::MAX);
+        p["frame_codec"]["max_message_bytes"] = json!(u64::MAX);
+        p["frame_codec"]["max_baseline_bytes"] = json!(0);
+        let accepted = frame_codec_limits(&p["frame_codec"]).unwrap();
+        assert_eq!(
+            accepted.max_frame_bytes,
+            DEFAULT_FRAME_CODEC_LIMITS.max_frame_bytes
+        );
+        assert_eq!(
+            accepted.max_message_bytes,
+            DEFAULT_FRAME_CODEC_LIMITS.max_message_bytes
+        );
+        assert_eq!(accepted.max_baseline_bytes, 0);
+        p["frame_codec"]["max_message_bytes"] = json!(0);
+        assert!(frame_codec_limits(&p["frame_codec"]).is_err());
+    }
+
+    #[test]
+    fn codec_ack_admission_precedes_activation_and_failed_ack_keeps_old_subscription() {
+        let mut server = server();
+        let (mut rx, pending) = insert_connection(&mut server, 1, true);
+        assert!(server.watch_codec(1, Caps::ALL, &params(), None).is_err());
+        assert!(server.conns[&1].subs.frame_codec.is_none());
+        let result = server
+            .watch_codec(1, Caps::ALL, &params(), Some(&json!(10)))
+            .unwrap();
+        let (ack, binary) = take_codec(&mut rx);
+        assert!(binary.is_none());
+        let ack: J = serde_json::from_str(ack.as_ref().unwrap()).unwrap();
+        assert_eq!(ack["id"], 10);
+        assert_eq!(ack["result"], result);
+        assert_eq!(result["sequence"], "0");
+        assert_eq!(result["reset_generation"], "1");
+        let previous = result["subscription"].clone();
+        pending.store(FRAME_CODEC_QUEUE_BYTES, Relaxed);
+        assert!(server
+            .watch_codec(1, Caps::ALL, &params(), Some(&json!(11)))
+            .is_err());
+        assert_eq!(
+            server.conns[&1]
+                .subs
+                .delivery
+                .as_ref()
+                .unwrap()
+                .subscription
+                .to_string(),
+            previous.as_str().unwrap()
+        );
+        assert_eq!(
+            server.conns[&1].subs.frame_codec.as_ref().unwrap().sequence,
+            0
+        );
+        assert_eq!(server.next_view_subscription, 2);
+        assert!(matches!(rx.try_recv().unwrap(), Out::Close));
+        pending.store(0, Relaxed);
+    }
+
+    #[test]
+    fn codec_negotiation_refuses_non_ws_non_sim_unfenced_and_duplicate_topics() {
+        let mut server = server();
+        let (_rx, _) = insert_connection(&mut server, 1, false);
+        assert!(server
+            .watch_codec(1, Caps::ALL, &params(), Some(&json!(1)))
+            .is_err());
+        server.conns.get_mut(&1).unwrap().binary = true;
+        for (key, value) in [
+            ("source", json!("view")),
+            ("view_delivery", json!(0)),
+            ("topics", json!(["frames", "events", "events"])),
+        ] {
+            let mut invalid = params();
+            invalid[key] = value;
+            assert!(server
+                .watch_codec(1, Caps::ALL, &invalid, Some(&json!(1)))
+                .is_err());
+            assert!(server.conns[&1].subs.frame_codec.is_none());
+        }
+    }
+
+    #[test]
+    fn codec_aggregate_baseline_capacity_is_reserved_before_ack() {
+        let mut server = server();
+        let mut readers = Vec::new();
+        for conn in 1..=9 {
+            let (rx, _) = insert_connection(&mut server, conn, true);
+            readers.push(rx);
+            let result = server.watch_codec(conn, Caps::ALL, &params(), Some(&json!(conn)));
+            assert_eq!(result.is_ok(), conn <= 8);
+        }
+        assert!(server.conns[&9].subs.frame_codec.is_none());
+        assert!(
+            readers[8].try_recv().is_err(),
+            "budget refusal sends no successful ACK"
+        );
+        // Replacing the same connection releases/reserves its own capacity.
+        assert!(server
+            .watch_codec(1, Caps::ALL, &params(), Some(&json!(20)))
+            .is_ok());
+        server.conns.remove(&2);
+        assert!(server
+            .watch_codec(9, Caps::ALL, &params(), Some(&json!(21)))
+            .is_ok());
     }
 }
