@@ -300,9 +300,17 @@ pub fn exercise_failure_cases(new_root: &Path) -> Result<serde_json::Value> {
 mod tests {
     use super::*;
     use orr_terrain::{Edit, TerrainDocument};
+    fn fixture_tempdir() -> tempfile::TempDir {
+        // Resolve only the trusted system-temp root before creating fixture content.
+        // macOS may use /var -> /private/var; package inputs must still reject links.
+        let temp_root = std::env::temp_dir();
+        #[cfg(unix)]
+        let temp_root = std::fs::canonicalize(temp_root).unwrap();
+        tempfile::tempdir_in(temp_root).unwrap()
+    }
     #[test]
     fn actual_install_reload_identity_source_isolation_missing_and_capability_checks() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_tempdir();
         let root = tmp.path().join("project");
         let source = tmp.path().join("source");
         let first = install_and_reload(&crate::fixture(), &root, &source, "1.0.0").unwrap();
@@ -343,7 +351,7 @@ mod tests {
     }
     #[test]
     fn missing_declared_installed_cooked_navigation_file_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_tempdir();
         let root = tmp.path().join("project");
         let loaded = install_and_reload(
             &crate::fixture(),
@@ -369,7 +377,7 @@ mod tests {
     }
     #[test]
     fn installed_cooked_navigation_tamper_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_tempdir();
         let root = tmp.path().join("project");
         let loaded = install_and_reload(
             &crate::fixture(),
@@ -399,7 +407,7 @@ mod tests {
     }
     #[test]
     fn valid_package_with_wrong_cooked_terrain_dependency_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_tempdir();
         let root = tmp.path().join("project");
         fs::create_dir(&root).unwrap();
         let original = crate::fixture();
@@ -430,7 +438,7 @@ mod tests {
     }
     #[test]
     fn edited_package_keeps_logical_ids_changes_content_and_rejects_scenario_revision_mismatch() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = fixture_tempdir();
         let root = tmp.path().join("project");
         let first = install_and_reload(
             &crate::fixture(),

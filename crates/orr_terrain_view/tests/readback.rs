@@ -61,7 +61,12 @@ fn orange(c: [u8; 4]) {
 #[test]
 fn edit_cook_package_read_asset_reload_gpu_silhouette_hole_camera_resize_query_marker() {
     let Some(device) = adapter() else { return };
-    let tmp = tempfile::tempdir().unwrap();
+    // Resolve only the trusted system-temp root before creating fixture content.
+    // macOS may use /var -> /private/var; package inputs must still reject links.
+    let temp_root = std::env::temp_dir();
+    #[cfg(unix)]
+    let temp_root = std::fs::canonicalize(temp_root).unwrap();
+    let tmp = tempfile::tempdir_in(temp_root).unwrap();
     let root = tmp.path().join("project");
     let mut doc = TerrainDocument::new(fixture());
     let before = install_and_reload(

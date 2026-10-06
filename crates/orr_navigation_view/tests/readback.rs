@@ -88,7 +88,12 @@ fn pixel_color_predicates_reject_route_agent_confusion_and_white_terrain() {
 #[test]
 fn packaged_point_agent_initial_midtick_arrival_edit_stale_replan_readback() {
     let Some(device) = adapter() else { return };
-    let tmp = tempfile::tempdir().unwrap();
+    // Resolve only the trusted system-temp root before creating fixture content.
+    // macOS may use /var -> /private/var; package inputs must still reject links.
+    let temp_root = std::env::temp_dir();
+    #[cfg(unix)]
+    let temp_root = std::fs::canonicalize(temp_root).unwrap();
+    let tmp = tempfile::tempdir_in(temp_root).unwrap();
     let root = tmp.path().join("project");
     let before =
         package::install_and_reload(&fixture(), &root, &tmp.path().join("source-v1"), "1.0.0")

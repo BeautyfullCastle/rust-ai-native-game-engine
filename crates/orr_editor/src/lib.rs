@@ -62,3 +62,8 @@ pub use app::{EditorApp, ScreenshotJob};
 pub use backend::HostSpec;
 pub use editor::{Editor, Mode, Owner};
 pub use model::Target;
+
+#[cfg(feature = "sprites")]
+pub mod sprite_bindings;
+#[cfg(feature = "sprites")]
+pub mod sprite_panel;
