@@ -82,6 +82,7 @@ pub struct IrradiancePanel {
     validated_input_key: Option<PreflightKey>,
     failed_input_key: Option<(PreflightKey, String)>,
     snapshot_captures: u64,
+    terrain_attached: bool,
 }
 impl Default for IrradiancePanel {
     fn default() -> Self {
@@ -117,10 +118,29 @@ impl Default for IrradiancePanel {
             validated_input_key: None,
             failed_input_key: None,
             snapshot_captures: 0,
+            terrain_attached: false,
         }
     }
 }
 impl IrradiancePanel {
+    /// Terrain is outside the bounded bake snapshot contract. Preserve the
+    /// document but prevent both new bakes and application of saved receipts.
+    pub fn set_terrain_attached(&mut self, attached: bool) {
+        if self.terrain_attached == attached { return; }
+        self.terrain_attached = attached;
+        // A cancelled source job must never cache its cancellation as a source
+        // failure after a quick attach/detach of otherwise unchanged terrain.
+        self.binding_generation = self.binding_generation.wrapping_add(1);
+        self.bake_preflight = None;
+        self.bake_preflight_key = None;
+        self.baked_fingerprint = None;
+        self.baked_revision = None;
+        self.baked_checksum = None;
+        self.cancel_validation();
+        if attached { self.cancel_bake(); }
+    }
+    pub const TERRAIN_BAKE_UNSUPPORTED: &'static str = "Scene terrain is not included in static bake snapshots. New bakes and baked irradiance are suspended while terrain is attached; authored/imported manual probes remain available";
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -264,6 +284,7 @@ impl IrradiancePanel {
         let bindings = self.bindings.as_ref()?;
         let grid = &bindings.document().grid;
         if grid.provenance == IrradianceProvenance::Baked {
+            if self.terrain_attached { return None; }
             let receipt = bindings.document().bake_receipt.as_ref()?;
             if self.baked_fingerprint.as_ref() != Some(&receipt.fingerprint)
                 || self.baked_revision != Some(bindings.revision())
@@ -472,6 +493,7 @@ impl IrradiancePanel {
     }
     pub fn preflight_bake(&mut self, editor: &Editor, models: &ModelPanel) -> Result<(), String> {
         let result = (|| {
+            if self.terrain_attached { return Err(Self::TERRAIN_BAKE_UNSUPPORTED.into()); }
             self.require_editable(editor)?;
             let grid = &self
                 .bindings
@@ -524,6 +546,7 @@ impl IrradiancePanel {
     }
     pub fn start_bake(&mut self, editor: &Editor, models: &ModelPanel) -> Result<(), String> {
         let result = (|| {
+            if self.terrain_attached { return Err(Self::TERRAIN_BAKE_UNSUPPORTED.into()); }
             if self.pending_bake.is_some() {
                 return Err("Wait for the current bake to finish or cancel".into());
             }
@@ -679,6 +702,17 @@ impl IrradiancePanel {
         self.baked_revision = None;
         self.baked_checksum = None;
         self.baked_stale_reason = None;
+        if self.terrain_attached {
+            self.cancel_validation();
+            // Drain cancelled work so detaching can start fresh validation.
+            if self.pending_validation.as_mut().and_then(|p| p.job.poll()).is_some() {
+                self.pending_validation = None;
+            }
+            if self.bindings.as_ref().is_some_and(|b| b.document().grid.provenance == IrradianceProvenance::Baked) {
+                self.baked_stale_reason = Some(Self::TERRAIN_BAKE_UNSUPPORTED.into());
+            }
+            return;
+        }
         if let Some(outcome) = self.pending_validation.as_mut().and_then(|p| p.job.poll()) {
             let pending = self
                 .pending_validation
@@ -878,6 +912,7 @@ impl IrradiancePanel {
     fn show_bake(&mut self, ui: &mut Ui, editor: &Editor, models: &ModelPanel) {
         ui.separator();
         ui.strong("Static sun bounce");
+        if self.terrain_attached { ui.colored_label(egui::Color32::YELLOW, Self::TERRAIN_BAKE_UNSUPPORTED); }
         ui.weak("One diffuse bounce from opaque static surfaces under the Yard sun. Dynamic/kinematic bodies, animated models, point lights and emission do not contribute. Unsupported static input is rejected.");
         if self.is_validating_bake() {
             ui.horizontal(|ui| {
@@ -904,7 +939,7 @@ impl IrradiancePanel {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(16));
         } else {
-            ui.add_enabled_ui(self.editable(editor) && !self.is_validating_bake(), |ui| {
+            ui.add_enabled_ui(self.editable(editor) && !self.is_validating_bake() && !self.terrain_attached, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Directions per probe (even)");
                     if ui

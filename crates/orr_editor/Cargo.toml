@@ -14,12 +14,15 @@ workspace = true
 
 [features]
 default = []
+terrain = ["models", "dep:orr_terrain", "dep:orr_terrain_view"]
 irradiance-probes = ["models", "orr_render/irradiance-probes"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile"]
 models = ["dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
 animated-models = ["models", "orr_model/animation", "orr_render/animation"]
 
 [dependencies]
+orr_terrain = { path = "../orr_terrain", optional = true }
+orr_terrain_view = { path = "../orr_terrain_view", optional = true }
 sha2 = { version = "0.11", optional = true }
 orr_model = { path = "../orr_model", features = ["import"], optional = true }
 orr_sprite = { path = "../orr_sprite", optional = true }

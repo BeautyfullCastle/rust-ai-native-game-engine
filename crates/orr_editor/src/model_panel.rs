@@ -32,6 +32,7 @@ pub struct ModelPanel {
     confirm_discard: bool,
     seen_scene: Option<String>,
     error: Option<String>,
+    reserved_scene_models: usize,
 }
 impl Default for ModelPanel {
     fn default() -> Self {
@@ -52,10 +53,36 @@ impl Default for ModelPanel {
             confirm_discard: false,
             seen_scene: None,
             error: None,
+            reserved_scene_models: 0,
         }
     }
 }
 impl ModelPanel {
+    /// Reserve the bounded scene-owned terrain slot before model mutations.
+    pub fn reserve_scene_models(&mut self, count: usize) { self.reserved_scene_models = count; }
+    pub fn terrain_admission_error(&self) -> Option<String> {
+        let bindings = self.bindings.as_ref()?;
+        let mut identities = std::collections::BTreeSet::new();
+        let mut draws = 7usize; // Five procedural kinds plus terrain and query marker.
+        for (guid, binding) in &bindings.document().bindings {
+            identities.insert((binding.kind == ModelKind::Animated, &binding.package, &binding.asset, &binding.package_digest, &binding.source_hash));
+            let Some(asset) = self.loaded.get(guid) else { return Some("Wait for verified model assets before editing terrain".into()); };
+            let count = match binding.kind {
+                ModelKind::Static => asset.static_model().map_or(0, |model| model.source().primitives.len()),
+                ModelKind::Animated => {
+                    #[cfg(feature="animated-models")]
+                    { asset.animated_model().map_or(0, |model| model.source().primitives.len()) }
+                    #[cfg(not(feature="animated-models"))]
+                    { 0 }
+                }
+            };
+            draws = draws.saturating_add(count);
+        }
+        if bindings.document().bindings.len() >= 256 || identities.len() >= 8 || draws > orr_render::imported_scene::MAX_IMPORTED_DRAWS {
+            Some("Terrain needs one shared viewport asset/instance slot and up to two draws; remove an entity model binding first".into())
+        } else { None }
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -147,7 +174,7 @@ impl ModelPanel {
             return Err("Model sidecar names another scene".into());
         }
         let loaded = Self::load_all(&candidate)?;
-        Self::validate_candidate(editor, candidate.document(), &loaded)?;
+        Self::validate_candidate(editor, candidate.document(), &loaded, self.reserved_scene_models)?;
         self.bindings = Some(candidate);
         self.loaded = loaded;
         self.candidate = None;
@@ -190,7 +217,7 @@ impl ModelPanel {
         }
         let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
         let loaded = Self::load_all(bindings)?;
-        Self::validate_candidate(editor, bindings.document(), &loaded)?;
+        Self::validate_candidate(editor, bindings.document(), &loaded, self.reserved_scene_models)?;
         self.loaded = loaded;
         Ok(())
     }
@@ -314,7 +341,7 @@ impl ModelPanel {
         let mut candidate_loaded = self.loaded.clone();
         candidate_loaded.insert(guid.to_string(), loaded.clone());
         candidate_loaded.retain(|guid, _| candidate.bindings.contains_key(guid));
-        Self::validate_candidate(editor, &candidate, &candidate_loaded)?;
+        Self::validate_candidate(editor, &candidate, &candidate_loaded, self.reserved_scene_models)?;
         bindings.assign_validated(std::slice::from_ref(&guid), &binding, &loaded)?;
         self.loaded = candidate_loaded;
         Ok(())
@@ -331,7 +358,7 @@ impl ModelPanel {
         let previous = bindings.document().clone();
         bindings.undo();
         match Self::load_all(bindings).and_then(|loaded| {
-            Self::validate_candidate(editor, bindings.document(), &loaded)?;
+            Self::validate_candidate(editor, bindings.document(), &loaded, self.reserved_scene_models)?;
             Ok(loaded)
         }) {
             Ok(loaded) => {
@@ -356,7 +383,7 @@ impl ModelPanel {
         let previous = bindings.document().clone();
         bindings.redo();
         match Self::load_all(bindings).and_then(|loaded| {
-            Self::validate_candidate(editor, bindings.document(), &loaded)?;
+            Self::validate_candidate(editor, bindings.document(), &loaded, self.reserved_scene_models)?;
             Ok(loaded)
         }) {
             Ok(loaded) => {
@@ -418,15 +445,16 @@ impl ModelPanel {
         editor: &Editor,
         document: &model_bindings::Document,
         loaded: &BTreeMap<String, LoadedAsset>,
+        reserved_scene_models: usize,
     ) -> Result<(), String> {
         if !editor.yard_rows_coherent() {
             return Err("Wait for the current host GUID map before changing model bindings".into());
         }
-        if document.bindings.len() > 256 {
+        if document.bindings.len().saturating_add(reserved_scene_models) > 256 {
             return Err("Viewport model binding limit reached".into());
         }
         let mut identities = std::collections::BTreeSet::new();
-        let mut draws = 5_usize;
+        let mut draws = 5_usize.saturating_add(reserved_scene_models.saturating_mul(2));
         for (guid, binding) in &document.bindings {
             identities.insert((
                 binding.kind == ModelKind::Animated,
@@ -435,7 +463,7 @@ impl ModelPanel {
                 &binding.package_digest,
                 &binding.source_hash,
             ));
-            if identities.len() > 8 {
+            if identities.len().saturating_add(reserved_scene_models) > 8 {
                 return Err(
                     "Viewport supports at most eight distinct verified model identities".into(),
                 );

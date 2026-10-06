@@ -90,3 +90,10 @@ pub mod irradiance_bindings;
 pub mod irradiance_bake;
 #[cfg(feature = "irradiance-probes")]
 pub mod irradiance_panel;
+
+#[cfg(feature = "terrain")]
+pub mod terrain_document;
+#[cfg(feature = "terrain")]
+pub mod terrain_panel;
+#[cfg(feature = "terrain")]
+pub mod terrain_pick;

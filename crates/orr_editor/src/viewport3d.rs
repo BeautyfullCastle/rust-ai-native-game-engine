@@ -124,6 +124,12 @@ pub struct ModelPlacement {
     pub model: std::sync::Arc<orr_model::StaticModel>,
     pub instance: orr_render::StaticInstance,
 }
+/// Scene-owned geometry has no ECS identity and must never hide a collider.
+#[cfg(feature = "models")]
+pub struct SceneModel {
+    pub model: std::sync::Arc<orr_model::StaticModel>,
+    pub instance: orr_render::StaticInstance,
+}
 #[cfg(feature = "animated-models")]
 pub struct AnimatedPlacement {
     pub entity: Entity,
@@ -276,6 +282,7 @@ impl Viewport3dGpu {
             list,
             camera,
             placements,
+            &[],
             #[cfg(feature = "animated-models")]
             &[],
             settings,
@@ -318,6 +325,7 @@ impl Viewport3dGpu {
             list,
             camera,
             placements,
+            &[],
             animated_placements,
             settings,
             #[cfg(feature = "irradiance-probes")]
@@ -339,7 +347,7 @@ impl Viewport3dGpu {
         settings: orr_render::PostProcessSettings,
         grid: Option<&orr_render::IrradianceGrid>,
     ) -> Result<(), String> {
-        self.render_composed(size, list, camera, placements,
+        self.render_composed(size, list, camera, placements, &[],
             #[cfg(feature = "animated-models")] animated_placements,
             settings, grid)
     }
@@ -356,6 +364,26 @@ impl Viewport3dGpu {
         (2 + static_count + animated_count) * std::mem::size_of::<orr_render::IrradianceUniform>()
     }
 
+    /// Compose scene-owned static geometry with entity models in the same depth/shadow pass.
+    #[cfg(feature = "terrain")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_scene(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        scene_models: &[SceneModel],
+        #[cfg(feature = "animated-models")] animated_placements: &[AnimatedPlacement],
+        settings: orr_render::PostProcessSettings,
+        #[cfg(feature = "irradiance-probes")] grid: Option<&orr_render::IrradianceGrid>,
+    ) -> Result<(), String> {
+        self.render_composed(size, list, camera, placements, scene_models,
+            #[cfg(feature = "animated-models")] animated_placements,
+            settings,
+            #[cfg(feature = "irradiance-probes")] grid)
+    }
+
     #[cfg(feature = "models")]
     #[allow(clippy::too_many_arguments)] // Keep all admission inputs in one transaction.
     fn render_composed(
@@ -364,6 +392,7 @@ impl Viewport3dGpu {
         list: &RenderList3D,
         camera: &Camera3D,
         placements: &[ModelPlacement],
+        scene_models: &[SceneModel],
         #[cfg(feature = "animated-models")] animated_placements: &[AnimatedPlacement],
         settings: orr_render::PostProcessSettings,
         #[cfg(feature = "irradiance-probes")] grid: Option<&orr_render::IrradianceGrid>,
@@ -377,6 +406,7 @@ impl Viewport3dGpu {
             .ok_or("Viewport model entity limit exceeded")?;
         #[cfg(not(feature = "animated-models"))]
         let entity_count = placements.len();
+        let entity_count = entity_count.checked_add(scene_models.len()).ok_or("Viewport static input limit exceeded")?;
         if entity_count > 256 {
             return Err("Viewport supports at most 256 model-bound entities".into());
         }
@@ -387,17 +417,18 @@ impl Viewport3dGpu {
             std::sync::Arc<orr_model::StaticModel>,
             Vec<orr_render::StaticInstance>,
         )> = Vec::new();
-        for placement in placements {
+        for (model, instance) in placements.iter().map(|p| (&p.model, p.instance))
+            .chain(scene_models.iter().map(|p| (&p.model, p.instance))) {
             if let Some((_, instances)) = groups
                 .iter_mut()
-                .find(|(model, _)| std::sync::Arc::ptr_eq(model, &placement.model))
+                .find(|(cached, _)| std::sync::Arc::ptr_eq(cached, model))
             {
-                instances.push(placement.instance);
+                instances.push(instance);
             } else {
                 if groups.len() >= 8 {
                     return Err("Viewport supports at most eight distinct model assets".into());
                 }
-                groups.push((placement.model.clone(), vec![placement.instance]));
+                groups.push((model.clone(), vec![instance]));
             }
         }
 
@@ -709,6 +740,25 @@ impl GpuViewport3d {
         self.gpu.render_irradiance(size, list, camera, placements,
             #[cfg(feature = "animated-models")] animated_placements,
             settings, grid)?;
+        Ok(self.publish_texture())
+    }
+    #[cfg(feature = "terrain")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_scene(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        scene_models: &[SceneModel],
+        #[cfg(feature = "animated-models")] animated_placements: &[AnimatedPlacement],
+        settings: orr_render::PostProcessSettings,
+        #[cfg(feature = "irradiance-probes")] grid: Option<&orr_render::IrradianceGrid>,
+    ) -> Result<egui::TextureId, String> {
+        self.gpu.render_scene(size, list, camera, placements, scene_models,
+            #[cfg(feature = "animated-models")] animated_placements,
+            settings,
+            #[cfg(feature = "irradiance-probes")] grid)?;
         Ok(self.publish_texture())
     }
     fn publish_texture(&mut self) -> egui::TextureId {

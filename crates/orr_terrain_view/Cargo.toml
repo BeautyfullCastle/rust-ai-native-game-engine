@@ -1,0 +1,31 @@
+[package]
+name = "orr_terrain_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Optional heightfield mesh bridge and offscreen edit/package/render lab"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+gpu = ["dep:orr_render", "dep:png"]
+
+[dependencies]
+orr_terrain = { path = "../orr_terrain" }
+orr_fp = { path = "../orr_fp", features = ["float-interop"] }
+orr_model = { path = "../orr_model" }
+orr_package = { path = "../orr_package" }
+orr_render = { path = "../orr_render", features = ["models"], optional = true }
+png = { version = "0.18", optional = true }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "terrain_lab"
+path = "src/bin/terrain_lab.rs"
+required-features = ["gpu"]
