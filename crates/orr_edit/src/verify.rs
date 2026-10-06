@@ -347,6 +347,7 @@ fn run_side<G: Game>(
     for (i, &t) in ticks.iter().enumerate() {
         check_cancelled(cancel)?;
         run.debug_replayed += inputs.step(&mut sim, t, opts.debug_commands, cancel)?;
+        check_cancelled(cancel)?;
         run.checksums.push(sim.checksum());
         if sampled(i + 1) {
             run.samples.push((i + 1, sim.tick(), metrics.sample(sim.frame())));
