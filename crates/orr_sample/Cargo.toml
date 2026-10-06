@@ -12,11 +12,19 @@ workspace = true
 
 [features]
 default = []
+# Optional native UI needs Rust 1.95 (egui); default remains workspace MSRV.
+game-ui = ["input-actions", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:orr_package", "dep:ttf-parser"]
+input-actions = ["dep:orr_input"]
 audio = ["dep:orr_audio"]
 audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+ttf-parser = { version = "=0.25.1", optional = true }
+egui = { version = "=0.36.2", optional = true }
+egui-wgpu = { version = "=0.36.2", optional = true }
+egui-winit = { version = "=0.36.2", default-features = false, optional = true }
+orr_input = { path = "../orr_input", optional = true }
 orr_sprite = { path = "../orr_sprite", optional = true }
 orr_package = { path = "../orr_package", optional = true }
 orr_audio = { path = "../orr_audio", optional = true }
