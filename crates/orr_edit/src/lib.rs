@@ -47,6 +47,7 @@ mod checks;
 mod diff;
 mod doc;
 mod error;
+mod fragment;
 mod op;
 mod play;
 mod proposal;
@@ -59,6 +60,11 @@ pub use checks::{evaluate_checks, Check, CheckOutcome, CheckResult, Cmp, MetricS
 pub use diff::{format_value, summarize, unified_diff, EntityRef, FieldChange, ProposalSummary, Renamed};
 pub use doc::EditorDoc;
 pub use error::EditError;
+pub use fragment::{
+    FragmentInstance, FragmentTranslation2D, SceneFragment, FRAGMENT_MAX_BYTES,
+    FRAGMENT_MAX_COMPONENTS, FRAGMENT_MAX_DEPTH, FRAGMENT_MAX_ENTITIES, FRAGMENT_MAX_STRING_BYTES,
+    FRAGMENT_MAX_VALUES,
+};
 pub use op::{Applied, HistoryEntry, Op, Origin};
 pub use play::{PlayController, StoppedPlay};
 pub use proposal::{Accepted, ProposalDiff, ProposalId, ProposalInfo, ProposalState};
