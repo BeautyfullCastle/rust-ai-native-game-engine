@@ -48,6 +48,10 @@ orr_view = { path = "../orr_view" }
 orr_server = { path = "../orr_server" }
 orr_relay_net = { path = "../orr_relay_net" }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Safe calling-thread CPU clock for the ignored data-plane cost probe.
+rustix = { version = "=1.1.5", features = ["time"] }
+
 [[bin]]
 name = "orr_remote_host"
 path = "src/bin/orr_remote_host.rs"

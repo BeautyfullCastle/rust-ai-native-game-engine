@@ -1,0 +1,97 @@
+{
+  "format": "frame_delta_cpu_receipt_redactions_v1",
+  "purpose": "Publication privacy: remove container hostname and absolute session-local paths from four archived runner receipts.",
+  "method": "UTF-8 literal substitutions only, applied in the rule order shown below. All other bytes are preserved, including numeric values and line endings. Original values are intentionally not published.",
+  "rule_order": [
+    "measurement_checkout_prefix",
+    "cargo_target_prefix",
+    "session_workspace_prefix",
+    "container_hostname"
+  ],
+  "placeholders": {
+    "$WORKSPACE": "The absolute session workspace root; choose the local workspace root when reproducing.",
+    "$REPO": "The absolute measurement checkout directory under the workspace; choose the relevant checkout when reproducing.",
+    "$TARGET_DIR": "The absolute existing warmed Cargo target directory under the workspace; choose the reserved warmed target when reproducing.",
+    "[redacted-hostname]": "The container hostname from the uname receipt; not required for reproduction."
+  },
+  "original_retention": "Unredacted originals are retained in the task-local audit directory outside the publication checkout; original hashes below identify them without disclosing their paths or hostname.",
+  "unchanged_evidence": "CPU rows and arrays, timing values, timer diagnostics, source, dependency manifest, lockfile, executable hash, checksums, byte controls, exit statuses and build/toolchain values were not changed. No measurement or build was rerun.",
+  "files": [
+    {
+      "file": "environment.txt",
+      "original_sha256": "2d69baae38c13500d7952e5f021b2d07a254ef146c0bd65989bbc1c9a0957e52",
+      "published_sha256": "b6be060e40dc7f86a2c54e6a9dfe25c9626bd2c79a87e89eb703bf682e6a504b",
+      "original_bytes": 776,
+      "published_bytes": 682,
+      "transformations": [
+        {
+          "rule": "cargo_target_prefix",
+          "replacement": "$TARGET_DIR",
+          "occurrences": 1
+        },
+        {
+          "rule": "session_workspace_prefix",
+          "replacement": "$WORKSPACE",
+          "occurrences": 3
+        },
+        {
+          "rule": "container_hostname",
+          "replacement": "[redacted-hostname]",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "file": "probe-run.json",
+      "original_sha256": "d4865dbf28ee57a3c44c965186b2374a9a88e22f5cc5952d89cb264cb473622e",
+      "published_sha256": "d94a9ba0f5df30da6ac75c2e6fde9e90e4eff941f7d67c441b568895bd676556",
+      "original_bytes": 1391,
+      "published_bytes": 1302,
+      "transformations": [
+        {
+          "rule": "measurement_checkout_prefix",
+          "replacement": "$REPO",
+          "occurrences": 1
+        },
+        {
+          "rule": "cargo_target_prefix",
+          "replacement": "$TARGET_DIR",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "file": "correctness.stderr",
+      "original_sha256": "6f4a441f31bc21e39c1e4b981420b38a311ea916839226a2dc7b905979a79e36",
+      "published_sha256": "5f0b1086e8fc418cc1a668f637d8b3c756379556dc179489029c4b7d39bcd0eb",
+      "original_bytes": 2591,
+      "published_bytes": 1431,
+      "transformations": [
+        {
+          "rule": "measurement_checkout_prefix",
+          "replacement": "$REPO",
+          "occurrences": 22
+        },
+        {
+          "rule": "cargo_target_prefix",
+          "replacement": "$TARGET_DIR",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "file": "clippy.stderr",
+      "original_sha256": "38ed1dd99dea04ccfd6e85e5a3940eb4553197e79f5d62809debf3c6eaf61776",
+      "published_sha256": "38cf1d5fd398c1551f2d561af58b88c624e67cd7c4b5c22f5b6020834992e2a8",
+      "original_bytes": 3588,
+      "published_bytes": 2466,
+      "transformations": [
+        {
+          "rule": "measurement_checkout_prefix",
+          "replacement": "$REPO",
+          "occurrences": 22
+        }
+      ]
+    }
+  ]
+}

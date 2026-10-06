@@ -1,5 +1,5 @@
 //! Matched data-plane cost probe; run the ignored test only in a quiet release lane.
-#![allow(clippy::disallowed_types)] // Tool-side monotonic wall-clock measurement.
+#![allow(clippy::disallowed_types)] // Tool-side clock measurements, outside deterministic simulation.
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -14,6 +14,151 @@ use serde_json::{json, Value};
 
 const STEPS: usize = 32;
 const PASSES: usize = 5;
+
+// Monomorphized per invocation: never read both clocks inside a timed region.
+trait Clock {
+    type Start;
+    const ENCODE_LABEL: &'static str;
+    const DECODE_LABEL: &'static str;
+    fn start() -> Self::Start;
+    fn elapsed_ns(start: Self::Start) -> u128;
+    fn distribution(values: &[u128]) -> Value {
+        distribution(values)
+    }
+}
+
+struct WallClock;
+
+impl Clock for WallClock {
+    type Start = Instant;
+    const ENCODE_LABEL: &'static str = "encode_wall_ns";
+    const DECODE_LABEL: &'static str = "decode_wall_ns";
+    fn start() -> Self::Start {
+        Instant::now()
+    }
+    fn elapsed_ns(start: Self::Start) -> u128 {
+        start.elapsed().as_nanos()
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct ThreadCpuClock;
+
+#[cfg(target_os = "linux")]
+fn checked_timespec_ns(value: rustix::time::Timespec) -> Option<u128> {
+    let seconds = u128::try_from(value.tv_sec).ok()?;
+    let nanos = u128::try_from(value.tv_nsec).ok()?;
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
+}
+
+#[cfg(target_os = "linux")]
+fn checked_interval_ns(start: u128, end: u128) -> u128 {
+    end.checked_sub(start).expect("CPU clock moved backward")
+}
+
+#[cfg(target_os = "linux")]
+impl Clock for ThreadCpuClock {
+    type Start = u128;
+    const ENCODE_LABEL: &'static str = "encode_thread_cpu_ns";
+    const DECODE_LABEL: &'static str = "decode_thread_cpu_ns";
+    fn start() -> Self::Start {
+        checked_timespec_ns(rustix::time::clock_gettime(
+            rustix::time::ClockId::ThreadCPUTime,
+        ))
+        .expect("invalid calling-thread CPU timestamp")
+    }
+    fn elapsed_ns(start: Self::Start) -> u128 {
+        checked_interval_ns(start, Self::start())
+    }
+    fn distribution(values: &[u128]) -> Value {
+        let total = values
+            .iter()
+            .try_fold(0_u128, |sum, n| sum.checked_add(*n))
+            .expect("CPU sample total overflow");
+        let mut result = distribution(values);
+        result["samples"] = json!(values);
+        result["count"] = json!(values.len());
+        result["total"] = json!(total);
+        result["zero_count"] = json!(values.iter().filter(|&&n| n == 0).count());
+        result
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn thread_cpu_timer_diagnostics() -> Value {
+    let resolution = checked_timespec_ns(rustix::time::clock_getres(
+        rustix::time::ClockId::ThreadCPUTime,
+    ))
+    .expect("invalid calling-thread CPU clock resolution");
+    assert!(resolution > 0, "CPU clock resolution must be positive");
+    let mut intervals = [0_u128; 64];
+    for interval in &mut intervals {
+        let start = ThreadCpuClock::start();
+        *interval = ThreadCpuClock::elapsed_ns(start);
+    }
+    let mut sorted = intervals;
+    sorted.sort_unstable();
+    json!({
+        "api": "rustix 1.1.5 clock_gettime(ClockId::ThreadCPUTime)",
+        "clock_getres_ns": resolution,
+        "back_to_back_intervals_ns": {
+            "samples": intervals.as_slice(), "count": intervals.len(),
+            "min": sorted[0], "median": sorted[sorted.len() / 2],
+            "max": sorted[sorted.len() - 1],
+            "zero_count": intervals.iter().filter(|&&n| n == 0).count()
+        },
+        "overhead_subtracted": false,
+        "precision_note": "nanosecond storage and nominal resolution do not imply nanosecond accuracy; zero samples are unresolved, not zero CPU cost"
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cpu_timestamp_conversion_rejects_invalid_fields() {
+    use rustix::time::Timespec;
+    assert_eq!(
+        checked_timespec_ns(Timespec {
+            tv_sec: 0,
+            tv_nsec: 0
+        }),
+        Some(0)
+    );
+    assert_eq!(
+        checked_timespec_ns(Timespec {
+            tv_sec: 1,
+            tv_nsec: 999_999_999
+        }),
+        Some(1_999_999_999)
+    );
+    for value in [
+        Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        },
+        Timespec {
+            tv_sec: 0,
+            tv_nsec: -1,
+        },
+        Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        },
+    ] {
+        assert_eq!(checked_timespec_ns(value), None);
+    }
+    assert_eq!(checked_interval_ns(7, 7), 0);
+    assert_eq!(checked_interval_ns(999_999_999, 1_000_000_002), 3);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[should_panic(expected = "CPU clock moved backward")]
+fn cpu_interval_rejects_backward_clock() {
+    checked_interval_ns(8, 7);
+}
 
 struct Sample {
     frame: Frame,
@@ -182,18 +327,18 @@ struct Costs {
     decoder_baseline_max: usize,
 }
 
-fn legacy_pass(registry: &Arc<ComponentRegistry>, case: &Case) -> Costs {
+fn legacy_pass<C: Clock>(registry: &Arc<ComponentRegistry>, case: &Case) -> Costs {
     let mut costs = Costs::default();
     for sample in &case.samples {
         let meta = metadata(sample);
-        let start = Instant::now();
+        let start = C::start();
         let message =
             wire::encode_frame_message(black_box(&meta), &black_box(&sample.frame).to_bytes());
-        let encode_ns = start.elapsed().as_nanos();
-        let start = Instant::now();
+        let encode_ns = C::elapsed_ns(start);
+        let start = C::start();
         let (_, raw) = wire::decode_frame_message(black_box(&message)).expect("legacy envelope");
         let decoded = Frame::from_bytes(Arc::clone(registry), &raw).expect("legacy Frame");
-        let decode_ns = start.elapsed().as_nanos();
+        let decode_ns = C::elapsed_ns(start);
         assert_frame(&sample.frame, &decoded);
         costs.bytes.push(message.len());
         costs.encode_ns.push(encode_ns);
@@ -203,7 +348,11 @@ fn legacy_pass(registry: &Arc<ComponentRegistry>, case: &Case) -> Costs {
     costs
 }
 
-fn negotiated_pass(registry: &Arc<ComponentRegistry>, case: &Case, baseline_cap: usize) -> Costs {
+fn negotiated_pass<C: Clock>(
+    registry: &Arc<ComponentRegistry>,
+    case: &Case,
+    baseline_cap: usize,
+) -> Costs {
     let limits = FrameCodecLimits {
         max_baseline_bytes: baseline_cap,
         ..DEFAULT_FRAME_CODEC_LIMITS
@@ -224,14 +373,14 @@ fn negotiated_pass(registry: &Arc<ComponentRegistry>, case: &Case, baseline_cap:
             decoder.reset();
         }
         let meta = negotiated_metadata(sample);
-        let start = Instant::now();
+        let start = C::start();
         let message = encode_negotiated(&mut encoder, black_box(sample), black_box(&meta), limits);
-        let encode_ns = start.elapsed().as_nanos();
-        let start = Instant::now();
+        let encode_ns = C::elapsed_ns(start);
+        let start = C::start();
         let (_, identity, record) = wire::decode_frame_record_message(black_box(&message), limits)
             .expect("negotiated envelope");
         let decoded = decoder.decode(&record).expect("reconstruct Frame");
-        let decode_ns = start.elapsed().as_nanos();
+        let decode_ns = C::elapsed_ns(start);
         assert_eq!(identity.sequence, sample.sequence);
         assert_eq!(identity.subscription, sample.scope.stream_generation);
         assert_eq!(identity.reset_generation, sample.scope.timeline_epoch);
@@ -271,24 +420,24 @@ fn negotiated_pass(registry: &Arc<ComponentRegistry>, case: &Case, baseline_cap:
 fn thousand_body_lifecycle_reconstruction_and_bounds() {
     let (registry, cases) = fixture();
     for case in &cases {
-        let legacy = legacy_pass(&registry, case);
-        let negotiated = negotiated_pass(
+        let legacy = legacy_pass::<WallClock>(&registry, case);
+        let negotiated = negotiated_pass::<WallClock>(
             &registry,
             case,
             DEFAULT_FRAME_CODEC_LIMITS.max_baseline_bytes,
         );
         assert_eq!(legacy.bytes.len(), negotiated.bytes.len());
-        let no_base = negotiated_pass(&registry, case, 0);
+        let no_base = negotiated_pass::<WallClock>(&registry, case, 0);
         assert_eq!(no_base.delta, 0);
     }
     let idle = &cases[0];
     let raw_len = idle.samples[0].frame.to_bytes().len();
     assert_eq!(
-        negotiated_pass(&registry, idle, raw_len).encoder_baseline_max,
+        negotiated_pass::<WallClock>(&registry, idle, raw_len).encoder_baseline_max,
         raw_len
     );
     assert_eq!(
-        negotiated_pass(&registry, idle, raw_len - 1).encoder_baseline_max,
+        negotiated_pass::<WallClock>(&registry, idle, raw_len - 1).encoder_baseline_max,
         0
     );
 }
@@ -341,24 +490,22 @@ fn distribution(values: &[u128]) -> Value {
         "p95": sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)]})
 }
 
-fn report(pass: usize, case: &Case, mode: &str, costs: Costs) {
-    println!(
-        "{}",
-        json!({
-            "pass": pass, "case": case.name, "mode": mode, "frames": costs.bytes.len(),
-            "erp_binary_bytes_total": costs.bytes.iter().sum::<usize>(),
-            "erp_binary_bytes_first": costs.bytes[0],
-            "erp_binary_bytes_min": costs.bytes.iter().min(),
-            "erp_binary_bytes_max": costs.bytes.iter().max(),
-            "full_records": costs.full, "delta_records": costs.delta,
-            "encode_wall_ns": distribution(&costs.encode_ns),
-            "decode_wall_ns": distribution(&costs.decode_ns),
-            "encoder_retained_baseline_bytes_max": costs.encoder_baseline_max,
-            "decoder_retained_baseline_bytes_max": costs.decoder_baseline_max,
-            "first_frame_checksum": wire::checksum_text(case.samples[0].frame.checksum()),
-            "last_frame_checksum": wire::checksum_text(case.samples.last().unwrap().frame.checksum())
-        })
-    );
+fn report<C: Clock>(pass: usize, case: &Case, mode: &str, costs: Costs) {
+    let mut row = json!({
+        "pass": pass, "case": case.name, "mode": mode, "frames": costs.bytes.len(),
+        "erp_binary_bytes_total": costs.bytes.iter().sum::<usize>(),
+        "erp_binary_bytes_first": costs.bytes[0],
+        "erp_binary_bytes_min": costs.bytes.iter().min(),
+        "erp_binary_bytes_max": costs.bytes.iter().max(),
+        "full_records": costs.full, "delta_records": costs.delta,
+        "encoder_retained_baseline_bytes_max": costs.encoder_baseline_max,
+        "decoder_retained_baseline_bytes_max": costs.decoder_baseline_max,
+        "first_frame_checksum": wire::checksum_text(case.samples[0].frame.checksum()),
+        "last_frame_checksum": wire::checksum_text(case.samples.last().unwrap().frame.checksum())
+    });
+    row[C::ENCODE_LABEL] = C::distribution(&costs.encode_ns);
+    row[C::DECODE_LABEL] = C::distribution(&costs.decode_ns);
+    println!("{row}");
 }
 
 #[test]
@@ -379,36 +526,71 @@ fn measure_full_lz4_vs_negotiated() {
         "baseline_cap": DEFAULT_FRAME_CODEC_LIMITS.max_baseline_bytes,
         "frame_cap": DEFAULT_FRAME_CODEC_LIMITS.max_frame_bytes})
     );
-    for case in &cases {
-        black_box(legacy_pass(&registry, case));
-        black_box(negotiated_pass(
-            &registry,
+    measured_passes::<WallClock>(&registry, &cases);
+}
+
+fn measured_passes<C: Clock>(registry: &Arc<ComponentRegistry>, cases: &[Case]) {
+    for case in cases {
+        black_box(legacy_pass::<C>(registry, case));
+        black_box(negotiated_pass::<C>(
+            registry,
             case,
             DEFAULT_FRAME_CODEC_LIMITS.max_baseline_bytes,
         ));
     }
     for pass in 0..PASSES {
-        for case in &cases {
+        for case in cases {
             let (legacy, negotiated) = if pass % 2 == 0 {
-                let legacy = legacy_pass(&registry, case);
+                let legacy = legacy_pass::<C>(registry, case);
                 (
                     legacy,
-                    negotiated_pass(
-                        &registry,
+                    negotiated_pass::<C>(
+                        registry,
                         case,
                         DEFAULT_FRAME_CODEC_LIMITS.max_baseline_bytes,
                     ),
                 )
             } else {
-                let negotiated = negotiated_pass(
-                    &registry,
+                let negotiated = negotiated_pass::<C>(
+                    registry,
                     case,
                     DEFAULT_FRAME_CODEC_LIMITS.max_baseline_bytes,
                 );
-                (legacy_pass(&registry, case), negotiated)
+                (legacy_pass::<C>(registry, case), negotiated)
             };
-            report(pass, case, "legacy_full_lz4", legacy);
-            report(pass, case, "negotiated", negotiated);
+            report::<C>(pass, case, "legacy_full_lz4", legacy);
+            report::<C>(pass, case, "negotiated", negotiated);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "CPU cost probe: run once in an explicitly reserved, quiet release lane"]
+fn measure_thread_cpu_full_lz4_vs_negotiated() {
+    assert!(
+        !black_box(cfg!(debug_assertions)),
+        "cost probe requires --release"
+    );
+    let (registry, cases) = fixture();
+    let timer = thread_cpu_timer_diagnostics();
+    let pairs_per_pass: usize = cases.iter().map(|case| case.samples.len()).sum();
+    assert_eq!(pairs_per_pass, 82);
+    println!(
+        "{}",
+        json!({"probe": "frame_delta_thread_cpu_cost_v1", "dynamic_bodies": 1000,
+        "fixture": "PhysGame Rain / layout_seed 0x0DDB_A110 / sim_seed 7 / 60 Hz / 2 players / neutral input",
+        "warmup_passes": 1, "measured_passes": PASSES,
+        "matched_pairs_per_pass": pairs_per_pass,
+        "matched_pairs_total": pairs_per_pass * PASSES,
+        "frame_mode_observations": pairs_per_pass * PASSES * 2,
+        "case_mode_pass_rows": cases.len() * PASSES * 2,
+        "timing": "calling-thread CPU time, user + system combined; includes synchronous callees and timer overhead; excludes other threads, sleep and descheduled time; not exclusive function CPU",
+        "timer": timer,
+        "summary": "median of five per-pass arithmetic means; three-frame lifecycle percentiles are descriptive",
+        "byte_scope": "ERP binary messages only; excludes transport and reset/negotiation control messages",
+        "baseline_cap": DEFAULT_FRAME_CODEC_LIMITS.max_baseline_bytes,
+        "frame_cap": DEFAULT_FRAME_CODEC_LIMITS.max_frame_bytes})
+    );
+    measured_passes::<ThreadCpuClock>(&registry, &cases);
 }
