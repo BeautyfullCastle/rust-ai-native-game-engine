@@ -100,6 +100,9 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
             VerifyInputs::Scripted { players, input, .. } => {
                 let mut ti = TickInputs::<G::Input, G::Command>::new(tick, *players);
                 for s in 0..*players {
+                    // A callback may request cancellation; do not invoke the
+                    // next player's callback after it returns.
+                    check_cancelled(cancel)?;
                     ti.set_input(PlayerSlot(s), input(tick, PlayerSlot(s)));
                 }
                 check_cancelled(cancel)?;
@@ -344,6 +347,7 @@ fn run_side<G: Game>(
     for (i, &t) in ticks.iter().enumerate() {
         check_cancelled(cancel)?;
         run.debug_replayed += inputs.step(&mut sim, t, opts.debug_commands, cancel)?;
+        check_cancelled(cancel)?;
         run.checksums.push(sim.checksum());
         if sampled(i + 1) {
             run.samples.push((i + 1, sim.tick(), metrics.sample(sim.frame())));
@@ -376,16 +380,16 @@ pub fn verify_frames<G: Game>(
 /// Runs `base` and `candidate` like [`verify_frames`], returning
 /// [`EditError::VerifyCancelled`] if `cancel` is set before a complete report
 /// is ready. The flag is checked before setup, during tick-list collection,
-/// before each simulation tick, between sequential sides, and before report
-/// assembly. In parallel mode,
+/// before each scripted player input callback and simulation tick, between
+/// sequential sides, and before report assembly. In parallel mode,
 /// both scoped workers observe the same flag and are joined before returning.
 ///
 /// The flag may be shared with another thread and set with
 /// [`AtomicBool::store`](AtomicBool::store). Cancellation never returns a
 /// successful partial report. Tick-list collection checks before and after
 /// each iterator visit. Cancellation is cooperative: parsing/decompression,
-/// snapshot/report allocations, hooks and a single simulation tick are not
-/// preempted; there is no hard preemption or wall-clock latency guarantee.
+/// snapshot/report allocations, hooks, a single input callback and a single
+/// simulation tick are not preempted; there is no hard preemption or wall-clock latency guarantee.
 pub fn verify_frames_cancellable<G: Game>(
     base: &Frame,
     candidate: &Frame,

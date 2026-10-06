@@ -4,6 +4,7 @@
 mod common;
 
 use std::{
+    cell::RefCell,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -19,7 +20,7 @@ use orr_edit::{
 use orr_reflect::Value;
 use orr_sample::physics_game::{PhysGame, PhysInput, PhysMetrics};
 use orr_session::ControlOp;
-use orr_sim::{Metrics, PlayerSlot};
+use orr_sim::{Game, Metrics, PlayerSlot, SimContext, Simulation, System};
 
 const BODY: &str = "orr_physics::Body";
 
@@ -227,6 +228,252 @@ fn cancellable_verify_stops_before_start_and_between_ticks() {
     let result = orr_edit::verify_frames_cancellable::<PhysGame>(doc.frame(), doc.frame(), &inputs, &metrics, &sequential, &cancel);
     assert!(matches!(result, Err(EditError::VerifyCancelled)));
     assert_eq!(input_calls.load(Ordering::Relaxed), 2, "only tick 1 inputs were requested");
+}
+
+#[test]
+fn scripted_input_cancellation_skips_later_players_and_simulation() {
+    let doc = demo_doc();
+    let checksum = doc.frame().checksum();
+    for cancel_slot in 0..3 {
+        let cancel = AtomicBool::new(false);
+        let calls = AtomicUsize::new(0);
+        let inputs = VerifyInputs::scripted(4, 3, |tick, slot| {
+            assert_eq!(tick, 1);
+            assert_eq!(usize::from(slot.0), calls.fetch_add(1, Ordering::Relaxed));
+            if slot.0 == cancel_slot {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            script(tick, slot)
+        });
+        struct InitialSampleOnly(AtomicUsize);
+        impl Metrics for InitialSampleOnly {
+            fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+                assert_eq!(
+                    frame.tick(),
+                    0,
+                    "cancelled inputs must not reach simulation"
+                );
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+        }
+        let metrics = InitialSampleOnly(AtomicUsize::new(0));
+        let sequential = VerifyOptions {
+            parallel: false,
+            sample_every: 1,
+            ..opts()
+        };
+        let result = orr_edit::verify_frames_cancellable::<PhysGame>(
+            doc.frame(),
+            doc.frame(),
+            &inputs,
+            &metrics,
+            &sequential,
+            &cancel,
+        );
+        assert!(matches!(result, Err(EditError::VerifyCancelled)));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            usize::from(cancel_slot) + 1,
+            "no later player callback is invoked"
+        );
+        assert_eq!(
+            metrics.0.load(Ordering::Relaxed),
+            1,
+            "the candidate side never starts"
+        );
+        assert_eq!(doc.frame().checksum(), checksum);
+    }
+}
+
+#[test]
+fn uncancelled_scripted_players_preserve_complete_reports() {
+    let doc = demo_doc();
+    for players in [0, 1, 3] {
+        for parallel in [false, true] {
+            let options = VerifyOptions {
+                parallel,
+                sample_every: 1,
+                ..opts()
+            };
+            let expected = orr_edit::verify_frames::<PhysGame>(
+                doc.frame(),
+                doc.frame(),
+                &VerifyInputs::scripted(16, players, script),
+                &PhysMetrics,
+                &options,
+            )
+            .unwrap();
+            let calls = AtomicUsize::new(0);
+            let inputs = VerifyInputs::scripted(16, players, |tick, slot| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                script(tick, slot)
+            });
+            let actual = orr_edit::verify_frames_cancellable::<PhysGame>(
+                doc.frame(),
+                doc.frame(),
+                &inputs,
+                &PhysMetrics,
+                &options,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual.ticks, 16);
+            assert_eq!(calls.load(Ordering::Relaxed), 2 * 16 * usize::from(players));
+        }
+    }
+}
+
+// The test system requests cancellation during an ordinary successful tick.
+// Thread-local instrumentation keeps concurrent tests independent without
+// coordinating worker threads; these fixtures deliberately run sequentially.
+#[derive(Default)]
+struct TickCancellationProbe {
+    cancel: Arc<AtomicBool>,
+    cancel_tick: Option<u64>,
+    ticks: Vec<u64>,
+    inputs: Vec<(u64, PlayerSlot)>,
+    samples: Vec<u64>,
+}
+
+thread_local! {
+    static TICK_CANCELLATION: RefCell<TickCancellationProbe> = RefCell::default();
+}
+
+struct TickCancellationGame;
+
+impl Game for TickCancellationGame {
+    type Input = u8;
+    type Command = <PhysGame as Game>::Command;
+    type Event = u8;
+    type Config = ();
+
+    fn register(_: &mut orr_ecs::ComponentRegistryBuilder) {}
+    fn setup(_: &mut orr_ecs::Frame, _: &()) {}
+    fn systems() -> Vec<Box<dyn System<Self>>> {
+        vec![Box::new(cancel_during_tick as fn(&mut SimContext<Self>))]
+    }
+}
+
+fn cancel_during_tick(ctx: &mut SimContext<TickCancellationGame>) {
+    TICK_CANCELLATION.with_borrow_mut(|probe| {
+        probe.ticks.push(ctx.tick);
+        if probe.cancel_tick == Some(ctx.tick) {
+            probe.cancel.store(true, Ordering::Relaxed);
+        }
+    });
+}
+
+fn tick_probe_input(tick: u64, slot: PlayerSlot) -> u8 {
+    TICK_CANCELLATION.with_borrow_mut(|probe| probe.inputs.push((tick, slot)));
+    0
+}
+
+struct TickProbeMetrics;
+
+impl Metrics for TickProbeMetrics {
+    fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+        TICK_CANCELLATION.with_borrow_mut(|probe| probe.samples.push(frame.tick()));
+        vec![("tick".into(), MetricValue::Int(frame.tick() as i64))]
+    }
+}
+
+#[test]
+fn cancellation_during_successful_tick_skips_sampling_and_candidate() {
+    let sim = Simulation::<TickCancellationGame>::new((), 60, 1);
+    let frame = sim.frame();
+    let bytes = frame.to_bytes();
+    let checksum = frame.checksum();
+    let options = VerifyOptions {
+        parallel: false,
+        sample_every: 1,
+        ..opts()
+    };
+    for cancel_tick in 1..=3 {
+        let cancel = Arc::new(AtomicBool::new(false));
+        TICK_CANCELLATION.set(TickCancellationProbe {
+            cancel: cancel.clone(),
+            cancel_tick: Some(cancel_tick),
+            ..Default::default()
+        });
+        let inputs = VerifyInputs::scripted(3, 2, tick_probe_input);
+        let result = orr_edit::verify_frames_cancellable::<TickCancellationGame>(
+            frame,
+            frame,
+            &inputs,
+            &TickProbeMetrics,
+            &options,
+            &cancel,
+        );
+        let probe = TICK_CANCELLATION.take();
+        assert!(matches!(result, Err(EditError::VerifyCancelled)));
+        assert_eq!(probe.ticks, (1..=cancel_tick).collect::<Vec<_>>());
+        assert_eq!(
+            probe.inputs,
+            (1..=cancel_tick)
+                .flat_map(|t| [(t, PlayerSlot(0)), (t, PlayerSlot(1))])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe.samples,
+            (0..cancel_tick).collect::<Vec<_>>(),
+            "no post-cancel sample or candidate start"
+        );
+        assert_eq!(frame.to_bytes(), bytes);
+        assert_eq!(frame.checksum(), checksum);
+    }
+}
+
+#[test]
+fn uncancelled_successful_ticks_preserve_complete_reports() {
+    let sim = Simulation::<TickCancellationGame>::new((), 60, 1);
+    let frame = sim.frame();
+    let bytes = frame.to_bytes();
+    let checksum = frame.checksum();
+    let options = VerifyOptions {
+        parallel: false,
+        sample_every: 1,
+        ..opts()
+    };
+    let inputs = VerifyInputs::scripted(3, 2, tick_probe_input);
+    TICK_CANCELLATION.set(TickCancellationProbe::default());
+    let expected = orr_edit::verify_frames::<TickCancellationGame>(
+        frame,
+        frame,
+        &inputs,
+        &TickProbeMetrics,
+        &options,
+    )
+    .unwrap();
+    let expected_probe = TICK_CANCELLATION.take();
+    let actual = orr_edit::verify_frames_cancellable::<TickCancellationGame>(
+        frame,
+        frame,
+        &inputs,
+        &TickProbeMetrics,
+        &options,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let actual_probe = TICK_CANCELLATION.take();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.ticks, 3);
+    assert_eq!(actual_probe.ticks, vec![1, 2, 3, 1, 2, 3]);
+    assert_eq!(actual_probe.ticks, expected_probe.ticks);
+    assert_eq!(
+        actual_probe.inputs,
+        (1..=3)
+            .cycle()
+            .take(6)
+            .flat_map(|t| [(t, PlayerSlot(0)), (t, PlayerSlot(1))])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(actual_probe.inputs, expected_probe.inputs);
+    assert_eq!(actual_probe.samples, vec![0, 1, 2, 3, 0, 1, 2, 3]);
+    assert_eq!(actual_probe.samples, expected_probe.samples);
+    assert_eq!(frame.to_bytes(), bytes);
+    assert_eq!(frame.checksum(), checksum);
 }
 
 #[test]
