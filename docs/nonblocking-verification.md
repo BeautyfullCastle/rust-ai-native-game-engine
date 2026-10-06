@@ -44,8 +44,13 @@ existing verification core can run its two sides in parallel: one coordinator
 plus one scoped side thread, at most two execution threads per active job.
 
 Disconnect and server drop set a cooperative cancellation flag. Cancellation is
-checked before setup, around replay preparation, before simulation ticks,
-between sequential sides, after each tick, and around report construction. No
+checked before setup, throughout replay preparation, before simulation ticks,
+between sequential sides, after each tick, and around report construction. Replay
+preparation checks before base64 reservation, between its four-character groups
+and at completion; before and after whole-block decompression; around tick,
+game-command, checksum, keyframe-copy and debug-command records; and before
+returning the full reader. A cancellation raised by the final command decoder
+also returns `verify_cancelled`, never `bad replay` / `verify_failed`. No
 partial successful report is returned. A canceled job occupies the slot until
 the worker actually exits; reconnecting cannot create overlapping workers.
 
@@ -63,8 +68,9 @@ error and leave the slot reusable.
 ## Explicit limits
 
 The default 6000-tick limit bounds simulation execution, not decoded replay
-memory, one tick's duration, or total elapsed time. Cancellation cannot preempt
-a blocked custom hook, replay decoder, or individual simulation tick. Hard
+memory, one tick's duration, or total elapsed time. Preparation is cooperative;
+cancellation cannot preempt one LZ4 call, allocation/copy, custom command
+decoder, blocked hook, or individual simulation tick. Hard
 preemption, absolute replay allocation limits, replay-format hardening and
 general RPC/transport queue bounds are separate work. A client call timeout
 alone does not disconnect its transport and therefore does not cancel a job.
@@ -73,6 +79,34 @@ request; it does not bound upstream request parsing or preparation allocations
 for accepted recordings.
 
 No simulation arithmetic, recording format, or golden checksums change.
+
+## Cooperative preparation regression coverage (2026-10-05)
+
+Small engine-generated recordings exercise the full reader, including input
+deltas, ordered game/debug commands, tick-zero and later checksums, keyframes,
+header fields and playback bounds. With cancellation unset, ordinary and
+cancellable parsing preserve every field and reproduce the same recording
+bytes. Private deterministic checkpoints request cancellation before and after
+decompression, at every record boundary (including the final record), and at
+completion; cancellation returns no reader and visits no later checkpoint.
+Base64 tests cover ordinary padding lengths and cancellation before reservation,
+between groups and at completion, without timing assumptions.
+
+The three-tick `PlayController` fixture and two-tick host cap below still check
+complete reports, starting-checkpoint comparisons, replay byte counts and state
+stamps across self/proposal and replay/last-play requests. Pre-cancelled inputs
+return no report. A normal POD command decoder also sets the existing flag on
+the first, middle or final command: preparation returns `verify_cancelled`,
+does not decode later commands and never starts simulation. No new malformed,
+oversized or panic fixture, dependency, benchmark or allocation ceiling is added.
+
+On Rust 1.97.1, focused release checks pass 89 library tests across `orr_session`,
+`orr_edit` and `orr_remote`; 22 remote lifecycle/proposal integration tests;
+22 edit verification/tick-budget tests; 11 session arena tests, including the
+existing goldens and v1/v2 replay compatibility; and the normal debug recording
+replay test. Strict release library Clippy for those three crates and
+`git diff --check` also pass. These 145 unique tests are focused regression
+coverage, not a full workspace, cross-platform or hard-preemption claim.
 
 ## Recorded admission regression coverage (2026-10-05)
 

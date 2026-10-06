@@ -43,7 +43,7 @@ pub use play::{
     ControlOp, PlayConfig, PlayError, PlayMode, PlayNote, PlaySession, Speed, Timeline, TIMELINE_CHECKSUM_WINDOW,
 };
 pub use replay::{
-    replay_seek_checked, replay_verify, replay_verify_checked, ReplayError, ReplayHeader, ReplayReader, ReplayWriter,
+    replay_seek_checked, replay_verify, replay_verify_checked, ReplayError, ReplayHeader, ReplayParseError, ReplayReader, ReplayWriter,
     VerifyReport,
 };
 pub use session::{
