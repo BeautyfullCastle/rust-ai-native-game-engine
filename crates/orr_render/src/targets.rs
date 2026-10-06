@@ -165,9 +165,21 @@ impl<B: Rhi> WindowRenderer<B> {
     /// Draws and presents. Returns `false` if the frame was skipped (window
     /// hidden, surface being reconfigured).
     pub fn render(&mut self, list: &RenderList, camera: &Camera) -> bool {
+        self.render_with_overlay(list, camera, |_, _, _| {})
+    }
+
+    /// Draws the scene, then an overlay on the same acquired view before present.
+    /// The callback must submit through the supplied RHI.
+    pub fn render_with_overlay(
+        &mut self,
+        list: &RenderList,
+        camera: &Camera,
+        overlay: impl FnOnce(&B, &B::TextureView, (u32, u32)),
+    ) -> bool {
         let rhi = self.renderer.rhi().clone();
         let Acquire::Frame(frame) = rhi.acquire_frame(&mut self.surface) else { return false };
         self.renderer.draw(rhi.frame_view(&frame), self.size, list, camera);
+        overlay(&rhi, rhi.frame_view(&frame), self.size);
         rhi.present(frame);
         true
     }
