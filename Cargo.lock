@@ -3256,6 +3256,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_navigation"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_terrain",
+ "sha2",
+]
+
+[[package]]
+name = "orr_navigation_view"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_model",
+ "orr_navigation",
+ "orr_package",
+ "orr_render",
+ "orr_terrain",
+ "orr_terrain_view",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "orr_net"
 version = "0.0.1"
 dependencies = [
