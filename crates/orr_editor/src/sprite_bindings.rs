@@ -219,16 +219,21 @@ pub fn resolve_project(base: &Path, relative_project: &str) -> Result<PathBuf, S
     if !relative(relative_project) {
         return Err("project path must be relative".into());
     }
-    let path = if base.is_absolute() {
-        base.to_path_buf()
+    let current = if base.is_absolute() {
+        PathBuf::new()
     } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(base)
-    }
-    .join(relative_project);
+        std::env::current_dir().map_err(|e| e.to_string())?
+    };
     let mut resolved = PathBuf::new();
-    for component in path.components() {
+    // Do not join onto a Windows verbatim path: push/join normalizes ParentDir
+    // before we can reject root escapes or symlinks along the original path.
+    // Parse portable relative separators before appending individual components.
+    let mut components = current
+        .components()
+        .chain(base.components())
+        .chain(Path::new(relative_project).components())
+        .peekable();
+    while let Some(component) = components.next() {
         match component {
             Component::CurDir => continue,
             Component::ParentDir => {
@@ -237,6 +242,14 @@ pub fn resolve_project(base: &Path, relative_project: &str) -> Result<PathBuf, S
                 }
             }
             _ => resolved.push(component),
+        }
+        // Canonical Windows paths include a verbatim drive prefix. Its bare
+        // prefix is a device, not a directory; check it together with RootDir.
+        // A prefix-only UNC root still needs its own metadata check.
+        if matches!(component, Component::Prefix(_))
+            && components.peek() == Some(&Component::RootDir)
+        {
+            continue;
         }
         let metadata = std::fs::symlink_metadata(&resolved)
             .map_err(|e| format!("project directory {}: {e}", resolved.display()))?;
@@ -408,6 +421,70 @@ mod tests {
             std::os::unix::fs::symlink(&scenes, dir.path().join("alias")).unwrap();
             assert!(resolve_project(dir.path(), "alias/..").is_err());
         }
+    }
+    #[test]
+    fn project_resolution_accepts_canonical_bases_and_portable_parent_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        // Windows canonicalize returns a verbatim path; joining a portable
+        // relative string onto it before parsing changes its traversal semantics.
+        let root = dir.path().canonicalize().unwrap();
+        let sidecars = root.join("sidecars");
+        let project = root.join("project");
+        std::fs::create_dir(&sidecars).unwrap();
+        std::fs::create_dir_all(project.join("nested")).unwrap();
+        assert_eq!(resolve_project(&root, ".").unwrap(), root);
+        assert_eq!(resolve_project(&sidecars, "../project").unwrap(), project);
+        assert_eq!(
+            resolve_project(&sidecars, "../project/nested").unwrap(),
+            project.join("nested")
+        );
+    }
+    #[test]
+    fn project_resolution_checks_ancestors_before_parent_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("file"), b"not a directory").unwrap();
+        for relative in ["missing/..", "file/..", "missing/../.", "file/../."] {
+            assert!(resolve_project(&root, relative).is_err(), "{relative}");
+        }
+        let volume_root = root.ancestors().last().unwrap();
+        assert!(resolve_project(volume_root, "..").is_err());
+        assert!(resolve_project(volume_root, "../.").is_err());
+        // Keep unchecked ancestors in the base too, without PathBuf::push
+        // normalizing them away on Windows verbatim paths.
+        for ancestor in ["missing", "file"] {
+            let mut base = root.join(ancestor).into_os_string();
+            base.push(format!("{0}..", std::path::MAIN_SEPARATOR));
+            assert!(resolve_project(Path::new(&base), ".").is_err());
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn project_resolution_checks_prefix_only_unc_roots() {
+        use std::path::Component;
+        // The NUL makes metadata fail locally, without contacting a UNC server.
+        // Unlike a drive prefix followed by RootDir, this prefix is the whole
+        // root and must not be skipped merely because it is a Prefix component.
+        let root = Path::new("\\\\?\\UNC\\invalid\\share\0");
+        let mut components = root.components();
+        assert!(matches!(components.next(), Some(Component::Prefix(_))));
+        assert_eq!(components.next(), None);
+        assert!(resolve_project(root, ".").is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn project_resolution_rejects_symlink_ancestors_even_when_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        for relative in ["alias", "alias/..", "alias/../project"] {
+            assert!(resolve_project(&root, relative).is_err(), "{relative}");
+        }
+        assert!(resolve_project(&alias, "../project").is_err());
+        assert!(resolve_project(&alias.join(".."), ".").is_err());
     }
     #[test]
     fn decoder_rejects_apng_small_subframe_and_bad_png() {
