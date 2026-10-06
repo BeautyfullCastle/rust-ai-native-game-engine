@@ -57,11 +57,35 @@ pub struct Summary {
 
 struct Gfx {
     window: Arc<Window>,
-    renderer: WindowRenderer<Wgpu>,
+    renderer: ArenaRenderer,
+}
+
+enum ArenaRenderer {
+    Shapes(Box<WindowRenderer<Wgpu>>),
+    #[cfg(feature = "sprites")]
+    Sprites(Box<crate::sprite_scene::SpriteWindow>),
+}
+impl ArenaRenderer {
+    fn adapter_name(&self) -> String {
+        match self {
+            Self::Shapes(renderer) => renderer.adapter_name(),
+            #[cfg(feature = "sprites")]
+            Self::Sprites(renderer) => renderer.adapter_name(),
+        }
+    }
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            Self::Shapes(renderer) => renderer.resize(width, height),
+            #[cfg(feature = "sprites")]
+            Self::Sprites(renderer) => renderer.resize(width, height),
+        }
+    }
 }
 
 struct App<B: Bridge<Arena>> {
     bridge: B,
+    #[cfg(feature = "sprites")]
+    sprites: Option<crate::sprite_scene::SpriteScene>,
     audio: ArenaAudio,
     view: ViewWorld<ArenaExtractor>,
     opts: Options,
@@ -104,7 +128,10 @@ impl<B: Bridge<Arena>> App<B> {
         if let Some(reset) = &update.resync {
             crate::net_client::log_view_resync(reset);
         }
-        self.view.update_from_bridge(dt.as_secs_f32().min(0.1), &update);
+        self.view
+            .update_from_bridge(dt.as_secs_f32().min(0.1), &update);
+        #[cfg(feature = "sprites")]
+        let sprite_reset = update.resync.is_some();
         for event in update.events {
             match event {
                 BridgeEvent::Sim { status: EventStatus::Predicted(_), .. } => self.summary.predicted_hits += 1,
@@ -118,11 +145,35 @@ impl<B: Bridge<Arena>> App<B> {
         self.items.clear();
         self.items.push(arena_floor());
         self.view.render_items(&mut self.items);
+        #[cfg(feature = "sprites")]
+        if let Some(scene) = &mut self.sprites {
+            scene.update(
+                dt,
+                snapshot.as_ref(),
+                self.bridge.local_slot().0,
+                sprite_reset,
+                &mut self.items,
+            );
+        }
         self.list.clear();
         extract_items(&self.items, &mut self.list);
         if let Some(gfx) = &mut self.gfx {
             let camera = Camera::new([0.0, 0.0], 2100.0);
-            gfx.renderer.render(&self.list, &camera);
+            match &mut gfx.renderer {
+                ArenaRenderer::Shapes(renderer) => {
+                    renderer.render(&self.list, &camera);
+                }
+                #[cfg(feature = "sprites")]
+                ArenaRenderer::Sprites(renderer) => {
+                    if let Err(error) =
+                        renderer.render(&self.list, self.sprites.as_ref().expect("sprite mode"))
+                    {
+                        self.error = Some(error);
+                        event_loop.exit();
+                        return;
+                    }
+                }
+            }
         }
 
         self.frames += 1;
@@ -174,7 +225,26 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
                 return;
             }
         };
-        match WindowRenderer::new(window.clone(), (window.inner_size().width, window.inner_size().height), self.opts.vsync) {
+        let create_renderer = || {
+            #[cfg(feature = "sprites")]
+            if let Some(scene) = &self.sprites {
+                return crate::sprite_scene::SpriteWindow::new(
+                    window.clone(),
+                    self.opts.vsync,
+                    scene,
+                )
+                .map(Box::new)
+                .map(ArenaRenderer::Sprites);
+            }
+            WindowRenderer::new(
+                window.clone(),
+                (window.inner_size().width, window.inner_size().height),
+                self.opts.vsync,
+            )
+            .map(Box::new)
+            .map(ArenaRenderer::Shapes)
+        };
+        match create_renderer() {
             Ok(renderer) => {
                 self.summary.adapter = renderer.adapter_name();
                 println!("adapter: {}", self.summary.adapter);
@@ -226,15 +296,44 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
 
 /// Opens the window and runs until it closes (or `opts.seconds` pass).
 pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String> {
+    run_inner(
+        bridge,
+        opts,
+        #[cfg(feature = "sprites")]
+        None,
+    )
+}
+
+/// Runs the same Arena simulation with installed sprite assets and local-player camera follow.
+#[cfg(feature = "sprites")]
+pub fn run_sprites<B: Bridge<Arena>>(
+    bridge: B,
+    opts: Options,
+    root: &std::path::Path,
+) -> Result<Summary, String> {
+    let scene = crate::sprite_scene::SpriteScene::open(root)?;
+    run_inner(bridge, opts, Some(scene))
+}
+
+fn run_inner<B: Bridge<Arena>>(
+    bridge: B,
+    opts: Options,
+    #[cfg(feature = "sprites")] sprites: Option<crate::sprite_scene::SpriteScene>,
+) -> Result<Summary, String> {
     let audio = ArenaAudio::open(opts.audio)?;
     eprintln!("audio: {}", audio.status());
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let now = Instant::now();
     let local_slot = bridge.local_slot().0;
-    let extractor = ArenaExtractor { remote_mode: opts.remote_mode, local_slot };
+    let extractor = ArenaExtractor {
+        remote_mode: opts.remote_mode,
+        local_slot,
+    };
     let mut app = App {
         bridge,
+        #[cfg(feature = "sprites")]
+        sprites,
         audio,
         view: ViewWorld::new(extractor, opts.view),
         opts,

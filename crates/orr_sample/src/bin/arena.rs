@@ -10,6 +10,7 @@
 //!   --audio off|auto|required     optional native output (default auto; build --features audio-native)
 //!   --no-vsync                   do not wait for the display (measure raw speed)
 //!   --seconds N                  close after N seconds and print a summary
+//!   --sprite-project DIR        installed sample-sprites project (build --features sprites)
 //!   --headless                   with --connect --bot: no window, play as a scripted bot (default 30 s)
 //! ```
 //! Play on a relay server (`orr_server`) instead of the local loopback with
@@ -44,6 +45,7 @@ fn real_main() -> Result<(), String> {
     let mut net = Loopback::default();
     let mut netargs = NetArgs::default();
     let mut headless = false;
+    let mut sprite_project = None;
     let mut opts = Options {
         label: String::new(),
         vsync: true,
@@ -61,6 +63,7 @@ fn real_main() -> Result<(), String> {
         }
         match arg.as_str() {
             "--headless" => headless = true,
+            "--sprite-project" => sprite_project = Some(std::path::PathBuf::from(value("--sprite-project")?)),
             "--audio" => opts.audio = value("--audio")?.parse()?,
             "--bridge" => {
                 threaded = match value("--bridge")?.as_str() {
@@ -86,6 +89,11 @@ fn real_main() -> Result<(), String> {
         }
     }
 
+    if sprite_project.is_some() {
+        if headless { return Err("--sprite-project requires a window".into()); }
+        #[cfg(not(feature = "sprites"))]
+        return Err("--sprite-project requires building orr_sample with --features sprites".into());
+    }
     if headless {
         if opts.audio == orr_sample::arena_audio::AudioMode::Required {
             return Err("--audio required is unavailable in headless bot mode".into());
@@ -106,7 +114,7 @@ fn real_main() -> Result<(), String> {
         opts.relay = Some(metrics.clone());
         eprintln!("connecting to {} ...", netargs.connect.as_deref().unwrap_or(""));
         let bridge = arena_bridge(&netargs, metrics.clone())?;
-        let summary = run_with(bridge, opts)?;
+        let summary = run_with(bridge, opts, sprite_project.as_deref())?;
         print_summary(&summary);
         print_relay_status(&metrics.status());
         return Ok(());
@@ -119,16 +127,22 @@ fn real_main() -> Result<(), String> {
         opts.label = "threaded".to_string();
         let bridge = Threaded::spawn(move || loopback_pair(net), arena_bridge_config(), ThreadedConfig::default())
             .map_err(|e| format!("start sim thread: {e}"))?;
-        run_with(bridge, opts)?
+        run_with(bridge, opts, sprite_project.as_deref())?
     } else {
         opts.label = "inproc".to_string();
-        run_with(InProc::new(loopback_pair(net), arena_bridge_config()), opts)?
+        run_with(InProc::new(loopback_pair(net), arena_bridge_config()), opts, sprite_project.as_deref())?
     };
     print_summary(&summary);
     Ok(())
 }
 
-fn run_with<B: Bridge<orr_testgame::Arena>>(bridge: B, opts: Options) -> Result<Summary, String> {
+fn run_with<B: Bridge<orr_testgame::Arena>>(bridge: B, opts: Options, sprite_project: Option<&std::path::Path>) -> Result<Summary, String> {
+    #[cfg(feature = "sprites")]
+    if let Some(root) = sprite_project {
+        return orr_sample::app::run_sprites(bridge, opts, root);
+    }
+    #[cfg(not(feature = "sprites"))]
+    let _ = sprite_project;
     run(bridge, opts)
 }
 

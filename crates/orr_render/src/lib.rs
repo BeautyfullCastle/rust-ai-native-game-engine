@@ -48,3 +48,12 @@ pub use stats::{FrameStats, PassStats};
 pub use targets::{OffscreenTarget, WindowRenderer, WindowRenderer3D};
 
 pub use orr_rhi;
+
+#[cfg(feature = "sprites")]
+pub mod sprite_list;
+#[cfg(feature = "sprites")]
+pub mod sprite_renderer;
+#[cfg(feature = "sprites")]
+pub use sprite_list::{SpriteDrawList, SpriteInstance};
+#[cfg(feature = "sprites")]
+pub use sprite_renderer::{SpriteRenderError, SpriteRenderer};

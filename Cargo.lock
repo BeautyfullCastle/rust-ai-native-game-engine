@@ -3257,6 +3257,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_package"
+version = "0.0.1"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "orr_physics"
 version = "0.0.1"
 dependencies = [
@@ -3356,6 +3367,7 @@ dependencies = [
  "bytemuck",
  "orr_ecs",
  "orr_rhi",
+ "orr_sprite",
  "orr_view",
 ]
 
@@ -3380,6 +3392,7 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_games",
+ "orr_package",
  "orr_physics",
  "orr_physics3d",
  "orr_proto",
@@ -3389,6 +3402,7 @@ dependencies = [
  "orr_server",
  "orr_session",
  "orr_sim",
+ "orr_sprite",
  "orr_testgame",
  "orr_view",
  "orr_viewstream",
@@ -3440,6 +3454,14 @@ dependencies = [
  "orr_ecs",
  "orr_fp",
  "subsecond",
+]
+
+[[package]]
+name = "orr_sprite"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::{
     Acquire, Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, Compare, Cull, DepthAttachment,
     PipelineDesc, Rhi, SamplerDesc, TextureDesc, TextureFormat, TextureUsage, Topology, VertexFormat, VertexStep,
-    WindowHandle,
+    TextureUpload, TextureUploadError, WindowHandle,
 };
 
 /// How to pick the adapter.
@@ -333,6 +333,50 @@ impl Rhi for Wgpu {
             usage: texture_usages(desc.usage),
             view_formats: &view_formats,
         })
+    }
+
+    fn write_texture_rgba8(
+        &self,
+        texture: &wgpu::Texture,
+        upload: &TextureUpload<'_>,
+    ) -> Result<(), TextureUploadError> {
+        if texture.dimension() != wgpu::TextureDimension::D2 || texture.depth_or_array_layers() != 1 {
+            return Err(TextureUploadError::UnsupportedTexture);
+        }
+        let format = from_wgpu_format(texture.format()).ok_or(TextureUploadError::UnsupportedFormat)?;
+        let usage = if texture.usage().contains(wgpu::TextureUsages::COPY_DST) {
+            TextureUsage::COPY_DST
+        } else {
+            TextureUsage::default()
+        };
+        crate::validate_texture_upload(
+            &TextureDesc {
+                label: "upload validation",
+                width: texture.width(),
+                height: texture.height(),
+                format,
+                usage,
+                sample_count: texture.sample_count(),
+                view_formats: &[],
+            },
+            upload,
+        )?;
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: upload.origin[0], y: upload.origin[1], z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            upload.data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(upload.bytes_per_row),
+                rows_per_image: Some(upload.height),
+            },
+            wgpu::Extent3d { width: upload.width, height: upload.height, depth_or_array_layers: 1 },
+        );
+        Ok(())
     }
 
     fn create_texture_view(&self, texture: &wgpu::Texture, format: Option<TextureFormat>) -> wgpu::TextureView {

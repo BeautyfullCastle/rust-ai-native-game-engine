@@ -5,13 +5,16 @@
 mod common;
 
 use common::{expect_disconnect, expect_message, loopback, wait_for, WAIT};
-use orr_net::{Channel, DisconnectReason, Endpoint, Event, NetConfig, QuicServerTls, QuicTrust};
+use orr_net::{
+    Channel, ConnId, ConnStats, DisconnectReason, Endpoint, Event, NetConfig, QuicServerTls,
+    QuicTrust,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -69,6 +72,35 @@ fn connect(server: &WssServer, host: &str, trust: QuicTrust) -> Endpoint {
     .unwrap()
 }
 
+fn wait_for_sent_stats(
+    ep: &Endpoint,
+    conn: ConnId,
+    messages: u64,
+    unreliable: u64,
+    payload_bytes: u64,
+) -> ConnStats {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let stats = ep.stats(conn).expect("connection should remain live");
+        // Receipt can precede sink.send completing on the sender, and its counters
+        // are published separately. Wait for all of them, not just messages_sent.
+        // Lower bounds here let the exact assertions below diagnose over-counting.
+        if stats.messages_sent >= messages
+            && stats.unreliable_sent >= unreliable
+            && stats.packets_sent >= messages
+            && stats.payload_bytes_sent >= payload_bytes
+            && stats.bytes_sent >= payload_bytes + messages
+        {
+            return stats;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "sender counters did not finish publishing: {stats:?}"
+        );
+        thread::yield_now();
+    }
+}
+
 #[test]
 fn wss_loopback_bidirectional_channels_stats_and_graceful_close() {
     let mut server = server_with_names(&["localhost"]);
@@ -120,7 +152,13 @@ fn wss_loopback_bidirectional_channels_stats_and_graceful_close() {
         (client_id, Channel::Unreliable, &b"server best effort"[..])
     );
 
-    let client_stats = client.stats(client_id).unwrap();
+    let client_stats = wait_for_sent_stats(
+        &client,
+        client_id,
+        2,
+        1,
+        b"client reliable".len() as u64 + b"client best effort".len() as u64,
+    );
     assert_eq!(client_stats.messages_sent, 2);
     assert_eq!(client_stats.messages_received, 2);
     assert_eq!(client_stats.unreliable_sent, 1);
@@ -142,7 +180,13 @@ fn wss_loopback_bidirectional_channels_stats_and_graceful_close() {
     );
     assert!(!client_stats.native_datagrams);
 
-    let server_stats = server.ep.stats(server_id).unwrap();
+    let server_stats = wait_for_sent_stats(
+        &server.ep,
+        server_id,
+        2,
+        1,
+        b"server reliable".len() as u64 + b"server best effort".len() as u64,
+    );
     assert_eq!(server_stats.messages_sent, 2);
     assert_eq!(server_stats.messages_received, 2);
     assert_eq!(server_stats.unreliable_sent, 1);
