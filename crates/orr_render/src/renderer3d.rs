@@ -794,7 +794,7 @@ impl<B: Rhi> Renderer3D<B> {
                 0.0004,
                 0.0,
             ],
-            viewport: [w, h, 0.0, 0.0],
+            viewport: [w, h, if self.format == TextureFormat::Rgba16Float { 1.0 } else { 0.0 }, 0.0],
             point_position_range: [0.0; 4],
             point_color_intensity: [0.0; 4],
         }
@@ -803,7 +803,7 @@ impl<B: Rhi> Renderer3D<B> {
     /// The clear color as the target stores it: a non sRGB target is written
     /// without hardware encoding, so the value is encoded here too.
     fn clear_value(&self) -> [f64; 4] {
-        if self.format.is_srgb() {
+        if self.format.is_srgb() || self.format == TextureFormat::Rgba16Float {
             return self.clear;
         }
         let enc = |c: f64| {

@@ -1,5 +1,6 @@
 struct Globals {
     view_proj: mat4x4<f32>, direction: vec4<f32>, sun: vec4<f32>,
+    // params: exposure, tone map, shader sRGB encode, scene-linear HDR output.
     sky: vec4<f32>, ground: vec4<f32>, params: vec4<f32>,
     point_position_range: vec4<f32>, point_color_intensity: vec4<f32>,
     light_vp: mat4x4<f32>, shadow: vec4<f32>,
@@ -77,7 +78,11 @@ fn shade(in:Varying, visibility:f32) -> vec4<f32> {
     let ambient=mix(globals.ground.xyz,globals.sky.xyz,n.y*0.5+0.5)*globals.sky.w;
     let sun=globals.sun.xyz*globals.sun.w*max(dot(n,-globals.direction.xyz),0.0)*visibility;
     let point=point_diffuse(in.world_position,n);
-    var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun+point)*globals.params.x;
+    var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun+point);
+    // Finite admitted lighting may exceed half-float range; saturate only at
+    // representation limits, never at display white, before the FP16 write.
+    if globals.params.w>0.5 { return vec4<f32>(clamp(color,vec3<f32>(0.0),vec3<f32>(65504.0)),1.0); }
+    color*=globals.params.x;
     if globals.params.y>0.5 { color=aces(color); } else { color=clamp(color,vec3<f32>(0.0),vec3<f32>(1.0)); }
     if globals.params.z>0.5 { color=linear_to_srgb(color); }
     // glTF OPAQUE ignores texture/factor alpha.

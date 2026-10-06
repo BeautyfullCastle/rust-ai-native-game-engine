@@ -751,7 +751,8 @@ pub(crate) fn prepare_globals(
             lighting.exposure,
             if lighting.tonemap { 1.0 } else { 0.0 },
             if format.is_srgb() { 0.0 } else { 1.0 },
-            0.0,
+            // HDR output is scene-linear before exposure, tone mapping and encoding.
+            if format == TextureFormat::Rgba16Float { 1.0 } else { 0.0 },
         ],
         point_position_range: [0.0; 4],
         point_color_intensity: [0.0; 4],

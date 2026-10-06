@@ -84,3 +84,8 @@ pub use renderer3d::ProceduralSceneError;
 mod shared_shadow;
 #[cfg(feature = "imported-scene")]
 pub use shared_shadow::{MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE};
+
+#[cfg(feature = "imported-scene")]
+pub mod post_process;
+#[cfg(feature = "imported-scene")]
+pub use post_process::{PostProcessSettings, PostProcessor, MAX_POST_PROCESS_BYTES, MAX_HDR_RADIANCE};

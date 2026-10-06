@@ -17,7 +17,7 @@ struct Globals {
     params: vec4<f32>,
     // x: shadow map texel size (uv), y: normal offset (world units), z: depth bias.
     shadow: vec4<f32>,
-    // x, y: viewport size in pixels.
+    // x, y: viewport size in pixels, z: scene-linear HDR output.
     viewport: vec4<f32>,
     point_position_range: vec4<f32>,
     point_color_intensity: vec4<f32>,
@@ -118,10 +118,17 @@ fn point_diffuse(world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         * max(dot(normal, delta / distance), 0.0) * attenuation * attenuation;
 }
 
+// Keep the legacy normalize operation unchanged. The HDR contract also covers
+// degenerate view/half vectors, which must not produce nonfinite FP16 output.
+fn output_normalize(v: vec3<f32>) -> vec3<f32> {
+    if (g.viewport.z > 0.5) { return v * inverseSqrt(max(dot(v, v), 1e-20)); }
+    return normalize(v);
+}
+
 @fragment
 fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
-    let v = normalize(g.cam_pos.xyz - in.world);
+    let n = output_normalize(in.normal);
+    let v = output_normalize(g.cam_pos.xyz - in.world);
     let l = g.light_dir.xyz;
 
     var base = in.color;
@@ -143,16 +150,25 @@ fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
     let radiance = g.light_color.rgb * g.light_dir.w * ndl * vis;
 
     // Blinn-Phong, normalized, shininess from roughness.
-    let h = normalize(l + v);
+    let h = output_normalize(l + v);
     let r2 = rough * rough;
     let shininess = clamp(2.0 / (r2 * r2 + 1e-4) - 2.0, 2.0, 400.0);
     let spec_shape = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / (8.0 * PI);
-    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - max(dot(h, v), 0.0), 5.0);
+    var fresnel_cosine = max(dot(h, v), 0.0);
+    // Normalized f32 vectors can have a dot just above one. pow of the
+    // resulting negative base is not portable even for an integral exponent.
+    // Preserve the legacy path; HDR must always write finite radiance.
+    if (g.viewport.z > 0.5) { fresnel_cosine = min(fresnel_cosine, 1.0); }
+    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - fresnel_cosine, 5.0);
 
     let hemi = mix(g.ground.rgb, g.sky.rgb, n.y * 0.5 + 0.5) * g.sky.w;
     var color = diffuse_color * (radiance + hemi) + fresnel * spec_shape * radiance + hemi * f0 * 0.35 * (1.0 - rough);
     color = color + diffuse_color * point_diffuse(in.world, n) + base * in.material.z;
 
+    // Scene-linear HDR bypasses every display transform. Bound FP16 writes.
+    if (g.viewport.z > 0.5) {
+        return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(65504.0)), 1.0);
+    }
     color = color * g.params.w;
     if (g.params.y > 0.5) {
         color = aces(color);
@@ -221,6 +237,9 @@ fn vs_line(i: LineIn) -> LineOut {
 @fragment
 fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
     var c = in.color.rgb;
+    if (g.viewport.z > 0.5) {
+        return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(65504.0)), clamp(in.color.a, 0.0, 1.0));
+    }
     if (g.params.z > 0.5) {
         c = linear_to_srgb(c);
     }

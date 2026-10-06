@@ -46,7 +46,10 @@ fn procedural_draw_count(list: &RenderList3D) -> Result<usize, ProceduralSceneEr
         + usize::from(!list.lines.is_empty()))
 }
 
-pub(crate) fn validate_procedural_list(list: &RenderList3D) -> Result<usize, ProceduralSceneError> {
+pub(crate) fn validate_procedural_list(
+    list: &RenderList3D,
+    hdr: bool,
+) -> Result<usize, ProceduralSceneError> {
     let draws = procedural_draw_count(list)?;
     for kind in MeshKind::ALL {
         let instances = list.instances(kind);
@@ -76,7 +79,10 @@ pub(crate) fn validate_procedural_list(list: &RenderList3D) -> Result<usize, Pro
             .iter()
             .all(|v| v.is_finite() && v.abs() <= 1e6)
             || !(0.0..=4096.0).contains(&line.width)
-            || !line.color.iter().all(|&v| (0.0..=1.0).contains(&v))
+            || (!line.color[..3]
+                .iter()
+                .all(|&v| (0.0..=if hdr { 65504.0 } else { 1.0 }).contains(&v))
+                || !(0.0..=1.0).contains(&line.color[3]))
         {
             return Err(ProceduralSceneError::InvalidInstance);
         }
@@ -106,7 +112,7 @@ impl<B: Rhi> Renderer3D<B> {
         shadow: Option<&crate::shared_shadow::PreparedShadow>,
     ) -> Result<PreparedProcedural, ProceduralSceneError> {
         self.composed_draw_count(list)?;
-        validate_procedural_list(list)?;
+        validate_procedural_list(list, self.format == TextureFormat::Rgba16Float)?;
         let mut first = 0;
         let ranges = std::array::from_fn(|index| {
             let count = list.instances(MeshKind::ALL[index]).len() as u32;

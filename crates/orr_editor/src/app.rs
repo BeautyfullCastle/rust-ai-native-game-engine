@@ -93,6 +93,12 @@ pub struct UiState {
     pub viewport_rect: Option<Rect>,
     /// Size of the viewport in pixels last frame.
     pub viewport_px: (u32, u32),
+    /// View-only opt-in. Exposure and tone mapping continue to come from Lighting.
+    #[cfg(feature = "models")]
+    pub yard_post_process: orr_render::PostProcessSettings,
+    /// Last rejected display-policy/frame request; the previous texture stays visible.
+    #[cfg(feature = "models")]
+    pub yard_post_process_error: Option<String>,
     /// Entities an agent just edited, pulsing in the viewport (see [`Pulse`]).
     pub pulses: Vec<Pulse>,
     body_drag: Option<BodyDrag>,
@@ -202,6 +208,7 @@ pub struct EditorApp {
     render_state: Option<egui_wgpu::RenderState>,
     gpu: Option<GpuViewport>,
     gpu3d: Option<crate::viewport3d::GpuViewport3d>,
+    viewport_hdr_disabled: bool,
     #[cfg(feature="models")]
     pub models: crate::model_panel::ModelPanel,
     shot: Option<ScreenshotJob>,
@@ -220,7 +227,15 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, ui: UiState::default(), render_state, gpu: None, gpu3d: None, #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+    }
+
+    /// Deliberately restrict HDR for compatibility. This one-way builder must
+    /// be applied before the first frame; the GPU device/adapter is unchanged.
+    pub fn without_hdr_support(mut self) -> Self {
+        assert!(self.gpu3d.is_none(), "restrict HDR before the first viewport frame");
+        self.viewport_hdr_disabled = true;
+        self
     }
 
     /// Asks for a screenshot of the window after some frames, then quits.
@@ -433,6 +448,26 @@ impl EditorApp {
                 Mode::Play => ui.label(RichText::new("PLAY").strong().color(Color32::from_rgb(255, 150, 60))),
             };
             ui.weak(self.editor.game().name());
+            if self.editor.game() == crate::game::EditorGame::Yard3D {
+                #[cfg(feature = "models")]
+                ui.menu_button("Viewport effects", |ui| {
+                    ui.checkbox(&mut self.ui.yard_post_process.enabled, "HDR post-processing");
+                    ui.add_enabled_ui(self.ui.yard_post_process.enabled, |ui| {
+                        ui.checkbox(&mut self.ui.yard_post_process.bloom, "Bloom");
+                        ui.add(egui::Slider::new(&mut self.ui.yard_post_process.threshold, 0.0..=8.0).text("Bloom threshold"));
+                        ui.add(egui::Slider::new(&mut self.ui.yard_post_process.strength, 0.0..=8.0).text("Bloom strength"));
+                        ui.add(egui::Slider::new(&mut self.ui.yard_post_process.radius, 1..=8).text("Bloom radius"));
+                        ui.add(egui::Slider::new(&mut self.ui.yard_post_process.iterations, 1..=4).text("Bloom iterations"));
+                    });
+                    ui.weak("View only · scene Lighting controls exposure and tone mapping");
+                    if let Some(error) = &self.ui.yard_post_process_error {
+                        ui.colored_label(Color32::RED, format!("Last rejected request: {error}"));
+                    }
+                });
+                #[cfg(not(feature = "models"))]
+                ui.add_enabled(false, egui::Button::new("Viewport effects"))
+                    .on_disabled_hover_text("HDR/bloom requires an editor built with the models or animated-models feature");
+            }
             if self.editor.is_viewer() { ui.label("REPLAY VIEWER · read-only"); }
             if self.editor.is_dirty() {
                 ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
@@ -716,11 +751,20 @@ impl EditorApp {
         let hidden=Vec::new();
         let list=self.editor.yard_frame().list(&hidden,selected);
         if let Some(rs)=&self.render_state {
-            let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::new(rs,px));
+            let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
             #[cfg(feature="animated-models")]
-            let rendered = gpu.render_mixed(px,&list,&self.editor.camera3d.camera(),&placements,&animated_placements);
-            #[cfg(not(feature="animated-models"))]
-            let rendered = gpu.render(px,&list,&self.editor.camera3d.camera(),#[cfg(feature="models")] &placements);
+            let rendered = gpu.render_mixed_post_processed(px,&list,&self.editor.camera3d.camera(),&placements,&animated_placements,self.ui.yard_post_process);
+            #[cfg(all(feature="models", not(feature="animated-models")))]
+            let rendered = gpu.render_post_processed(px,&list,&self.editor.camera3d.camera(),&placements,self.ui.yard_post_process);
+            #[cfg(not(feature="models"))]
+            let rendered = gpu.render(px,&list,&self.editor.camera3d.camera());
+            #[cfg(feature="models")]
+            if let Err(error) = &rendered {
+                // Unsupported/invalid requests cannot strand the editor in a broken
+                // mode. Keep the admitted policy and working native texture.
+                self.ui.yard_post_process = gpu.gpu().post_process_settings();
+                self.ui.yard_post_process_error = Some(error.clone());
+            }
             match rendered {
                 Ok(tex)=>{ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}
                 Err(error)=>{if let Some(tex)=gpu.last_texture(){ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);}
