@@ -15,8 +15,11 @@ workspace = true
 [features]
 default = []
 sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile"]
+animated-models = ["dep:orr_model", "orr_render/animation", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
 
 [dependencies]
+sha2 = { version = "0.11", optional = true }
+orr_model = { path = "../orr_model", features = ["import", "animation"], optional = true }
 orr_sprite = { path = "../orr_sprite", optional = true }
 orr_package = { path = "../orr_package", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }

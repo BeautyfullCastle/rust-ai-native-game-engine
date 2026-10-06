@@ -3163,6 +3163,7 @@ dependencies = [
  "orr_ecs",
  "orr_edit",
  "orr_fp",
+ "orr_model",
  "orr_package",
  "orr_reflect",
  "orr_remote",
@@ -3176,6 +3177,7 @@ dependencies = [
  "png 0.17.16",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "winit",
 ]
