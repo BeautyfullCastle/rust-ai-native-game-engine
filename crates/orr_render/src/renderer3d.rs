@@ -51,6 +51,9 @@ pub use composed::{ProceduralSceneError, MAX_PROCEDURAL_INSTANCES};
 #[cfg(feature = "imported-scene")]
 pub(crate) use composed::{validate_procedural_list, PreparedProcedural};
 
+#[cfg(feature = "irradiance-probes")]
+pub(crate) mod irradiance;
+
 const SHADER: &str = include_str!("shader3d.wgsl");
 const DEPTH: TextureFormat = TextureFormat::Depth32Float;
 
@@ -324,6 +327,8 @@ struct Globals {
     viewport: [f32; 4],
     point_position_range: [f32; 4],
     point_color_intensity: [f32; 4],
+    #[cfg(feature = "irradiance-probes")]
+    irradiance: crate::IrradianceUniform,
 }
 
 const MESH_ATTRS: [VertexAttr; 3] = [
@@ -493,7 +498,13 @@ impl<B: Rhi> Renderer3D<B> {
 
     fn build(rhi: B, format: TextureFormat, settings: Settings3D, policy: Option<SphereLod3D>) -> Self {
         let samples = rhi.supported_samples(format, settings.msaa);
-        let shader = rhi.create_shader("orr_render 3d", SHADER);
+        #[cfg(feature = "irradiance-probes")]
+        let source = irradiance::shader(SHADER, "g");
+        #[cfg(feature = "irradiance-probes")]
+        let source = source.as_str();
+        #[cfg(not(feature = "irradiance-probes"))]
+        let source = SHADER;
+        let shader = rhi.create_shader("orr_render 3d", source);
 
         let mesh_layout = VertexLayout {
             stride: std::mem::size_of::<Vertex3>() as u64,
@@ -797,6 +808,8 @@ impl<B: Rhi> Renderer3D<B> {
             viewport: [w, h, if self.format == TextureFormat::Rgba16Float { 1.0 } else { 0.0 }, 0.0],
             point_position_range: [0.0; 4],
             point_color_intensity: [0.0; 4],
+            #[cfg(feature = "irradiance-probes")]
+            irradiance: crate::IrradianceUniform::zeroed(),
         }
     }
 
@@ -1047,6 +1060,13 @@ impl<B: Rhi> Renderer3D<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "irradiance-probes")]
+    #[test]
+    fn probe_globals_remain_below_portable_uniform_limit() {
+        assert_eq!(std::mem::size_of::<Globals>(), 9568);
+        assert!(std::mem::size_of::<Globals>() <= 16 * 1024);
+    }
 
     #[test]
     fn light_matrix_maps_the_center_to_the_middle_of_the_box() {

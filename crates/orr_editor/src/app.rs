@@ -209,6 +209,8 @@ pub struct EditorApp {
     gpu: Option<GpuViewport>,
     gpu3d: Option<crate::viewport3d::GpuViewport3d>,
     viewport_hdr_disabled: bool,
+    #[cfg(feature="irradiance-probes")]
+    pub irradiance: crate::irradiance_panel::IrradiancePanel,
     #[cfg(feature="models")]
     pub models: crate::model_panel::ModelPanel,
     shot: Option<ScreenshotJob>,
@@ -227,7 +229,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Deliberately restrict HDR for compatibility. This one-way builder must
@@ -590,6 +592,8 @@ impl EditorApp {
         if self.editor.game()==crate::game::EditorGame::Yard3D { self.yard_transform(ui); }
         #[cfg(feature="models")]
         self.models.show(ui,&self.editor);
+        #[cfg(feature="irradiance-probes")]
+        self.irradiance.show(ui,&self.editor);
         #[cfg(feature = "sprites")]
         self.sprites.show(ui, &self.editor);
         #[cfg(feature = "animated-models")]
@@ -721,6 +725,8 @@ impl EditorApp {
     }
 
     fn yard_viewport(&mut self,ui:&mut Ui){
+        #[cfg(feature="irradiance-probes")]
+        self.irradiance.sync_for_editor(&self.editor);
         let (rect,resp)=ui.allocate_exact_size(ui.available_size(),Sense::click_and_drag());
         let ppp=ui.ctx().pixels_per_point();
         let px=(((rect.width()*ppp).round() as u32).clamp(1,8192),((rect.height()*ppp).round() as u32).clamp(1,8192));
@@ -752,10 +758,14 @@ impl EditorApp {
         let list=self.editor.yard_frame().list(&hidden,selected);
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
-            #[cfg(feature="animated-models")]
+            #[cfg(all(feature="animated-models", not(feature="irradiance-probes")))]
             let rendered = gpu.render_mixed_post_processed(px,&list,&self.editor.camera3d.camera(),&placements,&animated_placements,self.ui.yard_post_process);
-            #[cfg(all(feature="models", not(feature="animated-models")))]
+            #[cfg(all(feature="models", not(feature="animated-models"), not(feature="irradiance-probes")))]
             let rendered = gpu.render_post_processed(px,&list,&self.editor.camera3d.camera(),&placements,self.ui.yard_post_process);
+            #[cfg(feature="irradiance-probes")]
+            let rendered = gpu.render_irradiance(px,&list,&self.editor.camera3d.camera(),&placements,
+                #[cfg(feature="animated-models")] &animated_placements,
+                self.ui.yard_post_process,self.irradiance.grid_for_editor(&self.editor));
             #[cfg(not(feature="models"))]
             let rendered = gpu.render(px,&list,&self.editor.camera3d.camera());
             #[cfg(feature="models")]

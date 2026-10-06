@@ -21,6 +21,7 @@ struct Globals {
     viewport: vec4<f32>,
     point_position_range: vec4<f32>,
     point_color_intensity: vec4<f32>,
+    // IRRADIANCE_GLOBAL
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -162,6 +163,7 @@ fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
     let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - fresnel_cosine, 5.0);
 
     let hemi = mix(g.ground.rgb, g.sky.rgb, n.y * 0.5 + 0.5) * g.sky.w;
+    // IRRADIANCE_PROCEDURAL
     var color = diffuse_color * (radiance + hemi) + fresnel * spec_shape * radiance + hemi * f0 * 0.35 * (1.0 - rough);
     color = color + diffuse_color * point_diffuse(in.world, n) + base * in.material.z;
 

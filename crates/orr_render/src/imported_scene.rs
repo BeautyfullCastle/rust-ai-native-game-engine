@@ -41,6 +41,8 @@ pub enum ImportedSceneError {
     #[cfg(feature = "animation")]
     Skinned(SkinnedRenderError),
     PointLight(PointLightError),
+    #[cfg(feature = "irradiance-probes")]
+    Irradiance(String),
 }
 impl std::fmt::Display for ImportedSceneError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,6 +63,8 @@ impl std::fmt::Display for ImportedSceneError {
             #[cfg(feature = "animation")]
             Self::Skinned(error) => write!(f, "imported scene: {error}"),
             Self::PointLight(error) => write!(f, "imported scene: {error}"),
+            #[cfg(feature = "irradiance-probes")]
+            Self::Irradiance(error) => write!(f, "irradiance grid: {error}"),
         }
     }
 }
@@ -130,6 +134,12 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     /// Legacy clear semantics are unchanged when HDR is disabled.
     pub clear: [f64; 4],
     pub post_process: crate::PostProcessSettings,
+    /// Optional diffuse irradiance. Validated before any frame resource/cache mutation.
+    /// No coefficient storage is replicated per instance: each asset renderer has
+    /// one 9280-byte globals extension (procedural renderers have two). Existing
+    /// viewport asset limits bound retained storage; toggles allocate no variants.
+    #[cfg(feature = "irradiance-probes")]
+    pub irradiance: Option<crate::IrradianceGrid>,
     post_processor: Option<crate::PostProcessor<B>>,
     post_process_generation: u64,
 }
@@ -147,6 +157,8 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             shadow: None,
             clear: crate::DEFAULT_CLEAR_3D,
             post_process: crate::PostProcessSettings::default(),
+            #[cfg(feature = "irradiance-probes")]
+            irradiance: None,
             post_processor: None,
             post_process_generation: 0,
         })
@@ -315,6 +327,10 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         extra_batch_count: usize,
         extra_draw_count: usize,
     ) -> Result<(), ImportedSceneError> {
+        #[cfg(feature = "irradiance-probes")]
+        if let Some(grid) = &self.irradiance {
+            grid.validate().map_err(ImportedSceneError::Irradiance)?;
+        }
         self.validate_target(size, self.format, 1)?;
         prepare_shared_globals(self.scene_format(), size, camera, lighting)
             .map_err(ImportedSceneError::Model)?;
@@ -382,6 +398,12 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         point: &PointLightSettings,
         batches: &mut [ImportedBatch<'_, B>],
     ) -> Result<(), ImportedSceneError> {
+        // CPU-only probe admission comes before all allocation, cache and upload effects.
+        #[cfg(feature = "irradiance-probes")]
+        let irradiance = match &self.irradiance {
+            Some(grid) => grid.packed_uniform().map_err(ImportedSceneError::Irradiance)?,
+            None => <crate::IrradianceUniform as bytemuck::Zeroable>::zeroed(),
+        };
         self.validate_target(target.size, target.format, target.sample_count)?;
         if batches.len() > MAX_IMPORTED_BATCHES {
             return Err(ImportedSceneError::BatchLimit);
@@ -389,6 +411,10 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         let (mut globals, shadow_ready) =
             prepare_shared_globals(self.scene_format(), target.size, camera, lighting)
                 .map_err(ImportedSceneError::Model)?;
+        #[cfg(feature = "irradiance-probes")]
+        {
+            globals.irradiance = irradiance;
+        }
         point.validate().map_err(ImportedSceneError::PointLight)?;
         if let Some(light) = &point.point_light {
             globals.point_position_range = [
@@ -498,6 +524,13 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                     .map_err(ImportedSceneError::Skinned),
             })
             .collect::<Result<Vec<_>, ImportedSceneError>>()?;
+
+        #[cfg(feature = "irradiance-probes")]
+        for ready in &mut prepared {
+            if let PreparedBatch::Procedural(ready) = ready {
+                ready.set_irradiance(irradiance);
+            }
+        }
 
         // All fallible validation is finished, including the final batch/pose.
         if self.post_process.enabled {
@@ -1050,6 +1083,148 @@ mod tests {
             assert_eq!(depth_clear, index == 0);
             assert!(store);
         }
+    }
+
+    #[cfg(feature = "irradiance-probes")]
+    #[test]
+    fn probe_toggle_reuses_all_gpu_state_and_bad_grid_resize_is_atomic() {
+        let rhi = Mock::default();
+        let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        scene.post_process.enabled = true;
+        let mut model = model(&rhi, TextureFormat::Rgba16Float);
+        let mut procedural = Renderer3D::with_settings(
+            rhi.clone(),
+            TextureFormat::Rgba16Float,
+            crate::Settings3D::LOW,
+        );
+        let mut list = RenderList3D::new();
+        list.cuboid(
+            [0.0; 3],
+            crate::IDENTITY_ROT,
+            [0.5; 3],
+            &crate::Material::new([0.3; 3]),
+        );
+        let instances = [StaticInstance::default()];
+        let frame = |scene: &mut ImportedSceneRenderer<Mock>,
+                     model: &mut ModelRenderer<Mock>,
+                     procedural: &mut Renderer3D<Mock>,
+                     size,
+                     instances: &[StaticInstance]| {
+            draw(
+                scene,
+                size,
+                &mut [
+                    ImportedBatch::Procedural {
+                        renderer: procedural,
+                        list: &list,
+                    },
+                    ImportedBatch::StaticInstances {
+                        renderer: model,
+                        instances,
+                    },
+                ],
+            )
+        };
+        frame(
+            &mut scene,
+            &mut model,
+            &mut procedural,
+            (32, 32),
+            &instances,
+        )
+        .unwrap();
+        rhi.take();
+        for cycle in 0..40 {
+            scene.irradiance = (cycle % 3 != 0).then(|| crate::IrradianceGrid {
+                enabled: cycle % 3 == 1,
+                ..Default::default()
+            });
+            frame(
+                &mut scene,
+                &mut model,
+                &mut procedural,
+                (32, 32),
+                &instances,
+            )
+            .unwrap();
+            let effects = rhi.take();
+            assert_eq!(
+                effects.allocations, 0,
+                "probe toggles cannot cache new pipelines/binds/buffers"
+            );
+            assert!(effects.textures.is_empty());
+            assert_eq!(effects.submits, 1);
+            assert_eq!(effects.passes.len(), 2);
+        }
+        let previous_stats = procedural.last_frame_stats();
+        let previous_depth = (scene.depth_size(), scene.depth_generation());
+        let previous_hdr = (
+            scene.post_process_size(),
+            scene.post_process_generation(),
+            scene.post_process_allocated_bytes(),
+        );
+        let mut bad = crate::IrradianceGrid::default();
+        bad.spacing[1] = f32::NAN;
+        scene.irradiance = Some(bad);
+        assert!(matches!(
+            frame(
+                &mut scene,
+                &mut model,
+                &mut procedural,
+                (64, 64),
+                &[StaticInstance::default(); 4]
+            ),
+            Err(ImportedSceneError::Irradiance(_))
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        assert_eq!(previous_stats, procedural.last_frame_stats());
+        assert_eq!(
+            previous_depth,
+            (scene.depth_size(), scene.depth_generation())
+        );
+        assert_eq!(
+            previous_hdr,
+            (
+                scene.post_process_size(),
+                scene.post_process_generation(),
+                scene.post_process_allocated_bytes()
+            )
+        );
+        assert!(matches!(
+            scene.preflight(
+                (64, 64),
+                &Camera3D::orthographic([0.0, 0.0, 5.0], [0.0; 3], 2.0),
+                &Lighting {
+                    shadows: false,
+                    ..Default::default()
+                },
+                &PointLightSettings::default(),
+                &list,
+                &[(model.model(), &instances)],
+            ),
+            Err(ImportedSceneError::Irradiance(_))
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        // Re-admit the old shape after rejection: the rejected 4-instance request
+        // did not grow any slot cache, nor did it replace the old target.
+        scene.irradiance = None;
+        frame(
+            &mut scene,
+            &mut model,
+            &mut procedural,
+            (32, 32),
+            &instances,
+        )
+        .unwrap();
+        assert_eq!(rhi.take().allocations, 0);
+    }
+
+    #[cfg(feature = "irradiance-probes")]
+    #[test]
+    fn probe_globals_remain_below_portable_uniform_limit() {
+        assert_eq!(std::mem::size_of::<crate::IrradianceUniform>(), 9280);
+        assert_eq!(std::mem::size_of::<crate::model_renderer::Globals>(), 9536);
+        assert!(std::mem::size_of::<crate::model_renderer::Globals>() <= 16 * 1024);
     }
 
     #[test]

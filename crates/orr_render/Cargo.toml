@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 default = []
+irradiance-probes = ["imported-scene", "bytemuck/min_const_generics"]
 sprites = ["dep:orr_sprite"]
 models = ["dep:orr_model"]
 animation = ["models", "orr_model/animation"]

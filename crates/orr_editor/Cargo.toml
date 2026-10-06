@@ -14,6 +14,7 @@ workspace = true
 
 [features]
 default = []
+irradiance-probes = ["models", "orr_render/irradiance-probes"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile"]
 models = ["dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
 animated-models = ["models", "orr_model/animation", "orr_render/animation"]

@@ -4,6 +4,7 @@ struct Globals {
     sky: vec4<f32>, ground: vec4<f32>, params: vec4<f32>,
     point_position_range: vec4<f32>, point_color_intensity: vec4<f32>,
     light_vp: mat4x4<f32>, shadow: vec4<f32>,
+    // IRRADIANCE_GLOBAL
 };
 struct Object {
     world: mat4x4<f32>, normal: mat4x4<f32>, color: vec4<f32>, sampling: vec4<u32>,
@@ -76,6 +77,7 @@ fn point_diffuse(world_position:vec3<f32>,normal:vec3<f32>) -> vec3<f32> {
 fn shade(in:Varying, visibility:f32) -> vec4<f32> {
     let n=in.normal*inverseSqrt(max(dot(in.normal,in.normal),1e-20));
     let ambient=mix(globals.ground.xyz,globals.sky.xyz,n.y*0.5+0.5)*globals.sky.w;
+    // IRRADIANCE_MODEL
     let sun=globals.sun.xyz*globals.sun.w*max(dot(n,-globals.direction.xyz),0.0)*visibility;
     let point=point_diffuse(in.world_position,n);
     var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun+point);

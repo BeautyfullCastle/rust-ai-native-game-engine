@@ -89,3 +89,8 @@ pub use shared_shadow::{MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE};
 pub mod post_process;
 #[cfg(feature = "imported-scene")]
 pub use post_process::{PostProcessSettings, PostProcessor, MAX_POST_PROCESS_BYTES, MAX_HDR_RADIANCE};
+
+#[cfg(feature = "irradiance-probes")]
+pub mod irradiance;
+#[cfg(feature = "irradiance-probes")]
+pub use irradiance::{IrradianceGrid, IrradianceProvenance, IrradianceSample, IrradianceUniform};
