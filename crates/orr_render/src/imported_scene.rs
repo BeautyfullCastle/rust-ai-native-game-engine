@@ -1,19 +1,22 @@
 //! Bounded, single-sample composition of procedural, static and animated models.
 //!
 //! A frame is validated in full before GPU allocation, uniform writes, command
-//! encoding, or submitted-bound changes. The coordinator owns the only depth
-//! target used by this path, clears color/depth once, and submits one encoder.
+//! encoding, or submitted-bound changes. The coordinator owns shared main depth
+//! and one bounded directional map, clears each once, and submits one encoder.
 //! Standalone renderer draws retain their independent depth targets and behavior.
+use crate::shared_shadow::{
+    MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE, SharedShadow, prepare_shared_globals,
+};
 #[cfg(feature = "animation")]
 use crate::skinned::{PreparedSkinned, SkinnedInstance, SkinnedModelRenderer, SkinnedRenderError};
 use crate::{
+    Camera3D, Lighting, RenderList3D, Renderer3D,
     model_renderer::{
-        prepare_globals, static_instance_draw_count, validate_static_instances, ModelRenderError,
-        ModelRenderer, PreparedStatic, StaticInstance, StaticInstanceError,
+        ModelRenderError, ModelRenderer, PreparedStatic, StaticInstance, StaticInstanceError,
+        static_instance_draw_count, validate_static_instances,
     },
     point_light::{PointLightError, PointLightSettings},
-    renderer3d::{validate_procedural_list, PreparedProcedural, ProceduralSceneError},
-    Camera3D, Lighting, RenderList3D, Renderer3D,
+    renderer3d::{PreparedProcedural, ProceduralSceneError, validate_procedural_list},
 };
 use orr_rhi::{ColorAttachment, DepthAttachment, Rhi, TextureDesc, TextureFormat, TextureUsage};
 
@@ -28,6 +31,7 @@ pub enum ImportedSceneError {
     FormatMismatch,
     BatchLimit,
     DrawLimit,
+    CasterLimit,
     Model(ModelRenderError),
     StaticInstance(StaticInstanceError),
     Procedural(ProceduralSceneError),
@@ -43,6 +47,7 @@ impl std::fmt::Display for ImportedSceneError {
             ),
             Self::FormatMismatch => f.write_str("imported scene target and renderer formats must match"),
             Self::BatchLimit => f.write_str("imported scene batch limit exceeded"),
+            Self::CasterLimit => f.write_str("imported scene shadow caster limit exceeded"),
             Self::DrawLimit => f.write_str("imported scene draw limit exceeded"),
             Self::Model(error) => write!(f, "imported scene: {error}"),
             Self::StaticInstance(error) => write!(f, "imported scene: {error}"),
@@ -80,7 +85,7 @@ pub enum ImportedBatch<'a, B: Rhi> {
         instances: &'a [StaticInstance],
     },
     /// Single-sample, full-detail procedural geometry. Coordinator lighting is
-    /// used; list lighting, renderer clear, standalone shadows and LOD are ignored.
+    /// used; list lighting, renderer clear, private shadow map and LOD are ignored.
     Procedural {
         renderer: &'a mut Renderer3D<B>,
         list: &'a RenderList3D,
@@ -107,12 +112,14 @@ enum PreparedBatch {
 }
 
 /// Shared scene depth and frame submission for procedural and imported geometry.
-/// No shadows, multisampling, PBR, HDR, or cross-device composition is supported.
+/// One fixed-size directional shadow map. No cascades, multisampling, PBR, HDR,
+/// or cross-device composition. Off-coverage receivers are fully lit.
 pub struct ImportedSceneRenderer<B: Rhi> {
     rhi: B,
     format: TextureFormat,
     depth: Option<Depth<B>>,
     depth_generation: u64,
+    shadow: Option<SharedShadow<B>>,
     pub clear: [f64; 4],
 }
 impl<B: Rhi> ImportedSceneRenderer<B> {
@@ -126,6 +133,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             format,
             depth: None,
             depth_generation: 0,
+            shadow: None,
             clear: crate::DEFAULT_CLEAR_3D,
         })
     }
@@ -138,6 +146,15 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
     /// Zero before the first accepted frame; advances on accepted size changes.
     pub fn depth_generation(&self) -> u64 {
         self.depth_generation
+    }
+
+    /// Fixed map allocation is independent of main viewport resizing.
+    pub fn shadow_map_size(&self) -> Option<u32> {
+        self.shadow.as_ref().map(|_| SHARED_SHADOW_MAP_SIZE)
+    }
+    /// Zero before the first accepted shadow-on frame, then one for its fixed map.
+    pub fn shadow_map_generation(&self) -> u64 {
+        u64::from(self.shadow.is_some())
     }
 
     fn validate_target(
@@ -236,7 +253,8 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         extra_draw_count: usize,
     ) -> Result<(), ImportedSceneError> {
         self.validate_target(size, self.format, 1)?;
-        prepare_globals(self.format, size, camera, lighting).map_err(ImportedSceneError::Model)?;
+        prepare_shared_globals(self.format, size, camera, lighting)
+            .map_err(ImportedSceneError::Model)?;
         point.validate().map_err(ImportedSceneError::PointLight)?;
         let model_batch_count = models
             .len()
@@ -258,16 +276,23 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 return Err(ImportedSceneError::DrawLimit);
             }
         }
-        draws = draws
+        let imported_draws = draws
             .checked_add(extra_draw_count)
             .ok_or(ImportedSceneError::DrawLimit)?;
-        draws = draws
+        draws = imported_draws
             .checked_add(
                 validate_procedural_list(procedural).map_err(ImportedSceneError::Procedural)?,
             )
             .ok_or(ImportedSceneError::DrawLimit)?;
         if draws > MAX_IMPORTED_DRAWS {
             return Err(ImportedSceneError::DrawLimit);
+        }
+        // Keep the existing main-budget error precedence, including when shadows are off.
+        let casters = imported_draws
+            .checked_add(procedural_casters(procedural))
+            .ok_or(ImportedSceneError::CasterLimit)?;
+        if casters > MAX_IMPORTED_CASTERS {
+            return Err(ImportedSceneError::CasterLimit);
         }
         for (model, instances) in models {
             validate_static_instances(model, instances)
@@ -294,8 +319,9 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         if batches.len() > MAX_IMPORTED_BATCHES {
             return Err(ImportedSceneError::BatchLimit);
         }
-        let mut globals = prepare_globals(self.format, target.size, camera, lighting)
-            .map_err(ImportedSceneError::Model)?;
+        let (mut globals, shadow_ready) =
+            prepare_shared_globals(self.format, target.size, camera, lighting)
+                .map_err(ImportedSceneError::Model)?;
         point.validate().map_err(ImportedSceneError::PointLight)?;
         if let Some(light) = &point.point_light {
             globals.point_position_range = [
@@ -315,6 +341,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         // Admit all formats and budgets before potentially expensive pose checks.
         let mut draw_count = 0usize;
         let mut procedural_instances = 0usize;
+        let mut caster_count = 0usize;
         for batch in batches.iter() {
             let (format, count) = match batch {
                 ImportedBatch::Static(renderer) => (renderer.format(), renderer.draw_count()),
@@ -361,6 +388,16 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             if draw_count > MAX_IMPORTED_DRAWS {
                 return Err(ImportedSceneError::DrawLimit);
             }
+            let casters = match batch {
+                ImportedBatch::Procedural { list, .. } => procedural_casters(list),
+                _ => count,
+            };
+            caster_count = caster_count
+                .checked_add(casters)
+                .ok_or(ImportedSceneError::CasterLimit)?;
+            if caster_count > MAX_IMPORTED_CASTERS {
+                return Err(ImportedSceneError::CasterLimit);
+            }
         }
         let mut prepared = batches
             .iter()
@@ -374,7 +411,14 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                     .map(PreparedBatch::StaticInstances)
                     .map_err(ImportedSceneError::StaticInstance),
                 ImportedBatch::Procedural { renderer, list } => renderer
-                    .prepare_composed(list, camera, target.size, lighting, point)
+                    .prepare_composed(
+                        list,
+                        camera,
+                        target.size,
+                        lighting,
+                        point,
+                        shadow_ready.as_ref(),
+                    )
                     .map(|ready| PreparedBatch::Procedural(Box::new(ready)))
                     .map_err(ImportedSceneError::Procedural),
                 #[cfg(feature = "animation")]
@@ -388,7 +432,11 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             })
             .collect::<Result<Vec<_>, ImportedSceneError>>()?;
 
-        // All fallible validation is finished. This path never allocates a
+        // All fallible validation is finished.
+        if shadow_ready.is_some() && self.shadow.is_none() {
+            self.shadow = Some(SharedShadow::new(&self.rhi));
+        }
+        // This path never allocates a
         // renderer's standalone depth target, including on the first frame.
         if self
             .depth
@@ -432,7 +480,55 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 _ => unreachable!("prepared batches preserve order and kind"),
             }
         }
+        if shadow_ready.is_some() {
+            let map = self.shadow.as_ref().expect("validated shadow map");
+            for batch in batches.iter_mut() {
+                match batch {
+                    ImportedBatch::Static(r)
+                    | ImportedBatch::StaticInstances { renderer: r, .. } => {
+                        r.bind_shared_shadow(map)
+                    }
+                    ImportedBatch::Procedural { renderer, .. } => renderer.bind_shared_shadow(map),
+                    #[cfg(feature = "animation")]
+                    ImportedBatch::Skinned { renderer, .. } => renderer.bind_shared_shadow(map),
+                }
+            }
+        }
         let mut encoder = self.rhi.create_encoder("imported scene frame");
+        if shadow_ready.is_some() {
+            let mut commands = Vec::new();
+            for (batch, ready) in batches.iter().zip(&mut prepared) {
+                match (batch, ready) {
+                    (ImportedBatch::Static(r), PreparedBatch::Static) => {
+                        r.shared_commands(None, true, &mut commands)
+                    }
+                    (
+                        ImportedBatch::StaticInstances { renderer, .. },
+                        PreparedBatch::StaticInstances(ready),
+                    ) => renderer.shared_commands(Some(ready), true, &mut commands),
+                    (
+                        ImportedBatch::Procedural { renderer, .. },
+                        PreparedBatch::Procedural(ready),
+                    ) => renderer.composed_shadow_commands(ready, &mut commands),
+                    #[cfg(feature = "animation")]
+                    (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(ready)) => {
+                        renderer.shared_commands(ready, true, &mut commands)
+                    }
+                    _ => unreachable!("validated prepared batch kind"),
+                }
+            }
+            self.rhi.encode_pass(
+                &mut encoder,
+                "shared directional shadow",
+                None,
+                Some(&DepthAttachment {
+                    view: &self.shadow.as_ref().expect("validated shadow map").view,
+                    clear: Some(1.0),
+                    store: true,
+                }),
+                &commands,
+            );
+        }
         let depth = &self.depth.as_ref().expect("accepted frame owns depth").view;
         if batches.is_empty() {
             self.rhi.encode_pass(
@@ -464,18 +560,56 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             };
             match (batch, ready) {
                 (ImportedBatch::Static(renderer), PreparedBatch::Static) => {
-                    renderer.encode_frame(&mut encoder, &color, &depth)
+                    if shadow_ready.is_some() {
+                        let mut commands = Vec::new();
+                        renderer.shared_commands(None, false, &mut commands);
+                        self.rhi.encode_pass(
+                            &mut encoder,
+                            "shared static receiver",
+                            Some(&color),
+                            Some(&depth),
+                            &commands,
+                        );
+                    } else {
+                        renderer.encode_frame(&mut encoder, &color, &depth)
+                    }
                 }
                 (
                     ImportedBatch::StaticInstances { renderer, .. },
                     PreparedBatch::StaticInstances(ready),
-                ) => renderer.encode_instances(ready, &mut encoder, &color, &depth),
+                ) => {
+                    if shadow_ready.is_some() {
+                        let mut commands = Vec::new();
+                        renderer.shared_commands(Some(ready), false, &mut commands);
+                        self.rhi.encode_pass(
+                            &mut encoder,
+                            "shared static instance receiver",
+                            Some(&color),
+                            Some(&depth),
+                            &commands,
+                        );
+                    } else {
+                        renderer.encode_instances(ready, &mut encoder, &color, &depth);
+                    }
+                }
                 (ImportedBatch::Procedural { renderer, .. }, PreparedBatch::Procedural(ready)) => {
                     renderer.encode_composed(ready, &mut encoder, &color, &depth)
                 }
                 #[cfg(feature = "animation")]
                 (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(ready)) => {
-                    renderer.encode_frame(ready, &mut encoder, &color, &depth)
+                    if shadow_ready.is_some() {
+                        let mut commands = Vec::new();
+                        renderer.shared_commands(ready, false, &mut commands);
+                        self.rhi.encode_pass(
+                            &mut encoder,
+                            "shared skinned receiver",
+                            Some(&color),
+                            Some(&depth),
+                            &commands,
+                        );
+                    } else {
+                        renderer.encode_frame(ready, &mut encoder, &color, &depth);
+                    }
                 }
                 _ => unreachable!("prepared batches preserve order and kind"),
             }
@@ -497,6 +631,12 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
     }
 }
 
+fn procedural_casters(list: &RenderList3D) -> usize {
+    usize::from(!list.spheres.is_empty())
+        + usize::from(!list.boxes.is_empty())
+        + usize::from(!list.capsules.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,15 +654,22 @@ mod tests {
         submits: usize,
         textures: Vec<(TextureFormat, u32, (u32, u32))>,
         passes: Vec<(usize, bool, bool, bool, usize)>,
+        shadow_passes: Vec<(usize, bool, bool, usize)>,
+        pass_buffers: Vec<Vec<usize>>,
+        written_buffers: Vec<usize>,
+        pass_textures: Vec<Vec<usize>>,
     }
     /// Records every potentially mutating RHI call; no adapter is required.
+    type BoundResources = (Vec<usize>, Vec<usize>);
+    type BindRecords = Rc<RefCell<std::collections::BTreeMap<usize, BoundResources>>>;
     #[derive(Clone, Default)]
-    struct Mock(Rc<RefCell<Effects>>);
+    struct Mock(Rc<RefCell<Effects>>, Rc<RefCell<usize>>, BindRecords);
     impl Mock {
         fn allocate(&self) -> usize {
             let mut effects = self.0.borrow_mut();
             effects.allocations += 1;
-            effects.allocations
+            *self.1.borrow_mut() += 1;
+            *self.1.borrow()
         }
         fn take(&self) -> Effects {
             std::mem::take(&mut *self.0.borrow_mut())
@@ -545,7 +692,8 @@ mod tests {
         fn create_buffer(&self, _: &BufferDesc<'_>) -> usize {
             self.allocate()
         }
-        fn write_buffer(&self, _: &usize, _: u64, _: &[u8]) {
+        fn write_buffer(&self, buffer: &usize, _: u64, _: &[u8]) {
+            self.0.borrow_mut().written_buffers.push(*buffer);
             self.0.borrow_mut().writes += 1;
         }
         fn create_texture(&self, desc: &TextureDesc<'_>) -> usize {
@@ -580,8 +728,28 @@ mod tests {
         fn create_pipeline(&self, _: &PipelineDesc<'_, Self>) -> usize {
             self.allocate()
         }
-        fn create_bind_group(&self, _: &usize, _: u32, _: &[Binding<'_, Self>]) -> usize {
-            self.allocate()
+        fn create_bind_group(&self, _: &usize, _: u32, entries: &[Binding<'_, Self>]) -> usize {
+            let id = self.allocate();
+            self.2.borrow_mut().insert(
+                id,
+                (
+                    entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            Binding::Uniform { buffer, .. } => Some(**buffer),
+                            _ => None,
+                        })
+                        .collect(),
+                    entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            Binding::Texture { view, .. } => Some(**view),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+            );
+            id
         }
         fn create_encoder(&self, _: &str) -> usize {
             self.0.borrow_mut().encoders += 1;
@@ -595,12 +763,38 @@ mod tests {
             depth: Option<&DepthAttachment<'_, Self>>,
             commands: &[Command<'_, Self>],
         ) {
-            let color = color.expect("imported scene has a color attachment");
             let depth = depth.expect("imported scene has a depth attachment");
             let draws = commands
                 .iter()
                 .filter(|command| matches!(command, Command::DrawIndexed { .. }))
                 .count();
+            let mut buffers = Vec::new();
+            let mut textures = Vec::new();
+            for command in commands {
+                match command {
+                    Command::SetVertexBuffer(_, b) | Command::SetIndexBuffer(b) => {
+                        buffers.push(**b)
+                    }
+                    Command::SetBindGroup(_, b) => {
+                        let binds = self.2.borrow();
+                        let (bound_buffers, bound_textures) = binds.get(b).expect("recorded bind");
+                        buffers.extend(bound_buffers.iter().copied());
+                        textures.extend(bound_textures.iter().copied());
+                    }
+                    _ => {}
+                }
+            }
+            self.0.borrow_mut().pass_buffers.push(buffers);
+            self.0.borrow_mut().pass_textures.push(textures);
+            let Some(color) = color else {
+                self.0.borrow_mut().shadow_passes.push((
+                    *depth.view,
+                    depth.clear.is_some(),
+                    depth.store,
+                    draws,
+                ));
+                return;
+            };
             self.0.borrow_mut().passes.push((
                 *depth.view,
                 color.clear.is_some(),
@@ -750,7 +944,7 @@ mod tests {
 
     #[test]
     fn mock_procedural_and_static_instances_share_depth_and_late_failures_have_no_effects() {
-        use crate::{Material, Settings3D, StaticInstance, IDENTITY_ROT};
+        use crate::{IDENTITY_ROT, Material, Settings3D, StaticInstance};
         let rhi = Mock::default();
         let mut model = model(&rhi, FORMAT);
         let mut procedural = Renderer3D::with_settings(rhi.clone(), FORMAT, Settings3D::LOW);
@@ -1123,4 +1317,242 @@ mod tests {
         assert_eq!(scene.depth_size(), None);
         assert_eq!(scene.depth_generation(), 0);
     }
+    #[test]
+    fn mock_shared_shadow_preflight_retains_main_draw_limit_precedence() {
+        let rhi = Mock::default();
+        let scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        let camera = Camera3D::orthographic([0.0, 0.0, 5.0], [0.0; 3], 2.0);
+        for shadows in [false, true] {
+            let lighting = Lighting {
+                shadows,
+                ..Default::default()
+            };
+            assert!(matches!(
+                scene.preflight_cpu(
+                    (32, 32),
+                    &camera,
+                    &lighting,
+                    &PointLightSettings::default(),
+                    &RenderList3D::new(),
+                    &[],
+                    1,
+                    MAX_IMPORTED_DRAWS + 1
+                ),
+                Err(ImportedSceneError::DrawLimit)
+            ));
+            assert_eq!(rhi.take(), Effects::default());
+        }
+    }
+
+    #[test]
+    fn mock_shared_shadow_resources_upload_once_and_reject_before_any_mutation() {
+        let rhi = Mock::default();
+        let mut renderer = model(&rhi, FORMAT);
+        let mut procedural = Renderer3D::with_settings(rhi.clone(), FORMAT, crate::Settings3D::LOW);
+        let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        let camera = Camera3D::orthographic([0.0, 0.0, 5.0], [0.0; 3], 2.0);
+        let mut light = Lighting {
+            shadows: true,
+            shadow_radius: 4.0,
+            ..Default::default()
+        };
+        let mut list = RenderList3D::new();
+        list.cuboid(
+            [0.0; 3],
+            crate::IDENTITY_ROT,
+            [0.5; 3],
+            &crate::Material::new([0.5; 3]),
+        );
+        let instances = [StaticInstance::default(); 2];
+        let run = |scene: &mut ImportedSceneRenderer<Mock>,
+                   light: &Lighting,
+                   size,
+                   renderer: &mut ModelRenderer<Mock>,
+                   procedural: &mut Renderer3D<Mock>| {
+            scene.draw(
+                ImportedSceneTarget {
+                    view: &0,
+                    size,
+                    format: FORMAT,
+                    sample_count: 1,
+                },
+                &camera,
+                light,
+                &PointLightSettings::default(),
+                &mut [
+                    ImportedBatch::StaticInstances {
+                        renderer,
+                        instances: &instances,
+                    },
+                    ImportedBatch::Procedural {
+                        renderer: procedural,
+                        list: &list,
+                    },
+                ],
+            )
+        };
+        rhi.take();
+        run(&mut scene, &light, (32, 32), &mut renderer, &mut procedural).unwrap();
+        let first = rhi.take();
+        assert_eq!(first.submits, 1);
+        assert_eq!(first.encoders, 1);
+        let map = scene.shadow.as_ref().unwrap().view;
+        assert!(first.pass_textures[0].is_empty());
+        assert_eq!(
+            first.pass_textures[2],
+            vec![map],
+            "procedural main samples coordinator map only"
+        );
+        assert!(first.pass_textures[1].contains(&map));
+        assert_eq!(first.shadow_passes.len(), 1);
+        assert!(first.shadow_passes[0].1);
+        assert!(first.shadow_passes[0].2);
+        assert_eq!(first.shadow_passes[0].3, renderer.draw_count() * 2 + 1);
+        assert_eq!(first.textures.len(), 2);
+        assert!(
+            first
+                .textures
+                .contains(&(TextureFormat::Depth32Float, 1, (1024, 1024)))
+        );
+        // Main and depth use exactly the same uploaded object/instance/geometry buffers.
+        let mut shadow_buffers = first.pass_buffers[0].clone();
+        shadow_buffers.sort_unstable();
+        shadow_buffers.dedup();
+        let mut main_buffers = first.pass_buffers[1..]
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        main_buffers.sort_unstable();
+        main_buffers.dedup();
+        assert_eq!(shadow_buffers, main_buffers);
+        let mut written = first.written_buffers.clone();
+        written.sort_unstable();
+        written.dedup();
+        assert_eq!(
+            written.len(),
+            first.written_buffers.len(),
+            "no main/shadow duplicate writes"
+        );
+        for _ in 0..3 {
+            run(&mut scene, &light, (32, 32), &mut renderer, &mut procedural).unwrap();
+            let effects = rhi.take();
+            assert_eq!(effects.allocations, 0);
+            assert_eq!(effects.shadow_passes.len(), 1);
+            assert_eq!(effects.submits, 1);
+        }
+        let bad = [StaticInstance {
+            scale: [0.0; 3],
+            ..Default::default()
+        }];
+        let previous_stats = procedural.last_frame_stats();
+        assert!(
+            scene
+                .draw(
+                    ImportedSceneTarget {
+                        view: &0,
+                        size: (64, 64),
+                        format: FORMAT,
+                        sample_count: 1
+                    },
+                    &camera,
+                    &light,
+                    &PointLightSettings::default(),
+                    &mut [
+                        ImportedBatch::Procedural {
+                            renderer: &mut procedural,
+                            list: &list
+                        },
+                        ImportedBatch::StaticInstances {
+                            renderer: &mut renderer,
+                            instances: &bad
+                        }
+                    ]
+                )
+                .is_err()
+        );
+        assert_eq!(rhi.take(), Effects::default());
+        assert_eq!(procedural.last_frame_stats(), previous_stats);
+        let budget_instances = vec![StaticInstance::default(); 256];
+        let oversized = vec![(renderer.model(), budget_instances.as_slice()); 9];
+        assert!(
+            scene
+                .preflight(
+                    (64, 64),
+                    &camera,
+                    &light,
+                    &PointLightSettings::default(),
+                    &list,
+                    &oversized
+                )
+                .is_err()
+        );
+        assert_eq!(rhi.take(), Effects::default());
+        for bad in [f32::NAN, f32::INFINITY, 0.0, 1e6] {
+            light.shadow_radius = bad;
+            assert!(run(&mut scene, &light, (64, 64), &mut renderer, &mut procedural).is_err());
+            assert_eq!(rhi.take(), Effects::default());
+            assert_eq!(scene.depth_size(), Some((32, 32)));
+            assert_eq!(scene.shadow_map_generation(), 1);
+        }
+        light.shadow_radius = 4.0;
+        light.shadow_center[0] = f32::NAN;
+        assert!(run(&mut scene, &light, (64, 64), &mut renderer, &mut procedural).is_err());
+        assert_eq!(rhi.take(), Effects::default());
+        light.shadow_center = [0.0; 3];
+        run(&mut scene, &light, (64, 64), &mut renderer, &mut procedural).unwrap();
+        let resized = rhi.take();
+        assert_eq!(
+            resized.textures,
+            vec![(TextureFormat::Depth32Float, 1, (64, 64))]
+        );
+        assert_eq!(scene.shadow_map_generation(), 1);
+        light.shadows = false;
+        run(&mut scene, &light, (64, 64), &mut renderer, &mut procedural).unwrap();
+        assert!(rhi.take().shadow_passes.is_empty());
+        light.shadows = true;
+        scene
+            .draw(
+                ImportedSceneTarget {
+                    view: &0,
+                    size: (64, 64),
+                    format: FORMAT,
+                    sample_count: 1,
+                },
+                &camera,
+                &light,
+                &PointLightSettings::default(),
+                &mut [],
+            )
+            .unwrap();
+        let empty = rhi.take();
+        assert_eq!(empty.shadow_passes.len(), 1);
+        assert_eq!(empty.shadow_passes[0].3, 0);
+        assert!(empty.shadow_passes[0].1);
+        assert_eq!(empty.submits, 1);
+        let mut other = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        run(&mut other, &light, (64, 64), &mut renderer, &mut procedural).unwrap();
+        let other_map = other.shadow.as_ref().unwrap().view;
+        assert_ne!(map, other_map);
+        let changed = rhi.take();
+        assert_eq!(changed.pass_textures[2], vec![other_map]);
+        run(&mut other, &light, (64, 64), &mut renderer, &mut procedural).unwrap();
+        assert_eq!(
+            rhi.take().allocations,
+            0,
+            "one cached receiver binding per renderer"
+        );
+        run(&mut scene, &light, (64, 64), &mut renderer, &mut procedural).unwrap();
+        let rebound = rhi.take();
+        assert!(rebound.textures.is_empty());
+        assert_eq!(
+            rebound.allocations, 2,
+            "replace just the two receiver binding generations"
+        );
+        assert_eq!(rebound.pass_textures[2], vec![map]);
+    }
 }
+
+#[cfg(all(test, feature = "animation"))]
+#[path = "imported_scene/shadow_gpu_tests.rs"]
+mod shadow_gpu_tests;

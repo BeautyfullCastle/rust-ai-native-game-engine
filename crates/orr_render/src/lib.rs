@@ -79,3 +79,8 @@ pub use imported_scene::{ImportedBatch, ImportedSceneError, ImportedSceneRendere
 
 #[cfg(feature = "imported-scene")]
 pub use renderer3d::ProceduralSceneError;
+
+#[cfg(feature = "imported-scene")]
+mod shared_shadow;
+#[cfg(feature = "imported-scene")]
+pub use shared_shadow::{MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE};

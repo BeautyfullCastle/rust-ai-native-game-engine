@@ -181,7 +181,7 @@ let mut batches = [
 scene.draw(
     ImportedSceneTarget { view, size, format, sample_count: 1 },
     &camera,
-    &lighting, // shadows must be false
+    &lighting, // optional bounded shared directional shadows
     &point_settings,
     &mut batches,
 )?;
@@ -209,10 +209,10 @@ that lifecycle. A minimized native window skips zero-sized draws.
 ## Bounds of this milestone
 
 This path supports opaque imported static/skinned base-color materials,
-hemisphere ambient, directional diffuse, and one unshadowed point light at a
-single sample. It does not add shadows, spot lights, HDR output, bloom, probes,
-PBR, MSAA, glTF punctual-light import, or shared depth with the procedural
-`Renderer3D` path. Existing standalone draw entry points remain available and
+hemisphere ambient, shadowed directional diffuse, and one unshadowed point light
+at a single sample, with shared main depth for procedural and imported batches.
+It does not add spot lights, HDR output, bloom, probes, PBR, MSAA, or glTF
+punctual-light import. Existing standalone draw entry points remain available and
 continue owning their own depth targets. No simulation state, inputs, rollback,
 or golden checksum expectations are changed.
 
@@ -220,3 +220,59 @@ The original static fixtures and their reproducible Python authoring script are
 in `assets/imported_scene_demo`; the animated asset remains in
 `assets/animation_demo`. Their license files record provenance. The authoring
 script is optional offline tooling, not part of the runtime or install path.
+
+
+## Bounded shared directional shadows
+
+`ImportedSceneRenderer` now accepts `Lighting.shadows`. The coordinator owns one
+1024 × 1024 Depth32Float map (4 MiB), allocated on the first accepted shadow-on
+frame. Main viewport resize changes only the main depth target. No cascades,
+configurable map growth, HDR, probes, RHI extensions, or simulation changes are
+part of this path. Standalone static and skinned draws still reject shadows.
+
+The existing snapped directional camera covers a finite orthographic box:
+2 × shadow_radius wide/high and approximately 6 × shadow_radius deep. Radius
+must be finite in 0.5..=100000; center components must be finite with absolute
+value at most 1000000. Computed matrix and bias values are checked before any
+GPU or cache mutation. Receivers outside this coverage are fully lit. The
+existing 3×3 comparison filter, normal offset and raster depth bias are reused.
+Visibility affects directional direct light only; ambient, point and emissive
+terms are unchanged.
+
+A frame admits at most 256 batches, 4096 main draws and a separate 4096 caster
+draws. All target metadata, batches, poses, composed bounds and coverage are
+validated first. Original geometry and the once-prepared instance transforms
+and joint palettes are uploaded once and used by both passes. Each independent
+skinned instance retains its own palette. No clip is sampled during rendering.
+Static world placement is external TRS × node; skinned world placement is
+external placement × skin palette, without a second mesh-node transform.
+
+One shadow clear/store pass includes all casters, including objects outside the
+main camera. Imported opaque triangles cast from both sides (including sheets).
+Procedural spheres, boxes and capsules retain front-cull casting; planes and
+debug lines do not cast. Main batches then compose against one main depth target
+in the same encoder, submitted once. Bounds/statistics publish afterwards.
+Empty shadow-on frames clear the map; shadow-off shaders do not sample it. Each
+renderer retains at most one shared-map binding generation, replacing it if
+used with another coordinator; inferred layouts have pipeline-specific binds.
+
+Verification of this slice is separate from the known legacy GPU3D VIEW_FORMATS
+failure record (20 failures, 4 ignored). Focused shared-shadow and standalone
+checks do not establish a green full GPU suite. Windows local/native-window and
+physical-GPU behavior remain unverified. #100 and #101 remain open; this is a
+bounded shared main/shadow skinning and directional-light step, not their full
+acceptance.
+
+
+### Actual-map evidence on the software backend
+
+The test-only readout observes the coordinator's produced depth texture, never a
+second geometry render. wgpu/Naga 30's GLSL backend rejects `textureLoad` on depth
+textures; that attempted test failure is retained in the verification record.
+The supported readout instead uses a nearest `LessEqual` comparison sampler at
+exact texel centers. Sixteen bounded reference-depth bisections reconstruct each
+stored value to within 1/65536; an additional reference=1 probe identifies clear
+texels exactly. Results are RGB24-packed into an RGBA8 COPY_SRC target. No PCF or
+linear filtering is involved in this test readout. The independent scalar CPU
+oracle checks interior coverage, clear regions, light projection and raster slope
+bias with the reconstruction bound plus 5e-6 for floating-point plane arithmetic.

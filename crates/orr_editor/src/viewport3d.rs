@@ -35,7 +35,9 @@ impl YardFrame {
             lighting: orr_sample::yard3d_view::yard_lighting(),
             ..RenderList3D::default()
         };
-        list.lighting.shadows = false;
+        // Keep the Yard sun's shadow policy. The composed path admits all
+        // procedural, static and sampled skinned casters before drawing one
+        // shared shadow map for this immutable host frame.
         let visible: Vec<_> = self
             .items
             .iter()
@@ -526,5 +528,17 @@ impl GpuViewport3d {
 impl Drop for GpuViewport3d {
     fn drop(&mut self) {
         self.state.renderer.write().free_texture(&self.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yard_main_viewport_preserves_the_sample_sun_shadow_policy() {
+        let list = YardFrame::default().list(&[], None);
+        assert_eq!(list.lighting, orr_sample::yard3d_view::yard_lighting());
+        assert!(list.lighting.shadows);
     }
 }

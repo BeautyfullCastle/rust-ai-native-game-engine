@@ -87,8 +87,15 @@ sampled hierarchy is applied once by the existing skinning renderer; the
 mesh-node transform is not applied a second time. Instances sharing one
 immutable asset use one renderer/batch but have independent owned sampled poses.
 Procedural, static and skinned batches share one depth attachment and clear.
+They also cast into one shared directional shadow map and receive from that
+same map. Yard keeps its existing afternoon sun, center `[0, 0, 0]` and radius
+36; the imported-scene coordinator uses a fixed 1024×1024 depth map. Animated
+casters use the same owned sampled pose as their visible mesh. A hidden bound
+collider proxy is absent from both passes; selection/debug lines do not cast.
 The complete mixed CPU frame is preflighted before target resizing or GPU cache
-changes. Model bytes and floating-point poses remain outside authoritative ECS.
+changes, including bounded finite shadow center/radius validation. Rejected
+frames preserve the last valid native texture. Model bytes, shadow resources
+and floating-point poses remain outside authoritative ECS.
 
 ## Persistence, playback and boundaries
 
@@ -114,11 +121,13 @@ changes. Model bytes and floating-point poses remain outside authoritative ECS.
 - Proposal preview is currently not rendered in 3D; the viewport explicitly
   displays the live host snapshot and labels that limitation
 
-The composed path is bounded opaque diffuse, single-sample, with no shadows.
-It does not claim full glTF PBR, imported-mesh colliders, skinned shadows,
+The composed path is bounded opaque diffuse, single-sample, with shared
+directional shadows. It does not claim full glTF PBR, imported-mesh colliders,
+transparent/alpha-tested shadows, cascades, point-light shadows,
 root motion, a character controller, IK, retargeting, an animation graph,
 prefab/export or scene/sidecar atomic project save. Standalone
-renderers retain their existing behavior. Native-window, physical-GPU and
+model/skinned renderers still reject `Lighting.shadows = true`; shared shadows
+require the composed coordinator. Native-window, physical-GPU and
 Windows-local acceptance remain separate from software-GPU readback tests.
 
 ## Focused verification
@@ -126,6 +135,22 @@ Windows-local acceptance remain separate from software-GPU readback tests.
 Use the repository toolchain and serialized release test lane. GPU tests must set
 `ORR_REQUIRE_GPU=1`; an unavailable adapter is a failure, not accepted evidence.
 The focused suites are `orr_remote::yard3d_authoring`,
-`orr_editor::{yard3d_authoring,model_bindings,yard3d_models,yard3d_animated}` and renderer
+`orr_editor::{yard3d_authoring,model_bindings,yard3d_models,yard3d_animated,yard3d_shadows}` and renderer
 `imported_scene` plus standalone `gpu3d` regression. `ORR_YARD_CAPTURE_DIR`
 optionally records the main viewport's PPM readbacks.
+
+The shadow acceptance fixture installs the original static and skeletal packages
+into a disposable project, retaining a procedural box and ground. It opens the
+real `EditorApp`, checks its native main-viewport texture against a same-device
+shadowed reference, and compares a no-shadow control. A moving skeletal shadow
+must change pixels whose no-shadow receiver pixels are unchanged. Captures cover
+Edit, paused Play 0, Step 30, Pause, Seek 0/30, Stop, verified model reload and
+scene reopen. Exact host bytes/checksums match the unbound baseline at every
+checkpoint; rendering, bindings and reload leave scene bytes/history unchanged.
+Invalid shadow center/radius inputs also preserve target size and visible pixels.
+
+```sh
+ORR_REQUIRE_GPU=1 ORR_YARD_CAPTURE_DIR=/tmp/yard-shadows \
+  cargo test --release -p orr_editor --features animated-models \
+  --test yard3d_shadows -- --nocapture --test-threads=1
+```

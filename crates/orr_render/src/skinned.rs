@@ -4,16 +4,17 @@
 //! matrices; CPU deformation is used only to validate normals and compute exact
 //! current bounds. Each instance/primitive owns a separate 64-matrix uniform.
 //! All instances share one fresh depth/color pass. This is not an overlay into
-//! the procedural renderer's depth buffer; shadows, PBR, and HDR are not supported.
+//! the procedural renderer's depth buffer. Shared directional shadows are available
+//! through ImportedSceneRenderer; standalone shadows, PBR, and HDR are unsupported.
 use crate::{
-    math3::Mat4,
-    model_renderer::{prepare_globals, Globals, ModelRenderError},
     Camera3D, Lighting,
+    math3::Mat4,
+    model_renderer::{Globals, ModelRenderError, prepare_globals},
 };
 use bytemuck::{Pod, Zeroable};
 use orr_model::{
+    IDENTITY, Wrap,
     animation::{AnimatedModel, Matrix4, Pose},
-    Wrap, IDENTITY,
 };
 use orr_rhi::{
     Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, Cull, DepthAttachment,
@@ -111,6 +112,8 @@ struct Geometry<B: Rhi> {
 struct InstanceDraw<B: Rhi> {
     uniform: B::Buffer,
     bind: B::BindGroup,
+    #[cfg(feature = "imported-scene")]
+    shadow: crate::shared_shadow::ObjectBindings<B>,
 }
 /// Fully validated CPU state. Kept separate until the entire scene is admitted.
 pub(crate) struct PreparedSkinned {
@@ -133,6 +136,8 @@ pub struct SkinnedModelRenderer<B: Rhi> {
     format: TextureFormat,
     model: AnimatedModel,
     pipeline: B::Pipeline,
+    #[cfg(feature = "imported-scene")]
+    shadow: crate::shared_shadow::ShadowPipelines<B>,
     globals: B::Buffer,
     views: Vec<B::TextureView>,
     geometry: Vec<Geometry<B>>,
@@ -214,6 +219,17 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             depth: Some(DepthState::opaque(TextureFormat::Depth32Float)),
             samples: 1,
         });
+        #[cfg(feature = "imported-scene")]
+        let shadow = crate::shared_shadow::ShadowPipelines::new(
+            &rhi,
+            &shader,
+            format,
+            &[VertexLayout {
+                stride: 64,
+                step: VertexStep::Vertex,
+                attrs: &attrs,
+            }],
+        );
         let globals = rhi.create_buffer(&BufferDesc {
             label: "skinned globals",
             size: std::mem::size_of::<Globals>() as u64,
@@ -291,6 +307,8 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             format,
             model,
             pipeline,
+            #[cfg(feature = "imported-scene")]
+            shadow,
             globals,
             views,
             geometry,
@@ -466,7 +484,19 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                     },
                 ],
             );
-            self.draws.push(InstanceDraw { uniform, bind });
+            #[cfg(feature = "imported-scene")]
+            let shadow = self.shadow.object(
+                &self.rhi,
+                &self.globals,
+                &uniform,
+                &self.views[m.image as usize],
+            );
+            self.draws.push(InstanceDraw {
+                uniform,
+                bind,
+                #[cfg(feature = "imported-scene")]
+                shadow,
+            });
         }
         self.rhi
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(globals));
@@ -511,6 +541,40 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
     /// Publish bounds only after the complete encoder has been submitted.
     pub(crate) fn commit_frame(&mut self, prepared: PreparedSkinned) {
         self.bounds = prepared.bounds;
+    }
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn bind_shared_shadow(&mut self, map: &crate::shared_shadow::SharedShadow<B>) {
+        self.shadow.bind_map(&self.rhi, map);
+    }
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn shared_commands<'a>(
+        &'a self,
+        ready: &PreparedSkinned,
+        depth: bool,
+        commands: &mut Vec<Command<'a, B>>,
+    ) {
+        commands.push(Command::SetPipeline(if depth {
+            &self.shadow.depth
+        } else {
+            &self.shadow.main
+        }));
+        if !depth {
+            commands.push(Command::SetBindGroup(1, self.shadow.receiver()));
+        }
+        for i in 0..ready.objects.len() {
+            let geometry = &self.geometry[i % self.geometry.len()];
+            let binds = &self.draws[i].shadow;
+            commands.extend([
+                Command::SetBindGroup(0, if depth { &binds.depth } else { &binds.main }),
+                Command::SetVertexBuffer(0, &geometry.vertices),
+                Command::SetIndexBuffer(&geometry.indices),
+                Command::DrawIndexed {
+                    indices: 0..geometry.count,
+                    base_vertex: 0,
+                    instances: 0..1,
+                },
+            ]);
+        }
     }
 }
 

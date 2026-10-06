@@ -4,6 +4,7 @@ struct Globals {
     view_proj: mat4x4<f32>, direction: vec4<f32>, sun: vec4<f32>,
     sky: vec4<f32>, ground: vec4<f32>, params: vec4<f32>,
     point_position_range: vec4<f32>, point_color_intensity: vec4<f32>,
+    light_vp: mat4x4<f32>, shadow: vec4<f32>,
 };
 struct Object {
     world: mat4x4<f32>, normal: mat4x4<f32>, color: vec4<f32>, sampling: vec4<u32>,
@@ -21,10 +22,7 @@ struct Varying {
     @location(3) joint0: u32, @location(4) joint1: u32, @location(5) joint2: u32, @location(6) joint3: u32,
     @location(7) weights: vec4<f32>
 ) -> Varying {
-    let weight=weights/dot(weights,vec4<f32>(1.0));
-    var skin = object.joints[joint0]*weight.x + object.joints[joint1]*weight.y
-        + object.joints[joint2]*weight.z + object.joints[joint3]*weight.w;
-    skin[0][3]=0.0; skin[1][3]=0.0; skin[2][3]=0.0; skin[3][3]=1.0;
+    let skin=blend_skin(vec4<u32>(joint0,joint1,joint2,joint3),weights);
     // Cofactor columns divided by determinant are inverse-transpose(linear).
     // Transforming by blended individual normal matrices is not equivalent.
     // The CPU oracle rejects singular/reversed blends before GPU submission.
@@ -35,8 +33,8 @@ struct Varying {
     var out: Varying;
     // Palette already includes joint globals and inverse binds; applying the
     // skinned mesh node here would incorrectly transform the geometry twice.
-    let world=object.world*skin*vec4<f32>(position,1.0);
-    out.position=globals.view_proj*object.world*skin*vec4<f32>(position,1.0);
+    let world=skinned_world(position,skin);
+    out.position=globals.view_proj*world;
     out.world_position=world.xyz;
     out.normal=normalize((object.normal*vec4<f32>(skinned_normal,0.0)).xyz);
     out.uv=uv;
@@ -91,14 +89,45 @@ fn point_diffuse(world_position:vec3<f32>,normal:vec3<f32>) -> vec3<f32> {
     return globals.point_color_intensity.xyz*globals.point_color_intensity.w
         *diffuse*attenuation*attenuation;
 }
-@fragment fn fs_main(in:Varying) -> @location(0) vec4<f32> {
+fn shade(in:Varying, visibility:f32) -> vec4<f32> {
     let n=in.normal*inverseSqrt(max(dot(in.normal,in.normal),1e-20));
     let ambient=mix(globals.ground.xyz,globals.sky.xyz,n.y*0.5+0.5)*globals.sky.w;
-    let sun=globals.sun.xyz*globals.sun.w*max(dot(n,-globals.direction.xyz),0.0);
+    let sun=globals.sun.xyz*globals.sun.w*max(dot(n,-globals.direction.xyz),0.0)*visibility;
     let point=point_diffuse(in.world_position,n);
     var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun+point)*globals.params.x;
     if globals.params.y>0.5 { color=aces(color); } else { color=clamp(color,vec3<f32>(0.0),vec3<f32>(1.0)); }
     if globals.params.z>0.5 { color=linear_to_srgb(color); }
     // glTF OPAQUE ignores texture/factor alpha.
     return vec4<f32>(color,1.0);
+}
+
+@group(1) @binding(0) var shared_shadow_map: texture_depth_2d;
+@group(1) @binding(1) var shared_shadow_sampler: sampler_comparison;
+fn shared_visibility(world:vec3<f32>, n:vec3<f32>) -> f32 {
+    let lp=globals.light_vp*vec4<f32>(world+n*globals.shadow.y,1.0);
+    let uv=vec2<f32>(lp.x*0.5+0.5,0.5-lp.y*0.5);
+    if uv.x<0.0 || uv.x>1.0 || uv.y<0.0 || uv.y>1.0 || lp.z<0.0 || lp.z>1.0 { return 1.0; }
+    var sum=0.0;
+    for (var y=-1; y<=1; y=y+1) { for (var x=-1; x<=1; x=x+1) {
+        sum+=textureSampleCompareLevel(shared_shadow_map,shared_shadow_sampler,uv+vec2<f32>(f32(x),f32(y))*globals.shadow.x,lp.z-globals.shadow.z);
+    } }
+    return sum/9.0;
+}
+@fragment fn fs_main(in:Varying) -> @location(0) vec4<f32> { return shade(in,1.0); }
+@fragment fn fs_composed(in:Varying) -> @location(0) vec4<f32> {
+    let n=in.normal*inverseSqrt(max(dot(in.normal,in.normal),1e-20));
+    return shade(in,shared_visibility(in.world_position,n));
+}
+
+fn blend_skin(joints:vec4<u32>,weights:vec4<f32>) -> mat4x4<f32> {
+    let weight=weights/dot(weights,vec4<f32>(1.0));
+    var skin = object.joints[joints.x]*weight.x + object.joints[joints.y]*weight.y
+        + object.joints[joints.z]*weight.z + object.joints[joints.w]*weight.w;
+    skin[0][3]=0.0; skin[1][3]=0.0; skin[2][3]=0.0; skin[3][3]=1.0;
+    return skin;
+}
+
+fn skinned_world(position:vec3<f32>,skin:mat4x4<f32>) -> vec4<f32> { return object.world*skin*vec4<f32>(position,1.0); }
+@vertex fn vs_shadow(@location(0) position:vec3<f32>, @location(3) j0:u32, @location(4) j1:u32, @location(5) j2:u32, @location(6) j3:u32, @location(7) weights:vec4<f32>) -> @builtin(position) vec4<f32> {
+    return globals.light_vp*skinned_world(position,blend_skin(vec4<u32>(j0,j1,j2,j3),weights));
 }

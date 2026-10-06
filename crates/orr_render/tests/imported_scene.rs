@@ -805,6 +805,7 @@ fn invalid_later_static_batch_target_camera_and_light_leave_image_and_depth_unch
     .is_err());
     let mut invalid_light = light;
     invalid_light.shadows = true;
+    invalid_light.shadow_radius = f32::NAN;
     assert!(draw(
         &mut scene,
         &view,

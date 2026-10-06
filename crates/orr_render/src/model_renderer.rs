@@ -1,10 +1,11 @@
 //! Optional static imported model renderer. Real indexed POS/NORMAL/UV geometry,
 //! opaque sRGB base-color diffuse lighting, depth and mirrored-node winding.
-//! Single sample, no shadows/PBR/animation. External TRS instances can be composed
+//! Standalone: single sample, no shadows/PBR/animation. Shared directional shadows
+//! are admitted only by ImportedSceneRenderer. External TRS instances can be composed
 //! with procedural and animated geometry by the imported-scene coordinator.
 use crate::{
-    math3::{cross, dot, normalize, sub},
     Camera3D, Lighting, Projection,
+    math3::{cross, dot, normalize, sub},
 };
 use bytemuck::{Pod, Zeroable};
 use orr_model::{StaticModel, Wrap};
@@ -136,6 +137,8 @@ pub(crate) struct Globals {
     params: [f32; 4],
     pub(crate) point_position_range: [f32; 4],
     pub(crate) point_color_intensity: [f32; 4],
+    pub(crate) light_vp: [[f32; 4]; 4],
+    pub(crate) shadow: [f32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -149,15 +152,21 @@ struct Object {
 struct InstanceDraw<B: Rhi> {
     uniform: B::Buffer,
     bind: B::BindGroup,
+    #[cfg(feature = "imported-scene")]
+    shadow: crate::shared_shadow::ObjectBindings<B>,
 }
 #[cfg(feature = "imported-scene")]
 pub(crate) struct PreparedStatic {
     objects: Vec<Object>,
 }
 struct Draw<B: Rhi> {
+    #[cfg(feature = "imported-scene")]
+    _uniform: B::Buffer,
     vertices: B::Buffer,
     indices: B::Buffer,
     bind: B::BindGroup,
+    #[cfg(feature = "imported-scene")]
+    shadow: crate::shared_shadow::ObjectBindings<B>,
     count: u32,
 }
 struct Depth<B: Rhi> {
@@ -173,6 +182,8 @@ pub struct ModelRenderer<B: Rhi> {
     format: TextureFormat,
     model: StaticModel,
     pipeline: B::Pipeline,
+    #[cfg(feature = "imported-scene")]
+    shadow: crate::shared_shadow::ShadowPipelines<B>,
     globals: B::Buffer,
     draws: Vec<Draw<B>>,
     #[cfg(feature = "imported-scene")]
@@ -228,6 +239,17 @@ impl<B: Rhi> ModelRenderer<B> {
             depth: Some(DepthState::opaque(TextureFormat::Depth32Float)),
             samples: 1,
         });
+        #[cfg(feature = "imported-scene")]
+        let shadow = crate::shared_shadow::ShadowPipelines::new(
+            &rhi,
+            &shader,
+            format,
+            &[VertexLayout {
+                stride: 32,
+                step: VertexStep::Vertex,
+                attrs: &attrs,
+            }],
+        );
         let globals = rhi.create_buffer(&BufferDesc {
             label: "model globals",
             size: std::mem::size_of::<Globals>() as u64,
@@ -335,7 +357,11 @@ impl<B: Rhi> ModelRenderer<B> {
                     bytemuck::cast_slice(&indices),
                 ),
                 bind,
+                #[cfg(feature = "imported-scene")]
+                shadow: shadow.object(&rhi, &globals, &uniform, &views[m.image as usize]),
                 count: indices.len() as u32,
+                #[cfg(feature = "imported-scene")]
+                _uniform: uniform,
             });
         }
         #[cfg(feature = "imported-scene")]
@@ -345,6 +371,8 @@ impl<B: Rhi> ModelRenderer<B> {
             format,
             model,
             pipeline,
+            #[cfg(feature = "imported-scene")]
+            shadow,
             globals,
             draws,
             #[cfg(feature = "imported-scene")]
@@ -466,7 +494,17 @@ impl<B: Rhi> ModelRenderer<B> {
                     },
                 ],
             );
-            self.instance_draws.push(InstanceDraw { uniform, bind });
+            let shadow = self.shadow.object(
+                &self.rhi,
+                &self.globals,
+                &uniform,
+                &self.views[material.image as usize],
+            );
+            self.instance_draws.push(InstanceDraw {
+                uniform,
+                bind,
+                shadow,
+            });
         }
         self.write_frame(globals);
         for (draw, object) in self.instance_draws.iter().zip(&prepared.objects) {
@@ -539,6 +577,45 @@ impl<B: Rhi> ModelRenderer<B> {
         }
         self.rhi
             .encode_pass(encoder, "static model", Some(color), Some(depth), &commands);
+    }
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn bind_shared_shadow(&mut self, map: &crate::shared_shadow::SharedShadow<B>) {
+        self.shadow.bind_map(&self.rhi, map);
+    }
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn shared_commands<'a>(
+        &'a self,
+        ready: Option<&PreparedStatic>,
+        depth: bool,
+        commands: &mut Vec<Command<'a, B>>,
+    ) {
+        commands.push(Command::SetPipeline(if depth {
+            &self.shadow.depth
+        } else {
+            &self.shadow.main
+        }));
+        if !depth {
+            commands.push(Command::SetBindGroup(1, self.shadow.receiver()));
+        }
+        let count = ready.map_or(self.draws.len(), |r| r.objects.len());
+        for i in 0..count {
+            let geometry = &self.draws[i % self.draws.len()];
+            let binds = if ready.is_some() {
+                &self.instance_draws[i].shadow
+            } else {
+                &geometry.shadow
+            };
+            commands.extend([
+                Command::SetBindGroup(0, if depth { &binds.depth } else { &binds.main }),
+                Command::SetVertexBuffer(0, &geometry.vertices),
+                Command::SetIndexBuffer(&geometry.indices),
+                Command::DrawIndexed {
+                    indices: 0..geometry.count,
+                    base_vertex: 0,
+                    instances: 0..1,
+                },
+            ]);
+        }
     }
 }
 #[cfg(feature = "imported-scene")]
@@ -678,6 +755,8 @@ pub(crate) fn prepare_globals(
         ],
         point_position_range: [0.0; 4],
         point_color_intensity: [0.0; 4],
+        light_vp: orr_model::IDENTITY,
+        shadow: [0.0; 4],
     })
 }
 

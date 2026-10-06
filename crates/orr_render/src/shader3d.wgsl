@@ -73,10 +73,10 @@ fn vs_main(i: MeshIn) -> MainOut {
     return o;
 }
 
-// Shadow pass: `g.view_proj` is the light's matrix there.
+// Main and shadow read the same immutable per-frame transforms.
 @vertex
 fn vs_shadow(i: MeshIn) -> @builtin(position) vec4<f32> {
-    return g.view_proj * vec4<f32>(world_position(i), 1.0);
+    return g.light_vp * vec4<f32>(world_position(i), 1.0);
 }
 
 fn shadow_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
@@ -92,7 +92,7 @@ fn shadow_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
             sum = sum + textureSampleCompareLevel(shadow_map, shadow_samp, uv + o, reference);
         }
     }
-    let inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 && lp.z <= 1.0;
+    let inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 && lp.z >= 0.0 && lp.z <= 1.0;
     return select(1.0, sum / 9.0, inside);
 }
 
