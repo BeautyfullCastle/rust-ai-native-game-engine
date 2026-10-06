@@ -3233,6 +3233,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_model"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "orr_net"
 version = "0.0.1"
 dependencies = [
@@ -3366,6 +3377,7 @@ version = "0.0.1"
 dependencies = [
  "bytemuck",
  "orr_ecs",
+ "orr_model",
  "orr_rhi",
  "orr_sprite",
  "orr_view",

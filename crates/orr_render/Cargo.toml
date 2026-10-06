@@ -12,12 +12,15 @@ workspace = true
 [features]
 default = []
 sprites = ["dep:orr_sprite"]
+models = ["dep:orr_model"]
 
 [dependencies]
+orr_model = { path = "../orr_model", optional = true }
 orr_sprite = { path = "../orr_sprite", optional = true }
 orr_rhi = { path = "../orr_rhi" }
 orr_view = { path = "../orr_view" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+orr_model = { path = "../orr_model", features = ["import"] }
 orr_ecs = { path = "../orr_ecs" }
