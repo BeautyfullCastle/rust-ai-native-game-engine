@@ -275,6 +275,58 @@ or capacity errors. A terminal driver error makes the source inert; the
 application must stop advancing. Fixed membership failure is terminal even
 when the failed participant's last input was already queued elsewhere.
 
+## Opt-in local quiescence before recovery coordination
+
+`driver.quiesce(&session)` irreversibly blocks fresh admission and output on a
+healthy finite or rolling driver. It keeps existing incoming records drainable
+through the same source and preserves outstanding destination obligations.
+This is a small prerequisite for application-coordinated multisurvivor recovery,
+not a reconnect implementation. The shipped fixed-mesh runner retains its
+existing fail-on-edge-loss behavior and does not use this opt-in API.
+
+The first successful call freezes `P2pMeshQuiescence`: local slot, current local
+verified tick, Session next-send cursor, and three `accepted_remote_max_by_slot`
+values. The maxima cover newly admitted remote records, whether already polled
+or still queued, and survive canonical retirement. They can contain holes and
+include peer-0 defaults for logical slot 2 before its handoff. Ignored retired
+packets do not advance them. A missing maximum does not classify membership.
+The Session cursor is not the maximum submitted through driver `send_local`.
+These observations prove neither contiguous history nor agreed survivor fencing.
+Only three fixed maxima and one frozen summary are added; existing record,
+encoded-byte, per-edge and destination bounds are unchanged.
+
+Callers must independently fence their application/transport routes before
+quiescing. An active flush refuses quiescence without poisoning its in-flight
+FIFO acceptance. The API checks the exact source pointer, local slot,
+three-player P2P configuration and Ready/Unchecked join state. A syncing or
+failed join is rejected because Session may otherwise hold newly authored
+inputs without calling the source. Keep the same Session lifetime, with no
+restore, source swap, replacement or new join transition: source pointer equality
+cannot enforce those caller preconditions.
+
+After quiescence, receive, fallible driver send, ticket/snapshot installation,
+edge admission and flush return nonterminal `Quiesced` without mutating queues.
+A late disconnect for an already-admitted edge is a no-op; an unknown edge is
+rejected without losing drainable input. This acknowledges no transport data and
+does not close a socket. Pending output is never silently treated as delivered.
+Cancellation remains terminal. `is_quiesced()` records that the transition
+happened, including after later failure; inspect `check()` separately for health.
+
+Use `Session::poll_confirmed` to drain, or non-authoring `step` when simulation
+is needed. Source polling transfers already-admitted records once; it does not
+guarantee local verification, which still requires complete inputs and simulated
+history. Missing records can leave both survivors stalled with different maxima.
+Never call `advance`, default takeover, or another authoring operation while
+quiesced: the source becomes terminal and cannot authorize recovery afterward.
+Continue checking the driver before and after Session operations. Repeated
+quiescence revalidates health, source/configuration, readiness and unchanged send
+cursor, then returns the original frozen summary even after verification moves.
+
+There is no resume, source replacement, recovery target, survivor selection,
+default-owner election, repair, discovery, or wire change here. Do not construct
+a `DepartureFence` solely from this summary: independently settled routes,
+complete agreed membership and the existing departure protocol remain required.
+
 ## Wire formats and limits
 
 Mesh input uses a distinct **ORRM v1** envelope, separate from old two-peer

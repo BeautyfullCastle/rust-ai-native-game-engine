@@ -5,7 +5,8 @@
 //! Only peer 0 authors vacant slot 2, with portable default input and no commands,
 //! until the accepted checked ticket's exact first-input boundary. Each peer
 //! admits its two direct edges; there is no discovery, forwarding, reconnect,
-//! survivor election, or default takeover. Any edge failure aborts the driver.
+//! survivor election, or default takeover. Any edge failure aborts the driver
+//! unless the application first opts into irreversible local quiescence.
 //!
 //! Adapter instances have distinct application-assigned IDs. Remap their raw
 //! connection IDs (a NetLink uses 1) through the admitted registry before routing
@@ -34,7 +35,7 @@ use orr_net::SendError;
 use orr_proto::{Channel, ConnId};
 use orr_session::{
     CheckedJoinContext, CheckedJoinTicket, Game, InputSource, JoinBootstrap, JoinBootstrapStatus,
-    LocallyVerifiedTick, PlayerSlot, RemoteInput,
+    JoinStatus, LocallyVerifiedTick, PlayerSlot, RemoteInput, Session,
 };
 
 use crate::P2pInputCodec;
@@ -152,6 +153,10 @@ struct Rolling {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum P2pMeshInputError {
     InvalidConfig,
+    /// This irreversible local boundary blocks new admission and output.
+    Quiesced,
+    /// The source/Session, readiness, cursor or active-flush precondition failed.
+    QuiescenceUnavailable,
     InvalidEdge,
     AlreadyAdmitted,
     NotBound,
@@ -191,6 +196,21 @@ impl core::fmt::Display for P2pMeshInputError {
     }
 }
 impl std::error::Error for P2pMeshInputError {}
+
+/// Frozen local observation at the first successful quiescence, not a survivor
+/// fence, coverage proof, transport acknowledgment, or permission to recover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct P2pMeshQuiescence {
+    pub local: PlayerSlot,
+    pub verified_tick: u64,
+    /// Session's cursor, not the maximum submitted through driver `send_local`.
+    pub next_send_tick: u64,
+    /// Highest newly admitted remote tick by logical input slot. May have holes;
+    /// includes polled and unpolled records, including donor-authored defaults.
+    /// Ignored retired packets do not update these values. `None` means no such
+    /// admission in this source lifetime, not that a participant is absent.
+    pub accepted_remote_max_by_slot: [Option<u64>; 3],
+}
 
 /// One application-admitted direct edge. IDs are never inferred from packets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +273,8 @@ struct State<G: Game, C: P2pInputCodec<G>> {
     destination_records: usize,
     pending_bytes: usize,
     error: Option<P2pMeshInputError>,
+    quiescence: Option<P2pMeshQuiescence>,
+    accepted_remote_max_by_slot: [Option<u64>; 3],
     flushing: bool,
     marker: PhantomData<C>,
 }
@@ -348,6 +370,14 @@ impl<'a> Reader<'a> {
 impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
     fn check(&self) -> Result<(), P2pMeshInputError> {
         self.error.clone().map_or(Ok(()), Err)
+    }
+    fn live(&self) -> Result<(), P2pMeshInputError> {
+        self.check()?;
+        if self.quiescence.is_some() {
+            Err(P2pMeshInputError::Quiesced)
+        } else {
+            Ok(())
+        }
     }
     fn fail(&mut self, error: P2pMeshInputError) -> P2pMeshInputError {
         self.error.get_or_insert(error).clone()
@@ -518,7 +548,7 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         )
     }
     fn send(&mut self, record: RemoteInput<G>) -> Result<(), P2pMeshInputError> {
-        self.check()?;
+        self.live()?;
         self.authority(self.local, record.slot, record.tick)?;
         let bytes = encode::<G, C>(&record, &self.limits)?;
         self.vacancy(self.local, &record, &bytes)?;
@@ -769,6 +799,8 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         }
         self.vacancy(edge.remote, &record, canonical)?;
         self.accepted_vacancy(edge.remote, slot, tick);
+        let maximum = &mut self.accepted_remote_max_by_slot[usize::from(slot.0)];
+        *maximum = Some(maximum.map_or(tick, |old| old.max(tick)));
         self.seen.insert(
             key,
             Evidence {
@@ -861,6 +893,8 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
             destination_records: 0,
             pending_bytes: 0,
             error: None,
+            quiescence: None,
+            accepted_remote_max_by_slot: [None; 3],
             flushing: false,
             marker: PhantomData,
         }));
@@ -869,10 +903,64 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
     pub fn check(&self) -> Result<(), P2pMeshInputError> {
         self.0.borrow().check()
     }
+    /// Irreversibly stop new driver admission/output, retaining admitted incoming
+    /// records for exactly-once transfer through the existing source's polling.
+    /// The caller must independently fence application/transport routes first.
+    /// This does not settle transport queues, choose survivors, prove contiguous
+    /// coverage, verify a recovery target, or discharge pending output obligations.
+    ///
+    /// Use the same Session lifetime: no restore, replacement, source swap, or new
+    /// join transition. Source pointer equality cannot enforce that precondition.
+    /// Ready/Unchecked is required because a syncing Session can hold authored
+    /// input without calling its source. After success use `poll_confirmed` (or
+    /// non-authoring `step` if needed); never `advance`, default takeover or other
+    /// authoring. Source authoring becomes terminal, and `check` remains mandatory
+    /// before and after Session operations. Verification still needs complete
+    /// inputs and simulated history; draining alone need not make progress.
+    ///
+    /// Repeated calls recheck preconditions, then return the original summary,
+    /// even after polling/verification. Active-flush rejection is nonterminal.
+    pub fn quiesce(
+        &self,
+        session: &Session<G, P2pMeshInputSource<G, C>>,
+    ) -> Result<P2pMeshQuiescence, P2pMeshInputError> {
+        let mut s = self.0.borrow_mut();
+        s.check()?;
+        if !Rc::ptr_eq(&self.0, &session.source().0)
+            || session.config().relay
+            || session.config().local_slot != s.local
+            || session.config().player_count != 3
+            || !matches!(
+                session.join_status(),
+                Ok(JoinStatus::Ready | JoinStatus::Unchecked)
+            )
+            || s.flushing
+            || s.quiescence
+                .is_some_and(|q| q.next_send_tick != session.next_send_tick())
+        {
+            return Err(P2pMeshInputError::QuiescenceUnavailable);
+        }
+        if let Some(summary) = s.quiescence {
+            return Ok(summary);
+        }
+        let summary = P2pMeshQuiescence {
+            local: s.local,
+            verified_tick: session.verified_tick(),
+            next_send_tick: session.next_send_tick(),
+            accepted_remote_max_by_slot: s.accepted_remote_max_by_slot,
+        };
+        s.quiescence = Some(summary);
+        Ok(summary)
+    }
+    /// Whether the transition happened, including after a later terminal error.
+    /// Use `check` separately to determine whether draining is still healthy.
+    pub fn is_quiesced(&self) -> bool {
+        self.0.borrow().quiescence.is_some()
+    }
     /// Existing peers use only an accepted/imported checked ticket, never raw cutoff fields.
     pub fn install_ticket(&self, ticket: &CheckedJoinTicket) -> Result<(), P2pMeshInputError> {
         let mut s = self.0.borrow_mut();
-        s.check()?;
+        s.live()?;
         let t = ticket.ticket();
         let result = if s.local == PlayerSlot(2) || t.slot != PlayerSlot(2) {
             Err(P2pMeshInputError::InvalidSnapshot)
@@ -894,7 +982,7 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
         bootstrap: &JoinBootstrap<G, P2pMeshInputSource<G, C>>,
     ) -> Result<(), P2pMeshInputError> {
         let mut s = self.0.borrow_mut();
-        s.check()?;
+        s.live()?;
         let result = (|| {
             if s.local != PlayerSlot(2)
                 || !s.seen.is_empty()
@@ -938,7 +1026,7 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
     /// The application validates transport identity before calling this method.
     pub fn admit_edge(&self, edge: P2pMeshEdge) -> Result<(), P2pMeshInputError> {
         let mut s = self.0.borrow_mut();
-        s.check()?;
+        s.live()?;
         s.admit(edge).map_err(|e| s.fail(e))
     }
     /// Translate an adapter-local event; bare raw IDs from different adapters collide.
@@ -962,14 +1050,14 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
         bytes: &[u8],
     ) -> Result<P2pMeshInputAccepted, P2pMeshInputError> {
         let mut s = self.0.borrow_mut();
-        s.check()?;
+        s.live()?;
         s.receive(connection, channel, bytes).map_err(|e| s.fail(e))
     }
     /// Optional fallible local submission for applications outside Session. The
     /// authority checks are identical; this never forwards third-party records.
     pub fn send_local(&self, record: RemoteInput<G>) -> Result<(), P2pMeshInputError> {
         let mut s = self.0.borrow_mut();
-        s.check()?;
+        s.live()?;
         s.send(record).map_err(|e| s.fail(e))
     }
     pub fn pending(&self) -> (usize, usize) {
@@ -1031,7 +1119,7 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
     ) -> Result<P2pMeshInputFlush, P2pMeshInputError> {
         let initial: Vec<_> = {
             let mut s = self.0.borrow_mut();
-            s.check()?;
+            s.live()?;
             if s.flushing {
                 return Err(s.fail(P2pMeshInputError::ReentrantFlush));
             }
@@ -1089,6 +1177,13 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
     pub fn disconnected(&self, connection: ConnId) -> Result<(), P2pMeshInputError> {
         let mut s = self.0.borrow_mut();
         s.check()?;
+        if s.quiescence.is_some() {
+            return if s.edges.contains_key(&connection) {
+                Ok(())
+            } else {
+                Err(P2pMeshInputError::WrongConnection)
+            };
+        }
         let e = if s.edges.contains_key(&connection) {
             P2pMeshInputError::Disconnected
         } else {
