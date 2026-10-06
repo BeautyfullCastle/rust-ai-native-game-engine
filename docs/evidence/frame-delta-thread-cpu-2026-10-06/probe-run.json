@@ -1,0 +1,30 @@
+{
+  "base_commit": "f0162b9222e42d1b74247ab6aeebd9ff65b86ac3",
+  "base_tree": "8136c32e455c8825991426b34f40c245f48a9506",
+  "measured_commit": "02bfe84387bbb4cb5abf57fb12e2739baaf52e90",
+  "measured_tree": "e50e59c833801e863dd904c1813362a4475db95f",
+  "command": [
+    "timeout",
+    "--signal=KILL",
+    "30s",
+    "$TARGET_DIR/release/deps/frame_delta_cost-b39d7ed7df42126e",
+    "measure_thread_cpu_full_lz4_vs_negotiated",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "cwd": "$REPO",
+  "executable_sha256": "c4a0061b7ebc1cad91a9f50b4ea98ac579b5da78abe6cd9043252d50d50648a0",
+  "source_sha256": "d01073091c75bf3dfd59ee5cfc346e5ed3366d97280a90eec124fac8b2db7e8e",
+  "cargo_manifest_sha256": "7abcc69c686f5624c426d2219da9d7a7314f8fe14c0fc8c82e58f6d5b1725a2b",
+  "lockfile_sha256": "1f5685276b9f9526afca5716a89295978f21fad75a737e67af07b5903002a060",
+  "available_bytes_before": 1218170880,
+  "started_utc": "2026-10-06T02:23:21.127083+00:00",
+  "finished_utc": "2026-10-06T02:23:22.077078+00:00",
+  "exit_status": 0,
+  "wrapper_elapsed_ns": 949804565,
+  "available_bytes_after": 1218121728,
+  "stdout_sha256": "f73974ceea6f19ee4f38cce11a337e3d17aec59cafd289e24d377cf5edfab295",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

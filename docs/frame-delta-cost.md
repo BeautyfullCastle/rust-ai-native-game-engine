@@ -4,14 +4,18 @@
 
 Issue [#14](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/14)
 needs a measured trade-off, not an assumption that delta is faster. This probe
-uses the codec and wire contracts from candidate
-`c252ae9ae741449ca01976f6b2ce3c54fe5a5600`. It changes only this document and
-[`frame_delta_cost.rs`](../crates/orr_remote/tests/frame_delta_cost.rs).
-Production codec, client, server, dependencies, goldens and CI are unchanged.
+originally used the codec and wire contracts from candidate
+`c252ae9ae741449ca01976f6b2ce3c54fe5a5600`. The 2026-10-05 elapsed-time evidence
+below is preserved. The separately dated Linux calling-thread CPU addendum uses
+the later shared-development source identified there.
 
-One bounded measurement was completed on 2026-10-05; the results and raw rows
-are below. Existing codec/transport CI results are not counted as this probe's
-results. The recommendation remains opt-in, with no default-policy change.
+Instrumentation lives in
+[`frame_delta_cost.rs`](../crates/orr_remote/tests/frame_delta_cost.rs). The CPU
+probe adds a Linux-only **dev-dependency** edge to already-locked `rustix 1.1.5`
+with its `time` feature; no package version/checksum or production dependency
+changes. Production codec, client, server, goldens and CI are unchanged.
+Existing codec/transport CI results are not counted as this probe's results.
+The recommendation remains opt-in, with no default-policy change.
 
 ## Fixture and correctness oracle
 
@@ -75,13 +79,15 @@ network retransmissions. Thus lifecycle rows report reconstruction/data-frame
 cost, **not** total reconnect/seek network cost. Full and Delta counts show when
 compression policy actually falls back. There is no byte-savings assertion.
 
-`Instant` reports monotonic elapsed nanoseconds: encode/decode wall-clock cost
-proxies, **not exclusive CPU time**. Per-pass mean/p50/p95 include initial Full
+The original wall-clock mode uses `Instant` and reports monotonic elapsed
+nanoseconds: encode/decode wall-clock cost proxies, **not exclusive CPU time**. Per-pass mean/p50/p95 include initial Full
 and reset Full records. The report gives initial-frame bytes separately; small
 three-frame lifecycle percentiles are descriptive, not reliable tail estimates.
 No simulation/network/startup latency is included. Retained baseline byte maxima
-come from both production codec accessors. Peak heap/RSS and true thread CPU
-remain unmeasured; do not reinterpret retained bytes as a process-memory ceiling.
+come from both production codec accessors. That original mode does not measure
+calling-thread CPU; the separate Linux CPU mode is documented in the addendum.
+Peak heap/RSS remains unmeasured; do not reinterpret retained bytes as a
+process-memory ceiling.
 
 ## Bounded run and reproduction
 
@@ -255,3 +261,193 @@ No rounding or aggregation has been applied to these raw rows.
 {"pass":4,"case":"reconnect","mode":"legacy_full_lz4","frames":3,"erp_binary_bytes_total":234591,"erp_binary_bytes_first":78161,"erp_binary_bytes_min":78161,"erp_binary_bytes_max":78269,"full_records":3,"delta_records":0,"encode_wall_ns":{"mean":454859,"p50":471688,"p95":472388},"decode_wall_ns":{"mean":328409,"p50":325731,"p95":352461},"encoder_retained_baseline_bytes_max":0,"decoder_retained_baseline_bytes_max":0,"first_frame_checksum":"0xf3f5797dd53de329","last_frame_checksum":"0x302d4035feb3319a"}
 {"pass":4,"case":"reconnect","mode":"negotiated","frames":3,"erp_binary_bytes_total":231511,"erp_binary_bytes_first":78427,"erp_binary_bytes_min":74657,"erp_binary_bytes_max":78427,"full_records":2,"delta_records":1,"encode_wall_ns":{"mean":602754,"p50":391258,"p95":1031015},"decode_wall_ns":{"mean":382162,"p50":376086,"p95":437868},"encoder_retained_baseline_bytes_max":428807,"decoder_retained_baseline_bytes_max":428807,"first_frame_checksum":"0xf3f5797dd53de329","last_frame_checksum":"0x302d4035feb3319a"}
 ```
+
+
+## Calling-thread CPU addendum: 2026-10-06
+
+### Timer and unchanged workload
+
+Linux-only `measure_thread_cpu_full_lz4_vs_negotiated` uses the safe,
+already-locked [`rustix 1.1.5` time API](https://docs.rs/rustix/1.1.5/rustix/time/index.html):
+`clock_gettime(ClockId::ThreadCPUTime)` and `clock_getres` for nominal resolution.
+This is **calling-thread CPU time, user + system combined**, including
+synchronously called functions and some timer overhead. It excludes other
+threads, sleep and descheduled time. It is not exclusive-function CPU, process
+CPU, physical-CPU isolation or end-to-end latency. There is no CPU fallback on
+non-Linux targets; their existing wall and correctness tests remain available.
+The CPU test is absent there, so a filtered invocation reporting zero tests is
+not CPU evidence.
+
+A monomorphized clock parameter selects one clock per run. The original wall
+mode still uses `Instant` with its original wall labels and manifest. CPU mode
+retains exactly the same operation boundaries and object lifetimes described
+above. Fixture construction/physics, metadata, explicit resets, endpoint
+construction/destruction, assertions, sample-vector updates and JSON reporting
+remain outside the timers. Timestamp fields, nanosecond conversion and elapsed
+subtraction are checked; invalid or backward readings fail the test.
+
+Before warm-up, CPU mode records 64 back-to-back clock intervals, their
+min/upper-median/max and zero count, plus the positive nominal `clock_getres`
+resolution. These are timer diagnostics, **not an overhead correction**: nothing
+is subtracted from samples. Nanosecond storage and nominal resolution do not
+establish nanosecond accuracy. A zero observation means unresolved at this
+clock/run, not zero CPU cost.
+
+All five original cases, seeds, 1,000 bodies, metadata, caps and protocol versions
+are unchanged: 82 matched pairs per pass, one unreported warm-up per mode/case,
+then five measured passes, alternating execution order by pass. The 50 rows
+cover 410 matched pairs / 820 frame-mode observations. CPU distributions include
+raw samples, count, checked total, integer arithmetic mean, p50, p95 and zero
+count under `encode_thread_cpu_ns` and `decode_thread_cpu_ns`. The summary uses
+the median of five per-pass means; three-frame lifecycle percentiles remain
+descriptive. Byte, record-count, checksum and retained-baseline fields are
+control diagnostics rather than a new bandwidth or memory campaign.
+
+### Reproduction and evidence requirements
+
+Use the reserved warmed release lane and established environment described
+above. First run the focused ordinary tests and strict Clippy:
+
+```sh
+cargo test -p orr_remote --test frame_delta_cost --release --locked --offline -- --test-threads=1
+cargo clippy -p orr_remote --test frame_delta_cost --release --locked --offline -- -D warnings
+```
+
+After source review, select the exact already-compiled test executable from the
+focused test output. Run the following **once**, with an owned-process 30-second
+ceiling after compilation:
+
+```sh
+timeout --signal=KILL 30s "$TEST_EXE" \
+  measure_thread_cpu_full_lz4_vs_negotiated --ignored --exact --nocapture --test-threads=1
+```
+
+A timeout/error is failed or incomplete evidence, not permission to rerun for
+better numbers. Record the base and instrumented source commit/tree, source,
+lockfile, executable and timer-manifest hashes, command/environment, clock
+resolution/diagnostics, start/end/status and raw output. Verify 50 rows, 410
+matched pairs, exact reconstruction, consistent byte/record/baseline/checksum
+controls across passes and all arithmetic summaries before drawing conclusions.
+
+
+### Measured result and interpretation
+
+The **single** CPU invocation ran on 2026-10-06, 02:23:21.127083–02:23:22.077078
+UTC and exited 0. Libtest reported 0.95 s (the external wrapper measured
+949,804,565 elapsed ns; this is runner duration, not a CPU sample). It emitted
+one manifest and all 50 expected rows. All 410 matched frame pairs reconstructed
+exact original bytes, ticks and checksums. Byte totals, Full/Delta counts,
+retained-baseline maxima and endpoint fixture checksums were identical across
+all five passes; their controls also match the historical report. The raw
+1,640 encode/decode CPU samples and all 64 clock-diagnostic intervals are
+preserved, with no failed/discarded CPU measurement or number-selection rerun.
+
+The table reports **median of five per-pass arithmetic means**, in µs/frame,
+rounded to one decimal only here. These are calling-thread CPU values from
+this run, not the historical wall-time values or a same-run wall/CPU ratio.
+
+| Case | Legacy encode / decode CPU µs | Negotiated encode / decode CPU µs | Negotiated Full / Delta |
+| --- | ---: | ---: | ---: |
+| `idle_tick_only` | 347.0 / 301.0 | 558.2 / 114.5 | 1 / 32 |
+| `changing_physics` | 374.5 / 297.4 | 748.9 / 312.8 | 1 / 32 |
+| `rollback_resimulation` | 370.2 / 299.8 | 698.6 / 293.6 | 2 / 8 |
+| `backward_seek` | 358.7 / 322.3 | 517.2 / 265.0 | 2 / 1 |
+| `reconnect` | 356.3 / 295.0 | 512.7 / 326.2 | 2 / 1 |
+
+The trade-off remains clear: controlled idle data-frame bytes fall 96.11%,
+while encode CPU rises about 61% and decode CPU falls about 62%. Changing
+physics bytes fall 22.52%, while encode CPU is about twice legacy and decode
+CPU rises about 5%. The three-frame reconnect case saves just 1.31% of
+data-frame bytes while both measured CPU operations cost more; control/transport
+messages remain excluded. This is one small workload/runner, not statistical
+proof of a universal ratio.
+
+**Retain explicit opt-in.** This addendum supplies the previously missing Linux
+calling-thread encode/decode CPU evidence. It does not establish Windows CPU,
+exclusive-function CPU, live-network costs, peak heap/RSS, default enablement,
+production readiness or whole-issue #14 acceptance. Retained-baseline controls
+remain at most 428,807 bytes per negotiated endpoint, not a process-memory
+bound. Historical elapsed-time results above remain a separate measurement.
+
+### Runner, timer diagnostics and receipts
+
+- Base: `f0162b9222e42d1b74247ab6aeebd9ff65b86ac3`, tree
+  `8136c32e455c8825991426b34f40c245f48a9506`
+- Measured instrumented source: `02bfe84387bbb4cb5abf57fb12e2739baaf52e90`, tree
+  `e50e59c833801e863dd904c1813362a4475db95f`; results and evidence were added
+  afterward without changing the Rust source, manifest or lockfile
+- Linux x86_64, kernel 6.18.44, glibc 2.41; reported model AMD EPYC 9V74 80-Core
+  Processor. The process could use logical CPU IDs 0–8 according to
+  `sched_getaffinity`; that is not nine dedicated physical cores. Cgroup quota
+  and effective cpuset files were unavailable, so no quota capacity is claimed
+- Rust/Cargo 1.97.1, LLVM 22.1.6; existing `su-tui-wss-target`, default features,
+  release optimization/debug=1/thin LTO/one codegen unit, jobs=2; no RUSTFLAGS or
+  CARGO_PROFILE overrides. Compilation finished before the bounded invocation
+- The coordinator reserved the sole known engine compute lane; focused Cargo
+  sessions had completed. Process visibility was sandbox-local, not host-wide.
+  No pinned affinity, fixed frequency, physical isolation or absence of other
+  tenants is asserted. Available disk space was 1,218,170,880 bytes before and
+  1,218,121,728 bytes after the CPU invocation, above the 1 GiB floor
+- Nominal `clock_getres`: **1 ns**. The 64 back-to-back intervals had min / upper
+  median / max **110 / 120 / 360 ns**, zero count **0**. No overhead subtraction;
+  these do not establish 1 ns accuracy. None of the 1,640 operation samples was
+  zero; the raw arrays remain authoritative
+- Premeasurement focused release correctness: **4 passed, 2 ignored, 0 failed**,
+  including invalid timestamp/backward-clock arithmetic tests, exact lifecycle
+  reconstruction/bounds and missing/stale-base Full recovery. Strict targeted
+  release Clippy: **exit 0**, with no warning or source correction needed
+- `cargo metadata --offline --format-version 1` first updated only the intended
+  lock edge, then exited 101 while trying to materialize unrelated uncached
+  `accesskit_consumer 0.38.0` workspace metadata. The failure is preserved; no
+  network download or version update followed. Both focused locked/offline
+  checks above then passed. This was not a measured attempt
+- A post-run parser independently verified the manifest/counts, all sample
+  totals/means/order-statistic percentiles/zero counts and repeatable controls.
+  Source review and these focused checks are not workspace/all-platform CI
+
+[Raw manifest and 50 rows](evidence/frame-delta-thread-cpu-2026-10-06/raw.jsonl)
+preserve emitted JSON text and order (only libtest's surrounding status text is
+removed). [Complete stdout](evidence/frame-delta-thread-cpu-2026-10-06/probe.stdout),
+[stderr](evidence/frame-delta-thread-cpu-2026-10-06/probe.stderr),
+[path-redacted run identity/command/status](evidence/frame-delta-thread-cpu-2026-10-06/probe-run.json),
+[timer manifest](evidence/frame-delta-thread-cpu-2026-10-06/timer-manifest.json),
+[redacted build environment](evidence/frame-delta-thread-cpu-2026-10-06/environment.txt),
+[CPU availability](evidence/frame-delta-thread-cpu-2026-10-06/cpu-availability.txt),
+[correctness stdout](evidence/frame-delta-thread-cpu-2026-10-06/correctness.stdout),
+[path-redacted correctness build log](evidence/frame-delta-thread-cpu-2026-10-06/correctness.stderr),
+[path-redacted Clippy log](evidence/frame-delta-thread-cpu-2026-10-06/clippy.stderr),
+[metadata failure](evidence/frame-delta-thread-cpu-2026-10-06/metadata-attempt.txt),
+[validated summary](evidence/frame-delta-thread-cpu-2026-10-06/summary.json) and
+[validation output](evidence/frame-delta-thread-cpu-2026-10-06/validation.json)
+are retained beside it. JSONL/manifest hashes include their final newline.
+
+Four published runner receipts (environment, run identity, correctness build
+stderr and Clippy stderr) replace absolute session-local paths with `$WORKSPACE`,
+`$REPO` and `$TARGET_DIR`, and the container hostname with
+`[redacted-hostname]`. These placeholders mean the session workspace root,
+measurement checkout and existing warmed Cargo target; choose their local
+values for reproduction. They are not literal shell paths to execute.
+[The transformation manifest](evidence/frame-delta-thread-cpu-2026-10-06/receipt-redactions.json)
+records the ordered substitutions, occurrence counts and SHA-256 of both each
+original and its published version. Unredacted originals remain in the local
+audit archive outside the publication checkout. All other bytes in those four
+receipts, plus the complete CPU stdout/stderr, raw samples, timer manifest,
+timestamps, source/lockfile and executable hash, are unchanged. No build or
+measurement was rerun for this artifact-only privacy cleanup. Hashes in the
+table below identify the **published versions**.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Measured Rust source | `d01073091c75bf3dfd59ee5cfc346e5ed3366d97280a90eec124fac8b2db7e8e` |
+| Cargo manifest | `7abcc69c686f5624c426d2219da9d7a7314f8fe14c0fc8c82e58f6d5b1725a2b` |
+| Cargo.lock | `1f5685276b9f9526afca5716a89295978f21fad75a737e67af07b5903002a060` |
+| Measured executable | `c4a0061b7ebc1cad91a9f50b4ea98ac579b5da78abe6cd9043252d50d50648a0` |
+| Timer manifest | `1da4a27d92ba7a20635b20853e90d95c31f83e17e248b3bb18cd1d8ed42c08b1` |
+| Raw JSONL | `af70f44b95b6143e2e65c893158615f0cf4b6ca7ff067ebb0767273d0e5860b4` |
+| Complete stdout | `f73974ceea6f19ee4f38cce11a337e3d17aec59cafd289e24d377cf5edfab295` |
+| Complete stderr (empty) | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| Run identity and command (path-redacted) | `d94a9ba0f5df30da6ac75c2e6fde9e90e4eff941f7d67c441b568895bd676556` |
+| Environment (redacted) | `b6be060e40dc7f86a2c54e6a9dfe25c9626bd2c79a87e89eb703bf682e6a504b` |
+| Correctness build stderr (path-redacted) | `5f0b1086e8fc418cc1a668f637d8b3c756379556dc179489029c4b7d39bcd0eb` |
+| Clippy stderr (path-redacted) | `38cf1d5fd398c1551f2d561af58b88c624e67cd7c4b5c22f5b6020834992e2a8` |
+| Receipt transformation manifest | `12791890e4570e4a851fedfe73f3bb588e7e311060424b87c4c9e5182bba16e0` |
