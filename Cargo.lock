@@ -3494,6 +3494,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_terrain"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "sha2",
+]
+
+[[package]]
+name = "orr_terrain_view"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_model",
+ "orr_package",
+ "orr_render",
+ "orr_terrain",
+ "png 0.18.1",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "orr_testgame"
 version = "0.0.1"
 dependencies = [
