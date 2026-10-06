@@ -19,6 +19,8 @@ struct Globals {
     shadow: vec4<f32>,
     // x, y: viewport size in pixels.
     viewport: vec4<f32>,
+    point_position_range: vec4<f32>,
+    point_color_intensity: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -104,6 +106,18 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
+// Same bounded diffuse point term as the imported model shader. Standalone
+// Renderer3D leaves intensity zero; the coordinator supplies this optional light.
+fn point_diffuse(world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    if (g.point_color_intensity.w <= 0.0) { return vec3<f32>(0.0); }
+    let delta = g.point_position_range.xyz - world;
+    let distance = length(delta);
+    if (distance <= 1e-6) { return vec3<f32>(0.0); }
+    let attenuation = max(1.0 - distance / g.point_position_range.w, 0.0);
+    return g.point_color_intensity.xyz * g.point_color_intensity.w
+        * max(dot(normal, delta / distance), 0.0) * attenuation * attenuation;
+}
+
 @fragment
 fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
@@ -137,7 +151,7 @@ fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
 
     let hemi = mix(g.ground.rgb, g.sky.rgb, n.y * 0.5 + 0.5) * g.sky.w;
     var color = diffuse_color * (radiance + hemi) + fresnel * spec_shape * radiance + hemi * f0 * 0.35 * (1.0 - rough);
-    color = color + base * in.material.z;
+    color = color + diffuse_color * point_diffuse(in.world, n) + base * in.material.z;
 
     color = color * g.params.w;
     if (g.params.y > 0.5) {

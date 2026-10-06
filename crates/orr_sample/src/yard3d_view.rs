@@ -34,6 +34,12 @@ impl Extractor3 for YardExtractor {
     }
 }
 
+/// Authoritative body poses for presentation bindings. Unlike the decorative
+/// ground plane mapping, these retain the exact body's center. No write-back.
+pub fn editor_body_poses(frame: FrameView<'_>) -> Vec<(Entity, orr_view::Transform3)> {
+    frame.iter::<Body>().map(|(entity, body)| (entity, fp_to_transform3(body.pos, body.rot))).collect()
+}
+
 fn extract_body(entity: Entity, body: &Body, collider: &Collider) -> Extracted3 {
     let shape = &collider.shape;
     let mut transform = fp_to_transform3(body.pos, body.rot);

@@ -1623,3 +1623,510 @@ fn point_light_is_added_before_exposure_and_aces_in_linear_and_srgb_targets() {
         image_near(linear, srgb);
     }
 }
+
+#[test]
+fn procedural_and_static_instances_mutually_occlude_in_both_orders() {
+    use orr_render::{
+        Material, RenderList3D, Renderer3D, Settings3D, StaticInstance, IDENTITY_ROT,
+    };
+    let Some(g) = gpu() else { return };
+    let cam = camera();
+    let light = lighting(1.0);
+    let off = PointLightSettings::default();
+    let rect = [-0.4, -0.9, 0.4, 0.9];
+    let source = panel(rect, translated(0.2, 0.0, 0.0), [255, 0, 0], [1.0; 3]);
+    let instances = [
+        StaticInstance {
+            translation: [-0.8, 0.0, 0.5],
+            ..Default::default()
+        },
+        StaticInstance {
+            translation: [0.4, 0.0, -0.5],
+            ..Default::default()
+        },
+    ];
+    let oracle = [
+        surface(
+            &panel(rect, translated(-0.6, 0.0, 0.5), [255, 0, 0], [1.0; 3]),
+            [0.0, 0.0, 1.0],
+        ),
+        surface(
+            &panel(rect, translated(0.6, 0.0, -0.5), [255, 0, 0], [1.0; 3]),
+            [0.0, 0.0, 1.0],
+        ),
+        surface(
+            &panel(
+                [-1.3, -0.6, 1.3, 0.6],
+                translated(0.0, 0.0, 0.1),
+                [0, 0, 255],
+                [1.0; 3],
+            ),
+            [0.0, 0.0, 1.0],
+        ),
+    ];
+    for format in FORMATS {
+        let t = target(&g, format, EXTENT);
+        let view = g.create_texture_view(&t, None);
+        let mut scene = scene(&g, format);
+        let mut model = ModelRenderer::new(g.clone(), format, source.clone()).unwrap();
+        let mut procedural = Renderer3D::with_settings(g.clone(), format, Settings3D::LOW);
+        procedural.clear = [0.0, 1.0, 0.0, 1.0];
+        model.clear = [1.0, 1.0, 0.0, 1.0];
+        let mut list = RenderList3D::new();
+        // Its default shadowed lighting must not override coordinator lighting.
+        list.cuboid(
+            [0.0; 3],
+            IDENTITY_ROT,
+            [1.3, 0.6, 0.1],
+            &Material::new([0.0, 0.0, 1.0]).rough(1.0),
+        );
+        let mut previous = None;
+        for reverse in [false, true] {
+            let mut batches = if reverse {
+                [
+                    ImportedBatch::StaticInstances {
+                        renderer: &mut model,
+                        instances: &instances,
+                    },
+                    ImportedBatch::Procedural {
+                        renderer: &mut procedural,
+                        list: &list,
+                    },
+                ]
+            } else {
+                [
+                    ImportedBatch::Procedural {
+                        renderer: &mut procedural,
+                        list: &list,
+                    },
+                    ImportedBatch::StaticInstances {
+                        renderer: &mut model,
+                        instances: &instances,
+                    },
+                ]
+            };
+            draw(&mut scene, &view, EXTENT, &cam, &light, &off, &mut batches).unwrap();
+            let pixels = g.read_texture(&t);
+            let counts = assert_oracle(&pixels, EXTENT, &cam, &oracle, &light, &off);
+            assert!(
+                counts.iter().all(|&n| n > 150),
+                "both placements and procedural geometry must survive: {counts:?}"
+            );
+            if let Some(previous) = previous {
+                assert_eq!(
+                    previous, pixels,
+                    "mixed opaque depth changed with batch order"
+                );
+            }
+            previous = Some(pixels);
+        }
+        assert_eq!(procedural.last_frame_stats().shadow.passes, 0);
+        assert_eq!(procedural.last_frame_stats().attachment_allocations, 0);
+        assert_eq!(scene.depth_generation(), 1);
+    }
+}
+
+#[test]
+fn external_static_trs_composes_mirrored_sheared_nodes_and_preserves_standalone() {
+    use orr_render::StaticInstance;
+    let Some(g) = gpu() else { return };
+    let cam = camera();
+    let light = lighting(0.2);
+    let point = PointLightSettings {
+        point_light: Some(PointLight {
+            position: [-0.5, 1.0, 2.0],
+            color: [0.4, 0.8, 1.0],
+            intensity: 1.5,
+            range: 4.0,
+        }),
+    };
+    let mut node = translated(0.3, -0.2, 0.1);
+    node[0] = [0.8, 0.0, 0.3, 0.0];
+    node[1][1] = -1.1;
+    node[2][2] = 1.5;
+    let angle = 0.35_f32;
+    let (s, c) = angle.sin_cos();
+    let instance = StaticInstance {
+        translation: [-0.2, 0.3, 0.4],
+        rotation: [0.0, (angle * 0.5).sin(), 0.0, (angle * 0.5).cos()],
+        scale: [1.2, 0.7, 0.9],
+    };
+    // Independent, explicitly expanded S/R/T * imported node reference.
+    let composed = [
+        [
+            1.2 * 0.8 * c + 0.9 * 0.3 * s,
+            0.0,
+            -1.2 * 0.8 * s + 0.9 * 0.3 * c,
+            0.0,
+        ],
+        [0.0, -0.7 * 1.1, 0.0, 0.0],
+        [0.9 * 1.5 * s, 0.0, 0.9 * 1.5 * c, 0.0],
+        [
+            -0.2 + 1.2 * 0.3 * c + 0.9 * 0.1 * s,
+            0.3 - 0.7 * 0.2,
+            0.4 - 1.2 * 0.3 * s + 0.9 * 0.1 * c,
+            1.0,
+        ],
+    ];
+    for format in FORMATS {
+        let t = target(&g, format, EXTENT);
+        let view = g.create_texture_view(&t, None);
+        let mut scene = scene(&g, format);
+        let original = panel(
+            [-0.7, -0.7, 0.7, 0.7],
+            node,
+            [180, 100, 210],
+            [0.8, 0.7, 0.9],
+        );
+        let mut model = ModelRenderer::new(g.clone(), format, original.clone()).unwrap();
+        let mut reference = ModelRenderer::new(
+            g.clone(),
+            format,
+            panel(
+                [-0.7, -0.7, 0.7, 0.7],
+                composed,
+                [180, 100, 210],
+                [0.8, 0.7, 0.9],
+            ),
+        )
+        .unwrap();
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &cam,
+            &light,
+            &point,
+            &mut [ImportedBatch::Static(&mut reference)],
+        )
+        .unwrap();
+        let expected = g.read_texture(&t);
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &cam,
+            &light,
+            &point,
+            &mut [ImportedBatch::StaticInstances {
+                renderer: &mut model,
+                instances: &[instance],
+            }],
+        )
+        .unwrap();
+        image_near(&g.read_texture(&t), &expected);
+        assert!(expected.chunks_exact(4).filter(|p| p[0] > 20).count() > 500);
+        // A composed draw cannot overwrite the standalone immutable node bindings.
+        model.clear = [0.0, 0.0, 0.0, 1.0];
+        model.draw(&view, EXTENT, &cam, &light).unwrap();
+        let original_pixels = g.read_texture(&t);
+        let mut fresh = ModelRenderer::new(g.clone(), format, original).unwrap();
+        fresh.clear = model.clear;
+        fresh.draw(&view, EXTENT, &cam, &light).unwrap();
+        assert_eq!(g.read_texture(&t), original_pixels);
+    }
+}
+
+#[test]
+fn invalid_mixed_frame_preserves_pixels_depth_and_procedural_statistics() {
+    use orr_render::{
+        Material, ProceduralSceneError, RenderList3D, Renderer3D, Settings3D, StaticInstance,
+        StaticInstanceError, IDENTITY_ROT,
+    };
+    let Some(g) = gpu() else { return };
+    let format = FORMATS[0];
+    let t = target(&g, format, EXTENT);
+    let view = g.create_texture_view(&t, None);
+    let mut scene = scene(&g, format);
+    let mut model = ModelRenderer::new(
+        g.clone(),
+        format,
+        panel([-0.7, -0.7, 0.7, 0.7], IDENTITY, [255, 0, 0], [1.0; 3]),
+    )
+    .unwrap();
+    let mut procedural = Renderer3D::with_settings(g.clone(), format, Settings3D::LOW);
+    let mut list = RenderList3D::new();
+    list.cuboid(
+        [0.7, 0.0, 0.2],
+        IDENTITY_ROT,
+        [0.6; 3],
+        &Material::new([0.0, 0.0, 1.0]).rough(1.0),
+    );
+    let light = lighting(1.0);
+    let point = PointLightSettings::default();
+    let placements = [StaticInstance::default()];
+    draw(
+        &mut scene,
+        &view,
+        EXTENT,
+        &camera(),
+        &light,
+        &point,
+        &mut [
+            ImportedBatch::Procedural {
+                renderer: &mut procedural,
+                list: &list,
+            },
+            ImportedBatch::StaticInstances {
+                renderer: &mut model,
+                instances: &placements,
+            },
+        ],
+    )
+    .unwrap();
+    let before = g.read_texture(&t);
+    let stats = procedural.last_frame_stats();
+    let invalid = [StaticInstance {
+        rotation: [0.0; 4],
+        ..Default::default()
+    }];
+    list.boxes[0].pos = [-1.0, 0.0, 0.9];
+    assert!(matches!(
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &camera(),
+            &light,
+            &point,
+            &mut [
+                ImportedBatch::Procedural {
+                    renderer: &mut procedural,
+                    list: &list
+                },
+                ImportedBatch::StaticInstances {
+                    renderer: &mut model,
+                    instances: &invalid
+                }
+            ]
+        ),
+        Err(ImportedSceneError::StaticInstance(
+            StaticInstanceError::InvalidPlacement
+        ))
+    ));
+    assert_eq!(g.read_texture(&t), before);
+    assert_eq!(procedural.last_frame_stats(), stats);
+    list.boxes[0].pos[0] = f32::NAN;
+    let more = [StaticInstance::default(); 3];
+    assert!(matches!(
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &camera(),
+            &light,
+            &point,
+            &mut [
+                ImportedBatch::StaticInstances {
+                    renderer: &mut model,
+                    instances: &more
+                },
+                ImportedBatch::Procedural {
+                    renderer: &mut procedural,
+                    list: &list
+                }
+            ]
+        ),
+        Err(ImportedSceneError::Procedural(
+            ProceduralSceneError::InvalidInstance
+        ))
+    ));
+    assert_eq!(g.read_texture(&t), before);
+    assert_eq!(procedural.last_frame_stats(), stats);
+    assert_eq!(scene.depth_size(), Some(EXTENT));
+    assert_eq!(scene.depth_generation(), 1);
+}
+
+#[cfg(feature = "animation")]
+#[test]
+fn procedural_static_and_skinned_share_one_depth_across_animation_and_batch_orders() {
+    use orr_render::{
+        Material, RenderList3D, Renderer3D, Settings3D, StaticInstance, IDENTITY_ROT,
+    };
+    let Some(g) = gpu() else { return };
+    let animated_model = animated_model();
+    let poses = [
+        animated_model.rest_pose().unwrap(),
+        animated_model.sample_clip(0, 1.0).unwrap(),
+    ];
+    let cam = Camera3D::orthographic([0.0, 1.5, 5.0], [0.0, 1.5, 0.0], 2.2);
+    let light = lighting(0.6);
+    let off = PointLightSettings::default();
+    let fixed_model = panel(
+        [-1.1, 0.6, -0.25, 2.3],
+        translated(0.0, 0.0, 0.3),
+        [220, 65, 35],
+        [1.0; 3],
+    );
+    let procedural_surface = surface(
+        &panel(
+            [-1.4, 0.4, 1.4, 2.7],
+            translated(0.0, 0.0, 0.15),
+            [50, 90, 200],
+            [1.0; 3],
+        ),
+        [0.0, 0.0, 1.0],
+    );
+    for format in FORMATS {
+        let t = target(&g, format, EXTENT);
+        let view = g.create_texture_view(&t, None);
+        let mut scene = scene(&g, format);
+        let mut fixed = ModelRenderer::new(g.clone(), format, fixed_model.clone()).unwrap();
+        let mut animated =
+            SkinnedModelRenderer::new(g.clone(), format, animated_model.clone()).unwrap();
+        let mut procedural = Renderer3D::with_settings(g.clone(), format, Settings3D::LOW);
+        let mut list = RenderList3D::new();
+        list.cuboid(
+            [0.0, 1.55, 0.05],
+            IDENTITY_ROT,
+            [1.4, 1.15, 0.1],
+            &Material::new([decode(50), decode(90), decode(200)]).rough(1.0),
+        );
+        let placements = [StaticInstance::default()];
+        let mut frames = Vec::new();
+        for (pose, angle) in poses.iter().zip([0.0, std::f32::consts::PI / 3.0]) {
+            let moving_surface = animated_surface(&animated_model, angle, IDENTITY);
+            let oracle = [
+                surface(&fixed_model, [0.0, 0.0, 1.0]),
+                procedural_surface.clone(),
+                moving_surface.clone(),
+            ];
+            let instances = [SkinnedInstance::new(pose)];
+            let mut previous = None;
+            for reverse in [false, true] {
+                let mut batches = if reverse {
+                    [
+                        ImportedBatch::Skinned {
+                            renderer: &mut animated,
+                            instances: &instances,
+                        },
+                        ImportedBatch::StaticInstances {
+                            renderer: &mut fixed,
+                            instances: &placements,
+                        },
+                        ImportedBatch::Procedural {
+                            renderer: &mut procedural,
+                            list: &list,
+                        },
+                    ]
+                } else {
+                    [
+                        ImportedBatch::Procedural {
+                            renderer: &mut procedural,
+                            list: &list,
+                        },
+                        ImportedBatch::StaticInstances {
+                            renderer: &mut fixed,
+                            instances: &placements,
+                        },
+                        ImportedBatch::Skinned {
+                            renderer: &mut animated,
+                            instances: &instances,
+                        },
+                    ]
+                };
+                draw(&mut scene, &view, EXTENT, &cam, &light, &off, &mut batches).unwrap();
+                let pixels = g.read_texture(&t);
+                let counts = assert_oracle(&pixels, EXTENT, &cam, &oracle, &light, &off);
+                assert!(
+                    counts.iter().all(|&count| count > 20),
+                    "all three paths must remain visible: {counts:?}"
+                );
+                assert_bounds(&animated, std::slice::from_ref(&moving_surface));
+                if let Some(previous) = previous {
+                    assert_eq!(
+                        previous, pixels,
+                        "three-way shared depth changed with batch order"
+                    );
+                }
+                previous = Some(pixels);
+            }
+            frames.push(previous.unwrap());
+        }
+        assert_ne!(
+            frames[0], frames[1],
+            "animation must change actual composed visibility"
+        );
+    }
+}
+
+#[test]
+fn procedural_point_light_matches_diffuse_oracle_and_off_preserves_standalone_pixels() {
+    use orr_render::{Material, RenderList3D, Renderer3D, Settings3D, IDENTITY_ROT};
+    let Some(g) = gpu() else { return };
+    let cam = camera();
+    let light = lighting(0.2);
+    let off = PointLightSettings::default();
+    let on = PointLightSettings {
+        point_light: Some(PointLight {
+            position: [-0.2, 0.3, 1.5],
+            color: [0.5, 0.8, 1.0],
+            intensity: 1.2,
+            range: 3.5,
+        }),
+    };
+    let oracle = [surface(
+        &panel(
+            [-0.9, -0.9, 0.9, 0.9],
+            translated(0.0, 0.0, 0.1),
+            [160, 190, 220],
+            [1.0; 3],
+        ),
+        [0.0, 0.0, 1.0],
+    )];
+    for format in FORMATS {
+        let t = target(&g, format, EXTENT);
+        let view = g.create_texture_view(&t, None);
+        let mut scene = scene(&g, format);
+        let mut renderer = Renderer3D::with_settings(g.clone(), format, Settings3D::LOW);
+        renderer.clear = scene.clear;
+        let mut list = RenderList3D::new();
+        list.lighting = light;
+        list.cuboid(
+            [0.0; 3],
+            IDENTITY_ROT,
+            [0.9, 0.9, 0.1],
+            &Material::new([decode(160), decode(190), decode(220)]).rough(1.0),
+        );
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &cam,
+            &light,
+            &off,
+            &mut [ImportedBatch::Procedural {
+                renderer: &mut renderer,
+                list: &list,
+            }],
+        )
+        .unwrap();
+        let baseline = g.read_texture(&t);
+        assert_oracle(&baseline, EXTENT, &cam, &oracle, &light, &off);
+        renderer.draw(&view, EXTENT, &list, &cam);
+        assert_eq!(
+            g.read_texture(&t),
+            baseline,
+            "point-off composed output must preserve standalone procedural shading"
+        );
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &cam,
+            &light,
+            &on,
+            &mut [ImportedBatch::Procedural {
+                renderer: &mut renderer,
+                list: &list,
+            }],
+        )
+        .unwrap();
+        let lit = g.read_texture(&t);
+        assert_oracle(&lit, EXTENT, &cam, &oracle, &light, &on);
+        assert_ne!(
+            lit, baseline,
+            "point light must change actual procedural pixels"
+        );
+    }
+}

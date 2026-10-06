@@ -4,6 +4,8 @@
 //! This factory does not create a relay/client session. Local seek replays a
 //! document's play history; it is not late-input network rollback.
 
+use std::path::PathBuf;
+
 use orr_edit::{EditError, EditorDoc};
 use orr_reflect::{Scene, TypeRegistry};
 use orr_sample::yard3d_game::{register_reflect, Yard3D, YardConfig};
@@ -45,6 +47,17 @@ pub fn yard3d_doc(config: YardConfig) -> Result<EditorDoc, EditError> {
     )
 }
 
+/// Loads an authored Yard3D scene with the same types, bake hooks and seed as
+/// [`yard3d_doc`]. The supplied scene is authoritative; game setup is not run.
+pub fn yard3d_doc_from_yaml(yaml: &str) -> Result<EditorDoc, EditError> {
+    EditorDoc::from_yaml(
+        yaml,
+        yard3d_types(),
+        Simulation::<Yard3D>::build_registry(),
+        YARD_SEED,
+    )
+}
+
 /// Configures the existing ERP host machinery for the Yard3D vocabulary.
 pub fn configure_yard3d(limits: &mut HostLimits) {
     limits.player_count = YARD_PLAYERS;
@@ -65,6 +78,31 @@ pub fn spawn_yard3d_host(config: YardConfig, mut cfg: ServerConfig) -> Result<Lo
         configure_yard3d(&mut cfg.limits);
         Ok((doc, cfg))
     })
+}
+
+/// Starts a Yard3D host from authored scene text. A configured
+/// `cfg.limits.scene_path` is retained as the `scene.save {write: true}` target;
+/// without one, the document can be exported but cannot be written to disk.
+/// This does not grant clients permission to choose host filesystem paths.
+pub fn spawn_yard3d_yaml_host(yaml: String, mut cfg: ServerConfig) -> Result<LocalHost, String> {
+    LocalHost::spawn::<Yard3D>(move || {
+        let doc = yard3d_doc_from_yaml(&yaml).map_err(|e| match &cfg.limits.scene_path {
+            Some(path) => format!("{}: {e}", path.display()),
+            None => e.to_string(),
+        })?;
+        configure_yard3d(&mut cfg.limits);
+        Ok((doc, cfg))
+    })
+}
+
+/// Reads a scene file on this host and starts its local Yard3D authority.
+/// The same path becomes the default save destination, replacing any previous
+/// `cfg.limits.scene_path`. No host is published if reading or baking fails.
+pub fn spawn_yard3d_scene_host(path: PathBuf, mut cfg: ServerConfig) -> Result<LocalHost, String> {
+    let yaml = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    cfg.limits.scene_path = Some(path);
+    spawn_yard3d_yaml_host(yaml, cfg)
 }
 
 #[cfg(test)]

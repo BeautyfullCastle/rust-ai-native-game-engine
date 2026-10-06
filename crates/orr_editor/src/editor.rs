@@ -198,12 +198,17 @@ pub struct Editor {
     batch_uncertain: bool,
     /// The viewport camera (world units, y up).
     pub camera: Camera,
+    pub camera3d: orr_render::OrbitCamera,
+    yard_frame: crate::viewport3d::YardFrame,
     status: Option<Message>,
     log: Vec<Message>,
     // caches of host answers
     sim: SimState,
     history: History,
     rows: Vec<EntityRow>,
+    yard_rows_checksum: Option<u64>,
+    yard_rows_tick: u64,
+    yard_rows_generation: u64,
     inspect: Option<Inspect>,
     singletons: Vec<(String, Value)>,
     proposals: Vec<ProposalInfo>,
@@ -297,11 +302,16 @@ impl Editor {
             scene_edit_allowed,
             batch_uncertain: false,
             camera: Camera::new([0.0, 0.0], 20.0),
+            camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
+            yard_frame: crate::viewport3d::YardFrame::default(),
             status: None,
             log: Vec::new(),
             sim: SimState::default(),
             history: History::default(),
             rows: Vec::new(),
+            yard_rows_checksum: None,
+            yard_rows_tick: 0,
+            yard_rows_generation: 0,
             inspect: None,
             singletons: Vec::new(),
             proposals: Vec::new(),
@@ -363,6 +373,9 @@ impl Editor {
     fn read_rows(&mut self) -> Result<(), String> {
         let r = self.timed_erp_call("world.query", json!({"limit": ROWS_LIMIT})).map_err(|e| format!("world.query: {e}"))?;
         self.rows = rows_of(&r);
+        self.yard_rows_checksum=r.get("checksum").and_then(orr_remote::wire::parse_checksum);
+        self.yard_rows_tick=r.get("tick").and_then(J::as_u64).unwrap_or(u64::MAX);
+        self.yard_rows_generation=self.change_gen;
         Ok(())
     }
 
@@ -683,7 +696,7 @@ impl Editor {
 
     /// Read-only enablement; the host repeats all admission checks.
     pub fn can_nudge_selection(&self) -> bool {
-        self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
+        self.game() != EditorGame::Yard3D && self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
             && self.batch_supported && self.scene_edit_allowed && !self.batch_uncertain
             && !self.history.in_tx && !self.sim.in_tx && !self.gesture.busy()
             && !self.guid_selection.guids().is_empty()
@@ -765,6 +778,7 @@ impl Editor {
     /// Ctrl-click toggles a document GUID; a handle-only target keeps the
     /// original single inspect path. Refusing a 129th GUID changes nothing.
     pub fn toggle_selection(&mut self, target: Target) -> bool {
+        if self.game() == EditorGame::Yard3D { self.select(Some(target)); return true; }
         let Target::Guid(guid) = target else { self.select(Some(target)); return true };
         if self.rows.iter().all(|row| row.guid.as_ref() != Some(&guid)) {
             self.error("cannot select a GUID absent from the current document rows");
@@ -823,6 +837,7 @@ impl Editor {
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
+        if self.game() == EditorGame::Yard3D { self.camera3d = orr_render::OrbitCamera::new([0.0,2.0,0.0],0.55,0.5,16.0); return; }
         if self.game() == EditorGame::Arena {
             let half = orr_view::fp_to_f32(orr_sample::arena_game::ARENA_HALF);
             self.camera = Camera::new([0.0, 0.0], half * 1.06);
@@ -995,10 +1010,14 @@ impl Editor {
                 self.inflight.rows = false;
                 if let Ok(v) = r {
                     self.rows = rows_of(&v);
+                    self.yard_rows_checksum=v.get("checksum").and_then(orr_remote::wire::parse_checksum);
+                    self.yard_rows_tick=v.get("tick").and_then(J::as_u64).unwrap_or(u64::MAX);
+                    self.yard_rows_generation=gen;
+                    if gen != self.change_gen { self.dirty.rows=true; }
                     if gen == self.change_gen {
                         self.sanitize_selection();
                     }
-                }
+                } else { self.dirty.rows=true; }
             }
             Pend::Inspect(t) => {
                 self.inflight.inspect = false;
@@ -1249,8 +1268,13 @@ impl Editor {
             return;
         }
         let started = Instant::now();
+        if self.game()==EditorGame::Yard3D && self.snapshot.as_ref().is_some_and(|old| old.timeline().is_some()!=s.timeline().is_some() || (s.timeline().is_some()&&s.tick()<old.tick())) { self.mark_changed(); }
         let frame = s.predicted();
         self.bodies = self.backend.game.drawables(frame);
+        if self.game() == EditorGame::Yard3D {
+            self.yard_frame = crate::viewport3d::YardFrame::extract(frame);
+            if (s.timeline().is_none()&&self.yard_rows_checksum!=Some(frame.checksum())) || (s.timeline().is_some()&&self.yard_rows_tick>s.tick()) {self.dirty.rows=true;}
+        }
         self.checksum = frame.checksum();
         let alive = frame.alive_count();
         self.telemetry.snapshot_extract.record(started.elapsed());
@@ -1767,6 +1791,57 @@ impl Editor {
                 false
             }
         }
+    }
+
+    /// The current authoritative 3D snapshot mapped to presentation data.
+    pub fn yard_frame(&self) -> &crate::viewport3d::YardFrame { &self.yard_frame }
+
+    /// The asynchronously queried GUID map must describe this presentation
+    /// generation. Edit rebakes recycle handles, so checksum equality is also
+    /// required. Play preserves the seeded GUID map and versions runtime handles;
+    /// queries from a future tick are withheld after a backwards seek.
+    pub fn yard_rows_coherent(&self)->bool {
+        let Some(snapshot)=&self.snapshot else{return false};
+        !self.dirty.rows&&!self.inflight.rows&&self.yard_rows_generation==self.change_gen&&self.down.is_none()
+            && if snapshot.timeline().is_some(){self.yard_rows_tick<=snapshot.tick()}else{self.yard_rows_checksum==Some(snapshot.predicted().checksum())}
+    }
+
+    /// Nearest collider-proxy selection in the main Yard3D viewport.
+    pub fn pick3d(&self, pixel: [f32;2], size:(u32,u32)) -> Option<Target> {
+        if !self.yard_rows_coherent(){return None;}
+        self.yard_frame.pick(&self.camera3d.camera(),pixel,size,&self.rows)
+    }
+
+    /// Creates one persisted box proxy through the existing Yard3D host.
+    pub fn spawn_yard_body(&mut self, pos: orr_fp::FPVec3) -> bool {
+        if self.game()!=EditorGame::Yard3D || self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
+            self.error("Yard bodies require editable Yard3D scene mode"); return false;
+        }
+        let params=json!({"name":self.fresh_name(),"components":{
+            "orr_physics3d::Body":{"pos":value_to_json(&Value::Vec3(pos)),"kind":"dynamic","inv_mass":1,"inv_inertia":[6,6,6]},
+            "orr_physics3d::Collider":{"shape":{"kind":"box","half_extents":[0.5,0.5,0.5]}}
+        }});
+        match self.call("world.spawn",params) {
+            Ok(r)=>{ let t=r.get("guid").and_then(J::as_str).and_then(Target::parse); self.mark_edited();self.select(t);self.inspect=None;self.dirty.inspect=true;true }
+            Err(e)=>{self.error(format!("spawn Yard body: {e}"));false}
+        }
+    }
+
+    /// Atomic exact XYZ and whole unit-quaternion edit, one document undo entry.
+    /// No float presentation transform is ever written back to the host.
+    pub fn set_yard_transform(&mut self, pos:orr_fp::FPVec3, rotation:[FP;4])->bool {
+        if self.game()!=EditorGame::Yard3D || self.mode()!=Mode::Edit || !self.can_mutate() || self.selected_guids().len()!=1 || self.previewing().is_some() {
+            self.error("Yard transform requires one editable persistent entity");return false;
+        }
+        let Some(target)=self.selection.clone() else {return false};
+        if let Err(e)=self.call("tx.begin",json!({"label":"Yard XYZ and quaternion"})){self.error(e);return false;}
+        let rot=Value::Variant("unit".into(),["x","y","z","w"].into_iter().zip(rotation).map(|(key,value)|(key.into(),Value::Fixed(value))).collect());
+        let result=(||{
+            self.call("world.patch",json!({"entity":target.param(),"component":"orr_physics3d::Body","path":"pos","value":value_to_json(&Value::Vec3(pos))}))?;
+            self.call("world.patch",json!({"entity":target.param(),"component":"orr_physics3d::Body","path":"rot","value":value_to_json(&rot)}))?;
+            self.call("tx.commit",J::Null)?;Ok::<_,String>(())
+        })();
+        match result {Ok(())=>{self.mark_edited();true},Err(e)=>{let _=self.call("tx.rollback",J::Null);self.error(e);self.mark_changed();false}}
     }
 
     /// Spawns a dynamic circle body at `at` (world units) and selects it.

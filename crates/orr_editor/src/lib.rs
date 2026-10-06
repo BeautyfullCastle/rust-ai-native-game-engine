@@ -74,3 +74,9 @@ pub mod animated_bindings;
 pub mod animated_preview;
 #[cfg(feature = "animated-models")]
 pub mod animated_panel;
+
+pub mod viewport3d;
+#[cfg(feature = "models")]
+pub mod model_bindings;
+#[cfg(feature = "models")]
+pub mod model_panel;

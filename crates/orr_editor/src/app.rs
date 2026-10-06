@@ -96,6 +96,9 @@ pub struct UiState {
     /// Entities an agent just edited, pulsing in the viewport (see [`Pulse`]).
     pub pulses: Vec<Pulse>,
     body_drag: Option<BodyDrag>,
+    yard_transform_target: Option<Target>,
+    yard_xyz: [String;3],
+    yard_quat: [String;4],
     input_player: u8,
     take_control: bool,
     #[cfg(feature = "animated-models")]
@@ -198,6 +201,9 @@ pub struct EditorApp {
     pub ui: UiState,
     render_state: Option<egui_wgpu::RenderState>,
     gpu: Option<GpuViewport>,
+    gpu3d: Option<crate::viewport3d::GpuViewport3d>,
+    #[cfg(feature="models")]
+    pub models: crate::model_panel::ModelPanel,
     shot: Option<ScreenshotJob>,
     remote_capture: Option<RemoteCapture>,
     encoder: Option<EncoderWorker>,
@@ -214,7 +220,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, ui: UiState::default(), render_state, gpu: None, shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, ui: UiState::default(), render_state, gpu: None, gpu3d: None, #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Asks for a screenshot of the window after some frames, then quits.
@@ -234,6 +240,8 @@ impl EditorApp {
     }
 
     /// The viewport's GPU texture target, once it has drawn (readback in tests).
+    pub fn viewport3d_gpu(&self) -> Option<&crate::viewport3d::GpuViewport3d> { self.gpu3d.as_ref() }
+
     pub fn viewport_gpu(&self) -> Option<&GpuViewport> {
         self.gpu.as_ref()
     }
@@ -478,7 +486,7 @@ impl EditorApp {
                 None => ui.weak("ready"),
             };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let gpu = self.gpu.as_ref().map_or_else(|| "no GPU".to_string(), |g| g.gpu().adapter_name());
+                let gpu = self.gpu3d.as_ref().map(|g|g.gpu().adapter_name()).or_else(||self.gpu.as_ref().map(|g|g.gpu().adapter_name())).unwrap_or_else(||"no GPU".to_string());
                 ui.weak(gpu);
                 ui.weak(format!("checksum {:#018x}", self.editor.checksum()));
                 if let Some((url, clients)) = self.editor.erp_status() {
@@ -501,6 +509,9 @@ impl EditorApp {
             if self.editor.game() == crate::game::EditorGame::PhysGame && ui.button("+ Body").on_hover_text("Spawn a dynamic circle at the view center").clicked() {
                 let c = self.editor.camera.center;
                 self.editor.spawn_body(c);
+            }
+            if self.editor.game() == crate::game::EditorGame::Yard3D && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new("+ 3D Box")).clicked() {
+                self.editor.spawn_yard_body(orr_fp::FPVec3::new(FP::ZERO,FP::from_int(5),FP::ZERO));
             }
             if ui.add_enabled(self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).clicked() {
                 self.editor.delete_selected();
@@ -541,12 +552,16 @@ impl EditorApp {
 
     fn inspector(&mut self, ui: &mut Ui) {
         ui.heading("Inspector");
+        if self.editor.game()==crate::game::EditorGame::Yard3D { self.yard_transform(ui); }
+        #[cfg(feature="models")]
+        self.models.show(ui,&self.editor);
         #[cfg(feature = "sprites")]
         self.sprites.show(ui, &self.editor);
         #[cfg(feature = "animated-models")]
         if ui.add_enabled(self.editor.game() == crate::game::EditorGame::Arena && self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
         let count = self.editor.selected_guids().len();
-        if count > 0 {
+        if count>0&&self.editor.game()==crate::game::EditorGame::Yard3D {ui.label("Single 3D selection · Esc to clear");}
+        if count > 0 && self.editor.game()!=crate::game::EditorGame::Yard3D {
             ui.label(format!("{count} selected · Ctrl-click to toggle · Esc to clear"));
             let enabled = self.editor.can_nudge_selection();
             ui.horizontal_wrapped(|ui| {
@@ -646,9 +661,65 @@ impl EditorApp {
         }
     }
 
+    fn yard_transform(&mut self, ui:&mut Ui) {
+        let target=self.editor.selection().cloned();
+        let reset=self.ui.yard_transform_target!=target;
+        if reset || ui.button("Read 3D transform").clicked() {
+            if let Some(body)=self.editor.inspect().and_then(|inspect|inspect.components.iter().find(|(name,_)|name=="orr_physics3d::Body").map(|(_,value)|value)) {
+                if let Some(Value::Vec3(pos))=body.field("pos") { self.ui.yard_xyz=[orr_reflect::decimal::fp_to_decimal(pos.x),orr_reflect::decimal::fp_to_decimal(pos.y),orr_reflect::decimal::fp_to_decimal(pos.z)]; }
+                if let Some(rot)=body.field("rot") { for (i,key) in ["x","y","z","w"].into_iter().enumerate(){ if let Some(Value::Fixed(v))=rot.field(key){self.ui.yard_quat[i]=orr_reflect::decimal::fp_to_decimal(*v);} } }
+                self.ui.yard_transform_target=target;
+            }
+        }
+        ui.collapsing("Exact 3D transform",|ui|{
+            ui.add_enabled_ui(self.editor.mode()==Mode::Edit && self.editor.can_mutate() && self.editor.selected_guids().len()==1,|ui|{
+                for (i,axis) in ["X","Y","Z"].into_iter().enumerate(){ui.horizontal(|ui|{let label=ui.label(format!("Position {axis}"));ui.add(egui::TextEdit::singleline(&mut self.ui.yard_xyz[i]).id(egui::Id::new(("yard_xyz",i))).hint_text(format!("Position {axis}"))).labelled_by(label.id);});}
+                ui.label("Unit quaternion (x, y, z, w)");
+                for (i,axis) in ["x","y","z","w"].into_iter().enumerate(){ui.horizontal(|ui|{let label=ui.label(format!("Rotation {axis}"));ui.add(egui::TextEdit::singleline(&mut self.ui.yard_quat[i]).id(egui::Id::new(("yard_quat",i))).hint_text(format!("Rotation {axis}"))).labelled_by(label.id);});}
+                if ui.button("Apply XYZ + rotation").clicked(){
+                    let pos:Result<Vec<FP>,_>=self.ui.yard_xyz.iter().map(|v|v.parse()).collect();
+                    let rot:Result<Vec<FP>,_>=self.ui.yard_quat.iter().map(|v|v.parse()).collect();
+                    match (pos,rot){(Ok(p),Ok(q))=>{self.editor.set_yard_transform(orr_fp::FPVec3::new(p[0],p[1],p[2]),[q[0],q[1],q[2],q[3]]);},_=>self.editor.error("3D transform requires exact finite decimal values")}
+                }
+            });
+        });
+    }
+
+    fn yard_viewport(&mut self,ui:&mut Ui){
+        let (rect,resp)=ui.allocate_exact_size(ui.available_size(),Sense::click_and_drag());
+        let ppp=ui.ctx().pixels_per_point();
+        let px=(((rect.width()*ppp).round() as u32).clamp(1,8192),((rect.height()*ppp).round() as u32).clamp(1,8192));
+        self.ui.viewport_rect=Some(rect);self.ui.viewport_px=px;
+        if resp.dragged_by(PointerButton::Secondary){let d=resp.drag_delta();self.editor.camera3d.orbit([d.x*ppp,d.y*ppp]);}
+        if resp.dragged_by(PointerButton::Middle){let d=resp.drag_delta();self.editor.camera3d.pan([d.x*ppp,d.y*ppp],px);}
+        if resp.hovered(){let scroll=ui.input(|i|i.smooth_scroll_delta.y);if scroll!=0.0 {self.editor.camera3d.zoom(scroll*0.01);}}
+        if resp.clicked_by(PointerButton::Primary)&&self.editor.previewing().is_none(){if let Some(at)=resp.interact_pointer_pos(){let target=self.editor.pick3d([(at.x-rect.min.x)*ppp,(at.y-rect.min.y)*ppp],px);self.editor.select(target);}}
+        let selected=if self.editor.yard_rows_coherent(){self.editor.selection().and_then(|t|self.editor.row_of(t)).map(|r|r.entity)}else{None};
+        #[cfg(feature="models")]
+        let placements=self.models.placements(&self.editor);
+        #[cfg(feature="models")]
+        let hidden:Vec<_>=placements.iter().map(|p|p.entity).collect();
+        #[cfg(not(feature="models"))]
+        let hidden=Vec::new();
+        let list=self.editor.yard_frame().list(&hidden,selected);
+        if let Some(rs)=&self.render_state {
+            let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::new(rs,px));
+            match gpu.render(px,&list,&self.editor.camera3d.camera(),#[cfg(feature="models")] &placements){
+                Ok(tex)=>{ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}
+                Err(error)=>{if let Some(tex)=gpu.last_texture(){ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);}
+            }
+        } else {
+            ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
+            ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
+        }
+        ui.painter().text(rect.left_top()+egui::vec2(10.0,10.0),egui::Align2::LEFT_TOP,"Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan",egui::FontId::proportional(12.0),Color32::WHITE);
+        if self.editor.previewing().is_some(){ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"3D proposal preview unavailable; displaying live host snapshot",egui::FontId::proportional(14.0),Color32::YELLOW);}
+    }
+
     // ---- viewport ----
 
     fn viewport(&mut self, ui: &mut Ui) {
+        if self.editor.game()==crate::game::EditorGame::Yard3D { self.yard_viewport(ui);return; }
         let (rect, resp) = if self.editor.game() == crate::game::EditorGame::Arena {
             let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
             (rect, ui.interact(rect, egui::Id::new("arena_keyboard_viewport"), Sense::click_and_drag()))
