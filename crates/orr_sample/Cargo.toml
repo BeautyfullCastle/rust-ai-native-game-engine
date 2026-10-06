@@ -12,11 +12,13 @@ workspace = true
 
 [features]
 default = []
+input-actions = ["dep:orr_input"]
 audio = ["dep:orr_audio"]
 audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+orr_input = { path = "../orr_input", optional = true }
 orr_sprite = { path = "../orr_sprite", optional = true }
 orr_package = { path = "../orr_package", optional = true }
 orr_audio = { path = "../orr_audio", optional = true }
