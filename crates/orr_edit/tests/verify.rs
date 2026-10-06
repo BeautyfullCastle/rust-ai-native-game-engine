@@ -230,6 +230,101 @@ fn cancellable_verify_stops_before_start_and_between_ticks() {
 }
 
 #[test]
+fn scripted_input_cancellation_skips_later_players_and_simulation() {
+    let doc = demo_doc();
+    let checksum = doc.frame().checksum();
+    for cancel_slot in 0..3 {
+        let cancel = AtomicBool::new(false);
+        let calls = AtomicUsize::new(0);
+        let inputs = VerifyInputs::scripted(4, 3, |tick, slot| {
+            assert_eq!(tick, 1);
+            assert_eq!(usize::from(slot.0), calls.fetch_add(1, Ordering::Relaxed));
+            if slot.0 == cancel_slot {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            script(tick, slot)
+        });
+        struct InitialSampleOnly(AtomicUsize);
+        impl Metrics for InitialSampleOnly {
+            fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+                assert_eq!(
+                    frame.tick(),
+                    0,
+                    "cancelled inputs must not reach simulation"
+                );
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+        }
+        let metrics = InitialSampleOnly(AtomicUsize::new(0));
+        let sequential = VerifyOptions {
+            parallel: false,
+            sample_every: 1,
+            ..opts()
+        };
+        let result = orr_edit::verify_frames_cancellable::<PhysGame>(
+            doc.frame(),
+            doc.frame(),
+            &inputs,
+            &metrics,
+            &sequential,
+            &cancel,
+        );
+        assert!(matches!(result, Err(EditError::VerifyCancelled)));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            usize::from(cancel_slot) + 1,
+            "no later player callback is invoked"
+        );
+        assert_eq!(
+            metrics.0.load(Ordering::Relaxed),
+            1,
+            "the candidate side never starts"
+        );
+        assert_eq!(doc.frame().checksum(), checksum);
+    }
+}
+
+#[test]
+fn uncancelled_scripted_players_preserve_complete_reports() {
+    let doc = demo_doc();
+    for players in [0, 1, 3] {
+        for parallel in [false, true] {
+            let options = VerifyOptions {
+                parallel,
+                sample_every: 1,
+                ..opts()
+            };
+            let expected = orr_edit::verify_frames::<PhysGame>(
+                doc.frame(),
+                doc.frame(),
+                &VerifyInputs::scripted(16, players, script),
+                &PhysMetrics,
+                &options,
+            )
+            .unwrap();
+            let calls = AtomicUsize::new(0);
+            let inputs = VerifyInputs::scripted(16, players, |tick, slot| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                script(tick, slot)
+            });
+            let actual = orr_edit::verify_frames_cancellable::<PhysGame>(
+                doc.frame(),
+                doc.frame(),
+                &inputs,
+                &PhysMetrics,
+                &options,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual.ticks, 16);
+            assert_eq!(calls.load(Ordering::Relaxed), 2 * 16 * usize::from(players));
+        }
+    }
+}
+
+#[test]
 fn cancellable_verify_does_not_return_a_report_when_cancelled_after_final_tick() {
     let doc = demo_doc();
     let cancel = Arc::new(AtomicBool::new(false));
