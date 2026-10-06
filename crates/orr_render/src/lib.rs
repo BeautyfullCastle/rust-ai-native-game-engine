@@ -57,3 +57,8 @@ pub mod sprite_renderer;
 pub use sprite_list::{SpriteDrawList, SpriteInstance};
 #[cfg(feature = "sprites")]
 pub use sprite_renderer::{SpriteRenderError, SpriteRenderer};
+
+#[cfg(feature = "models")]
+pub mod model_renderer;
+#[cfg(feature = "models")]
+pub use model_renderer::{ModelRenderer, ModelRenderError};
