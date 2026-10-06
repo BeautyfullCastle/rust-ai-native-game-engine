@@ -1,0 +1,33 @@
+{
+  "stage": "diagnostic",
+  "command": [
+    "taskset",
+    "-c",
+    "0",
+    "/workspace/scratch/edd3c9d10b8b/su-physics-phase-logs/phase_costs"
+  ],
+  "cwd": "/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs",
+  "limit_seconds": 120,
+  "free_floor_bytes": 1073741824,
+  "utc_start": "2026-10-06T00:31:02.433546+00:00",
+  "free_start_bytes": 1323585536,
+  "minimum_free_bytes": 1323225088,
+  "aborted": false,
+  "abort_reason": null,
+  "pid": 200,
+  "initial_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "exit_code": 0,
+  "elapsed_seconds": 7.012186390005809,
+  "utc_end": "2026-10-06T00:31:09.445752+00:00",
+  "free_end_bytes": 1323130880
+}
