@@ -73,7 +73,12 @@ mod tests {
     use orr_terrain::{Edit, TerrainDocument};
     #[test]
     fn edited_package_is_reloaded_isolated_capability_checked_and_tamper_checked() {
-        let tmp = tempfile::tempdir().unwrap();
+        // Resolve only the trusted system-temp root before creating fixture content.
+        // macOS may use /var -> /private/var; package inputs must still reject links.
+        let temp_root = std::env::temp_dir();
+        #[cfg(unix)]
+        let temp_root = std::fs::canonicalize(temp_root).unwrap();
+        let tmp = tempfile::tempdir_in(temp_root).unwrap();
         let root = tmp.path().join("project");
         let source = tmp.path().join("source");
         let mut doc = TerrainDocument::new(crate::fixture());
