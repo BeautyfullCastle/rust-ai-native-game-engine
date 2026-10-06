@@ -11,7 +11,9 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+#[cfg(not(feature = "input-actions"))]
+use winit::keyboard::KeyCode;
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 use crate::arena_audio::{ArenaAudio, AudioMode};
@@ -24,6 +26,8 @@ use orr_render::{extract_items, Camera, RenderList, WindowRenderer};
 pub struct Options {
     /// Which adapter runs the sim, for the window title and the log.
     pub label: String,
+    #[cfg(feature = "input-actions")]
+    pub input_map: Option<orr_input::ActionMap>,
     pub vsync: bool,
     /// Arena-only audio policy; the physics sample ignores it.
     pub audio: AudioMode,
@@ -91,6 +95,8 @@ struct App<B: Bridge<Arena>> {
     opts: Options,
     gfx: Option<Gfx>,
     keys: Keys,
+    #[cfg(feature = "input-actions")]
+    controls: crate::arena_input::ArenaControls,
     sent_keys: Option<Keys>,
     items: Vec<RenderItem>,
     list: RenderList,
@@ -105,6 +111,26 @@ struct App<B: Bridge<Arena>> {
 }
 
 impl<B: Bridge<Arena>> App<B> {
+    fn publish_input(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        #[cfg(feature = "input-actions")]
+        { self.keys = self.controls.keys(); }
+        if self.sent_keys != Some(self.keys) {
+            #[cfg(feature = "input-actions")]
+            let result = self.controls.publish(&mut self.bridge);
+            #[cfg(not(feature = "input-actions"))]
+            let result = self.bridge.set_input(self.bridge.local_slot(), self.keys.to_input());
+            match result {
+                Ok(()) => self.sent_keys = Some(self.keys),
+                Err(error) => {
+                    self.error = Some(format!("set input: {error:?}"));
+                    event_loop.exit();
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let dt = now - self.last_frame;
@@ -113,10 +139,7 @@ impl<B: Bridge<Arena>> App<B> {
             self.worst_frame = self.worst_frame.max(dt);
         }
 
-        if self.sent_keys != Some(self.keys) {
-            self.sent_keys = Some(self.keys);
-            let _ = self.bridge.set_input(self.bridge.local_slot(), self.keys.to_input());
-        }
+        if !self.publish_input(event_loop) { return; }
         self.bridge.update(dt);
         let update = self.bridge.poll_view();
         let snapshot = update.snapshot.clone();
@@ -183,9 +206,13 @@ impl<B: Bridge<Arena>> App<B> {
             let fps = self.window_frames as f32 / window_secs;
             let stats = snapshot.as_ref().map(|s| (s.tick(), s.verified_tick(), s.stats()));
             if let (Some(gfx), Some((tick, verified, stats))) = (&self.gfx, stats) {
+                #[cfg(feature = "input-actions")]
+                let input_status = if self.controls.paused() { " | INPUT PAUSED (pause binding resumes)" } else { "" };
+                #[cfg(not(feature = "input-actions"))]
+                let input_status = "";
                 let net = self.opts.relay.as_ref().map(|m| relay_title(&m.status())).unwrap_or_default();
                 gfx.window.set_title(&format!(
-                    "Orrery arena [{}] fps {:.0} | tick {} (verified {}) | rollbacks {} (deepest {}){net}",
+                    "Orrery arena [{}] fps {:.0} | tick {} (verified {}) | rollbacks {} (deepest {}){net}{input_status}",
                     self.opts.label, fps, tick, verified, stats.rollbacks, stats.max_rollback_depth
                 ));
             }
@@ -268,9 +295,18 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
                     gfx.renderer.resize(size.width, size.height);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
+                #[cfg(not(feature = "input-actions"))]
+                let _ = is_synthetic;
                 let down = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    #[cfg(feature = "input-actions")]
+                    if let Some(button) = crate::arena_input::keyboard(code) {
+                        if self.controls.button(button, down, event.repeat, is_synthetic && down).quit {
+                            event_loop.exit();
+                        }
+                    }
+                    #[cfg(not(feature = "input-actions"))]
                     match code {
                         KeyCode::KeyA | KeyCode::ArrowLeft => self.keys.left = down,
                         KeyCode::KeyD | KeyCode::ArrowRight => self.keys.right = down,
@@ -282,9 +318,25 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
                     }
                 }
             }
+            WindowEvent::Focused(focused) => {
+                #[cfg(feature = "input-actions")]
+                self.controls.set_focused(focused);
+                if !focused { self.keys = Keys::default(); }
+            }
+            #[cfg(feature = "input-actions")]
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(button) = crate::arena_input::mouse(button) {
+                    if self.controls.button(button, state == ElementState::Pressed, false, false).quit {
+                        event_loop.exit();
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}
         }
+        // Threaded bridges advance even when redraws are throttled/minimized.
+        // Publish releases/focus loss/pause immediately at the event boundary.
+        self.publish_input(event_loop);
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
@@ -330,6 +382,10 @@ fn run_inner<B: Bridge<Arena>>(
         remote_mode: opts.remote_mode,
         local_slot,
     };
+    #[cfg(feature = "input-actions")]
+    let controls = crate::arena_input::ArenaControls::new(
+        opts.input_map.clone().unwrap_or_else(crate::arena_input::default_map),
+    )?;
     let mut app = App {
         bridge,
         #[cfg(feature = "sprites")]
@@ -339,6 +395,8 @@ fn run_inner<B: Bridge<Arena>>(
         opts,
         gfx: None,
         keys: Keys::default(),
+        #[cfg(feature = "input-actions")]
+        controls,
         sent_keys: None,
         items: Vec::new(),
         list: RenderList::new(),

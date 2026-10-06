@@ -6,8 +6,9 @@
 //! All instances share one fresh depth/color pass. This is not an overlay into
 //! the procedural renderer's depth buffer; shadows, PBR, and HDR are not supported.
 use crate::{
-    math3::{cross, dot, normalize, sub, Mat4},
-    Camera3D, Lighting, Projection,
+    math3::Mat4,
+    model_renderer::{prepare_globals, Globals, ModelRenderError},
+    Camera3D, Lighting,
 };
 use bytemuck::{Pod, Zeroable};
 use orr_model::{
@@ -88,16 +89,6 @@ struct Vertex {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Globals {
-    view_proj: Matrix4,
-    direction: [f32; 4],
-    sun: [f32; 4],
-    sky: [f32; 4],
-    ground: [f32; 4],
-    params: [f32; 4],
-}
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
 struct Object {
     world: Matrix4,
     normal: Matrix4,
@@ -114,6 +105,12 @@ struct InstanceDraw<B: Rhi> {
     uniform: B::Buffer,
     bind: B::BindGroup,
 }
+/// Fully validated CPU state. Kept separate until the entire scene is admitted.
+pub(crate) struct PreparedSkinned {
+    objects: Vec<Object>,
+    bounds: Vec<SkinnedBounds>,
+}
+
 struct Depth<B: Rhi> {
     _texture: B::Texture,
     view: B::TextureView,
@@ -354,28 +351,70 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         {
             return Err(SkinnedRenderError::InvalidTarget);
         }
-        let count = instances
-            .len()
+        self.draw_count(instances.len())?;
+        let globals =
+            prepare_globals(self.format, size, camera, lighting).map_err(|error| match error {
+                ModelRenderError::InvalidCamera => SkinnedRenderError::InvalidCamera,
+                ModelRenderError::InvalidLighting => SkinnedRenderError::InvalidLighting,
+                ModelRenderError::InvalidTarget => SkinnedRenderError::InvalidTarget,
+                ModelRenderError::Upload(error) => SkinnedRenderError::Upload(error),
+            })?;
+        let prepared = self.prepare_instances(instances)?;
+        if self.depth.as_ref().is_none_or(|d| d.size != size) {
+            let texture = self.rhi.create_texture(&TextureDesc {
+                label: "skinned depth",
+                width: size.0,
+                height: size.1,
+                format: TextureFormat::Depth32Float,
+                usage: TextureUsage::RENDER_ATTACHMENT,
+                sample_count: 1,
+                view_formats: &[],
+            });
+            let depth_view = self.rhi.create_texture_view(&texture, None);
+            self.depth = Some(Depth {
+                _texture: texture,
+                view: depth_view,
+                size,
+            });
+        }
+        self.write_frame(&globals, &prepared);
+        let mut encoder = self.rhi.create_encoder("skinned frame");
+        // Exactly one pass/clear for all instances, including an empty scene.
+        self.encode_frame(
+            &prepared,
+            &mut encoder,
+            &ColorAttachment {
+                view,
+                clear: Some(self.clear),
+                resolve: None,
+            },
+            &DepthAttachment {
+                view: &self.depth.as_ref().expect("depth allocated").view,
+                clear: Some(1.0),
+                store: false,
+            },
+        );
+        self.rhi.submit(encoder);
+        self.commit_frame(prepared);
+        Ok(())
+    }
+
+    pub(crate) fn draw_count(&self, instance_count: usize) -> Result<usize, SkinnedRenderError> {
+        let count = instance_count
             .checked_mul(self.geometry.len())
             .ok_or(SkinnedRenderError::InstanceLimit)?;
-        if instances.len() > MAX_SKINNED_INSTANCES || count > MAX_SKINNED_DRAWS {
+        if instance_count > MAX_SKINNED_INSTANCES || count > MAX_SKINNED_DRAWS {
             return Err(SkinnedRenderError::InstanceLimit);
         }
-        let view_proj = validate_camera(camera, size)?;
-        let direction = normalize(lighting.direction);
-        if lighting.shadows
-            || !lighting.direction.iter().all(|v| v.is_finite())
-            || dot(direction, direction) < 0.5
-            || !lighting
-                .color
-                .iter()
-                .chain(&lighting.sky)
-                .chain(&lighting.ground)
-                .chain([&lighting.intensity, &lighting.ambient, &lighting.exposure])
-                .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1e4)
-        {
-            return Err(SkinnedRenderError::InvalidLighting);
-        }
+        Ok(count)
+    }
+
+    /// Pure CPU validation; no depth/cache allocation, writes, or bound mutation.
+    pub(crate) fn prepare_instances(
+        &self,
+        instances: &[SkinnedInstance<'_>],
+    ) -> Result<PreparedSkinned, SkinnedRenderError> {
+        let count = self.draw_count(instances.len())?;
         // Every pose (including singular blended normals) and placement is checked
         // before the first GPU write. Failed submission keeps old pixels/bounds.
         let bounds: Vec<_> = instances
@@ -413,23 +452,12 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                 });
             }
         }
-        if self.depth.as_ref().is_none_or(|d| d.size != size) {
-            let texture = self.rhi.create_texture(&TextureDesc {
-                label: "skinned depth",
-                width: size.0,
-                height: size.1,
-                format: TextureFormat::Depth32Float,
-                usage: TextureUsage::RENDER_ATTACHMENT,
-                sample_count: 1,
-                view_formats: &[],
-            });
-            let depth_view = self.rhi.create_texture_view(&texture, None);
-            self.depth = Some(Depth {
-                _texture: texture,
-                view: depth_view,
-                size,
-            });
-        }
+        Ok(PreparedSkinned { objects, bounds })
+    }
+
+    /// Allocate only uniform slots, then upload the already validated frame.
+    pub(crate) fn write_frame(&mut self, globals: &Globals, prepared: &PreparedSkinned) {
+        let count = prepared.objects.len();
         // Cache one slot for every instance/primitive pair. Rewriting one shared
         // buffer between recorded draws would make all instances see the last pose.
         while self.draws.len() < count {
@@ -460,30 +488,26 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             );
             self.draws.push(InstanceDraw { uniform, bind });
         }
-        let vector = |v: [f32; 3], w| [v[0], v[1], v[2], w];
-        self.rhi.write_buffer(
-            &self.globals,
-            0,
-            bytemuck::bytes_of(&Globals {
-                view_proj,
-                direction: vector(direction, 0.0),
-                sun: vector(lighting.color, lighting.intensity),
-                sky: vector(lighting.sky, lighting.ambient),
-                ground: vector(lighting.ground, 0.0),
-                params: [
-                    lighting.exposure,
-                    if lighting.tonemap { 1.0 } else { 0.0 },
-                    if self.format.is_srgb() { 0.0 } else { 1.0 },
-                    0.0,
-                ],
-            }),
-        );
-        let mut commands = vec![Command::SetPipeline(&self.pipeline)];
-        for (i, object) in objects.iter().enumerate() {
-            let draw = &self.draws[i];
-            let geometry = &self.geometry[i % self.geometry.len()];
+        self.rhi
+            .write_buffer(&self.globals, 0, bytemuck::bytes_of(globals));
+        for (draw, object) in self.draws.iter().zip(&prepared.objects) {
             self.rhi
                 .write_buffer(&draw.uniform, 0, bytemuck::bytes_of(object));
+        }
+    }
+
+    /// Records into caller-owned attachments without allocating private depth.
+    pub(crate) fn encode_frame(
+        &self,
+        prepared: &PreparedSkinned,
+        encoder: &mut B::Encoder,
+        color: &ColorAttachment<'_, B>,
+        depth: &DepthAttachment<'_, B>,
+    ) {
+        let mut commands = vec![Command::SetPipeline(&self.pipeline)];
+        for i in 0..prepared.objects.len() {
+            let draw = &self.draws[i];
+            let geometry = &self.geometry[i % self.geometry.len()];
             commands.extend([
                 Command::SetBindGroup(0, &draw.bind),
                 Command::SetVertexBuffer(0, &geometry.vertices),
@@ -495,79 +519,24 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                 },
             ]);
         }
-        let mut encoder = self.rhi.create_encoder("skinned frame");
-        // Exactly one pass/clear for all instances, including an empty scene.
         self.rhi.encode_pass(
-            &mut encoder,
+            encoder,
             "skinned models",
-            Some(&ColorAttachment {
-                view,
-                clear: Some(self.clear),
-                resolve: None,
-            }),
-            Some(&DepthAttachment {
-                view: &self.depth.as_ref().expect("depth allocated").view,
-                clear: Some(1.0),
-                store: false,
-            }),
+            Some(color),
+            Some(depth),
             &commands,
         );
-        self.rhi.submit(encoder);
-        self.bounds = bounds;
-        Ok(())
+    }
+
+    /// Publish bounds only after the complete encoder has been submitted.
+    pub(crate) fn commit_frame(&mut self, prepared: PreparedSkinned) {
+        self.bounds = prepared.bounds;
     }
 }
+
 fn validate_placement(transform: Matrix4) -> Result<Matrix4, SkinnedRenderError> {
     if orr_model::determinant(transform) <= 0.0 {
         return Err(SkinnedRenderError::InvalidPlacement);
     }
     orr_model::normal_matrix(transform).map_err(|_| SkinnedRenderError::InvalidPlacement)
-}
-fn validate_camera(
-    camera: &Camera3D,
-    size: (u32, u32),
-) -> Result<[[f32; 4]; 4], SkinnedRenderError> {
-    let f = sub(camera.target, camera.eye);
-    // Match Camera3D::view / Mat4::look_at, which crosses the normalized forward.
-    let right = cross(normalize(f), camera.up);
-    if !camera
-        .eye
-        .iter()
-        .chain(&camera.target)
-        .chain(&camera.up)
-        .all(|v| v.is_finite())
-        || !dot(f, f).is_finite()
-        || dot(f, f) < 1e-12
-        || !dot(right, right).is_finite()
-        || dot(right, right) < 1e-12
-    {
-        return Err(SkinnedRenderError::InvalidCamera);
-    }
-    let valid = match camera.projection {
-        Projection::Perspective { fov_y, near, far } => {
-            fov_y.is_finite()
-                && fov_y > 0.0
-                && fov_y < std::f32::consts::PI
-                && near.is_finite()
-                && near > 0.0
-                && far.is_finite()
-                && far > near
-        }
-        Projection::Orthographic {
-            half_height,
-            near,
-            far,
-        } => {
-            half_height.is_finite()
-                && half_height >= 1e-6
-                && near.is_finite()
-                && far.is_finite()
-                && far > near
-        }
-    };
-    let matrix = camera.view_proj(size.0 as f32 / size.1 as f32).0;
-    if !valid || !matrix.iter().flatten().all(|v| v.is_finite()) {
-        return Err(SkinnedRenderError::InvalidCamera);
-    }
-    Ok(matrix)
 }
