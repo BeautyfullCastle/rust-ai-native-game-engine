@@ -3163,6 +3163,7 @@ dependencies = [
  "orr_ecs",
  "orr_edit",
  "orr_fp",
+ "orr_package",
  "orr_reflect",
  "orr_remote",
  "orr_render",
@@ -3170,9 +3171,12 @@ dependencies = [
  "orr_sample",
  "orr_session",
  "orr_sim",
+ "orr_sprite",
  "orr_view",
  "png 0.17.16",
+ "serde",
  "serde_json",
+ "tempfile",
  "winit",
 ]
 
@@ -3220,6 +3224,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_input"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "orr_mcp"
 version = "0.0.1"
 dependencies = [
@@ -3241,6 +3253,32 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "orr_navigation"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_terrain",
+ "sha2",
+]
+
+[[package]]
+name = "orr_navigation_view"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_model",
+ "orr_navigation",
+ "orr_package",
+ "orr_render",
+ "orr_terrain",
+ "orr_terrain_view",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3401,6 +3439,9 @@ name = "orr_sample"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "egui",
+ "egui-wgpu",
+ "egui-winit",
  "lz4_flex",
  "orr_audio",
  "orr_bridge",
@@ -3408,6 +3449,7 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_games",
+ "orr_input",
  "orr_package",
  "orr_physics",
  "orr_physics3d",
@@ -3424,6 +3466,7 @@ dependencies = [
  "orr_viewstream",
  "orr_web",
  "png 0.18.1",
+ "ttf-parser",
  "winit",
 ]
 
@@ -3478,6 +3521,28 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "orr_terrain"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "sha2",
+]
+
+[[package]]
+name = "orr_terrain_view"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_model",
+ "orr_package",
+ "orr_render",
+ "orr_terrain",
+ "png 0.18.1",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
