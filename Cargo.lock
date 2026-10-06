@@ -3393,6 +3393,9 @@ name = "orr_sample"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "egui",
+ "egui-wgpu",
+ "egui-winit",
  "lz4_flex",
  "orr_audio",
  "orr_bridge",
@@ -3417,6 +3420,7 @@ dependencies = [
  "orr_viewstream",
  "orr_web",
  "png 0.18.1",
+ "ttf-parser",
  "winit",
 ]
 
