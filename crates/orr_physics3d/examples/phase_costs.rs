@@ -15,6 +15,10 @@ use common::scenes::{bench_field, bench_pile};
 use orr_ecs::Frame;
 use orr_physics3d::{step, step_probed, Phase, PhysicsState, Scratch, StepStats};
 use std::hint::black_box;
+#[expect(
+    clippy::disallowed_types,
+    reason = "Wall clocks belong to this diagnostic executable, never to simulation state."
+)]
 use std::time::Instant;
 
 const PHASE_COUNT: usize = 9;
@@ -88,6 +92,10 @@ fn warmed(mut frame: Frame, ticks: u32) -> Frame {
     frame
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "Wall clocks measure diagnostic phase boundaries outside simulation state."
+)]
 fn measured_tick(frame: &mut Frame, scratch: &mut Scratch) -> TickRecord {
     frame.set_tick(frame.tick() + 1);
     let mut phases = PhaseTimes::default();
@@ -124,6 +132,10 @@ fn stats_values(stats: StepStats) -> [u32; 6] {
     ]
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "Wall clocks measure diagnostic snapshot copies outside simulation state."
+)]
 fn run_case(
     name: &str,
     mut frame: Frame,
@@ -232,6 +244,10 @@ fn accumulator_self_check() {
     assert_eq!(early.calls, [1, 0, 0, 0, 0, 0, 0, 0, 1]);
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "Wall clocks calibrate diagnostic probe overhead outside simulation state."
+)]
 fn clock_calibration() {
     // Empty clock brackets are a timer-resolution/overhead diagnostic only.
     // They do not reproduce phase callbacks, and are never subtracted from data.
