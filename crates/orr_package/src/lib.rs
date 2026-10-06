@@ -582,12 +582,26 @@ fn no_links(path: &Path) -> Result<()> {
     } else {
         std::env::current_dir()?.join(path)
     };
+    if !absolute.is_absolute() {
+        return fail("absolute path required after resolving current directory");
+    }
     let mut current = PathBuf::new();
-    for component in absolute.components() {
+    let mut components = absolute.components().peekable();
+    while let Some(component) = components.next() {
         if component == std::path::Component::ParentDir {
             return fail("parent traversal rejected");
         }
         current.push(component);
+        // A Windows prefix is not a directory: canonicalize produces verbatim
+        // paths whose bare prefix (e.g. \\?\C:) names a device, not its root.
+        // Wait for RootDir, then check the root and every actual ancestor.
+        // A verbatim UNC share can itself be the root with no RootDir component;
+        // in that case the prefix must be checked rather than skipped.
+        if matches!(component, std::path::Component::Prefix(_))
+            && components.peek() == Some(&std::path::Component::RootDir)
+        {
+            continue;
+        }
         let m = fs::symlink_metadata(&current)?;
         if m.file_type().is_symlink() {
             return fail(format!("symlink rejected: {}", current.display()));
@@ -671,6 +685,29 @@ mod tests {
         #[cfg(unix)]
         let root = fs::canonicalize(root).unwrap();
         tempfile::tempdir_in(root).unwrap()
+    }
+
+    #[test]
+    fn canonical_paths_check_root_and_each_existing_component() {
+        let tmp = fixture_dir();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        // On Windows this is the verbatim path returned by Project::open.
+        no_links(&root).unwrap();
+        let volume_root = root.ancestors().last().unwrap();
+        no_links(volume_root).unwrap();
+        let nested = root.join("nested");
+        safe_mkdir(&nested).unwrap();
+        write_sync(&nested.join("asset.txt"), b"checked").unwrap();
+        no_links(&nested.join("asset.txt")).unwrap();
+        assert!(no_links(&nested.join("missing")).is_err());
+        // Appending text preserves ParentDir even for verbatim Windows paths;
+        // PathBuf::push would normalize it away before no_links sees it.
+        let mut traversal = nested.as_os_str().to_os_string();
+        traversal.push(format!("{}..", std::path::MAIN_SEPARATOR));
+        assert!(no_links(Path::new(&traversal))
+            .unwrap_err()
+            .to_string()
+            .contains("parent traversal"));
     }
 
     #[test]
