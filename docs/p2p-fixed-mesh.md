@@ -485,3 +485,18 @@ retirement, admission pins, stale snapshots, delayed obligations, reentrant
 flushes, retired framing/authority, and exhausted budgets/horizons. These checks
 are scoped to a fixed three-peer room; they do not claim arbitrary-N membership, discovery, distributed consensus,
 repair, production security, or completion of the broader P2P feature.
+
+The `p2p_mesh_departure_quic` integration test adds one finite, input-delay-2
+planned-departure witness: three pinned loopback QUIC connections (six transport
+handles), four command-bearing advances before slot 2 departs and twelve survivor
+advances afterward. Every mesh input/backlog frame is tracked from successful
+queue acceptance to a byte-matched real receive event and public-driver admission;
+all six directions and driver record/byte queues settle before quiescence. Checked
+bootstrap, including the initial historical-state snapshot, and departure
+fences/acks remain in-memory coordinator controls. The QUIC claim covers emitted
+mesh input/backlog packets, not snapshot history or input-delay preconfirmation.
+Both survivors switch to an agreed fresh generation on the settled 0–1 connection,
+with owner-0 command-free defaults for slot 2, and match independent tick-zero
+Arena simulation at every verified checkpoint. This is a bounded healthy data-path
+witness, not distributed control, crash recovery, adversarial-network coverage,
+reconnection, or a new rolling-mode socket test; close completion is only cleanup.
