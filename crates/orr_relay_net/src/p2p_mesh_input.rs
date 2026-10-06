@@ -5,7 +5,8 @@
 //! Only peer 0 authors vacant slot 2, with portable default input and no commands,
 //! until the accepted checked ticket's exact first-input boundary. Each peer
 //! admits its two direct edges; there is no discovery, forwarding, reconnect,
-//! survivor election, or default takeover. Any edge failure aborts the driver
+//! survivor election, or automatic default takeover. The explicit planned-departure helper can replace
+//! a fully drained survivor source. Any edge failure aborts the driver
 //! unless the application first opts into irreversible local quiescence.
 //!
 //! Adapter instances have distinct application-assigned IDs. Remap their raw
@@ -34,8 +35,9 @@ use std::rc::Rc;
 use orr_net::SendError;
 use orr_proto::{Channel, ConnId};
 use orr_session::{
-    CheckedJoinContext, CheckedJoinTicket, Game, InputSource, JoinBootstrap, JoinBootstrapStatus,
-    JoinStatus, LocallyVerifiedTick, PlayerSlot, RemoteInput, Session,
+    CheckedJoinContext, CheckedJoinTicket, DepartureAck, DepartureBarrier, DepartureError,
+    DepartureFence, Game, InputSource, JoinBootstrap, JoinBootstrapStatus, JoinStatus,
+    LocallyVerifiedTick, PlayerSlot, RemoteInput, Session,
 };
 
 use crate::P2pInputCodec;
@@ -264,6 +266,7 @@ struct State<G: Game, C: P2pInputCodec<G>> {
     // Authority evidence must outlive canonical retirement.
     highest_vacancy: Option<u64>,
     grant: Option<Grant>,
+    departure_cutoff: Option<u64>,
     default_input: Vec<u8>,
     edges: BTreeMap<ConnId, Edge>,
     seen: BTreeMap<Key, Evidence>,
@@ -383,6 +386,9 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         self.error.get_or_insert(error).clone()
     }
     fn tick(&self, tick: u64) -> Result<(), P2pMeshInputError> {
+        if self.departure_cutoff.is_some_and(|cutoff| tick < cutoff) {
+            return Err(P2pMeshInputError::TickRange);
+        }
         if let Some(r) = self.rolling {
             if tick == 0 || tick > r.window.last(r.progress)? {
                 return Err(P2pMeshInputError::TickRange);
@@ -597,6 +603,9 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         context: &CheckedJoinContext,
         grant: Grant,
     ) -> Result<(), P2pMeshInputError> {
+        if self.departure_cutoff.is_some() {
+            return Err(P2pMeshInputError::InvalidConfig);
+        }
         if &self.context != context {
             return Err(P2pMeshInputError::WrongContext);
         }
@@ -634,6 +643,9 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
         Ok(())
     }
     fn admit(&mut self, admitted: P2pMeshEdge) -> Result<(), P2pMeshInputError> {
+        if self.departure_cutoff.is_some() {
+            return Err(P2pMeshInputError::InvalidEdge);
+        }
         if admitted.connection.0 == 0
             || admitted.adapter_id == 0
             || admitted.raw_connection.0 == 0
@@ -817,6 +829,36 @@ impl<G: Game, C: P2pInputCodec<G>> State<G, C> {
 
 pub struct P2pMeshInputDriver<G: Game, C: P2pInputCodec<G>>(Rc<RefCell<State<G, C>>>);
 pub struct P2pMeshInputSource<G: Game, C: P2pInputCodec<G>>(Rc<RefCell<State<G, C>>>);
+/// A fresh survivor driver, whose source is already installed in the Session.
+/// The retired source and every old driver handle remain irreversibly quiesced.
+pub struct P2pMeshPlannedDeparture<G: Game, C: P2pInputCodec<G>> {
+    pub fresh_driver: P2pMeshInputDriver<G, C>,
+    pub retired_source: P2pMeshInputSource<G, C>,
+}
+
+#[derive(Debug)]
+pub enum P2pMeshDepartureError {
+    Input(P2pMeshInputError),
+    Barrier(DepartureError),
+    Unavailable,
+}
+impl core::fmt::Display for P2pMeshDepartureError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "planned mesh departure: {self:?}")
+    }
+}
+impl std::error::Error for P2pMeshDepartureError {}
+impl From<P2pMeshInputError> for P2pMeshDepartureError {
+    fn from(error: P2pMeshInputError) -> Self {
+        Self::Input(error)
+    }
+}
+impl From<DepartureError> for P2pMeshDepartureError {
+    fn from(error: DepartureError) -> Self {
+        Self::Barrier(error)
+    }
+}
+
 impl<G: Game, C: P2pInputCodec<G>> Clone for P2pMeshInputDriver<G, C> {
     fn clone(&self) -> Self {
         Self(Rc::clone(&self.0))
@@ -833,7 +875,8 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
     }
     /// Explicit rolling mode; finite tick limits are ignored, all memory caps
     /// still apply. The source belongs to one Session lifetime. Do not restore
-    /// or replace that Session while retaining this driver/source generation.
+    /// or replace that Session while retaining this driver/source generation; only
+    /// `continue_planned_departure` may perform its checked source replacement.
     pub fn new_rolling(
         local: PlayerSlot,
         context: CheckedJoinContext,
@@ -884,6 +927,7 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
             rolling,
             highest_vacancy: None,
             grant: None,
+            departure_cutoff: None,
             default_input,
             edges: BTreeMap::new(),
             seen: BTreeMap::new(),
@@ -909,7 +953,7 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
     /// This does not settle transport queues, choose survivors, prove contiguous
     /// coverage, verify a recovery target, or discharge pending output obligations.
     ///
-    /// Use the same Session lifetime: no restore, replacement, source swap, or new
+    /// Use the same Session lifetime: no restore, replacement, manual source swap, or new
     /// join transition. Source pointer equality cannot enforce that precondition.
     /// Ready/Unchecked is required because a syncing Session can hold authored
     /// input without calling its source. After success use `poll_confirmed` (or
@@ -951,6 +995,214 @@ impl<G: Game, C: P2pInputCodec<G>> P2pMeshInputDriver<G, C> {
         };
         s.quiescence = Some(summary);
         Ok(summary)
+    }
+    /// Continue a planned, fully settled departure of slot 2 with survivors 0/1.
+    ///
+    /// The caller authenticates both fences and acknowledgments, settles actual
+    /// transport queues (queue acceptance is insufficient), and pauses routes.
+    /// Both ends independently agree a fresh, never-reused edge generation and
+    /// activate routing only after both transitions. The barrier does not bind it.
+    /// Keep this exact Session lifetime: no restore, replacement, manual source
+    /// swap, membership change or new join. This helper is the sole supported
+    /// source replacement. It does not repair missing input or unplanned loss.
+    ///
+    /// Stop authoring, flush and settle before quiescing. Drain with non-authoring
+    /// `step` only through `next_send_tick() - 1`, then `poll_confirmed`. This also
+    /// supports positive input delay without re-priming its ahead-of-head pipeline.
+    /// All returned errors preserve the old driver and Session. After preparation,
+    /// only owner 0 commits vacancy with an empty default range, then the source
+    /// swap is infallible. Old handles never become live again.
+    pub fn continue_planned_departure(
+        &self,
+        session: &mut Session<G, P2pMeshInputSource<G, C>>,
+        fences: [DepartureFence; 2],
+        acknowledgments: [DepartureAck; 2],
+        survivor_edge: P2pMeshEdge,
+    ) -> Result<P2pMeshPlannedDeparture<G, C>, P2pMeshDepartureError> {
+        use P2pMeshDepartureError::Unavailable;
+        let s = self.0.borrow();
+        s.check()?;
+        let q = s.quiescence.ok_or(Unavailable)?;
+        let t = session.verified_tick();
+        let cutoff = t.checked_add(1).ok_or(Unavailable)?;
+        let grant = s.grant.ok_or(Unavailable)?;
+        if !Rc::ptr_eq(&self.0, &session.source().0)
+            || s.flushing
+            || s.departure_cutoff.is_some()
+            || s.local.0 > 1
+            || session.config().local_slot != s.local
+            || session.config().player_count != 3
+            || session.config().relay
+            || !matches!(
+                session.join_status(),
+                Ok(JoinStatus::Ready | JoinStatus::Unchecked)
+            )
+            || q.next_send_tick != session.next_send_tick()
+            || session.next_send_tick() != cutoff
+            || session.head_tick() != t
+            || !session.authored_since(t).is_empty()
+            || s.edges.len() != 2
+            || !s.edges.values().any(|e| e.admitted.remote == PlayerSlot(2))
+            || !s
+                .edges
+                .values()
+                .any(|e| e.admitted.remote == PlayerSlot(1 - s.local.0))
+            || !s.accepted_remote_max_by_slot[2].is_some_and(|max| max >= grant.first)
+            || !s.incoming.is_empty()
+            || s.incoming_bytes != 0
+            || s.pending_bytes != 0
+            || s.edges
+                .values()
+                .any(|e| !e.pending.is_empty() || e.pending_bytes != 0)
+            || (0..3).any(|slot| {
+                session
+                    .last_remote_tick(PlayerSlot(slot))
+                    .is_some_and(|max| max > t)
+            })
+            || s.accepted_remote_max_by_slot
+                .iter()
+                .flatten()
+                .any(|&max| max > t)
+            || s.seen.keys().any(|&(tick, _)| tick > t)
+        {
+            return Err(Unavailable);
+        }
+        for slot in [PlayerSlot(0), PlayerSlot(1)] {
+            if fences.iter().filter(|f| f.survivor == slot).count() != 1
+                || acknowledgments
+                    .iter()
+                    .filter(|a| a.survivor == slot)
+                    .count()
+                    != 1
+            {
+                return Err(Unavailable);
+            }
+        }
+        if fences
+            .iter()
+            .any(|f| f.verified_tick != t || f.departed_max.is_some_and(|max| max > t))
+            || fences
+                .iter()
+                .find(|f| f.survivor == s.local)
+                .unwrap()
+                .departed_max
+                != q.accepted_remote_max_by_slot[2]
+        {
+            return Err(Unavailable);
+        }
+        let mut config = session.config().clone();
+        config.local_slot = PlayerSlot(0);
+        let mut barrier = DepartureBarrier::new(
+            fences[0].recovery_id,
+            fences[0].revision,
+            PlayerSlot(2),
+            PlayerSlot(0),
+            vec![PlayerSlot(0), PlayerSlot(1)],
+            &[],
+            &config,
+        )?;
+        for fence in fences {
+            barrier.report_fence(fence)?;
+        }
+        let target = barrier.target()?;
+        if target.target != t || target.cutoff != cutoff {
+            return Err(Unavailable);
+        }
+        for ack in acknowledgments {
+            barrier.acknowledge(ack)?;
+        }
+        if !barrier.ready()?
+            || barrier.acknowledgment(session)?
+                != *acknowledgments
+                    .iter()
+                    .find(|a| a.survivor == s.local)
+                    .unwrap()
+        {
+            return Err(Unavailable);
+        }
+        if survivor_edge.remote != PlayerSlot(1 - s.local.0)
+            || s.edges
+                .values()
+                .any(|e| survivor_edge.generation <= e.admitted.generation)
+        {
+            return Err(P2pMeshInputError::InvalidEdge.into());
+        }
+        let rolling = if let Some(r) = s.rolling {
+            r.window.last(t)?;
+            Some(Rolling {
+                window: r.window,
+                progress: t,
+                retired_through: t,
+                discarded_local_through: 0,
+            })
+        } else {
+            s.limits.validate()?;
+            s.limits.tick(cutoff)?;
+            None
+        };
+        s.limits.validate_caps()?;
+        let (fresh_driver, fresh_source) =
+            Self::create(s.local, s.context.clone(), s.limits.clone(), rolling)?;
+        {
+            let mut fresh = fresh_driver.0.borrow_mut();
+            fresh.admit(survivor_edge)?;
+            // Validate the mandatory default before committing vacancy. Local 0
+            // sends two records per tick; local 1 receives those same two records.
+            let default = encode::<G, C>(
+                &RemoteInput {
+                    tick: cutoff,
+                    slot: PlayerSlot(2),
+                    input: G::Input::default(),
+                    commands: Vec::new(),
+                    disconnected: false,
+                },
+                &fresh.limits,
+            )?;
+            budget(
+                0,
+                3,
+                fresh.limits.max_logical_records,
+                P2pMeshInputError::RecordLimit,
+            )?;
+            budget(
+                0,
+                3 * default.len(),
+                fresh.limits.max_logical_encoded_bytes,
+                P2pMeshInputError::ByteLimit,
+            )?;
+            let outgoing = if s.local == PlayerSlot(0) { 2 } else { 1 };
+            let incoming = 3 - outgoing;
+            let packet_bytes = ENVELOPE + default.len();
+            fresh.destination_budget(outgoing, outgoing * packet_bytes)?;
+            fresh.edge_budget(
+                &fresh.edges[&survivor_edge.connection],
+                outgoing,
+                outgoing * packet_bytes,
+            )?;
+            budget(
+                0,
+                incoming,
+                fresh.limits.max_incoming_records,
+                P2pMeshInputError::RecordLimit,
+            )?;
+            budget(
+                0,
+                incoming * packet_bytes,
+                fresh.limits.max_incoming_encoded_bytes,
+                P2pMeshInputError::ByteLimit,
+            )?;
+            fresh.departure_cutoff = Some(cutoff);
+        }
+        let owner = s.local == PlayerSlot(0);
+        drop(s);
+        if owner {
+            barrier.commit(session, target.revision, &[PlayerSlot(0), PlayerSlot(1)])?;
+        }
+        let retired_source = std::mem::replace(session.source_mut(), fresh_source);
+        Ok(P2pMeshPlannedDeparture {
+            fresh_driver,
+            retired_source,
+        })
     }
     /// Whether the transition happened, including after a later terminal error.
     /// Use `check` separately to determine whether draining is still healthy.
