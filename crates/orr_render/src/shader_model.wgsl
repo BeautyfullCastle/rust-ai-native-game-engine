@@ -1,6 +1,7 @@
 struct Globals {
     view_proj: mat4x4<f32>, direction: vec4<f32>, sun: vec4<f32>,
     sky: vec4<f32>, ground: vec4<f32>, params: vec4<f32>,
+    point_position_range: vec4<f32>, point_color_intensity: vec4<f32>,
 };
 struct Object {
     world: mat4x4<f32>, normal: mat4x4<f32>, color: vec4<f32>, sampling: vec4<u32>,
@@ -10,10 +11,13 @@ struct Object {
 @group(0) @binding(2) var<uniform> object: Object;
 struct Varying {
     @builtin(position) position: vec4<f32>, @location(0) normal: vec3<f32>, @location(1) uv: vec2<f32>,
+    @location(2) world_position: vec3<f32>,
 };
 @vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>) -> Varying {
     var out: Varying;
+    let world=object.world*vec4<f32>(position,1.0);
     out.position=globals.view_proj*object.world*vec4<f32>(position,1.0);
+    out.world_position=world.xyz;
     out.normal=(object.normal*vec4<f32>(normal,0.0)).xyz;
     out.uv=uv;
     return out;
@@ -55,11 +59,24 @@ fn aces(x:vec3<f32>) -> vec3<f32> {
 fn linear_to_srgb(c:vec3<f32>) -> vec3<f32> {
     return select(1.055*pow(max(c,vec3<f32>(0.0)),vec3<f32>(1.0/2.4))-0.055,12.92*c,c<=vec3<f32>(0.0031308));
 }
+// Bounded stylized diffuse, intentionally not inverse-square/PBR lighting.
+// Disabled and coincident lights return before dividing by range/distance.
+fn point_diffuse(world_position:vec3<f32>,normal:vec3<f32>) -> vec3<f32> {
+    if globals.point_color_intensity.w<=0.0 { return vec3<f32>(0.0); }
+    let delta=globals.point_position_range.xyz-world_position;
+    let distance=length(delta);
+    if distance<=1e-6 { return vec3<f32>(0.0); }
+    let attenuation=max(1.0-distance/globals.point_position_range.w,0.0);
+    let diffuse=max(dot(normal,delta/distance),0.0);
+    return globals.point_color_intensity.xyz*globals.point_color_intensity.w
+        *diffuse*attenuation*attenuation;
+}
 @fragment fn fs_main(in:Varying) -> @location(0) vec4<f32> {
     let n=in.normal*inverseSqrt(max(dot(in.normal,in.normal),1e-20));
     let ambient=mix(globals.ground.xyz,globals.sky.xyz,n.y*0.5+0.5)*globals.sky.w;
     let sun=globals.sun.xyz*globals.sun.w*max(dot(n,-globals.direction.xyz),0.0);
-    var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun)*globals.params.x;
+    let point=point_diffuse(in.world_position,n);
+    var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun+point)*globals.params.x;
     if globals.params.y>0.5 { color=aces(color); } else { color=clamp(color,vec3<f32>(0.0),vec3<f32>(1.0)); }
     if globals.params.z>0.5 { color=linear_to_srgb(color); }
     // glTF OPAQUE ignores texture/factor alpha.

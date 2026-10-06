@@ -3420,6 +3420,8 @@ dependencies = [
  "orr_rhi",
  "orr_sprite",
  "orr_view",
+ "serde",
+ "serde_json",
  "winit",
 ]
 
