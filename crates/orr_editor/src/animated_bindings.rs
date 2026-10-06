@@ -498,6 +498,20 @@ pub fn load_asset(project_root: &Path, package: &str, asset: &str) -> Result<Loa
     validate_package_name(package)?;
     validate_asset_path(asset)?;
     let project = open_project(project_root)?;
+    load_asset_from_project(&project, package, asset)
+}
+
+/// Load an animated asset through an already-open project. Yard uses this entry
+/// with its deliberately small `models` + `animation` capability union so it can
+/// mix static and skeletal packages in one project. The Arena preview continues
+/// to call `load_asset`, whose project policy remains animation-only.
+pub(crate) fn load_asset_from_project(
+    project: &Project,
+    package: &str,
+    asset: &str,
+) -> Result<LoadedAsset, String> {
+    validate_package_name(package)?;
+    validate_asset_path(asset)?;
     let before = project
         .verify()
         .map_err(|e| format!("package verification: {e}"))?;

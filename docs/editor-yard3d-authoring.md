@@ -1,4 +1,4 @@
-# Yard3D scene authoring (bounded static-model slice)
+# Yard3D scene authoring and host-timeline skeletal playback
 
 This is the main editor viewport backed by the existing Yard3D ERP host and
 `RemoteBridge<Yard3D>`. It is not the separate Arena animation-preview pane.
@@ -13,8 +13,8 @@ cargo run --release -p orr_editor --features models -- \
 
 Without `models`, Yard3D procedural rendering, picking, reflected inspection,
 scene editing and the host timeline still work. Model import/package dependencies
-remain optional. `animated-models` additionally preserves the older Arena-only
-animation authoring pane; this Yard3D slice binds static assets only.
+remain optional. `animated-models` adds host-timeline skeletal playback in the
+main Yard3D viewport and preserves the older independent Arena preview pane.
 
 The supplied fixture contains ground and two dynamic boxes. Rain is disabled and
 the body limit is 128. `+ 3D Box` creates a dynamic box through `world.spawn` and
@@ -63,11 +63,41 @@ Changed content is diagnosed rather than silently changing a saved binding.
 An invalid replacement or explicit reload retains the last valid document/cache.
 **Reload verified models** explicitly checks installed content again.
 
+## Assign skeletal content and use the host timeline
+
+Build with `--features animated-models` and install `assets/animation_demo`
+with the same package command. The package is `sample-animation`, asset
+`animated.glb`; it contains the independent `bend` (index 0) and `pulse`
+(index 1) clips. Choose the animated kind, clip index and Once/Loop policy,
+then assign to a persistent body GUID. Static and animated assets can coexist
+in the same Yard project and sidecar. Yard's loader permits only compiled
+model/animation capabilities; the Arena preview retains its narrower policy.
+
+Animation uses exactly the immutable host snapshot that supplied the Body
+transforms: absolute `tick / tick_rate` at fixed 1x. Host speed already changes
+tick progression and is not applied again. Rolling history does not move the
+animation origin. Paused repeated frames therefore use identical poses;
+Step, backward Seek and restart sample directly from the requested tick.
+Edit and Stop use rest pose, while paused Play at tick 0 and Seek 0 use the
+selected clip's time-zero pose. Once holds its endpoint and Loop wraps.
+Invalid clock/range/pose input rejects the frame before changing visible output.
+
+For a skinned asset the external placement is Body pose × local TRS. The
+sampled hierarchy is applied once by the existing skinning renderer; the
+mesh-node transform is not applied a second time. Instances sharing one
+immutable asset use one renderer/batch but have independent owned sampled poses.
+Procedural, static and skinned batches share one depth attachment and clear.
+The complete mixed CPU frame is preflighted before target resizing or GPU cache
+changes. Model bytes and floating-point poses remain outside authoritative ECS.
+
 ## Persistence, playback and boundaries
 
-- The sidecar is `<scene path>.models.json`, with an explicit `static` model kind,
-  package/asset identity and persistent scene GUIDs. Recyclable ECS handles and
-  GPU handles are never persisted
+- The sidecar is `<scene path>.models.json`, written as schema version 2 with
+  explicit `static` or `animated` kinds, package/path/digest/source-hash identity,
+  local TRS and persistent scene GUIDs. Animated bindings also persist a clip
+  index and `once`/`loop` policy. Version-1 static sidecars remain readable and
+  migrate on save. Recyclable ECS handles, GPU handles and elapsed playback
+  time are never persisted
 - **Save model bindings**, **Undo model**, and **Redo model** affect only the
   sidecar. The ordinary scene Save/Undo/Redo affect only the host scene. Save
   both; a successful scene save does not mean the sidecar was saved
@@ -85,8 +115,9 @@ An invalid replacement or explicit reload retains the last valid document/cache.
   displays the live host snapshot and labels that limitation
 
 The composed path is bounded opaque diffuse, single-sample, with no shadows.
-It does not claim full glTF PBR, imported-mesh colliders, skinned Yard authoring,
-root motion, prefab/export or scene/sidecar atomic project save. Standalone
+It does not claim full glTF PBR, imported-mesh colliders, skinned shadows,
+root motion, a character controller, IK, retargeting, an animation graph,
+prefab/export or scene/sidecar atomic project save. Standalone
 renderers retain their existing behavior. Native-window, physical-GPU and
 Windows-local acceptance remain separate from software-GPU readback tests.
 
@@ -95,6 +126,6 @@ Windows-local acceptance remain separate from software-GPU readback tests.
 Use the repository toolchain and serialized release test lane. GPU tests must set
 `ORR_REQUIRE_GPU=1`; an unavailable adapter is a failure, not accepted evidence.
 The focused suites are `orr_remote::yard3d_authoring`,
-`orr_editor::{yard3d_authoring,model_bindings,yard3d_models}` and renderer
+`orr_editor::{yard3d_authoring,model_bindings,yard3d_models,yard3d_animated}` and renderer
 `imported_scene` plus standalone `gpu3d` regression. `ORR_YARD_CAPTURE_DIR`
 optionally records the main viewport's PPM readbacks.

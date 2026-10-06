@@ -697,14 +697,31 @@ impl EditorApp {
         let selected=if self.editor.yard_rows_coherent(){self.editor.selection().and_then(|t|self.editor.row_of(t)).map(|r|r.entity)}else{None};
         #[cfg(feature="models")]
         let placements=self.models.placements(&self.editor);
-        #[cfg(feature="models")]
+        #[cfg(feature="animated-models")]
+        let animated_placements = match self.models.animated_placements(&self.editor) {
+            Ok(placements) => placements,
+            Err(error) => {
+                if let Some(texture) = self.gpu3d.as_ref().and_then(|gpu| gpu.last_texture()) {
+                    ui.painter().image(texture,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);
+                }
+                ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
+                return;
+            }
+        };
+        #[cfg(all(feature="models", feature="animated-models"))]
+        let hidden:Vec<_>=placements.iter().map(|p|p.entity).chain(animated_placements.iter().map(|p|p.entity)).collect();
+        #[cfg(all(feature="models", not(feature="animated-models")))]
         let hidden:Vec<_>=placements.iter().map(|p|p.entity).collect();
         #[cfg(not(feature="models"))]
         let hidden=Vec::new();
         let list=self.editor.yard_frame().list(&hidden,selected);
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::new(rs,px));
-            match gpu.render(px,&list,&self.editor.camera3d.camera(),#[cfg(feature="models")] &placements){
+            #[cfg(feature="animated-models")]
+            let rendered = gpu.render_mixed(px,&list,&self.editor.camera3d.camera(),&placements,&animated_placements);
+            #[cfg(not(feature="animated-models"))]
+            let rendered = gpu.render(px,&list,&self.editor.camera3d.camera(),#[cfg(feature="models")] &placements);
+            match rendered {
                 Ok(tex)=>{ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}
                 Err(error)=>{if let Some(tex)=gpu.last_texture(){ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);}
             }
