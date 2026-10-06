@@ -12,7 +12,15 @@ default-run = "orr_editor"
 [lints]
 workspace = true
 
+[features]
+default = []
+sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile"]
+
 [dependencies]
+orr_sprite = { path = "../orr_sprite", optional = true }
+orr_package = { path = "../orr_package", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+tempfile = { version = "3", optional = true }
 # The editor is a view: it sees the simulation only through the bridge and ERP.
 # No orr_sim / orr_session / orr_edit / orr_physics here (see tests/deps.rs).
 orr_fp = { path = "../orr_fp" }

@@ -33,3 +33,6 @@ pub mod yard3d_view;
 
 #[cfg(feature = "sprites")]
 pub mod sprite_scene;
+
+#[cfg(feature = "input-actions")]
+pub mod arena_input;

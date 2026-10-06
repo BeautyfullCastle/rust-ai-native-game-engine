@@ -3163,6 +3163,7 @@ dependencies = [
  "orr_ecs",
  "orr_edit",
  "orr_fp",
+ "orr_package",
  "orr_reflect",
  "orr_remote",
  "orr_render",
@@ -3170,9 +3171,12 @@ dependencies = [
  "orr_sample",
  "orr_session",
  "orr_sim",
+ "orr_sprite",
  "orr_view",
  "png 0.17.16",
+ "serde",
  "serde_json",
+ "tempfile",
  "winit",
 ]
 
@@ -3220,6 +3224,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_input"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "orr_mcp"
 version = "0.0.1"
 dependencies = [
@@ -3230,6 +3242,17 @@ dependencies = [
  "orr_sim",
  "orr_testgame",
  "serde_json",
+]
+
+[[package]]
+name = "orr_model"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -3366,6 +3389,7 @@ version = "0.0.1"
 dependencies = [
  "bytemuck",
  "orr_ecs",
+ "orr_model",
  "orr_rhi",
  "orr_sprite",
  "orr_view",
@@ -3392,6 +3416,7 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_games",
+ "orr_input",
  "orr_package",
  "orr_physics",
  "orr_physics3d",
