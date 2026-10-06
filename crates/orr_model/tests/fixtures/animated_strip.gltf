@@ -1,0 +1,341 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "Orrery original animated_strip_generate.py",
+    "copyright": "CC0-1.0; original Orrery test fixture"
+  },
+  "buffers": [
+    {
+      "byteLength": 827,
+      "uri": "data:application/octet-stream;base64,KVyPvgAAAAAAAAAAPQrXPgAAAAAAAAAArkdhvgAAgD8AAAAAexSuPgAAgD8AAAAAMzOzvgAAAEAAAAAAcT2KPgAAAEAAAAAA7FE4vgAAQEAAAAAAH4XrPgAAQEAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AACAPwAAAACrqio/AACAP6uqKj8AAAAAq6qqPgAAgD+rqqo+AAAAAAAAAAAAAIA/AAAAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAAAQAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAADNzEw/zcxMPgAAAAAAAAAAzcxMP83MTD4AAAAAAAAAAJqZmT4zMzM/AAAAAAAAAACamZk+MzMzPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAEAAgABAAMAAgACAAMABAADAAUABAAEAAUABgAFAAcABgAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPwAAAACamZm+zcxMvgAAAAAAAIA/AACAPwAAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAAAAmpmZvpqZ2b8AAAAAAACAPwAAAAAAAIA/AAAAQAAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAD/Xs10/AAAAAAAAAAAAAAAAAACAPwAAAAAAAAA/AACAP5qZmT7NzEw+AAAAAM3MDD/NzMw+AAAAAJqZmT7NzEw+AAAAAAAAgD8AAIA/AACAPzMzkz/NzEw/AACAPwAAgD8AAIA/AACAP4lQTkcNChoKAAAADUlIRFIAAAAEAAAABAgGAAAAqfGefgAAAC5JREFUeNpj+Fqo8R+ElfddBWMGEOfX82VgTmvo7f8MIAKEQYIgDBYAyYI4INUA6Sst8QKnli4AAAAASUVORK5CYII="
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 96,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 96,
+      "byteLength": 96,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 192,
+      "byteLength": 64,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 256,
+      "byteLength": 32,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 288,
+      "byteLength": 128,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 416,
+      "byteLength": 36,
+      "target": 34963
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 452,
+      "byteLength": 128
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 580,
+      "byteLength": 12
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 592,
+      "byteLength": 48
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 640,
+      "byteLength": 12
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 652,
+      "byteLength": 36
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 688,
+      "byteLength": 36
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 724,
+      "byteLength": 103
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 8,
+      "type": "VEC3",
+      "min": [
+        -0.35,
+        0,
+        0
+      ],
+      "max": [
+        0.46,
+        3,
+        0
+      ]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 8,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 8,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5121,
+      "count": 8,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 4,
+      "componentType": 5126,
+      "count": 8,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 5,
+      "componentType": 5123,
+      "count": 18,
+      "type": "SCALAR"
+    },
+    {
+      "bufferView": 6,
+      "componentType": 5126,
+      "count": 2,
+      "type": "MAT4"
+    },
+    {
+      "bufferView": 7,
+      "componentType": 5126,
+      "count": 3,
+      "type": "SCALAR",
+      "min": [
+        0
+      ],
+      "max": [
+        2
+      ]
+    },
+    {
+      "bufferView": 8,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 9,
+      "componentType": 5126,
+      "count": 3,
+      "type": "SCALAR",
+      "min": [
+        0
+      ],
+      "max": [
+        1
+      ]
+    },
+    {
+      "bufferView": 10,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 11,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3"
+    }
+  ],
+  "images": [
+    {
+      "bufferView": 12,
+      "mimeType": "image/png"
+    }
+  ],
+  "samplers": [
+    {
+      "minFilter": 9728,
+      "magFilter": 9728,
+      "wrapS": 33071,
+      "wrapT": 33071
+    }
+  ],
+  "textures": [
+    {
+      "source": 0,
+      "sampler": 0
+    }
+  ],
+  "materials": [
+    {
+      "name": "original asymmetric checker",
+      "pbrMetallicRoughness": {
+        "baseColorTexture": {
+          "index": 0
+        },
+        "metallicFactor": 0,
+        "roughnessFactor": 1
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "asymmetric strip",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2,
+            "JOINTS_0": 3,
+            "WEIGHTS_0": 4
+          },
+          "indices": 5,
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "transformed nonjoint ancestor",
+      "translation": [
+        0.3,
+        0.2,
+        0
+      ],
+      "children": [
+        1
+      ]
+    },
+    {
+      "name": "lower joint",
+      "children": [
+        2
+      ]
+    },
+    {
+      "name": "upper joint",
+      "translation": [
+        0,
+        1.5,
+        0
+      ]
+    },
+    {
+      "name": "mesh transform deliberately ignored by skinning",
+      "mesh": 0,
+      "skin": 0,
+      "translation": [
+        7,
+        0,
+        0
+      ]
+    }
+  ],
+  "skins": [
+    {
+      "name": "two-joint original rig",
+      "joints": [
+        1,
+        2
+      ],
+      "skeleton": 0,
+      "inverseBindMatrices": 6
+    }
+  ],
+  "animations": [
+    {
+      "name": "bend",
+      "samplers": [
+        {
+          "input": 7,
+          "output": 8,
+          "interpolation": "LINEAR"
+        }
+      ],
+      "channels": [
+        {
+          "sampler": 0,
+          "target": {
+            "node": 2,
+            "path": "rotation"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pulse",
+      "samplers": [
+        {
+          "input": 9,
+          "output": 10,
+          "interpolation": "STEP"
+        },
+        {
+          "input": 9,
+          "output": 11,
+          "interpolation": "LINEAR"
+        }
+      ],
+      "channels": [
+        {
+          "sampler": 0,
+          "target": {
+            "node": 0,
+            "path": "translation"
+          }
+        },
+        {
+          "sampler": 1,
+          "target": {
+            "node": 1,
+            "path": "scale"
+          }
+        }
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "nodes": [
+        0,
+        3
+      ]
+    }
+  ],
+  "scene": 0
+}

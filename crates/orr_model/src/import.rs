@@ -12,208 +12,291 @@ use std::{
     path::Path,
 };
 const MAX_JSON_BYTES: usize = 4 * 1024 * 1024;
-const MAX_DEPTH: usize = 64;
+pub(crate) const MAX_DEPTH: usize = 64;
 const MAX_RESOURCES: usize = 256;
 
 // Names/extras are non-semantic exporter metadata. All other unknown fields
 // (including extensions at every level, sparse accessors and skin data) reject.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Document {
-    asset: Asset,
+pub(crate) struct Document {
+    pub(crate) asset: Asset,
     #[serde(default)]
-    extensions_used: Vec<String>,
+    pub(crate) extensions_used: Vec<String>,
     #[serde(default)]
-    extensions_required: Vec<String>,
+    pub(crate) extensions_required: Vec<String>,
     #[serde(default)]
-    buffers: Vec<Buffer>,
+    pub(crate) buffers: Vec<Buffer>,
     #[serde(default)]
-    buffer_views: Vec<View>,
+    pub(crate) buffer_views: Vec<View>,
     #[serde(default)]
-    accessors: Vec<Accessor>,
+    pub(crate) accessors: Vec<Accessor>,
     #[serde(default)]
-    images: Vec<ImageDef>,
+    pub(crate) images: Vec<ImageDef>,
     #[serde(default)]
-    textures: Vec<Texture>,
+    pub(crate) textures: Vec<Texture>,
     #[serde(default)]
-    samplers: Vec<Sampler>,
+    pub(crate) samplers: Vec<Sampler>,
     #[serde(default)]
-    materials: Vec<MaterialDef>,
+    pub(crate) materials: Vec<MaterialDef>,
     #[serde(default)]
-    meshes: Vec<Mesh>,
+    pub(crate) meshes: Vec<Mesh>,
     #[serde(default)]
-    nodes: Vec<Node>,
-    scenes: Vec<Scene>,
-    scene: Option<usize>,
+    pub(crate) nodes: Vec<Node>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) skins: Option<Vec<SkinDef>>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) animations: Option<Vec<ClipDef>>,
+    pub(crate) scenes: Vec<Scene>,
+    pub(crate) scene: Option<usize>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Asset {
-    version: String,
-    min_version: Option<String>,
+pub(crate) struct Asset {
+    pub(crate) version: String,
+    pub(crate) min_version: Option<String>,
     #[serde(rename = "generator")]
-    _generator: Option<String>,
+    pub(crate) _generator: Option<String>,
     #[serde(rename = "copyright")]
-    _copyright: Option<String>,
+    pub(crate) _copyright: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Buffer {
-    byte_length: usize,
-    uri: Option<String>,
+pub(crate) struct Buffer {
+    pub(crate) byte_length: usize,
+    pub(crate) uri: Option<String>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct View {
-    buffer: usize,
+pub(crate) struct View {
+    pub(crate) buffer: usize,
     #[serde(default)]
-    byte_offset: usize,
-    byte_length: usize,
-    byte_stride: Option<usize>,
-    target: Option<u32>,
+    pub(crate) byte_offset: usize,
+    pub(crate) byte_length: usize,
+    pub(crate) byte_stride: Option<usize>,
+    pub(crate) target: Option<u32>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Accessor {
-    buffer_view: usize,
+pub(crate) struct Accessor {
+    pub(crate) buffer_view: usize,
     #[serde(default)]
-    byte_offset: usize,
-    component_type: u32,
-    count: usize,
+    pub(crate) byte_offset: usize,
+    pub(crate) component_type: u32,
+    pub(crate) count: usize,
     #[serde(rename = "type")]
-    kind: String,
+    pub(crate) kind: String,
     #[serde(default)]
-    normalized: bool,
-    min: Option<Vec<f32>>,
-    max: Option<Vec<f32>>,
+    pub(crate) normalized: bool,
+    pub(crate) min: Option<Vec<f32>>,
+    pub(crate) max: Option<Vec<f32>>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ImageDef {
-    uri: Option<String>,
-    buffer_view: Option<usize>,
-    mime_type: Option<String>,
+pub(crate) struct ImageDef {
+    pub(crate) uri: Option<String>,
+    pub(crate) buffer_view: Option<usize>,
+    pub(crate) mime_type: Option<String>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Texture {
-    source: usize,
-    sampler: Option<usize>,
+pub(crate) struct Texture {
+    pub(crate) source: usize,
+    pub(crate) sampler: Option<usize>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Sampler {
-    mag_filter: Option<u32>,
-    min_filter: Option<u32>,
-    wrap_s: Option<u32>,
-    wrap_t: Option<u32>,
+pub(crate) struct Sampler {
+    pub(crate) mag_filter: Option<u32>,
+    pub(crate) min_filter: Option<u32>,
+    pub(crate) wrap_s: Option<u32>,
+    pub(crate) wrap_t: Option<u32>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MaterialDef {
-    pbr_metallic_roughness: Pbr,
-    alpha_mode: Option<String>,
+pub(crate) struct MaterialDef {
+    pub(crate) pbr_metallic_roughness: Pbr,
+    pub(crate) alpha_mode: Option<String>,
     #[serde(default)]
-    double_sided: bool,
+    pub(crate) double_sided: bool,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Pbr {
-    base_color_texture: TextureInfo,
-    base_color_factor: Option<[f32; 4]>,
-    metallic_factor: Option<f32>,
-    roughness_factor: Option<f32>,
+pub(crate) struct Pbr {
+    pub(crate) base_color_texture: TextureInfo,
+    pub(crate) base_color_factor: Option<[f32; 4]>,
+    pub(crate) metallic_factor: Option<f32>,
+    pub(crate) roughness_factor: Option<f32>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TextureInfo {
-    index: usize,
+pub(crate) struct TextureInfo {
+    pub(crate) index: usize,
     #[serde(default)]
-    tex_coord: u32,
+    pub(crate) tex_coord: u32,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Mesh {
-    primitives: Vec<PrimitiveDef>,
+pub(crate) struct Mesh {
+    pub(crate) primitives: Vec<PrimitiveDef>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PrimitiveDef {
-    attributes: BTreeMap<String, usize>,
-    indices: usize,
-    material: usize,
-    mode: Option<u32>,
+pub(crate) struct PrimitiveDef {
+    pub(crate) attributes: BTreeMap<String, usize>,
+    pub(crate) indices: usize,
+    pub(crate) material: usize,
+    pub(crate) mode: Option<u32>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Node {
-    mesh: Option<usize>,
+pub(crate) struct Node {
+    pub(crate) mesh: Option<usize>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) skin: Option<usize>,
     #[serde(default)]
-    children: Vec<usize>,
-    matrix: Option<[f32; 16]>,
-    translation: Option<[f32; 3]>,
-    rotation: Option<[f32; 4]>,
-    scale: Option<[f32; 3]>,
+    pub(crate) children: Vec<usize>,
+    pub(crate) matrix: Option<[f32; 16]>,
+    pub(crate) translation: Option<[f32; 3]>,
+    pub(crate) rotation: Option<[f32; 4]>,
+    pub(crate) scale: Option<[f32; 3]>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Scene {
-    nodes: Vec<usize>,
+pub(crate) struct Scene {
+    pub(crate) nodes: Vec<usize>,
     #[serde(rename = "name")]
-    _name: Option<String>,
+    pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
-    _extras: Option<serde_json::Value>,
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(feature = "animation"), allow(dead_code))]
+pub(crate) struct SkinDef {
+    pub(crate) joints: Vec<usize>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) inverse_bind_matrices: Option<usize>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) skeleton: Option<usize>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) name: Option<String>,
+    #[serde(default, rename = "extras")]
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(feature = "animation"), allow(dead_code))]
+pub(crate) struct ClipDef {
+    pub(crate) samplers: Vec<AnimationSampler>,
+    pub(crate) channels: Vec<ChannelDef>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) name: Option<String>,
+    #[serde(default, rename = "extras")]
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(feature = "animation"), allow(dead_code))]
+pub(crate) struct AnimationSampler {
+    pub(crate) input: usize,
+    pub(crate) output: usize,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) interpolation: Option<String>,
+    #[serde(default, rename = "extras")]
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(feature = "animation"), allow(dead_code))]
+pub(crate) struct ChannelDef {
+    pub(crate) sampler: usize,
+    pub(crate) target: ChannelTarget,
+    #[serde(default, rename = "extras")]
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(feature = "animation"), allow(dead_code))]
+pub(crate) struct ChannelTarget {
+    pub(crate) node: usize,
+    pub(crate) path: String,
+    #[serde(default, rename = "extras")]
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+
+// An absent declaration differs from an explicitly present value for static
+// import. Explicit null is not a valid glTF property and must not erase it.
+fn present_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
 }
 
 /// The normalized package-relative `asset_id` remains stable across reimport.
 /// Canonical containment also rejects symlinks escaping the immutable snapshot.
 pub fn import_path(root: &Path, asset_id: &str) -> Result<StaticModel, Error> {
+    import_path_with(root, asset_id, |id, bytes, resolve| {
+        import_with_resolver(id, bytes, resolve)
+    })
+}
+
+pub(crate) fn import_path_with<T>(
+    root: &Path,
+    asset_id: &str,
+    importer: impl FnOnce(
+        &str,
+        &[u8],
+        &mut dyn FnMut(&str) -> Result<Vec<u8>, Error>,
+    ) -> Result<T, Error>,
+) -> Result<T, Error> {
     valid_path(asset_id)?;
     let root = root.canonicalize().map_err(|e| invalid(e.to_string()))?;
     let source_path = root.join(asset_id);
@@ -246,17 +329,28 @@ pub fn import_path(root: &Path, asset_id: &str) -> Result<StaticModel, Error> {
     let base = source_path
         .parent()
         .ok_or_else(|| invalid("missing asset parent"))?;
-    import_with_resolver(asset_id, &bytes, |uri| read(&base.join(uri)))
+    importer(asset_id, &bytes, &mut |uri| read(&base.join(uri)))
 }
 
 /// Resolver receives only normalized relative URIs, once per URI. It must enforce
 /// package containment and bounded reads. Returned bytes are checked/charged again.
 /// Embedded GLB and data-URI resources never invoke the resolver.
-pub fn import_with_resolver(
+pub(crate) struct Loaded {
+    pub(crate) doc: Document,
+    pub(crate) buffers: Vec<Vec<u8>>,
+    pub(crate) dependencies: Vec<Dependency>,
+    pub(crate) materials: Vec<Material>,
+    pub(crate) images: Vec<Image>,
+}
+
+/// Both importers use this strict schema/resource reader; the static entrypoint
+/// explicitly rejects every animation/skin declaration before resolving data.
+pub(crate) fn load_resources(
     asset_id: &str,
     bytes: &[u8],
     mut resolver: impl FnMut(&str) -> Result<Vec<u8>, Error>,
-) -> Result<StaticModel, Error> {
+    animated: bool,
+) -> Result<Loaded, Error> {
     valid_path(asset_id)?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(invalid("source exceeds byte budget"));
@@ -267,6 +361,13 @@ pub fn import_with_resolver(
     }
     let doc: Document =
         serde_json::from_slice(json).map_err(|e| invalid(format!("glTF subset: {e}")))?;
+    if !animated
+        && (doc.skins.is_some()
+            || doc.animations.is_some()
+            || doc.nodes.iter().any(|node| node.skin.is_some()))
+    {
+        return Err(invalid("static importer does not support skins/animations"));
+    }
     if doc.asset.version != "2.0"
         || doc.asset.min_version.as_deref().is_some_and(|s| s != "2.0")
         || !doc.extensions_used.is_empty()
@@ -287,6 +388,10 @@ pub fn import_with_resolver(
         || doc.scenes.len() > MAX_NODES
     {
         return Err(invalid("glTF collection budget exceeded"));
+    }
+    #[cfg(feature = "animation")]
+    if animated {
+        crate::animation_import::validate_document_limits(&doc)?;
     }
     let mut dependencies = BTreeMap::from([("$source".to_owned(), digest(bytes))]);
     let mut cache: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -368,6 +473,7 @@ pub fn import_with_resolver(
             return Err(invalid("invalid buffer view range/stride/target"));
         }
     }
+    let mut accessor_validation_bytes = 0usize;
     for a in &doc.accessors {
         let v = at(&doc.buffer_views, a.buffer_view, "buffer view")?;
         let (component, elements) = a.layout()?;
@@ -380,7 +486,9 @@ pub fn import_with_resolver(
         if a.count == 0
             || a.count > MAX_INDICES
             || stride < size
-            || a.normalized
+            || (!animated && (a.normalized || matches!(a.kind.as_str(), "VEC4" | "MAT4")))
+            || (a.normalized && !matches!(a.component_type, 5121 | 5123))
+            || (a.kind == "MAT4" && a.component_type != 5126)
             || stride % component != 0
             || a.byte_offset % component != 0
             || offset % component != 0
@@ -398,6 +506,29 @@ pub fn import_with_resolver(
         for bound in [&a.min, &a.max].into_iter().flatten() {
             if bound.len() != elements || !bound.iter().all(|v| v.is_finite()) {
                 return Err(invalid("invalid accessor bounds"));
+            }
+        }
+        if animated && a.component_type == 5126 {
+            // Include orphan accessor values without permitting repeated
+            // overlapping views to turn a small source into unbounded work.
+            accessor_validation_bytes = accessor_validation_bytes
+                .checked_add(
+                    a.count
+                        .checked_mul(size)
+                        .ok_or_else(|| invalid("accessor scan byte overflow"))?,
+                )
+                .ok_or_else(|| invalid("accessor scan byte overflow"))?;
+            if accessor_validation_bytes > MAX_FILE_BYTES {
+                return Err(invalid("accessor value validation byte budget exceeded"));
+            }
+            for i in 0..a.count {
+                for component in a.bytes(&doc, &buffers, i).chunks_exact(4) {
+                    if !f32::from_le_bytes(component.try_into().expect("validated f32 component"))
+                        .is_finite()
+                    {
+                        return Err(invalid("nonfinite f32 accessor value"));
+                    }
+                }
             }
         }
     }
@@ -472,6 +603,30 @@ pub fn import_with_resolver(
             wrap_t: wrap(s.wrap_t.unwrap_or(10497))?,
         });
     }
+    Ok(Loaded {
+        doc,
+        buffers,
+        materials,
+        images,
+        dependencies: dependencies
+            .into_iter()
+            .map(|(uri, sha256)| Dependency { uri, sha256 })
+            .collect(),
+    })
+}
+
+pub fn import_with_resolver(
+    asset_id: &str,
+    bytes: &[u8],
+    resolver: impl FnMut(&str) -> Result<Vec<u8>, Error>,
+) -> Result<StaticModel, Error> {
+    let Loaded {
+        doc,
+        buffers,
+        dependencies,
+        materials,
+        images,
+    } = load_resources(asset_id, bytes, resolver, false)?;
     // Validate every source mesh before allocating any decoded geometry.
     let mut primitive_count = 0usize;
     for mesh in &doc.meshes {
@@ -553,22 +708,19 @@ pub fn import_with_resolver(
         format: "orr_static_model".into(),
         version: 1,
         asset_id: asset_id.into(),
-        dependencies: dependencies
-            .into_iter()
-            .map(|(uri, sha256)| Dependency { uri, sha256 })
-            .collect(),
+        dependencies,
         primitives: builder.primitives,
         materials,
         images,
     })
 }
-fn at<'a, T>(items: &'a [T], i: usize, label: &str) -> Result<&'a T, Error> {
+pub(crate) fn at<'a, T>(items: &'a [T], i: usize, label: &str) -> Result<&'a T, Error> {
     items
         .get(i)
         .ok_or_else(|| invalid(format!("{label} index out of range")))
 }
 impl Accessor {
-    fn layout(&self) -> Result<(usize, usize), Error> {
+    pub(crate) fn layout(&self) -> Result<(usize, usize), Error> {
         let c = match self.component_type {
             5121 => 1,
             5123 => 2,
@@ -579,17 +731,24 @@ impl Accessor {
             "SCALAR" => 1,
             "VEC2" => 2,
             "VEC3" => 3,
+            "VEC4" => 4,
+            "MAT4" => 16,
             _ => return Err(invalid("unsupported accessor dimensions")),
         };
         Ok((c, n))
     }
-    fn bytes<'a>(&self, doc: &Document, buffers: &'a [Vec<u8>], i: usize) -> &'a [u8] {
+    pub(crate) fn bytes<'a>(&self, doc: &Document, buffers: &'a [Vec<u8>], i: usize) -> &'a [u8] {
         let v = &doc.buffer_views[self.buffer_view];
         let (c, n) = self.layout().expect("validated accessor");
         let start = v.byte_offset + self.byte_offset + i * v.byte_stride.unwrap_or(c * n);
         &buffers[v.buffer][start..start + c * n]
     }
-    fn floats<const N: usize>(&self, doc: &Document, buffers: &[Vec<u8>], i: usize) -> [f32; N] {
+    pub(crate) fn floats<const N: usize>(
+        &self,
+        doc: &Document,
+        buffers: &[Vec<u8>],
+        i: usize,
+    ) -> [f32; N] {
         let b = self.bytes(doc, buffers, i);
         std::array::from_fn(|n| {
             f32::from_le_bytes(b[n * 4..n * 4 + 4].try_into().expect("validated f32"))
@@ -726,7 +885,7 @@ impl Builder<'_> {
     }
 }
 impl Node {
-    fn transform(&self) -> Result<[[f32; 4]; 4], Error> {
+    pub(crate) fn transform(&self) -> Result<[[f32; 4]; 4], Error> {
         let result = if let Some(m) = self.matrix {
             if self.translation.is_some() || self.rotation.is_some() || self.scale.is_some() {
                 return Err(invalid("matrix and TRS are mutually exclusive"));

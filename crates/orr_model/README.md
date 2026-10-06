@@ -107,3 +107,11 @@ Focused CPU/GPU tests do not replace mandatory CI. Software offscreen GPU
 readback is distinct from window play, Windows validation and physical-device
 runs. Full issue #99, editor placement/undo/save/reopen, package registration,
 shadows and PBR are not claimed complete by this slice.
+
+## Optional skeletal path
+
+The separate `animation` feature supports a bounded skeletal import/runtime and
+`orr_render/animation` provides actual per-instance GPU skinning. See
+[ANIMATION.md](ANIMATION.md) for its distinct cooked format, limits, transform and
+playback semantics, installed-content viewer and incomplete #100 scope. The
+static importer above continues to reject animated content.

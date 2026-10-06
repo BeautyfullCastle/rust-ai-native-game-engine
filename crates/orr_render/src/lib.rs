@@ -62,3 +62,8 @@ pub use sprite_renderer::{SpriteRenderError, SpriteRenderer};
 pub mod model_renderer;
 #[cfg(feature = "models")]
 pub use model_renderer::{ModelRenderer, ModelRenderError};
+
+#[cfg(feature = "animation")]
+pub mod skinned;
+#[cfg(feature = "animation")]
+pub use skinned::{SkinnedBounds, SkinnedInstance, SkinnedModelRenderer, SkinnedRenderError};
