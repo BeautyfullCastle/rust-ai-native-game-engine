@@ -202,13 +202,15 @@ pub struct EditorApp {
     ui_settled_reported: bool,
     frames: u64,
     last_title: String,
+    #[cfg(feature = "sprites")]
+    pub sprites: crate::sprite_panel::SpritePanel,
 }
 
 impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, ui: UiState::default(), render_state, gpu: None, shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new() }
+        Self { editor, ui: UiState::default(), render_state, gpu: None, shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default() }
     }
 
     /// Asks for a screenshot of the window after some frames, then quits.
@@ -522,6 +524,8 @@ impl EditorApp {
 
     fn inspector(&mut self, ui: &mut Ui) {
         ui.heading("Inspector");
+        #[cfg(feature = "sprites")]
+        self.sprites.show(ui, &self.editor);
         let count = self.editor.selected_guids().len();
         if count > 0 {
             ui.label(format!("{count} selected · Ctrl-click to toggle · Esc to clear"));
@@ -724,6 +728,8 @@ impl EditorApp {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "viewport needs a GPU (wgpu adapter)", egui::FontId::proportional(14.0), Color32::GRAY);
             }
         }
+        #[cfg(feature = "sprites")]
+        self.sprites.paint(ui, &self.editor, rect, px);
         if !live {
             ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 120));
         }
