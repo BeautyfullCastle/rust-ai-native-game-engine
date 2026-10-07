@@ -67,6 +67,8 @@ pub use model::Target;
 pub mod sprite_bindings;
 #[cfg(feature = "sprites")]
 pub mod sprite_panel;
+#[cfg(feature = "sprites")]
+pub mod sprite_playback;
 
 #[cfg(feature = "animated-models")]
 pub mod animated_bindings;

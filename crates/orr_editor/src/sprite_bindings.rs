@@ -17,6 +17,11 @@ const MAX_HISTORY: usize = 128;
 pub enum Source {
     Region(u32),
     Clip(String),
+    /// Presentation-only clip selection from caller-observed motion.
+    Locomotion {
+        idle: String,
+        walk: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,7 +34,16 @@ pub struct Binding {
     pub units_per_pixel: f32,
 }
 impl Binding {
+    /// Existing callers preview the idle clip of a locomotion binding.
     pub fn region(&self, document: &SpriteDocument, elapsed_ms: u64) -> Result<u32, String> {
+        self.region_for_motion(document, elapsed_ms, false)
+    }
+    pub fn region_for_motion(
+        &self,
+        document: &SpriteDocument,
+        elapsed_ms: u64,
+        moving: bool,
+    ) -> Result<u32, String> {
         if !self.units_per_pixel.is_finite() || !(0.0001..=100.0).contains(&self.units_per_pixel) {
             return Err("units per pixel must be finite and between 0.0001 and 100".into());
         }
@@ -42,6 +56,18 @@ impl Binding {
                 .clip(id)
                 .map(|clip| clip.sample(elapsed_ms).region)
                 .ok_or_else(|| format!("missing clip {id}")),
+            Source::Locomotion { idle, walk } => {
+                // Resolve both clips so a missing inactive clip cannot hide
+                // until the entity starts or stops moving.
+                let idle = document
+                    .clip(idle)
+                    .ok_or_else(|| format!("missing idle clip {idle}"))?;
+                let walk = document
+                    .clip(walk)
+                    .ok_or_else(|| format!("missing walk clip {walk}"))?;
+                let clip = if moving { walk } else { idle };
+                Ok(clip.sample(elapsed_ms).region)
+            }
         }
     }
 }
@@ -56,6 +82,9 @@ pub struct Document {
     pub project: String,
     /// Persistent scene GUIDs, never recyclable frame handles.
     pub bindings: BTreeMap<String, Binding>,
+    /// Optional persistent scene GUID. View-only, never sent to the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_follow: Option<String>,
 }
 fn relative(path: &str) -> bool {
     !path.is_empty()
@@ -65,8 +94,17 @@ fn relative(path: &str) -> bool {
 }
 impl Document {
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if !matches!(self.version, 1 | 2) {
             return Err("unsupported sprite binding version".into());
+        }
+        if self.version == 1 && self.has_v2_features() {
+            return Err(
+                "version-1 sprite bindings cannot contain locomotion or camera follow".into(),
+            );
+        }
+        if let Some(guid) = &self.camera_follow {
+            orr_reflect::Guid::parse(guid)
+                .map_err(|_| format!("invalid camera follow scene GUID: {guid}"))?;
         }
         if !relative(&self.scene) || !relative(&self.project) {
             return Err("scene and project must be explicit relative paths".into());
@@ -84,8 +122,22 @@ impl Document {
             {
                 return Err(format!("invalid sprite scale for {guid}"));
             }
+            if let Source::Locomotion { idle, walk } = &binding.source {
+                for (role, clip) in [("idle", idle), ("walk", walk)] {
+                    if clip.trim().is_empty() || clip.len() > orr_sprite::MAX_CLIP_ID_BYTES {
+                        return Err(format!("invalid {role} clip name for {guid}"));
+                    }
+                }
+            }
         }
         Ok(())
+    }
+    fn has_v2_features(&self) -> bool {
+        self.camera_follow.is_some()
+            || self
+                .bindings
+                .values()
+                .any(|binding| matches!(binding.source, Source::Locomotion { .. }))
     }
 }
 
@@ -102,10 +154,11 @@ impl Bindings {
             return Err("sidecar exists; use Open bindings".into());
         }
         let document = Document {
-            version: 1,
+            version: 2,
             scene,
             project,
             bindings: BTreeMap::new(),
+            camera_follow: None,
         };
         document.validate()?;
         Ok(Self {
@@ -173,6 +226,20 @@ impl Bindings {
             } else {
                 next.bindings.remove(&guid.to_string());
             }
+        }
+        self.commit(next)
+    }
+    /// Follow assignment/removal shares the sprite binding undo history.
+    pub fn set_camera_follow(&mut self, guid: Option<orr_reflect::Guid>) -> Result<(), String> {
+        let mut next = self.document.clone();
+        next.camera_follow = guid.map(|guid| guid.to_string());
+        self.commit(next)
+    }
+    fn commit(&mut self, mut next: Document) -> Result<(), String> {
+        // Preserve legacy documents until a v2 feature is authored. Migration
+        // is part of the same transaction, so undo restores the prior version.
+        if next.version == 1 && next.has_v2_features() {
+            next.version = 2;
         }
         next.validate()?;
         if next != self.document {
@@ -366,6 +433,418 @@ fn decode_atlas(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn binding(source: Source) -> Binding {
+        Binding {
+            package: "demo".into(),
+            document: "hero.json".into(),
+            source,
+            units_per_pixel: 0.125,
+        }
+    }
+
+    fn sprite_document() -> SpriteDocument {
+        SpriteDocument::from_json(
+            r#"{
+                "format":"orr_sprite","version":1,
+                "atlas":{"image":"hero.png","width":3,"height":1},
+                "regions":[
+                    {"id":1,"x":0,"y":0,"width":1,"height":1},
+                    {"id":2,"x":1,"y":0,"width":1,"height":1},
+                    {"id":3,"x":2,"y":0,"width":1,"height":1}
+                ],
+                "clips":[
+                    {"id":"idle","mode":"loop","frames":[{"region":1,"duration_ms":100}]},
+                    {"id":"walk","mode":"loop","frames":[
+                        {"region":2,"duration_ms":100},{"region":3,"duration_ms":100}
+                    ]}
+                ]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    fn legacy_json() -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "scene": "arena.scene.yaml",
+            "project": ".",
+            "bindings": {
+                "e_00000001": binding(Source::Region(1)),
+                "e_00000002": binding(Source::Clip("walk".into()))
+            }
+        })
+    }
+
+    fn open_json(path: &Path, json: &serde_json::Value) -> Result<Bindings, String> {
+        std::fs::write(path, serde_json::to_vec(json).unwrap()).unwrap();
+        Bindings::open(path.to_path_buf())
+    }
+
+    #[test]
+    fn locomotion_samples_motion_and_legacy_sources_keep_their_behavior() {
+        let document = sprite_document();
+        let locomotion = binding(Source::Locomotion {
+            idle: "idle".into(),
+            walk: "walk".into(),
+        });
+        assert_eq!(locomotion.region(&document, 100).unwrap(), 1);
+        assert_eq!(
+            locomotion.region_for_motion(&document, 100, false).unwrap(),
+            1
+        );
+        assert_eq!(locomotion.region_for_motion(&document, 0, true).unwrap(), 2);
+        assert_eq!(
+            locomotion.region_for_motion(&document, 100, true).unwrap(),
+            3
+        );
+        assert_eq!(
+            locomotion.region_for_motion(&document, 200, true).unwrap(),
+            2
+        );
+        for moving in [false, true] {
+            assert_eq!(
+                binding(Source::Region(2))
+                    .region_for_motion(&document, 100, moving)
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                binding(Source::Clip("walk".into()))
+                    .region_for_motion(&document, 100, moving)
+                    .unwrap(),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn locomotion_validates_both_clips_even_when_the_missing_clip_is_inactive() {
+        let document = sprite_document();
+        for (idle, walk, missing) in [
+            ("absent", "walk", "missing idle clip absent"),
+            ("idle", "absent", "missing walk clip absent"),
+        ] {
+            let binding = binding(Source::Locomotion {
+                idle: idle.into(),
+                walk: walk.into(),
+            });
+            for moving in [false, true] {
+                assert_eq!(
+                    binding.region_for_motion(&document, 0, moving).unwrap_err(),
+                    missing
+                );
+            }
+            assert_eq!(binding.region(&document, 0).unwrap_err(), missing);
+        }
+    }
+
+    #[test]
+    fn legacy_read_save_and_ordinary_edits_retain_version_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sprites.json");
+        let mut bindings = open_json(&path, &legacy_json()).unwrap();
+        assert_eq!(bindings.document().version, 1);
+        assert_eq!(bindings.document().camera_follow, None);
+        assert!(!bindings.dirty());
+        assert_eq!(
+            bindings.document().bindings["e_00000002"]
+                .region(&sprite_document(), 100)
+                .unwrap(),
+            3
+        );
+        bindings.set_camera_follow(None).unwrap();
+        assert!(bindings.undo.is_empty());
+        bindings
+            .assign(
+                &[orr_reflect::Guid::from_u32(3)],
+                Some(binding(Source::Clip("idle".into()))),
+            )
+            .unwrap();
+        assert_eq!(bindings.document().version, 1);
+        bindings.undo();
+        assert!(!bindings.dirty());
+        bindings.save().unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, legacy_json());
+        assert_eq!(
+            Bindings::open(path).unwrap().document(),
+            bindings.document()
+        );
+    }
+
+    #[test]
+    fn legacy_migration_is_part_of_each_new_feature_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sprites.json");
+        for follow in [false, true] {
+            let mut bindings = open_json(&path, &legacy_json()).unwrap();
+            let legacy = bindings.document().clone();
+            if follow {
+                bindings
+                    .set_camera_follow(Some(orr_reflect::Guid::from_u32(1)))
+                    .unwrap();
+            } else {
+                bindings
+                    .assign(
+                        &[orr_reflect::Guid::from_u32(1)],
+                        Some(binding(Source::Locomotion {
+                            idle: "idle".into(),
+                            walk: "walk".into(),
+                        })),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(bindings.document().version, 2);
+            assert!(bindings.dirty());
+            let migrated = bindings.document().clone();
+            bindings.undo();
+            assert_eq!(bindings.document(), &legacy);
+            assert!(!bindings.dirty());
+            bindings.redo();
+            assert_eq!(bindings.document(), &migrated);
+            bindings.save().unwrap();
+            assert_eq!(Bindings::open(path.clone()).unwrap().document(), &migrated);
+        }
+    }
+
+    #[test]
+    fn legacy_documents_cannot_smuggle_new_features_or_unknown_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.sprites.json");
+        let mut follow = legacy_json();
+        follow["camera_follow"] = serde_json::json!("e_00000001");
+        assert!(open_json(&path, &follow)
+            .err()
+            .unwrap()
+            .contains("version-1"));
+        let mut locomotion = legacy_json();
+        locomotion["bindings"]["e_00000001"]["source"] =
+            serde_json::json!({"Locomotion": {"idle": "idle", "walk": "walk"}});
+        assert!(open_json(&path, &locomotion)
+            .err()
+            .unwrap()
+            .contains("version-1"));
+        for version in [0, 3, u32::MAX] {
+            let mut unknown = legacy_json();
+            unknown["version"] = serde_json::json!(version);
+            assert!(open_json(&path, &unknown)
+                .err()
+                .unwrap()
+                .contains("unsupported"));
+        }
+    }
+
+    #[test]
+    fn camera_follow_accepts_only_persistent_scene_guids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("follow.sprites.json");
+        let mut document = legacy_json();
+        document["version"] = serde_json::json!(2);
+        for invalid in [
+            "",
+            "hero",
+            "1v0",
+            "e_1",
+            "e_DEADBEEF",
+            "e_0000000g",
+            "e_000000000000000000000000000000000",
+        ] {
+            document["camera_follow"] = serde_json::json!(invalid);
+            assert!(open_json(&path, &document)
+                .err()
+                .unwrap()
+                .contains("camera follow scene GUID"));
+        }
+        for valid in ["e_deadbeef", "e_0123456789abcdef0123456789abcdef"] {
+            document["camera_follow"] = serde_json::json!(valid);
+            let mut bindings = open_json(&path, &document).unwrap();
+            assert_eq!(bindings.document().camera_follow.as_deref(), Some(valid));
+            bindings.save().unwrap();
+            assert_eq!(
+                Bindings::open(path.clone())
+                    .unwrap()
+                    .document()
+                    .camera_follow
+                    .as_deref(),
+                Some(valid)
+            );
+        }
+        document["camera_follow"] = serde_json::Value::Null;
+        assert_eq!(
+            open_json(&path, &document)
+                .unwrap()
+                .document()
+                .camera_follow,
+            None
+        );
+    }
+
+    #[test]
+    fn follow_and_sprite_edits_share_history_and_noops_preserve_redo() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bindings = Bindings::create(
+            dir.path().join("view.json"),
+            "scene.yaml".into(),
+            ".".into(),
+        )
+        .unwrap();
+        assert_eq!(bindings.document().version, 2);
+        let empty = bindings.document().clone();
+        let guid = orr_reflect::Guid::from_u32(1);
+        bindings.set_camera_follow(Some(guid.clone())).unwrap();
+        let follow_only = bindings.document().clone();
+        bindings
+            .assign(std::slice::from_ref(&guid), Some(binding(Source::Region(1))))
+            .unwrap();
+        let both = bindings.document().clone();
+        bindings.set_camera_follow(None).unwrap();
+        assert_eq!(bindings.document().camera_follow, None);
+        assert_eq!(bindings.document().bindings.len(), 1);
+        bindings.undo();
+        assert_eq!(bindings.document(), &both);
+        bindings.undo();
+        assert_eq!(bindings.document(), &follow_only);
+        let redo = bindings.redo.clone();
+        bindings.set_camera_follow(Some(guid.clone())).unwrap();
+        bindings.assign(&[guid], None).unwrap();
+        assert_eq!(bindings.redo, redo);
+        bindings.undo();
+        assert_eq!(bindings.document(), &empty);
+        bindings.redo();
+        assert_eq!(bindings.document(), &follow_only);
+        bindings.redo();
+        assert_eq!(bindings.document(), &both);
+        bindings
+            .set_camera_follow(Some(orr_reflect::Guid::from_u32(2)))
+            .unwrap();
+        assert!(bindings.redo.is_empty());
+    }
+
+    #[test]
+    fn shared_history_is_bounded_across_both_edit_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bindings = Bindings::create(
+            dir.path().join("view.json"),
+            "scene.yaml".into(),
+            ".".into(),
+        )
+        .unwrap();
+        let guid = orr_reflect::Guid::from_u32(1);
+        let mut retained_start = bindings.document().clone();
+        for i in 0..MAX_HISTORY + 2 {
+            if i % 2 == 0 {
+                bindings
+                    .set_camera_follow(Some(orr_reflect::Guid::from_u32(i as u32)))
+                    .unwrap();
+            } else {
+                bindings
+                    .assign(
+                        std::slice::from_ref(&guid),
+                        Some(binding(Source::Region(i as u32))),
+                    )
+                    .unwrap();
+            }
+            if i == 1 {
+                retained_start = bindings.document().clone();
+            }
+        }
+        assert_eq!(bindings.undo.len(), MAX_HISTORY);
+        let latest = bindings.document().clone();
+        for _ in 0..MAX_HISTORY + 2 {
+            bindings.undo();
+        }
+        assert_eq!(bindings.document(), &retained_start);
+        assert_eq!(bindings.redo.len(), MAX_HISTORY);
+        for _ in 0..MAX_HISTORY + 2 {
+            bindings.redo();
+        }
+        assert_eq!(bindings.document(), &latest);
+        assert_eq!(bindings.undo.len(), MAX_HISTORY);
+    }
+
+    #[test]
+    fn invalid_locomotion_names_preserve_document_version_and_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sprites.json");
+        let mut bindings = open_json(&path, &legacy_json()).unwrap();
+        bindings
+            .set_camera_follow(Some(orr_reflect::Guid::from_u32(1)))
+            .unwrap();
+        bindings.undo();
+        let before = bindings.document().clone();
+        let redo = bindings.redo.clone();
+        for invalid in [
+            String::new(),
+            " \t".into(),
+            "x".repeat(orr_sprite::MAX_CLIP_ID_BYTES + 1),
+        ] {
+            for source in [
+                Source::Locomotion {
+                    idle: invalid.clone(),
+                    walk: "walk".into(),
+                },
+                Source::Locomotion {
+                    idle: "idle".into(),
+                    walk: invalid.clone(),
+                },
+            ] {
+                assert!(bindings
+                    .assign(&[orr_reflect::Guid::from_u32(1)], Some(binding(source)))
+                    .is_err());
+                assert_eq!(bindings.document(), &before);
+                assert!(bindings.undo.is_empty());
+                assert_eq!(bindings.redo, redo);
+                assert!(!bindings.dirty());
+            }
+        }
+    }
+
+    #[test]
+    fn failed_follow_save_preserves_file_saved_document_and_shared_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("view.json");
+        let mut bindings = Bindings::create(path.clone(), "scene.yaml".into(), ".".into()).unwrap();
+        bindings.save().unwrap();
+        let original = std::fs::read(&path).unwrap();
+        bindings
+            .set_camera_follow(Some(orr_reflect::Guid::from_u32(1)))
+            .unwrap();
+        let mut oversized = binding(Source::Locomotion {
+            idle: "idle".into(),
+            walk: "walk".into(),
+        });
+        oversized.package = "x".repeat(MAX_BYTES as usize);
+        bindings
+            .assign(&[orr_reflect::Guid::from_u32(1)], Some(oversized))
+            .unwrap();
+        bindings.set_camera_follow(None).unwrap();
+        bindings.undo();
+        let before = bindings.document().clone();
+        let saved = bindings.saved.clone();
+        let undo = bindings.undo.clone();
+        let redo = bindings.redo.clone();
+        assert!(bindings.save().unwrap_err().contains("byte limit"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(bindings.document(), &before);
+        assert_eq!(bindings.saved, saved);
+        assert_eq!(bindings.undo, undo);
+        assert_eq!(bindings.redo, redo);
+        assert!(bindings.dirty());
+        bindings.undo();
+        assert!(bindings.document().bindings.is_empty());
+        assert_eq!(
+            bindings.document().camera_follow.as_deref(),
+            Some("e_00000001")
+        );
+        bindings.undo();
+        assert!(!bindings.dirty());
+        bindings.redo();
+        bindings.redo();
+        assert_eq!(bindings.document(), &before);
+    }
+
     #[test]
     fn transaction_undo_save_reopen_and_scene_unchanged() {
         let dir = tempfile::tempdir().unwrap();
