@@ -335,6 +335,7 @@ pub enum Edit {
 }
 /// Bounded snapshot undo/redo. Transactions validate completely before publication.
 /// Undo restores content and revision; history is intentionally not part of cooked assets.
+#[derive(Clone)]
 pub struct TerrainDocument {
     terrain: Terrain,
     undo: Vec<Terrain>,
@@ -352,6 +353,12 @@ impl TerrainDocument {
     }
     pub fn terrain(&self) -> &Terrain {
         &self.terrain
+    }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
     /// Most recent successful content change, not an accumulated upload queue.
     /// No-ops preserve it. Rejected transactions leave it untouched.

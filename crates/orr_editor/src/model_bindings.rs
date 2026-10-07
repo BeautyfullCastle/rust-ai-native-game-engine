@@ -605,6 +605,8 @@ impl Bindings {
 pub fn open_project(project_root: &Path) -> Result<Project, String> {
     let mut capabilities = BTreeSet::new();
     capabilities.insert("models".to_owned());
+    #[cfg(feature = "terrain")]
+    capabilities.insert("terrain_v1".to_owned());
     #[cfg(feature = "irradiance-probes")]
     capabilities.insert("irradiance-probes".to_owned());
     #[cfg(feature = "animated-models")]

@@ -379,6 +379,8 @@ pub fn open_project(root: &Path) -> Result<orr_package::Project, String> {
     runtime.capabilities.insert("irradiance-probes".into());
     #[cfg(feature = "models")]
     runtime.capabilities.insert("models".into());
+    #[cfg(feature = "terrain")]
+    runtime.capabilities.insert("terrain_v1".into());
     #[cfg(feature = "animated-models")]
     runtime.capabilities.insert("animation".into());
     #[cfg(feature = "sprites")]

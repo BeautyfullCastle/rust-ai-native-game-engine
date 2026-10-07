@@ -875,3 +875,26 @@ fn production_editor_main_gpu_viewport_renders_bound_models_edits_play_seek_and_
         "Stop returns the Edit viewport to the authored scene pixels"
     );
 }
+
+#[cfg(feature = "terrain")]
+#[test]
+fn scene_owned_reservation_rejects_model_assignment_before_history_or_cache_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let scene = install_and_scene(&root);
+    let mut h = headless(&scene);
+    settle(&mut h);
+    assert!(h.state_mut().editor.select_named("box_right"));
+    assign_direct(h.state_mut());
+    let before = h.state().models.bindings.as_ref().unwrap().document().clone();
+    let before_model = h.state().models.placements(&h.state().editor)[0].model.clone();
+    // Eight reserved scene assets leave no slot for this existing model.
+    let app = h.state_mut();
+    app.models.reserve_scene_models(8);
+    assert!(app.models.assign(&app.editor).is_err());
+    assert_eq!(app.models.bindings.as_ref().unwrap().document(), &before);
+    assert!(std::sync::Arc::ptr_eq(&app.models.placements(&app.editor)[0].model, &before_model));
+    app.models.reserve_scene_models(1);
+    app.models.assign(&app.editor).unwrap();
+    assert_eq!(app.models.bindings.as_ref().unwrap().document(), &before);
+}

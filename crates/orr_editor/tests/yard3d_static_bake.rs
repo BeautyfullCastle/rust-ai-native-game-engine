@@ -1052,3 +1052,61 @@ fn same_content_project_retarget_revalidates_current_root_and_rejects_old_worker
     );
     assert_eq!(std::fs::read(&sidecar).unwrap(), saved);
 }
+
+#[cfg(feature = "terrain")]
+#[test]
+fn terrain_attachment_suspends_baked_receipts_without_mutating_probes_and_detach_revalidates() {
+    use orr_editor::terrain_document::NewTerrain;
+    use orr_terrain::Edit;
+    use orr_fp::FP;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut app = plain_app(&root);
+    // Manual probes remain available in the bounded terrain slice.
+    let scene = app.editor.sim().scene_path.as_ref().unwrap().clone();
+    app.terrain.document.set_scene(Some(Path::new(&scene))).unwrap();
+    app.terrain.document.new_local("terrain.orrt", NewTerrain::default()).unwrap();
+    app.irradiance.set_terrain_attached(app.terrain.attached_for_editor(&app.editor));
+    assert!(app.irradiance.grid_for_editor(&app.editor).is_some());
+    assert!(app.irradiance.start_bake(&app.editor, &app.models).unwrap_err().contains("terrain"));
+    app.terrain.document.discard();
+    app.irradiance.set_terrain_attached(false);
+    let manual = app.irradiance.bindings.as_ref().unwrap().document().clone();
+    app.irradiance.start_bake(&app.editor, &app.models).unwrap();
+    app.irradiance.set_terrain_attached(true);
+    drain(&mut app);
+    assert_eq!(app.irradiance.bindings.as_ref().unwrap().document(), &manual,
+        "attachment cancels an in-flight bake before admission");
+    app.irradiance.set_terrain_attached(false);
+    app.irradiance.start_bake(&app.editor, &app.models).unwrap();
+    drain(&mut app);await_verified_grid(&mut app);
+    app.irradiance.save().unwrap();
+    let path = app.irradiance.bindings.as_ref().unwrap().path.clone();
+    let bytes = std::fs::read(&path).unwrap();
+    let document = app.irradiance.bindings.as_ref().unwrap().document().clone();
+    let revision = app.irradiance.bindings.as_ref().unwrap().revision();
+    for height in [FP::ZERO, FP::from_int(2)] {
+        if app.terrain.document.terrain().is_none() {
+            app.terrain.document.new_local("terrain.orrt", NewTerrain::default()).unwrap();
+        }
+        app.terrain.document.apply(&[Edit::SetHeight{x:0,z:0,height}]).unwrap();
+        app.irradiance.set_terrain_attached(app.terrain.attached_for_editor(&app.editor));
+        app.irradiance.sync_bake_for_editor(&app.editor, &app.models);
+        assert!(app.irradiance.grid_for_editor(&app.editor).is_none());
+        assert!(app.irradiance.baked_stale_reason().unwrap().contains("terrain"));
+        assert!(app.irradiance.start_bake(&app.editor, &app.models).is_err());
+        assert_eq!(app.irradiance.bindings.as_ref().unwrap().document(), &document);
+        assert_eq!(app.irradiance.bindings.as_ref().unwrap().revision(), revision);
+        assert!(!app.irradiance.bindings.as_ref().unwrap().dirty());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+    app.terrain.document.discard();app.irradiance.set_terrain_attached(false);
+    app.irradiance.refresh_baked_validity(&app.editor, &app.models);
+    assert!(app.irradiance.is_validating_bake(), "detach starts source revalidation");
+    // Race: cancel validation with a transient attach/detach before it drains.
+    app.irradiance.set_terrain_attached(true);
+    app.irradiance.set_terrain_attached(false);
+    await_verified_grid(&mut app);
+    assert_eq!(app.irradiance.grid_for_editor(&app.editor), Some(&document.grid));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}

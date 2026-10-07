@@ -3172,6 +3172,8 @@ dependencies = [
  "orr_sample",
  "orr_session",
  "orr_sim",
+ "orr_terrain",
+ "orr_terrain_view",
  "orr_sprite",
  "orr_view",
  "png 0.17.16",

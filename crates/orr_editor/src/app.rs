@@ -213,6 +213,8 @@ pub struct EditorApp {
     pub irradiance: crate::irradiance_panel::IrradiancePanel,
     #[cfg(feature="models")]
     pub models: crate::model_panel::ModelPanel,
+    #[cfg(feature="terrain")]
+    pub terrain: crate::terrain_panel::TerrainPanel,
     shot: Option<ScreenshotJob>,
     remote_capture: Option<RemoteCapture>,
     encoder: Option<EncoderWorker>,
@@ -229,7 +231,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Deliberately restrict HDR for compatibility. This one-way builder must
@@ -590,8 +592,21 @@ impl EditorApp {
     fn inspector(&mut self, ui: &mut Ui) {
         ui.heading("Inspector");
         if self.editor.game()==crate::game::EditorGame::Yard3D { self.yard_transform(ui); }
+        #[cfg(feature="terrain")]
+        {
+            self.terrain.sync_for_editor(&self.editor);
+            self.models.reserve_scene_models(usize::from(self.terrain.attached_for_editor(&self.editor)));
+        }
         #[cfg(feature="models")]
         self.models.show(ui,&self.editor);
+        #[cfg(feature="terrain")]
+        {
+            let error = if self.models.scene_matches(&self.editor) { self.models.terrain_admission_error() } else { None };
+            self.terrain.document.set_render_admission_error(error);
+            self.terrain.show(ui, &self.editor);
+        }
+        #[cfg(all(feature="terrain", feature="irradiance-probes"))]
+        self.irradiance.set_terrain_attached(self.terrain.attached_for_editor(&self.editor));
         #[cfg(feature="irradiance-probes")]
         self.irradiance.show_with_models(ui,&self.editor,&self.models);
         #[cfg(feature = "sprites")]
@@ -725,6 +740,10 @@ impl EditorApp {
     }
 
     fn yard_viewport(&mut self,ui:&mut Ui){
+        #[cfg(feature="terrain")]
+        self.terrain.sync_for_editor(&self.editor);
+        #[cfg(all(feature="terrain", feature="irradiance-probes"))]
+        self.irradiance.set_terrain_attached(self.terrain.attached_for_editor(&self.editor));
         #[cfg(feature="irradiance-probes")]
         {
             self.irradiance.sync_for_editor(&self.editor);
@@ -740,7 +759,16 @@ impl EditorApp {
         if resp.dragged_by(PointerButton::Secondary){let d=resp.drag_delta();self.editor.camera3d.orbit([d.x*ppp,d.y*ppp]);}
         if resp.dragged_by(PointerButton::Middle){let d=resp.drag_delta();self.editor.camera3d.pan([d.x*ppp,d.y*ppp],px);}
         if resp.hovered(){let scroll=ui.input(|i|i.smooth_scroll_delta.y);if scroll!=0.0 {self.editor.camera3d.zoom(scroll*0.01);}}
-        if resp.clicked_by(PointerButton::Primary)&&self.editor.previewing().is_none(){if let Some(at)=resp.interact_pointer_pos(){let target=self.editor.pick3d([(at.x-rect.min.x)*ppp,(at.y-rect.min.y)*ppp],px);self.editor.select(target);}}
+        if resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
+            if let Some(at) = resp.interact_pointer_pos() {
+                let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
+                #[cfg(feature="terrain")]
+                let consumed = self.terrain.pick(&self.editor, &self.editor.camera3d.camera(), pixel, px);
+                #[cfg(not(feature="terrain"))]
+                let consumed = false;
+                if !consumed { let target = self.editor.pick3d(pixel, px); self.editor.select(target); }
+            }
+        }
         let selected=if self.editor.yard_rows_coherent(){self.editor.selection().and_then(|t|self.editor.row_of(t)).map(|r|r.entity)}else{None};
         #[cfg(feature="models")]
         let placements=self.models.placements(&self.editor);
@@ -762,16 +790,23 @@ impl EditorApp {
         #[cfg(not(feature="models"))]
         let hidden=Vec::new();
         let list=self.editor.yard_frame().list(&hidden,selected);
+        #[cfg(feature="terrain")]
+        let scene_models: Vec<_> = self.terrain.viewport_model(&self.editor).into_iter().map(|model| crate::viewport3d::SceneModel { model, instance: Default::default() }).collect();
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
-            #[cfg(all(feature="animated-models", not(feature="irradiance-probes")))]
+            #[cfg(all(feature="animated-models", not(feature="irradiance-probes"), not(feature="terrain")))]
             let rendered = gpu.render_mixed_post_processed(px,&list,&self.editor.camera3d.camera(),&placements,&animated_placements,self.ui.yard_post_process);
-            #[cfg(all(feature="models", not(feature="animated-models"), not(feature="irradiance-probes")))]
+            #[cfg(all(feature="models", not(feature="animated-models"), not(feature="irradiance-probes"), not(feature="terrain")))]
             let rendered = gpu.render_post_processed(px,&list,&self.editor.camera3d.camera(),&placements,self.ui.yard_post_process);
-            #[cfg(feature="irradiance-probes")]
+            #[cfg(all(feature="irradiance-probes", not(feature="terrain")))]
             let rendered = gpu.render_irradiance(px,&list,&self.editor.camera3d.camera(),&placements,
                 #[cfg(feature="animated-models")] &animated_placements,
                 self.ui.yard_post_process,self.irradiance.grid_for_editor(&self.editor));
+            #[cfg(feature="terrain")]
+            let rendered = gpu.render_scene(px, &list, &self.editor.camera3d.camera(), &placements, &scene_models,
+                #[cfg(feature="animated-models")] &animated_placements,
+                self.ui.yard_post_process,
+                #[cfg(feature="irradiance-probes")] self.irradiance.grid_for_editor(&self.editor));
             #[cfg(not(feature="models"))]
             let rendered = gpu.render(px,&list,&self.editor.camera3d.camera());
             #[cfg(feature="models")]
@@ -789,6 +824,8 @@ impl EditorApp {
             ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
         }
+        #[cfg(feature="terrain")]
+        self.terrain.paint_selection(&self.editor, ui.painter(), &self.editor.camera3d.camera(), rect);
         ui.painter().text(rect.left_top()+egui::vec2(10.0,10.0),egui::Align2::LEFT_TOP,"Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan",egui::FontId::proportional(12.0),Color32::WHITE);
         if self.editor.previewing().is_some(){ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"3D proposal preview unavailable; displaying live host snapshot",egui::FontId::proportional(14.0),Color32::YELLOW);}
     }
@@ -1046,6 +1083,12 @@ impl EditorApp {
         });
         if accept && !dialog.text.trim().is_empty() {
             let path = PathBuf::from(dialog.text.trim());
+            #[cfg(feature="terrain")]
+            if self.terrain.document.dirty() {
+                self.editor.error("Save or explicitly discard terrain changes before changing the scene path");
+                self.ui.dialog = Some(dialog);
+                return;
+            }
             let ok = match dialog.kind {
                 DialogKind::Open => self.editor.open_path(&path),
                 DialogKind::SaveAs => self.editor.save_as(&path),

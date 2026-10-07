@@ -88,3 +88,19 @@ fn the_editor_sources_do_not_name_the_simulation_crates() {
     }
     assert!(checked >= 10);
 }
+
+#[test]
+fn terrain_is_an_optional_presentation_leaf() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(manifest.contains("terrain = [\"models\", \"dep:orr_terrain\", \"dep:orr_terrain_view\"]"));
+    assert!(manifest.contains("default = []"));
+    let view = std::fs::read_to_string(root.join("../orr_terrain_view/Cargo.toml")).unwrap();
+    assert!(view.contains("default = []"));
+    assert!(!manifest.contains("orr_terrain_view/gpu"));
+    for name in ["orr_fp", "orr_ecs", "orr_sim", "orr_session", "orr_physics3d", "orr_games"] {
+        let manifest = std::fs::read_to_string(root.join(format!("../{name}/Cargo.toml"))).unwrap();
+        assert!(!dependencies(&manifest).iter().any(|d| d.starts_with("orr_terrain")), "{name} must remain independent of terrain authoring");
+    }
+    assert!(!dependencies(&manifest).iter().any(|d| d == "orr_navigation"));
+}
