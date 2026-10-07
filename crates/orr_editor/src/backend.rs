@@ -178,10 +178,10 @@ impl Backend {
                 // restart keeps the established saved-on-disk local-host semantics
                 // (including saves made by agents through ERP).
                 let restart = HostSpec::LocalGame {
-                    scene: scene.path.clone(), game: EditorGame::Arena,
+                    scene: scene.path().to_path_buf(), game: EditorGame::Arena,
                     listen: listen.clone(), debug_hooks: *debug_hooks,
                 };
-                Self::connect_local(&restart, &scene.path, scene.text.to_string(), EditorGame::Arena, listen, *debug_hooks)
+                Self::connect_local(&restart, scene.path(), scene.text().to_string(), EditorGame::Arena, listen, *debug_hooks)
             }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());

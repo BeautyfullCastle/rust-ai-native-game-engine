@@ -90,11 +90,11 @@ impl ModelPanel {
         editor.spec().is_local()
             && editor.game() == EditorGame::Yard3D
             && self.bindings.as_ref().is_some_and(|b| {
-                let local_path = match editor.spec() {
+                let local_path: &std::path::Path = match editor.spec() {
                     crate::backend::HostSpec::Local { scene, .. }
                     | crate::backend::HostSpec::LocalGame { scene, .. } => scene,
                     #[cfg(feature = "sprites")]
-                    crate::backend::HostSpec::PreparedArena { scene, .. } => &scene.path,
+                    crate::backend::HostSpec::PreparedArena { scene, .. } => scene.path(),
                     crate::backend::HostSpec::Remote { .. } => return false,
                 };
                 if !local_path
@@ -122,11 +122,11 @@ impl ModelPanel {
         if !editor.spec().is_local() || editor.game() != EditorGame::Yard3D {
             return Err("Model bindings require a local Yard3D scene".into());
         }
-        let expected = match editor.spec() {
+        let expected: &std::path::Path = match editor.spec() {
             crate::backend::HostSpec::Local { scene, .. }
             | crate::backend::HostSpec::LocalGame { scene, .. } => scene,
             #[cfg(feature = "sprites")]
-            crate::backend::HostSpec::PreparedArena { scene, .. } => &scene.path,
+            crate::backend::HostSpec::PreparedArena { scene, .. } => scene.path(),
             crate::backend::HostSpec::Remote { .. } => {
                 return Err("Remote scene paths are not local authority".into())
             }
@@ -137,12 +137,12 @@ impl ModelPanel {
             .as_ref()
             .map(PathBuf::from)
             .ok_or("Save the local scene first")?;
-        if &reported != expected {
+        if reported.as_path() != expected {
             return Err(
                 "Wait for the local scene path to synchronize before opening bindings".into(),
             );
         }
-        Ok(expected.clone())
+        Ok(expected.to_path_buf())
     }
     fn sidecar(scene: &std::path::Path) -> PathBuf {
         let mut path = scene.as_os_str().to_os_string();

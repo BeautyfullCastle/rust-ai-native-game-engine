@@ -205,10 +205,10 @@ fn participating_input_key(
     {
         return Err("Bake input key requires coherent local Yard3D without a preview".into());
     }
-    let expected = match editor.spec() {
+    let expected: &std::path::Path = match editor.spec() {
         HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => scene,
         #[cfg(feature = "sprites")]
-        HostSpec::PreparedArena { scene, .. } => &scene.path,
+        HostSpec::PreparedArena { scene, .. } => scene.path(),
         HostSpec::Remote { .. } => return Err("Remote scene has no local bake input key".into()),
     };
     if editor.sim().scene_path.as_deref() != expected.to_str() {
@@ -393,10 +393,10 @@ fn capture(
     {
         return Err("Static diffuse bake requires a coherent local Yard3D scene without preview; start and completion require Edit mode".into());
     }
-    let expected = match editor.spec() {
+    let expected: &std::path::Path = match editor.spec() {
         HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => scene,
         #[cfg(feature = "sprites")]
-        HostSpec::PreparedArena { scene, .. } => &scene.path,
+        HostSpec::PreparedArena { scene, .. } => scene.path(),
         HostSpec::Remote { .. } => return Err("Remote paths cannot authorize a bake".into()),
     };
     if editor.sim().scene_path.as_deref() != expected.to_str() {

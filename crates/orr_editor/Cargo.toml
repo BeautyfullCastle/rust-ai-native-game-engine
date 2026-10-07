@@ -18,7 +18,7 @@ terrain-physics = ["terrain", "orr_remote/terrain-physics"]
 default = []
 terrain = ["models", "dep:orr_terrain", "dep:orr_terrain_view"]
 irradiance-probes = ["models", "orr_render/irradiance-probes"]
-sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile"]
+sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile", "orr_sample/project"]
 models = ["dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
 animated-models = ["models", "orr_model/animation", "orr_render/animation"]
 

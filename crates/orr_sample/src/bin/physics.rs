@@ -72,6 +72,8 @@ fn real_main() -> Result<(), String> {
         label: String::new(),
         #[cfg(feature = "input-actions")]
         input_map: None,
+        #[cfg(feature = "game-ui")]
+        game_ui_project: None,
         vsync: true,
         audio: orr_sample::arena_audio::AudioMode::Off,
         seconds: None,

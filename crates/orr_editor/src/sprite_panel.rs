@@ -153,31 +153,9 @@ impl SpritePanel {
         bindings: &Bindings,
         project: &orr_package::Project,
     ) -> Result<BTreeMap<(String, String), Asset>, String> {
-        let references: BTreeSet<_> = bindings
-            .document()
-            .bindings
-            .values()
-            .map(|b| (b.package.clone(), b.document.clone()))
-            .collect();
-        if references.len() > 8 {
-            return Err("sidecar references more than 8 sprite documents; reduce references before reloading".into());
-        }
-        let mut assets = BTreeMap::new();
-        for (package, document) in references {
-            let asset = sprite_bindings::load_project_asset(project, &package, &document)
-                .map_err(|e| format!("{package}/{document}: {e}"))?;
-            for binding in bindings
-                .document()
-                .bindings
-                .values()
-                .filter(|b| b.package == package && b.document == document)
-            {
-                binding.region(&asset.document, 0)?;
-            }
-            assets.insert((package, document), asset);
-        }
-        Ok(assets)
+        orr_sample::project_sprites::load_project_assets(bindings.document(), project)
     }
+
     fn replace_assets(&mut self, ctx: &egui::Context, assets: BTreeMap<(String, String), Asset>) {
         let loaded = assets.into_iter().map(|(key, asset)| {
             let atlas = asset.document.atlas();
