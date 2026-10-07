@@ -887,6 +887,14 @@ impl EditorApp {
             fire: i.key_down(Key::Space),
         });
         self.editor.arena_keys(focused, keys);
+        if self.editor.game() == crate::game::EditorGame::Arena && resp.has_focus() {
+            // Arrow movement belongs to managed gameplay, not egui's focus
+            // navigation. Tab/Escape still release focus normally.
+            let controlled = focused && self.editor.input_phase() == crate::editor::input::Phase::Active;
+            ui.memory_mut(|memory| memory.set_focus_lock_filter(resp.id, egui::EventFilter {
+                horizontal_arrows: controlled, vertical_arrows: controlled, ..Default::default()
+            }));
+        }
         if focused && self.editor.input_phase() == crate::editor::input::Phase::Active {
             ui.input_mut(|i| i.events.retain(|event| !matches!(event, egui::Event::Key { key: Key::W | Key::A | Key::S | Key::D | Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight | Key::Space, .. })));
         }
@@ -896,14 +904,21 @@ impl EditorApp {
         self.ui.viewport_px = px;
         let to_px = |p: Pos2| [(p.x - rect.min.x) * ppp, (p.y - rect.min.y) * ppp];
 
+        #[cfg(feature = "sprites")]
+        self.sprites.update(&mut self.editor);
+
         // Camera: pan with middle or right drag, zoom with the wheel.
         if resp.dragged_by(PointerButton::Middle) || resp.dragged_by(PointerButton::Secondary) {
             let d = resp.drag_delta();
+            #[cfg(feature = "sprites")]
+            if d != egui::Vec2::ZERO { self.sprites.playback.suspend_follow(); }
             self.editor.camera.pan_pixels([d.x * ppp, d.y * ppp], px);
         }
         if resp.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if let (true, Some(at)) = (scroll != 0.0, resp.hover_pos()) {
+                #[cfg(feature = "sprites")]
+                self.sprites.playback.suspend_follow();
                 self.editor.camera.zoom_at((scroll * 0.0015).exp(), to_px(at), px);
             }
         }

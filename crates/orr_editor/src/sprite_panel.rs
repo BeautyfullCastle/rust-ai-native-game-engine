@@ -5,6 +5,7 @@ use crate::{
     game::EditorGame,
     model::Mode,
     sprite_bindings::{self, Asset, Binding, Bindings, Source},
+    sprite_playback::SpritePlayback,
 };
 use egui::{Color32, Pos2, Rect, TextureHandle, Ui};
 use std::{
@@ -19,13 +20,14 @@ struct Loaded {
 
 pub struct SpritePanel {
     pub bindings: Option<Bindings>,
-    path: String,
-    scene: String,
-    project: String,
-    package: String,
-    document: String,
-    source: Source,
-    scale: f32,
+    pub playback: SpritePlayback,
+    pub path: String,
+    pub scene: String,
+    pub project: String,
+    pub package: String,
+    pub document: String,
+    pub source: Source,
+    pub scale: f32,
     loaded: BTreeMap<(String, String), Loaded>,
     error: Option<String>,
     preview_playing: bool,
@@ -35,6 +37,7 @@ impl Default for SpritePanel {
     fn default() -> Self {
         Self {
             bindings: None,
+            playback: SpritePlayback::default(),
             path: String::new(),
             scene: String::new(),
             project: ".".into(),
@@ -50,7 +53,7 @@ impl Default for SpritePanel {
     }
 }
 impl SpritePanel {
-    fn scene_matches(&self, editor: &Editor) -> bool {
+    pub fn scene_matches(&self, editor: &Editor) -> bool {
         self.bindings.as_ref().is_some_and(|b| {
             editor
                 .sim()
@@ -95,37 +98,219 @@ impl SpritePanel {
         );
         self.loaded.insert(key, Loaded { asset, texture });
     }
-    fn reload(&mut self, ctx: &egui::Context) -> Result<(), String> {
+    /// Failed open/reload retains the last good document and atlas textures.
+    pub fn open(&mut self, ctx: &egui::Context, path: PathBuf) -> Result<(), String> {
+        if self.bindings.as_ref().is_some_and(Bindings::dirty) {
+            return Err(
+                "save or explicitly discard the current bindings before opening another sidecar"
+                    .into(),
+            );
+        }
+        let candidate = Bindings::open(path)?;
+        let assets = Self::load_assets(&candidate)?;
+        self.path = candidate.path.to_string_lossy().into_owned();
+        self.bindings = Some(candidate);
+        self.playback.reset_document();
+        self.replace_assets(ctx, assets);
+        self.preview_playing = false;
+        Ok(())
+    }
+    pub fn create(&mut self, path: PathBuf, scene: String, project: String) -> Result<(), String> {
+        if self.bindings.is_some() {
+            return Err("close the current bindings before creating another sidecar".into());
+        }
+        let candidate = Bindings::create(path, scene, project)?;
+        self.path = candidate.path.to_string_lossy().into_owned();
+        self.bindings = Some(candidate);
+        self.playback.reset_document();
         self.loaded.clear();
-        let references: BTreeSet<_> = self
+        self.preview_playing = false;
+        Ok(())
+    }
+    fn load_assets(bindings: &Bindings) -> Result<BTreeMap<(String, String), Asset>, String> {
+        let references: BTreeSet<_> = bindings
+            .document()
             .bindings
-            .as_ref()
-            .into_iter()
-            .flat_map(|b| b.document().bindings.values())
+            .values()
             .map(|b| (b.package.clone(), b.document.clone()))
             .collect();
-        if references.is_empty() {
-            return Ok(());
-        }
         if references.len() > 8 {
             return Err("sidecar references more than 8 sprite documents; reduce references before reloading".into());
         }
-        let bindings = self.bindings.as_ref().ok_or("open a view sidecar first")?;
+        if references.is_empty() {
+            return Ok(BTreeMap::new());
+        }
         let root = sprite_bindings::resolve_project(bindings.base(), &bindings.document().project)?;
-        // Verify the project once per reload, then read each distinct asset once.
         let project = sprite_bindings::open_project(&root)?;
-        let mut errors = Vec::new();
+        let mut assets = BTreeMap::new();
         for (package, document) in references {
-            match sprite_bindings::load_project_asset(&project, &package, &document) {
-                Ok(asset) => self.cache_asset(ctx, (package, document), asset),
-                Err(e) => errors.push(format!("{package}/{document}: {e}")),
+            let asset = sprite_bindings::load_project_asset(&project, &package, &document)
+                .map_err(|e| format!("{package}/{document}: {e}"))?;
+            for binding in bindings
+                .document()
+                .bindings
+                .values()
+                .filter(|b| b.package == package && b.document == document)
+            {
+                binding.region(&asset.document, 0)?;
+            }
+            assets.insert((package, document), asset);
+        }
+        Ok(assets)
+    }
+    fn replace_assets(&mut self, ctx: &egui::Context, assets: BTreeMap<(String, String), Asset>) {
+        self.loaded.clear();
+        for (key, asset) in assets {
+            self.cache_asset(ctx, key, asset);
+        }
+    }
+    pub fn reload(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let bindings = self.bindings.as_ref().ok_or("open a view sidecar first")?;
+        let assets = Self::load_assets(bindings)?;
+        self.replace_assets(ctx, assets);
+        Ok(())
+    }
+    /// Restore authoring history only if every restored asset is still valid.
+    pub fn undo(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let bindings = self.bindings.as_mut().ok_or("open a view sidecar first")?;
+        let before = bindings.document().clone();
+        bindings.undo();
+        if bindings.document() == &before {
+            return Ok(());
+        }
+        if let Err(error) = self.reload(ctx) {
+            self.bindings.as_mut().unwrap().redo();
+            return Err(error);
+        }
+        Ok(())
+    }
+    pub fn redo(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let bindings = self.bindings.as_mut().ok_or("open a view sidecar first")?;
+        let before = bindings.document().clone();
+        bindings.redo();
+        if bindings.document() == &before {
+            return Ok(());
+        }
+        if let Err(error) = self.reload(ctx) {
+            self.bindings.as_mut().unwrap().undo();
+            return Err(error);
+        }
+        Ok(())
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+    fn display_coherent(editor: &Editor) -> bool {
+        editor.yard_rows_coherent()
+            && editor
+                .snapshot()
+                .is_some_and(|snapshot| snapshot.timeline().is_some() == editor.is_playing_mode())
+    }
+    fn editable(&self, editor: &Editor) -> bool {
+        editor.game() == EditorGame::Arena
+            && self.scene_matches(editor)
+            && editor.mode() == Mode::Edit
+            && !editor.is_viewer()
+            && editor.previewing().is_none()
+            && Self::display_coherent(editor)
+    }
+    /// Verify the currently installed bytes before committing an assignment.
+    pub fn assign(&mut self, ctx: &egui::Context, editor: &Editor) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("sprite assignment requires the matching settled scene in Edit".into());
+        }
+        let bindings = self.bindings.as_ref().ok_or("open a view sidecar first")?;
+        let key = (self.package.clone(), self.document.clone());
+        let asset = sprite_bindings::load_asset(
+            &sprite_bindings::resolve_project(bindings.base(), &bindings.document().project)?,
+            &self.package,
+            &self.document,
+        )?;
+        let binding = Binding {
+            package: self.package.clone(),
+            document: self.document.clone(),
+            source: self.source.clone(),
+            units_per_pixel: self.scale,
+        };
+        binding.region(&asset.document, 0)?;
+        // One atlas is shared by every binding of this document. A package
+        // refresh must not silently invalidate an unselected entity's clip.
+        for (guid, existing) in &bindings.document().bindings {
+            if existing.package == self.package
+                && existing.document == self.document
+                && !editor.selected_guids().iter().any(|g| g.as_str() == guid)
+            {
+                existing.region(&asset.document, 0)?;
             }
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("\n"))
+        let mut references: BTreeSet<_> = bindings
+            .document()
+            .bindings
+            .iter()
+            .filter(|(guid, _)| {
+                !editor
+                    .selected_guids()
+                    .iter()
+                    .any(|g| g.as_str() == guid.as_str())
+            })
+            .map(|(_, b)| (b.package.clone(), b.document.clone()))
+            .collect();
+        references.insert(key.clone());
+        if references.len() > 8 {
+            return Err("sidecar references more than 8 sprite documents".into());
         }
+        self.bindings
+            .as_mut()
+            .unwrap()
+            .assign(editor.selected_guids(), Some(binding))?;
+        self.loaded.retain(|key, _| references.contains(key));
+        self.cache_asset(ctx, key, asset);
+        Ok(())
+    }
+    pub fn update(&mut self, editor: &mut Editor) {
+        let matches = self.scene_matches(editor);
+        self.playback.update(
+            editor,
+            self.bindings.as_ref().map(Bindings::document),
+            matches,
+        );
+    }
+    /// The same sampled region used by the production viewport paint pass.
+    pub fn sampled_region(&self, editor: &Editor, guid: &str) -> Option<u32> {
+        if editor.game() != EditorGame::Arena
+            || !self.scene_matches(editor)
+            || editor.previewing().is_some()
+            || !Self::display_coherent(editor)
+        {
+            return None;
+        }
+        let bindings = self.bindings.as_ref()?;
+        let binding = bindings.document().bindings.get(guid)?;
+        let row = binding_row(editor.rows(), guid)?;
+        editor.bodies().iter().find(|b| b.entity == row.entity)?;
+        let asset = self
+            .loaded
+            .get(&(binding.package.clone(), binding.document.clone()))?;
+        self.sample_binding(editor, guid, binding, &asset.asset)
+    }
+    fn sample_binding(
+        &self,
+        editor: &Editor,
+        guid: &str,
+        binding: &Binding,
+        asset: &Asset,
+    ) -> Option<u32> {
+        let state = self.playback.state(guid);
+        let elapsed = match &binding.source {
+            Source::Locomotion { .. } => state.elapsed_ms,
+            _ => editor.snapshot().map_or(0, |s| {
+                s.timeline()
+                    .map_or(0, |t| scene_elapsed_ms(Mode::Play, t.tick, s.tick_rate()))
+            }),
+        };
+        binding
+            .region_for_motion(&asset.document, elapsed, state.moving)
+            .ok()
     }
     fn report(&mut self, result: Result<(), String>) {
         self.error = result.err();
@@ -133,6 +318,9 @@ impl SpritePanel {
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
         if editor.game() != EditorGame::Arena {
             return;
+        }
+        if editor.mode() != Mode::Edit {
+            self.preview_playing = false;
         }
         ui.collapsing("Sprite bindings (view only)", |ui| {
             ui.weak("Separate sidecar save and undo. Scene Save does not save bindings. Picking uses existing collider shapes.");
@@ -143,16 +331,10 @@ impl SpritePanel {
                 ui.weak("Choose local scene/project files. Remote host paths are not local filesystem authority.");
                 ui.horizontal(|ui| {
                     if ui.button("Open bindings").clicked() {
-                        match Bindings::open(PathBuf::from(&self.path)) {
-                            Ok(b) => { self.bindings = Some(b); let result = self.reload(ui.ctx()); self.report(result); }
-                            Err(e) => self.error = Some(e),
-                        }
+                        let result = self.open(ui.ctx(), PathBuf::from(&self.path)); self.report(result);
                     }
                     if ui.button("Create bindings").clicked() {
-                        match Bindings::create(PathBuf::from(&self.path), self.scene.clone(), self.project.clone()) {
-                            Ok(b) => { self.bindings = Some(b); self.loaded.clear(); self.error = None; }
-                            Err(e) => self.error = Some(e),
-                        }
+                        let result = self.create(PathBuf::from(&self.path), self.scene.clone(), self.project.clone()); self.report(result);
                     }
                 });
             } else {
@@ -163,13 +345,13 @@ impl SpritePanel {
                 if !matches { ui.colored_label(Color32::YELLOW, "Scene changed or unavailable. Bindings retained; preview/assignment disabled. Save the old sidecar or explicitly discard/close. Save As does not retarget this sidecar."); }
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Save bindings").clicked() { let result = self.bindings.as_mut().unwrap().save(); self.report(result); }
-                    if ui.button("Undo binding").clicked() { self.bindings.as_mut().unwrap().undo(); }
-                    if ui.button("Redo binding").clicked() { self.bindings.as_mut().unwrap().redo(); }
+                    if ui.button("Undo binding").clicked() { let result = self.undo(ui.ctx()); self.report(result); }
+                    if ui.button("Redo binding").clicked() { let result = self.redo(ui.ctx()); self.report(result); }
                     if ui.button("Reload assets").clicked() { let result = self.reload(ui.ctx()); self.report(result); }
                 });
                 let dirty = self.bindings.as_ref().unwrap().dirty();
                 if ui.button(if dirty { "Discard unsaved bindings and close" } else { "Close bindings" }).clicked() {
-                    self.bindings = None; self.loaded.clear(); self.error = None; return;
+                    self.bindings = None; self.loaded.clear(); self.error = None; self.preview_playing = false; self.playback.reset_document(); return;
                 }
                 ui.separator();
                 ui.label("Package name"); ui.text_edit_singleline(&mut self.package);
@@ -184,13 +366,28 @@ impl SpritePanel {
                 }
                 let key = (self.package.clone(), self.document.clone());
                 if let Some(loaded) = self.loaded.get(&key) {
-                    egui::ComboBox::from_id_salt("sprite-source").selected_text(format!("{:?}", self.source)).show_ui(ui, |ui| {
+                    egui::ComboBox::from_label("Sprite source").selected_text(format!("{:?}", self.source)).show_ui(ui, |ui| {
                         for region in loaded.asset.document.regions() { ui.selectable_value(&mut self.source, Source::Region(region.id), format!("Region {}", region.id)); }
                         for clip in loaded.asset.document.clips() { ui.selectable_value(&mut self.source, Source::Clip(clip.id().into()), format!("Clip {}", clip.id())); }
+                        let idle = loaded.asset.document.clip("idle").or_else(|| loaded.asset.document.clips().first());
+                        let walk = loaded.asset.document.clip("walk").or_else(|| loaded.asset.document.clips().first());
+                        if let (Some(idle), Some(walk)) = (idle, walk) {
+                            let pair = match &self.source { Source::Locomotion { .. } => self.source.clone(),
+                                _ => Source::Locomotion { idle: idle.id().into(), walk: walk.id().into() } };
+                            ui.selectable_value(&mut self.source, pair, "Idle / walk");
+                        }
                     });
+                    if let Source::Locomotion { idle, walk } = &mut self.source {
+                        for (label, selected) in [("Idle clip", idle), ("Walk clip", walk)] {
+                            egui::ComboBox::from_label(label).selected_text(selected.as_str()).show_ui(ui, |ui| {
+                                for clip in loaded.asset.document.clips() { ui.selectable_value(selected, clip.id().to_string(), clip.id()); }
+                            });
+                        }
+                        ui.weak("Movement uses displayed snapshot positions. Seek and discontinuities reset to idle; paused frames never advance.");
+                    }
                     ui.add(egui::Slider::new(&mut self.scale, 0.0001..=2.0).logarithmic(true).text("world units/pixel"));
                     ui.horizontal(|ui| {
-                        if ui.button("Play sprite preview").clicked() { self.preview_playing = true; self.preview_started = ui.input(|i| i.time); }
+                        if ui.add_enabled(editor.mode() == Mode::Edit, egui::Button::new("Play sprite preview")).clicked() { self.preview_playing = true; self.preview_started = ui.input(|i| i.time); }
                         if ui.button("Stop sprite preview").clicked() { self.preview_playing = false; }
                     });
                     let binding = Binding { package: self.package.clone(), document: self.document.clone(), source: self.source.clone(), units_per_pixel: self.scale };
@@ -204,16 +401,29 @@ impl SpritePanel {
                         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                         ui.painter().image(loaded.texture.id(), rect, Rect::from_min_max(Pos2::new(uv[0], uv[1]), Pos2::new(uv[2], uv[3])), Color32::WHITE);
                     }
-                    let enabled = matches && editor.mode() == Mode::Edit && !editor.is_viewer() && editor.previewing().is_none() && !editor.selected_guids().is_empty();
+                    let enabled = self.editable(editor) && !editor.selected_guids().is_empty();
                     if ui.add_enabled(enabled, egui::Button::new("Assign sprite to selection")).clicked() {
-                        let result = binding.region(&loaded.asset.document, 0).and_then(|_| self.bindings.as_mut().unwrap().assign(editor.selected_guids(), Some(binding)));
-                        self.report(result);
+                        let result = self.assign(ui.ctx(), editor); self.report(result);
                     }
                 }
-                let enabled = matches && editor.mode() == Mode::Edit && !editor.is_viewer() && editor.previewing().is_none() && !editor.selected_guids().is_empty();
+                let enabled = self.editable(editor) && !editor.selected_guids().is_empty();
                 if ui.add_enabled(enabled, egui::Button::new("Remove selected sprite bindings")).clicked() {
                     let result = self.bindings.as_mut().unwrap().assign(editor.selected_guids(), None); self.report(result);
                 }
+                ui.separator();
+                let follow = self.bindings.as_ref().unwrap().document().camera_follow.as_deref().unwrap_or("none");
+                ui.label(format!("Saved camera follow: {follow}"));
+                ui.weak("Following runs in Play. Manual pan/zoom suspends it until resumed. Stop restores the Edit camera.");
+                if ui.add_enabled(self.editable(editor) && editor.selected_guids().len() == 1,
+                    egui::Button::new("Follow selected entity")).clicked() {
+                    let result = self.bindings.as_mut().unwrap().set_camera_follow(editor.selected_guid()); self.report(result);
+                    self.playback.resume_follow();
+                }
+                if ui.add_enabled(self.editable(editor), egui::Button::new("Clear camera follow")).clicked() {
+                    let result = self.bindings.as_mut().unwrap().set_camera_follow(None); self.report(result);
+                }
+                if self.playback.follow_suspended() && ui.button("Resume camera follow").clicked() { self.playback.resume_follow(); }
+                if let Some(diagnostic) = self.playback.diagnostic() { ui.colored_label(Color32::YELLOW, diagnostic); }
                 for guid in editor.selected_guids() {
                     if let Some(binding) = self.bindings.as_ref().unwrap().document().bindings.get(&guid.to_string()) { ui.label(format!("{guid}: {}/{} {:?}", binding.package, binding.document, binding.source)); }
                 }
@@ -227,6 +437,13 @@ impl SpritePanel {
     pub fn diagnostics(&self, editor: &Editor) -> Vec<String> {
         let mut errors = Vec::new();
         if let Some(bindings) = &self.bindings {
+            if let Some(guid) = &bindings.document().camera_follow {
+                if binding_row(editor.rows(), guid).is_none() {
+                    errors.push(format!(
+                        "Camera follow target unavailable: {guid}; holding camera position"
+                    ));
+                }
+            }
             for (guid, binding) in &bindings.document().bindings {
                 if !editor
                     .rows()
@@ -256,19 +473,13 @@ impl SpritePanel {
         if editor.game() != EditorGame::Arena
             || !self.scene_matches(editor)
             || editor.previewing().is_some()
+            || !Self::display_coherent(editor)
         {
             return;
         }
         let Some(bindings) = &self.bindings else {
             return;
         };
-        // The bodies and timeline are extracted from the same displayed snapshot.
-        // ERP sim.state may be ahead or behind during Play/Stop/seek transitions.
-        let elapsed = editor.snapshot().map_or(0, |snapshot| {
-            snapshot.timeline().map_or(0, |timeline| {
-                scene_elapsed_ms(Mode::Play, timeline.tick, snapshot.tick_rate())
-            })
-        });
         let painter = ui.painter().with_clip_rect(rect);
         for (guid, binding) in &bindings.document().bindings {
             let Some(row) = binding_row(editor.rows(), guid) else {
@@ -287,7 +498,7 @@ impl SpritePanel {
             else {
                 continue;
             };
-            let Ok(id) = binding.region(&asset.asset.document, elapsed) else {
+            let Some(id) = self.sample_binding(editor, guid, binding, &asset.asset) else {
                 continue;
             };
             let region = asset.asset.document.region(id).unwrap();
@@ -378,11 +589,22 @@ mod tests {
         assert!(binding_row(&[original], "e_00000001").is_some());
     }
     /// Real egui widgets and input events, CPU-only: no eframe renderer/window.
-    /// Atlas loading is injected; verified package loading has separate tests.
+    /// The asset comes from the real installed sample package.
     #[test]
     fn headless_widgets_assign_remove_save_and_guard_dirty_scene_switch() {
         use egui_kittest::{kittest::Queryable, Harness};
         let dir = tempfile::tempdir().unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/sprite_demo")
+            .canonicalize()
+            .unwrap();
+        orr_package::Project::open_for_install(
+            dir.path(),
+            orr_package::Runtime::content_only().engine_version,
+        )
+        .unwrap()
+        .install(&[source])
+        .unwrap();
         let scene = dir.path().join("arena.yaml");
         let other = dir.path().join("other.yaml");
         let scene_text = include_str!("../../../scenes/arena_blank.scene.yaml");
@@ -399,7 +621,7 @@ mod tests {
             bindings: Some(
                 Bindings::create(path.clone(), "arena.yaml".into(), ".".into()).unwrap(),
             ),
-            package: "fixture".into(),
+            package: "sample-sprites".into(),
             document: "sprites.json".into(),
             source: Source::Region(10),
             ..Default::default()
@@ -409,18 +631,9 @@ mod tests {
             .build_ui_state(
                 |ui, (panel, editor): &mut (SpritePanel, Editor)| {
                     if panel.loaded.is_empty() && panel.bindings.is_some() {
-                        let document = orr_sprite::SpriteDocument::from_json(include_str!(
-                            "../../../assets/sprite_demo/sprites.json"
-                        ))
-                        .unwrap();
-                        panel.cache_asset(
-                            ui.ctx(),
-                            ("fixture".into(), "sprites.json".into()),
-                            Asset {
-                                document,
-                                rgba: vec![255; 64 * 16 * 4],
-                            },
-                        );
+                        panel
+                            .load(ui.ctx(), "sample-sprites", "sprites.json")
+                            .unwrap();
                     }
                     panel.show(ui, editor);
                 },
