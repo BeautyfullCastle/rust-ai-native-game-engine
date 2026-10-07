@@ -215,6 +215,8 @@ pub struct EditorApp {
     pub models: crate::model_panel::ModelPanel,
     #[cfg(feature="terrain")]
     pub terrain: crate::terrain_panel::TerrainPanel,
+    #[cfg(feature="navigation")]
+    pub navigation: crate::navigation_panel::NavigationPanel,
     shot: Option<ScreenshotJob>,
     remote_capture: Option<RemoteCapture>,
     encoder: Option<EncoderWorker>,
@@ -231,7 +233,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Deliberately restrict HDR for compatibility. This one-way builder must
@@ -280,6 +282,14 @@ impl eframe::App for EditorApp {
         }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
         self.editor.pump();
+        #[cfg(feature="navigation")]
+        {
+            self.terrain.sync_for_editor(&self.editor);
+            self.navigation.sync_from_editor(&self.editor);
+            self.navigation.observe_terrain(&self.editor, &self.terrain);
+            let blocker = self.navigation.play_blocker(&self.editor, &self.terrain);
+            self.editor.set_navigation_blocker(blocker);
+        }
         self.poll_remote_capture_request();
         self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {
@@ -549,7 +559,7 @@ impl EditorApp {
                 let c = self.editor.camera.center;
                 self.editor.spawn_body(c);
             }
-            if self.editor.game().is_3d() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
+            if self.editor.game().is_3d() && !self.editor.game().is_navigation() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
                 self.editor.spawn_yard_body(orr_fp::FPVec3::new(FP::ZERO,FP::from_int(5),FP::ZERO));
             }
             if ui.add_enabled(self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).clicked() {
@@ -595,7 +605,10 @@ impl EditorApp {
         #[cfg(feature="terrain")]
         {
             self.terrain.sync_for_editor(&self.editor);
-            self.models.reserve_scene_models(usize::from(self.terrain.attached_for_editor(&self.editor)));
+            let terrain_slots = usize::from(self.terrain.attached_for_editor(&self.editor));
+            #[cfg(feature="navigation")]
+            let terrain_slots = terrain_slots + usize::from(self.editor.game().is_navigation() && self.editor.admitted_navigation().admitted);
+            self.models.reserve_scene_models(terrain_slots);
         }
         #[cfg(feature="models")]
         self.models.show(ui,&self.editor);
@@ -605,6 +618,8 @@ impl EditorApp {
             self.terrain.document.set_render_admission_error(error);
             self.terrain.show(ui, &self.editor);
         }
+        #[cfg(feature="navigation")]
+        self.navigation.show(ui, &mut self.editor, &self.terrain);
         #[cfg(all(feature="terrain", feature="irradiance-probes"))]
         self.irradiance.set_terrain_attached(self.terrain.attached_for_editor(&self.editor));
         #[cfg(feature="irradiance-probes")]
@@ -791,7 +806,25 @@ impl EditorApp {
         let hidden=Vec::new();
         let list=self.editor.yard_frame().list(&hidden,selected);
         #[cfg(feature="terrain")]
-        let scene_models: Vec<_> = self.terrain.viewport_model(&self.editor).into_iter().map(|model| crate::viewport3d::SceneModel { model, instance: Default::default() }).collect();
+        let scene_models: Vec<_> = {
+            #[cfg(feature="navigation")]
+            let model = if self.editor.game().is_navigation() {
+                if self.editor.mode() == Mode::Edit {
+                    self.terrain.viewport_model(&self.editor).or_else(|| self.editor.admitted_navigation().model())
+                } else { self.editor.admitted_navigation().model() }
+            } else { self.terrain.viewport_model(&self.editor) };
+            #[cfg(not(feature="navigation"))]
+            let model = self.terrain.viewport_model(&self.editor);
+            #[allow(unused_mut)]
+            let mut models: Vec<_> = model.into_iter().map(|model| crate::viewport3d::SceneModel { model, instance: Default::default() }).collect();
+            #[cfg(feature="navigation")]
+            if self.editor.game().is_navigation() {
+                if let Some(model) = self.editor.admitted_navigation().overlay_model(self.navigation.route_stale(&self.editor, &self.terrain)) {
+                    models.push(crate::viewport3d::SceneModel { model, instance: Default::default() });
+                }
+            }
+            models
+        };
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
             #[cfg(all(feature="animated-models", not(feature="irradiance-probes"), not(feature="terrain")))]

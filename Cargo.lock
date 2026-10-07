@@ -3164,6 +3164,7 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_model",
+ "orr_navigation",
  "orr_package",
  "orr_reflect",
  "orr_remote",
@@ -3221,6 +3222,8 @@ dependencies = [
  "bytemuck",
  "orr_ecs",
  "orr_fp",
+ "orr_navigation",
+ "orr_navigation_runtime",
  "orr_physics",
  "orr_physics3d",
  "orr_reflect",
@@ -3259,6 +3262,43 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "orr_navigation"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_terrain",
+ "sha2",
+]
+
+[[package]]
+name = "orr_navigation_runtime"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_fp",
+ "orr_navigation",
+ "orr_terrain",
+]
+
+[[package]]
+name = "orr_navigation_view"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_model",
+ "orr_navigation",
+ "orr_package",
+ "orr_render",
+ "orr_terrain",
+ "orr_terrain_view",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3373,6 +3413,8 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_games",
+ "orr_navigation",
+ "orr_navigation_runtime",
  "orr_physics",
  "orr_reflect",
  "orr_relay_net",

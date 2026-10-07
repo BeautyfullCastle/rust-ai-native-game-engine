@@ -117,3 +117,6 @@ pub use viewstream::ViewStreamHook;
 
 #[cfg(feature = "terrain-physics")]
 pub mod terrain_yard3d;
+
+#[cfg(feature = "navigation")]
+pub mod navigation_yard3d;

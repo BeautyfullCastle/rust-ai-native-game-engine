@@ -13,6 +13,7 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+navigation = ["terrain", "orr_remote/navigation", "dep:orr_navigation"]
 terrain-physics = ["terrain", "orr_remote/terrain-physics"]
 default = []
 terrain = ["models", "dep:orr_terrain", "dep:orr_terrain_view"]
@@ -22,6 +23,7 @@ models = ["dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:
 animated-models = ["models", "orr_model/animation", "orr_render/animation"]
 
 [dependencies]
+orr_navigation = { path = "../orr_navigation", optional = true }
 orr_terrain = { path = "../orr_terrain", optional = true }
 orr_terrain_view = { path = "../orr_terrain_view", optional = true }
 sha2 = { version = "0.11", optional = true }

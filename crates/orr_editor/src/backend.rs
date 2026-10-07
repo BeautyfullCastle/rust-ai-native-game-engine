@@ -169,6 +169,8 @@ impl Backend {
                     EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.clone(), cfg)?,
                     #[cfg(feature = "terrain-physics")]
                     EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.clone(), cfg)?,
+                    #[cfg(feature = "navigation")]
+                    EditorGame::NavigationYard3D => orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.clone(), cfg)?,
                 };
                 let connector = host.connector();
                 let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
