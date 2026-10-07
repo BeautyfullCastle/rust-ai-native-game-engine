@@ -36,3 +36,8 @@ pub mod sprite_scene;
 
 #[cfg(feature = "input-actions")]
 pub mod arena_input;
+
+#[cfg(feature = "game-ui")]
+pub mod game_ui;
+#[cfg(feature = "game-ui")]
+pub mod game_ui_gpu;

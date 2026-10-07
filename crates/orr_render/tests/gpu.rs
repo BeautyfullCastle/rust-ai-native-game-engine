@@ -5,6 +5,8 @@
 //! Hardware is preferred; a software adapter (WARP, llvmpipe) is the fallback.
 #![allow(clippy::float_arithmetic)] // a view-layer test: pixel colors are floats
 
+mod offscreen;
+
 use orr_render::orr_rhi::{TextureFormat, Wgpu, WgpuOptions};
 use orr_render::{Camera, OffscreenTarget, RenderList, Renderer};
 use std::sync::{Mutex, MutexGuard};
