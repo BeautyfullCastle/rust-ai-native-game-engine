@@ -15,6 +15,23 @@ use crate::op::{Applied, HistoryEntry, Op, Origin};
 use crate::query::View;
 use crate::scene_ops::{self, Effect, Refs};
 
+/// Host-owned, fallible admission after ordinary scene baking.
+///
+/// Implementations resolve pinned external assets only while baking, then put
+/// all authoritative content in the candidate frame. They must not retain a
+/// mutable simulation authority outside that frame. Failure discards the
+/// candidate and preserves the live document and preview.
+pub trait BakeAdmission: Send + Sync {
+    /// Admit and validate the fully baked candidate before publication.
+    fn admit(&self, scene: &Scene, frame: &mut Frame, index: &SceneIndex) -> Result<(), EditError>;
+
+    /// Whether reflected debug edits during play are supported. Asset-backed
+    /// hosts may prohibit them until they have a runtime validation contract.
+    fn allow_play_edits(&self) -> bool {
+        true
+    }
+}
+
 /// One applied op with what is needed to run it again and to take it back.
 #[derive(Clone, Debug)]
 struct Step {
@@ -34,6 +51,18 @@ struct Tx {
     label: String,
     origin: Origin,
     steps: Vec<Step>,
+    snapshot: Option<TxSnapshot>,
+}
+
+// Asset-backed rollback must not re-read a file which can disappear between
+// begin and rollback. This is edit-mode state, not simulation authority.
+struct TxSnapshot {
+    scene: Scene,
+    frame: Frame,
+    index: SceneIndex,
+    next_guid: u32,
+    revision: u64,
+    redo: Vec<Entry>,
 }
 
 /// The document an editor (or an agent) edits: a [`Scene`] with a baked
@@ -53,6 +82,7 @@ pub struct EditorDoc {
     pub(crate) types: Arc<TypeRegistry>,
     pub(crate) frame_registry: Arc<ComponentRegistry>,
     pub(crate) seed: u64,
+    pub(crate) admission: Option<Arc<dyn BakeAdmission>>,
     pub(crate) frame: Frame,
     pub(crate) index: SceneIndex,
     /// Text the document was loaded from or last saved as.
@@ -75,7 +105,11 @@ impl EditorDoc {
     /// An empty scene. `frame_registry` must be the one the game's
     /// `Simulation` uses (see [`for_game`](Self::for_game)); `seed` seeds the
     /// `FrameRng` of the preview frame (and so of a play session).
-    pub fn new(types: TypeRegistry, frame_registry: Arc<ComponentRegistry>, seed: u64) -> Result<Self, EditError> {
+    pub fn new(
+        types: TypeRegistry,
+        frame_registry: Arc<ComponentRegistry>,
+        seed: u64,
+    ) -> Result<Self, EditError> {
         Self::from_scene(Scene::default(), types, frame_registry, seed)
     }
 
@@ -86,7 +120,12 @@ impl EditorDoc {
 
     /// Loads scene text. Comments are kept. The document is not dirty, and
     /// [`to_yaml`](Self::to_yaml) returns `text` byte for byte until the first edit.
-    pub fn from_yaml(text: &str, types: TypeRegistry, frame_registry: Arc<ComponentRegistry>, seed: u64) -> Result<Self, EditError> {
+    pub fn from_yaml(
+        text: &str,
+        types: TypeRegistry,
+        frame_registry: Arc<ComponentRegistry>,
+        seed: u64,
+    ) -> Result<Self, EditError> {
         let scene = Scene::parse(text, &types)?;
         let mut doc = Self::from_scene(scene, types, frame_registry, seed)?;
         doc.source = Some(text.to_string());
@@ -94,14 +133,46 @@ impl EditorDoc {
     }
 
     /// Wraps a scene (already valid for `types`).
-    pub fn from_scene(scene: Scene, types: TypeRegistry, frame_registry: Arc<ComponentRegistry>, seed: u64) -> Result<Self, EditError> {
+    pub fn from_scene(
+        scene: Scene,
+        types: TypeRegistry,
+        frame_registry: Arc<ComponentRegistry>,
+        seed: u64,
+    ) -> Result<Self, EditError> {
+        Self::from_scene_with_admission(scene, types, frame_registry, seed, None)
+    }
+
+    /// Loads text through the same fallible admission used by every rebake.
+    pub fn from_yaml_with_admission(
+        text: &str,
+        types: TypeRegistry,
+        frame_registry: Arc<ComponentRegistry>,
+        seed: u64,
+        admission: Option<Arc<dyn BakeAdmission>>,
+    ) -> Result<Self, EditError> {
+        let scene = Scene::parse(text, &types)?;
+        let mut doc =
+            Self::from_scene_with_admission(scene, types, frame_registry, seed, admission)?;
+        doc.source = Some(text.to_string());
+        Ok(doc)
+    }
+
+    /// Creates a document with a host-owned asset admission policy. All edits,
+    /// staging, undo/redo and loads preserve this policy; play copies its frame.
+    pub fn from_scene_with_admission(
+        scene: Scene,
+        types: TypeRegistry,
+        frame_registry: Arc<ComponentRegistry>,
+        seed: u64,
+        admission: Option<Arc<dyn BakeAdmission>>,
+    ) -> Result<Self, EditError> {
         let mismatch = types.check_against(&frame_registry);
         if !mismatch.is_empty() {
             return Err(EditError::RegistryMismatch(mismatch));
         }
         let types = Arc::new(types);
         let scene = canonicalize(scene, &types)?;
-        let (frame, index) = bake(&scene, &types, &frame_registry, seed)?;
+        let (frame, index) = bake(&scene, &types, &frame_registry, seed, admission.as_deref())?;
         let next_guid = next_free_guid(&scene, 1);
         Ok(Self {
             instance_id: new_instance_id(),
@@ -109,6 +180,7 @@ impl EditorDoc {
             types,
             frame_registry,
             seed,
+            admission,
             frame,
             index,
             source: None,
@@ -131,7 +203,13 @@ impl EditorDoc {
             return Err(EditError::TxOpen);
         }
         let scene = canonicalize(Scene::parse(text, &self.types)?, &self.types)?;
-        let (frame, index) = bake(&scene, &self.types, &self.frame_registry, self.seed)?;
+        let (frame, index) = bake(
+            &scene,
+            &self.types,
+            &self.frame_registry,
+            self.seed,
+            self.admission.as_deref(),
+        )?;
         self.next_guid = next_free_guid(&scene, self.next_guid);
         self.scene = scene;
         self.frame = frame;
@@ -156,6 +234,7 @@ impl EditorDoc {
             types: self.types.clone(),
             frame_registry: self.frame_registry.clone(),
             seed: self.seed,
+            admission: self.admission.clone(),
             frame,
             index: self.index.clone(),
             source: None,
@@ -181,7 +260,11 @@ impl EditorDoc {
                 return s.clone();
             }
         }
-        let mut out = Scene { singletons: self.scene.singletons.clone(), entities: self.scene.entities.clone(), ..Scene::default() };
+        let mut out = Scene {
+            singletons: self.scene.singletons.clone(),
+            entities: self.scene.entities.clone(),
+            ..Scene::default()
+        };
         out.carry_comments_from(&self.scene);
         out.to_yaml()
     }
@@ -243,7 +326,11 @@ impl EditorDoc {
     }
     /// Read-only queries on the preview frame.
     pub fn view(&self) -> View<'_> {
-        View { types: &self.types, frame: &self.frame, index: &self.index }
+        View {
+            types: &self.types,
+            frame: &self.frame,
+            index: &self.index,
+        }
     }
     /// A paused [`PlayConfig`] with this document's seed, to pass to
     /// [`PlayController::start_play`](crate::PlayController::start_play).
@@ -264,48 +351,98 @@ impl EditorDoc {
     pub fn apply(&mut self, op: Op, origin: Origin) -> Result<Applied, EditError> {
         if let Some(tx) = &self.tx {
             if tx.origin != origin {
-                return Err(EditError::TxBusy { owner: tx.origin.to_string() });
+                return Err(EditError::TxBusy {
+                    owner: tx.origin.to_string(),
+                });
             }
         }
+        let old_guid = self.next_guid;
+        let backup = self.admission.as_ref().map(|_| self.scene.clone());
         let op = self.with_guid(op);
-        let done = scene_ops::apply(&mut self.scene, &self.types, &op)?;
+        let done = match scene_ops::apply(&mut self.scene, &self.types, &op) {
+            Ok(done) => done,
+            Err(error) => {
+                self.next_guid = old_guid;
+                return Err(error);
+            }
+        };
         if !done.changed {
-            return Ok(Applied { guid: done.guid, changed: false });
+            return Ok(Applied {
+                guid: done.guid,
+                changed: false,
+            });
         }
         if let Err(e) = self.sync(std::slice::from_ref(&done.effect)) {
-            // Cannot happen for checked values; keep the invariant anyway.
-            let _ = scene_ops::apply(&mut self.scene, &self.types, &done.inverse);
-            let _ = self.rebake();
+            self.next_guid = old_guid;
+            if let Some(scene) = backup {
+                // Admission used an isolated frame; restore the scene without
+                // resolving the now potentially unavailable external asset.
+                self.scene = scene;
+            } else {
+                let _ = scene_ops::apply(&mut self.scene, &self.types, &done.inverse);
+                let _ = self.rebake();
+            }
             return Err(e);
         }
         self.redo.clear();
-        let step = Step { forward: done.forward, inverse: done.inverse };
+        let step = Step {
+            forward: done.forward,
+            inverse: done.inverse,
+        };
         match &mut self.tx {
             Some(tx) => push_coalescing(&mut tx.steps, step),
             None => {
                 let id = self.next_id;
                 self.next_id += 1;
-                self.undo.push(Entry { id, label: step.forward.describe(), origin, steps: vec![step] });
+                self.undo.push(Entry {
+                    id,
+                    label: step.forward.describe(),
+                    origin,
+                    steps: vec![step],
+                });
             }
         }
-        Ok(Applied { guid: done.guid, changed: true })
+        Ok(Applied {
+            guid: done.guid,
+            changed: true,
+        })
     }
 
     /// Applies several ops as one transaction: all or nothing, one undo step.
-    pub fn apply_batch(&mut self, label: &str, ops: Vec<Op>, origin: Origin) -> Result<Vec<Applied>, EditError> {
+    pub fn apply_batch(
+        &mut self,
+        label: &str,
+        ops: Vec<Op>,
+        origin: Origin,
+    ) -> Result<Vec<Applied>, EditError> {
         // Preserve the existing transaction/rollback semantics, including
         // conservative revision invalidation on a rejected proposal preview.
-        self.apply_batch_in_place(label, ops, origin)
+        if self.admission.is_some() {
+            self.apply_atomic_batch(label, ops, origin)
+        } else {
+            self.apply_batch_in_place(label, ops, origin)
+        }
     }
 
     /// Applies a batch on an isolated copy, preserving all live document state
     /// on rejection or when every operation is a no-op. A successful changed
     /// batch becomes one undo entry. Existing transactional callers continue
     /// to use [`apply_batch`](Self::apply_batch).
-    pub fn apply_atomic_batch(&mut self, label: &str, ops: Vec<Op>, origin: Origin) -> Result<Vec<Applied>, EditError> {
-        // A batch is not allowed to join an existing transaction. Stage it on
-        // a private document copy so a rejected suffix cannot clear redo (or
-        // otherwise change history metadata) after a valid prefix was applied.
+    pub fn apply_atomic_batch(
+        &mut self,
+        label: &str,
+        ops: Vec<Op>,
+        origin: Origin,
+    ) -> Result<Vec<Applied>, EditError> {
+        self.stage_atomically(|staged| staged.apply_batch_in_place(label, ops, origin))
+    }
+
+    /// Stages edits while retaining live document identity and proposal state.
+    pub(crate) fn stage_atomically<T>(
+        &mut self,
+        action: impl FnOnce(&mut EditorDoc) -> Result<T, EditError>,
+    ) -> Result<T, EditError> {
+        // Never let a rejected suffix invalidate history or consume GUIDs.
         if self.tx.is_some() {
             return Err(EditError::TxOpen);
         }
@@ -317,8 +454,8 @@ impl EditorDoc {
         staged.next_id = self.next_id;
         staged.revision = self.revision;
 
-        let out = staged.apply_batch_in_place(label, ops, origin)?;
-        if out.iter().any(|applied| applied.changed) {
+        let out = action(&mut staged)?;
+        if staged.revision != self.revision {
             // Preserve this document's identity and proposals; transfer only
             // state that a successful batch can change.
             self.scene = staged.scene;
@@ -335,7 +472,12 @@ impl EditorDoc {
         Ok(out)
     }
 
-    fn apply_batch_in_place(&mut self, label: &str, ops: Vec<Op>, origin: Origin) -> Result<Vec<Applied>, EditError> {
+    fn apply_batch_in_place(
+        &mut self,
+        label: &str,
+        ops: Vec<Op>,
+        origin: Origin,
+    ) -> Result<Vec<Applied>, EditError> {
         self.begin_tx(label, origin.clone())?;
         let mut out = Vec::with_capacity(ops.len());
         for op in ops {
@@ -353,7 +495,11 @@ impl EditorDoc {
 
     fn with_guid(&mut self, op: Op) -> Op {
         match op {
-            Op::SpawnEntity { guid: None, name, components } => {
+            Op::SpawnEntity {
+                guid: None,
+                name,
+                components,
+            } => {
                 let guid = loop {
                     let g = Guid::from_u32(self.next_guid);
                     self.next_guid = self.next_guid.wrapping_add(1);
@@ -361,7 +507,11 @@ impl EditorDoc {
                         break g;
                     }
                 };
-                Op::SpawnEntity { guid: Some(guid), name, components }
+                Op::SpawnEntity {
+                    guid: Some(guid),
+                    name,
+                    components,
+                }
             }
             other => other,
         }
@@ -376,7 +526,16 @@ impl EditorDoc {
         if self.tx.is_some() {
             return Err(EditError::TxOpen);
         }
-        self.tx = Some(Tx { label: label.to_string(), origin, steps: Vec::new() });
+        let snapshot = self.admission.as_ref().map(|_| TxSnapshot {
+            scene: self.scene.clone(), frame: self.frame.clone(), index: self.index.clone(),
+            next_guid: self.next_guid, revision: self.revision, redo: self.redo.clone(),
+        });
+        self.tx = Some(Tx {
+            label: label.to_string(),
+            origin,
+            steps: Vec::new(),
+            snapshot,
+        });
         Ok(())
     }
 
@@ -386,7 +545,12 @@ impl EditorDoc {
         if !tx.steps.is_empty() {
             let id = self.next_id;
             self.next_id += 1;
-            self.undo.push(Entry { id, label: tx.label, origin: tx.origin, steps: tx.steps });
+            self.undo.push(Entry {
+                id,
+                label: tx.label,
+                origin: tx.origin,
+                steps: tx.steps,
+            });
             self.redo.clear();
         }
         Ok(())
@@ -394,8 +558,21 @@ impl EditorDoc {
 
     /// Ends the transaction and takes back everything it did.
     pub fn rollback_tx(&mut self) -> Result<(), EditError> {
-        let tx = self.tx.take().ok_or(EditError::NoTx)?;
-        self.revert(&tx.steps)
+        let mut tx = self.tx.take().ok_or(EditError::NoTx)?;
+        if let Some(snapshot) = tx.snapshot.take() {
+            self.scene = snapshot.scene;
+            self.frame = snapshot.frame;
+            self.index = snapshot.index;
+            self.next_guid = snapshot.next_guid;
+            self.revision = snapshot.revision;
+            self.redo = snapshot.redo;
+            return Ok(());
+        }
+        if let Err(error) = self.revert(&tx.steps) {
+            self.tx = Some(tx);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// True while a transaction is open.
@@ -462,7 +639,11 @@ impl EditorDoc {
             op_count: e.steps.len(),
             undone,
         };
-        self.undo.iter().map(|e| info(e, false)).chain(self.redo.iter().rev().map(|e| info(e, true))).collect()
+        self.undo
+            .iter()
+            .map(|e| info(e, false))
+            .chain(self.redo.iter().rev().map(|e| info(e, true)))
+            .collect()
     }
 
     /// Undoes `steps` (in reverse) as a unit: on failure the scene is restored.
@@ -486,7 +667,9 @@ impl EditorDoc {
         }
         if let Err(e) = self.sync(&effects) {
             self.scene = backup;
-            let _ = self.rebake();
+            if self.admission.is_none() {
+                let _ = self.rebake();
+            }
             return Err(e);
         }
         Ok(())
@@ -497,6 +680,11 @@ impl EditorDoc {
     /// Brings the preview frame in line with the scene after ops with these
     /// effects: patches single fields and names in place, rebakes otherwise.
     fn sync(&mut self, effects: &[Effect]) -> Result<(), EditError> {
+        // Even a field-only edit may change an asset pin or violate its
+        // numerical profile. Never patch around host admission.
+        if self.admission.is_some() {
+            return self.rebake();
+        }
         self.revision += 1;
         if effects.iter().any(|e| matches!(e, Effect::Structural)) {
             return self.rebake();
@@ -522,8 +710,15 @@ impl EditorDoc {
     /// Writes the scene's value of one component into the preview frame.
     /// `false` if the frame does not have it (caller rebakes).
     fn patch_field(&mut self, guid: &Guid, component: &str) -> Result<bool, EditError> {
-        let Some(entity) = self.index.entity(guid) else { return Ok(false) };
-        let Some((_, value)) = self.scene.entities.get(guid).and_then(|e| e.components.iter().find(|(n, _)| n == component)) else {
+        let Some(entity) = self.index.entity(guid) else {
+            return Ok(false);
+        };
+        let Some((_, value)) = self
+            .scene
+            .entities
+            .get(guid)
+            .and_then(|e| e.components.iter().find(|(n, _)| n == component))
+        else {
             return Ok(false);
         };
         let index = &self.index;
@@ -531,18 +726,27 @@ impl EditorDoc {
             Value::EntityGuid(None) => Ok(Value::Entity(orr_ecs::Entity::NONE)),
             Value::EntityGuid(Some(g)) => {
                 let target = Guid::parse(g).ok().and_then(|g| index.entity(&g));
-                target.map(Value::Entity).ok_or_else(|| EditError::Invalid(format!("reference to unknown entity '{g}'")))
+                target
+                    .map(Value::Entity)
+                    .ok_or_else(|| EditError::Invalid(format!("reference to unknown entity '{g}'")))
             }
             other => Ok(other.clone()),
         })?;
-        self.types.add_component_value(&mut self.frame, entity, component, &resolved)?;
+        self.types
+            .add_component_value(&mut self.frame, entity, component, &resolved)?;
         Ok(true)
     }
 
     /// Bakes the scene into a fresh preview frame. Edits do this themselves
     /// (or patch in place); call it only to force a full rebuild.
     pub fn rebake(&mut self) -> Result<(), EditError> {
-        let (frame, index) = bake(&self.scene, &self.types, &self.frame_registry, self.seed)?;
+        let (frame, index) = bake(
+            &self.scene,
+            &self.types,
+            &self.frame_registry,
+            self.seed,
+            self.admission.as_deref(),
+        )?;
         self.frame = frame;
         self.index = index;
         self.revision += 1;
@@ -560,8 +764,23 @@ fn new_instance_id() -> u128 {
 
 /// Adds `step`, merging it into the last one when both set the same field.
 fn push_coalescing(steps: &mut Vec<Step>, step: Step) {
-    if let (Some(last), Op::SetField { guid, component, path, .. }) = (steps.last_mut(), &step.forward) {
-        if let Op::SetField { guid: g, component: c, path: p, .. } = &last.forward {
+    if let (
+        Some(last),
+        Op::SetField {
+            guid,
+            component,
+            path,
+            ..
+        },
+    ) = (steps.last_mut(), &step.forward)
+    {
+        if let Op::SetField {
+            guid: g,
+            component: c,
+            path: p,
+            ..
+        } = &last.forward
+        {
             if g == guid && c == component && p == path {
                 last.forward = step.forward;
                 return;
@@ -576,12 +795,16 @@ fn bake(
     types: &TypeRegistry,
     registry: &Arc<ComponentRegistry>,
     seed: u64,
+    admission: Option<&dyn BakeAdmission>,
 ) -> Result<(Frame, SceneIndex), EditError> {
     let mut frame = Frame::new(registry.clone());
     if registry.singleton_id::<FrameRng>().is_some() {
         frame.set_singleton(FrameRng::new(seed));
     }
     let index = scene.bake(types, &mut frame)?;
+    if let Some(admission) = admission {
+        admission.admit(scene, &mut frame, &index)?;
+    }
     Ok((frame, index))
 }
 

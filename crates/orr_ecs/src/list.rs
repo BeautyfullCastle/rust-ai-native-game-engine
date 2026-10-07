@@ -95,6 +95,11 @@ impl<T: Component> ListPool<T> {
         self.slots.get_mut(h.index as usize).filter(|s| s.alive && s.version == h.version)
     }
 
+    /// True for an allocated list of this exact generation, including empty lists.
+    pub fn is_alive(&self, h: FrameList<T>) -> bool {
+        self.slot(h).is_some()
+    }
+
     pub fn get(&self, h: FrameList<T>) -> &[T] {
         self.slot(h).map(|s| s.items.as_slice()).unwrap_or_default()
     }

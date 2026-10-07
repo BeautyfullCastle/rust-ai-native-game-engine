@@ -1,0 +1,77 @@
+   Compiling libc v0.2.189
+   Compiling orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs)
+   Compiling orr_sim v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sim)
+   Compiling orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect)
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.3
+   Compiling tokio v1.53.1
+   Compiling getrandom v0.2.17
+   Compiling ring v0.17.14
+   Compiling getrandom v0.4.3
+   Compiling rand v0.10.3
+   Compiling rustls-webpki v0.103.15
+   Compiling orr_session v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_session)
+   Compiling rustls v0.23.45
+   Compiling parking_lot_core v0.9.12
+   Compiling h3 v0.0.8
+   Compiling parking_lot v0.12.5
+   Compiling quinn-udp v0.5.15
+   Compiling quinn-proto v0.11.18
+   Compiling khronos-egl v6.0.0
+   Compiling wgpu-hal v30.0.1
+   Compiling quinn v0.11.12
+   Compiling h3-datagram v0.0.2
+   Compiling tungstenite v0.30.0
+   Compiling wgpu-core-deps-windows-linux-android v30.0.1
+   Compiling tokio-util v0.7.19
+   Compiling rcgen v0.14.10
+   Compiling h3-quinn v0.0.10
+   Compiling orr_bridge v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_bridge)
+   Compiling wgpu-core v30.0.1
+   Compiling tokio-tungstenite v0.30.0
+   Compiling wtransport v0.7.2
+   Compiling h3-webtransport v0.1.2
+   Compiling tokio-rustls v0.26.6
+   Compiling memmap2 v0.9.11
+   Compiling orr_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_net)
+   Compiling smithay-client-toolkit v0.19.2
+   Compiling wgpu v30.0.1
+   Compiling orr_view v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_view)
+   Compiling getrandom v0.3.4
+   Compiling orr_terrain v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain)
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+   Compiling orr_rhi v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_rhi)
+   Compiling x11rb v0.13.2
+   Compiling orr_terrain_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain_physics3d)
+   Compiling ahash v0.8.12
+   Compiling serde_json v1.0.151
+   Compiling sctk-adwaita v0.10.1
+   Compiling orr_relay_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_relay_net)
+   Compiling x11-dl v2.21.0
+   Compiling orr_testgame v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_testgame)
+   Compiling orr_physics v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics)
+   Compiling nix v0.31.3
+   Compiling winit v0.30.13
+   Compiling orr_games v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_games)
+   Compiling orr_viewstream v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_viewstream)
+   Compiling orr_render v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_render)
+   Compiling orr_sample v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sample)
+   Compiling orr_edit v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_edit)
+   Compiling orr_remote v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_remote)
+   Compiling ctrlc v3.5.2
+   Compiling orr_server v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_server)
+error[E0599]: no method named `kind` found for enum `ClientError` in the current scope
+   --> crates/orr_remote/tests/terrain_yard3d.rs:145:20
+    |
+145 |     assert_eq!(err.kind(), Some("play_edit_refused"));
+    |                    ^^^^ method not found in `ClientError`
+    |
+note: the method `kind` exists on the type `RpcError`
+   --> crates/orr_remote/src/error.rs:83:5
+    |
+ 83 |     pub fn kind(&self) -> Option<&str> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `orr_remote` (test "terrain_yard3d") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

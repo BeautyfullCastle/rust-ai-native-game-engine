@@ -58,6 +58,10 @@ pub struct HostLimits {
     /// embedding editor, whose person owns the machine; false (default) for
     /// a headless host, where only the configured scene file is written.
     pub allow_scene_paths: bool,
+    /// Refuse an explicit scene path rather than ignoring it. Asset-backed
+    /// hosts use this to keep their resolver root and save destination aligned.
+    /// Default false preserves the legacy fixed-path host behavior.
+    pub reject_scene_path_overrides: bool,
     /// Enables the `debug.panic` test hook (default false).
     pub debug_hooks: bool,
     /// The game's view stream producer (the `viewstream` topic of
@@ -80,6 +84,7 @@ impl Default for HostLimits {
             build_id: 0,
             game: GameHooks::default(),
             allow_scene_paths: false,
+            reject_scene_path_overrides: false,
             debug_hooks: false,
             view_stream: None,
             client_session: None,
@@ -299,6 +304,9 @@ pub(crate) fn call<G: Game>(
         "sim.debug" => {
             let cmd = debug_from_json(obj).map_err(RpcError::params)?;
             let pc = play_mut(t)?;
+            if !pc.allow_play_edits() {
+                return Err(RpcError::state("play_edit_refused", "this admitted scene does not allow play-mode debug mutations; stop play first"));
+            }
             match pc.session_mut().debug(cmd) {
                 Ok(()) => Ok(json!({"ok": true})),
                 Err(e) => Err(RpcError::new(DEBUG_REFUSED, "debug_refused", e.to_string()).with("error", json!(debug_error_name(e)))),
@@ -906,6 +914,7 @@ fn singleton_patch<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin)
 /// The `path` parameter of `scene.save` / `scene.load`, if the host allows one.
 fn scene_path_param(lim: &HostLimits, p: &P<'_>) -> Result<Option<PathBuf>, RpcError> {
     match p.opt_str("path")? {
+        Some(_) if lim.reject_scene_path_overrides => Err(RpcError::state("scene_path_fixed", "this asset-backed host is bound to its original scene path; start another host to change it")),
         Some(path) if lim.allow_scene_paths => Ok(Some(PathBuf::from(path))),
         // A host that does not let clients pick files ignores the parameter (the configured file is used).
         _ => Ok(None),

@@ -57,8 +57,10 @@ mod scene_ops;
 mod verify;
 
 pub use checks::{evaluate_checks, Check, CheckOutcome, CheckResult, Cmp, MetricStat, Side};
-pub use diff::{format_value, summarize, unified_diff, EntityRef, FieldChange, ProposalSummary, Renamed};
-pub use doc::EditorDoc;
+pub use diff::{
+    format_value, summarize, unified_diff, EntityRef, FieldChange, ProposalSummary, Renamed,
+};
+pub use doc::{BakeAdmission, EditorDoc};
 pub use error::EditError;
 pub use fragment::{
     FragmentInstance, FragmentTranslation2D, SceneFragment, FRAGMENT_MAX_BYTES,
@@ -70,8 +72,8 @@ pub use play::{PlayController, StoppedPlay};
 pub use proposal::{Accepted, ProposalDiff, ProposalId, ProposalInfo, ProposalState};
 pub use query::{EntityInfo, Target, View};
 pub use verify::{
-    verify_frames, verify_frames_cancellable, ChecksumSample, MetricComparison, MetricStats, RecordingCheck, ReflectMetrics,
-    VerifyInputs, VerifyOptions, VerifyReport,
+    verify_frames, verify_frames_cancellable, ChecksumSample, MetricComparison, MetricStats,
+    RecordingCheck, ReflectMetrics, VerifyInputs, VerifyOptions, VerifyReport,
 };
 
 pub use orr_sim::{MetricValue, Metrics, NoMetrics};

@@ -11,12 +11,16 @@ description = "Orrery ERP (Engine Remote Protocol): JSON-RPC server for the edit
 workspace = true
 
 [features]
+terrain-physics = ["sample-host", "dep:orr_games", "orr_games/terrain-physics", "dep:orr_terrain_physics3d", "dep:orr_terrain"]
 default = ["sample-host"]
 # The headless host binary `orr_remote_host` (PhysGame from `orr_sample`).
 # Off = the library only, without the wgpu/winit stack of `orr_sample`.
 sample-host = ["dep:orr_sample", "dep:orr_relay_net", "dep:orr_testgame"]
 
 [dependencies]
+orr_games = { path = "../orr_games", optional = true }
+orr_terrain_physics3d = { path = "../orr_terrain_physics3d", optional = true }
+orr_terrain = { path = "../orr_terrain", optional = true }
 orr_fp = { path = "../orr_fp" }
 orr_ecs = { path = "../orr_ecs" }
 orr_sim = { path = "../orr_sim" }

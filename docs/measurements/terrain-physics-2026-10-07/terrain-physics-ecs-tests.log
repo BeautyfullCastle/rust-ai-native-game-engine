@@ -1,0 +1,40 @@
+   Compiling orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs)
+    Finished `release` profile [optimized + debuginfo] target(s) in 12.35s
+     Running tests/checksum.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/checksum-cc274a7feb5c9020)
+
+running 9 tests
+test legacy_frame_version_is_rejected_explicitly ... ok
+test list_item_boundaries_are_part_of_checksum ... ok
+test schema_is_part_of_checksum_even_when_payloads_match ... ok
+test identical_payload_in_different_component_stores_has_different_checksum ... ok
+test list_free_order_changes_checksum_and_survives_restore ... ok
+test checksum_is_the_hash_of_every_encoded_body_byte ... ok
+test maximum_zero_sized_count_needs_no_payload_allocation_or_count_sized_loop ... ok
+test list_pool_boundaries_are_part_of_checksum ... ok
+test zero_sized_list_lengths_round_trip_and_change_checksum ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/list_liveness.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/list_liveness-9135ef257bd21171)
+
+running 1 test
+test live_empty_lists_are_distinct_from_stale_or_unregistered_handles ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/serialize.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/serialize-9526cef309a62b76)
+
+running 10 tests
+test empty_frame_round_trips ... ok
+test deterministic_garbage_never_panics ... ok
+test forged_huge_count_does_not_allocate_or_panic ... ok
+test header_and_trailer_errors ... ok
+test mismatched_registry_is_rejected ... ok
+test identical_frames_serialize_identically ... ok
+test round_trip_keeps_checksum_and_bytes ... ok
+test restored_frame_continues_identically ... ok
+test every_truncation_is_an_error ... ok
+test every_single_byte_corruption_is_an_error ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

@@ -1,0 +1,12 @@
+    Checking tungstenite v0.30.0
+    Checking orr_rhi v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_rhi)
+    Checking serde_json v1.0.151
+    Checking tokio-tungstenite v0.30.0
+    Checking orr_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_net)
+    Checking orr_games v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_games)
+    Checking orr_viewstream v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_viewstream)
+    Checking orr_render v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_render)
+    Checking orr_relay_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_relay_net)
+    Checking orr_sample v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sample)
+    Checking orr_edit v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_edit)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.69s

@@ -1,0 +1,29 @@
+   Compiling orr_fp v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_fp)
+   Compiling orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs)
+   Compiling syn v2.0.119
+   Compiling orr_sim v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sim)
+   Compiling orr_terrain v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain)
+   Compiling orr_session v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_session)
+   Compiling orr_reflect_derive v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect_derive)
+   Compiling orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect)
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+   Compiling orr_terrain_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 11.12s
+     Running tests/frame_assets.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/frame_assets-3184b3de5fc308bb)
+
+running 12 tests
+test collision_profile_rejects_wider_asset_domain_atomically ... ok
+test identity_is_part_of_the_pin_even_when_geometry_is_identical ... ok
+test material_rejection_and_second_admission_are_atomic ... ok
+test every_authoritative_field_changes_frame_checksum ... ok
+test empty_and_unregistered_frames_are_distinguished ... ok
+test admission_is_atomic_for_every_revision_byte ... ok
+test canonical_content_and_material_are_frame_owned ... ok
+test runtime_rejects_corrupt_lists_revisions_and_metadata_without_mutation ... ok
+test transformed_or_convex_terrain_proxy_is_rejected ... ok
+test malformed_canonical_inputs_never_allocate_or_publish ... ok
+test snapshots_restore_every_asset_byte_without_external_assets ... ok
+test inclusive_collision_profile_edges_are_admitted ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

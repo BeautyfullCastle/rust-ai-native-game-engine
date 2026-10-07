@@ -8,7 +8,7 @@
 //! host ticks it in real time.
 //!
 //! ```text
-//! orr_remote_host [--game physics|arena] [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]
+//! orr_remote_host [--game physics|arena|terrain-yard3d] [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]
 //!                 [--seed N] [--players N] [--tick-rate N] [--max-step N] [--build-id N]
 //!                 [--join HOST:PORT [--fingerprint HEX | --insecure] [--ws] [--room N] [--slot N]
 //!                  [--sim-latency MS] [--sim-jitter MS] [--sim-loss P] [--sim-seed N] [--connect-timeout S]]
@@ -48,7 +48,7 @@ use orr_sample::physics_game::{bot_input, register_reflect, PhysGame, PhysMetric
 use orr_sample::physics_stream::phys_stream_source;
 use orr_sim::{PlayerSlot, Simulation};
 
-const USAGE: &str = "usage: orr_remote_host [--game physics|arena] [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]\n\
+const USAGE: &str = "usage: orr_remote_host [--game physics|arena|terrain-yard3d] [--scene PATH] [--bind ADDR] [--token name:token:caps]... [--dev-no-auth]\n\
                      \x20                       [--seed N] [--players N] [--tick-rate N] [--max-step N] [--build-id N]\n\
                      \x20                       [--join HOST:PORT [--fingerprint HEX | --insecure] [--ws] [--room N] [--slot N]\n\
                      \x20                        [--sim-latency MS] [--sim-jitter MS] [--sim-loss P] [--sim-seed N] [--connect-timeout S]]\n\
@@ -76,7 +76,7 @@ struct Args {
 }
 
 fn default_scene(game: &str) -> PathBuf {
-    let file = if game == "arena" { "arena_blank.scene.yaml" } else { "physics_demo.scene.yaml" };
+    let file = match game { "arena" => "arena_blank.scene.yaml", "terrain-yard3d" => "terrain_sphere.scene.yaml", _ => "physics_demo.scene.yaml" };
     let rel = PathBuf::from("scenes").join(file);
     if rel.exists() {
         return rel;
@@ -130,8 +130,11 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown flag '{other}'")),
         }
     }
-    if !matches!(a.game.as_str(), "physics" | "arena") {
-        return Err("--game must be physics or arena".into());
+    if !matches!(a.game.as_str(), "physics" | "arena") && !(cfg!(feature = "terrain-physics") && a.game == "terrain-yard3d") {
+        return Err("--game must be physics or arena, or terrain-yard3d with the terrain-physics feature".into());
+    }
+    if a.game == "terrain-yard3d" && (a.join.connect.is_some() || a.tick_rate != 60) {
+        return Err("terrain-yard3d requires local 60 Hz authoring; network join is unsupported".into());
     }
     if a.game == "arena" && a.join.connect.is_some() {
         return Err("--game arena is local authoring only; --join remains physics-only".into());
@@ -167,6 +170,8 @@ fn main() -> ExitCode {
         }
     };
     if args.game == "arena" { return run_arena(args); }
+    #[cfg(feature = "terrain-physics")]
+    if args.game == "terrain-yard3d" { return run_terrain_yard3d(args); }
     let client_mode = args.join.connect.is_some();
     let text = match std::fs::read_to_string(&args.scene) {
         Ok(t) => t,
@@ -279,6 +284,30 @@ fn run_arena(args: Args) -> ExitCode {
     if args.dev { println!("orr_remote_host: DEV MODE, no authentication (loopback only)"); }
     for token in &args.tokens { println!("orr_remote_host: client '{}' may {}", token.client, token.caps); }
     let mut host = Host::<Arena>::new(doc, server);
+    host.run(&AtomicBool::new(false), Duration::from_millis(1));
+    ExitCode::SUCCESS
+}
+
+#[cfg(feature = "terrain-physics")]
+fn run_terrain_yard3d(args: Args) -> ExitCode {
+    use orr_remote::terrain_yard3d::{configure_terrain_yard3d, terrain_yard3d_doc_from_path, TerrainYard3D};
+    let doc = match terrain_yard3d_doc_from_path(&args.scene) {
+        Ok(doc) => doc,
+        Err(error) => { eprintln!("error: {error}"); return ExitCode::FAILURE; }
+    };
+    let auth = if args.dev { Auth::DevNoAuth } else { Auth::Tokens(args.tokens) };
+    let mut config = ServerConfig::new(auth);
+    config.bind = args.bind;
+    config.limits.scene_path = Some(args.scene.clone());
+    config.limits.max_step_per_call = args.max_step;
+    configure_terrain_yard3d(&mut config.limits);
+    let server = match ErpServer::start(config) {
+        Ok(server) => server,
+        Err(error) => { eprintln!("error: {error}"); return ExitCode::FAILURE; }
+    };
+    println!("orr_remote_host: TerrainYard3D admitted {} (sphere-only, 60 Hz, seed 42)", args.scene.display());
+    println!("orr_remote_host: ERP listening on {}", server.url());
+    let mut host = Host::<TerrainYard3D>::new(doc, server);
     host.run(&AtomicBool::new(false), Duration::from_millis(1));
     ExitCode::SUCCESS
 }

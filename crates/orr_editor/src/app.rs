@@ -452,7 +452,7 @@ impl EditorApp {
                 Mode::Play => ui.label(RichText::new("PLAY").strong().color(Color32::from_rgb(255, 150, 60))),
             };
             ui.weak(self.editor.game().name());
-            if self.editor.game() == crate::game::EditorGame::Yard3D {
+            if self.editor.game().is_3d() {
                 #[cfg(feature = "models")]
                 ui.menu_button("Viewport effects", |ui| {
                     ui.checkbox(&mut self.ui.yard_post_process.enabled, "HDR post-processing");
@@ -549,7 +549,7 @@ impl EditorApp {
                 let c = self.editor.camera.center;
                 self.editor.spawn_body(c);
             }
-            if self.editor.game() == crate::game::EditorGame::Yard3D && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new("+ 3D Box")).clicked() {
+            if self.editor.game().is_3d() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
                 self.editor.spawn_yard_body(orr_fp::FPVec3::new(FP::ZERO,FP::from_int(5),FP::ZERO));
             }
             if ui.add_enabled(self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).clicked() {
@@ -591,7 +591,7 @@ impl EditorApp {
 
     fn inspector(&mut self, ui: &mut Ui) {
         ui.heading("Inspector");
-        if self.editor.game()==crate::game::EditorGame::Yard3D { self.yard_transform(ui); }
+        if self.editor.game().is_3d() { self.yard_transform(ui); }
         #[cfg(feature="terrain")]
         {
             self.terrain.sync_for_editor(&self.editor);
@@ -614,8 +614,8 @@ impl EditorApp {
         #[cfg(feature = "animated-models")]
         if ui.add_enabled(self.editor.game() == crate::game::EditorGame::Arena && self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
         let count = self.editor.selected_guids().len();
-        if count>0&&self.editor.game()==crate::game::EditorGame::Yard3D {ui.label("Single 3D selection · Esc to clear");}
-        if count > 0 && self.editor.game()!=crate::game::EditorGame::Yard3D {
+        if count>0&&self.editor.game().is_3d() {ui.label("Single 3D selection · Esc to clear");}
+        if count > 0 && !self.editor.game().is_3d() {
             ui.label(format!("{count} selected · Ctrl-click to toggle · Esc to clear"));
             let enabled = self.editor.can_nudge_selection();
             ui.horizontal_wrapped(|ui| {
@@ -833,7 +833,7 @@ impl EditorApp {
     // ---- viewport ----
 
     fn viewport(&mut self, ui: &mut Ui) {
-        if self.editor.game()==crate::game::EditorGame::Yard3D { self.yard_viewport(ui);return; }
+        if self.editor.game().is_3d() { self.yard_viewport(ui);return; }
         let (rect, resp) = if self.editor.game() == crate::game::EditorGame::Arena {
             let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
             (rect, ui.interact(rect, egui::Id::new("arena_keyboard_viewport"), Sense::click_and_drag()))

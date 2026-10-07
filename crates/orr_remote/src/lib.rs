@@ -114,3 +114,6 @@ pub use server::{
     ErpServer, PollReport, ServerConfig, ServerError, ServerStats, MAX_PENDING_BYTES,
 };
 pub use viewstream::ViewStreamHook;
+
+#[cfg(feature = "terrain-physics")]
+pub mod terrain_yard3d;

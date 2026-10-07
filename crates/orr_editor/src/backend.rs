@@ -167,6 +167,8 @@ impl Backend {
                     EditorGame::PhysGame => spawn_phys_host(text, Some(scene.clone()), cfg)?,
                     EditorGame::Arena => spawn_arena_host(text, Some(scene.clone()), cfg)?,
                     EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.clone(), cfg)?,
+                    #[cfg(feature = "terrain-physics")]
+                    EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.clone(), cfg)?,
                 };
                 let connector = host.connector();
                 let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
@@ -273,5 +275,5 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
 }
 
 fn delivery(game: EditorGame, local: bool) -> ViewDeliveryMode {
-    if local || matches!(game, EditorGame::Arena | EditorGame::Yard3D) { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced }
+    if local || (game == EditorGame::Arena || game.is_3d()) { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced }
 }

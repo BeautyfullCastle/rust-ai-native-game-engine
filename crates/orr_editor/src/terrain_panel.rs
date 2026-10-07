@@ -1,6 +1,7 @@
 //! One scene-owned terrain authoring session, separate from the simulation/ERP.
 //! All authoring numbers use decimal text and integer-only FP parsing. The
-//! optional terrain is never attached to a body or installed as a collider.
+//! presentation session never installs collision. The explicit terrain-physics
+//! game instead displays immutable terrain admitted by the host.
 use crate::{
     backend::HostSpec,
     editor::Editor,
@@ -117,9 +118,15 @@ impl TerrainPanel {
     /// Distinct from model presence: an all-hole terrain still participates in
     /// render compatibility and must disable stale baked lighting.
     pub fn attached_for_editor(&self, editor: &Editor) -> bool {
+        #[cfg(feature = "terrain-physics")]
+        if editor.game().is_terrain() { return editor.admitted_terrain().admitted; }
         self.scene_matches(editor) && self.document.terrain().is_some()
     }
     pub fn viewport_model(&self, editor: &Editor) -> Option<Arc<StaticModel>> {
+        #[cfg(feature = "terrain-physics")]
+        if editor.game().is_terrain() {
+            return (editor.yard_rows_coherent() && editor.previewing().is_none()).then(|| editor.admitted_terrain().model.clone()).flatten();
+        }
         (self.attached_for_editor(editor)
             && editor.yard_rows_coherent()
             && editor.previewing().is_none())
@@ -421,6 +428,21 @@ impl TerrainPanel {
     }
 
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+        #[cfg(feature = "terrain-physics")]
+        if editor.game().is_terrain() {
+            ui.collapsing("Terrain collision", |ui| {
+                let admitted = editor.admitted_terrain();
+                ui.label("Admitted Frame-owned terrain · dynamic spheres only");
+                ui.weak("No hidden floor, mixed rain or input spawning. Terrain and body edits are blocked during Play");
+                ui.label(format!("Asset: {}", admitted.identity));
+                ui.label(format!("Scene-relative source: {}", admitted.source));
+                ui.label(format!("SHA-256: {}", admitted.revision_text()));
+                if let Some(error) = &admitted.error { ui.colored_label(egui::Color32::RED, error); }
+                ui.weak("To change terrain, stop play, save the source asset, and update its full scene pin. Every scene edit revalidates the source before admission");
+            });
+            return;
+        }
+
         if editor.game() != EditorGame::Yard3D {
             return;
         }

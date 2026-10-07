@@ -10,7 +10,13 @@ description = "Orrery sim-only sample games (PhysGame 2D physics, Yard3D 3D phys
 [lints]
 workspace = true
 
+[features]
+default = []
+terrain-physics = ["dep:orr_terrain_physics3d", "dep:orr_terrain"]
+
 [dependencies]
+orr_terrain_physics3d = { path = "../orr_terrain_physics3d", optional = true }
+orr_terrain = { path = "../orr_terrain", optional = true }
 orr_sim = { path = "../orr_sim" }
 orr_ecs = { path = "../orr_ecs" }
 orr_fp = { path = "../orr_fp" }

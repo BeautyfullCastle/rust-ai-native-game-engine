@@ -13,6 +13,7 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+terrain-physics = ["terrain", "orr_remote/terrain-physics"]
 default = []
 terrain = ["models", "dep:orr_terrain", "dep:orr_terrain_view"]
 irradiance-probes = ["models", "orr_render/irradiance-probes"]

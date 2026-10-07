@@ -1,0 +1,23 @@
+   Compiling orr_testgame v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_testgame)
+   Compiling orr_bridge v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_bridge)
+    Finished `release` profile [optimized + debuginfo] target(s) in 13.66s
+     Running unittests src/lib.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/orr_bridge-bb08f941364d2f05)
+
+running 14 tests
+test frame_view::tests::frame_list_view_reads_without_changing_authority ... ok
+test ingress::tests::command_credits_survive_dequeue_and_controls_have_a_separate_fifo_quota ... ok
+test ingress::tests::failed_branch_admission_does_not_enable_viewer_input_or_commands ... ok
+test ingress::tests::reconciliation_preserves_only_outstanding_guaranteed_branches ... ok
+test ingress::tests::held_input_coalesces_but_both_explicit_step_kinds_capture_at_admission ... ok
+test ingress::tests::shutdown_is_out_of_band_even_when_both_quotas_are_full ... ok
+test ingress::tests::unsupported_branch_cannot_speculatively_enable_admission ... ok
+test view_events::tests::reset_keeps_previously_observed_terminal_diagnostics ... ok
+test view_events::tests::reset_before_enqueue_skips_exact_prefix_then_accepts_new_tail ... ok
+test view_events::tests::publication_before_enqueue_does_not_skip_normal_events ... ok
+test view_events::tests::producer_advances_across_a_barrier_pinned_recovery ... ok
+test threaded::tests::realtime_clock_gets_a_turn_before_a_full_control_queue_is_drained ... ok
+test relay_host::tests::relay_reports_unsubmitted_staging_and_stops_growth_after_disconnect ... ok
+test view_events::tests::concurrent_fast_producer_keeps_each_poll_bounded_and_accounts_for_losses ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
