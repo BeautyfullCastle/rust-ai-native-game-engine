@@ -14,6 +14,16 @@ pub enum Action {
     Continue,
     Restart,
     Quit,
+    #[cfg(feature = "player-settings")]
+    FireSpace,
+    #[cfg(feature = "player-settings")]
+    FireLeftMouse,
+    #[cfg(feature = "player-settings")]
+    SettingsApply,
+    #[cfg(feature = "player-settings")]
+    SettingsCancel,
+    #[cfg(feature = "player-settings")]
+    SettingsReset,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Hud {
@@ -30,6 +40,8 @@ pub struct GameUi {
     pub buttons: Vec<(Action, egui::Rect)>,
     hud_rect: Option<egui::Rect>,
     pointer_layout_stale: bool,
+    #[cfg(feature = "player-settings")]
+    player_settings: Option<crate::player_controls::PlayerSettingsSession>,
 }
 impl GameUi {
     pub fn open(root: &Path, restart_allowed: bool) -> Result<Self, String> {
@@ -62,6 +74,8 @@ impl GameUi {
             buttons: Vec::new(),
             hud_rect: None,
             pointer_layout_stale: true,
+            #[cfg(feature = "player-settings")]
+            player_settings: None,
         })
     }
     /// Validate a bounded font against the parser and UI text corpus without creating UI state.
@@ -69,7 +83,10 @@ impl GameUi {
         Self::validate_font_with_corpus(
             font,
             include_str!("../../../assets/game_ui_font/corpus.txt"),
-        )
+        )?;
+        #[cfg(feature = "player-settings")]
+        Self::validate_font_with_corpus(font, SETTINGS_TEXT_CORPUS)?;
+        Ok(())
     }
     fn validate_font_with_corpus(font: &[u8], corpus: &str) -> Result<(), String> {
         if font.is_empty() || font.len() > 16 * 1024 * 1024 {
@@ -87,6 +104,23 @@ impl GameUi {
         }
         Ok(())
     }
+    #[cfg(feature = "player-settings")]
+    pub fn set_player_settings(&mut self, session: crate::player_controls::PlayerSettingsSession) {
+        self.player_settings = Some(session);
+    }
+    #[cfg(feature = "player-settings")]
+    pub fn player_settings(&self) -> Option<&crate::player_controls::PlayerSettingsSession> {
+        self.player_settings.as_ref()
+    }
+    #[cfg(feature = "player-settings")]
+    pub fn apply_player_settings(
+        &mut self,
+        controls: &mut crate::arena_input::ArenaControls,
+    ) -> bool {
+        self.player_settings
+            .as_mut()
+            .is_some_and(|settings| settings.apply(controls))
+    }
     pub fn screen(&self) -> Screen {
         self.screen
     }
@@ -100,6 +134,27 @@ impl GameUi {
             Action::Restart if self.restart_allowed => self.screen = Screen::Playing,
             Action::Restart => return false,
             Action::Quit => {}
+            #[cfg(feature = "player-settings")]
+            Action::FireSpace
+            | Action::FireLeftMouse
+            | Action::SettingsCancel
+            | Action::SettingsReset
+            | Action::SettingsApply => {
+                let Some(settings) = &mut self.player_settings else {
+                    return false;
+                };
+                match action {
+                    Action::FireSpace => {
+                        settings.select(crate::player_settings::FireBinding::Space)
+                    }
+                    Action::FireLeftMouse => {
+                        settings.select(crate::player_settings::FireBinding::LeftMouse)
+                    }
+                    Action::SettingsCancel => settings.cancel(),
+                    Action::SettingsReset => settings.reset(),
+                    _ => {}
+                }
+            }
         }
         true
     }
@@ -165,7 +220,61 @@ impl GameUi {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(root.ctx(), |ui| {
                     ui.label("로컬 조작만 멈춥니다. 시뮬레이션과 네트워크는 계속됩니다.");
+                    #[cfg(not(feature = "player-settings"))]
                     ui.label("이동: WASD / 방향키 · 발사: Space (기본 설정)");
+                    #[cfg(feature = "player-settings")]
+                    if let Some(settings) = &self.player_settings {
+                        use crate::player_settings::FireBinding;
+                        ui.set_max_width(600.0);
+                        ui.label(if settings.is_external() {
+                            "이동과 발사: 외부 입력 파일 설정"
+                        } else if settings.active() == FireBinding::Space {
+                            "이동: WASD / 방향키 · 발사: Space"
+                        } else {
+                            "이동: WASD / 방향키 · 발사: 마우스 왼쪽 버튼"
+                        });
+                        ui.label("발사 조작 설정");
+                        ui.horizontal(|ui| {
+                            for (kind, value, label) in [
+                                (Action::FireSpace, FireBinding::Space, "Space"),
+                                (
+                                    Action::FireLeftMouse,
+                                    FireBinding::LeftMouse,
+                                    "마우스 왼쪽 버튼",
+                                ),
+                            ] {
+                                let response = ui.add_enabled(
+                                    settings.editable(),
+                                    egui::RadioButton::new(
+                                        settings.draft() == value && !settings.is_external(),
+                                        label,
+                                    ),
+                                );
+                                self.buttons.push((kind, response.rect));
+                                if response.clicked() {
+                                    action = Some(kind);
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            for (kind, label) in [
+                                (Action::SettingsApply, "적용"),
+                                (Action::SettingsCancel, "취소"),
+                                (Action::SettingsReset, "기본값"),
+                            ] {
+                                let enabled = settings.editable()
+                                    && (kind != Action::SettingsApply || settings.dirty());
+                                let response = ui.add_enabled(enabled, egui::Button::new(label));
+                                self.buttons.push((kind, response.rect));
+                                if response.clicked() {
+                                    action = Some(kind);
+                                }
+                            }
+                        });
+                        ui.label(settings.status());
+                    } else {
+                        ui.label("이동: WASD / 방향키 · 발사: Space (기본 설정)");
+                    }
                     let primary = if self.screen == Screen::Title {
                         (Action::Play, "플레이")
                     } else {
@@ -196,9 +305,37 @@ impl GameUi {
     }
 }
 
+// Additional runtime corpus: the installed immutable font package is not rebuilt.
+#[cfg(feature = "player-settings")]
+const SETTINGS_TEXT_CORPUS: &str = "발사 조작 설정 마우스 왼쪽 버튼 적용 취소 기본값 외부 입력 파일 사용 중 이 실행에서는 설정을 저장하지 않습니다 저장 불가 컴퓨터의 Arena에서 공유됩니다 적용 실패 이전 조작을 유지합니다 저장하고 적용했습니다 설정은 적용됐지만 저장 안정성을 확인할 수 없습니다 다시 실행해 확인하세요 이동과 발사";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "player-settings")]
+    #[test]
+    fn external_map_disables_real_settings_widgets_without_importing() {
+        use crate::player_controls::PlayerSettingsSession;
+        let mut ui = ui(true);
+        ui.set_player_settings(PlayerSettingsSession::external(
+            crate::arena_input::default_map(),
+        ));
+        for action in [
+            Action::FireLeftMouse,
+            Action::SettingsApply,
+            Action::SettingsReset,
+            Action::SettingsCancel,
+        ] {
+            assert_eq!(
+                click(&mut ui, action),
+                None,
+                "external selectors are visibly disabled"
+            );
+        }
+        assert!(ui.player_settings().unwrap().is_external());
+        assert!(!ui.player_settings().unwrap().editable());
+        assert_eq!(click(&mut ui, Action::Play), Some(Action::Play));
+    }
     fn ui(restart: bool) -> GameUi {
         GameUi::from_font(
             include_bytes!("../../../assets/game_ui_font/OrreryKoreanUI.otf").to_vec(),

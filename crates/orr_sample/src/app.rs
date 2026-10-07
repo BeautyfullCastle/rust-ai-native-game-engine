@@ -219,6 +219,15 @@ impl<B: Bridge<Arena>> App<B> {
         if !self.ui.as_mut().is_some_and(|ui| ui.apply(action)) {
             return Ok(UiActionOutcome::Continue);
         }
+        #[cfg(feature = "player-settings")]
+        if action == Action::SettingsApply {
+            if let Some(ui) = &mut self.ui {
+                ui.apply_player_settings(&mut self.controls);
+            }
+            // Both successful replacement and rejected Apply stay in the menu.
+            // Publish neutral even if the threaded host advances before redraw.
+            self.sent_keys = None;
+        }
         if action == Action::Restart {
             self.restart_local()?;
         }
@@ -1061,3 +1070,7 @@ pub fn run_project_restartable<B: Bridge<Arena> + 'static>(
 #[cfg(all(test, feature = "project", feature = "game-ui"))]
 #[path = "app_project_ui_tests.rs"]
 mod project_ui_tests;
+
+#[cfg(all(test, feature = "player-settings", target_os = "linux"))]
+#[path = "app_player_settings_tests.rs"]
+mod player_settings_tests;
