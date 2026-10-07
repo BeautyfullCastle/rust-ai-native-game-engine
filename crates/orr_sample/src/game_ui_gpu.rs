@@ -164,7 +164,8 @@ impl GpuOverlay {
             TextureFormat::Rgba8UnormSrgb => Some(wgpu::TextureFormat::Rgba8UnormSrgb),
             TextureFormat::Bgra8Unorm => Some(wgpu::TextureFormat::Bgra8Unorm),
             TextureFormat::Bgra8UnormSrgb => Some(wgpu::TextureFormat::Bgra8UnormSrgb),
-            TextureFormat::Depth32Float => None,
+            // The overlay consumes the final SDR target, never a scene-linear HDR buffer.
+            TextureFormat::Depth32Float | TextureFormat::Rgba16Float => None,
         };
         Self {
             renderer: format.map(|format| {
@@ -404,6 +405,24 @@ mod tests {
             .textures_delta
             .clear();
         let id = TextureId::Managed(987);
+        // Unsupported output formats must fail before texture or target mutation.
+        // A normal SDR sentinel view makes an accidental draw observable without
+        // relying on this adapter to allocate an HDR/depth color attachment.
+        for format in [TextureFormat::Depth32Float, TextureFormat::Rgba16Float] {
+            let (texture, view) = target(&gpu, 64, TextureFormat::Rgba8Unorm);
+            scene(&gpu, &view, 64, TextureFormat::Rgba8Unorm);
+            let before = gpu.read_texture(&texture);
+            let mut overlay = GpuOverlay::new(&gpu, format);
+            assert!(overlay.renderer.is_none());
+            let mut frame = output(id, 1.0);
+            frame.textures_delta.push(id, image(Color32::WHITE));
+            assert_eq!(
+                overlay.paint_checked(&gpu, &view, (64, 64), &ctx, frame),
+                Err(OverlayError::UnsupportedFormat)
+            );
+            assert!(overlay.textures.is_empty());
+            assert_eq!(gpu.read_texture(&texture), before);
+        }
         for format in [
             TextureFormat::Rgba8Unorm,
             TextureFormat::Rgba8UnormSrgb,

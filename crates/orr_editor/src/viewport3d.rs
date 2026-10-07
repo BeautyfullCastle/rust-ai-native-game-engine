@@ -154,6 +154,8 @@ type AnimatedGroup = (
 pub struct Viewport3dGpu {
     target: OffscreenTarget<Wgpu>,
     renderer: Renderer3D<Wgpu>,
+    /// Advances only when an accepted frame changes every scene pipeline format.
+    pipeline_generation: u64,
     #[cfg(feature = "models")]
     imported: orr_render::ImportedSceneRenderer<Wgpu>,
     #[cfg(feature = "models")]
@@ -166,6 +168,7 @@ impl Viewport3dGpu {
         Self {
             target: OffscreenTarget::new(rhi, size.0, size.1, TARGET_FORMAT),
             renderer: Renderer3D::with_settings(rhi.clone(), TARGET_FORMAT, Settings3D::LOW),
+            pipeline_generation: 0,
             #[cfg(feature = "models")]
             imported: orr_render::ImportedSceneRenderer::new(rhi.clone(), TARGET_FORMAT)
                 .expect("color format"),
@@ -184,6 +187,57 @@ impl Viewport3dGpu {
     pub fn adapter_name(&self) -> String {
         self.renderer.rhi().adapter_name()
     }
+    /// Format of all current scene pipelines. The presented texture remains UNORM.
+    pub fn scene_format(&self) -> TextureFormat {
+        self.renderer.format()
+    }
+    pub fn pipeline_generation(&self) -> u64 {
+        self.pipeline_generation
+    }
+    #[cfg(feature = "models")]
+    pub fn post_process_settings(&self) -> orr_render::PostProcessSettings {
+        self.imported.post_process
+    }
+    #[cfg(feature = "models")]
+    pub fn read_hdr_rgba(&self) -> Option<Vec<[f32; 4]>> {
+        self.imported.read_hdr_rgba()
+    }
+    /// Tightly packed little-endian RGBA16F scene bytes for portable diagnostics.
+    #[cfg(feature = "models")]
+    pub fn read_hdr_rgba16f(&self) -> Option<Vec<u8>> {
+        self.imported
+            .hdr_scene_texture()
+            .map(|texture| self.renderer.rhi().read_texture(texture))
+    }
+    #[cfg(feature = "models")]
+    pub fn post_process_size(&self) -> Option<(u32, u32)> {
+        self.imported.post_process_size()
+    }
+    #[cfg(feature = "models")]
+    pub fn post_process_generation(&self) -> u64 {
+        self.imported.post_process_generation()
+    }
+    #[cfg(feature = "models")]
+    pub fn post_process_allocated_bytes(&self) -> u64 {
+        self.imported.post_process_allocated_bytes()
+    }
+    /// Asset counts expose the admitted cache, never a rejected partial frame.
+    #[cfg(feature = "models")]
+    pub fn model_cache_counts(&self) -> (usize, usize) {
+        #[cfg(feature = "animated-models")]
+        return (self.models.len(), self.animated_models.len());
+        #[cfg(not(feature = "animated-models"))]
+        (self.models.len(), 0)
+    }
+
+    #[cfg(feature = "animated-models")]
+    pub fn animated_bounds(&self) -> Vec<Vec<orr_render::SkinnedBounds>> {
+        self.animated_models
+            .iter()
+            .map(|entry| entry.renderer.bounds().to_vec())
+            .collect()
+    }
+
     #[cfg(not(feature = "models"))]
     pub fn render(
         &mut self,
@@ -204,10 +258,28 @@ impl Viewport3dGpu {
         camera: &Camera3D,
         placements: &[ModelPlacement],
     ) -> Result<(), String> {
-        #[cfg(feature = "animated-models")]
-        return self.render_composed(size, list, camera, placements, &[]);
-        #[cfg(not(feature = "animated-models"))]
-        self.render_composed(size, list, camera, placements)
+        self.render_post_processed(size, list, camera, placements, self.post_process_settings())
+    }
+
+    /// Admit the complete next frame and its output policy before changing any cache.
+    #[cfg(feature = "models")]
+    pub fn render_post_processed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        settings: orr_render::PostProcessSettings,
+    ) -> Result<(), String> {
+        self.render_composed(
+            size,
+            list,
+            camera,
+            placements,
+            #[cfg(feature = "animated-models")]
+            &[],
+            settings,
+        )
     }
 
     #[cfg(feature = "animated-models")]
@@ -219,7 +291,34 @@ impl Viewport3dGpu {
         placements: &[ModelPlacement],
         animated_placements: &[AnimatedPlacement],
     ) -> Result<(), String> {
-        self.render_composed(size, list, camera, placements, animated_placements)
+        self.render_mixed_post_processed(
+            size,
+            list,
+            camera,
+            placements,
+            animated_placements,
+            self.post_process_settings(),
+        )
+    }
+
+    #[cfg(feature = "animated-models")]
+    pub fn render_mixed_post_processed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        animated_placements: &[AnimatedPlacement],
+        settings: orr_render::PostProcessSettings,
+    ) -> Result<(), String> {
+        self.render_composed(
+            size,
+            list,
+            camera,
+            placements,
+            animated_placements,
+            settings,
+        )
     }
 
     #[cfg(feature = "models")]
@@ -230,6 +329,7 @@ impl Viewport3dGpu {
         camera: &Camera3D,
         placements: &[ModelPlacement],
         #[cfg(feature = "animated-models")] animated_placements: &[AnimatedPlacement],
+        settings: orr_render::PostProcessSettings,
     ) -> Result<(), String> {
         #[cfg(feature = "animated-models")]
         let entity_count = placements
@@ -313,8 +413,13 @@ impl Viewport3dGpu {
             .zip(&skinned_instances)
             .map(|((model, _), instances)| (model.as_ref(), instances.as_slice()))
             .collect();
+        // Preflight must see retained HDR resources to account for old + new
+        // allocation budgets on resize. Restore the policy even on rejection.
+        let previous_settings = self.imported.post_process;
+        self.imported.post_process = settings;
         #[cfg(feature = "animated-models")]
-        self.imported
+        let admission = self
+            .imported
             .preflight_mixed(
                 size,
                 camera,
@@ -324,9 +429,10 @@ impl Viewport3dGpu {
                 &prepared,
                 &prepared_skinned,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string());
         #[cfg(not(feature = "animated-models"))]
-        self.imported
+        let admission = self
+            .imported
             .preflight(
                 size,
                 camera,
@@ -335,69 +441,97 @@ impl Viewport3dGpu {
                 list,
                 &prepared,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string());
+        self.imported.post_process = previous_settings;
+        admission?;
 
-        // The complete mixed CPU frame has been admitted. GPU cache mutations
-        // and target resizing below can no longer expose an invalid partial frame.
-        for model in &mut self.models {
-            model.instances.clear();
+        let format = if settings.enabled {
+            TextureFormat::Rgba16Float
+        } else {
+            TARGET_FORMAT
+        };
+        let format_changed = self.renderer.format() != format;
+        let rhi = self.renderer.rhi().clone();
+        // Construct all missing/format-specific renderers off to the side. If an
+        // upload fails, no admitted model cache, target, bounds or policy changed.
+        let replacement_renderer =
+            format_changed.then(|| Renderer3D::with_settings(rhi.clone(), format, Settings3D::LOW));
+        let mut new_models = Vec::new();
+        for (model, _) in &groups {
+            if format_changed
+                || !self
+                    .models
+                    .iter()
+                    .any(|entry| std::sync::Arc::ptr_eq(&entry.model, model))
+            {
+                new_models.push(CachedModel {
+                    model: model.clone(),
+                    renderer: orr_render::ModelRenderer::new(
+                        rhi.clone(),
+                        format,
+                        (**model).clone(),
+                    )
+                    .map_err(|error| error.to_string())?,
+                    instances: Vec::new(),
+                });
+            }
         }
+        #[cfg(feature = "animated-models")]
+        let mut new_animated = Vec::new();
+        #[cfg(feature = "animated-models")]
+        for (model, _) in &animated_groups {
+            if format_changed
+                || !self
+                    .animated_models
+                    .iter()
+                    .any(|entry| std::sync::Arc::ptr_eq(&entry.model, model))
+            {
+                new_animated.push(CachedAnimatedModel {
+                    model: model.clone(),
+                    renderer: orr_render::SkinnedModelRenderer::new(
+                        rhi.clone(),
+                        format,
+                        (**model).clone(),
+                    )
+                    .map_err(|error| error.to_string())?,
+                });
+            }
+        }
+        if let Some(renderer) = replacement_renderer {
+            self.renderer = renderer;
+            self.models.clear();
+            #[cfg(feature = "animated-models")]
+            self.animated_models.clear();
+            self.pipeline_generation += 1;
+        }
+        self.models.extend(new_models);
+        let mut ordered = Vec::with_capacity(groups.len());
         for (model, instances) in &groups {
-            let index = if let Some(index) = self
+            let index = self
                 .models
                 .iter()
                 .position(|entry| std::sync::Arc::ptr_eq(&entry.model, model))
-            {
-                index
-            } else {
-                let renderer = orr_render::ModelRenderer::new(
-                    self.renderer.rhi().clone(),
-                    TARGET_FORMAT,
-                    (**model).clone(),
-                )
-                .map_err(|e| e.to_string())?;
-                self.models.push(CachedModel {
-                    model: model.clone(),
-                    renderer,
-                    instances: Vec::new(),
-                });
-                self.models.len() - 1
-            };
-            self.models[index]
-                .instances
-                .extend(instances.iter().copied());
+                .expect("admitted static cache");
+            let mut entry = self.models.swap_remove(index);
+            entry.instances.clone_from(instances);
+            ordered.push(entry);
         }
-        self.models.retain(|entry| {
-            groups
-                .iter()
-                .any(|(model, _)| std::sync::Arc::ptr_eq(&entry.model, model))
-        });
-
+        self.models = ordered;
         #[cfg(feature = "animated-models")]
         {
+            self.animated_models.extend(new_animated);
             let mut ordered = Vec::with_capacity(animated_groups.len());
             for (model, _) in &animated_groups {
-                if let Some(index) = self
+                let index = self
                     .animated_models
                     .iter()
                     .position(|entry| std::sync::Arc::ptr_eq(&entry.model, model))
-                {
-                    ordered.push(self.animated_models.swap_remove(index));
-                } else {
-                    let renderer = orr_render::SkinnedModelRenderer::new(
-                        self.renderer.rhi().clone(),
-                        TARGET_FORMAT,
-                        (**model).clone(),
-                    )
-                    .map_err(|e| e.to_string())?;
-                    ordered.push(CachedAnimatedModel {
-                        model: model.clone(),
-                        renderer,
-                    });
-                }
+                    .expect("admitted animated cache");
+                ordered.push(self.animated_models.swap_remove(index));
             }
             self.animated_models = ordered;
         }
+        self.imported.post_process = settings;
         self.target.resize(size.0, size.1);
         let mut batches = vec![orr_render::ImportedBatch::Procedural {
             renderer: &mut self.renderer,
@@ -441,12 +575,26 @@ pub struct GpuViewport3d {
 }
 impl GpuViewport3d {
     pub fn new(state: &egui_wgpu::RenderState, size: (u32, u32)) -> Self {
+        Self::with_hdr_support(state, size, true)
+    }
+    /// `false` deliberately narrows the viewport capability; it cannot enable
+    /// HDR on an unsupported adapter or change the underlying device.
+    pub fn with_hdr_support(
+        state: &egui_wgpu::RenderState,
+        size: (u32, u32),
+        allow_hdr: bool,
+    ) -> Self {
         let rhi = Wgpu::from_parts(
             state.instance.clone(),
             state.adapter.clone(),
             state.device.clone(),
             state.queue.clone(),
         );
+        let rhi = if allow_hdr {
+            rhi
+        } else {
+            rhi.without_hdr_support()
+        };
         let gpu = Viewport3dGpu::new(&rhi, size);
         let id = state.renderer.write().register_native_texture(
             &state.device,
@@ -468,6 +616,56 @@ impl GpuViewport3d {
     pub fn gpu(&self) -> &Viewport3dGpu {
         &self.gpu
     }
+    #[cfg(feature = "models")]
+    pub fn render_post_processed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        settings: orr_render::PostProcessSettings,
+    ) -> Result<egui::TextureId, String> {
+        self.gpu
+            .render_post_processed(size, list, camera, placements, settings)?;
+        Ok(self.publish_texture())
+    }
+    #[cfg(feature = "animated-models")]
+    pub fn render_mixed_post_processed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        animated_placements: &[AnimatedPlacement],
+        settings: orr_render::PostProcessSettings,
+    ) -> Result<egui::TextureId, String> {
+        self.gpu.render_mixed_post_processed(
+            size,
+            list,
+            camera,
+            placements,
+            animated_placements,
+            settings,
+        )?;
+        Ok(self.publish_texture())
+    }
+    fn publish_texture(&mut self) -> egui::TextureId {
+        if self.generation != self.gpu.target().generation() {
+            self.generation = self.gpu.target().generation();
+            self.state
+                .renderer
+                .write()
+                .update_egui_texture_from_wgpu_texture(
+                    &self.state.device,
+                    self.gpu.target().sample_view(),
+                    egui_wgpu::wgpu::FilterMode::Linear,
+                    self.id,
+                );
+        }
+        self.has_frame = true;
+        self.id
+    }
+
     pub fn render(
         &mut self,
         size: (u32, u32),
@@ -482,20 +680,7 @@ impl GpuViewport3d {
             #[cfg(feature = "models")]
             placements,
         )?;
-        if self.generation != self.gpu.target().generation() {
-            self.generation = self.gpu.target().generation();
-            self.state
-                .renderer
-                .write()
-                .update_egui_texture_from_wgpu_texture(
-                    &self.state.device,
-                    self.gpu.target().sample_view(),
-                    egui_wgpu::wgpu::FilterMode::Linear,
-                    self.id,
-                );
-        }
-        self.has_frame = true;
-        Ok(self.id)
+        Ok(self.publish_texture())
     }
 
     #[cfg(feature = "animated-models")]
@@ -509,20 +694,7 @@ impl GpuViewport3d {
     ) -> Result<egui::TextureId, String> {
         self.gpu
             .render_mixed(size, list, camera, placements, animated_placements)?;
-        if self.generation != self.gpu.target().generation() {
-            self.generation = self.gpu.target().generation();
-            self.state
-                .renderer
-                .write()
-                .update_egui_texture_from_wgpu_texture(
-                    &self.state.device,
-                    self.gpu.target().sample_view(),
-                    egui_wgpu::wgpu::FilterMode::Linear,
-                    self.id,
-                );
-        }
-        self.has_frame = true;
-        Ok(self.id)
+        Ok(self.publish_texture())
     }
 }
 impl Drop for GpuViewport3d {

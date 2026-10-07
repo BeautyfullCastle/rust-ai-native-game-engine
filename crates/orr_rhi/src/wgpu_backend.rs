@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::{
     Acquire, Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, Compare, Cull, DepthAttachment,
-    PipelineDesc, Rhi, SamplerDesc, TextureDesc, TextureFormat, TextureUsage, Topology, VertexFormat, VertexStep,
-    TextureUpload, TextureUploadError, WindowHandle,
+    PipelineDesc, Rhi, SamplerDesc, TextureDesc, TextureFormat, TextureFormatCapabilities, TextureUpload,
+    TextureUploadError, TextureUsage, Topology, VertexFormat, VertexStep, WindowHandle,
 };
 
 /// How to pick the adapter.
@@ -32,6 +32,7 @@ pub struct Wgpu {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    hdr_disabled: bool,
 }
 
 /// A window surface with its current configuration.
@@ -56,6 +57,7 @@ fn to_wgpu_format(f: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
         TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
         TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+        TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
         TextureFormat::Depth32Float => wgpu::TextureFormat::Depth32Float,
     }
 }
@@ -66,6 +68,8 @@ fn from_wgpu_format(f: wgpu::TextureFormat) -> Option<TextureFormat> {
         wgpu::TextureFormat::Rgba8UnormSrgb => TextureFormat::Rgba8UnormSrgb,
         wgpu::TextureFormat::Bgra8Unorm => TextureFormat::Bgra8Unorm,
         wgpu::TextureFormat::Bgra8UnormSrgb => TextureFormat::Bgra8UnormSrgb,
+        wgpu::TextureFormat::Rgba16Float => TextureFormat::Rgba16Float,
+        wgpu::TextureFormat::Depth32Float => TextureFormat::Depth32Float,
         _ => return None,
     })
 }
@@ -109,6 +113,88 @@ fn texture_usages(u: TextureUsage) -> wgpu::TextureUsages {
         }
     }
     r
+}
+
+// Match wgpu's device-side format validation: downlevel adapters cannot assume
+// WebGPU format guarantees, while adapter-only extras need an enabled feature
+// on conformant adapters. Intersect with hardware support in either case.
+fn usable_format_features(
+    format: wgpu::TextureFormat,
+    adapter: wgpu::TextureFormatFeatures,
+    downlevel: wgpu::DownlevelFlags,
+    enabled: wgpu::Features,
+) -> wgpu::TextureFormatFeatures {
+    if !enabled.contains(format.required_features()) {
+        return wgpu::TextureFormatFeatures {
+            allowed_usages: wgpu::TextureUsages::empty(),
+            flags: wgpu::TextureFormatFeatureFlags::empty(),
+        };
+    }
+    if enabled.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        || !downlevel.contains(wgpu::DownlevelFlags::WEBGPU_TEXTURE_FORMAT_SUPPORT)
+    {
+        adapter
+    } else {
+        let guaranteed = format.guaranteed_format_features(enabled);
+        wgpu::TextureFormatFeatures {
+            allowed_usages: guaranteed.allowed_usages & adapter.allowed_usages,
+            flags: guaranteed.flags & adapter.flags,
+        }
+    }
+}
+
+fn format_capabilities(
+    format: TextureFormat,
+    features: wgpu::TextureFormatFeatures,
+    limits: &wgpu::Limits,
+) -> TextureFormatCapabilities {
+    let mut usages = TextureUsage::default();
+    for (flag, usage) in [
+        (wgpu::TextureUsages::RENDER_ATTACHMENT, TextureUsage::RENDER_ATTACHMENT),
+        (wgpu::TextureUsages::TEXTURE_BINDING, TextureUsage::TEXTURE_BINDING),
+        (wgpu::TextureUsages::COPY_SRC, TextureUsage::COPY_SRC),
+        (wgpu::TextureUsages::COPY_DST, TextureUsage::COPY_DST),
+    ] {
+        if features.allowed_usages.contains(flag) {
+            usages = usages | usage;
+        }
+    }
+    if !format.is_depth()
+        && (limits.max_color_attachments == 0
+            || to_wgpu_format(format)
+                .target_pixel_byte_cost()
+                .is_none_or(|cost| cost > limits.max_color_attachment_bytes_per_sample))
+    {
+        usages.0 &= !TextureUsage::RENDER_ATTACHMENT.0;
+    }
+    if limits.max_bind_groups == 0 || limits.max_sampled_textures_per_shader_stage == 0 {
+        usages.0 &= !TextureUsage::TEXTURE_BINDING.0;
+    }
+    let filterable = usages.contains(TextureUsage::TEXTURE_BINDING)
+        && limits.max_samplers_per_shader_stage > 0
+        && features.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+    let blendable = usages.contains(TextureUsage::RENDER_ATTACHMENT)
+        && features.flags.contains(wgpu::TextureFormatFeatureFlags::BLENDABLE);
+    let supports_hdr_postprocessing = format == TextureFormat::Rgba16Float
+        && usages.contains(TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_SRC)
+        && filterable
+        && blendable
+        && limits.max_bind_groups >= 2
+        && limits.max_bind_groups_plus_vertex_buffers >= 2
+        && limits.max_bindings_per_bind_group >= 4
+        && limits.max_sampled_textures_per_shader_stage >= 2
+        && limits.max_uniform_buffers_per_shader_stage >= 1
+        && limits.max_uniform_buffer_binding_size >= 32
+        && limits.max_buffer_size >= 256
+        && limits.max_texture_dimension_2d > 0;
+    TextureFormatCapabilities {
+        usages,
+        filterable,
+        blendable,
+        max_dimension_2d: limits.max_texture_dimension_2d,
+        max_readback_buffer_size: limits.max_buffer_size,
+        supports_hdr_postprocessing,
+    }
 }
 
 impl Wgpu {
@@ -189,7 +275,7 @@ impl Wgpu {
             desc.required_limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
         }
         let (device, queue) = adapter.request_device(&desc).await.map_err(|e| format!("request_device: {e}"))?;
-        Ok(Self { instance, adapter, device, queue })
+        Ok(Self { instance, adapter, device, queue, hdr_disabled: false })
     }
 
     fn configure_new_surface(
@@ -214,7 +300,8 @@ impl Wgpu {
         } else {
             wgpu::PresentMode::AutoNoVsync
         };
-        let format = from_wgpu_format(config.format).ok_or_else(|| format!("unsupported surface format {:?}", config.format))?;
+        let format =
+            from_wgpu_format(config.format).ok_or_else(|| format!("unsupported surface format {:?}", config.format))?;
         surface.configure(&self.device, &config);
         Ok(WgpuSurface { surface, config, format, can_copy })
     }
@@ -222,8 +309,22 @@ impl Wgpu {
     /// Wraps a device that someone else created (for example eframe's
     /// `egui_wgpu::RenderState`), so the renderer can draw with the same
     /// device and queue that a UI toolkit uses. The parts must belong together.
-    pub fn from_parts(instance: wgpu::Instance, adapter: wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        Self { instance, adapter, device, queue }
+    pub fn from_parts(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Self {
+        Self { instance, adapter, device, queue, hdr_disabled: false }
+    }
+
+    /// Conservatively disables optional HDR support on this handle and its
+    /// future clones. Useful for a compatibility fallback and for testing
+    /// unsupported-device behavior on a capable adapter. It does not change
+    /// device features or affect other handles that were cloned earlier.
+    pub fn without_hdr_support(mut self) -> Self {
+        self.hdr_disabled = true;
+        self
     }
 
     /// The raw wgpu device, for integrations such as egui-wgpu.
@@ -237,6 +338,16 @@ impl Wgpu {
 
     pub fn adapter(&self) -> &wgpu::Adapter {
         &self.adapter
+    }
+
+    fn usable_format_features(&self, format: TextureFormat) -> wgpu::TextureFormatFeatures {
+        let format = to_wgpu_format(format);
+        usable_format_features(
+            format,
+            self.adapter.get_texture_format_features(format),
+            self.adapter.get_downlevel_capabilities().flags,
+            self.device.features(),
+        )
     }
 
     /// True when the adapter is a software rasterizer (WARP, llvmpipe).
@@ -412,18 +523,16 @@ impl Rhi for Wgpu {
         })
     }
 
+    fn texture_format_capabilities(&self, format: TextureFormat) -> TextureFormatCapabilities {
+        if self.hdr_disabled && format == TextureFormat::Rgba16Float {
+            return TextureFormatCapabilities::default();
+        }
+        format_capabilities(format, self.usable_format_features(format), &self.device.limits())
+    }
+
     fn sample_count_supported(&self, format: TextureFormat, samples: u32) -> bool {
-        // Adapter-specific counts are only usable when the device enabled
-        // TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES; otherwise only the
-        // WebGPU-guaranteed counts (1 and 4) pass validation.
-        let format = to_wgpu_format(format);
-        let features = self.device.features();
-        let flags = if features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
-            self.adapter.get_texture_format_features(format).flags
-        } else {
-            format.guaranteed_format_features(features).flags
-        };
-        samples == 1 || flags.sample_count_supported(samples)
+        self.texture_format_capabilities(format).usages.contains(TextureUsage::RENDER_ATTACHMENT)
+            && self.usable_format_features(format).flags.sample_count_supported(samples)
     }
 
     fn create_shader(&self, label: &str, wgsl: &str) -> wgpu::ShaderModule {
@@ -513,13 +622,22 @@ impl Rhi for Wgpu {
                 ..Default::default()
             },
             depth_stencil,
-            multisample: wgpu::MultisampleState { count: desc.samples.max(1), mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: desc.samples.max(1),
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview_mask: None,
             cache: None,
         })
     }
 
-    fn create_bind_group(&self, pipeline: &wgpu::RenderPipeline, group: u32, bindings: &[Binding<Self>]) -> wgpu::BindGroup {
+    fn create_bind_group(
+        &self,
+        pipeline: &wgpu::RenderPipeline,
+        group: u32,
+        bindings: &[Binding<Self>],
+    ) -> wgpu::BindGroup {
         let layout = pipeline.get_bind_group_layout(group);
         let entries: Vec<wgpu::BindGroupEntry> = bindings
             .iter()
@@ -564,7 +682,8 @@ impl Rhi for Wgpu {
                 ops: wgpu::Operations { load, store },
             }
         });
-        let color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = color_attachment.into_iter().map(Some).collect();
+        let color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> =
+            color_attachment.into_iter().map(Some).collect();
         let depth_attachment = depth.map(|d| wgpu::RenderPassDepthStencilAttachment {
             view: d.view,
             depth_ops: Some(wgpu::Operations {
@@ -607,12 +726,21 @@ impl Rhi for Wgpu {
     }
 
     fn read_texture(&self, texture: &wgpu::Texture) -> Vec<u8> {
+        assert_eq!(texture.dimension(), wgpu::TextureDimension::D2, "readback requires a 2D texture");
+        assert_eq!(texture.depth_or_array_layers(), 1, "readback requires one texture layer");
+        assert_eq!(texture.sample_count(), 1, "readback requires one sample");
+        assert!(texture.usage().contains(wgpu::TextureUsages::COPY_SRC), "readback requires COPY_SRC");
+        let bytes_per_texel = from_wgpu_format(texture.format())
+            .and_then(TextureFormat::readback_bytes_per_texel)
+            .expect("readback requires a supported color format");
         let (w, h) = (texture.width(), texture.height());
-        let unpadded = w * 4;
+        let unpadded = w.checked_mul(bytes_per_texel).expect("readback row size overflow");
         let padded = unpadded.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let size = u64::from(padded) * u64::from(h);
+        assert!(size <= self.device.limits().max_buffer_size, "readback exceeds enabled buffer size limit");
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size: u64::from(padded) * u64::from(h),
+            size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -638,7 +766,8 @@ impl Rhi for Wgpu {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().expect("map callback").expect("map readback buffer");
         let data = buffer.slice(..).get_mapped_range().expect("mapped range");
-        let mut out = Vec::with_capacity((unpadded * h) as usize);
+        let output_size = usize::try_from(u64::from(unpadded) * u64::from(h)).expect("readback size overflow");
+        let mut out = Vec::with_capacity(output_size);
         for row in data.chunks(padded as usize).take(h as usize) {
             out.extend_from_slice(&row[..unpadded as usize]);
         }
@@ -688,5 +817,133 @@ impl Rhi for Wgpu {
 
     fn present(&self, frame: WgpuFrame) {
         self.queue.present(frame.texture);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hdr_features() -> wgpu::TextureFormatFeatures {
+        wgpu::TextureFormat::Rgba16Float.guaranteed_format_features(wgpu::Features::empty())
+    }
+
+    #[test]
+    fn all_rhi_formats_roundtrip_through_wgpu() {
+        for format in [
+            TextureFormat::Rgba8Unorm,
+            TextureFormat::Rgba8UnormSrgb,
+            TextureFormat::Bgra8Unorm,
+            TextureFormat::Bgra8UnormSrgb,
+            TextureFormat::Rgba16Float,
+            TextureFormat::Depth32Float,
+        ] {
+            assert_eq!(from_wgpu_format(to_wgpu_format(format)), Some(format));
+        }
+        assert_eq!(from_wgpu_format(wgpu::TextureFormat::Rgba32Float), None);
+    }
+
+    #[test]
+    fn conformant_adapter_extras_require_enabled_device_features() {
+        let mut adapter = hdr_features();
+        adapter.flags |= wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X8;
+        let limited = usable_format_features(
+            wgpu::TextureFormat::Rgba16Float,
+            adapter,
+            wgpu::DownlevelFlags::WEBGPU_TEXTURE_FORMAT_SUPPORT,
+            wgpu::Features::empty(),
+        );
+        assert!(!limited.flags.sample_count_supported(8));
+        assert!(limited.flags.sample_count_supported(4));
+        let enabled = usable_format_features(
+            wgpu::TextureFormat::Rgba16Float,
+            adapter,
+            wgpu::DownlevelFlags::WEBGPU_TEXTURE_FORMAT_SUPPORT,
+            wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+        );
+        assert!(enabled.flags.sample_count_supported(8));
+    }
+
+    #[test]
+    fn downlevel_adapter_can_deny_hdr_rendering_and_filtering() {
+        let mut adapter = hdr_features();
+        adapter.allowed_usages.remove(wgpu::TextureUsages::RENDER_ATTACHMENT);
+        adapter.flags.remove(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+        for downlevel in [wgpu::DownlevelFlags::empty(), wgpu::DownlevelFlags::WEBGPU_TEXTURE_FORMAT_SUPPORT] {
+            let features =
+                usable_format_features(wgpu::TextureFormat::Rgba16Float, adapter, downlevel, wgpu::Features::empty());
+            let caps = format_capabilities(TextureFormat::Rgba16Float, features, &wgpu::Limits::default());
+            assert!(!caps.usages.contains(TextureUsage::RENDER_ATTACHMENT));
+            assert!(!caps.filterable);
+            assert!(!caps.blendable);
+        }
+    }
+
+    #[test]
+    fn enabled_device_limits_narrow_format_capabilities() {
+        let format = TextureFormat::Rgba16Float;
+        let mut limits = wgpu::Limits { max_texture_dimension_2d: 64, ..wgpu::Limits::default() };
+        let caps = format_capabilities(format, hdr_features(), &limits);
+        assert_eq!(caps.max_dimension_2d, 64);
+        assert_eq!(caps.max_readback_buffer_size, limits.max_buffer_size);
+        assert!(caps.supports_hdr_postprocessing);
+        assert!(caps
+            .usages
+            .contains(TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_SRC));
+        assert!(caps.filterable && caps.blendable);
+        limits.max_color_attachment_bytes_per_sample = 7;
+        let caps = format_capabilities(format, hdr_features(), &limits);
+        assert!(!caps.usages.contains(TextureUsage::RENDER_ATTACHMENT));
+        assert!(!caps.blendable);
+        limits.max_color_attachment_bytes_per_sample = 8;
+        limits.max_color_attachments = 0;
+        assert!(!format_capabilities(format, hdr_features(), &limits).usages.contains(TextureUsage::RENDER_ATTACHMENT));
+        limits.max_color_attachments = 1;
+        limits.max_sampled_textures_per_shader_stage = 0;
+        let caps = format_capabilities(format, hdr_features(), &limits);
+        assert!(!caps.usages.contains(TextureUsage::TEXTURE_BINDING));
+        assert!(!caps.filterable);
+        limits.max_sampled_textures_per_shader_stage = 1;
+        limits.max_samplers_per_shader_stage = 0;
+        assert!(!format_capabilities(format, hdr_features(), &limits).filterable);
+        limits.max_samplers_per_shader_stage = 1;
+        limits.max_bind_groups = 0;
+        assert!(!format_capabilities(format, hdr_features(), &limits).usages.contains(TextureUsage::TEXTURE_BINDING));
+    }
+
+    #[test]
+    fn hdr_postprocess_admission_obeys_every_enabled_binding_limit() {
+        let defaults = wgpu::Limits::default();
+        let supported = |limits: &wgpu::Limits| {
+            format_capabilities(TextureFormat::Rgba16Float, hdr_features(), limits).supports_hdr_postprocessing
+        };
+        assert!(supported(&defaults));
+        for limits in [
+            wgpu::Limits { max_bind_groups: 1, ..defaults.clone() },
+            wgpu::Limits { max_bind_groups_plus_vertex_buffers: 1, ..defaults.clone() },
+            wgpu::Limits { max_bindings_per_bind_group: 3, ..defaults.clone() },
+            wgpu::Limits { max_sampled_textures_per_shader_stage: 1, ..defaults.clone() },
+            wgpu::Limits { max_samplers_per_shader_stage: 0, ..defaults.clone() },
+            wgpu::Limits { max_uniform_buffers_per_shader_stage: 0, ..defaults.clone() },
+            wgpu::Limits { max_uniform_buffer_binding_size: 31, ..defaults.clone() },
+            wgpu::Limits { max_buffer_size: 255, ..defaults.clone() },
+            wgpu::Limits { max_texture_dimension_2d: 0, ..defaults.clone() },
+        ] {
+            assert!(!supported(&limits), "must reject inadequate limits: {limits:?}");
+        }
+        let minimum = wgpu::Limits {
+            max_bind_groups: 2,
+            max_bind_groups_plus_vertex_buffers: 2,
+            max_bindings_per_bind_group: 4,
+            max_sampled_textures_per_shader_stage: 2,
+            max_samplers_per_shader_stage: 1,
+            max_uniform_buffers_per_shader_stage: 1,
+            max_uniform_buffer_binding_size: 32,
+            max_buffer_size: 256,
+            max_texture_dimension_2d: 1,
+            ..defaults
+        };
+        assert!(supported(&minimum));
+        assert!(!format_capabilities(TextureFormat::Rgba8Unorm, hdr_features(), &minimum).supports_hdr_postprocessing);
     }
 }

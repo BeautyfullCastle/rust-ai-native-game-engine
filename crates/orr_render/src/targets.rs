@@ -169,7 +169,9 @@ impl<B: Rhi> OffscreenTarget<B> {
 
     /// Waits for the GPU and reads the pixels back as tightly packed RGBA8
     /// (stored bytes, so sRGB targets return encoded values), top row first.
+    /// Panics for non-8-bit formats; use `Rhi::read_texture` for RGBA16F bytes.
     pub fn read_rgba8(&self) -> Vec<u8> {
+        assert!(matches!(self.format, TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb | TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb), "read_rgba8 requires an 8-bit color target");
         let mut bytes = self.rhi.read_texture(&self.texture);
         if self.format.is_bgra() {
             for px in bytes.chunks_exact_mut(4) {

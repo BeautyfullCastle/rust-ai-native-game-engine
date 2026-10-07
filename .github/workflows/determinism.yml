@@ -187,6 +187,29 @@ jobs:
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:
           ORR_REQUIRE_GPU: "1"
+      # HDR is an explicit required acceptance lane, not an optional adapter
+      # smoke test. Keep each feature configuration separate: animated-models
+      # deliberately excludes the static-only editor test via its cfg.
+      - name: Required HDR RHI software-adapter acceptance (1 test)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_rhi --features gpu-tests --test hdr_texture -- --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+      - name: Required HDR renderer acceptance (11 tests)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_render --features imported-scene,animation --test hdr -- --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+      - name: Required HDR animated editor acceptance (3 tests)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_editor --features animated-models --test yard3d_hdr -- --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+      - name: Required HDR static-only editor acceptance (1 test)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_editor --features models --test yard3d_hdr_static -- --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
       # The editor's GPU tests (viewport pixels read back, the app rendered by
       # egui_kittest's wgpu renderer) on the same software adapter.
       - if: runner.os == 'Linux'

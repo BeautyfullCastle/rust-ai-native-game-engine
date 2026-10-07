@@ -28,6 +28,9 @@ pub const MAX_IMPORTED_DRAWS: usize = 4096;
 #[derive(Debug)]
 pub enum ImportedSceneError {
     InvalidTarget,
+    UnsupportedHdr,
+    InvalidPostProcess,
+    PostProcessBudget,
     FormatMismatch,
     BatchLimit,
     DrawLimit,
@@ -45,6 +48,9 @@ impl std::fmt::Display for ImportedSceneError {
             Self::InvalidTarget => f.write_str(
                 "imported scene requires a single-sample color target, finite clear, and dimensions in 1..=8192",
             ),
+            Self::UnsupportedHdr => f.write_str("RGBA16F render/sample/filter/blend/readback or requested dimensions unsupported"),
+            Self::InvalidPostProcess => f.write_str("invalid bounded HDR/bloom settings"),
+            Self::PostProcessBudget => f.write_str("HDR color targets exceed the 128 MiB retained/transient resize budget"),
             Self::FormatMismatch => f.write_str("imported scene target and renderer formats must match"),
             Self::BatchLimit => f.write_str("imported scene batch limit exceeded"),
             Self::CasterLimit => f.write_str("imported scene shadow caster limit exceeded"),
@@ -112,7 +118,7 @@ enum PreparedBatch {
 }
 
 /// Shared scene depth and frame submission for procedural and imported geometry.
-/// One fixed-size directional shadow map. No cascades, multisampling, PBR, HDR,
+/// One fixed-size directional shadow map and opt-in bounded HDR/bloom. No cascades, multisampling, PBR,
 /// or cross-device composition. Off-coverage receivers are fully lit.
 pub struct ImportedSceneRenderer<B: Rhi> {
     rhi: B,
@@ -120,7 +126,12 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     depth: Option<Depth<B>>,
     depth_generation: u64,
     shadow: Option<SharedShadow<B>>,
+    /// HDR clear is scene-linear and receives the final display transform.
+    /// Legacy clear semantics are unchanged when HDR is disabled.
     pub clear: [f64; 4],
+    pub post_process: crate::PostProcessSettings,
+    post_processor: Option<crate::PostProcessor<B>>,
+    post_process_generation: u64,
 }
 impl<B: Rhi> ImportedSceneRenderer<B> {
     /// Create a coordinator without allocating GPU resources.
@@ -135,10 +146,49 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             depth_generation: 0,
             shadow: None,
             clear: crate::DEFAULT_CLEAR_3D,
+            post_process: crate::PostProcessSettings::default(),
+            post_processor: None,
+            post_process_generation: 0,
         })
     }
     pub fn format(&self) -> TextureFormat {
         self.format
+    }
+    /// Required format of every procedural/static/skinned scene pipeline.
+    /// Enabled postprocessing requires an RGBA8/BGRA8 final display format.
+    /// `format()` remains the caller's final display target format.
+    pub fn scene_format(&self) -> TextureFormat {
+        if self.post_process.enabled {
+            TextureFormat::Rgba16Float
+        } else {
+            self.format
+        }
+    }
+    pub fn post_process_size(&self) -> Option<(u32, u32)> {
+        self.post_processor.as_ref().map(|p| p.size())
+    }
+    /// Advances only when an accepted HDR frame creates/replaces color targets.
+    pub fn post_process_generation(&self) -> u64 {
+        self.post_process_generation
+    }
+    pub fn post_process_allocated_bytes(&self) -> u64 {
+        self.post_processor.as_ref().map_or(0, |p| p.bytes())
+    }
+    /// Read-only pre-display scene texture for diagnostics and rendering oracles.
+    pub fn hdr_scene_texture(&self) -> Option<&B::Texture> {
+        self.post_processor.as_ref().map(|p| p.scene_texture())
+    }
+    /// Synchronous diagnostic readback, independent of final display encoding.
+    pub fn read_hdr_rgba(&self) -> Option<Vec<[f32; 4]>> {
+        self.hdr_scene_texture().map(|texture| {
+            self.rhi
+                .read_texture(texture)
+                .chunks_exact(8)
+                .map(|pixel| {
+                    orr_rhi::decode_rgba16f_texel(pixel.try_into().expect("RGBA16F texel"))
+                })
+                .collect()
+        })
     }
     pub fn depth_size(&self) -> Option<(u32, u32)> {
         self.depth.as_ref().map(|depth| depth.size)
@@ -176,12 +226,25 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         if format != self.format {
             return Err(ImportedSceneError::FormatMismatch);
         }
+        crate::post_process::validate(
+            &self.rhi,
+            self.post_process,
+            size,
+            self.post_processor.as_ref(),
+        )?;
+        if self.post_process.enabled
+            && (self.format == TextureFormat::Rgba16Float
+                || !self.clear[..3].iter().all(|v| (0.0..=65504.0).contains(v))
+                || !(0.0..=1.0).contains(&self.clear[3]))
+        {
+            return Err(ImportedSceneError::InvalidTarget);
+        }
         Ok(())
     }
 
     /// Pure authoring-frame validation before target resizing or GPU asset-cache creation.
     /// Admits exactly one procedural batch and the supplied static-instance batches,
-    /// using this coordinator's format/clear and a single-sample target. Renderers
+    /// using this coordinator's scene format/clear and a single-sample target. Renderers
     /// constructed afterwards must use that same format, device, and one sample.
     /// The accepted data must remain unchanged until `draw`, which validates again.
     /// No GPU calls or retained state changes occur, including on success.
@@ -253,7 +316,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         extra_draw_count: usize,
     ) -> Result<(), ImportedSceneError> {
         self.validate_target(size, self.format, 1)?;
-        prepare_shared_globals(self.format, size, camera, lighting)
+        prepare_shared_globals(self.scene_format(), size, camera, lighting)
             .map_err(ImportedSceneError::Model)?;
         point.validate().map_err(ImportedSceneError::PointLight)?;
         let model_batch_count = models
@@ -281,7 +344,11 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             .ok_or(ImportedSceneError::DrawLimit)?;
         draws = imported_draws
             .checked_add(
-                validate_procedural_list(procedural).map_err(ImportedSceneError::Procedural)?,
+                validate_procedural_list(
+                    procedural,
+                    self.scene_format() == TextureFormat::Rgba16Float,
+                )
+                .map_err(ImportedSceneError::Procedural)?,
             )
             .ok_or(ImportedSceneError::DrawLimit)?;
         if draws > MAX_IMPORTED_DRAWS {
@@ -320,7 +387,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             return Err(ImportedSceneError::BatchLimit);
         }
         let (mut globals, shadow_ready) =
-            prepare_shared_globals(self.format, target.size, camera, lighting)
+            prepare_shared_globals(self.scene_format(), target.size, camera, lighting)
                 .map_err(ImportedSceneError::Model)?;
         point.validate().map_err(ImportedSceneError::PointLight)?;
         if let Some(light) = &point.point_light {
@@ -371,7 +438,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                         .map_err(ImportedSceneError::Skinned)?,
                 ),
             };
-            if format != self.format {
+            if format != self.scene_format() {
                 return Err(ImportedSceneError::FormatMismatch);
             }
             if let ImportedBatch::Procedural { list, .. } = batch {
@@ -432,7 +499,35 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             })
             .collect::<Result<Vec<_>, ImportedSceneError>>()?;
 
-        // All fallible validation is finished.
+        // All fallible validation is finished, including the final batch/pose.
+        if self.post_process.enabled {
+            if self
+                .post_processor
+                .as_ref()
+                .is_none_or(|p| p.size() != target.size)
+            {
+                if let Some(p) = self.post_processor.as_mut() {
+                    // Retire older in-flight generations before allocating the
+                    // admitted old + new peak. Only resource transitions stall.
+                    self.rhi.wait_idle();
+                    p.resize(&self.rhi, target.size);
+                } else {
+                    self.post_processor = Some(crate::PostProcessor::new(
+                        &self.rhi,
+                        target.size,
+                        self.format,
+                    ));
+                }
+                self.post_process_generation = self.post_process_generation.saturating_add(1);
+            }
+        } else {
+            // Retire in-flight HDR references before releasing this ownership;
+            // a rapid off/on sequence cannot hide an older color generation.
+            if self.post_processor.is_some() {
+                self.rhi.wait_idle();
+            }
+            self.post_processor = None;
+        }
         if shadow_ready.is_some() && self.shadow.is_none() {
             self.shadow = Some(SharedShadow::new(&self.rhi));
         }
@@ -530,12 +625,16 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             );
         }
         let depth = &self.depth.as_ref().expect("accepted frame owns depth").view;
+        let scene_view = self
+            .post_processor
+            .as_ref()
+            .map_or(target.view, |p| p.scene_view());
         if batches.is_empty() {
             self.rhi.encode_pass(
                 &mut encoder,
                 "empty imported scene",
                 Some(&ColorAttachment {
-                    view: target.view,
+                    view: scene_view,
                     clear: Some(self.clear),
                     resolve: None,
                 }),
@@ -549,7 +648,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         }
         for (index, (batch, ready)) in batches.iter().zip(&mut prepared).enumerate() {
             let color = ColorAttachment {
-                view: target.view,
+                view: scene_view,
                 clear: (index == 0).then_some(self.clear),
                 resolve: None,
             };
@@ -614,6 +713,16 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 _ => unreachable!("prepared batches preserve order and kind"),
             }
         }
+        if let Some(post) = &self.post_processor {
+            post.encode(
+                &self.rhi,
+                &mut encoder,
+                target.view,
+                self.format,
+                self.post_process,
+                lighting,
+            );
+        }
         self.rhi.submit(encoder);
         for (batch, ready) in batches.iter_mut().zip(prepared) {
             match (batch, ready) {
@@ -652,18 +761,46 @@ mod tests {
         writes: usize,
         encoders: usize,
         submits: usize,
+        idle_waits: usize,
+        dropped_textures: Vec<(usize, TextureFormat)>,
+        texture_lifecycle: Vec<&'static str>,
         textures: Vec<(TextureFormat, u32, (u32, u32))>,
         passes: Vec<(usize, bool, bool, bool, usize)>,
         shadow_passes: Vec<(usize, bool, bool, usize)>,
         pass_buffers: Vec<Vec<usize>>,
         written_buffers: Vec<usize>,
         pass_textures: Vec<Vec<usize>>,
+        post_passes: Vec<(String, usize, Vec<usize>)>,
+    }
+    /// Records ownership release separately from texture/view creation. The
+    /// production backend may defer physical release until the recorded wait.
+    struct RecordedTexture {
+        id: usize,
+        format: TextureFormat,
+        effects: Rc<RefCell<Effects>>,
+    }
+    impl Drop for RecordedTexture {
+        fn drop(&mut self) {
+            self.effects
+                .borrow_mut()
+                .texture_lifecycle
+                .push("drop_texture");
+            self.effects
+                .borrow_mut()
+                .dropped_textures
+                .push((self.id, self.format));
+        }
     }
     /// Records every potentially mutating RHI call; no adapter is required.
     type BoundResources = (Vec<usize>, Vec<usize>);
     type BindRecords = Rc<RefCell<std::collections::BTreeMap<usize, BoundResources>>>;
     #[derive(Clone, Default)]
-    struct Mock(Rc<RefCell<Effects>>, Rc<RefCell<usize>>, BindRecords);
+    struct Mock(
+        Rc<RefCell<Effects>>,
+        Rc<RefCell<usize>>,
+        BindRecords,
+        Rc<RefCell<Option<orr_rhi::TextureFormatCapabilities>>>,
+    );
     impl Mock {
         fn allocate(&self) -> usize {
             let mut effects = self.0.borrow_mut();
@@ -677,7 +814,7 @@ mod tests {
     }
     impl Rhi for Mock {
         type Buffer = usize;
-        type Texture = usize;
+        type Texture = RecordedTexture;
         type TextureView = usize;
         type Shader = usize;
         type Pipeline = usize;
@@ -699,34 +836,60 @@ mod tests {
         fn texture_view_formats_supported(&self) -> bool {
             true
         }
-        fn copy_texture(&self, _: &usize, _: &usize) {
+        fn copy_texture(&self, _: &RecordedTexture, _: &RecordedTexture) {
             panic!("imported renderer does not copy textures");
         }
-        fn create_texture(&self, desc: &TextureDesc<'_>) -> usize {
+        fn create_texture(&self, desc: &TextureDesc<'_>) -> RecordedTexture {
+            self.0.borrow_mut().texture_lifecycle.push("create_texture");
             self.0.borrow_mut().textures.push((
                 desc.format,
                 desc.sample_count,
                 (desc.width, desc.height),
             ));
-            self.allocate()
+            RecordedTexture {
+                id: self.allocate(),
+                format: desc.format,
+                effects: self.0.clone(),
+            }
         }
         fn write_texture_rgba8(
             &self,
-            _: &usize,
+            _: &RecordedTexture,
             _: &TextureUpload<'_>,
         ) -> Result<(), TextureUploadError> {
             self.0.borrow_mut().writes += 1;
             Ok(())
         }
-        fn create_texture_view(&self, texture: &usize, _: Option<TextureFormat>) -> usize {
+        fn create_texture_view(
+            &self,
+            texture: &RecordedTexture,
+            _: Option<TextureFormat>,
+        ) -> usize {
             self.allocate();
-            *texture
+            texture.id
         }
         fn create_sampler(&self, _: &SamplerDesc) -> usize {
             self.allocate()
         }
         fn sample_count_supported(&self, _: TextureFormat, samples: u32) -> bool {
             samples == 1
+        }
+        fn texture_format_capabilities(
+            &self,
+            _: TextureFormat,
+        ) -> orr_rhi::TextureFormatCapabilities {
+            self.3
+                .borrow()
+                .unwrap_or(orr_rhi::TextureFormatCapabilities {
+                    usages: TextureUsage::RENDER_ATTACHMENT
+                        | TextureUsage::TEXTURE_BINDING
+                        | TextureUsage::COPY_SRC,
+                    filterable: true,
+                    blendable: true,
+                    max_dimension_2d: 8192,
+                    supports_hdr_postprocessing: true,
+                    max_readback_buffer_size: 256 * 1024 * 1024,
+                })
         }
         fn create_shader(&self, _: &str, _: &str) -> usize {
             self.allocate()
@@ -764,12 +927,11 @@ mod tests {
         fn encode_pass(
             &self,
             _: &mut usize,
-            _: &str,
+            label: &str,
             color: Option<&ColorAttachment<'_, Self>>,
             depth: Option<&DepthAttachment<'_, Self>>,
             commands: &[Command<'_, Self>],
         ) {
-            let depth = depth.expect("imported scene has a depth attachment");
             let draws = commands
                 .iter()
                 .filter(|command| matches!(command, Command::DrawIndexed { .. }))
@@ -790,6 +952,18 @@ mod tests {
                     _ => {}
                 }
             }
+            let Some(depth) = depth else {
+                let color = color.expect("postprocess has a color target");
+                assert!(
+                    !textures.contains(color.view),
+                    "a pass must never sample its own output"
+                );
+                self.0
+                    .borrow_mut()
+                    .post_passes
+                    .push((label.to_owned(), *color.view, textures));
+                return;
+            };
             self.0.borrow_mut().pass_buffers.push(buffers);
             self.0.borrow_mut().pass_textures.push(textures);
             let Some(color) = color else {
@@ -812,8 +986,11 @@ mod tests {
         fn submit(&self, _: usize) {
             self.0.borrow_mut().submits += 1;
         }
-        fn wait_idle(&self) {}
-        fn read_texture(&self, _: &usize) -> Vec<u8> {
+        fn wait_idle(&self) {
+            self.0.borrow_mut().idle_waits += 1;
+            self.0.borrow_mut().texture_lifecycle.push("wait_idle");
+        }
+        fn read_texture(&self, _: &RecordedTexture) -> Vec<u8> {
             unimplemented!()
         }
         fn surface_format(&self, _: &()) -> TextureFormat {
@@ -879,6 +1056,254 @@ mod tests {
             assert_eq!(depth_clear, index == 0);
             assert!(store);
         }
+    }
+
+    #[test]
+    fn hdr_targets_passes_reuse_resize_and_off_are_recorded() {
+        let rhi = Mock::default();
+        let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        assert_eq!(scene.scene_format(), FORMAT);
+        draw(&mut scene, (3, 5), &mut []).unwrap();
+        let off = rhi.take();
+        assert!(off.post_passes.is_empty());
+        assert_eq!(off.textures, vec![(TextureFormat::Depth32Float, 1, (3, 5))]);
+        assert_eq!(scene.post_process_allocated_bytes(), 0);
+        scene.post_process.enabled = true;
+        assert_eq!(scene.scene_format(), TextureFormat::Rgba16Float);
+        draw(&mut scene, (3, 5), &mut []).unwrap();
+        let first = rhi.take();
+        assert_eq!(
+            first.textures,
+            vec![
+                (TextureFormat::Rgba16Float, 1, (3, 5)),
+                (TextureFormat::Rgba16Float, 1, (2, 3)),
+                (TextureFormat::Rgba16Float, 1, (2, 3))
+            ]
+        );
+        assert_eq!(first.post_passes.len(), 6);
+        assert_eq!(first.submits, 1);
+        assert_eq!(first.idle_waits, 0);
+        assert_eq!(scene.post_process_generation(), 1);
+        assert_eq!(scene.post_process_allocated_bytes(), 216);
+        draw(&mut scene, (3, 5), &mut []).unwrap();
+        let reused = rhi.take();
+        assert_eq!(reused.allocations, 0);
+        assert_eq!(reused.idle_waits, 0);
+        assert!(reused.dropped_textures.is_empty());
+        assert_eq!(reused.post_passes, first.post_passes);
+        scene.post_process.bloom = false;
+        draw(&mut scene, (3, 5), &mut []).unwrap();
+        let no_bloom = rhi.take();
+        assert_eq!(no_bloom.allocations, 0);
+        assert_eq!(no_bloom.idle_waits, 0);
+        assert!(no_bloom.dropped_textures.is_empty());
+        assert_eq!(no_bloom.post_passes.len(), 1);
+        assert_eq!(no_bloom.post_passes[0].0, "HDR final display");
+        scene.post_process.bloom = true;
+        scene.post_process.strength = 0.0;
+        draw(&mut scene, (3, 5), &mut []).unwrap();
+        assert_eq!(rhi.take().post_passes.len(), 1);
+        draw(&mut scene, (7, 9), &mut []).unwrap();
+        let resized = rhi.take();
+        assert_eq!(resized.idle_waits, 1);
+        assert_eq!(
+            resized.texture_lifecycle.first(),
+            Some(&"wait_idle"),
+            "retire in-flight work before allocating or releasing a generation"
+        );
+        assert_eq!(
+            resized
+                .dropped_textures
+                .iter()
+                .filter(|(_, format)| *format == TextureFormat::Rgba16Float)
+                .count(),
+            3
+        );
+        assert_eq!(
+            resized
+                .dropped_textures
+                .iter()
+                .filter(|(_, format)| *format == TextureFormat::Depth32Float)
+                .count(),
+            1
+        );
+        assert_eq!(
+            resized.allocations, 12,
+            "reuse pipelines/uniforms/sampler; replace 3 colors, 4 bindings and shared depth"
+        );
+        assert_eq!(scene.post_process_generation(), 2);
+        assert_eq!(scene.post_process_size(), Some((7, 9)));
+        assert_eq!(scene.post_process_allocated_bytes(), 824);
+        scene.post_process.enabled = false;
+        draw(&mut scene, (7, 9), &mut []).unwrap();
+        let off = rhi.take();
+        assert_eq!(off.allocations, 0);
+        assert_eq!(off.idle_waits, 1);
+        assert_eq!(off.dropped_textures.len(), 3);
+        assert_eq!(
+            off.texture_lifecycle,
+            vec!["wait_idle", "drop_texture", "drop_texture", "drop_texture"]
+        );
+        assert!(
+            off.dropped_textures
+                .iter()
+                .all(|(_, format)| *format == TextureFormat::Rgba16Float)
+        );
+        assert!(off.post_passes.is_empty());
+        assert!(scene.hdr_scene_texture().is_none());
+        assert_eq!(scene.post_process_allocated_bytes(), 0);
+        assert_eq!(scene.post_process_generation(), 2);
+        scene.post_process.enabled = true;
+        draw(&mut scene, (7, 9), &mut []).unwrap();
+        assert_eq!(scene.post_process_generation(), 3);
+    }
+
+    #[test]
+    fn hdr_final_target_must_be_display_format() {
+        let rhi = Mock::default();
+        let mut scene =
+            ImportedSceneRenderer::new(rhi.clone(), TextureFormat::Rgba16Float).unwrap();
+        // Direct scene-linear rendering into a float target remains deliberate.
+        assert!(
+            scene
+                .validate_target((32, 32), TextureFormat::Rgba16Float, 1)
+                .is_ok()
+        );
+        scene.post_process.enabled = true;
+        assert!(matches!(
+            scene.validate_target((32, 32), TextureFormat::Rgba16Float, 1),
+            Err(ImportedSceneError::InvalidTarget)
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        assert_eq!(scene.post_process_generation(), 0);
+    }
+
+    #[test]
+    fn hdr_every_required_capability_is_checked_before_effects() {
+        let rhi = Mock::default();
+        let base = rhi.texture_format_capabilities(TextureFormat::Rgba16Float);
+        let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        scene.post_process.enabled = true;
+        let mut failures = Vec::new();
+        let mut caps = base;
+        caps.usages = TextureUsage::RENDER_ATTACHMENT;
+        failures.push(caps);
+        let mut caps = base;
+        caps.filterable = false;
+        failures.push(caps);
+        let mut caps = base;
+        caps.blendable = false;
+        failures.push(caps);
+        let mut caps = base;
+        caps.max_dimension_2d = 32;
+        failures.push(caps);
+        let mut caps = base;
+        caps.supports_hdr_postprocessing = false;
+        failures.push(caps);
+        let mut caps = base;
+        caps.max_readback_buffer_size = 511;
+        failures.push(caps);
+        for caps in failures {
+            *rhi.3.borrow_mut() = Some(caps);
+            assert!(matches!(
+                draw(&mut scene, (33, 1), &mut []),
+                Err(ImportedSceneError::UnsupportedHdr)
+            ));
+            assert_eq!(rhi.take(), Effects::default());
+            assert_eq!(scene.post_process_generation(), 0);
+            assert_eq!(scene.depth_generation(), 0);
+        }
+        // Exact row padding matters: 33 FP16 texels require a 512-byte row.
+        let mut caps = base;
+        caps.max_readback_buffer_size = 512;
+        *rhi.3.borrow_mut() = Some(caps);
+        draw(&mut scene, (33, 1), &mut []).unwrap();
+        assert_eq!(scene.post_process_size(), Some((33, 1)));
+    }
+
+    #[test]
+    fn hdr_capability_settings_peak_budget_and_late_batches_fail_closed() {
+        let rhi = Mock::default();
+        let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        scene.post_process.enabled = true;
+        *rhi.3.borrow_mut() = Some(orr_rhi::TextureFormatCapabilities::default());
+        assert!(matches!(
+            draw(&mut scene, (32, 32), &mut []),
+            Err(ImportedSceneError::UnsupportedHdr)
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        assert_eq!(scene.post_process_generation(), 0);
+        *rhi.3.borrow_mut() = None;
+        draw(&mut scene, (3000, 3000), &mut []).unwrap();
+        rhi.take();
+        let generation = scene.post_process_generation();
+        let bytes = scene.post_process_allocated_bytes();
+        // Each fits alone, but both during replacement exceed 128 MiB.
+        assert!(matches!(
+            draw(&mut scene, (3100, 3100), &mut []),
+            Err(ImportedSceneError::PostProcessBudget)
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        assert_eq!(scene.post_process_generation(), generation);
+        assert_eq!(scene.post_process_allocated_bytes(), bytes);
+        assert_eq!(scene.depth_size(), Some((3000, 3000)));
+        assert!(matches!(
+            draw(&mut scene, (4000, 4000), &mut []),
+            Err(ImportedSceneError::PostProcessBudget)
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        scene.post_process.threshold = f32::NAN;
+        assert!(matches!(
+            draw(&mut scene, (32, 32), &mut []),
+            Err(ImportedSceneError::InvalidPostProcess)
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        scene.post_process.threshold = 1.0;
+        scene.clear[0] = 65505.0;
+        assert!(matches!(
+            draw(&mut scene, (32, 32), &mut []),
+            Err(ImportedSceneError::InvalidTarget)
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        scene.clear = crate::DEFAULT_CLEAR_3D;
+        let mut renderer = model(&rhi, TextureFormat::Rgba16Float);
+        let mut procedural = Renderer3D::with_settings(
+            rhi.clone(),
+            TextureFormat::Rgba16Float,
+            crate::Settings3D::LOW,
+        );
+        let list = RenderList3D::default();
+        let mut invalid = StaticInstance::default();
+        invalid.translation[0] = f32::NAN;
+        rhi.take();
+        assert!(
+            draw(
+                &mut scene,
+                (32, 32),
+                &mut [
+                    ImportedBatch::Procedural {
+                        renderer: &mut procedural,
+                        list: &list
+                    },
+                    ImportedBatch::StaticInstances {
+                        renderer: &mut renderer,
+                        instances: &[invalid]
+                    }
+                ]
+            )
+            .is_err()
+        );
+        assert_eq!(rhi.take(), Effects::default());
+        assert_eq!(scene.post_process_generation(), generation);
+        // Off still validates settings, and rejecting it retains every HDR target.
+        scene.post_process.enabled = false;
+        scene.post_process.radius = 0;
+        assert!(matches!(
+            draw(&mut scene, (32, 32), &mut []),
+            Err(ImportedSceneError::InvalidPostProcess)
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        assert_eq!(scene.post_process_allocated_bytes(), bytes);
     }
 
     #[test]
