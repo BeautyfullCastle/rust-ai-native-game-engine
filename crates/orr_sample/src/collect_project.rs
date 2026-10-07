@@ -186,13 +186,27 @@ impl PreparedScene {
     }
 }
 
+/// Explicit route support; metadata-only readers never discover player data.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ProgressSupport {
+    Unsupported,
+    MetadataOnly,
+}
+
 pub struct PreparedProject {
     root: PathBuf,
     path: PathBuf,
     scene: PreparedScene,
+    progress: Option<orr_package::ProjectProgress>,
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
+        Self::open_with_progress(root, ProgressSupport::Unsupported)
+    }
+    pub fn open_with_progress(
+        root: impl AsRef<Path>,
+        support: ProgressSupport,
+    ) -> Result<Self, String> {
         // Capability inventory is route-local, not Cargo feature unification.
         // This first authored adapter intentionally consumes no sprite/UI package.
         let project =
@@ -201,13 +215,15 @@ impl PreparedProject {
         project.verify().map_err(|e| e.to_string())?;
         let manifest = project
             .manifest()
-            .ok_or("CollectDodgeV1 requires schema-2 project manifest")?;
+            .ok_or("CollectDodgeV1 requires schema-2/3 project manifest")?;
         let entry = manifest
             .entry
             .as_ref()
             .ok_or("CollectDodgeV1 requires a project entry")?;
-        if manifest.schema != 2 || entry.game != orr_package::ProjectGame::CollectDodgeV1 {
-            return Err("project entry must be schema 2 and collect-dodge-v1".into());
+        if !matches!(manifest.schema, 2 | 3)
+            || entry.game != orr_package::ProjectGame::CollectDodgeV1
+        {
+            return Err("project entry must be schema 2/3 and collect-dodge-v1".into());
         }
         if entry.sprites.is_some() || entry.ui.is_some() {
             return Err(
@@ -215,12 +231,24 @@ impl PreparedProject {
                     .into(),
             );
         }
+        if manifest.progress.is_some() && support == ProgressSupport::Unsupported {
+            return Err("this consuming route does not support collect progress metadata".into());
+        }
+        let progress = manifest.progress.clone();
         let root = project.root().to_path_buf();
         let path = crate::project::entry_file(&root, &entry.scene)?;
         let bytes = crate::project::read_regular(&path, MAX_BYTES)?;
         let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
         let scene = PreparedScene::parse(&text)?;
-        Ok(Self { root, path, scene })
+        Ok(Self {
+            root,
+            path,
+            scene,
+            progress,
+        })
+    }
+    pub fn progress(&self) -> Option<&orr_package::ProjectProgress> {
+        self.progress.as_ref()
     }
     pub fn root(&self) -> &Path {
         &self.root

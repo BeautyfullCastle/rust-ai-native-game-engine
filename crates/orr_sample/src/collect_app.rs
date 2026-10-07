@@ -128,7 +128,12 @@ fn bridge(project: &PreparedProject) -> Result<LocalBridge, String> {
 }
 pub fn run(options: Options) -> Result<(), String> {
     // All package verification and scene admission precede any GPU/window work.
-    let project = PreparedProject::open(&options.project)?;
+    let support = if cfg!(all(feature = "collect-progress", target_os = "linux")) {
+        crate::collect_project::ProgressSupport::MetadataOnly
+    } else {
+        crate::collect_project::ProgressSupport::Unsupported
+    };
+    let project = PreparedProject::open_with_progress(&options.project, support)?;
     if options.headless {
         headless(
             &project,
@@ -222,14 +227,25 @@ impl Keys {
         }
     }
 }
+#[cfg(all(feature = "collect-progress", target_os = "linux"))]
+type WindowBridge = InProc<CollectDodgeV1, crate::collect_progress_host::ProgressHost>;
+#[cfg(not(all(feature = "collect-progress", target_os = "linux")))]
+type WindowBridge = LocalBridge;
 struct App {
-    bridge: LocalBridge,
+    bridge: WindowBridge,
+    #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+    progress: crate::collect_progress::ProgressSession,
     gfx: Option<(Arc<Window>, WindowRenderer<Wgpu>)>,
     keys: Keys,
     last: Instant,
     error: Option<String>,
 }
 impl App {
+    #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+    fn persist_completed(&mut self) {
+        self.progress
+            .observe_completed(self.bridge.host().completed_best());
+    }
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: String) {
         self.error = Some(error);
         event_loop.exit();
@@ -243,6 +259,8 @@ impl App {
             return;
         }
         self.bridge.update(dt);
+        #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+        self.persist_completed();
         let update = self.bridge.poll_view(); // Drain events, including after terminal states.
         if let Some(snapshot) = &update.snapshot {
             self.keys.observe(
@@ -258,7 +276,10 @@ impl App {
             let frame = snapshot.predicted();
             let mut list = RenderList::new();
             extract_items(&collect_view::render_items(frame), &mut list);
-            window.set_title(&collect_view::title(frame));
+            let title = collect_view::title(frame);
+            #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+            let title = format!("{title} | {}", self.progress.status());
+            window.set_title(&title);
             renderer.render(&list, &collect_view::scene_camera(frame));
         }
     }
@@ -326,17 +347,33 @@ impl ApplicationHandler for App {
         }
     }
 }
-pub fn run_window(project: PreparedProject) -> Result<(), String> {
-    let bridge = bridge(&project)?;
-    let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App {
+fn window_app(project: &PreparedProject) -> Result<App, String> {
+    #[cfg(not(all(feature = "collect-progress", target_os = "linux")))]
+    let bridge = bridge(project)?;
+    #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+    let bridge = InProc::new(
+        crate::collect_progress_host::ProgressHost::new(PlayHost::new(
+            project.scene().session()?,
+            PlayerSlot(0),
+        )),
+        BridgeConfig::default(),
+    );
+    #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+    let progress = crate::collect_progress::ProgressSession::open(project);
+    Ok(App {
         bridge,
+        #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+        progress,
         gfx: None,
         keys: Keys::default(),
         last: Instant::now(),
         error: None,
-    };
+    })
+}
+pub fn run_window(project: PreparedProject) -> Result<(), String> {
+    let mut app = window_app(&project)?;
+    let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
+    event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
 }
@@ -401,6 +438,53 @@ pub fn headless(
         writer.finish().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "collect-progress", target_os = "linux"))]
+pub(crate) fn exercise_window_progress(project: &PreparedProject, mode: &str) {
+    // Exact production App constructor and persistence dispatch; no OS window
+    // is claimed by this source-hidden test harness.
+    let mut app = window_app(project).unwrap();
+    if mode == "relaunch" {
+        assert_eq!(app.progress.status(), "Best collected: 2");
+        return;
+    }
+    assert_eq!(mode, "win");
+    assert_eq!(app.progress.status(), "Best collected: 0");
+    app.bridge
+        .set_input(
+            PlayerSlot(0),
+            CollectInput {
+                x: FP::ONE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    app.bridge.step(20);
+    assert_eq!(app.bridge.host().completed_best(), Some(2));
+    app.bridge
+        .set_input(
+            PlayerSlot(0),
+            CollectInput {
+                buttons: game::RESTART,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    app.bridge.step(1);
+    assert_eq!(
+        app.bridge
+            .snapshot()
+            .unwrap()
+            .predicted()
+            .singleton::<game::CollectRun>()
+            .score,
+        0
+    );
+    app.persist_completed();
+    assert_eq!(app.progress.status(), "Best collected: 2 (saved)");
+    app.persist_completed();
+    assert_eq!(app.progress.status(), "Best collected: 2 (saved)");
 }
 
 #[cfg(test)]

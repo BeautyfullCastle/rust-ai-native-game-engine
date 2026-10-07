@@ -308,3 +308,150 @@ fn hex(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
+
+#[cfg(feature = "collect-progress")]
+#[test]
+#[ignore = "requires built progress runtime, exporter and exact test binary; namespace isolation"]
+fn collect_progress_source_hidden_relaunch_and_no_headless_writes() {
+    let w = Work::new();
+    let manifest_path = w.project.join("orr.project.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["schema"] = 3.into();
+    manifest["progress"] = serde_json::json!({"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"collect-dodge-highscore-v1"});
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let before = snapshot(&w.project);
+    let data = w.root.path().join("isolated progress data");
+    let run = |c: &mut Command| {
+        c.env("XDG_DATA_HOME", &data)
+            .env("HOME", w.root.path().join("isolated home"));
+        good(c.output().unwrap())
+    };
+    for ticks in [0, 20, 600] {
+        let mut c = w.isolated(&w.runtime, None);
+        c.arg("--project").arg(&w.project).args([
+            "--headless",
+            "--ticks",
+            &ticks.to_string(),
+            "--hold",
+            "right",
+        ]);
+        run(&mut c);
+        assert!(!data.exists(), "headless created profile data");
+    }
+    let bundle = w.root.path().join("progress export");
+    let hash = hex(&fs::read(&w.runtime).unwrap());
+    let mut c = w.isolated(&w.exporter, None);
+    c.arg("--project")
+        .arg(&w.project)
+        .arg("--runtime")
+        .arg(&w.runtime)
+        .args(["--runtime-sha256", &hash, "--trusted-runtime", "--output"])
+        .arg(&bundle);
+    run(&mut c);
+    assert!(!data.exists(), "export smoke created profile data");
+    assert_eq!(snapshot(&w.project), before);
+    assert_eq!(
+        fs::read(bundle.join("project/orr.project.json")).unwrap(),
+        fs::read(&manifest_path).unwrap()
+    );
+    let bundle_before = snapshot(&bundle);
+    let test_binary = PathBuf::from(
+        std::env::var_os("ORR_PROGRESS_TEST_BIN").expect("exact built sample test binary"),
+    );
+    assert!(test_binary.is_absolute() && test_binary.is_file());
+    let harness_dir = w.root.path().join("test-harness");
+    fs::create_dir(&harness_dir).unwrap();
+    let harness = harness_dir.join("progress-test-harness");
+    fs::copy(test_binary, &harness).unwrap();
+    for mode in ["win", "relaunch"] {
+        let mut c = w.isolated(&harness, Some(&bundle));
+        c.args([
+            "--ignored",
+            "--exact",
+            "collect_progress::tests::isolated_window_progress_child",
+            "--nocapture",
+        ])
+        .env("ORR_PROGRESS_TEST_PROJECT", bundle.join("project"))
+        .env("ORR_PROGRESS_TEST_MODE", mode);
+        let output = run(&mut c);
+        assert!(
+            output.contains("1 passed"),
+            "explicit helper did not execute: {output}"
+        );
+    }
+    assert!(data.join("orrery/games").is_dir());
+    assert_eq!(snapshot(&bundle), bundle_before);
+    assert_eq!(snapshot(&w.project), before);
+}
+
+/// Additional OS syscall observation. Kept separate so environments denying
+/// ptrace report this check blocked without disguising independent acceptance.
+#[cfg(feature = "collect-progress")]
+#[test]
+#[ignore = "requires strace/ptrace permission plus built progress runtime and exporter"]
+fn collect_progress_noninteractive_syscall_isolation() {
+    let w = Work::new();
+    let path = w.project.join("orr.project.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["schema"] = 3.into();
+    manifest["progress"] = serde_json::json!({"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"collect-dodge-highscore-v1"});
+    fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let data = w.root.path().join("isolated progress data");
+    let trace_number = std::cell::Cell::new(0u32);
+    let run_no_profile = |c: &mut Command| {
+        c.env("XDG_DATA_HOME", &data)
+            .env("HOME", w.root.path().join("isolated home"));
+        let n = trace_number.get();
+        trace_number.set(n + 1);
+        let trace_path = w.root.path().join(format!("profile-file-syscalls-{n}.log"));
+        let mut traced = Command::new("strace");
+        traced
+            .args(["-f", "-yy", "-s", "4096", "-e", "trace=%file", "-o"])
+            .arg(&trace_path)
+            .arg(c.get_program())
+            .args(c.get_args());
+        if let Some(dir) = c.get_current_dir() {
+            traced.current_dir(dir);
+        }
+        for (key, value) in c.get_envs() {
+            if let Some(value) = value {
+                traced.env(key, value);
+            } else {
+                traced.env_remove(key);
+            }
+        }
+        let output = good(traced.output().unwrap());
+        let trace = fs::read_to_string(trace_path).unwrap();
+        assert!(
+            trace.contains("execve("),
+            "syscall observation did not execute"
+        );
+        assert!(
+            !trace.contains(data.to_str().unwrap()) && !trace.contains("isolated progress data"),
+            "noninteractive route touched progress root: {trace}"
+        );
+        output
+    };
+
+    let mut c = w.isolated(&w.runtime, None);
+    c.arg("--project")
+        .arg(&w.project)
+        .args(["--headless", "--ticks", "20", "--hold", "right"]);
+    run_no_profile(&mut c);
+    let hash = hex(&fs::read(&w.runtime).unwrap());
+    let mut c = w.isolated(&w.exporter, None);
+    c.arg("--project")
+        .arg(&w.project)
+        .arg("--runtime")
+        .arg(&w.runtime)
+        .args(["--runtime-sha256", &hash, "--trusted-runtime", "--output"])
+        .arg(w.root.path().join("traced export"));
+    run_no_profile(&mut c);
+    assert!(!data.exists());
+}

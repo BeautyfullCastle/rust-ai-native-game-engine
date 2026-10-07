@@ -11,6 +11,7 @@ default-run = "arena"
 workspace = true
 
 [features]
+collect-progress = ["collect-dodge", "dep:sha2", "dep:tempfile", "dep:rustix"]
 collect-dodge = ["project", "orr_games/collect-dodge"]
 default = []
 # Optional Linux player preferences; no simulation or default dependencies.
