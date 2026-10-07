@@ -1,0 +1,15 @@
+[package]
+name = "orr_navigation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Bounded deterministic point-agent navigation on heightfield terrain"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_terrain = { path = "../orr_terrain" }
+sha2 = "0.11"

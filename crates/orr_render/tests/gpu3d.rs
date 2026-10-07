@@ -14,6 +14,11 @@ use std::sync::{Mutex, MutexGuard};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
+// Every draw uploads main + shadow Globals, including empty/no-shadow frames.
+// Each uniform is two mat4 (128 bytes) + ten vec4 (160 bytes); the private
+// renderer3d layout test pins its 288-byte size and point-light field offsets.
+const GLOBAL_UPLOAD_BYTES: u64 = 2 * 288;
+
 fn gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     match Wgpu::headless(WgpuOptions::default()) {
@@ -360,7 +365,7 @@ fn run_release_sphere_lod_perf_default_mixed(lod_enabled: bool) {
             assert_eq!(frame.main.instances, u64::from(SPHERE_COUNT));
             assert_eq!(frame.shadow.draw_calls, 1);
             assert_eq!(frame.upload_calls, 3);
-            assert_eq!(frame.upload_bytes, u64::from(SPHERE_COUNT) * 80 + 512);
+            assert_eq!(frame.upload_bytes, u64::from(SPHERE_COUNT) * 80 + GLOBAL_UPLOAD_BYTES);
             if frame_class != "cold" {
                 assert_eq!(frame.buffer_reallocations, 0, "steady fixture unexpectedly grew instance buffers");
                 assert_eq!(frame.attachment_allocations, 0, "steady fixture unexpectedly allocated attachments");
@@ -892,7 +897,7 @@ fn render_into_a_resized_target_and_an_empty_list() {
         ),
         (0, 0, 0)
     );
-    assert_eq!((empty.upload_calls, empty.upload_bytes), (2, 512)); // two 3D globals
+    assert_eq!((empty.upload_calls, empty.upload_bytes), (2, GLOBAL_UPLOAD_BYTES)); // two 3D globals
     assert_eq!(empty.buffer_reallocations, 0);
     assert_eq!(
         (empty.attachment_allocations, empty.attachment_reallocations),
@@ -923,7 +928,7 @@ fn render_into_a_resized_target_and_an_empty_list() {
         }
     );
     assert_eq!(resized.shadow, resized.main);
-    assert_eq!((resized.upload_calls, resized.upload_bytes), (3, 512 + 80));
+    assert_eq!((resized.upload_calls, resized.upload_bytes), (3, GLOBAL_UPLOAD_BYTES + 80));
     assert_eq!(resized.buffer_reallocations, 0);
     assert_eq!(
         (
@@ -958,7 +963,7 @@ fn render_into_a_resized_target_and_an_empty_list() {
         "disabled shadows still encode a clear pass"
     );
     assert_eq!((cleared.mesh_instances, cleared.line_instances), (0, 0));
-    assert_eq!((cleared.upload_calls, cleared.upload_bytes), (2, 512));
+    assert_eq!((cleared.upload_calls, cleared.upload_bytes), (2, GLOBAL_UPLOAD_BYTES));
     assert_eq!(
         (
             cleared.attachment_allocations,
@@ -1016,7 +1021,7 @@ fn frame_stats_count_mesh_batches_shadow_exclusions_and_buffer_growth() {
         "disabled shadows still clear, without drawing casters"
     );
     assert_eq!(cold.upload_calls, 7); // two uniforms, four mesh kinds, lines
-    assert_eq!(cold.upload_bytes, 512 + 1028 * 80 + 1025 * 48);
+    assert_eq!(cold.upload_bytes, GLOBAL_UPLOAD_BYTES + 1028 * 80 + 1025 * 48);
     assert_eq!(cold.buffer_reallocations, 2);
     assert_eq!(
         (cold.attachment_allocations, cold.attachment_reallocations),
@@ -1076,7 +1081,7 @@ fn frame_stats_count_mesh_batches_shadow_exclusions_and_buffer_growth() {
         "the shadow pass runs with no caster draws for a plane-only list"
     );
     assert_eq!((plane.mesh_instances, plane.line_instances), (1, 0));
-    assert_eq!((plane.upload_calls, plane.upload_bytes), (3, 512 + 80));
+    assert_eq!((plane.upload_calls, plane.upload_bytes), (3, GLOBAL_UPLOAD_BYTES + 80));
     assert_eq!(plane.buffer_reallocations, 0);
 }
 
@@ -1102,7 +1107,7 @@ fn sphere_lod_disabled_and_all_near_are_pixel_identical_for_both_presets() {
         assert_eq!(lod.main_index_invocations, sphere_index_invocations(settings.mesh_segments.clamp(3, 64), 2));
         assert_eq!(lod.shadow_index_invocations, lod.main_index_invocations);
         assert_eq!((lod.upload_calls, lod.upload_bytes), (1, 160));
-        assert_eq!((frame.upload_calls, frame.upload_bytes), (7, 512 + 5 * 80 + 48));
+        assert_eq!((frame.upload_calls, frame.upload_bytes), (7, GLOBAL_UPLOAD_BYTES + 5 * 80 + 48));
     }
 }
 
@@ -1122,7 +1127,7 @@ fn sphere_lod_far_detail_keeps_the_small_silhouette_and_center_color_for_both_pr
         assert_eq!(lod.main_index_invocations, sphere_index_invocations(lod_policy(settings).far_segments, 1));
         assert_eq!(lod.shadow_index_invocations, 0);
         assert_eq!((lod.upload_calls, lod.upload_bytes), (1, 80));
-        assert_eq!((frame.upload_calls, frame.upload_bytes), (3, 512 + 80));
+        assert_eq!((frame.upload_calls, frame.upload_bytes), (3, GLOBAL_UPLOAD_BYTES + 80));
         assert!(lod.additional_static_mesh_bytes > 0);
 
         let reference_boundary = sphere_boundary(&reference, 128, 128);
@@ -1163,7 +1168,7 @@ fn sphere_lod_mixed_buckets_preserve_counts_indices_uploads_and_reuse_staging() 
     assert_eq!(mixed.main_index_invocations, sphere_index_invocations(12, 1) + sphere_index_invocations(6, 2));
     assert_eq!(mixed.shadow_index_invocations, sphere_index_invocations(12, 3));
     assert_eq!((mixed.upload_calls, mixed.upload_bytes), (1, 3 * 80));
-    assert_eq!((mixed_frame.upload_calls, mixed_frame.upload_bytes), (3, 512 + 3 * 80));
+    assert_eq!((mixed_frame.upload_calls, mixed_frame.upload_bytes), (3, GLOBAL_UPLOAD_BYTES + 3 * 80));
     assert_eq!(mixed_frame.main.draw_calls, 2);
     assert_eq!(mixed_frame.shadow.draw_calls, 1);
     assert_eq!((mixed_frame.main.instances, mixed_frame.shadow.instances), (3, 3));
@@ -1209,7 +1214,7 @@ fn sphere_lod_equal_detail_and_empty_frames_keep_single_draw_and_clear_behavior(
     assert_eq!(equal.shadow_index_invocations, sphere_index_invocations(12, 1));
     assert_eq!(equal.additional_static_mesh_bytes, 0);
     assert_eq!((equal.upload_calls, equal.upload_bytes), (1, 80));
-    assert_eq!((renderer.last_frame_stats().upload_calls, renderer.last_frame_stats().upload_bytes), (3, 512 + 80));
+    assert_eq!((renderer.last_frame_stats().upload_calls, renderer.last_frame_stats().upload_bytes), (3, GLOBAL_UPLOAD_BYTES + 80));
 
     list.clear();
     target.render3d(&mut renderer, &list, &camera);
@@ -1222,7 +1227,7 @@ fn sphere_lod_equal_detail_and_empty_frames_keep_single_draw_and_clear_behavior(
     let frame = renderer.last_frame_stats();
     assert_eq!(frame.main.draw_calls, 0);
     assert_eq!(frame.shadow.draw_calls, 0, "the empty shadow pass clears without draws");
-    assert_eq!((frame.upload_calls, frame.upload_bytes), (2, 512));
+    assert_eq!((frame.upload_calls, frame.upload_bytes), (2, GLOBAL_UPLOAD_BYTES));
     assert!(target.read_rgba8().chunks_exact(4).all(|p| p == BLACK.map(|c| (c * 255.0) as u8)));
 }
 
@@ -1332,7 +1337,7 @@ fn sphere_lod_mixed_materials_and_unequal_depth_occlusion_survive_both_input_ord
             );
             assert_eq!(frame.main.draw_calls, 2);
             assert_eq!(frame.main.instances, 4);
-            assert_eq!((frame.upload_calls, frame.upload_bytes), (3, 512 + 4 * 80));
+            assert_eq!((frame.upload_calls, frame.upload_bytes), (3, GLOBAL_UPLOAD_BYTES + 4 * 80));
 
             let center = px(&image, size.0, 100, 100);
             let left = px(&image, size.0, 60, 100);
