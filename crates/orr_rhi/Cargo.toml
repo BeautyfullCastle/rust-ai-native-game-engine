@@ -9,6 +9,15 @@ description = "Thin render hardware interface over wgpu (view layer)"
 [lints]
 workspace = true
 
+# Software-adapter acceptance runs in the provisioned Linux sample-build job.
+# Native determinism jobs keep the RHI library and other default targets.
+[features]
+gpu-tests = []
+
+[[test]]
+name = "hdr_texture"
+required-features = ["gpu-tests"]
+
 [dependencies]
 wgpu = "30"
 pollster = "1"

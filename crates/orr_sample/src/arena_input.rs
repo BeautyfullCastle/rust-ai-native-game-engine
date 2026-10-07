@@ -71,6 +71,12 @@ impl ArenaControls {
     pub fn paused(&self) -> bool {
         self.paused
     }
+    /// Explicit menu action, independent of remappable physical bindings.
+    /// Blocking clears held inputs; resuming always requires fresh presses.
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        self.gameplay.set_blocked(paused || self.ui);
+    }
     pub fn set_ui_capture(&mut self, captured: bool) {
         self.ui = captured;
         self.system.set_blocked(captured);
@@ -179,4 +185,35 @@ pub fn mouse(button: winit::event::MouseButton) -> Option<Button> {
         _ => return None,
     };
     Some(Button::Mouse { button })
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+    #[test]
+    fn explicit_pause_never_synthesizes_remapped_system_action() {
+        let mut map = default_map();
+        map.actions
+            .iter_mut()
+            .find(|a| a.name == "quit")
+            .unwrap()
+            .bindings = vec![Button::Keyboard { key: Key::P }];
+        map.actions
+            .iter_mut()
+            .find(|a| a.name == "pause")
+            .unwrap()
+            .bindings = vec![Button::Keyboard { key: Key::Q }];
+        let mut controls = ArenaControls::new(map).unwrap();
+        let right = Button::Keyboard { key: Key::D };
+        controls.button(right, true, false, false);
+        controls.set_paused(true);
+        assert!(controls.paused());
+        assert_eq!(controls.keys(), Keys::default());
+        controls.set_paused(false);
+        controls.button(right, true, true, false);
+        assert_eq!(controls.keys(), Keys::default());
+        controls.button(right, false, false, false);
+        controls.button(right, true, false, false);
+        assert!(controls.keys().right);
+    }
 }
