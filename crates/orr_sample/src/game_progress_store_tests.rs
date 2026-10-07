@@ -1,7 +1,7 @@
 use super::*;
 use std::{
     fs,
-    os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+    os::unix::fs::{symlink, MetadataExt, PermissionsExt},
 };
 fn key() -> ProgressKey {
     let mut id = [1; 16];
@@ -59,27 +59,62 @@ fn pure_discovery_and_missing_load_do_not_write() {
         assert!(ProgressPaths::from_directory(path).is_err());
     }
 }
-// The parallel suite launches subprocesses. A fork can briefly inherit an
-// unrelated test's locked open-file description until CLOEXEC takes effect.
-// Retry ONLY the prepublication EAGAIN lock result for sequential assertions;
-// production stays fail-fast, and uncertain publication is never retried.
-fn submit_after_transient_lock(
+// The API deliberately uses a nonblocking lock. Concurrent subprocess launches
+// elsewhere in a parallel test process can temporarily keep an inherited locked
+// open-file description alive until exec. Never assume a positive fixture commit
+// is uncontended. This helper retries only the exact lock-stage EAGAIN, proves
+// that no checkpoint ran and no saved bytes/in-memory best changed, and bounds
+// its retries. All other failures and publication uncertainty return immediately.
+fn submit_checkpoint_after_transient_lock(
     store: &mut ProgressStore,
     score: u32,
+    checkpoint: impl FnMut(&str) -> Result<(), String>,
+) -> Result<CommitOutcome, String> {
+    submit_checkpoint_with_busy(store, score, checkpoint, || {})
+}
+fn submit_checkpoint_with_busy(
+    store: &mut ProgressStore,
+    score: u32,
+    mut checkpoint: impl FnMut(&str) -> Result<(), String>,
+    mut on_busy: impl FnMut(),
 ) -> Result<CommitOutcome, String> {
     for attempt in 0..100 {
-        match store.submit_completed(score) {
+        let before = copies(store);
+        let best = store.best();
+        let mut reached_checkpoint = false;
+        let result = store.submit_with_checkpoint(score, |point| {
+            reached_checkpoint = true;
+            checkpoint(point)
+        });
+        match result {
             Err(reason)
                 if reason.contains("progress are locked or locking is unavailable")
                     && reason.contains("os error 11")
                     && attempt < 99 =>
             {
+                assert!(
+                    !reached_checkpoint,
+                    "lock failure must precede every checkpoint"
+                );
+                assert_eq!(
+                    copies(store),
+                    before,
+                    "busy lock must not publish saved data"
+                );
+                assert_eq!(store.best(), best);
+                on_busy();
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
             result => return result,
         }
     }
     unreachable!("last attempt returns its result")
+}
+fn submit_after_transient_lock(
+    store: &mut ProgressStore,
+    score: u32,
+) -> Result<CommitOutcome, String> {
+    submit_checkpoint_after_transient_lock(store, score, |_| Ok(()))
 }
 #[test]
 fn scores_are_bounded_and_stale_writers_merge_maximum() {
@@ -111,7 +146,7 @@ fn backup_recovery_preserves_good_backup() {
     let mut recovered = reopen(&store);
     assert_eq!(recovered.best(), 5);
     assert!(recovered.notice().is_some());
-    recovered.submit_completed(6).unwrap();
+    submit_after_transient_lock(&mut recovered, 6).unwrap();
     assert_eq!(reopen(&store).best(), 6);
     assert_eq!(
         fs::read(store.paths.directory().join(BACKUP_NAME)).unwrap(),
@@ -180,41 +215,38 @@ fn prepublication_failures_leave_bytes_and_loaded_best_unchanged() {
         "primary-rename",
     ] {
         let (_root, mut store) = sandbox();
-        store.submit_completed(3).unwrap();
+        submit_after_transient_lock(&mut store, 3).unwrap();
         let before = copies(&store);
-        assert!(
-            store
-                .submit_with_checkpoint(7, |p| if p == point {
-                    Err("injected".into())
-                } else {
-                    Ok(())
-                })
-                .is_err()
+        assert_eq!(
+            submit_checkpoint_after_transient_lock(&mut store, 7, |p| if p == point {
+                Err("injected".into())
+            } else {
+                Ok(())
+            })
+            .unwrap_err(),
+            "injected"
         );
         assert_eq!(store.best(), 3);
         assert_eq!(copies(&store), before);
-        assert!(
-            !fs::read_dir(store.paths.directory()).unwrap().any(|e| e
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .contains("stage"))
-        );
+        assert!(!fs::read_dir(store.paths.directory()).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("stage")));
     }
 }
 #[test]
 fn postpublication_failure_keeps_published_best_and_disallows_blind_retry() {
     for point in ["after-publication", "backup-rename", "directory-sync"] {
         let (_root, mut store) = sandbox();
-        store.submit_completed(3).unwrap();
+        submit_after_transient_lock(&mut store, 3).unwrap();
         assert!(matches!(
-            store
-                .submit_with_checkpoint(7, |p| if p == point {
-                    Err("injected".into())
-                } else {
-                    Ok(())
-                })
-                .unwrap(),
+            submit_checkpoint_after_transient_lock(&mut store, 7, |p| if p == point {
+                Err("injected".into())
+            } else {
+                Ok(())
+            })
+            .unwrap(),
             CommitOutcome::DurabilityUncertain(_)
         ));
         assert_eq!(store.best(), 7);
@@ -225,19 +257,19 @@ fn postpublication_failure_keeps_published_best_and_disallows_blind_retry() {
 #[test]
 fn stable_nonblocking_lock_and_reread_before_merge() {
     let (_root, mut a) = sandbox();
-    a.submit_completed(2).unwrap();
+    submit_after_transient_lock(&mut a, 2).unwrap();
     let inode = fs::metadata(a.paths.directory().join(LOCK_NAME))
         .unwrap()
         .ino();
     let mut b = reopen(&a);
-    a.submit_with_checkpoint(6, |point| {
+    submit_checkpoint_after_transient_lock(&mut a, 6, |point| {
         if point == "primary-write" {
             assert!(b.submit_completed(9).is_err());
         }
         Ok(())
     })
     .unwrap();
-    b.submit_completed(4).unwrap();
+    submit_after_transient_lock(&mut b, 4).unwrap();
     assert_eq!(b.best(), 6);
     assert_eq!(
         fs::metadata(a.paths.directory().join(LOCK_NAME))
@@ -245,6 +277,49 @@ fn stable_nonblocking_lock_and_reread_before_merge() {
             .ino(),
         inode
     );
+    // Deterministically exercise the helper's prepublication busy branch. This
+    // proves retry eligibility without relying on the hypothesized fork timing.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(a.paths.directory().join(LOCK_NAME))
+        .unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
+    let (release_signal, observed_busy) = std::sync::mpsc::channel();
+    let release = std::thread::spawn(move || {
+        observed_busy
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("lock must remain held until helper observes EAGAIN");
+        drop(lock);
+    });
+    let mut release_signal = Some(release_signal);
+    let mut entered = 0;
+    assert_eq!(
+        submit_checkpoint_with_busy(
+            &mut b,
+            7,
+            |point| {
+                if point == "primary-write" {
+                    entered += 1;
+                }
+                Ok(())
+            },
+            || {
+                if let Some(signal) = release_signal.take() {
+                    signal.send(()).unwrap();
+                }
+            }
+        )
+        .unwrap(),
+        CommitOutcome::DurablySaved
+    );
+    release.join().unwrap();
+    assert!(
+        release_signal.is_none(),
+        "must exercise the busy retry branch"
+    );
+    assert_eq!(entered, 1);
+    assert_eq!(b.best(), 7);
 }
 #[test]
 fn links_special_files_and_unwritable_files_are_refused() {
@@ -277,17 +352,16 @@ fn links_special_files_and_unwritable_files_are_refused() {
 #[test]
 fn changed_public_names_and_ancestor_symlinks_block_publication() {
     let (root, mut store) = sandbox();
-    store.submit_completed(2).unwrap();
+    submit_after_transient_lock(&mut store, 2).unwrap();
     let path = store.paths.directory().join(BACKUP_NAME);
     assert!(
-        store
-            .submit_with_checkpoint(8, |point| {
-                if point == "before-publication" {
-                    fs::write(&path, br#"{"version":8}"#).unwrap();
-                }
-                Ok(())
-            })
-            .is_err()
+        submit_checkpoint_after_transient_lock(&mut store, 8, |point| {
+            if point == "before-publication" {
+                fs::write(&path, br#"{"version":8}"#).unwrap();
+            }
+            Ok(())
+        })
+        .is_err()
     );
     assert_eq!(reopen(&store).best(), 2);
     assert_eq!(fs::read(path).unwrap(), br#"{"version":8}"#);
@@ -335,12 +409,10 @@ fn insecure_ancestor_and_invalid_key_are_rejected() {
     fs::create_dir(&ancestor).unwrap();
     fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o777)).unwrap();
     let paths = ProgressPaths::from_directory(ancestor.join("progress")).unwrap();
-    assert!(
-        ProgressStore::open(paths, key())
-            .unwrap()
-            .submit_completed(3)
-            .is_err()
-    );
+    assert!(ProgressStore::open(paths, key())
+        .unwrap()
+        .submit_completed(3)
+        .is_err());
     for goal in [0, 33, u32::MAX] {
         let mut k = key();
         k.goal = goal;
@@ -409,7 +481,7 @@ fn concurrent_process_child() {
 #[test]
 fn concurrent_processes_merge_without_lost_highscore() {
     let (_root, mut store) = sandbox();
-    store.submit_completed(1).unwrap();
+    submit_after_transient_lock(&mut store, 1).unwrap();
     let exe = std::env::current_exe().unwrap();
     let mut children = [4, 9].map(|score| {
         std::process::Command::new(&exe)
