@@ -1,0 +1,18 @@
+Orrery Korean UI is a modified subset of Noto Sans CJK KR, version 2.004.
+
+Embedded upstream name-table copyright:
+© 2014-2021 Adobe (http://www.adobe.com/).
+
+Embedded upstream CFF notice:
+Copyright 2014-2021 Adobe (http://www.adobe.com/). Noto is a trademark of Google Inc.
+
+Installed distribution attribution (/usr/share/doc/fonts-noto-cjk/copyright):
+Copyright: 2010-2012, Google Corporation
+Upstream: https://github.com/notofonts/noto-cjk
+
+Font software and this derivative are licensed under SIL Open Font License 1.1
+(OFL-1.1); see OFL.txt. The repository's MIT license does not replace the font
+license. Preserve this notice and OFL.txt when redistributing the font.
+The modified font is named Orrery Korean UI / OrreryKoreanUI-Regular.
+Upstream names are retained only for provenance, copyright and attribution.
+No upstream endorsement is implied. Debian packaging scripts are not included.
