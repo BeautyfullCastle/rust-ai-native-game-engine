@@ -44,6 +44,13 @@ use crate::mesh::{MeshKind, MeshSet, Vertex3};
 use crate::renderer::Growing;
 use crate::stats::{CpuClock, FrameStats, PassStats};
 
+#[cfg(feature = "imported-scene")]
+mod composed;
+#[cfg(feature = "imported-scene")]
+pub use composed::{ProceduralSceneError, MAX_PROCEDURAL_INSTANCES};
+#[cfg(feature = "imported-scene")]
+pub(crate) use composed::{validate_procedural_list, PreparedProcedural};
+
 const SHADER: &str = include_str!("shader3d.wgsl");
 const DEPTH: TextureFormat = TextureFormat::Depth32Float;
 
@@ -315,6 +322,8 @@ struct Globals {
     params: [f32; 4],
     shadow: [f32; 4],
     viewport: [f32; 4],
+    point_position_range: [f32; 4],
+    point_color_intensity: [f32; 4],
 }
 
 const MESH_ATTRS: [VertexAttr; 3] = [
@@ -775,6 +784,8 @@ impl<B: Rhi> Renderer3D<B> {
                 0.0,
             ],
             viewport: [w, h, 0.0, 0.0],
+            point_position_range: [0.0; 4],
+            point_color_intensity: [0.0; 4],
         }
     }
 
@@ -1025,6 +1036,16 @@ impl<B: Rhi> Renderer3D<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn globals_layout_includes_point_light_uniforms() {
+        // Match shader3d.wgsl: retain the 256-byte prefix, then two vec4s.
+        // gpu3d upload budgets count two complete uniforms on every draw.
+        assert_eq!(std::mem::offset_of!(Globals, viewport), 240);
+        assert_eq!(std::mem::offset_of!(Globals, point_position_range), 256);
+        assert_eq!(std::mem::offset_of!(Globals, point_color_intensity), 272);
+        assert_eq!(std::mem::size_of::<Globals>(), 288);
+    }
 
     #[test]
     fn light_matrix_maps_the_center_to_the_middle_of_the_box() {

@@ -61,7 +61,7 @@ pub use sprite_renderer::{SpriteRenderError, SpriteRenderer};
 #[cfg(feature = "models")]
 pub mod model_renderer;
 #[cfg(feature = "models")]
-pub use model_renderer::{ModelRenderer, ModelRenderError};
+pub use model_renderer::{ModelRenderer, ModelRenderError, StaticInstance, StaticInstanceError};
 
 #[cfg(feature = "animation")]
 pub mod skinned;
@@ -76,3 +76,6 @@ pub mod imported_scene;
 pub use point_light::{PointLight, PointLightError, PointLightSettings};
 #[cfg(feature = "imported-scene")]
 pub use imported_scene::{ImportedBatch, ImportedSceneError, ImportedSceneRenderer, ImportedSceneTarget};
+
+#[cfg(feature = "imported-scene")]
+pub use renderer3d::ProceduralSceneError;

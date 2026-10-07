@@ -124,7 +124,7 @@ fn replay_viewer_inspects_and_seeks_without_any_mutation_or_auto_branch() {
 
 #[test]
 fn unsupported_and_supported_but_incompatible_hosts_fail_before_frames() {
-    for (game, error) in [("Yard3D", "unsupported editor game"), ("", "unsupported editor game"), ("PhysGame", "reflected schema mismatch")] {
+    for (game, error) in [("Yard3D", "reflected schema mismatch"), ("", "unsupported editor game"), ("PhysGame", "reflected schema mismatch")] {
         let host = ArenaHost::named(false, game);
         let message = Editor::attach(&host.url, None).err().expect("no decoder fallback");
         assert!(message.contains(error), "{message}");
