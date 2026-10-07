@@ -193,11 +193,31 @@ pub enum ProgressSupport {
     MetadataOnly,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SpriteSupport {
+    Unsupported,
+    Supported,
+}
+pub fn sprite_runtime(support: SpriteSupport) -> orr_package::Runtime {
+    let mut runtime = orr_package::Runtime::content_only();
+    if support == SpriteSupport::Supported {
+        runtime.capabilities.insert("sprite".into());
+    }
+    runtime
+}
+pub fn compiled_sprite_support() -> SpriteSupport {
+    if cfg!(feature = "collect-sprites") {
+        SpriteSupport::Supported
+    } else {
+        SpriteSupport::Unsupported
+    }
+}
 pub struct PreparedProject {
     root: PathBuf,
     path: PathBuf,
     scene: PreparedScene,
     progress: Option<orr_package::ProjectProgress>,
+    sprites: Option<crate::project::PreparedSprites>,
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
@@ -207,12 +227,16 @@ impl PreparedProject {
         root: impl AsRef<Path>,
         support: ProgressSupport,
     ) -> Result<Self, String> {
-        // Capability inventory is route-local, not Cargo feature unification.
-        // This first authored adapter intentionally consumes no sprite/UI package.
-        let project =
-            orr_package::Project::open(root.as_ref(), orr_package::Runtime::content_only())
-                .map_err(|e| e.to_string())?;
-        project.verify().map_err(|e| e.to_string())?;
+        Self::open_with_presentation(root, support, SpriteSupport::Unsupported)
+    }
+    pub fn open_with_presentation(
+        root: impl AsRef<Path>,
+        support: ProgressSupport,
+        sprites: SpriteSupport,
+    ) -> Result<Self, String> {
+        let project = orr_package::Project::open(root.as_ref(), sprite_runtime(sprites))
+            .map_err(|e| e.to_string())?;
+        let lock = project.verify().map_err(|e| e.to_string())?;
         let manifest = project
             .manifest()
             .ok_or("CollectDodgeV1 requires schema-2/3 project manifest")?;
@@ -225,7 +249,8 @@ impl PreparedProject {
         {
             return Err("project entry must be schema 2/3 and collect-dodge-v1".into());
         }
-        if entry.sprites.is_some() || entry.ui.is_some() {
+        if entry.ui.is_some() || (entry.sprites.is_some() && sprites == SpriteSupport::Unsupported)
+        {
             return Err(
                 "CollectDodgeV1 authored route does not yet support sprite or UI declarations"
                     .into(),
@@ -240,12 +265,51 @@ impl PreparedProject {
         let bytes = crate::project::read_regular(&path, MAX_BYTES)?;
         let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
         let scene = PreparedScene::parse(&text)?;
+        let sprites = entry
+            .sprites
+            .as_ref()
+            .map(|relative| {
+                crate::project::prepare_sprites(
+                    &project,
+                    &lock,
+                    &root,
+                    &path,
+                    relative,
+                    |guid, role| {
+                        let guid = orr_reflect::Guid::parse(guid)
+                            .map_err(|_| format!("invalid {role} GUID"))?;
+                        let entity = scene
+                            .index()
+                            .entity(&guid)
+                            .ok_or_else(|| format!("{role}: missing Collect actor GUID {guid}"))?;
+                        scene
+                            .frame()
+                            .get::<CollectActor>(entity)
+                            .ok_or_else(|| format!("{role}: target is not a Collect actor"))?;
+                        Ok(())
+                    },
+                )
+            })
+            .transpose()?;
         Ok(Self {
             root,
             path,
             scene,
             progress,
+            sprites,
         })
+    }
+    pub fn sprites(&self) -> Option<&crate::project::PreparedSprites> {
+        self.sprites.as_ref()
+    }
+    pub fn take_sprites(&mut self) -> Option<crate::project::PreparedSprites> {
+        self.sprites.take()
+    }
+    pub fn presentation(&self) -> crate::project_runtime::ProjectPresentation {
+        crate::project_runtime::ProjectPresentation::collect(
+            self.scene.index().clone(),
+            self.sprites.clone(),
+        )
     }
     pub fn progress(&self) -> Option<&orr_package::ProjectProgress> {
         self.progress.as_ref()
@@ -258,5 +322,59 @@ impl PreparedProject {
     }
     pub fn scene(&self) -> &PreparedScene {
         &self.scene
+    }
+}
+
+#[cfg(all(test, feature = "collect-progress"))]
+#[path = "../tests/common/collect_sprites.rs"]
+mod sprite_test_fixture;
+#[cfg(all(test, feature = "collect-progress"))]
+mod sprite_identity_tests {
+    use super::*;
+    #[test]
+    fn cosmetic_sprite_edits_preserve_explicit_progress_and_semantic_digest() {
+        let root = tempfile::tempdir().unwrap();
+        sprite_test_fixture::fixture(root.path());
+        sprite_test_fixture::change(root.path().join("orr.project.json"), |v| {
+            v["schema"] = 3.into();
+            v["progress"] = serde_json::json!({"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"collect-dodge-highscore-v1"});
+        });
+        let open = || {
+            PreparedProject::open_with_presentation(
+                root.path(),
+                ProgressSupport::MetadataOnly,
+                SpriteSupport::Supported,
+            )
+            .unwrap()
+        };
+        let before = open();
+        let checksum = before.scene().frame().checksum();
+        let digest = crate::collect_progress::challenge_digest(&before);
+        sprite_test_fixture::change(root.path().join("view.json"), |v| {
+            v["bindings"]["e_00000001"]["source"] = serde_json::json!({"Clip":"greet"});
+            v["bindings"]["e_00000001"]["units_per_pixel"] = 1.0.into();
+        });
+        let after = open();
+        assert_eq!(before.progress(), after.progress());
+        assert_eq!(checksum, after.scene().frame().checksum());
+        assert_eq!(digest, crate::collect_progress::challenge_digest(&after));
+    }
+}
+
+#[cfg(test)]
+mod sprite_capability_tests {
+    use super::*;
+    #[test]
+    fn unrelated_sprite_unification_does_not_enable_collect_consumer() {
+        assert_eq!(
+            compiled_sprite_support() == SpriteSupport::Supported,
+            cfg!(feature = "collect-sprites")
+        );
+        assert!(!sprite_runtime(SpriteSupport::Unsupported)
+            .capabilities
+            .contains("sprite"));
+        assert!(sprite_runtime(SpriteSupport::Supported)
+            .capabilities
+            .contains("sprite"));
     }
 }

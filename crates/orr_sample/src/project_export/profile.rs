@@ -11,7 +11,7 @@ impl Profile {
         match self {
             Self::Arena => crate::project_runtime::compiled_runtime(),
             #[cfg(feature = "collect-dodge")]
-            Self::Collect => orr_package::Runtime::content_only(),
+            Self::Collect => crate::collect_project::sprite_runtime(crate::collect_project::compiled_sprite_support()),
         }
     }
     pub fn binary(self) -> &'static str {
@@ -57,7 +57,7 @@ impl Prepared {
             Profile::Arena => crate::project_runtime::PreparedRuntime::open(root)
                 .map(|value| Self::Arena(Box::new(value))),
             #[cfg(feature = "collect-dodge")]
-            Profile::Collect => crate::collect_project::PreparedProject::open_with_progress(root, crate::collect_project::ProgressSupport::MetadataOnly)
+            Profile::Collect => crate::collect_project::PreparedProject::open_with_presentation(root, crate::collect_project::ProgressSupport::MetadataOnly, crate::collect_project::compiled_sprite_support())
                 .map(|value| Self::Collect(Box::new(value))),
         }
     }
@@ -93,7 +93,7 @@ impl Prepared {
         match self {
             Self::Arena(p) => p.project().sprites(),
             #[cfg(feature = "collect-dodge")]
-            Self::Collect(_) => None,
+            Self::Collect(p) => p.sprites(),
         }
     }
     pub fn smoke(&self) -> Result<Vec<u8>, String> {

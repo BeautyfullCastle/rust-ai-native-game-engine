@@ -153,6 +153,12 @@ impl PreparedRuntime {
         (
             self.restart_seed,
             ProjectPresentation {
+                #[cfg(feature = "collect-dodge")]
+                collect: false,
+                #[cfg(feature = "collect-dodge")]
+                collect_camera_initialized: false,
+                #[cfg(feature = "collect-dodge")]
+                collect_elapsed: None,
                 index: self.index,
                 document,
                 assets,
@@ -170,6 +176,12 @@ impl PreparedRuntime {
 /// Shape underlays, sprite positions/cursors and follow all use one displayed
 /// frame. No interpolation or wall-clock animation is mixed into this route.
 pub struct ProjectPresentation {
+    #[cfg(feature = "collect-dodge")]
+    collect: bool,
+    #[cfg(feature = "collect-dodge")]
+    collect_camera_initialized: bool,
+    #[cfg(feature = "collect-dodge")]
+    collect_elapsed: Option<u32>,
     index: SceneIndex,
     document: Option<Document>,
     assets: BTreeMap<AssetKey, Asset>,
@@ -180,6 +192,28 @@ pub struct ProjectPresentation {
     sprites: Vec<SpriteDraw>,
 }
 impl ProjectPresentation {
+    #[cfg(feature = "collect-dodge")]
+    pub(crate) fn collect(
+        index: SceneIndex,
+        sprites: Option<crate::project::PreparedSprites>,
+    ) -> Self {
+        let (document, assets) =
+            sprites.map_or((None, BTreeMap::new()), |s| (Some(s.document), s.assets));
+        Self {
+            collect: true,
+            collect_camera_initialized: false,
+            collect_elapsed: None,
+            index,
+            document,
+            assets,
+            sampler: SnapshotPlayback::default(),
+            follow: CameraFollow::new(),
+            camera: Camera::new([0.0, 0.0], 270.0),
+            shapes: RenderList::new(),
+            sprites: Vec::new(),
+        }
+    }
+
     pub fn index(&self) -> &SceneIndex {
         &self.index
     }
@@ -199,6 +233,11 @@ impl ProjectPresentation {
         self.sampler.state(guid)
     }
     pub fn reset(&mut self) {
+        #[cfg(feature = "collect-dodge")]
+        {
+            self.collect_camera_initialized = false;
+            self.collect_elapsed = None;
+        }
         self.sampler.reset();
         self.follow.stop();
         self.shapes.clear();
@@ -221,8 +260,43 @@ impl ProjectPresentation {
             self.follow.stop();
             return Err("authored project received an incoherent Play snapshot".into());
         }
+        #[cfg(feature = "collect-dodge")]
+        let bodies = if self.collect {
+            let elapsed = snapshot
+                .predicted()
+                .singleton::<crate::collect_game::CollectRun>()
+                .elapsed_ticks;
+            if self
+                .collect_elapsed
+                .is_some_and(|previous| elapsed < previous)
+            {
+                self.sampler.reset();
+            }
+            self.collect_elapsed = Some(elapsed);
+            if !self.collect_camera_initialized
+                || self
+                    .document
+                    .as_ref()
+                    .is_none_or(|document| document.camera_follow.is_none())
+            {
+                self.camera = crate::collect_view::scene_camera(snapshot.predicted());
+                self.collect_camera_initialized = true;
+            }
+            crate::collect_view::editor_drawables(snapshot.predicted())
+        } else {
+            editor_drawables(snapshot.predicted())
+        };
+        #[cfg(not(feature = "collect-dodge"))]
         let bodies = editor_drawables(snapshot.predicted());
-        let items: Vec<_> = std::iter::once(arena_floor())
+        #[cfg(feature = "collect-dodge")]
+        let floor = if self.collect {
+            crate::collect_view::scene_floor()
+        } else {
+            arena_floor()
+        };
+        #[cfg(not(feature = "collect-dodge"))]
+        let floor = arena_floor();
+        let items: Vec<_> = std::iter::once(floor)
             .chain(bodies.iter().map(|b| RenderItem {
                 entity: b.entity,
                 transform: Transform2::new(Vec2::new(b.pos[0], b.pos[1]), b.angle + b.turn),
@@ -275,7 +349,25 @@ impl ProjectPresentation {
                 .get(&key)
                 .ok_or("admitted sprite asset is missing")?;
             let state = self.sampler.state(guid);
-            let id = binding.region_for_motion(&asset.document, state.elapsed_ms, state.moving)?;
+            let elapsed = state.elapsed_ms;
+            #[cfg(feature = "collect-dodge")]
+            let elapsed = if self.collect
+                && !matches!(
+                    binding.source,
+                    crate::project_sprites::Source::Locomotion { .. }
+                ) {
+                u64::from(
+                    snapshot
+                        .predicted()
+                        .singleton::<crate::collect_game::CollectRun>()
+                        .elapsed_ticks,
+                )
+                .saturating_mul(1000)
+                    / u64::from(snapshot.tick_rate())
+            } else {
+                elapsed
+            };
+            let id = binding.region_for_motion(&asset.document, elapsed, state.moving)?;
             let region = asset
                 .document
                 .region(id)

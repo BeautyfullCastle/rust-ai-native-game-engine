@@ -212,7 +212,7 @@ impl SpritePanel {
                 .is_some_and(|snapshot| snapshot.timeline().is_some() == editor.is_playing_mode())
     }
     fn editable(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::Arena
+        (editor.game() == EditorGame::Arena || editor.game().is_collect())
             && self.scene_matches(editor)
             && editor.mode() == Mode::Edit
             && !editor.is_viewer()
@@ -282,7 +282,7 @@ impl SpritePanel {
     }
     /// The same sampled region used by the production viewport paint pass.
     pub fn sampled_region(&self, editor: &Editor, guid: &str) -> Option<u32> {
-        if editor.game() != EditorGame::Arena
+        if (editor.game() != EditorGame::Arena && !editor.game().is_collect())
             || !self.scene_matches(editor)
             || editor.previewing().is_some()
             || !Self::display_coherent(editor)
@@ -309,8 +309,11 @@ impl SpritePanel {
         let elapsed = match &binding.source {
             Source::Locomotion { .. } => state.elapsed_ms,
             _ => editor.snapshot().map_or(0, |s| {
-                s.timeline()
-                    .map_or(0, |t| scene_elapsed_ms(Mode::Play, t.tick, s.tick_rate()))
+                #[cfg(feature="collect-dodge")]
+                if editor.game().is_collect() {
+                    return s.timeline().map_or(0, |_| scene_elapsed_ms(Mode::Play, u64::from(s.predicted().singleton::<orr_sample::collect_game::CollectRun>().elapsed_ticks), s.tick_rate()));
+                }
+                s.timeline().map_or(0, |t| scene_elapsed_ms(Mode::Play, t.tick, s.tick_rate()))
             }),
         };
         binding
@@ -321,7 +324,7 @@ impl SpritePanel {
         self.error = result.err();
     }
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
-        if editor.game() != EditorGame::Arena {
+        if editor.game() != EditorGame::Arena && !editor.game().is_collect() {
             return;
         }
         if editor.mode() != Mode::Edit {
@@ -475,7 +478,7 @@ impl SpritePanel {
         errors
     }
     pub fn paint(&self, ui: &Ui, editor: &Editor, rect: Rect, pixels: (u32, u32)) {
-        if editor.game() != EditorGame::Arena
+        if (editor.game() != EditorGame::Arena && !editor.game().is_collect())
             || !self.scene_matches(editor)
             || editor.previewing().is_some()
             || !Self::display_coherent(editor)

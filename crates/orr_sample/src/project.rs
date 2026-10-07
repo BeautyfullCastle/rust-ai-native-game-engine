@@ -37,6 +37,7 @@ impl PreparedArenaScene {
         &self.scene
     }
 }
+#[derive(Clone)]
 pub struct PreparedSprites {
     pub path: PathBuf,
     pub document: Document,
@@ -119,44 +120,20 @@ impl PreparedProject {
         if scene.entities.len() > MAX_SCENE_ENTITIES {
             return Err(format!("Arena scene exceeds {MAX_SCENE_ENTITIES} entities"));
         }
-        let sprites = if let Some(relative) = &entry.sprites {
-            let path = entry_file(&root, relative)?;
-            let bytes = read_regular(&path, project_sprites::MAX_BYTES)?;
-            let document =
-                Document::from_bytes(&bytes).map_err(|e| format!("sprite sidecar: {e}"))?;
-            let base = path.parent().expect("admitted file parent");
-            let sidecar_project = resolve_inside(&root, base, &document.project, true)?;
-            if sidecar_project != root {
-                return Err("sprite sidecar project must resolve to the same project root".into());
-            }
-            let sidecar_scene = resolve_inside(&root, base, &document.scene, false)?;
-            if sidecar_scene != scene_path {
-                return Err("sprite sidecar scene must resolve to the project entry scene".into());
-            }
-            for (guid, binding) in &document.bindings {
-                validate_target(&scene, guid, "sprite binding")?;
-                let package = lock.packages.get(&binding.package).ok_or_else(|| {
-                    format!("sprite binding {guid}: missing package {}", binding.package)
-                })?;
-                if !package.manifest.capabilities.contains("sprite") {
-                    return Err(format!(
-                        "sprite package {} must declare the sprite capability",
-                        binding.package
-                    ));
-                }
-            }
-            if let Some(guid) = &document.camera_follow {
-                validate_target(&scene, guid, "camera follow")?;
-            }
-            let assets = project_sprites::load_project_assets(&document, &project)?;
-            Some(PreparedSprites {
-                path,
-                document,
-                assets,
+        let sprites = entry
+            .sprites
+            .as_ref()
+            .map(|relative| {
+                prepare_sprites(
+                    &project,
+                    &lock,
+                    &root,
+                    &scene_path,
+                    relative,
+                    |guid, role| validate_target(&scene, guid, role),
+                )
             })
-        } else {
-            None
-        };
+            .transpose()?;
         Ok(Self {
             root,
             scene: PreparedArenaScene {
@@ -615,4 +592,49 @@ pub(crate) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
         return Err(format!("{} exceeds {limit} bytes", path.display()));
     }
     Ok(bytes)
+}
+
+/// Shared strict sidecar boundary; each game validates its own stable GUID targets.
+pub(crate) fn prepare_sprites(
+    project: &orr_package::Project,
+    lock: &orr_package::Lock,
+    root: &Path,
+    scene_path: &Path,
+    relative: &str,
+    validate_target: impl Fn(&str, &str) -> Result<(), String>,
+) -> Result<PreparedSprites, String> {
+    let path = entry_file(root, relative)?;
+    let bytes = read_regular(&path, project_sprites::MAX_BYTES)?;
+    let document = Document::from_bytes(&bytes).map_err(|e| format!("sprite sidecar: {e}"))?;
+    let base = path.parent().expect("admitted file parent");
+    let sidecar_project = resolve_inside(root, base, &document.project, true)?;
+    if sidecar_project != root {
+        return Err("sprite sidecar project must resolve to the same project root".into());
+    }
+    let sidecar_scene = resolve_inside(root, base, &document.scene, false)?;
+    if sidecar_scene != scene_path {
+        return Err("sprite sidecar scene must resolve to the project entry scene".into());
+    }
+    for (guid, binding) in &document.bindings {
+        validate_target(guid, "sprite binding")?;
+        let package = lock
+            .packages
+            .get(&binding.package)
+            .ok_or_else(|| format!("sprite binding {guid}: missing package {}", binding.package))?;
+        if !package.manifest.capabilities.contains("sprite") {
+            return Err(format!(
+                "sprite package {} must declare the sprite capability",
+                binding.package
+            ));
+        }
+    }
+    if let Some(guid) = &document.camera_follow {
+        validate_target(guid, "camera follow")?;
+    }
+    let assets = project_sprites::load_project_assets(&document, project)?;
+    Ok(PreparedSprites {
+        path,
+        document,
+        assets,
+    })
 }

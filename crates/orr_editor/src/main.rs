@@ -35,7 +35,7 @@ fn main() {
             .unwrap_or_else(|error| fail(&format!("--project: {error}")))
     });
     #[cfg(feature = "collect-dodge")]
-    let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_progress(root, orr_sample::collect_project::ProgressSupport::MetadataOnly).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
+    let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_presentation(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
@@ -112,6 +112,10 @@ fn main() {
             };
             #[cfg(not(feature = "sprites"))]
             let mut app = EditorApp::new(editor, cc.wgpu_render_state.clone());
+            #[cfg(all(feature="sprites",feature="collect-dodge"))]
+            if let Some(project) = collect_project {
+                orr_editor::project::install_collect_presentation(&mut app, project, &cc.egui_ctx);
+            }
             if let Some(job) = shot {
                 app = app.with_screenshot(job);
             }
