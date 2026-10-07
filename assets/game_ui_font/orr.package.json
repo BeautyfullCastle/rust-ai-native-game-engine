@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "korean-game-ui",
+  "version": "1.0.0",
+  "engine": "^0.0.1",
+  "capabilities": [],
+  "dependencies": {},
+  "files": ["OrreryKoreanUI.otf", "font-manifest.json", "corpus.txt", "OFL.txt", "COPYRIGHT.txt"]
+}
