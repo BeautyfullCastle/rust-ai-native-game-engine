@@ -98,6 +98,8 @@ pub struct UiState {
     body_drag: Option<BodyDrag>,
     input_player: u8,
     take_control: bool,
+    #[cfg(feature = "animated-models")]
+    animated_window: bool,
 }
 
 /// A request to save the app's own framebuffer as a PNG and quit (see [`crate::cli`]).
@@ -204,13 +206,15 @@ pub struct EditorApp {
     last_title: String,
     #[cfg(feature = "sprites")]
     pub sprites: crate::sprite_panel::SpritePanel,
+    #[cfg(feature = "animated-models")]
+    pub animated_models: crate::animated_panel::AnimatedPanel,
 }
 
 impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, ui: UiState::default(), render_state, gpu: None, shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default() }
+        Self { editor, ui: UiState::default(), render_state, gpu: None, shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Asks for a screenshot of the window after some frames, then quits.
@@ -293,6 +297,19 @@ impl eframe::App for EditorApp {
             self.ui.body_drag = None;
         }
         self.dialogs(&ctx);
+        #[cfg(feature = "animated-models")]
+        egui::Window::new("Animation authoring · local sidecar")
+            .open(&mut self.ui.animated_window)
+            .default_pos([280.0, 70.0])
+            .default_width(540.0)
+            .resizable(true)
+            .show(&ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.animated_models.show(ui, &self.editor, self.render_state.as_ref());
+                });
+            });
+        #[cfg(feature = "animated-models")]
+        if !self.ui.animated_window { self.animated_models.suspend_preview(); }
         if !self.ui.pulses.is_empty() {
             // The pulses animate until they expire.
             ctx.request_repaint();
@@ -526,6 +543,8 @@ impl EditorApp {
         ui.heading("Inspector");
         #[cfg(feature = "sprites")]
         self.sprites.show(ui, &self.editor);
+        #[cfg(feature = "animated-models")]
+        if ui.add_enabled(self.editor.game() == crate::game::EditorGame::Arena && self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
         let count = self.editor.selected_guids().len();
         if count > 0 {
             ui.label(format!("{count} selected · Ctrl-click to toggle · Esc to clear"));
