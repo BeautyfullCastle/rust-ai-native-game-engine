@@ -2,8 +2,9 @@
 
 This is a bounded standalone-playback slice of #104. It opens the same schema-2
 Arena entry as the editor, using the project-local installed package snapshots.
-It does not generate a project, export/package an executable, add game code,
-combine authored UI/font settings, or complete the first finished game.
+It does not generate a project, add game code, or complete the first finished game.
+Optional [saved Korean UI/font presets and authored Restart](authored-project-ui.md)
+compose with this route. [Export folders](arena-project-export.md) are a separate tool.
 
 ```sh
 cargo run --release -p orr_sample --bin arena --features project,input-actions -- \
@@ -48,8 +49,10 @@ concurrent hostile filesystem replacement.
 Editor adapters still own undo/redo/save, egui textures, ERP row coherence and
 Edit/Play camera restoration. Extraction does not add editor authoring operations
 to the runtime. Restart/relaunch makes a fresh session from the admitted authored
-initial frame; no project bytes change. This first route has no authored restart
-menu. Existing sample Korean UI/restart routes remain available separately.
+initial frame; no project bytes change. With `game-ui` and a declared `entry.ui`,
+the menu restarts from the immutable admitted frame/config, never from current
+disk or a loopback world. Editor Restart deliberately keeps its saved-scene reload
+behavior. Existing external Korean UI/restart routes remain available separately.
 
 ## Simulation and presentation
 

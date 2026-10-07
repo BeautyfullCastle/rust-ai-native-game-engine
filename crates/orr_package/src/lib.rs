@@ -132,6 +132,33 @@ pub struct ProjectEntry {
         deserialize_with = "present_sprites"
     )]
     pub sprites: Option<String>,
+    /// Optional closed presentation preset. Assets are resolved only by the lock.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_ui"
+    )]
+    pub ui: Option<ProjectUi>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProjectUiProfile {
+    #[serde(rename = "arena-korean-v1")]
+    ArenaKoreanV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectUi {
+    pub profile: ProjectUiProfile,
+    pub font: ProjectFont,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectFont {
+    pub package: String,
+    pub asset: String,
 }
 
 // A missing optional field is valid. An explicitly supplied null is not a
@@ -146,6 +173,11 @@ fn present_sprites<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<Option<String>, D::Error> {
     String::deserialize(d).map(Some)
 }
+fn present_ui<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<ProjectUi>, D::Error> {
+    ProjectUi::deserialize(d).map(Some)
+}
 
 impl ProjectManifest {
     fn validate(&self, runtime: &Runtime) -> Result<()> {
@@ -158,6 +190,10 @@ impl ProjectManifest {
                     if sprites.eq_ignore_ascii_case(&entry.scene) {
                         return fail("entry scene and sprite sidecar must be different files");
                     }
+                }
+                if let Some(ui) = &entry.ui {
+                    name(&ui.font.package)?;
+                    portable(&ui.font.asset)?;
                 }
             }
             (1, Some(_)) => return fail("schema-1 projects cannot contain entry metadata"),
@@ -850,6 +886,68 @@ mod tests {
             .unwrap()
             .sprites
             .is_none());
+    }
+
+    #[test]
+    fn project_ui_is_strict_optional_metadata_without_activation_authority() {
+        let tmp = fixture_dir();
+        let path = tmp.path().join("orr.project.json");
+        let base = r#"{"schema":2,"engine":"*","entry":{"game":"arena","scene":"arena.yaml"}}"#;
+        let without: ProjectManifest = serde_json::from_str(base).unwrap();
+        assert!(without.entry.as_ref().unwrap().ui.is_none());
+        assert_eq!(serde_json::to_string(&without).unwrap(), base);
+        let valid_ui = r#"{"profile":"arena-korean-v1","font":{"package":"korean-game-ui","asset":"OrreryKoreanUI.otf"}}"#;
+        let with = |ui: &str| {
+            format!("{{\"schema\":2,\"engine\":\"*\",\"entry\":{{\"game\":\"arena\",\"scene\":\"arena.yaml\",\"ui\":{ui}}}}}")
+        };
+        fs::write(&path, with(valid_ui)).unwrap();
+        let project = Project::open(tmp.path(), Runtime::content_only()).unwrap();
+        let ui = project
+            .manifest()
+            .unwrap()
+            .entry
+            .as_ref()
+            .unwrap()
+            .ui
+            .as_ref()
+            .unwrap();
+        assert_eq!(ui.profile, ProjectUiProfile::ArenaKoreanV1);
+        assert_eq!(ui.font.package, "korean-game-ui");
+        assert!(!tmp.path().join(LOCK).exists());
+        let invalid = [
+            "null".to_owned(),
+            "{}".to_owned(),
+            valid_ui.replace("arena-korean-v1", "arena-korean-v2"),
+            valid_ui.replace("korean-game-ui", "../font"),
+            valid_ui.replace("OrreryKoreanUI.otf", "../font.otf"),
+            valid_ui.replace("OrreryKoreanUI.otf", "/font.otf"),
+            valid_ui.replace("OrreryKoreanUI.otf", ""),
+            valid_ui.replace("\"font\":", "\"digest\":\"bad\",\"font\":"),
+            valid_ui.replace("\"package\":", "\"version\":\"1.0.0\",\"package\":"),
+            valid_ui.replace(
+                "\"profile\":",
+                "\"profile\":\"arena-korean-v1\",\"profile\":",
+            ),
+            valid_ui.replace("\"asset\":", "\"asset\":\"font.otf\",\"asset\":"),
+            valid_ui.replace(
+                "{\"package\":\"korean-game-ui\",\"asset\":\"OrreryKoreanUI.otf\"}",
+                "null",
+            ),
+        ];
+        for ui in invalid {
+            fs::write(&path, with(&ui)).unwrap();
+            assert!(
+                Project::open(tmp.path(), Runtime::content_only()).is_err(),
+                "accepted {ui}"
+            );
+            assert!(!tmp.path().join(LOCK).exists());
+        }
+        fs::write(
+            &path,
+            with(valid_ui).replace("\"ui\":", "\"ui\":null,\"ui\":"),
+        )
+        .unwrap();
+        assert!(Project::open(tmp.path(), Runtime::content_only()).is_err());
     }
 
     #[test]

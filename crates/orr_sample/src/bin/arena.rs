@@ -230,23 +230,60 @@ fn real_main() -> Result<(), String> {
                 capture.as_deref(),
             );
         }
-        let (session, presentation) = prepared.into_parts()?;
-        let summary = if threaded {
-            opts.label = "authored project / threaded".into();
-            let bridge = Threaded::spawn(
-                move || orr_bridge::PlayHost::new(session, orr_bridge::PlayerSlot(0)),
-                arena_bridge_config(),
-                ThreadedConfig::default(),
-            )
-            .map_err(|e| format!("start project thread: {e}"))?;
-            orr_sample::app::run_project(bridge, opts, presentation)?
-        } else {
-            opts.label = "authored project / inproc".into();
-            let bridge = InProc::new(
-                orr_bridge::PlayHost::new(session, orr_bridge::PlayerSlot(0)),
-                arena_bridge_config(),
-            );
-            orr_sample::app::run_project(bridge, opts, presentation)?
+        #[cfg(feature = "game-ui")]
+        let summary = {
+            let (seed, presentation, prepared_ui) = prepared.into_launch_parts();
+            // Decode/install the already admitted font before spawning the host.
+            let ui = prepared_ui
+                .map(|ui| orr_sample::game_ui::GameUi::from_font(ui.font, true))
+                .transpose()?;
+            if threaded {
+                opts.label = "authored project / threaded".into();
+                orr_sample::app::run_project_restartable(
+                    move || {
+                        let session = seed.session()?;
+                        Threaded::spawn(
+                            move || orr_bridge::PlayHost::new(session, orr_bridge::PlayerSlot(0)),
+                            arena_bridge_config(),
+                            ThreadedConfig::default(),
+                        )
+                        .map_err(|e| format!("start project thread: {e}"))
+                    },
+                    opts,
+                    presentation,
+                    ui,
+                )?
+            } else {
+                opts.label = "authored project / inproc".into();
+                orr_sample::app::run_project_restartable(
+                    move || seed.bridge(),
+                    opts,
+                    presentation,
+                    ui,
+                )?
+            }
+        };
+        #[cfg(not(feature = "game-ui"))]
+        let summary = {
+            let (session, presentation) = prepared.into_parts()?;
+            let summary = if threaded {
+                opts.label = "authored project / threaded".into();
+                let bridge = Threaded::spawn(
+                    move || orr_bridge::PlayHost::new(session, orr_bridge::PlayerSlot(0)),
+                    arena_bridge_config(),
+                    ThreadedConfig::default(),
+                )
+                .map_err(|e| format!("start project thread: {e}"))?;
+                orr_sample::app::run_project(bridge, opts, presentation)?
+            } else {
+                opts.label = "authored project / inproc".into();
+                let bridge = InProc::new(
+                    orr_bridge::PlayHost::new(session, orr_bridge::PlayerSlot(0)),
+                    arena_bridge_config(),
+                );
+                orr_sample::app::run_project(bridge, opts, presentation)?
+            };
+            summary
         };
         print_summary(&summary);
         return Ok(());

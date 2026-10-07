@@ -28,6 +28,8 @@ pub struct GameUi {
     restart_allowed: bool,
     /// Last real widget bounds, also useful for accessibility/input regression tests.
     pub buttons: Vec<(Action, egui::Rect)>,
+    hud_rect: Option<egui::Rect>,
+    pointer_layout_stale: bool,
 }
 impl GameUi {
     pub fn open(root: &Path, restart_allowed: bool) -> Result<Self, String> {
@@ -39,19 +41,7 @@ impl GameUi {
         Self::from_font(font, restart_allowed)
     }
     pub fn from_font(font: Vec<u8>, restart_allowed: bool) -> Result<Self, String> {
-        if font.is_empty() || font.len() > 16 * 1024 * 1024 {
-            return Err("game UI font must be 1 byte to 16 MiB".into());
-        }
-        let face = ttf_parser::Face::parse(&font, 0)
-            .map_err(|e| format!("invalid game UI font: {e:?}"))?;
-        for character in include_str!("../../../assets/game_ui_font/corpus.txt").chars() {
-            if !character.is_whitespace() && face.glyph_index(character).is_none() {
-                return Err(format!(
-                    "game UI font lacks required glyph U+{:04X}",
-                    character as u32
-                ));
-            }
-        }
+        Self::validate_font(&font)?;
         let context = egui::Context::default();
         let mut definitions = egui::FontDefinitions::default();
         definitions
@@ -70,7 +60,32 @@ impl GameUi {
             screen: Screen::Title,
             restart_allowed,
             buttons: Vec::new(),
+            hud_rect: None,
+            pointer_layout_stale: true,
         })
+    }
+    /// Validate a bounded font against the parser and UI text corpus without creating UI state.
+    pub fn validate_font(font: &[u8]) -> Result<(), String> {
+        Self::validate_font_with_corpus(
+            font,
+            include_str!("../../../assets/game_ui_font/corpus.txt"),
+        )
+    }
+    fn validate_font_with_corpus(font: &[u8], corpus: &str) -> Result<(), String> {
+        if font.is_empty() || font.len() > 16 * 1024 * 1024 {
+            return Err("game UI font must be 1 byte to 16 MiB".into());
+        }
+        let face =
+            ttf_parser::Face::parse(font, 0).map_err(|e| format!("invalid game UI font: {e:?}"))?;
+        for character in corpus.chars() {
+            if !character.is_whitespace() && face.glyph_index(character).is_none() {
+                return Err(format!(
+                    "game UI font lacks required glyph U+{:04X}",
+                    character as u32
+                ));
+            }
+        }
+        Ok(())
     }
     pub fn screen(&self) -> Screen {
         self.screen
@@ -88,12 +103,42 @@ impl GameUi {
         }
         true
     }
+    /// Keep local controls neutral after resize/DPI/resume until a new UI layout.
+    pub fn invalidate_pointer_layout(&mut self) {
+        self.pointer_layout_stale = true;
+    }
+
+    /// Hit-test the latest queued pointer point against the completed HUD layout
+    /// before egui's next pass refreshes its previous-frame capture state.
+    pub fn pending_pointer_over_ui(&self, input: &egui::RawInput) -> bool {
+        // Resized/scaled surfaces must not send a click through old HUD bounds.
+        // Only local controls wait for the next completed UI layout.
+        if self.pointer_layout_stale {
+            return true;
+        }
+        let position = input
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                egui::Event::PointerMoved(position)
+                | egui::Event::PointerButton { pos: position, .. } => Some(Some(*position)),
+                egui::Event::PointerGone => Some(None),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.context.pointer_latest_pos());
+        position.is_some_and(|point| {
+            self.hud_rect.is_some_and(|rect| rect.contains(point))
+                || self.buttons.iter().any(|(_, rect)| rect.contains(point))
+        })
+    }
+
     pub fn show(&mut self, input: egui::RawInput, hud: Hud) -> (egui::FullOutput, Option<Action>) {
         let mut action = None;
         self.buttons.clear();
         let context = self.context.clone();
         let output = context.run_ui(input, |root| {
-            egui::Panel::top("arena-hud").show(root, |ui| {
+            let hud = egui::Panel::top("arena-hud").show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!(
                         "오러리 투기장 | 틱 {} | 검증 {} | 롤백 {}",
@@ -108,6 +153,7 @@ impl GameUi {
                     }
                 });
             });
+            self.hud_rect = Some(hud.response.rect);
             if self.screen != Screen::Playing {
                 egui::Window::new(if self.screen == Screen::Title {
                     "오러리 투기장"
@@ -145,6 +191,7 @@ impl GameUi {
                 });
             }
         });
+        self.pointer_layout_stale = false;
         (output, action)
     }
 }
@@ -227,6 +274,102 @@ mod tests {
         }
     }
     #[test]
+    fn queued_menu_click_captures_remapped_fire_before_the_next_ui_frame() {
+        use crate::arena_input::{default_map, ArenaControls};
+        use orr_input::Button;
+        let mut ui = ui(true);
+        ui.apply(Action::Play);
+        for _ in 0..3 {
+            ui.show(
+                input(vec![egui::Event::PointerMoved(egui::pos2(800.0, 800.0))]),
+                Hud::default(),
+            )
+            .0
+            .drop_without_applying_deltas();
+        }
+        assert!(!ui.context.egui_wants_pointer_input());
+        let point = ui
+            .buttons
+            .iter()
+            .find(|(action, _)| *action == Action::Menu)
+            .unwrap()
+            .1
+            .center();
+        let pending = input(vec![
+            egui::Event::PointerMoved(point),
+            egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+        ]);
+        // No show() call intervenes: this is the same raw event queue that the
+        // winit adapter checks before immediately publishing held bridge input.
+        assert!(ui.pending_pointer_over_ui(&pending));
+        let mut map = default_map();
+        map.actions
+            .iter_mut()
+            .find(|action| action.name == "fire")
+            .unwrap()
+            .bindings = vec![Button::Mouse { button: 0 }];
+        let mut controls = ArenaControls::new(map).unwrap();
+        controls.set_ui_capture(ui.pending_pointer_over_ui(&pending));
+        controls.button(Button::Mouse { button: 0 }, true, false, false);
+        assert!(!controls.keys().fire);
+        assert!(!ui.pending_pointer_over_ui(&input(vec![egui::Event::PointerGone])));
+        assert!(
+            !ui.pending_pointer_over_ui(&input(vec![egui::Event::PointerMoved(egui::pos2(
+                800.0, 800.0
+            ))]))
+        );
+        controls.button(Button::Mouse { button: 0 }, false, false, true);
+        controls.set_ui_capture(false);
+        controls.button(Button::Mouse { button: 0 }, true, true, false);
+        assert!(
+            !controls.keys().fire,
+            "capture release still requires a fresh press"
+        );
+    }
+
+    #[test]
+    fn pointer_layout_invalidates_until_resized_dpi_layout_is_observed() {
+        let mut ui = ui(true);
+        ui.apply(Action::Play);
+        ui.show(input(vec![]), Hud::default())
+            .0
+            .drop_without_applying_deltas();
+        let outside = input(vec![egui::Event::PointerMoved(egui::pos2(400.0, 400.0))]);
+        assert!(!ui.pending_pointer_over_ui(&outside));
+        ui.invalidate_pointer_layout();
+        assert!(ui.pending_pointer_over_ui(&outside));
+        let mut resized = input(vec![]);
+        resized.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(450.0, 450.0),
+        ));
+        resized
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .native_pixels_per_point = Some(2.0);
+        for _ in 0..3 {
+            ui.show(resized.clone(), Hud::default())
+                .0
+                .drop_without_applying_deltas();
+        }
+        let menu = ui
+            .buttons
+            .iter()
+            .find(|(action, _)| *action == Action::Menu)
+            .unwrap()
+            .1
+            .center();
+        assert!(ui.pending_pointer_over_ui(&input(vec![egui::Event::PointerMoved(menu)])));
+        assert!(!ui.pending_pointer_over_ui(&outside));
+    }
+
+    #[test]
     fn relay_restart_disabled_in_widget_and_dispatch() {
         let mut ui = ui(false);
         assert_eq!(click(&mut ui, Action::Restart), None);
@@ -249,6 +392,12 @@ mod tests {
             );
         }
         assert!(GameUi::from_font(vec![0; 20], true).is_err());
+    }
+    #[test]
+    fn font_validator_rejects_a_missing_required_glyph() {
+        let bytes = include_bytes!("../../../assets/game_ui_font/OrreryKoreanUI.otf");
+        let error = GameUi::validate_font_with_corpus(bytes, "🦄").unwrap_err();
+        assert!(error.contains("lacks required glyph"));
     }
     #[test]
     fn font_package_is_required_hash_verified_and_removable() {
