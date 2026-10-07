@@ -83,3 +83,8 @@ pub mod model_panel;
 
 #[cfg(feature = "animated-models")]
 pub mod yard_animation;
+
+#[cfg(feature = "irradiance-probes")]
+pub mod irradiance_bindings;
+#[cfg(feature = "irradiance-probes")]
+pub mod irradiance_panel;

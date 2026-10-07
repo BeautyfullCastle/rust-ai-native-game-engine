@@ -125,7 +125,23 @@ fn offscreen_sampling_tracks_msaa_3d_and_linear_2d_compositing() {
     overlay_renderer.clear = Some([0.; 4]);
     let mut overlay = RenderList::new();
     overlay.quad([16., 8.], [40., 40.], 0., [0., 0.5, 0., 0.5]);
+    // The fallback must not alter renderer upload accounting. This frontier
+    // has an optional 9,280-byte SH9 extension in EACH frame uniform. Keep an
+    // independent ABI expectation rather than importing private Globals size.
+    #[cfg(not(feature = "irradiance-probes"))]
+    let globals_bytes = 288_u64;
+    #[cfg(feature = "irradiance-probes")]
+    let globals_bytes = {
+        assert_eq!(std::mem::size_of::<orr_render::IrradianceUniform>(), 4 * 16 + 64 * 9 * 16);
+        288_u64 + 4 * 16 + 64 * 9 * 16
+    };
+    // A UNORM target needs neither alternate views nor a sample-mirror copy.
+    // Compare its unchanged renderer contract to the sRGB target on each draw.
+    let control_target = OffscreenTarget::new(&gpu, 32, 16, TextureFormat::Rgba8Unorm);
     for msaa in [1, 4] {
+        let mut control_renderer = Renderer3D::with_settings(
+            gpu.clone(), TextureFormat::Rgba8Unorm, Settings3D { msaa, ..Settings3D::LOW },
+        );
         let mut renderer = Renderer3D::with_settings(gpu.clone(), format, Settings3D { msaa, ..Settings3D::LOW });
         renderer.clear = [0.25, 0., 0., 0.25];
         for composite in [false, true, false] {
@@ -145,8 +161,11 @@ fn offscreen_sampling_tracks_msaa_3d_and_linear_2d_compositing() {
             assert_eq!(sampled.read_rgba8(), stored, "3D mirror stale: msaa={msaa}, overlay={composite}");
             assert_pixel(&stored, target.size(), if composite { [99, 137, 0, 159] } else { [137, 0, 0, 64] });
             assert_eq!(renderer.last_frame_stats().msaa_samples, gpu.supported_samples(format, msaa));
-            assert_eq!(renderer.last_frame_stats().upload_calls, 2);
-            assert_eq!(renderer.last_frame_stats().upload_bytes, 2 * 288);
+            control_target.render3d(&mut control_renderer, &list, &camera);
+            assert_eq!(control_renderer.last_frame_stats().upload_calls, 2);
+            assert_eq!(control_renderer.last_frame_stats().upload_bytes, 2 * globals_bytes);
+            assert_eq!(renderer.last_frame_stats().upload_calls, control_renderer.last_frame_stats().upload_calls);
+            assert_eq!(renderer.last_frame_stats().upload_bytes, control_renderer.last_frame_stats().upload_bytes);
         }
     }
 }

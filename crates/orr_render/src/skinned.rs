@@ -155,10 +155,13 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         if format.is_depth() {
             return Err(SkinnedRenderError::InvalidTarget);
         }
-        let shader = rhi.create_shader(
-            "skinned textured model",
-            include_str!("shader_skinned.wgsl"),
-        );
+        #[cfg(feature = "irradiance-probes")]
+        let source = crate::renderer3d::irradiance::shader(include_str!("shader_skinned.wgsl"), "globals");
+        #[cfg(feature = "irradiance-probes")]
+        let source = source.as_str();
+        #[cfg(not(feature = "irradiance-probes"))]
+        let source = include_str!("shader_skinned.wgsl");
+        let shader = rhi.create_shader("skinned textured model", source);
         let attrs = [
             VertexAttr {
                 location: 0,

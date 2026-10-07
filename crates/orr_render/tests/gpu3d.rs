@@ -17,7 +17,11 @@ static SERIAL: Mutex<()> = Mutex::new(());
 // Every draw uploads main + shadow Globals, including empty/no-shadow frames.
 // Each uniform is two mat4 (128 bytes) + ten vec4 (160 bytes); the private
 // renderer3d layout test pins its 288-byte size and point-light field offsets.
+#[cfg(not(feature = "irradiance-probes"))]
 const GLOBAL_UPLOAD_BYTES: u64 = 2 * 288;
+// SH9 appends four vec4 headers and 64 probes of nine padded vec4 coefficients.
+#[cfg(feature = "irradiance-probes")]
+const GLOBAL_UPLOAD_BYTES: u64 = 2 * (288 + 4 * 16 + 64 * 9 * 16);
 
 fn gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());

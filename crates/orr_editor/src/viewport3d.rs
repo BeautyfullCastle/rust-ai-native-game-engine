@@ -279,6 +279,8 @@ impl Viewport3dGpu {
             #[cfg(feature = "animated-models")]
             &[],
             settings,
+            #[cfg(feature = "irradiance-probes")]
+            None,
         )
     }
 
@@ -318,10 +320,44 @@ impl Viewport3dGpu {
             placements,
             animated_placements,
             settings,
+            #[cfg(feature = "irradiance-probes")]
+            None,
         )
     }
 
+    /// Render one fully admitted frame with an optional view-only irradiance grid.
+    /// Grid validation precedes resizing, cache creation and all GPU writes.
+    #[cfg(feature = "irradiance-probes")]
+    #[allow(clippy::too_many_arguments)] // One coherent composed frame plus its view-only policy.
+    pub fn render_irradiance(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        #[cfg(feature = "animated-models")] animated_placements: &[AnimatedPlacement],
+        settings: orr_render::PostProcessSettings,
+        grid: Option<&orr_render::IrradianceGrid>,
+    ) -> Result<(), String> {
+        self.render_composed(size, list, camera, placements,
+            #[cfg(feature = "animated-models")] animated_placements,
+            settings, grid)
+    }
+
+    #[cfg(feature = "irradiance-probes")]
+    pub fn irradiance(&self) -> Option<&orr_render::IrradianceGrid> {
+        self.imported.irradiance.as_ref()
+    }
+
+    /// Persistent probe payload, excluding existing renderer uniforms and driver overhead.
+    #[cfg(feature = "irradiance-probes")]
+    pub fn irradiance_uniform_bytes(&self) -> usize {
+        let (static_count, animated_count) = self.model_cache_counts();
+        (2 + static_count + animated_count) * std::mem::size_of::<orr_render::IrradianceUniform>()
+    }
+
     #[cfg(feature = "models")]
+    #[allow(clippy::too_many_arguments)] // Keep all admission inputs in one transaction.
     fn render_composed(
         &mut self,
         size: (u32, u32),
@@ -330,7 +366,10 @@ impl Viewport3dGpu {
         placements: &[ModelPlacement],
         #[cfg(feature = "animated-models")] animated_placements: &[AnimatedPlacement],
         settings: orr_render::PostProcessSettings,
+        #[cfg(feature = "irradiance-probes")] grid: Option<&orr_render::IrradianceGrid>,
     ) -> Result<(), String> {
+        #[cfg(feature = "irradiance-probes")]
+        if let Some(grid) = grid { grid.validate()?; }
         #[cfg(feature = "animated-models")]
         let entity_count = placements
             .len()
@@ -415,6 +454,8 @@ impl Viewport3dGpu {
             .collect();
         // Preflight must see retained HDR resources to account for old + new
         // allocation budgets on resize. Restore the policy even on rejection.
+        #[cfg(feature = "irradiance-probes")]
+        let previous_grid = std::mem::replace(&mut self.imported.irradiance, grid.cloned());
         let previous_settings = self.imported.post_process;
         self.imported.post_process = settings;
         #[cfg(feature = "animated-models")]
@@ -443,6 +484,8 @@ impl Viewport3dGpu {
             )
             .map_err(|e| e.to_string());
         self.imported.post_process = previous_settings;
+        #[cfg(feature = "irradiance-probes")]
+        { self.imported.irradiance = previous_grid; }
         admission?;
 
         let format = if settings.enabled {
@@ -532,6 +575,8 @@ impl Viewport3dGpu {
             self.animated_models = ordered;
         }
         self.imported.post_process = settings;
+        #[cfg(feature = "irradiance-probes")]
+        { self.imported.irradiance = grid.cloned(); }
         self.target.resize(size.0, size.1);
         let mut batches = vec![orr_render::ImportedBatch::Procedural {
             renderer: &mut self.renderer,
@@ -647,6 +692,23 @@ impl GpuViewport3d {
             animated_placements,
             settings,
         )?;
+        Ok(self.publish_texture())
+    }
+    #[cfg(feature = "irradiance-probes")]
+    #[allow(clippy::too_many_arguments)] // One coherent composed frame plus its view-only policy.
+    pub fn render_irradiance(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        #[cfg(feature = "animated-models")] animated_placements: &[AnimatedPlacement],
+        settings: orr_render::PostProcessSettings,
+        grid: Option<&orr_render::IrradianceGrid>,
+    ) -> Result<egui::TextureId, String> {
+        self.gpu.render_irradiance(size, list, camera, placements,
+            #[cfg(feature = "animated-models")] animated_placements,
+            settings, grid)?;
         Ok(self.publish_texture())
     }
     fn publish_texture(&mut self) -> egui::TextureId {

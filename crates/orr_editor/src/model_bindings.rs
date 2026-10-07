@@ -599,12 +599,14 @@ impl Bindings {
     }
 }
 
-/// Open a Yard model project with only the compiled model capabilities. The
+/// Open a Yard model project with compiled model and optional irradiance capabilities. The
 /// Arena preview's `animated_bindings::open_project` intentionally remains
 /// animation-only; this loader is the mixed static/skinned Yard path.
 pub fn open_project(project_root: &Path) -> Result<Project, String> {
     let mut capabilities = BTreeSet::new();
     capabilities.insert("models".to_owned());
+    #[cfg(feature = "irradiance-probes")]
+    capabilities.insert("irradiance-probes".to_owned());
     #[cfg(feature = "animated-models")]
     capabilities.insert("animation".to_owned());
     let mut runtime = Runtime::content_only();

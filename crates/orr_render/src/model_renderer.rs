@@ -139,6 +139,8 @@ pub(crate) struct Globals {
     pub(crate) point_color_intensity: [f32; 4],
     pub(crate) light_vp: [[f32; 4]; 4],
     pub(crate) shadow: [f32; 4],
+    #[cfg(feature = "irradiance-probes")]
+    pub(crate) irradiance: crate::IrradianceUniform,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -204,7 +206,13 @@ impl<B: Rhi> ModelRenderer<B> {
         if format.is_depth() {
             return Err(ModelRenderError::InvalidTarget);
         }
-        let shader = rhi.create_shader("static textured model", include_str!("shader_model.wgsl"));
+        #[cfg(feature = "irradiance-probes")]
+        let source = crate::renderer3d::irradiance::shader(include_str!("shader_model.wgsl"), "globals");
+        #[cfg(feature = "irradiance-probes")]
+        let source = source.as_str();
+        #[cfg(not(feature = "irradiance-probes"))]
+        let source = include_str!("shader_model.wgsl");
+        let shader = rhi.create_shader("static textured model", source);
         let attrs = [
             VertexAttr {
                 location: 0,
@@ -758,6 +766,8 @@ pub(crate) fn prepare_globals(
         point_color_intensity: [0.0; 4],
         light_vp: orr_model::IDENTITY,
         shadow: [0.0; 4],
+        #[cfg(feature = "irradiance-probes")]
+        irradiance: crate::IrradianceUniform::zeroed(),
     })
 }
 

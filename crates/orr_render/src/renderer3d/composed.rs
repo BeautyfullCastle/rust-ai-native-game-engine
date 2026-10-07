@@ -29,6 +29,13 @@ pub(crate) struct PreparedProcedural {
     lines: u32,
     stats: FrameStats,
 }
+#[cfg(feature = "irradiance-probes")]
+impl PreparedProcedural {
+    pub(crate) fn set_irradiance(&mut self, uniform: crate::IrradianceUniform) {
+        self.globals.irradiance = uniform;
+    }
+}
+
 fn procedural_draw_count(list: &RenderList3D) -> Result<usize, ProceduralSceneError> {
     let mut total = list.lines.len();
     for kind in MeshKind::ALL {
