@@ -833,6 +833,12 @@ mod tests {
             self.0.borrow_mut().written_buffers.push(*buffer);
             self.0.borrow_mut().writes += 1;
         }
+        fn texture_view_formats_supported(&self) -> bool {
+            true
+        }
+        fn copy_texture(&self, _: &RecordedTexture, _: &RecordedTexture) {
+            panic!("imported renderer does not copy textures");
+        }
         fn create_texture(&self, desc: &TextureDesc<'_>) -> RecordedTexture {
             self.0.borrow_mut().texture_lifecycle.push("create_texture");
             self.0.borrow_mut().textures.push((
