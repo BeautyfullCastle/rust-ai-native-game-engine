@@ -52,3 +52,6 @@ pub mod project_playback;
 pub mod project_runtime;
 #[cfg(feature = "project")]
 pub mod project_compositor;
+
+#[cfg(all(feature = "project-export", target_os = "linux", target_arch = "x86_64"))]
+pub mod project_export;

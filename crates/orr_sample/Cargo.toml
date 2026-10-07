@@ -12,6 +12,7 @@ workspace = true
 
 [features]
 default = []
+project-export = ["project", "dep:sha2", "dep:tempfile", "dep:rustix"]
 project = ["sprites", "orr_reflect/scene", "dep:serde", "dep:serde_json", "dep:png17"]
 # Optional native UI needs Rust 1.95 (egui); default remains workspace MSRV.
 game-ui = ["input-actions", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:orr_package", "dep:ttf-parser"]
@@ -21,6 +22,8 @@ audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+sha2 = { version = "0.11", optional = true }
+tempfile = { version = "3", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 png17 = { package = "png", version = "0.17", optional = true }
@@ -52,6 +55,9 @@ png = "0.18"
 # Window (view layer only): winit 0.30 (raw-window-handle 0.6, same as wgpu 30).
 winit = "0.30"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.5", features = ["fs", "process"], optional = true }
+
 [dev-dependencies]
 # Compile-check browser and native sample identities together.
 orr_web = { path = "../orr_web" }
@@ -63,6 +69,12 @@ lz4_flex = { version = "0.14", default-features = false, features = ["std", "saf
 [[bench]]
 name = "seek"
 harness = false
+
+[[bin]]
+name = "orr_export_arena"
+path = "src/bin/orr_export_arena.rs"
+required-features = ["project-export"]
+test = false
 
 [[bin]]
 name = "arena"
