@@ -76,6 +76,19 @@ impl SpriteScene {
         })
     }
 
+    /// Clears all transient presentation state for a new local session.
+    pub fn reset(&mut self) {
+        self.camera = Camera::new([0.0, 0.0], 500.0);
+        self.follow.stop();
+        self.playback.reset();
+        self.previous = None;
+        self.moving = false;
+        self.since_movement = Duration::MAX;
+        self.facing_left = false;
+        self.elapsed_remainder = Duration::ZERO;
+        self.list.clear();
+    }
+
     /// Uses the same interpolated/rollback-smoothed positions as shape rendering.
     /// A resync clears presentation history, without writing into the simulation.
     pub fn update(
@@ -263,6 +276,20 @@ impl SpriteWindow {
         }
     }
     pub fn render(&mut self, list: &RenderList, scene: &SpriteScene) -> Result<(), String> {
+        self.render_with_overlay(list, scene, |_, _, _| Ok(()))
+    }
+    pub fn rhi(&self) -> &Wgpu {
+        &self.rhi
+    }
+    pub fn format(&self) -> orr_render::orr_rhi::TextureFormat {
+        self.rhi.surface_format(&self.surface)
+    }
+    pub fn render_with_overlay(
+        &mut self,
+        list: &RenderList,
+        scene: &SpriteScene,
+        overlay: impl FnOnce(&Wgpu, &<Wgpu as Rhi>::TextureView, (u32, u32)) -> Result<(), String>,
+    ) -> Result<(), String> {
         let Acquire::Frame(frame) = self.rhi.acquire_frame(&mut self.surface) else {
             return Ok(());
         };
@@ -271,6 +298,7 @@ impl SpriteWindow {
         self.sprites
             .draw(view, self.size, &scene.list, &scene.camera)
             .map_err(|e| e.to_string())?;
+        overlay(&self.rhi, view, self.size)?;
         self.rhi.present(frame);
         Ok(())
     }
@@ -292,7 +320,11 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
+            // Resolve only the trusted OS temp root; package path policy stays strict.
+            let temp_root = std::env::temp_dir();
+            #[cfg(unix)]
+            let temp_root = std::fs::canonicalize(temp_root).unwrap();
+            let path = temp_root.join(format!(
                 "orr-sprite-scene-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
@@ -319,6 +351,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn restart_resets_sprite_camera_and_animation_history() {
+        let fixture = Fixture::new();
+        fixture.install();
+        let mut scene = SpriteScene::open(&fixture.0).unwrap();
+        scene.camera = Camera::new([900.0, -700.0], 123.0);
+        scene.moving = true;
+        scene.facing_left = true;
+        scene.since_movement = Duration::ZERO;
+        scene.elapsed_remainder = Duration::from_micros(700);
+        scene.playback.advance(1250);
+        scene.list.push(SpriteInstance::default());
+        scene.reset();
+        assert!(!scene.moving);
+        assert!(!scene.facing_left);
+        assert!(scene.previous.is_none());
+        assert!(scene.follow.target().is_none());
+        assert_eq!(scene.elapsed_remainder, Duration::ZERO);
+        assert_eq!(scene.since_movement, Duration::MAX);
+        assert!(scene.list.sprites.is_empty());
+        assert_eq!(scene.camera.center, [0.0, 0.0]);
     }
 
     #[test]

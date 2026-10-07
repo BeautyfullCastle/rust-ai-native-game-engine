@@ -26,6 +26,10 @@ pub const IDENTITY: [[f32; 4]; 4] = [
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error(pub(crate) String);
+impl Error {
+    /// Report a caller-provided resolver failure without losing its diagnostic.
+    pub fn message(message: impl Into<String>) -> Self { Self(message.into()) }
+}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
@@ -288,3 +292,8 @@ pub(crate) fn valid_path(uri: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[cfg(feature = "animation")]
+pub mod animation;
+#[cfg(all(feature = "animation", feature = "import"))]
+pub mod animation_import;

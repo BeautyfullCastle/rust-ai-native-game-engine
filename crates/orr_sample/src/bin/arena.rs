@@ -11,6 +11,7 @@
 //!   --no-vsync                   do not wait for the display (measure raw speed)
 //!   --seconds N                  close after N seconds and print a summary
 //!   --sprite-project DIR        installed sample-sprites project (build --features sprites)
+//!   --game-ui-project DIR       installed Korean font project (build --features game-ui)
 //!   --headless                   with --connect --bot: no window, play as a scripted bot (default 30 s)
 //! ```
 //! Play on a relay server (`orr_server`) instead of the local loopback with
@@ -20,14 +21,19 @@
 //!   --room N  --slot N  --name TEXT  --sim-latency MS  --sim-jitter MS  --sim-loss P  --sim-seed N
 //!   --desync-dir DIR  --bot  --connect-timeout SECONDS
 //! ```
+//! With `--features input-actions`: `--input-bindings FILE` loads bindings;
+//! `--save-input-bindings NEW_FILE` exports and exits (never overwrites).
+//! P toggles local input blocking; the network simulation continues.
 //! Keys: WASD or arrows move, space fires, Escape quits. In local mode the other player is a bot.
 use std::process::ExitCode;
 
-use orr_bridge::{Bridge, InProc, Threaded, ThreadedConfig};
 use orr_bridge::RelayMetrics;
+use orr_bridge::{Bridge, InProc, Threaded, ThreadedConfig};
 use orr_sample::app::{run, Options, Summary};
-use orr_sample::net_client::{arena_bridge, print_bot_report, print_relay_status, run_arena_bot, NetArgs};
 use orr_sample::arena_view::{arena_bridge_config, loopback_pair, Loopback};
+use orr_sample::net_client::{
+    arena_bridge, print_bot_report, print_relay_status, run_arena_bot, NetArgs,
+};
 use orr_view::{InterpMode, ViewConfig};
 
 fn main() -> ExitCode {
@@ -46,8 +52,15 @@ fn real_main() -> Result<(), String> {
     let mut netargs = NetArgs::default();
     let mut headless = false;
     let mut sprite_project = None;
+    let mut game_ui_project = None;
+    let mut input_bindings = None;
+    let mut save_input_bindings = None;
     let mut opts = Options {
         label: String::new(),
+        #[cfg(feature = "input-actions")]
+        input_map: None,
+        #[cfg(feature = "game-ui")]
+        game_ui_project: None,
         vsync: true,
         audio: Default::default(),
         seconds: None,
@@ -62,8 +75,15 @@ fn real_main() -> Result<(), String> {
             continue;
         }
         match arg.as_str() {
+            "--input-bindings" => input_bindings = Some(value("--input-bindings")?),
+            "--save-input-bindings" => save_input_bindings = Some(value("--save-input-bindings")?),
+            "--game-ui-project" => {
+                game_ui_project = Some(std::path::PathBuf::from(value("--game-ui-project")?))
+            }
             "--headless" => headless = true,
-            "--sprite-project" => sprite_project = Some(std::path::PathBuf::from(value("--sprite-project")?)),
+            "--sprite-project" => {
+                sprite_project = Some(std::path::PathBuf::from(value("--sprite-project")?))
+            }
             "--audio" => opts.audio = value("--audio")?.parse()?,
             "--bridge" => {
                 threaded = match value("--bridge")?.as_str() {
@@ -72,8 +92,16 @@ fn real_main() -> Result<(), String> {
                     other => return Err(format!("unknown bridge '{other}'")),
                 }
             }
-            "--latency" => net.latency_ticks = value("--latency")?.parse().map_err(|e| format!("--latency: {e}"))?,
-            "--jitter" => net.jitter_ticks = value("--jitter")?.parse().map_err(|e| format!("--jitter: {e}"))?,
+            "--latency" => {
+                net.latency_ticks = value("--latency")?
+                    .parse()
+                    .map_err(|e| format!("--latency: {e}"))?
+            }
+            "--jitter" => {
+                net.jitter_ticks = value("--jitter")?
+                    .parse()
+                    .map_err(|e| format!("--jitter: {e}"))?
+            }
             "--remote" => {
                 opts.remote_mode = match value("--remote")?.as_str() {
                     "snapshot" => InterpMode::Snapshot,
@@ -82,15 +110,59 @@ fn real_main() -> Result<(), String> {
                     other => return Err(format!("unknown remote mode '{other}'")),
                 }
             }
-            "--tau" => opts.view.correction_tau = value("--tau")?.parse().map_err(|e| format!("--tau: {e}"))?,
+            "--tau" => {
+                opts.view.correction_tau =
+                    value("--tau")?.parse().map_err(|e| format!("--tau: {e}"))?
+            }
             "--no-vsync" => opts.vsync = false,
-            "--seconds" => opts.seconds = Some(value("--seconds")?.parse().map_err(|e| format!("--seconds: {e}"))?),
-            other => return Err(format!("unknown option '{other}' (see the header of this file)")),
+            "--seconds" => {
+                opts.seconds = Some(
+                    value("--seconds")?
+                        .parse()
+                        .map_err(|e| format!("--seconds: {e}"))?,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "unknown option '{other}' (see the header of this file)"
+                ))
+            }
         }
     }
 
+    if input_bindings.is_some() || save_input_bindings.is_some() {
+        #[cfg(not(feature = "input-actions"))]
+        return Err("input binding options require --features input-actions".into());
+        #[cfg(feature = "input-actions")]
+        {
+            let map = if let Some(path) = input_bindings {
+                orr_input::ActionMap::load_file(path)?
+            } else {
+                orr_sample::arena_input::default_map()
+            };
+            orr_sample::arena_input::validate_map(&map)?;
+            if let Some(path) = save_input_bindings {
+                map.save_new(&path)?;
+                return Ok(());
+            }
+            opts.input_map = Some(map);
+        }
+    }
+    if game_ui_project.is_some() {
+        if headless {
+            return Err("--game-ui-project requires a window".into());
+        }
+        #[cfg(not(feature = "game-ui"))]
+        return Err("--game-ui-project requires --features game-ui".into());
+        #[cfg(feature = "game-ui")]
+        {
+            opts.game_ui_project = game_ui_project;
+        }
+    }
     if sprite_project.is_some() {
-        if headless { return Err("--sprite-project requires a window".into()); }
+        if headless {
+            return Err("--sprite-project requires a window".into());
+        }
         #[cfg(not(feature = "sprites"))]
         return Err("--sprite-project requires building orr_sample with --features sprites".into());
     }
@@ -112,7 +184,10 @@ fn real_main() -> Result<(), String> {
         opts.label = format!("relay {}", netargs.name);
         let metrics = RelayMetrics::new();
         opts.relay = Some(metrics.clone());
-        eprintln!("connecting to {} ...", netargs.connect.as_deref().unwrap_or(""));
+        eprintln!(
+            "connecting to {} ...",
+            netargs.connect.as_deref().unwrap_or("")
+        );
         let bridge = arena_bridge(&netargs, metrics.clone())?;
         let summary = run_with(bridge, opts, sprite_project.as_deref())?;
         print_summary(&summary);
@@ -125,18 +200,56 @@ fn real_main() -> Result<(), String> {
 
     let summary = if threaded {
         opts.label = "threaded".to_string();
-        let bridge = Threaded::spawn(move || loopback_pair(net), arena_bridge_config(), ThreadedConfig::default())
-            .map_err(|e| format!("start sim thread: {e}"))?;
+        #[cfg(not(feature = "game-ui"))]
+        let bridge = Threaded::spawn(
+            move || loopback_pair(net),
+            arena_bridge_config(),
+            ThreadedConfig::default(),
+        )
+        .map_err(|e| format!("start sim thread: {e}"))?;
+        #[cfg(feature = "game-ui")]
+        {
+            orr_sample::app::run_restartable(
+                move || {
+                    Threaded::spawn(
+                        move || loopback_pair(net),
+                        arena_bridge_config(),
+                        ThreadedConfig::default(),
+                    )
+                    .map_err(|e| format!("start sim thread: {e}"))
+                },
+                opts,
+                sprite_project.as_deref(),
+            )?
+        }
+        #[cfg(not(feature = "game-ui"))]
         run_with(bridge, opts, sprite_project.as_deref())?
     } else {
         opts.label = "inproc".to_string();
-        run_with(InProc::new(loopback_pair(net), arena_bridge_config()), opts, sprite_project.as_deref())?
+        #[cfg(feature = "game-ui")]
+        {
+            orr_sample::app::run_restartable(
+                move || Ok(InProc::new(loopback_pair(net), arena_bridge_config())),
+                opts,
+                sprite_project.as_deref(),
+            )?
+        }
+        #[cfg(not(feature = "game-ui"))]
+        run_with(
+            InProc::new(loopback_pair(net), arena_bridge_config()),
+            opts,
+            sprite_project.as_deref(),
+        )?
     };
     print_summary(&summary);
     Ok(())
 }
 
-fn run_with<B: Bridge<orr_testgame::Arena>>(bridge: B, opts: Options, sprite_project: Option<&std::path::Path>) -> Result<Summary, String> {
+fn run_with<B: Bridge<orr_testgame::Arena>>(
+    bridge: B,
+    opts: Options,
+    sprite_project: Option<&std::path::Path>,
+) -> Result<Summary, String> {
     #[cfg(feature = "sprites")]
     if let Some(root) = sprite_project {
         return orr_sample::app::run_sprites(bridge, opts, root);
@@ -148,10 +261,22 @@ fn run_with<B: Bridge<orr_testgame::Arena>>(bridge: B, opts: Options, sprite_pro
 
 fn print_summary(s: &Summary) {
     println!("adapter        : {}", s.adapter);
-    println!("audio          : {} ({} voices started)", s.audio_status, s.audio_started);
-    println!("frames         : {} in {:.2} s = {:.1} fps (worst frame {:.1} ms)", s.frames, s.seconds, s.fps, s.worst_frame_ms);
-    println!("sim tick       : {} (verified {})", s.sim_tick, s.verified_tick);
-    println!("rollbacks      : {} (deepest {} ticks), stalls {}", s.rollbacks, s.max_rollback_depth, s.stalls);
+    println!(
+        "audio          : {} ({} voices started)",
+        s.audio_status, s.audio_started
+    );
+    println!(
+        "frames         : {} in {:.2} s = {:.1} fps (worst frame {:.1} ms)",
+        s.frames, s.seconds, s.fps, s.worst_frame_ms
+    );
+    println!(
+        "sim tick       : {} (verified {})",
+        s.sim_tick, s.verified_tick
+    );
+    println!(
+        "rollbacks      : {} (deepest {} ticks), stalls {}",
+        s.rollbacks, s.max_rollback_depth, s.stalls
+    );
     println!(
         "hit events     : predicted {}, verified {}, canceled {}",
         s.predicted_hits, s.verified_hits, s.canceled_events
