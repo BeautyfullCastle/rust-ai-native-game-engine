@@ -69,3 +69,13 @@ pub mod project_create;
     any(feature = "project-create", all(feature = "project-export", target_arch = "x86_64"))
 ))]
 mod project_publish;
+
+#[cfg(feature = "collect-dodge")]
+pub mod collect_project;
+#[cfg(feature = "collect-dodge")]
+pub use orr_games::collect_dodge_game as collect_game;
+
+#[cfg(feature = "collect-dodge")]
+pub mod collect_view;
+#[cfg(feature = "collect-dodge")]
+pub mod collect_app;

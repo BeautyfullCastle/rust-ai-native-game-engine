@@ -12,6 +12,8 @@ pub use orr_sample::editor_view::Drawable;
 pub enum EditorGame {
     PhysGame,
     Arena,
+    #[cfg(feature = "collect-dodge")]
+    CollectDodge,
     Yard3D,
     #[cfg(feature = "terrain-physics")]
     TerrainYard3D,
@@ -25,6 +27,8 @@ impl EditorGame {
         match name {
             "physics" => Ok(Self::PhysGame),
             "arena" => Ok(Self::Arena),
+            #[cfg(feature = "collect-dodge")]
+            "collect-dodge-v1" => Ok(Self::CollectDodge),
             "yard3d" => Ok(Self::Yard3D),
             #[cfg(feature = "terrain-physics")]
             "terrain-yard3d" => Ok(Self::TerrainYard3D),
@@ -39,6 +43,8 @@ impl EditorGame {
         match name {
             "PhysGame" => Ok(Self::PhysGame),
             "Arena" => Ok(Self::Arena),
+            #[cfg(feature = "collect-dodge")]
+            "CollectDodgeV1" => Ok(Self::CollectDodge),
             "Yard3D" => Ok(Self::Yard3D),
             #[cfg(feature = "terrain-physics")]
             "TerrainYard3D" => Ok(Self::TerrainYard3D),
@@ -49,9 +55,15 @@ impl EditorGame {
     }
 
     pub fn name(self) -> &'static str {
-        match self { Self::PhysGame => "PhysGame", Self::Arena => "Arena", Self::Yard3D => "Yard3D", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "TerrainYard3D", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationYard3D" }
+        match self { Self::PhysGame => "PhysGame", Self::Arena => "Arena", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1", Self::Yard3D => "Yard3D", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "TerrainYard3D", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationYard3D" }
     }
 
+    pub fn is_collect(self) -> bool {
+        #[cfg(feature = "collect-dodge")] { self == Self::CollectDodge }
+        #[cfg(not(feature = "collect-dodge"))] { false }
+    }
+    pub fn has_keyboard(self) -> bool { self == Self::Arena || self.is_collect() }
+    pub fn position_field(self) -> &'static str { if self.is_collect() { "position" } else { "pos" } }
     pub fn is_3d(self) -> bool {
         self == Self::Yard3D || self.is_terrain() || self.is_navigation()
     }
@@ -79,6 +91,8 @@ impl EditorGame {
         match self {
             Self::PhysGame => orr_sample::physics_game::register_reflect(&mut types),
             Self::Arena => orr_sample::arena_game::register_reflect(&mut types),
+            #[cfg(feature = "collect-dodge")]
+            Self::CollectDodge => orr_sample::collect_game::register_reflect(&mut types),
             Self::Yard3D => orr_sample::yard3d_game::register_reflect(&mut types),
             #[cfg(feature = "terrain-physics")]
             Self::TerrainYard3D => return orr_remote::terrain_yard3d::terrain_yard3d_types(),
@@ -92,6 +106,8 @@ impl EditorGame {
         match self {
             Self::PhysGame => orr_sample::physics_view::body_views(frame),
             Self::Arena => orr_sample::arena_view::editor_drawables(frame),
+            #[cfg(feature = "collect-dodge")]
+            Self::CollectDodge => orr_sample::collect_view::editor_drawables(frame),
             Self::Yard3D => Vec::new(),
             #[cfg(feature = "terrain-physics")]
             Self::TerrainYard3D => Vec::new(),
@@ -101,7 +117,7 @@ impl EditorGame {
     }
 
     pub fn position_component(self) -> &'static str {
-        match self { Self::PhysGame => "orr_physics::Body", Self::Arena => "Position", Self::Yard3D => "orr_physics3d::Body", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "orr_physics3d::Body", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationAgent" }
+        match self { Self::PhysGame => "orr_physics::Body", Self::Arena => "Position", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1::Actor", Self::Yard3D => "orr_physics3d::Body", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "orr_physics3d::Body", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationAgent" }
     }
 
     /// Default scene for a locally started game, preferring the current
@@ -110,6 +126,8 @@ impl EditorGame {
         let filename = match self {
             Self::PhysGame => "physics_demo.scene.yaml",
             Self::Arena => "arena_blank.scene.yaml",
+            #[cfg(feature = "collect-dodge")]
+            Self::CollectDodge => "collect_dodge_v1.scene.yaml",
             Self::Yard3D => "yard3d_authoring.scene.yaml",
             #[cfg(feature = "terrain-physics")]
             Self::TerrainYard3D => "terrain_sphere.scene.yaml",
@@ -128,6 +146,8 @@ impl EditorGame {
 pub enum EditorStream {
     Phys(RemoteBridge<PhysGame>),
     Arena(RemoteBridge<Arena>),
+    #[cfg(feature = "collect-dodge")]
+    CollectDodge(RemoteBridge<orr_sample::collect_game::CollectDodgeV1>),
     Yard3D(RemoteBridge<orr_sample::yard3d_game::Yard3D>),
     #[cfg(feature = "terrain-physics")]
     TerrainYard3D(RemoteBridge<orr_remote::terrain_yard3d::TerrainYard3D>),
@@ -140,6 +160,8 @@ impl EditorStream {
         match game {
             EditorGame::PhysGame => RemoteBridge::connect(cfg).map(Self::Phys),
             EditorGame::Arena => RemoteBridge::connect(cfg).map(Self::Arena),
+            #[cfg(feature = "collect-dodge")]
+            EditorGame::CollectDodge => RemoteBridge::connect(cfg).map(Self::CollectDodge),
             EditorGame::Yard3D => RemoteBridge::connect(cfg).map(Self::Yard3D),
             #[cfg(feature = "terrain-physics")]
             EditorGame::TerrainYard3D => RemoteBridge::connect(cfg).map(Self::TerrainYard3D),
@@ -152,6 +174,8 @@ impl EditorStream {
         match game {
             EditorGame::PhysGame => RemoteBridge::connect_transport(transport, cfg).map(Self::Phys),
             EditorGame::Arena => RemoteBridge::connect_transport(transport, cfg).map(Self::Arena),
+            #[cfg(feature = "collect-dodge")]
+            EditorGame::CollectDodge => RemoteBridge::connect_transport(transport, cfg).map(Self::CollectDodge),
             EditorGame::Yard3D => RemoteBridge::connect_transport(transport, cfg).map(Self::Yard3D),
             #[cfg(feature = "terrain-physics")]
             EditorGame::TerrainYard3D => RemoteBridge::connect_transport(transport, cfg).map(Self::TerrainYard3D),
@@ -161,29 +185,29 @@ impl EditorStream {
     }
 
     pub fn poll_view(&mut self) -> ViewUpdate<()> {
-        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => normalize(s.poll_view()) }
+        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => normalize(s.poll_view()) }
     }
 
     #[cfg(test)]
     pub fn snapshot(&self) -> Option<orr_bridge::Snapshot> {
-        match self { Self::Phys(s) => s.snapshot(), Self::Arena(s) => s.snapshot(), Self::Yard3D(s) => s.snapshot(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.snapshot(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.snapshot() }
+        match self { Self::Phys(s) => s.snapshot(), Self::Arena(s) => s.snapshot(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.snapshot(), Self::Yard3D(s) => s.snapshot(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.snapshot(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.snapshot() }
     }
 
     #[cfg(test)]
     pub fn request(&self, method: &str, params: serde_json::Value) -> Result<(), orr_bridge::BridgeError> {
-        match self { Self::Phys(s) => s.request(method, params), Self::Arena(s) => s.request(method, params), Self::Yard3D(s) => s.request(method, params), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.request(method, params), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.request(method, params) }
+        match self { Self::Phys(s) => s.request(method, params), Self::Arena(s) => s.request(method, params), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.request(method, params), Self::Yard3D(s) => s.request(method, params), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.request(method, params), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.request(method, params) }
     }
 
     pub fn take_errors(&self) -> Vec<RpcError> {
-        match self { Self::Phys(s) => s.take_errors(), Self::Arena(s) => s.take_errors(), Self::Yard3D(s) => s.take_errors(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.take_errors(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.take_errors() }
+        match self { Self::Phys(s) => s.take_errors(), Self::Arena(s) => s.take_errors(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.take_errors(), Self::Yard3D(s) => s.take_errors(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.take_errors(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.take_errors() }
     }
 
     pub fn is_alive(&self) -> bool {
-        match self { Self::Phys(s) => s.is_alive(), Self::Arena(s) => s.is_alive(), Self::Yard3D(s) => s.is_alive(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.is_alive(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.is_alive() }
+        match self { Self::Phys(s) => s.is_alive(), Self::Arena(s) => s.is_alive(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.is_alive(), Self::Yard3D(s) => s.is_alive(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.is_alive(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.is_alive() }
     }
 
     pub fn view_delivery(&self) -> RemoteViewDelivery {
-        match self { Self::Phys(s) => s.view_delivery(), Self::Arena(s) => s.view_delivery(), Self::Yard3D(s) => s.view_delivery(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.view_delivery(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.view_delivery() }
+        match self { Self::Phys(s) => s.view_delivery(), Self::Arena(s) => s.view_delivery(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.view_delivery(), Self::Yard3D(s) => s.view_delivery(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.view_delivery(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.view_delivery() }
     }
 }
 

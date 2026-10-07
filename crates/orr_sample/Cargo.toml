@@ -11,6 +11,7 @@ default-run = "arena"
 workspace = true
 
 [features]
+collect-dodge = ["project", "orr_games/collect-dodge"]
 default = []
 # Optional Linux player preferences; no simulation or default dependencies.
 player-settings = ["project", "game-ui", "dep:tempfile", "dep:rustix"]
@@ -105,4 +106,16 @@ name = "physics3d"
 path = "src/bin/physics3d.rs"
 # No unit tests here; keep the normal binary build, skip its empty test harness.
 # Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
+
+[[bin]]
+name = "collect_dodge"
+path = "src/bin/collect_dodge.rs"
+required-features = ["collect-dodge"]
+test = false
+
+[[bin]]
+name = "orr_export_collect"
+path = "src/bin/orr_export_collect.rs"
+required-features = ["collect-dodge", "project-export"]
 test = false

@@ -296,7 +296,8 @@ impl Editor {
         let mut feed = Feed::default();
         feed.own.clone_from(&backend.own_client);
         let types = Arc::new(backend.game.types());
-        let input = input::Input::new(backend.managed_input);
+        let mut input = input::Input::new(backend.managed_input);
+        input.collect_dodge = backend.game.is_collect();
         let mut e = Self {
             input,
             backend,
@@ -850,6 +851,12 @@ impl Editor {
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
         if self.game().is_3d() { self.camera3d = orr_render::OrbitCamera::new([0.0,2.0,0.0],0.55,0.5,16.0); return; }
+        if self.game().is_collect() {
+            let mut low = [f32::INFINITY; 2]; let mut high = [f32::NEG_INFINITY; 2];
+            for body in &self.bodies { for axis in 0..2 { let radius = body.outline.extent(); low[axis] = low[axis].min(body.pos[axis] - radius); high[axis] = high[axis].max(body.pos[axis] + radius); } }
+            self.camera = if self.bodies.is_empty() { Camera::new([0.0, 0.0], 270.0) } else { Camera::new([(low[0]+high[0])*0.5,(low[1]+high[1])*0.5],((high[0]-low[0]).max(high[1]-low[1])*0.6).max(40.0)) };
+            return;
+        }
         if self.game() == EditorGame::Arena {
             let half = orr_view::fp_to_f32(orr_sample::arena_game::ARENA_HALF);
             self.camera = Camera::new([0.0, 0.0], half * 1.06);
@@ -1318,7 +1325,7 @@ impl Editor {
         }
         if self.initial_camera_fit {
             self.initial_camera_fit = false;
-            if self.game() == EditorGame::Arena { self.fit_camera(); }
+            if self.game().has_keyboard() { self.fit_camera(); }
         }
     }
 
@@ -1612,7 +1619,7 @@ impl Editor {
         let component = self.game().position_component();
         let mut patches = Vec::with_capacity(guids.len());
         for guid in &guids {
-            let position = match self.field_of(&Target::Guid(guid.clone()), component, "pos") {
+            let position = match self.field_of(&Target::Guid(guid.clone()), component, self.game().position_field()) {
                 Ok(Value::Vec2(position)) => position,
                 Ok(_) => { self.error("selected position is not a two-dimensional fixed-point value"); return false; }
                 Err(error) => { self.error(error); return false; }
@@ -1623,7 +1630,7 @@ impl Editor {
             patches.push(json!({"guid":guid.to_string(), "value":value_to_json(&Value::Vec2(FPVec2::new(FP::from_raw(x), FP::from_raw(y))))}));
         }
         let params = json!({"label":"move selected entities", "expected_checksum":format!("0x{expected_checksum:016x}"),
-            "component":component, "path":"pos", "patches":patches});
+            "component":component, "path":self.game().position_field(), "patches":patches});
         if match serde_json::to_vec(&params) { Ok(bytes) => bytes.len() > 64 * 1024, Err(_) => true } {
             self.error("selection move exceeds the 64 KiB request limit"); return false;
         }

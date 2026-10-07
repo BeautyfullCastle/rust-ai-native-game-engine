@@ -531,7 +531,7 @@ fn validate_target(scene: &Scene, guid: &str, role: &str) -> Result<(), String> 
     Ok(())
 }
 
-fn entry_file(root: &Path, relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn entry_file(root: &Path, relative: &str) -> Result<PathBuf, String> {
     if relative.split('/').any(|part| part == "." || part == "..") {
         return Err("project entry paths must be root-relative without traversal".into());
     }
@@ -589,7 +589,7 @@ fn resolve_inside(
     Ok(canonical)
 }
 
-fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     // Do not open a FIFO/device merely to inspect its descriptor afterward.
     let before = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if before.file_type().is_symlink() || !before.is_file() || before.len() > limit {

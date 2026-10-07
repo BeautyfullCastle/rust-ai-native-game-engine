@@ -3,7 +3,7 @@
 This default-off `orr_games/collect-dodge` module implements a real deterministic
 `Game`, not an Arena tag or presentation-side score. It adds no dependency, core
 API, Arena component, network protocol, package schema, asset or filesystem call.
-The existing package manager does not yet install this game as an authored project.
+The core itself has no project loader. The optional [authored adapter](collect-dodge-authored.md) adds a separate validated project route.
 
 ## Rules and limits
 
@@ -32,7 +32,7 @@ The existing package manager does not yet install this game as an authored proje
 
 ## Admission boundary
 
-`CollectLevel::new` is the only supported level constructor in this increment.
+`CollectLevel::new` is the core level constructor. The optional authored adapter admits initial-only scene data through the same bounds.
 Calling `Simulation::from_frame` on bytes previously emitted from a valid run is
 supported and tested, including a fresh registry and replay after reset. Raw
 engine `frame_mut`, edited frame bytes or arbitrary scene baking are not game
@@ -40,9 +40,10 @@ admission APIs. Future project/editor adapters must validate actor cardinality,
 kind/ordinal uniqueness, bounds, motion, canonical reserved fields and run-state
 invariants before admitting such data. Engine layout decoding alone cannot do it.
 
-No persisted high score, stable project/save identity, game build ID, arbitrary
-script loading, authored renderer, UI win/loss panel, editor scene adapter,
-project generator template or exported runtime selection is introduced here.
+The core introduces no persisted high score, stable project/save identity, arbitrary
+script loading, authored renderer, UI win/loss panel, project generator template
+or exported runtime selection. The authored adapter separately defines a
+versioned game profile/build identity and initial-scene admission.
 Those are dependent slices, not implied by this game module. Full #94 acceptance
 still requires the actual authored 2D game flow and persistence/export proof.
 

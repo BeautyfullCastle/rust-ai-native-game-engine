@@ -8,6 +8,7 @@
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Frame};
 use orr_fp::{FPVec2, FP};
+use orr_reflect::{Reflect, TypeRegistry};
 use orr_sim::{decode_pod, encode_pod, Game, PlayerSlot, SimCommand, SimContext, System};
 
 pub const MAX_COLLECTIBLES: usize = 32;
@@ -27,12 +28,16 @@ pub const EVENT_FINISHED: u32 = 2;
 pub const EVENT_RESTARTED: u32 = 3;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable, Reflect)]
 pub struct CollectInput {
     /// Clamped to [-1,1] per axis. Diagonal speed is intentionally per-axis.
+    #[reflect(range = "-1..=1")]
     pub x: FP,
+    #[reflect(range = "-1..=1")]
     pub y: FP,
+    #[reflect(flags = "restart=1")]
     pub buttons: u32,
+    #[reflect(skip)]
     pub reserved: u32,
 }
 
@@ -65,26 +70,35 @@ pub struct CollectEvent {
 /// A never-despawned level actor. Ordinals and initial state survive rollback
 /// and restart; inactive collectibles remain available to the view as hidden.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
 pub struct CollectActor {
     pub position: FPVec2,
+    #[reflect(skip)]
     pub initial_position: FPVec2,
     pub velocity: FPVec2,
+    #[reflect(skip)]
     pub initial_velocity: FPVec2,
     pub kind: u32,
     pub ordinal: u32,
+    #[reflect(skip)]
     pub active: u32,
+    #[reflect(skip)]
     pub reserved: u32,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
 pub struct CollectRun {
+    #[reflect(skip)]
     pub phase: u32,
+    #[reflect(skip)]
     pub score: u32,
+    #[reflect(skip)]
     pub elapsed_ticks: u32,
     pub time_limit_ticks: u32,
+    #[reflect(skip)]
     pub goal: u32,
+    #[reflect(skip)]
     pub restart_held: u32,
 }
 
@@ -310,4 +324,10 @@ fn bounce(position: &mut FP, velocity: &mut FP, bound: FP) {
     } else {
         *position = next;
     }
+}
+
+/// Initial-only authoring descriptors; hosts must run validated admission after baking.
+pub fn register_reflect(types: &mut TypeRegistry) {
+    types.register_component::<CollectActor>("CollectDodgeV1::Actor");
+    types.register_singleton::<CollectRun>("CollectDodgeV1::Run");
 }

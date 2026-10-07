@@ -22,6 +22,10 @@ use crate::scene_ops::{self, Effect, Refs};
 /// mutable simulation authority outside that frame. Failure discards the
 /// candidate and preserves the live document and preview.
 pub trait BakeAdmission: Send + Sync {
+    /// Validate raw source text before parsing or preserving it for a future save.
+    /// The default preserves existing host admission behavior.
+    fn admit_source(&self, _text: &str) -> Result<(), EditError> { Ok(()) }
+
     /// Admit and validate the fully baked candidate before publication.
     fn admit(&self, scene: &Scene, frame: &mut Frame, index: &SceneIndex) -> Result<(), EditError>;
 
@@ -150,6 +154,7 @@ impl EditorDoc {
         seed: u64,
         admission: Option<Arc<dyn BakeAdmission>>,
     ) -> Result<Self, EditError> {
+        if let Some(policy) = admission.as_deref() { policy.admit_source(text)?; }
         let scene = Scene::parse(text, &types)?;
         let mut doc =
             Self::from_scene_with_admission(scene, types, frame_registry, seed, admission)?;
@@ -202,6 +207,7 @@ impl EditorDoc {
         if self.tx.is_some() {
             return Err(EditError::TxOpen);
         }
+        if let Some(policy) = self.admission.as_deref() { policy.admit_source(text)?; }
         let scene = canonicalize(Scene::parse(text, &self.types)?, &self.types)?;
         let (frame, index) = bake(
             &scene,

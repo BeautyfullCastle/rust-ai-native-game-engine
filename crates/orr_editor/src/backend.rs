@@ -56,6 +56,14 @@ pub enum HostSpec {
         listen: Option<ServerConfig>,
         debug_hooks: bool,
     },
+    /// Initial CollectDodge project bytes already admitted before host startup.
+    #[cfg(feature = "collect-dodge")]
+    PreparedCollect {
+        scene: PathBuf,
+        text: String,
+        listen: Option<ServerConfig>,
+        debug_hooks: bool,
+    },
     /// A host in another process.
     Remote {
         /// `ws://host:port` of its ERP server.
@@ -82,6 +90,8 @@ impl HostSpec {
             HostSpec::Local { listen: current, .. } | HostSpec::LocalGame { listen: current, .. } => *current = Some(listen),
             #[cfg(feature = "sprites")]
             HostSpec::PreparedArena { listen: current, .. } => *current = Some(listen),
+            #[cfg(feature = "collect-dodge")]
+            HostSpec::PreparedCollect { listen: current, .. } => *current = Some(listen),
             HostSpec::Remote { .. } => {}
         }
         self
@@ -105,6 +115,10 @@ impl HostSpec {
                     debug_hooks: *debug_hooks,
                 };
                 true
+            }
+            #[cfg(feature = "collect-dodge")]
+            HostSpec::PreparedCollect { listen, debug_hooks, .. } => {
+                *self = HostSpec::LocalGame { scene:path,game:EditorGame::CollectDodge,listen:listen.clone(),debug_hooks:*debug_hooks }; true
             }
             HostSpec::Remote { .. } => false,
         }
@@ -183,6 +197,11 @@ impl Backend {
                 };
                 Self::connect_local(&restart, scene.path(), scene.text().to_string(), EditorGame::Arena, listen, *debug_hooks)
             }
+            #[cfg(feature = "collect-dodge")]
+            HostSpec::PreparedCollect { scene, text, listen, debug_hooks } => {
+                let restart = HostSpec::LocalGame { scene:scene.clone(),game:EditorGame::CollectDodge,listen:listen.clone(),debug_hooks:*debug_hooks };
+                Self::connect_local(&restart,scene,text.clone(),EditorGame::CollectDodge,listen,*debug_hooks)
+            }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());
                 let mut erp = match token {
@@ -228,6 +247,8 @@ impl Backend {
         let host = match selected_game {
             EditorGame::PhysGame => spawn_phys_host(text, Some(scene.to_path_buf()), cfg)?,
             EditorGame::Arena => spawn_arena_host(text, Some(scene.to_path_buf()), cfg)?,
+            #[cfg(feature = "collect-dodge")]
+            EditorGame::CollectDodge => orr_remote::collect_dodge::spawn_host(text, Some(scene.to_path_buf()), cfg)?,
             EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.to_path_buf(), cfg)?,
             #[cfg(feature = "terrain-physics")]
             EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.to_path_buf(), cfg)?,
@@ -255,6 +276,8 @@ impl Backend {
     pub fn frame_stream(&self, source: &str) -> Result<EditorStream, String> {
         let mut rc = match &self.spec {
             HostSpec::Local { .. } | HostSpec::LocalGame { .. } => RemoteConfig::new(""),
+            #[cfg(feature = "collect-dodge")]
+            HostSpec::PreparedCollect { .. } => RemoteConfig::new(""),
             #[cfg(feature = "sprites")]
             HostSpec::PreparedArena { .. } => RemoteConfig::new(""),
             HostSpec::Remote { url, token } => {
@@ -313,14 +336,20 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         return Err(format!("{name} reflected schema mismatch: host descriptors differ from this editor"));
     }
     let own_client = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
-    let input = if game == EditorGame::Arena { erp.call("registry.input", J::Null).ok() } else { None };
+    let input = if game.has_keyboard() { erp.call("registry.input", J::Null).ok() } else { None };
     let mut input_types = orr_reflect::TypeRegistry::new();
     input_types.register_component::<orr_sample::arena_game::ArenaInput>("ArenaInput");
     let expected_input: J = serde_json::from_str(&input_types.type_json_schema("ArenaInput").expect("registered input")).expect("valid reflected schema");
-    let managed_input = game == EditorGame::Arena && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
+    #[cfg(feature = "collect-dodge")]
+    let expected_input = if game.is_collect() {
+        let mut types = orr_reflect::TypeRegistry::new();
+        types.register_component::<orr_sample::collect_game::CollectInput>("CollectInput");
+        serde_json::from_str(&types.type_json_schema("CollectInput").expect("registered input")).expect("reflected JSON schema")
+    } else { expected_input };
+    let managed_input = game.has_keyboard() && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
     Ok((game, RemoteIdentity { game: name.to_string(), build_id, schema }, own_client, managed_input))
 }
 
 fn delivery(game: EditorGame, local: bool) -> ViewDeliveryMode {
-    if local || (game == EditorGame::Arena || game.is_3d()) { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced }
+    if local || (game.has_keyboard() || game.is_3d()) { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced }
 }

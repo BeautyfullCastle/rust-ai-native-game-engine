@@ -1,6 +1,6 @@
 //! Read-only export closure admission. This detects ordinary source changes;
 //! it is not a sandbox against a hostile process replacing paths concurrently.
-use crate::{project_runtime::PreparedRuntime, project_sprites::Document};
+use crate::project_sprites::Document;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -152,7 +152,8 @@ pub(super) struct ProjectSnapshot {
 }
 
 impl ProjectSnapshot {
-    pub fn open(root: &Path) -> Result<Self, String> {
+    pub fn open(root: &Path) -> Result<Self, String> { Self::open_profile(root, super::Profile::Arena) }
+    pub fn open_profile(root: &Path, profile: super::Profile) -> Result<Self, String> {
         let root = check_path(root, true)?;
         // Pin exact bytes before any existing validator opens either authority.
         let mut manifest_file = SnapshotFile::read(
@@ -174,7 +175,7 @@ impl ProjectSnapshot {
             file.role = "package_lock";
         }
         let absent_lock = lock_file.is_none();
-        let project = orr_package::Project::open(&root, crate::project_runtime::compiled_runtime())
+        let project = orr_package::Project::open(&root, profile.runtime())
             .map_err(|e| format!("export project: {e}"))?;
         let manifest = project
             .manifest()
@@ -237,10 +238,9 @@ impl ProjectSnapshot {
         if verified != lock {
             return Err("package lock changed during export verification".into());
         }
-        let prepared = PreparedRuntime::open(&root)?;
-        let initial_checksum = prepared.initial_frame().checksum();
-        let admitted = prepared.project();
-        if admitted.root() != root {
+        let prepared = super::Prepared::open(&root, profile)?;
+        let initial_checksum = prepared.checksum();
+        if prepared.root() != root {
             return Err("project root changed during export admission".into());
         }
         let mut files = vec![manifest_file];
@@ -250,13 +250,13 @@ impl ProjectSnapshot {
         let mut scene =
             SnapshotFile::read(&root.join(&entry.scene), &entry.scene, MAX_SCENE_BYTES)?;
         scene.role = "scene";
-        if scene.source != admitted.scene().path()
-            || scene.bytes != admitted.scene().text().as_bytes()
+        if scene.source != prepared.scene_path()
+            || scene.bytes != prepared.scene_text().as_bytes()
         {
             return Err("entry scene changed after runtime admission".into());
         }
         files.push(scene);
-        match (&entry.sprites, admitted.sprites()) {
+        match (&entry.sprites, prepared.sprites()) {
             (Some(path), Some(sprites)) => {
                 let mut file = SnapshotFile::read(&root.join(path), path, MAX_JSON_BYTES)?;
                 file.role = "sprite_sidecar";
