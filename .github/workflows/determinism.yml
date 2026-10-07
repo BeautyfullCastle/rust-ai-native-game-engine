@@ -399,7 +399,13 @@ jobs:
           key: android-ndk-${{ env.ORR_ANDROID_NDK_VERSION }}
 
       - name: Install qemu-user
-        run: sudo apt-get update -q && sudo apt-get install -y -q qemu-user
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt_options=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2)
+          sudo apt-get "${apt_options[@]}" update -q
+          sudo apt-get "${apt_options[@]}" install -y -q qemu-user
 
       - name: cargo build (sim crates + games) for aarch64-linux-android
         # Library builds need no linker, so this also works without an NDK.

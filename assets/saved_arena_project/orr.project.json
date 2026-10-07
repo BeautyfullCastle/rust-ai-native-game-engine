@@ -1,0 +1,9 @@
+{
+  "schema": 2,
+  "engine": "^0.0.1",
+  "entry": {
+    "game": "arena",
+    "scene": "arena.scene.yaml",
+    "sprites": "arena.sprites.json"
+  }
+}

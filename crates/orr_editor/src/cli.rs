@@ -9,6 +9,7 @@ pub const USAGE: &str = "\
 orr_editor [--game physics|arena|yard3d|terrain-yard3d|navigation-yard3d] [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
            [--screenshot <out.png> [--frames <n>] [--screenshot-settle]] [--size <WxH>]
            [--erp <addr>] [--erp-token <name:token:caps>]... [--erp-dev]
+orr_editor --project <directory> [--select <name>] [--play-ticks <n>] [--erp <addr>] [screenshot flags]
 orr_editor --connect <ws://host:port> [--token <t>] [same flags, but --scene/--erp]
 
 The editor is a view. The simulation and the scene document live in a
@@ -17,6 +18,9 @@ connected in-process; with --connect, an `orr_remote_host` (or another
 editor's ERP) that is already running.
 
   --scene <file>        scene to open (default scene depends on --game)
+  --project <dir>       open a saved Arena project, including its optional sprites
+                        (requires the sprites feature); cannot be combined with
+                        --scene, --game, --connect or --script
   --game <name>         local game: physics (default), arena, yard3d or terrain-yard3d (terrain-physics feature) or navigation-yard3d (navigation feature); cannot be used with --connect
   --connect <url>       attach to a running host instead of starting one: the
                         editor then shows and edits THAT host's scene and play
@@ -44,6 +48,8 @@ editor's ERP) that is already running.
 /// Parsed flags.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Args {
+    /// `--project`: an explicitly saved project, with no default-path fallback.
+    pub project: Option<PathBuf>,
     /// Optional local game selection. `None` preserves the PhysGame default.
     pub game: Option<EditorGame>,
     /// `--scene`.
@@ -76,7 +82,7 @@ pub struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Self { game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
+        Self { project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -89,6 +95,12 @@ impl Args {
         while let Some(a) = it.next() {
             let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value\n\n{USAGE}"));
             match a.as_str() {
+                "--project" => {
+                    if out.project.is_some() {
+                        return Err("--project may only be supplied once".into());
+                    }
+                    out.project = Some(PathBuf::from(value("--project")?));
+                }
                 "--game" => out.game = Some(EditorGame::from_local_name(&value("--game")?)?),
                 "--scene" => out.scene = Some(PathBuf::from(value("--scene")?)),
                 "--select" => out.select = Some(value("--select")?),
@@ -109,6 +121,14 @@ impl Args {
                 "--token" => out.token = Some(value("--token")?),
                 "-h" | "--help" => return Err(USAGE.to_string()),
                 other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
+            }
+        }
+        if out.project.is_some() {
+            if out.scene.is_some() || out.game.is_some() || out.connect.is_some() || out.script.is_some() {
+                return Err("--project cannot be combined with --scene, --game, --connect or --script".into());
+            }
+            if !cfg!(feature = "sprites") {
+                return Err("--project requires an editor built with the sprites feature".into());
             }
         }
         if out.connect.is_some() && (out.scene.is_some() || out.erp.is_some()) {
@@ -159,6 +179,29 @@ mod tests {
     fn parses_connect() {
         let a = parse("--connect ws://127.0.0.1:7790 --token s3 --screenshot /tmp/a.png").unwrap();
         assert_eq!((a.connect.as_deref(), a.token.as_deref()), (Some("ws://127.0.0.1:7790"), Some("s3")));
+    }
+
+    #[test]
+    fn saved_project_flags_have_one_explicit_authority() {
+        for flags in [
+            "--project", "--project a --project b",
+            "--project a --scene a.yaml", "--scene a.yaml --project a",
+            "--project a --game arena", "--game arena --project a",
+            "--project a --connect ws://127.0.0.1:7790",
+            "--project a --script commands.txt", "--script commands.txt --project a",
+        ] {
+            assert!(parse(flags).is_err(), "must reject {flags}");
+        }
+        #[cfg(feature = "sprites")]
+        {
+            let args = parse("--project game --select hero --play-ticks 12 --screenshot out.png --erp 127.0.0.1:0 --erp-dev").unwrap();
+            assert_eq!(args.project, Some(PathBuf::from("game")));
+            assert_eq!(args.play_ticks, Some(12));
+            assert_eq!(args.game, None);
+            assert_eq!(args.scene, None);
+        }
+        #[cfg(not(feature = "sprites"))]
+        assert!(parse("--project game").unwrap_err().contains("sprites feature"));
     }
 
     #[test]

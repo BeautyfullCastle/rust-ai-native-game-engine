@@ -93,6 +93,8 @@ impl ModelPanel {
                 let local_path = match editor.spec() {
                     crate::backend::HostSpec::Local { scene, .. }
                     | crate::backend::HostSpec::LocalGame { scene, .. } => scene,
+                    #[cfg(feature = "sprites")]
+                    crate::backend::HostSpec::PreparedArena { scene, .. } => &scene.path,
                     crate::backend::HostSpec::Remote { .. } => return false,
                 };
                 if !local_path
@@ -123,6 +125,8 @@ impl ModelPanel {
         let expected = match editor.spec() {
             crate::backend::HostSpec::Local { scene, .. }
             | crate::backend::HostSpec::LocalGame { scene, .. } => scene,
+            #[cfg(feature = "sprites")]
+            crate::backend::HostSpec::PreparedArena { scene, .. } => &scene.path,
             crate::backend::HostSpec::Remote { .. } => {
                 return Err("Remote scene paths are not local authority".into())
             }

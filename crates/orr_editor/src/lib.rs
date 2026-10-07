@@ -69,6 +69,8 @@ pub mod sprite_bindings;
 pub mod sprite_panel;
 #[cfg(feature = "sprites")]
 pub mod sprite_playback;
+#[cfg(feature = "sprites")]
+pub mod project;
 
 #[cfg(feature = "animated-models")]
 pub mod animated_bindings;

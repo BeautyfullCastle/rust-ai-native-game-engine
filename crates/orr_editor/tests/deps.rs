@@ -135,3 +135,19 @@ fn navigation_is_optional_and_independent_of_terrain_physics() {
         assert!(!["orr_bridge", "orr_sim", "orr_session", "orr_physics3d", "orr_render", "orr_remote"].contains(&dep.as_str()), "runtime dependency boundary: {dep}");
     }
 }
+
+#[test]
+fn saved_projects_reuse_optional_sprite_packages_without_new_core_dependencies() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(manifest.contains("default = []"));
+    assert!(manifest.contains("sprites = [\"dep:orr_sprite\", \"dep:orr_package\", \"dep:serde\", \"dep:tempfile\"]"));
+    for name in ["orr_sprite", "orr_package"] {
+        let line = manifest.lines().find(|line| line.starts_with(&format!("{name} ="))).unwrap();
+        assert!(line.contains("optional = true"), "{name} must remain optional");
+    }
+    let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(library.contains("#[cfg(feature = \"sprites\")]\npub mod project;"));
+    let package = std::fs::read_to_string(root.join("../orr_package/Cargo.toml")).unwrap();
+    assert!(dependencies(&package).iter().all(|dependency| !dependency.starts_with("orr_")), "package metadata must stay independent of engine, simulation and renderer crates");
+}
