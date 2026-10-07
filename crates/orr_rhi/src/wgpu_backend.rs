@@ -432,6 +432,10 @@ impl Rhi for Wgpu {
         self.queue.write_buffer(buffer, offset, data);
     }
 
+    fn texture_view_formats_supported(&self) -> bool {
+        self.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS)
+    }
+
     fn create_texture(&self, desc: &TextureDesc) -> wgpu::Texture {
         let view_formats: Vec<wgpu::TextureFormat> = desc.view_formats.iter().map(|&f| to_wgpu_format(f)).collect();
         self.device.create_texture(&wgpu::TextureDescriptor {
@@ -444,6 +448,17 @@ impl Rhi for Wgpu {
             usage: texture_usages(desc.usage),
             view_formats: &view_formats,
         })
+    }
+
+    fn copy_texture(&self, source: &wgpu::Texture, destination: &wgpu::Texture) {
+        assert_eq!(source.size(), destination.size(), "whole-texture copy requires equal extents");
+        let mut encoder = self.create_encoder("offscreen sample copy");
+        encoder.copy_texture_to_texture(
+            source.as_image_copy(),
+            destination.as_image_copy(),
+            source.size(),
+        );
+        self.submit(encoder);
     }
 
     fn write_texture_rgba8(
