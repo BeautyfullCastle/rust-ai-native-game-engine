@@ -1,4 +1,4 @@
-//! Optional, authored/imported diffuse irradiance. No baking or reflections.
+//! Optional diffuse irradiance. Bounded CPU baking lives in `irradiance_bake`.
 //!
 //! SH9 stores RGB **irradiance** coefficients, already cosine-convolved, in the
 //! positive real basis of Ramamoorthi–Hanrahan (2001), equation 3:
@@ -29,12 +29,14 @@ pub const MAX_COEFFICIENT: f32 = 1.0e4;
 pub const Y00: f32 = 0.282_094_8;
 pub type Sh9 = [[f32; 3]; SH_COEFFICIENTS];
 
-/// Describes authoring provenance, never a claim of physically baked GI.
+/// Describes the source. `Baked` is bounded static sun-only diffuse transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IrradianceProvenance {
     Authored,
     Imported,
+    /// Single-bounce static sun bake; see the sidecar receipt for freshness.
+    Baked,
 }
 
 /// A bounded axis-aligned grid with uniform spacing along each axis.
@@ -517,7 +519,7 @@ mod tests {
         invalid["coefficients"] = serde_json::to_value(vec![grid().coefficients[0]; 65]).unwrap();
         assert!(IrradianceGrid::from_json(&serde_json::to_vec(&invalid).unwrap()).is_err());
         invalid = source;
-        invalid["provenance"] = serde_json::json!("baked");
+        invalid["provenance"] = serde_json::json!("unsupported_realtime_gi");
         assert!(IrradianceGrid::from_json(&serde_json::to_vec(&invalid).unwrap()).is_err());
     }
 

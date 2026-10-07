@@ -593,7 +593,7 @@ impl EditorApp {
         #[cfg(feature="models")]
         self.models.show(ui,&self.editor);
         #[cfg(feature="irradiance-probes")]
-        self.irradiance.show(ui,&self.editor);
+        self.irradiance.show_with_models(ui,&self.editor,&self.models);
         #[cfg(feature = "sprites")]
         self.sprites.show(ui, &self.editor);
         #[cfg(feature = "animated-models")]
@@ -726,7 +726,13 @@ impl EditorApp {
 
     fn yard_viewport(&mut self,ui:&mut Ui){
         #[cfg(feature="irradiance-probes")]
-        self.irradiance.sync_for_editor(&self.editor);
+        {
+            self.irradiance.sync_for_editor(&self.editor);
+            self.irradiance.sync_bake_for_editor(&self.editor,&self.models);
+            if self.irradiance.is_baking() || self.irradiance.is_validating_bake() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+            }
+        }
         let (rect,resp)=ui.allocate_exact_size(ui.available_size(),Sense::click_and_drag());
         let ppp=ui.ctx().pixels_per_point();
         let px=(((rect.width()*ppp).round() as u32).clamp(1,8192),((rect.height()*ppp).round() as u32).clamp(1,8192));
