@@ -1,6 +1,15 @@
 #![allow(dead_code)]
 use serde_json::{json, Value};
 use std::{fs, path::Path};
+/// Resolve only the trusted OS temp root before creating fixture content.
+/// Product validation still rejects symlinks in every supplied project ancestor.
+pub fn tempdir() -> tempfile::TempDir {
+    let root = std::env::temp_dir();
+    #[cfg(unix)]
+    let root = fs::canonicalize(root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
+}
+
 pub fn copy(source: &Path, dest: &Path) {
     fs::create_dir_all(dest).unwrap();
     for entry in fs::read_dir(source).unwrap() {

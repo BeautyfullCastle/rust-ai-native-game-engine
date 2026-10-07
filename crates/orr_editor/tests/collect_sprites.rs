@@ -43,7 +43,7 @@ fn settle(h: &mut Harness<'_, EditorApp>) {
 }
 #[test]
 fn collect_sprite_author_save_undo_reopen_and_tick_phase() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     common::fixture(dir.path());
     let p = open(dir.path());
     let checksum = p.scene().frame().checksum();
@@ -118,7 +118,7 @@ fn collect_sprite_author_save_undo_reopen_and_tick_phase() {
 #[test]
 #[ignore = "mandatory composed EditorApp installed-atlas framebuffer proof"]
 fn collect_sprite_actual_editor_pixels() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     common::fixture(dir.path());
     let p = open(dir.path());
     let e = editor(&p);

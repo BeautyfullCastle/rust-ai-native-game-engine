@@ -15,7 +15,7 @@ fn open(root: &std::path::Path) -> Result<PreparedProject, String> {
 }
 #[test]
 fn collect_sprite_admission_is_explicit_and_atomic() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     common::fixture(dir.path());
     assert!(PreparedProject::open(dir.path()).is_err());
     let p = open(dir.path()).unwrap();
@@ -49,7 +49,7 @@ fn collect_sprite_admission_is_explicit_and_atomic() {
 }
 #[test]
 fn actual_snapshot_clip_seek_collect_hide_restart_and_source_loss() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     common::fixture(dir.path());
     let project = open(dir.path()).unwrap();
     let initial = project.scene().frame().checksum();
@@ -112,7 +112,7 @@ fn actual_snapshot_clip_seek_collect_hide_restart_and_source_loss() {
 }
 #[test]
 fn collect_follow_hidden_target_holds_camera_and_locomotion_resets() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     common::fixture(dir.path());
     common::change(dir.path().join("view.json"), |v| {
         v["camera_follow"] = serde_json::json!("e_00000002");
@@ -156,7 +156,7 @@ fn collect_follow_hidden_target_holds_camera_and_locomotion_resets() {
 }
 #[test]
 fn rejects_other_scene_root_missing_camera_region_and_ui() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     common::fixture(dir.path());
     let view = fs::read(dir.path().join("view.json")).unwrap();
     for (field, value) in [
@@ -184,7 +184,7 @@ fn rejects_other_scene_root_missing_camera_region_and_ui() {
 fn collect_real_atlas_pixels_read_only_runtime() {
     use orr_render::orr_rhi::{TextureFormat, Wgpu, WgpuOptions};
     use orr_sample::project_compositor::ProjectCompositor;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     common::fixture(dir.path());
     let project = open(dir.path()).unwrap();
     let mut p = project.presentation();
@@ -261,7 +261,7 @@ fn collect_real_atlas_pixels_read_only_runtime() {
 
 #[test]
 fn unbound_collect_camera_retains_previous_auto_framing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tempdir();
     common::fixture(dir.path());
     common::change(dir.path().join("orr.project.json"), |v| {
         v["entry"].as_object_mut().unwrap().remove("sprites");

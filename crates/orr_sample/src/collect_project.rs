@@ -325,15 +325,15 @@ impl PreparedProject {
     }
 }
 
-#[cfg(all(test, feature = "collect-progress"))]
+#[cfg(all(test, feature = "collect-progress", target_os = "linux"))]
 #[path = "../tests/common/collect_sprites.rs"]
 mod sprite_test_fixture;
-#[cfg(all(test, feature = "collect-progress"))]
+#[cfg(all(test, feature = "collect-progress", target_os = "linux"))]
 mod sprite_identity_tests {
     use super::*;
     #[test]
     fn cosmetic_sprite_edits_preserve_explicit_progress_and_semantic_digest() {
-        let root = tempfile::tempdir().unwrap();
+        let root = sprite_test_fixture::tempdir();
         sprite_test_fixture::fixture(root.path());
         sprite_test_fixture::change(root.path().join("orr.project.json"), |v| {
             v["schema"] = 3.into();
