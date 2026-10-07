@@ -451,6 +451,10 @@ pub struct Renderer3D<B: Rhi> {
     shadow_globals: B::Buffer,
     main_bind: B::BindGroup,
     shadow_bind: B::BindGroup,
+    #[cfg(feature = "imported-scene")]
+    composed_shadow_bind: B::BindGroup,
+    #[cfg(feature = "imported-scene")]
+    composed_main_bind: Option<(u64, B::BindGroup)>,
     line_bind: B::BindGroup,
     _shadow_texture: B::Texture,
     shadow_view: B::TextureView,
@@ -610,6 +614,9 @@ impl<B: Rhi> Renderer3D<B> {
                 buffer: &shadow_globals,
             }],
         );
+        #[cfg(feature = "imported-scene")]
+        let composed_shadow_bind = rhi.create_bind_group(&shadow_pipeline, 0,
+            &[Binding::Uniform { binding: 0, buffer: &globals }]);
         let line_bind = rhi.create_bind_group(
             &line_pipeline,
             0,
@@ -673,6 +680,10 @@ impl<B: Rhi> Renderer3D<B> {
             shadow_globals,
             main_bind,
             shadow_bind,
+            #[cfg(feature = "imported-scene")]
+            composed_shadow_bind,
+            #[cfg(feature = "imported-scene")]
+            composed_main_bind: None,
             line_bind,
             _shadow_texture: shadow_texture,
             shadow_view,

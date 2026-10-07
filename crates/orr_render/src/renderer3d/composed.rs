@@ -103,6 +103,7 @@ impl<B: Rhi> Renderer3D<B> {
         size: (u32, u32),
         lighting: &Lighting,
         point: &PointLightSettings,
+        shadow: Option<&crate::shared_shadow::PreparedShadow>,
     ) -> Result<PreparedProcedural, ProceduralSceneError> {
         self.composed_draw_count(list)?;
         validate_procedural_list(list)?;
@@ -117,6 +118,12 @@ impl<B: Rhi> Renderer3D<B> {
         // is authoritative; the standalone list's light/clear settings are ignored.
         let mut globals = self.globals(camera, size, lighting, &Mat4::IDENTITY);
         globals.shadow = [0.0; 4];
+        globals.params[0] = 0.0;
+        if let Some(ready) = shadow {
+            globals.light_vp = ready.matrix.0;
+            globals.shadow = ready.params;
+            globals.params[0] = 1.0;
+        }
         if let Some(light) = point.point_light {
             globals.point_position_range = [
                 light.position[0],
@@ -193,7 +200,18 @@ impl<B: Rhi> Renderer3D<B> {
         if prepared.stats.mesh_instances > 0 {
             commands.extend([
                 Command::SetPipeline(&self.main_pipeline),
-                Command::SetBindGroup(0, &self.main_bind),
+                Command::SetBindGroup(
+                    0,
+                    if prepared.globals.params[0] > 0.5 {
+                        &self
+                            .composed_main_bind
+                            .as_ref()
+                            .expect("shared map bound")
+                            .1
+                    } else {
+                        &self.main_bind
+                    },
+                ),
                 Command::SetVertexBuffer(0, &self.mesh_vertices),
                 Command::SetVertexBuffer(1, &self.instances.buffer),
                 Command::SetIndexBuffer(&self.mesh_indices),
@@ -234,12 +252,75 @@ impl<B: Rhi> Renderer3D<B> {
         prepared.stats.cpu_encode_time = clock.elapsed();
     }
 
+    pub(crate) fn bind_shared_shadow(&mut self, map: &crate::shared_shadow::SharedShadow<B>) {
+        if self
+            .composed_main_bind
+            .as_ref()
+            .is_none_or(|(id, _)| *id != map.id)
+        {
+            self.composed_main_bind = Some((
+                map.id,
+                self.rhi.create_bind_group(
+                    &self.main_pipeline,
+                    0,
+                    &[
+                        Binding::Uniform {
+                            binding: 0,
+                            buffer: &self.globals,
+                        },
+                        Binding::Texture {
+                            binding: 1,
+                            view: &map.view,
+                        },
+                        Binding::Sampler {
+                            binding: 2,
+                            sampler: &map.sampler,
+                        },
+                    ],
+                ),
+            ));
+        }
+    }
+    pub(crate) fn composed_shadow_commands<'a>(
+        &'a self,
+        ready: &mut PreparedProcedural,
+        commands: &mut Vec<Command<'a, B>>,
+    ) {
+        commands.extend([
+            Command::SetPipeline(&self.shadow_pipeline),
+            Command::SetBindGroup(0, &self.composed_shadow_bind),
+            Command::SetVertexBuffer(0, &self.mesh_vertices),
+            Command::SetVertexBuffer(1, &self.instances.buffer),
+            Command::SetIndexBuffer(&self.mesh_indices),
+        ]);
+        for kind in [MeshKind::Sphere, MeshKind::Box, MeshKind::Capsule] {
+            let instances = ready.ranges[kind as usize].clone();
+            if !instances.is_empty() {
+                let (indices, base_vertex) = self.mesh_ranges[kind as usize].clone();
+                ready.stats.shadow.draw(instances.end - instances.start);
+                commands.push(Command::DrawIndexed {
+                    indices,
+                    base_vertex,
+                    instances,
+                });
+            }
+        }
+        ready.stats.shadow.passes = 1;
+    }
+
     pub(crate) fn commit_composed(&mut self, prepared: PreparedProcedural) {
         self.last_frame_stats = prepared.stats;
         let spheres = &prepared.ranges[MeshKind::Sphere as usize];
         self.last_sphere_lod_stats = SphereLodStats3D {
             near_instances: spheres.end - spheres.start,
             main_draw_calls: u32::from(!spheres.is_empty()),
+            shadow_draw_calls: u32::from(prepared.globals.params[0] > 0.5 && !spheres.is_empty()),
+            shadow_index_invocations: if prepared.globals.params[0] > 0.5 {
+                u64::from(spheres.end - spheres.start)
+                    * self.mesh_ranges[MeshKind::Sphere as usize].0.len() as u64
+            } else {
+                0
+            },
             main_index_invocations: u64::from(spheres.end - spheres.start)
                 * self.mesh_ranges[MeshKind::Sphere as usize].0.len() as u64,
             upload_calls: u32::from(!spheres.is_empty()),
