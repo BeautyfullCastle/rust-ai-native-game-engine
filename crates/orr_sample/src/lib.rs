@@ -60,3 +60,12 @@ pub mod project_export;
 pub mod player_settings;
 #[cfg(feature = "player-settings")]
 pub mod player_controls;
+
+#[cfg(all(feature = "project-create", target_os = "linux"))]
+pub mod project_create;
+
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "project-create", all(feature = "project-export", target_arch = "x86_64"))
+))]
+mod project_publish;

@@ -14,6 +14,8 @@ workspace = true
 default = []
 # Optional Linux player preferences; no simulation or default dependencies.
 player-settings = ["project", "game-ui", "dep:tempfile", "dep:rustix"]
+# Offline bounded Arena starter creation; no default/runtime dependency changes.
+project-create = ["project", "dep:sha2", "dep:tempfile", "dep:rustix"]
 project-export = ["project", "dep:sha2", "dep:tempfile", "dep:rustix"]
 project = ["sprites", "orr_reflect/scene", "dep:serde", "dep:serde_json", "dep:png17"]
 # Optional native UI needs Rust 1.95 (egui); default remains workspace MSRV.
@@ -71,6 +73,12 @@ lz4_flex = { version = "0.14", default-features = false, features = ["std", "saf
 [[bench]]
 name = "seek"
 harness = false
+
+[[bin]]
+name = "orr_new_arena"
+path = "src/bin/orr_new_arena.rs"
+required-features = ["project-create"]
+test = false
 
 [[bin]]
 name = "orr_export_arena"

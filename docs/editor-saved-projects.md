@@ -5,6 +5,12 @@ scene and optional sprite bindings. This is a bounded project-opening slice of
 [#104](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/104),
 not the complete project-management feature.
 
+## Create a fresh project
+
+Use the [offline Arena starter generator](new-arena-project.md) to create a new
+project with deterministic seeded GUIDs and an installed, verified sprite package.
+The checked-in project below remains an inspection/regression fixture.
+
 ## Open the checked-in project
 
 ```sh
@@ -85,8 +91,8 @@ scene save does not silently save bindings; a bindings save does not modify the
 scene or host history. Play does not rewrite either file. Close/reopen and
 relocation recover the saved GUID-keyed bindings and follow target.
 
-This slice adds no exporter, project generator, prefab GUI, joint scene/sidecar
-save transaction, or general project browser. The acceptance evidence below is
+Project opening itself adds no prefab GUI, joint scene/sidecar save transaction,
+or general project browser. Creation and export have their own optional tools. The acceptance evidence below is
 real `EditorApp` execution and an offscreen composed egui/wgpu framebuffer, not
 a claim of native-window automation or Windows verification.
 

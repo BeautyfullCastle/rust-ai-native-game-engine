@@ -6,6 +6,10 @@
 //! Inputs are read-only; this detects ordinary changes, not hostile filesystem races.
 mod admission;
 
+use crate::project_publish::publish_no_replace;
+#[cfg(test)]
+use crate::project_publish::publish_with;
+
 use admission::{check_path, hash, ProjectSnapshot, SnapshotFile, MAX_BINARY_BYTES};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -348,24 +352,6 @@ fn write_payload(
         sha256: hash(bytes),
     });
     Ok(())
-}
-fn publish_no_replace(stage: &Path, output: &Path) -> Result<(), String> {
-    publish_with(stage, output, |stage, output| {
-        rustix::fs::renameat_with(
-            rustix::fs::CWD,
-            stage,
-            rustix::fs::CWD,
-            output,
-            rustix::fs::RenameFlags::NOREPLACE,
-        )
-    })
-}
-fn publish_with(
-    stage: &Path,
-    output: &Path,
-    operation: impl FnOnce(&Path, &Path) -> Result<(), rustix::io::Errno>,
-) -> Result<(), String> {
-    operation(stage, output).map_err(|e| format!("atomic no-replace publication failed: {e}"))
 }
 
 fn expected_smoke(prepared: &crate::project_runtime::PreparedRuntime) -> Result<Vec<u8>, String> {
