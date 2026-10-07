@@ -121,6 +121,7 @@
 #![allow(clippy::needless_range_loop)]
 
 mod collide;
+mod checked_solver;
 mod fastmath;
 mod geom;
 mod query;
@@ -128,6 +129,7 @@ mod reflection;
 mod sleep;
 mod solver;
 mod step;
+mod static_contacts;
 mod system;
 #[cfg(test)]
 mod manifold_tests;
@@ -137,6 +139,7 @@ pub use query::{raycast, sphere_cast, QueryFilter, RayHit};
 pub use reflection::register_reflect;
 pub use sleep::{apply_impulse, is_asleep, set_velocity, wake, wake_all};
 pub use step::{step, step_probed, Phase, Scratch, StepStats};
+pub use static_contacts::{validate_static_sleeping_support, step_with_static_contacts, StaticContact, StaticContactBody, StaticContactError, StaticContactObject};
 pub use system::PhysicsSystem;
 pub use types::{
     Body, Collider, ContactCache, MassData, PhysicsConfig, PhysicsState, Shape, BODY_DYNAMIC, BODY_KINEMATIC, BODY_STATIC, SHAPE_BOX,

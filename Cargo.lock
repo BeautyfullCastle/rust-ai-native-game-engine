@@ -3172,9 +3172,9 @@ dependencies = [
  "orr_sample",
  "orr_session",
  "orr_sim",
+ "orr_sprite",
  "orr_terrain",
  "orr_terrain_view",
- "orr_sprite",
  "orr_view",
  "png 0.17.16",
  "serde",
@@ -3225,6 +3225,8 @@ dependencies = [
  "orr_physics3d",
  "orr_reflect",
  "orr_sim",
+ "orr_terrain",
+ "orr_terrain_physics3d",
 ]
 
 [[package]]
@@ -3370,6 +3372,7 @@ dependencies = [
  "orr_ecs",
  "orr_edit",
  "orr_fp",
+ "orr_games",
  "orr_physics",
  "orr_reflect",
  "orr_relay_net",
@@ -3377,6 +3380,8 @@ dependencies = [
  "orr_server",
  "orr_session",
  "orr_sim",
+ "orr_terrain",
+ "orr_terrain_physics3d",
  "orr_testgame",
  "orr_view",
  "orr_viewstream",
@@ -3502,6 +3507,20 @@ name = "orr_terrain"
 version = "0.0.1"
 dependencies = [
  "orr_fp",
+ "sha2",
+]
+
+[[package]]
+name = "orr_terrain_physics3d"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_fp",
+ "orr_physics3d",
+ "orr_session",
+ "orr_sim",
+ "orr_terrain",
  "sha2",
 ]
 

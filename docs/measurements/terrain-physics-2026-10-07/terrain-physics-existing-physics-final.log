@@ -1,0 +1,34 @@
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.70s
+     Running tests/physics3d.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/physics3d-5d7faa43be8b19e1)
+
+running 26 tests
+test capsule_lying_across_a_box_stays_on_top ... ok
+test box_dropped_on_its_edge_falls_flat ... ok
+test collision_filters_let_masked_bodies_pass ... ok
+test free_spin_keeps_its_rate_and_kinetic_energy ... ok
+test impulse_off_center_produces_spin_and_motion ... ok
+test capsule_standing_upright_stays_upright ... ok
+test kinematic_spin_rotates_by_omega_times_time ... ok
+test box_overhanging_past_its_center_of_mass_tips_off ... ok
+test kinematic_platform_carries_a_box ... ok
+test friction_holds_a_box_on_a_slope_when_mu_exceeds_tan_angle ... ok
+test raycast_hits_a_rotated_box_face ... ok
+test offset_box_on_box_stays_when_over_the_support ... ok
+test no_tunneling_through_a_wall_at_moderate_speed ... ok
+test raycast_hits_every_shape_with_the_right_distance_and_normal ... ok
+test sphere_cast_is_exact_for_sphere_box_and_capsule_targets ... ok
+test restitution_bounces_back_to_the_expected_height ... ok
+test removing_the_support_wakes_a_sleeping_box ... ok
+test sphere_box_capsule_come_to_rest_and_sleep ... ok
+test mass_properties_match_numeric_integration ... ok
+test a_resting_stack_sleeps_and_wakes_on_impulse_and_on_contact ... ok
+test tilted_capsule_topples_and_lies_down ... ok
+test sphere_lands_on_a_static_capsule_and_slides_off ... ok
+test sphere_rolls_off_a_box_edge_and_reaches_the_ground ... ok
+test energy_does_not_grow_in_a_bouncing_pile ... ok
+test every_shape_pair_survives_a_drop_onto_each_other ... ok
+test pyramid_and_big_pile_stay_inside_the_arena ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+

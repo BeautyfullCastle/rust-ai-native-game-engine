@@ -13,6 +13,8 @@ pub enum EditorGame {
     PhysGame,
     Arena,
     Yard3D,
+    #[cfg(feature = "terrain-physics")]
+    TerrainYard3D,
 }
 
 impl EditorGame {
@@ -22,6 +24,8 @@ impl EditorGame {
             "physics" => Ok(Self::PhysGame),
             "arena" => Ok(Self::Arena),
             "yard3d" => Ok(Self::Yard3D),
+            #[cfg(feature = "terrain-physics")]
+            "terrain-yard3d" => Ok(Self::TerrainYard3D),
             _ => Err(format!("unsupported local game '{name}'; expected physics, arena or yard3d")),
         }
     }
@@ -32,12 +36,25 @@ impl EditorGame {
             "PhysGame" => Ok(Self::PhysGame),
             "Arena" => Ok(Self::Arena),
             "Yard3D" => Ok(Self::Yard3D),
+            #[cfg(feature = "terrain-physics")]
+            "TerrainYard3D" => Ok(Self::TerrainYard3D),
             _ => Err(format!("unsupported editor game '{name}'; expected explicit PhysGame, Arena or Yard3D")),
         }
     }
 
     pub fn name(self) -> &'static str {
-        match self { Self::PhysGame => "PhysGame", Self::Arena => "Arena", Self::Yard3D => "Yard3D" }
+        match self { Self::PhysGame => "PhysGame", Self::Arena => "Arena", Self::Yard3D => "Yard3D", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "TerrainYard3D" }
+    }
+
+    pub fn is_3d(self) -> bool {
+        self == Self::Yard3D || self.is_terrain()
+    }
+
+    pub fn is_terrain(self) -> bool {
+        #[cfg(feature = "terrain-physics")]
+        { self == Self::TerrainYard3D }
+        #[cfg(not(feature = "terrain-physics"))]
+        { false }
     }
 
     pub fn types(self) -> TypeRegistry {
@@ -46,6 +63,8 @@ impl EditorGame {
             Self::PhysGame => orr_sample::physics_game::register_reflect(&mut types),
             Self::Arena => orr_sample::arena_game::register_reflect(&mut types),
             Self::Yard3D => orr_sample::yard3d_game::register_reflect(&mut types),
+            #[cfg(feature = "terrain-physics")]
+            Self::TerrainYard3D => return orr_remote::terrain_yard3d::terrain_yard3d_types(),
         }
         types
     }
@@ -55,11 +74,13 @@ impl EditorGame {
             Self::PhysGame => orr_sample::physics_view::body_views(frame),
             Self::Arena => orr_sample::arena_view::editor_drawables(frame),
             Self::Yard3D => Vec::new(),
+            #[cfg(feature = "terrain-physics")]
+            Self::TerrainYard3D => Vec::new(),
         }
     }
 
     pub fn position_component(self) -> &'static str {
-        match self { Self::PhysGame => "orr_physics::Body", Self::Arena => "Position", Self::Yard3D => "orr_physics3d::Body" }
+        match self { Self::PhysGame => "orr_physics::Body", Self::Arena => "Position", Self::Yard3D => "orr_physics3d::Body", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "orr_physics3d::Body" }
     }
 
     /// Default scene for a locally started game, preferring the current
@@ -69,6 +90,8 @@ impl EditorGame {
             Self::PhysGame => "physics_demo.scene.yaml",
             Self::Arena => "arena_blank.scene.yaml",
             Self::Yard3D => "yard3d_authoring.scene.yaml",
+            #[cfg(feature = "terrain-physics")]
+            Self::TerrainYard3D => "terrain_sphere.scene.yaml",
         };
         let local = PathBuf::from("scenes").join(filename);
         if local.exists() {
@@ -83,6 +106,8 @@ pub enum EditorStream {
     Phys(RemoteBridge<PhysGame>),
     Arena(RemoteBridge<Arena>),
     Yard3D(RemoteBridge<orr_sample::yard3d_game::Yard3D>),
+    #[cfg(feature = "terrain-physics")]
+    TerrainYard3D(RemoteBridge<orr_remote::terrain_yard3d::TerrainYard3D>),
 }
 
 impl EditorStream {
@@ -91,6 +116,8 @@ impl EditorStream {
             EditorGame::PhysGame => RemoteBridge::connect(cfg).map(Self::Phys),
             EditorGame::Arena => RemoteBridge::connect(cfg).map(Self::Arena),
             EditorGame::Yard3D => RemoteBridge::connect(cfg).map(Self::Yard3D),
+            #[cfg(feature = "terrain-physics")]
+            EditorGame::TerrainYard3D => RemoteBridge::connect(cfg).map(Self::TerrainYard3D),
         }
     }
 
@@ -99,33 +126,35 @@ impl EditorStream {
             EditorGame::PhysGame => RemoteBridge::connect_transport(transport, cfg).map(Self::Phys),
             EditorGame::Arena => RemoteBridge::connect_transport(transport, cfg).map(Self::Arena),
             EditorGame::Yard3D => RemoteBridge::connect_transport(transport, cfg).map(Self::Yard3D),
+            #[cfg(feature = "terrain-physics")]
+            EditorGame::TerrainYard3D => RemoteBridge::connect_transport(transport, cfg).map(Self::TerrainYard3D),
         }
     }
 
     pub fn poll_view(&mut self) -> ViewUpdate<()> {
-        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()) }
+        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()) }
     }
 
     #[cfg(test)]
     pub fn snapshot(&self) -> Option<orr_bridge::Snapshot> {
-        match self { Self::Phys(s) => s.snapshot(), Self::Arena(s) => s.snapshot(), Self::Yard3D(s) => s.snapshot() }
+        match self { Self::Phys(s) => s.snapshot(), Self::Arena(s) => s.snapshot(), Self::Yard3D(s) => s.snapshot(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.snapshot() }
     }
 
     #[cfg(test)]
     pub fn request(&self, method: &str, params: serde_json::Value) -> Result<(), orr_bridge::BridgeError> {
-        match self { Self::Phys(s) => s.request(method, params), Self::Arena(s) => s.request(method, params), Self::Yard3D(s) => s.request(method, params) }
+        match self { Self::Phys(s) => s.request(method, params), Self::Arena(s) => s.request(method, params), Self::Yard3D(s) => s.request(method, params), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.request(method, params) }
     }
 
     pub fn take_errors(&self) -> Vec<RpcError> {
-        match self { Self::Phys(s) => s.take_errors(), Self::Arena(s) => s.take_errors(), Self::Yard3D(s) => s.take_errors() }
+        match self { Self::Phys(s) => s.take_errors(), Self::Arena(s) => s.take_errors(), Self::Yard3D(s) => s.take_errors(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.take_errors() }
     }
 
     pub fn is_alive(&self) -> bool {
-        match self { Self::Phys(s) => s.is_alive(), Self::Arena(s) => s.is_alive(), Self::Yard3D(s) => s.is_alive() }
+        match self { Self::Phys(s) => s.is_alive(), Self::Arena(s) => s.is_alive(), Self::Yard3D(s) => s.is_alive(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.is_alive() }
     }
 
     pub fn view_delivery(&self) -> RemoteViewDelivery {
-        match self { Self::Phys(s) => s.view_delivery(), Self::Arena(s) => s.view_delivery(), Self::Yard3D(s) => s.view_delivery() }
+        match self { Self::Phys(s) => s.view_delivery(), Self::Arena(s) => s.view_delivery(), Self::Yard3D(s) => s.view_delivery(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.view_delivery() }
     }
 }
 

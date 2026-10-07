@@ -1,0 +1,19 @@
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 9.21s
+     Running tests/static_contacts.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/static_contacts-7e0b12377eabd8a4)
+
+running 1 test
+
+thread 'falling_onto_a_terrain_grounded_sphere_stack_eventually_sleeps' (73) panicked at crates/orr_physics3d/tests/static_contacts.rs:813:9:
+lower from height 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test falling_onto_a_terrain_grounded_sphere_stack_eventually_sleeps ... FAILED
+
+failures:
+
+failures:
+    falling_onto_a_terrain_grounded_sphere_stack_eventually_sleeps
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p orr_physics3d --test static_contacts`

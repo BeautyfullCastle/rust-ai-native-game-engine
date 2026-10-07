@@ -17,6 +17,7 @@ use crate::collide::collide;
 use crate::fastmath::{div, length, mul_round, sqrt};
 use crate::geom::Xf;
 use crate::solver::{self, BodyInv, Constraint, ContactPt, Vw};
+use crate::static_contacts::{StaticContact, StaticContactBody, StaticContactError, StaticContactObject};
 use crate::types::{
     Body, Collider, ContactCache, PhysicsConfig, PhysicsState, BODY_DYNAMIC, BODY_STATIC, SHAPE_BOX, SHAPE_SPHERE, SLEEP_FLAG,
 };
@@ -104,6 +105,18 @@ pub struct Scratch {
     new_cache: Vec<ContactCache>,
     carried: Vec<ContactCache>,
     asleep_end: u32,
+    /// External geometry scratch, rebuilt from admitted frame-bound objects.
+    static_slots: Vec<bool>,
+    static_bodies: Vec<StaticContactBody>,
+    static_points: Vec<StaticContact>,
+    static_cache: Vec<ContactCache>,
+    current_binv: Vec<BodyInv>,
+    /// External support seen in the incoming cache or any substep. Endpoint
+    /// contacts clear this bit; a remaining bit prohibits sleep this tick.
+    static_support_lost: Vec<bool>,
+    /// Optional-provider gravity support, empty for the legacy/zero-gravity
+    /// path. Only genuinely grounded dynamic islands may accrue sleep time.
+    static_sleep_supported: Vec<bool>,
 }
 
 #[inline]
@@ -201,6 +214,8 @@ impl Scratch {
     /// (both mean game code woke it), wakes its whole island.
     fn gather(&mut self, be: &[Entity], bd: &[Body], ce: &[Entity], cfg: &PhysicsConfig) {
         self.order_bodies(be, ce);
+        self.static_support_lost.clear();
+        self.static_sleep_supported.clear();
         let n = self.ents.len();
         let enabled = cfg.sleep_ticks != 0;
         self.flags.clear();
@@ -550,6 +565,286 @@ impl Scratch {
         solver::store_friction(&self.cons, &mut self.pool);
     }
 
+    /// Builds current poses without changing the frame or the convex contacts'
+    /// tick-start anchors. External rows are prepared against these positions.
+    fn refresh_static_bodies(&mut self, bd: &[Body], cd: &[Collider]) {
+        self.static_bodies.clear();
+        self.current_binv.clear();
+        self.current_binv.extend_from_slice(&self.binv);
+        for &i in &self.movers {
+            let i = i as usize;
+            if self.flags[i] & F_DYN == 0 {
+                continue;
+            }
+            let mut body = bd[self.bslot[i] as usize];
+            body.pos += self.pw[i].v;
+            if self.pw[i].w != FPVec3::ZERO {
+                body.rot = integrate_rot(body.rot, self.pw[i].w, FP::ONE);
+            }
+            body.vel = self.vw[i].v;
+            body.omega = self.vw[i].w;
+            self.current_binv[i].pos = body.pos;
+            self.current_binv[i].inv_inertia = FPMat3::from_quat(body.rot).rotate_diag(body.inv_inertia);
+            self.static_bodies.push(StaticContactBody {
+                entity: self.ents[i],
+                body,
+                collider: cd[self.cslot[i] as usize],
+            });
+        }
+    }
+
+    fn run_static_substeps<E>(
+        &mut self,
+        bd: &[Body],
+        cd: &[Collider],
+        old_cache: &[ContactCache],
+        cfg: &PhysicsConfig,
+        source: &mut StaticSource<'_, E>,
+    ) -> Result<(), StaticContactError<E>> {
+        let subs = cfg.substeps.max(1);
+        let (base, rem) = (cfg.dt.raw() / i64::from(subs), cfg.dt.raw() % i64::from(subs));
+        let convex_points = self.pool.len();
+        self.pw.clear();
+        self.pw.resize(self.ents.len(), Vw::default());
+        self.static_support_lost.resize(self.ents.len(), false);
+        self.static_slots.clear();
+        self.static_slots.extend(self.ents.iter().map(|entity| source.objects.iter().any(|object| object.entity == *entity)));
+        self.static_cache.clear();
+        // A full tuple lookup below is deliberate: several independent
+        // constraints can now belong to a single pair. Never carry a forward
+        // cursor from a higher feature back to a lower feature of that pair.
+        self.static_cache.extend_from_slice(old_cache);
+        // A supported body may already have left the finite surface before
+        // this tick's first refresh. Retain that incoming support observation
+        // even though the provider correctly returns no current contact.
+        for cached in old_cache {
+            let a = self.ents.binary_search_by_key(&cached.a, |entity| entity.index);
+            let b = self.ents.binary_search_by_key(&cached.b, |entity| entity.index);
+            if let (Ok(a), Ok(b)) = (a, b) {
+                if self.static_slots[a] && self.flags[b] & F_DYN != 0 {
+                    self.static_support_lost[b] = true;
+                }
+                if self.static_slots[b] && self.flags[a] & F_DYN != 0 {
+                    self.static_support_lost[a] = true;
+                }
+            }
+        }
+        for sub in 0..subs {
+            self.refresh_static_bodies(bd, cd);
+            self.static_points.clear();
+            (source.provider)(&self.static_bodies, cfg.contact_margin, &mut self.static_points)
+                .map_err(StaticContactError::Provider)?;
+            self.cons.retain(|constraint| !constraint.refreshed);
+            self.pool.truncate(convex_points);
+            self.append_static_constraints(cd, cfg, source.objects)?;
+            // Accumulate across *all* refreshes. Looking only at the last
+            // solved substep misses a surface left earlier in the same tick.
+            for constraint in self.cons.iter().filter(|constraint| constraint.refreshed) {
+                for i in [constraint.a as usize, constraint.b as usize] {
+                    if self.flags[i] & F_DYN != 0 {
+                        self.static_support_lost[i] = true;
+                    }
+                }
+            }
+            // Convex points are internally feature-sorted; external contacts
+            // each have one point, independently oriented. Sorting all groups
+            // keeps solving and the cache forward merge in pair/feature order.
+            let pool = &self.pool;
+            self.cons.sort_by_key(|constraint| (constraint.a, constraint.b, pool[constraint.first as usize].id));
+            let h = FP::from_raw(base + i64::from(i64::from(sub) < rem));
+            let g = cfg.gravity * h;
+            for &i in &self.movers {
+                let i = i as usize;
+                if self.flags[i] & F_DYN != 0 {
+                    self.vw[i].v += g;
+                }
+            }
+            if !self.cons.is_empty() {
+                crate::checked_solver::update_targets(&self.cons, &mut self.pool, &self.pw, cfg, h).map_err(|_| StaticContactError::NumericOverflow)?;
+                crate::checked_solver::warm_start(&self.cons, &self.pool, &mut self.vw).map_err(|_| StaticContactError::NumericOverflow)?;
+                crate::checked_solver::solve(&mut self.cons, &mut self.pool, &mut self.vw, cfg.velocity_iterations).map_err(|_| StaticContactError::NumericOverflow)?;
+            }
+            // Optional geometry adapters may admit movement using this bound;
+            // the convex-only path retains its original end-of-tick clamp.
+            self.clamp_velocities(cfg);
+            for &i in &self.movers {
+                let i = i as usize;
+                let (v, w) = (self.vw[i].v, self.vw[i].w);
+                self.pw[i].v += FPVec3::new(mul_round(v.x, h), mul_round(v.y, h), mul_round(v.z, h));
+                self.pw[i].w += FPVec3::new(mul_round(w.x, h), mul_round(w.y, h), mul_round(w.z, h));
+            }
+            crate::checked_solver::store_friction(&self.cons, &mut self.pool).map_err(|_| StaticContactError::NumericOverflow)?;
+            self.static_cache.clear();
+            for constraint in self.cons.iter().filter(|constraint| constraint.refreshed) {
+                let point = &self.pool[constraint.first as usize];
+                self.static_cache.push(ContactCache {
+                    a: self.ents[constraint.a as usize].index,
+                    b: self.ents[constraint.b as usize].index,
+                    id: point.id,
+                    _pad: 0,
+                    normal_impulse: point.jn,
+                    tangent_impulse: point.jt,
+                });
+            }
+        }
+        // Retain the endpoint's actual feature ownership. A body can leave a
+        // finite surface in any integration; its old contact must not survive
+        // in the cache or let it fall asleep above a newly reached hole. Only
+        // reacquired endpoint support clears the accumulated support-loss bit.
+        self.refresh_static_bodies(bd, cd);
+        self.static_points.clear();
+        (source.provider)(&self.static_bodies, cfg.contact_margin, &mut self.static_points)
+            .map_err(StaticContactError::Provider)?;
+        self.cons.retain(|constraint| !constraint.refreshed);
+        self.pool.truncate(convex_points);
+        self.append_static_constraints(cd, cfg, source.objects)?;
+        for constraint in self.cons.iter().filter(|constraint| constraint.refreshed) {
+            self.static_support_lost[constraint.a as usize] = false;
+            self.static_support_lost[constraint.b as usize] = false;
+        }
+        let pool = &self.pool;
+        self.cons.sort_by_key(|constraint| (constraint.a, constraint.b, pool[constraint.first as usize].id));
+        self.build_static_sleep_support(cfg)?;
+        Ok(())
+    }
+
+    /// Under nonzero gravity, proximity alone cannot ground a body. Build
+    /// dynamic islands only through endpoint contacts that are near enough to
+    /// touch and transmitted a positive normal impulse. Refreshed geometry
+    /// uses linear slop; ordinary convex rows retain their legacy contact skin.
+    /// Anchor an island only when an immovable contact's normal pushes its dynamic side against
+    /// gravity. Friction-only wall support stays awake conservatively.
+    fn build_static_sleep_support<E>(&mut self, cfg: &PhysicsConfig) -> Result<(), StaticContactError<E>> {
+        if cfg.gravity == FPVec3::ZERO || cfg.sleep_ticks == 0 {
+            return Ok(());
+        }
+        let n = self.ents.len();
+        self.static_sleep_supported.resize(n, false);
+        self.parent.clear();
+        self.parent.extend(0..n as u32);
+        // First connect actual dynamic contacts, so anchors propagate through
+        // a supported stack, but never through a far speculative neighbor.
+        for k in 0..self.cons.len() {
+            let c = self.cons[k];
+            let (a, b) = (c.a as usize, c.b as usize);
+            if self.flags[a] & F_DYN == 0 || self.flags[b] & F_DYN == 0
+                || !self.has_endpoint_support(&c, cfg)? {
+                continue;
+            }
+            let (ra, rb) = (find(&mut self.parent, c.a), find(&mut self.parent, c.b));
+            if ra != rb {
+                let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+                self.parent[hi as usize] = lo;
+            }
+        }
+        for k in 0..self.cons.len() {
+            let c = self.cons[k];
+            let (a_dynamic, b_dynamic) = (self.flags[c.a as usize] & F_DYN != 0, self.flags[c.b as usize] & F_DYN != 0);
+            if a_dynamic == b_dynamic || !self.has_endpoint_support(&c, cfg)? {
+                continue;
+            }
+            if crate::checked_solver::supports_gravity(c.normal, cfg.gravity, b_dynamic)
+                .map_err(|_| StaticContactError::NumericOverflow)? {
+                let dynamic = if a_dynamic { c.a } else { c.b };
+                let root = find(&mut self.parent, dynamic) as usize;
+                self.static_sleep_supported[root] = true;
+            }
+        }
+        // Union roots are the lowest member index, so this ascending expansion
+        // preserves every root's support bit while filling its descendants.
+        for i in 0..n {
+            let root = find(&mut self.parent, i as u32) as usize;
+            self.static_sleep_supported[i] = self.static_sleep_supported[root];
+        }
+        Ok(())
+    }
+
+    fn has_endpoint_support<E>(&self, constraint: &Constraint, cfg: &PhysicsConfig) -> Result<bool, StaticContactError<E>> {
+        // Legacy convex rows stop approach inside their configured contact
+        // skin. Such impulse-bearing contacts genuinely support that solver's
+        // stacks. The expanded external query envelope has no such meaning:
+        // refreshed terrain contacts must reach the smaller linear slop.
+        let support_distance = if constraint.refreshed { cfg.linear_slop } else { cfg.contact_margin };
+        for point in &self.pool[constraint.first as usize..(constraint.first + constraint.count) as usize] {
+            if point.jn > FP::ZERO
+                && crate::checked_solver::endpoint_separation(constraint, point, &self.pw)
+                    .map_err(|_| StaticContactError::NumericOverflow)? <= support_distance {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn append_static_constraints<E>(
+        &mut self,
+        cd: &[Collider],
+        cfg: &PhysicsConfig,
+        objects: &[StaticContactObject],
+    ) -> Result<(), StaticContactError<E>> {
+        self.static_points.sort_by_key(|point| (
+            point.body.index.min(point.static_body.index),
+            point.body.index.max(point.static_body.index),
+            point.feature_id,
+        ));
+        let mut previous = None;
+        for point in &self.static_points {
+            let body_index = self.ents.binary_search_by_key(&point.body.index, |entity| entity.index)
+                .map_err(|_| StaticContactError::InvalidContact)?;
+            let static_index = self.ents.binary_search_by_key(&point.static_body.index, |entity| entity.index)
+                .map_err(|_| StaticContactError::InvalidContact)?;
+            if self.ents[body_index] != point.body
+                || self.ents[static_index] != point.static_body
+                || self.flags[body_index] & (F_DYN | F_ACTIVE) != (F_DYN | F_ACTIVE)
+                || !self.static_slots[static_index]
+                || !valid_static_point(point)
+            {
+                return Err(StaticContactError::InvalidContact);
+            }
+            let (a, b, normal) = if body_index < static_index {
+                (body_index, static_index, -point.normal)
+            } else {
+                (static_index, body_index, point.normal)
+            };
+            let key = (self.ents[a].index, self.ents[b].index, point.feature_id);
+            if previous == Some(key) {
+                return Err(StaticContactError::DuplicateFeature);
+            }
+            previous = Some(key);
+            let object = objects.iter().find(|object| object.entity == point.static_body)
+                .ok_or(StaticContactError::InvalidContact)?;
+            let collider = &cd[self.cslot[body_index] as usize];
+            if collider.layer & object.mask == 0 || object.layer & collider.mask == 0 {
+                continue;
+            }
+            let mut contact = ContactPt {
+                point: point.point,
+                sep: point.separation,
+                id: point.feature_id,
+                ..ContactPt::default()
+            };
+            if let Ok(index) = self.static_cache.binary_search_by_key(&key, |cached| (cached.a, cached.b, cached.id)) {
+                contact.jn = self.static_cache[index].normal_impulse;
+                contact.jt = self.static_cache[index].tangent_impulse;
+            }
+            let mut constraint = Constraint {
+                a: a as u32,
+                b: b as u32,
+                count: 1,
+                first: self.pool.len() as u32,
+                normal,
+                friction: mix_friction(collider.friction, object.friction),
+                restitution: collider.restitution.max(object.restitution),
+                refreshed: true,
+                ..Constraint::default()
+            };
+            self.pool.push(contact);
+            crate::checked_solver::prepare(core::slice::from_mut(&mut constraint), &mut self.pool, &self.current_binv, &self.vw, cfg).map_err(|_| StaticContactError::NumericOverflow)?;
+            self.cons.push(constraint);
+        }
+        Ok(())
+    }
+
+
     /// Keeps a badly over-constrained pile from producing runaway
     /// velocities.
     fn clamp_velocities(&mut self, cfg: &PhysicsConfig) {
@@ -579,7 +874,9 @@ impl Scratch {
             let mut t = 0;
             if enabled && self.flags[i] & F_DYN != 0 {
                 let x = self.vw[i];
-                let still = x.v.length_sq() <= lin2 && x.w.length_sq() <= ang2;
+                let support_lost = self.static_support_lost.get(i).copied().unwrap_or(false);
+                let supported = self.static_sleep_supported.get(i).copied().unwrap_or(true);
+                let still = !support_lost && supported && x.v.length_sq() <= lin2 && x.w.length_sq() <= ang2;
                 if still {
                     let prev = bd[self.bslot[i] as usize].sleep & !SLEEP_FLAG;
                     t = (prev + 1).min(limit);
@@ -656,6 +953,22 @@ impl Scratch {
     }
 }
 
+fn valid_static_point(point: &StaticContact) -> bool {
+    let coordinate_limit = FP::from_int(60_000);
+    let normal_limit = FP::from_int(2);
+    for axis in 0..3 {
+        let p = point.point.get(axis);
+        let n = point.normal.get(axis);
+        if p < -coordinate_limit || p > coordinate_limit || n < -normal_limit || n > normal_limit {
+            return false;
+        }
+    }
+    let norm_squared = point.normal.length_sq();
+    point.separation >= -coordinate_limit
+        && point.separation <= coordinate_limit
+        && (norm_squared - FP::ONE).abs() <= FP::from_ratio(1, 100)
+}
+
 /// Same bits as `FPQuat::integrate_angular`, with the faster square root
 /// and division of [`crate::fastmath`] (checked equal by a test).
 pub(crate) fn integrate_rot(q: FPQuat, omega: FPVec3, dt: FP) -> FPQuat {
@@ -724,6 +1037,103 @@ pub enum Phase {
 /// how benchmarks time phases without the sim crate touching a clock. It
 /// must not affect the simulation.
 pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(Phase)) {
+    // The infallible convex-only route retains exactly its original pipeline.
+    let result = step_impl::<core::convert::Infallible>(frame, sc, probe, None);
+    debug_assert!(result.is_ok());
+}
+
+type StaticProvider<'a, E> = dyn FnMut(&[StaticContactBody], FP, &mut Vec<StaticContact>) -> Result<(), E> + 'a;
+
+struct StaticSource<'a, E> {
+    objects: &'a [StaticContactObject],
+    provider: &'a mut StaticProvider<'a, E>,
+}
+
+pub(crate) fn step_static<E>(
+    frame: &mut Frame,
+    sc: &mut Scratch,
+    objects: &[StaticContactObject],
+    provider: &mut impl FnMut(&[StaticContactBody], FP, &mut Vec<StaticContact>) -> Result<(), E>,
+) -> Result<(), StaticContactError<E>> {
+    let mut source = StaticSource { objects, provider };
+    step_impl(frame, sc, &mut |_| {}, Some(&mut source))
+}
+
+/// Read-only current-geometry validation, before any all-sleep fast path. A
+/// separate scratch keeps discovery flags and callbacks out of runtime state.
+pub(crate) fn validate_static_sleeping_support<E>(
+    frame: &Frame,
+    objects: &[StaticContactObject],
+    provider: &mut impl FnMut(&[StaticContactBody], FP, &mut Vec<StaticContact>) -> Result<(), E>,
+) -> Result<(), StaticContactError<E>> {
+    let state = frame.singleton::<PhysicsState>();
+    let cfg = state.config;
+    if objects.is_empty() || cfg.gravity == FPVec3::ZERO || cfg.sleep_ticks == 0 {
+        return Ok(());
+    }
+    let (be, bd) = frame.dense::<Body>();
+    if !bd.iter().any(|b| b.kind == BODY_DYNAMIC && b.sleep & SLEEP_FLAG != 0) {
+        return Ok(());
+    }
+    let (ce, cd) = frame.dense::<Collider>();
+    let (mut be, mut bd, mut ce, mut cd) = (be.to_vec(), bd.to_vec(), ce.to_vec(), cd.to_vec());
+    for object in objects {
+        if !frame.exists(object.entity) || frame.has::<Body>(object.entity) || frame.has::<Collider>(object.entity) {
+            return Err(StaticContactError::InvalidStaticObject(object.entity));
+        }
+        be.push(object.entity);
+        bd.push(Body::new_static(FPVec3::ZERO));
+        ce.push(object.entity);
+        cd.push(Collider::new(crate::Shape::sphere(FP::ZERO)).with_filter(0, 0));
+    }
+    let old_cache = frame.list(state.contacts);
+    let mut validation = Scratch::new();
+    validation.gather(&be, &bd, &ce, &cfg);
+    validation.wake_orphans(old_cache, &bd);
+    let sleepers: Vec<Entity> = validation.ents.iter().zip(&validation.flags)
+        .filter_map(|(&e, &f)| (f & F_ASLEEP != 0).then_some(e)).collect();
+    if sleepers.is_empty() { return Ok(()); }
+    // Enable only scratch discovery, never the authoritative bodies. Contacts
+    // between two sleepers must be rebuilt to verify transitive support.
+    for flag in &mut validation.flags {
+        if *flag & F_DYN != 0 { *flag = (*flag & !F_ASLEEP) | F_ACTIVE; }
+    }
+    validation.rebuild_movers();
+    validation.build_transforms(&bd, &cd, cfg.contact_margin);
+    validation.broad_phase();
+    validation.narrow_phase(&cd, old_cache, cfg.contact_margin);
+    validation.integrate_velocities(&bd, &cfg);
+    // Preflight reports exact current velocities, not damped/integrated ones.
+    for i in 0..validation.ents.len() {
+        let body = bd[validation.bslot[i] as usize];
+        validation.vw[i] = Vw { v: body.vel, w: body.omega };
+    }
+    validation.pw.resize(validation.ents.len(), Vw::default());
+    crate::checked_solver::prepare(&mut validation.cons, &mut validation.pool,
+        &validation.binv, &validation.vw, &cfg).map_err(|_| StaticContactError::NumericOverflow)?;
+    validation.static_slots.extend(validation.ents.iter().map(|e| objects.iter().any(|object| object.entity == *e)));
+    validation.static_cache.extend_from_slice(old_cache);
+    validation.refresh_static_bodies(&bd, &cd);
+    provider(&validation.static_bodies, cfg.contact_margin, &mut validation.static_points)
+        .map_err(StaticContactError::Provider)?;
+    validation.append_static_constraints(&cd, &cfg, objects)?;
+    validation.build_static_sleep_support(&cfg)?;
+    for sleeper in sleepers {
+        let i = validation.ents.binary_search_by_key(&sleeper.index, |e| e.index)
+            .map_err(|_| StaticContactError::UnsupportedSleepingSupport(sleeper))?;
+        if !validation.static_sleep_supported.get(i).copied().unwrap_or(false) {
+            return Err(StaticContactError::UnsupportedSleepingSupport(sleeper));
+        }
+    }
+    Ok(())
+}
+
+fn step_impl<E>(
+    frame: &mut Frame,
+    sc: &mut Scratch,
+    probe: &mut impl FnMut(Phase),
+    mut source: Option<&mut StaticSource<'_, E>>,
+) -> Result<(), StaticContactError<E>> {
     let st = *frame.singleton::<PhysicsState>();
     let cfg = st.config;
     assert!(cfg.dt.raw() > 0, "orr_physics3d: call orr_physics3d::init before step");
@@ -732,6 +1142,28 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
     {
         let (be, bd) = frame.dense::<Body>();
         let (ce, cd) = frame.dense::<Collider>();
+        // External geometry has real frame identity but no fabricated convex
+        // collider component. Temporary zero-mask entries only give the shared
+        // solver a massless slot and keep orphan/sleep/cache entity handling.
+        let mut extended_bodies = Vec::new();
+        let mut extended_colliders = Vec::new();
+        let mut extended_be = Vec::new();
+        let mut extended_ce = Vec::new();
+        let (be, bd, ce, cd) = if let Some(source) = source.as_ref() {
+            extended_be.extend_from_slice(be);
+            extended_bodies.extend_from_slice(bd);
+            extended_ce.extend_from_slice(ce);
+            extended_colliders.extend_from_slice(cd);
+            for object in source.objects {
+                extended_be.push(object.entity);
+                extended_bodies.push(Body::new_static(FPVec3::ZERO));
+                extended_ce.push(object.entity);
+                extended_colliders.push(Collider::new(crate::Shape::sphere(FP::ZERO)).with_filter(0, 0));
+            }
+            (&extended_be[..], &extended_bodies[..], &extended_ce[..], &extended_colliders[..])
+        } else {
+            (be, bd, ce, cd)
+        };
         let old_cache = frame.list(st.contacts);
 
         sc.gather(be, bd, ce, &cfg);
@@ -748,7 +1180,7 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
             sc.mslept.clear();
             sc.asleep_end = sc.flags.iter().filter(|&&f| f & F_ASLEEP != 0).count() as u32;
             probe(Phase::Finish);
-            return;
+            return Ok(());
         }
         sc.build_transforms(bd, cd, cfg.contact_margin);
         probe(Phase::Transforms);
@@ -776,9 +1208,18 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
         // Dynamics.
         sc.integrate_velocities(bd, &cfg);
         probe(Phase::Integrate);
-        solver::prepare(&mut sc.cons, &mut sc.pool, &sc.binv, &sc.vw, &cfg);
+        if source.is_some() {
+            crate::checked_solver::prepare(&mut sc.cons, &mut sc.pool, &sc.binv, &sc.vw, &cfg)
+                .map_err(|_| StaticContactError::NumericOverflow)?;
+        } else {
+            solver::prepare(&mut sc.cons, &mut sc.pool, &sc.binv, &sc.vw, &cfg);
+        }
         probe(Phase::Prepare);
-        sc.run_substeps(&cfg);
+        if let Some(source) = source.as_mut() {
+            sc.run_static_substeps(bd, cd, old_cache, &cfg, source)?;
+        } else {
+            sc.run_substeps(&cfg);
+        }
         sc.clamp_velocities(&cfg);
         probe(Phase::Solve);
         sc.update_sleep(bd, &cfg);
@@ -796,6 +1237,16 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
         let dynamic = sc.flags[i] & F_DYN != 0;
         let Some(b) = frame.get_mut::<Body>(sc.ents[i]) else { continue };
         if sc.mslept[k] != 0 {
+            // Refreshed contacts were prepared at the last substep pose. Keep
+            // that pose even on the tick that enters sleep, so a later wake's
+            // cached normal remains at most one admitted substep out of date.
+            // The historical convex-only sleep/write-back path is unchanged.
+            if source.is_some() {
+                b.pos += sc.pw[i].v;
+                if sc.pw[i].w != FPVec3::ZERO {
+                    b.rot = integrate_rot(b.rot, sc.pw[i].w, FP::ONE);
+                }
+            }
             b.sleep = SLEEP_FLAG | limit;
             b.island = sc.mslept[k];
             b.vel = FPVec3::ZERO;
@@ -818,6 +1269,7 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, probe: &mut impl FnMut(P
     // Persist the warm-starting cache (sorted by (a, b, id)).
     store_list(frame, st.contacts, &sc.new_cache);
     probe(Phase::Finish);
+    Ok(())
 }
 
 /// Replaces the contents of a frame list, in place when the length is

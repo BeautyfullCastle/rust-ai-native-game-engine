@@ -1,4 +1,4 @@
-use orr_ecs::{Component, Entity, Frame};
+use orr_ecs::{Component, Entity, Frame, FrameList};
 
 /// A read-only window onto one sim [`Frame`].
 ///
@@ -76,8 +76,29 @@ impl<'a> FrameView<'a> {
         self.frame.singleton::<T>()
     }
 
+    /// Immutable values in a frame-owned list. This grants no allocation or mutation.
+    pub fn list<T: Component>(&self, list: FrameList<T>) -> &'a [T] {
+        self.frame.list(list)
+    }
+
     /// The frame checksum (xxh3), for tests and desync diagnostics.
     pub fn checksum(&self) -> u64 {
         self.frame.checksum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn frame_list_view_reads_without_changing_authority() {
+        let mut registry = orr_ecs::ComponentRegistryBuilder::new();
+        registry.register_list::<u32>("values");
+        let mut frame = Frame::new(registry.build());
+        let list = frame.alloc_list::<u32>();
+        frame.list_push(list, 17);
+        let before = frame.to_bytes();
+        assert_eq!(FrameView::of(&frame).list(list), &[17]);
+        assert_eq!(frame.to_bytes(), before);
     }
 }

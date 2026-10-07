@@ -200,6 +200,8 @@ pub struct Editor {
     pub camera: Camera,
     pub camera3d: orr_render::OrbitCamera,
     yard_frame: crate::viewport3d::YardFrame,
+    #[cfg(feature = "terrain-physics")]
+    terrain_view: crate::terrain_physics::TerrainPhysicsView,
     status: Option<Message>,
     log: Vec<Message>,
     // caches of host answers
@@ -304,6 +306,8 @@ impl Editor {
             camera: Camera::new([0.0, 0.0], 20.0),
             camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
             yard_frame: crate::viewport3d::YardFrame::default(),
+            #[cfg(feature = "terrain-physics")]
+            terrain_view: crate::terrain_physics::TerrainPhysicsView::default(),
             status: None,
             log: Vec::new(),
             sim: SimState::default(),
@@ -696,7 +700,7 @@ impl Editor {
 
     /// Read-only enablement; the host repeats all admission checks.
     pub fn can_nudge_selection(&self) -> bool {
-        self.game() != EditorGame::Yard3D && self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
+        !self.game().is_3d() && self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
             && self.batch_supported && self.scene_edit_allowed && !self.batch_uncertain
             && !self.history.in_tx && !self.sim.in_tx && !self.gesture.busy()
             && !self.guid_selection.guids().is_empty()
@@ -778,7 +782,7 @@ impl Editor {
     /// Ctrl-click toggles a document GUID; a handle-only target keeps the
     /// original single inspect path. Refusing a 129th GUID changes nothing.
     pub fn toggle_selection(&mut self, target: Target) -> bool {
-        if self.game() == EditorGame::Yard3D { self.select(Some(target)); return true; }
+        if self.game().is_3d() { self.select(Some(target)); return true; }
         let Target::Guid(guid) = target else { self.select(Some(target)); return true };
         if self.rows.iter().all(|row| row.guid.as_ref() != Some(&guid)) {
             self.error("cannot select a GUID absent from the current document rows");
@@ -837,7 +841,7 @@ impl Editor {
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
-        if self.game() == EditorGame::Yard3D { self.camera3d = orr_render::OrbitCamera::new([0.0,2.0,0.0],0.55,0.5,16.0); return; }
+        if self.game().is_3d() { self.camera3d = orr_render::OrbitCamera::new([0.0,2.0,0.0],0.55,0.5,16.0); return; }
         if self.game() == EditorGame::Arena {
             let half = orr_view::fp_to_f32(orr_sample::arena_game::ARENA_HALF);
             self.camera = Camera::new([0.0, 0.0], half * 1.06);
@@ -1268,12 +1272,20 @@ impl Editor {
             return;
         }
         let started = Instant::now();
-        if self.game()==EditorGame::Yard3D && self.snapshot.as_ref().is_some_and(|old| old.timeline().is_some()!=s.timeline().is_some() || (s.timeline().is_some()&&s.tick()<old.tick())) { self.mark_changed(); }
+        if self.game().is_3d() && self.snapshot.as_ref().is_some_and(|old| old.timeline().is_some()!=s.timeline().is_some() || (s.timeline().is_some()&&s.tick()<old.tick())) { self.mark_changed(); }
         let frame = s.predicted();
         self.bodies = self.backend.game.drawables(frame);
-        if self.game() == EditorGame::Yard3D {
+        if self.game().is_3d() {
             self.yard_frame = crate::viewport3d::YardFrame::extract(frame);
             if (s.timeline().is_none()&&self.yard_rows_checksum!=Some(frame.checksum())) || (s.timeline().is_some()&&self.yard_rows_tick>s.tick()) {self.dirty.rows=true;}
+        }
+        #[cfg(feature = "terrain-physics")]
+        if self.game().is_terrain() {
+            let previous = self.terrain_view.error.clone();
+            self.terrain_view.update(frame);
+            if previous != self.terrain_view.error {
+                if let Some(error) = self.terrain_view.error.clone() { self.error(error); }
+            }
         }
         self.checksum = frame.checksum();
         let alive = frame.alive_count();
@@ -1487,6 +1499,10 @@ impl Editor {
             self.error("clear the proposal preview before opening a scene");
             return false;
         }
+        if self.game().is_terrain() && self.path().as_deref() != Some(path) {
+            self.error("Terrain collision hosts are bound to their original scene directory. Open another scene with --game terrain-yard3d --scene PATH");
+            return false;
+        }
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => {
@@ -1494,7 +1510,7 @@ impl Editor {
                 return false;
             }
         };
-        match self.call("scene.load", json!({"text": text, "path": path.display().to_string()})) {
+        match self.call("scene.load", if self.game().is_terrain() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
                 self.select(None);
                 self.refit = true;
@@ -1524,6 +1540,10 @@ impl Editor {
 
     /// Saves the scene text to `path` and makes it the current path.
     pub fn save_as(&mut self, path: &Path) -> bool {
+        if self.game().is_terrain() {
+            self.error("Terrain collision scene paths are fixed for this host; use Save to preserve its pinned source directory");
+            return false;
+        }
         self.save_with(json!({"write": true, "path": path.display().to_string()}))
     }
 
@@ -1793,6 +1813,10 @@ impl Editor {
         }
     }
 
+    /// The terrain geometry reconstructed from the authoritative host snapshot.
+    #[cfg(feature = "terrain-physics")]
+    pub fn admitted_terrain(&self) -> &crate::terrain_physics::TerrainPhysicsView { &self.terrain_view }
+
     /// The current authoritative 3D snapshot mapped to presentation data.
     pub fn yard_frame(&self) -> &crate::viewport3d::YardFrame { &self.yard_frame }
 
@@ -1812,14 +1836,14 @@ impl Editor {
         self.yard_frame.pick(&self.camera3d.camera(),pixel,size,&self.rows)
     }
 
-    /// Creates one persisted box proxy through the existing Yard3D host.
+    /// Creates a persisted Yard3D box, or a sphere in the admitted terrain game.
     pub fn spawn_yard_body(&mut self, pos: orr_fp::FPVec3) -> bool {
-        if self.game()!=EditorGame::Yard3D || self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
+        if !self.game().is_3d() || self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
             self.error("Yard bodies require editable Yard3D scene mode"); return false;
         }
         let params=json!({"name":self.fresh_name(),"components":{
-            "orr_physics3d::Body":{"pos":value_to_json(&Value::Vec3(pos)),"kind":"dynamic","inv_mass":1,"inv_inertia":[6,6,6]},
-            "orr_physics3d::Collider":{"shape":{"kind":"box","half_extents":[0.5,0.5,0.5]}}
+            "orr_physics3d::Body":{"pos":value_to_json(&Value::Vec3(pos)),"kind":"dynamic","inv_mass":1,"inv_inertia":if self.game().is_terrain() {[10,10,10]}else{[6,6,6]}},
+            "orr_physics3d::Collider":{"shape":if self.game().is_terrain() { json!({"kind":"sphere","radius":0.5}) } else { json!({"kind":"box","half_extents":[0.5,0.5,0.5]}) }}
         }});
         match self.call("world.spawn",params) {
             Ok(r)=>{ let t=r.get("guid").and_then(J::as_str).and_then(Target::parse); self.mark_edited();self.select(t);self.inspect=None;self.dirty.inspect=true;true }
@@ -1830,7 +1854,7 @@ impl Editor {
     /// Atomic exact XYZ and whole unit-quaternion edit, one document undo entry.
     /// No float presentation transform is ever written back to the host.
     pub fn set_yard_transform(&mut self, pos:orr_fp::FPVec3, rotation:[FP;4])->bool {
-        if self.game()!=EditorGame::Yard3D || self.mode()!=Mode::Edit || !self.can_mutate() || self.selected_guids().len()!=1 || self.previewing().is_some() {
+        if !self.game().is_3d() || self.mode()!=Mode::Edit || !self.can_mutate() || self.selected_guids().len()!=1 || self.previewing().is_some() {
             self.error("Yard transform requires one editable persistent entity");return false;
         }
         let Some(target)=self.selection.clone() else {return false};
@@ -2242,6 +2266,11 @@ impl Editor {
     /// Starts a play session from the scene, paused at tick 0. Does nothing
     /// if one already runs.
     pub fn start_play(&mut self) -> bool {
+        #[cfg(feature = "terrain-physics")]
+        if self.game().is_terrain() && (!self.terrain_view.admitted || self.terrain_view.error.is_some()) {
+            self.error(self.terrain_view.error.clone().unwrap_or_else(|| "Wait for a valid admitted terrain snapshot before Play".into()));
+            return false;
+        }
         if self.sim.mode == Mode::Play {
             return true;
         }

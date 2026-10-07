@@ -230,6 +230,13 @@ impl Frame {
     pub fn alloc_list<T: Component>(&mut self) -> FrameList<T> {
         self.list_pool_mut::<T>().alloc()
     }
+    /// Whether a list handle names an allocated list of this exact generation.
+    /// Unlike `list`, distinguishes a live empty list from a stale handle.
+    /// Returns false when the element type is not registered.
+    pub fn list_is_alive<T: Component>(&self, h: FrameList<T>) -> bool {
+        self.registry.list_id::<T>().is_some() && self.list_pool::<T>().is_alive(h)
+    }
+
     pub fn list<T: Component>(&self, h: FrameList<T>) -> &[T] {
         self.list_pool::<T>().get(h)
     }
