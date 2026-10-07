@@ -14,7 +14,7 @@
 //! For a local host both channels are in-process links (no sockets, frames
 //! as shared copies); for a remote one they are two WebSocket connections.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use orr_remote::sample::{spawn_arena_host, spawn_phys_host};
@@ -48,6 +48,14 @@ pub enum HostSpec {
         /// Enable the `debug.panic` test hook.
         debug_hooks: bool,
     },
+    /// An Arena host admitted from a completely validated saved project.
+    /// The first connection consumes the already checked scene bytes, not disk.
+    #[cfg(feature = "sprites")]
+    PreparedArena {
+        scene: crate::project::PreparedArenaScene,
+        listen: Option<ServerConfig>,
+        debug_hooks: bool,
+    },
     /// A host in another process.
     Remote {
         /// `ws://host:port` of its ERP server.
@@ -72,6 +80,8 @@ impl HostSpec {
     pub fn with_listener(mut self, listen: ServerConfig) -> HostSpec {
         match &mut self {
             HostSpec::Local { listen: current, .. } | HostSpec::LocalGame { listen: current, .. } => *current = Some(listen),
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { listen: current, .. } => *current = Some(listen),
             HostSpec::Remote { .. } => {}
         }
         self
@@ -82,6 +92,18 @@ impl HostSpec {
         match self {
             HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => {
                 *scene = path;
+                true
+            }
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { listen, debug_hooks, .. } => {
+                // A successful explicit scene open/save returns to the ordinary
+                // local lifecycle; stale admission bytes must not replace it.
+                *self = HostSpec::LocalGame {
+                    scene: path,
+                    game: EditorGame::Arena,
+                    listen: listen.clone(),
+                    debug_hooks: *debug_hooks,
+                };
                 true
             }
             HostSpec::Remote { .. } => false,
@@ -95,7 +117,7 @@ impl HostSpec {
 
     /// True for a host thread of this process.
     pub fn is_local(&self) -> bool {
-        matches!(self, HostSpec::Local { .. } | HostSpec::LocalGame { .. })
+        !matches!(self, HostSpec::Remote { .. })
     }
 }
 
@@ -142,51 +164,24 @@ impl Backend {
     /// Starts the host thread or attaches to the host, and opens both channels.
     pub fn connect(spec: &HostSpec) -> Result<Backend, String> {
         match spec {
-            HostSpec::Local { scene, listen, debug_hooks } | HostSpec::LocalGame { scene, listen, debug_hooks, .. } => {
-                let selected_game = match spec {
-                    HostSpec::Local { .. } => EditorGame::PhysGame,
-                    HostSpec::LocalGame { game, .. } => *game,
-                    HostSpec::Remote { .. } => unreachable!("matched local host spec"),
-                };
+            HostSpec::Local { scene, listen, debug_hooks } => {
                 let text = std::fs::read_to_string(scene).map_err(|e| format!("cannot read {}: {e}", scene.display()))?;
-                let mut cfg = match listen {
-                    Some(c) => c.clone(),
-                    None => {
-                        let mut c = ServerConfig::new(Auth::DevNoAuth);
-                        c.listen = false;
-                        c
-                    }
+                Self::connect_local(spec, scene, text, EditorGame::PhysGame, listen, *debug_hooks)
+            }
+            HostSpec::LocalGame { scene, game, listen, debug_hooks } => {
+                let text = std::fs::read_to_string(scene).map_err(|e| format!("cannot read {}: {e}", scene.display()))?;
+                Self::connect_local(spec, scene, text, *game, listen, *debug_hooks)
+            }
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { scene, listen, debug_hooks } => {
+                // Admission uses the captured bytes once. After successful startup,
+                // restart keeps the established saved-on-disk local-host semantics
+                // (including saves made by agents through ERP).
+                let restart = HostSpec::LocalGame {
+                    scene: scene.path.clone(), game: EditorGame::Arena,
+                    listen: listen.clone(), debug_hooks: *debug_hooks,
                 };
-                cfg.listen = listen.is_some();
-                cfg.limits.allow_scene_paths = true;
-                cfg.limits.debug_hooks = *debug_hooks;
-                cfg.limits.max_step_per_call = 20_000;
-                let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
-                cfg.screenshot = Some(screenshot_service);
-                let host = match selected_game {
-                    EditorGame::PhysGame => spawn_phys_host(text, Some(scene.clone()), cfg)?,
-                    EditorGame::Arena => spawn_arena_host(text, Some(scene.clone()), cfg)?,
-                    EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.clone(), cfg)?,
-                    #[cfg(feature = "terrain-physics")]
-                    EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.clone(), cfg)?,
-                    #[cfg(feature = "navigation")]
-                    EditorGame::NavigationYard3D => orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.clone(), cfg)?,
-                };
-                let connector = host.connector();
-                let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
-                let mut erp = ErpClient::with_transport(Box::new(link("ERP")?));
-                erp.call_timeout = CALL_TIMEOUT;
-                let mut rc = RemoteConfig::new("");
-                rc.source = "view".to_string();
-                rc.view_delivery = ViewDeliveryMode::RequireFenced;
-                // In process a frame is a copy, not a message: let an edit show at once instead of
-                // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
-                rc.max_fps = 240;
-                let (game, identity, own_client, managed_input) = discover(&mut erp)?;
-                rc.expected_identity = Some(identity.clone());
-                let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
-                let url = host.url().map(str::to_string);
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner) })
+                Self::connect_local(&restart, &scene.path, scene.text.to_string(), EditorGame::Arena, listen, *debug_hooks)
             }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());
@@ -208,10 +203,60 @@ impl Backend {
         }
     }
 
+    fn connect_local(
+        spec: &HostSpec,
+        scene: &Path,
+        text: String,
+        selected_game: EditorGame,
+        listen: &Option<ServerConfig>,
+        debug_hooks: bool,
+    ) -> Result<Backend, String> {
+        let mut cfg = match listen {
+            Some(c) => c.clone(),
+            None => {
+                let mut c = ServerConfig::new(Auth::DevNoAuth);
+                c.listen = false;
+                c
+            }
+        };
+        cfg.listen = listen.is_some();
+        cfg.limits.allow_scene_paths = true;
+        cfg.limits.debug_hooks = debug_hooks;
+        cfg.limits.max_step_per_call = 20_000;
+        let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
+        cfg.screenshot = Some(screenshot_service);
+        let host = match selected_game {
+            EditorGame::PhysGame => spawn_phys_host(text, Some(scene.to_path_buf()), cfg)?,
+            EditorGame::Arena => spawn_arena_host(text, Some(scene.to_path_buf()), cfg)?,
+            EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+            #[cfg(feature = "terrain-physics")]
+            EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+            #[cfg(feature = "navigation")]
+            EditorGame::NavigationYard3D => orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+        };
+        let connector = host.connector();
+        let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
+        let mut erp = ErpClient::with_transport(Box::new(link("ERP")?));
+        erp.call_timeout = CALL_TIMEOUT;
+        let mut rc = RemoteConfig::new("");
+        rc.source = "view".to_string();
+        rc.view_delivery = ViewDeliveryMode::RequireFenced;
+        // In process a frame is a copy, not a message: let an edit show at once instead of
+        // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
+        rc.max_fps = 240;
+        let (game, identity, own_client, managed_input) = discover(&mut erp)?;
+        rc.expected_identity = Some(identity.clone());
+        let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
+        let url = host.url().map(str::to_string);
+        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner) })
+    }
+
     /// Another frame stream, for what the viewport previews (`proposal:p3`).
     pub fn frame_stream(&self, source: &str) -> Result<EditorStream, String> {
         let mut rc = match &self.spec {
             HostSpec::Local { .. } | HostSpec::LocalGame { .. } => RemoteConfig::new(""),
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { .. } => RemoteConfig::new(""),
             HostSpec::Remote { url, token } => {
                 let mut c = RemoteConfig::new(&if token.is_some() { url.clone() } else { ws_url(url, None) });
                 c.token.clone_from(token);

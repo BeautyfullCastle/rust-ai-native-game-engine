@@ -75,6 +75,8 @@ impl TerrainPanel {
         }
         let expected = match editor.spec() {
             HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => scene,
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { scene, .. } => &scene.path,
             HostSpec::Remote { .. } => {
                 return Err("Remote paths are not local terrain authority".into())
             }

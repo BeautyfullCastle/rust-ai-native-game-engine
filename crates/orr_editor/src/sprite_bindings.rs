@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MAX_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_BINDINGS: usize = 4096;
 const MAX_HISTORY: usize = 128;
 
@@ -170,16 +170,26 @@ impl Bindings {
         })
     }
     pub fn open(path: PathBuf) -> Result<Self, String> {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        resolve_project(parent, ".")?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_BYTES {
+            return Err("binding file must be a regular file within byte limit".into());
+        }
         let mut bytes = Vec::new();
         std::fs::File::open(&path)
             .map_err(|e| e.to_string())?
             .take(MAX_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
+        Self::from_bytes(path, &bytes)
+    }
+    /// Construct a checked candidate from an already bounded, regular-file read.
+    pub(crate) fn from_bytes(path: PathBuf, bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() as u64 > MAX_BYTES {
             return Err("binding file exceeds byte limit".into());
         }
-        let document: Document = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let document: Document = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
         document.validate()?;
         Ok(Self {
             path,
@@ -340,11 +350,23 @@ pub fn load_asset(project_root: &Path, package: &str, document: &str) -> Result<
     let project = open_project(project_root)?;
     load_project_asset(&project, package, document)
 }
-pub fn open_project(project_root: &Path) -> Result<orr_package::Project, String> {
+/// Inventory comes only from features actually compiled into this editor.
+pub(crate) fn compiled_runtime() -> orr_package::Runtime {
     let mut runtime = orr_package::Runtime::content_only();
     runtime.capabilities.insert("sprite".into());
-    let project =
-        orr_package::Project::open(project_root, runtime).map_err(|e| format!("project: {e}"))?;
+    #[cfg(feature = "models")]
+    runtime.capabilities.insert("models".into());
+    #[cfg(feature = "animated-models")]
+    runtime.capabilities.insert("animation".into());
+    #[cfg(feature = "irradiance-probes")]
+    runtime.capabilities.insert("irradiance-probes".into());
+    #[cfg(feature = "terrain")]
+    runtime.capabilities.insert("terrain_v1".into());
+    runtime
+}
+pub fn open_project(project_root: &Path) -> Result<orr_package::Project, String> {
+    let project = orr_package::Project::open(project_root, compiled_runtime())
+        .map_err(|e| format!("project: {e}"))?;
     project
         .verify()
         .map_err(|e| format!("package verification: {e}"))?;

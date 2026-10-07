@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "scene": "arena.scene.yaml",
+  "project": ".",
+  "bindings": {
+    "e_00000001": {
+      "package": "sample-sprites",
+      "document": "sprites.json",
+      "source": { "Locomotion": { "idle": "idle", "walk": "walk" } },
+      "units_per_pixel": 2.0
+    },
+    "e_00000002": {
+      "package": "sample-sprites",
+      "document": "sprites.json",
+      "source": { "Locomotion": { "idle": "walk", "walk": "idle" } },
+      "units_per_pixel": 2.0
+    }
+  },
+  "camera_follow": "e_00000001"
+}

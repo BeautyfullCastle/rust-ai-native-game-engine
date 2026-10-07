@@ -95,15 +95,82 @@ impl Runtime {
         }
     }
 }
-#[derive(Deserialize)]
+/// Project metadata. Schema 1 remains metadata-only; schema 2 selects exactly
+/// one saved entry scene. Neither schema selects packages: the lock is the
+/// only authority for package activation and exact versions.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ProjectManifest {
-    schema: u32,
-    engine: String,
+pub struct ProjectManifest {
+    pub schema: u32,
+    pub engine: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_entry"
+    )]
+    pub entry: Option<ProjectEntry>,
+}
+
+/// Closed launch profiles supported by the project contract. This is metadata,
+/// not permission to enable optional code in a consuming application.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProjectGame {
+    #[serde(rename = "arena")]
+    Arena,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectEntry {
+    pub game: ProjectGame,
+    /// Portable path relative to the project root.
+    pub scene: String,
+    /// Optional sprite sidecar, also relative to the project root.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_sprites"
+    )]
+    pub sprites: Option<String>,
+}
+
+// A missing optional field is valid. An explicitly supplied null is not a
+// second spelling of missing launch metadata (including on schema 1).
+fn present_entry<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<ProjectEntry>, D::Error> {
+    ProjectEntry::deserialize(d).map(Some)
+}
+fn present_sprites<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    String::deserialize(d).map(Some)
+}
+
+impl ProjectManifest {
+    fn validate(&self, runtime: &Runtime) -> Result<()> {
+        match (self.schema, &self.entry) {
+            (1, None) => {}
+            (2, Some(entry)) => {
+                portable(&entry.scene)?;
+                if let Some(sprites) = &entry.sprites {
+                    portable(sprites)?;
+                    if sprites.eq_ignore_ascii_case(&entry.scene) {
+                        return fail("entry scene and sprite sidecar must be different files");
+                    }
+                }
+            }
+            (1, Some(_)) => return fail("schema-1 projects cannot contain entry metadata"),
+            (2, None) => return fail("schema-2 projects require an entry"),
+            _ => return fail("unsupported project schema"),
+        }
+        compatible(&self.engine, runtime)
+    }
 }
 
 pub struct Project {
     root: PathBuf,
+    manifest: Option<ProjectManifest>,
     runtime: Runtime,
     enforce_capabilities: bool,
 }
@@ -117,18 +184,29 @@ impl Project {
             return fail("project root is not a directory");
         }
         let project = root.join("orr.project.json");
-        if project.try_exists()? {
-            let p: ProjectManifest = json(&project)?;
-            if p.schema != 1 {
-                return fail("unsupported project schema");
+        let manifest = match fs::symlink_metadata(&project) {
+            Ok(_) => {
+                let p: ProjectManifest = json(&project)?;
+                p.validate(&runtime)?;
+                Some(p)
             }
-            compatible(&p.engine, &runtime)?;
-        }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
         Ok(Self {
             root,
+            manifest,
             runtime,
             enforce_capabilities: true,
         })
+    }
+    /// Canonical, symlink-free project root captured at open.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    /// Validated metadata captured at open, without rewriting it or the lock.
+    pub fn manifest(&self) -> Option<&ProjectManifest> {
+        self.manifest.as_ref()
     }
     /// Metadata-only installation tool. This cannot read assets: a consuming host must
     /// reopen with its compiled capability inventory before loading content.
@@ -685,6 +763,93 @@ mod tests {
         #[cfg(unix)]
         let root = fs::canonicalize(root).unwrap();
         tempfile::tempdir_in(root).unwrap()
+    }
+
+    #[test]
+    fn project_schemas_preserve_metadata_and_only_describe_entry_content() {
+        let tmp = fixture_dir();
+        let path = tmp.path().join("orr.project.json");
+        let legacy = br#"{"schema":1,"engine":"^0.0.1"}"#;
+        fs::write(&path, legacy).unwrap();
+        let project = Project::open(tmp.path(), Runtime::content_only()).unwrap();
+        assert_eq!(project.manifest().unwrap().schema, 1);
+        assert!(project.manifest().unwrap().entry.is_none());
+        assert_eq!(fs::read(&path).unwrap(), legacy);
+        assert_eq!(project.list().unwrap(), Lock::default());
+        assert!(!tmp.path().join(LOCK).exists());
+
+        let saved = br#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"scenes/arena.scene.yaml","sprites":"arena.sprites.json"}}"#;
+        fs::write(&path, saved).unwrap();
+        let project = Project::open(tmp.path(), Runtime::content_only()).unwrap();
+        let entry = project.manifest().unwrap().entry.as_ref().unwrap();
+        assert_eq!(entry.game, ProjectGame::Arena);
+        assert_eq!(entry.scene, "scenes/arena.scene.yaml");
+        assert_eq!(entry.sprites.as_deref(), Some("arena.sprites.json"));
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        assert!(!tmp.path().join(LOCK).exists());
+        // Package metadata tools do not need the optional presentation feature
+        // or existing scene files merely to install/remove content.
+        let src_root = fixture_dir();
+        let src = source(src_root.path(), "art", &[]);
+        let installer =
+            Project::open_for_install(tmp.path(), Runtime::content_only().engine_version).unwrap();
+        let installed = installer.install(&[src]).unwrap();
+        assert_eq!(
+            installed.direct.get("art").map(String::as_str),
+            Some("1.0.0")
+        );
+        installer.verify().unwrap();
+        installer.remove("art").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), saved);
+    }
+
+    #[test]
+    fn project_entry_contract_rejects_ambiguous_unsupported_and_unsafe_metadata() {
+        let tmp = fixture_dir();
+        let path = tmp.path().join("orr.project.json");
+        let invalid = [
+            r#"{"schema":0,"engine":"^0.0.1"}"#,
+            r#"{"schema":3,"engine":"^0.0.1"}"#,
+            r#"{"schema":2,"engine":"^0.0.1"}"#,
+            r#"{"schema":1,"engine":"^0.0.1","entry":null}"#,
+            r#"{"schema":1,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"physics","scene":"a.yaml"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"Arena","scene":"a.yaml"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"scene":"a.yaml"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"../a.yaml"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"/a.yaml"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml","sprites":"../b.json"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml","sprites":"A.yaml"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml","sprites":null}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml","unknown":0}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml"},"packages":{}}"#,
+            r#"{"schema":2,"schema":1,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml"}}"#,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml","scene":"b.yaml"}}"#,
+            r#"{"schema":2,"engine":">=99.0.0","entry":{"game":"arena","scene":"a.yaml"}}"#,
+        ];
+        for text in invalid {
+            fs::write(&path, text).unwrap();
+            assert!(
+                Project::open(tmp.path(), Runtime::content_only()).is_err(),
+                "accepted {text}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+            assert!(!tmp.path().join(LOCK).exists());
+        }
+        fs::write(
+            &path,
+            r#"{"schema":2,"engine":"^0.0.1","entry":{"game":"arena","scene":"a.yaml"}}"#,
+        )
+        .unwrap();
+        assert!(Project::open(tmp.path(), Runtime::content_only())
+            .unwrap()
+            .manifest()
+            .unwrap()
+            .entry
+            .as_ref()
+            .unwrap()
+            .sprites
+            .is_none());
     }
 
     #[test]

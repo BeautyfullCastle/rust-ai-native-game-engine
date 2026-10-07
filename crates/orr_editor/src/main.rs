@@ -26,11 +26,17 @@ fn main() {
             std::process::exit(if m == USAGE { 0 } else { 2 });
         }
     };
+    // All project files, active package bytes and presentation references are
+    // admitted before constructing any host or window. Keep this owned candidate
+    // until the actual egui context is available for texture restoration.
+    #[cfg(feature = "sprites")]
+    let project = args.project.as_ref().map(|root| {
+        orr_editor::project::PreparedProject::open(root)
+            .unwrap_or_else(|error| fail(&format!("--project: {error}")))
+    });
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
-            let game = args.game.unwrap_or(EditorGame::PhysGame);
-            let scene: PathBuf = args.scene.clone().unwrap_or_else(|| game.default_scene_path());
             // With --erp the same host thread also listens for agents: they share the window's document.
             let listen = args.erp.map(|bind| {
                 let auth = if args.erp_dev {
@@ -45,7 +51,15 @@ fn main() {
                 cfg.bind = bind;
                 cfg
             });
-            let spec = HostSpec::local_game(scene, game);
+            let standalone = || {
+                let game = args.game.unwrap_or(EditorGame::PhysGame);
+                let scene: PathBuf = args.scene.clone().unwrap_or_else(|| game.default_scene_path());
+                HostSpec::local_game(scene, game)
+            };
+            #[cfg(feature = "sprites")]
+            let spec = project.as_ref().map_or_else(standalone, |project| project.host_spec());
+            #[cfg(not(feature = "sprites"))]
+            let spec = standalone();
             match listen {
                 Some(cfg) => spec.with_listener(cfg),
                 None => spec,
@@ -85,6 +99,12 @@ fn main() {
         "Orrery Editor",
         options,
         Box::new(move |cc| {
+            #[cfg(feature = "sprites")]
+            let mut app = match project {
+                Some(project) => project.into_app(editor, cc.wgpu_render_state.clone(), &cc.egui_ctx),
+                None => EditorApp::new(editor, cc.wgpu_render_state.clone()),
+            };
+            #[cfg(not(feature = "sprites"))]
             let mut app = EditorApp::new(editor, cc.wgpu_render_state.clone());
             if let Some(job) = shot {
                 app = app.with_screenshot(job);

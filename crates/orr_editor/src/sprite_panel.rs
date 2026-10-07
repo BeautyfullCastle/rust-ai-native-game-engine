@@ -108,12 +108,24 @@ impl SpritePanel {
         }
         let candidate = Bindings::open(path)?;
         let assets = Self::load_assets(&candidate)?;
+        self.install_prepared(ctx, candidate, assets);
+        Ok(())
+    }
+    /// Install a complete CPU-validated candidate without further filesystem I/O.
+    pub(crate) fn install_prepared(
+        &mut self,
+        ctx: &egui::Context,
+        candidate: Bindings,
+        assets: BTreeMap<(String, String), Asset>,
+    ) {
+        self.replace_assets(ctx, assets);
         self.path = candidate.path.to_string_lossy().into_owned();
+        self.scene.clone_from(&candidate.document().scene);
+        self.project.clone_from(&candidate.document().project);
         self.bindings = Some(candidate);
         self.playback.reset_document();
-        self.replace_assets(ctx, assets);
         self.preview_playing = false;
-        Ok(())
+        self.error = None;
     }
     pub fn create(&mut self, path: PathBuf, scene: String, project: String) -> Result<(), String> {
         if self.bindings.is_some() {
@@ -128,6 +140,19 @@ impl SpritePanel {
         Ok(())
     }
     fn load_assets(bindings: &Bindings) -> Result<BTreeMap<(String, String), Asset>, String> {
+        // Preserve standalone empty-sidecar behavior; saved-project admission
+        // always verifies the entire lock, even without bindings or a sidecar.
+        if bindings.document().bindings.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let root = sprite_bindings::resolve_project(bindings.base(), &bindings.document().project)?;
+        let project = sprite_bindings::open_project(&root)?;
+        Self::load_project_assets(bindings, &project)
+    }
+    pub(crate) fn load_project_assets(
+        bindings: &Bindings,
+        project: &orr_package::Project,
+    ) -> Result<BTreeMap<(String, String), Asset>, String> {
         let references: BTreeSet<_> = bindings
             .document()
             .bindings
@@ -137,14 +162,9 @@ impl SpritePanel {
         if references.len() > 8 {
             return Err("sidecar references more than 8 sprite documents; reduce references before reloading".into());
         }
-        if references.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let root = sprite_bindings::resolve_project(bindings.base(), &bindings.document().project)?;
-        let project = sprite_bindings::open_project(&root)?;
         let mut assets = BTreeMap::new();
         for (package, document) in references {
-            let asset = sprite_bindings::load_project_asset(&project, &package, &document)
+            let asset = sprite_bindings::load_project_asset(project, &package, &document)
                 .map_err(|e| format!("{package}/{document}: {e}"))?;
             for binding in bindings
                 .document()
@@ -159,10 +179,17 @@ impl SpritePanel {
         Ok(assets)
     }
     fn replace_assets(&mut self, ctx: &egui::Context, assets: BTreeMap<(String, String), Asset>) {
-        self.loaded.clear();
-        for (key, asset) in assets {
-            self.cache_asset(ctx, key, asset);
-        }
+        let loaded = assets.into_iter().map(|(key, asset)| {
+            let atlas = asset.document.atlas();
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [atlas.width as usize, atlas.height as usize], &asset.rgba,
+            );
+            let texture = ctx.load_texture(
+                format!("sprite:{}:{}", key.0, key.1), image, egui::TextureOptions::NEAREST,
+            );
+            (key, Loaded { asset, texture })
+        }).collect();
+        self.loaded = loaded;
     }
     pub fn reload(&mut self, ctx: &egui::Context) -> Result<(), String> {
         let bindings = self.bindings.as_ref().ok_or("open a view sidecar first")?;
