@@ -138,7 +138,7 @@ fn save(name: &str, size: (u32, u32), rgba: &[u8]) {
         let mut file =
             std::fs::File::create(Path::new(&directory).join(format!("{name}.ppm"))).unwrap();
         write!(file, "P6\n{} {}\n255\n", size.0, size.1).unwrap();
-        for pixel in rgba.chunks_exact(4) {
+        for pixel in rgba.as_chunks::<4>().0.iter() {
             file.write_all(&pixel[..3]).unwrap();
         }
     }
@@ -326,7 +326,7 @@ fn production_editor_hdr_bloom_mixed_frame_toggles_resize_readback_and_display_e
         "real scene preserves highlights above one before output mapping"
     );
     let lighting = orr_sample::yard3d_view::yard_lighting();
-    for (hdr, rgba) in raw.iter().zip(no_bloom.chunks_exact(4)) {
+    for (hdr, rgba) in raw.iter().zip(no_bloom.as_chunks::<4>().0.iter()) {
         for channel in 0..3 {
             let expected = display_channel(hdr[channel], lighting.exposure, lighting.tonemap);
             assert!(
@@ -368,8 +368,8 @@ fn production_editor_hdr_bloom_mixed_frame_toggles_resize_readback_and_display_e
     );
     let expanded = raw
         .iter()
-        .zip(no_bloom.chunks_exact(4))
-        .zip(bloom.chunks_exact(4))
+        .zip(no_bloom.as_chunks::<4>().0.iter())
+        .zip(bloom.as_chunks::<4>().0.iter())
         .filter(|((hdr, off), on)| {
             hdr[..3].iter().copied().fold(0.0_f32, f32::max) < 0.7
                 && (0..3).any(|c| i16::from(on[c]) - i16::from(off[c]) > 2)
@@ -717,7 +717,7 @@ fn mixed_hdr_viewport_rejects_late_invalid_batches_settings_budgets_and_unsuppor
         );
         let bytes = viewport.read_rgba8();
         assert!(
-            bytes.chunks_exact(4).all(|p| p == &bytes[..4]),
+            bytes.as_chunks::<4>().0.iter().all(|p| p == &bytes[..4]),
             "no stale bright geometry in an empty final frame"
         );
         for c in 0..3 {
