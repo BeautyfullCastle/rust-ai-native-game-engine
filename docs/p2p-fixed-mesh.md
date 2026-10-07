@@ -193,7 +193,8 @@ independent reference map.
 The public module is `orr_relay_net::p2p_mesh_input`:
 
 - `P2pMeshInputDriver<G,C>` and `P2pMeshInputSource<G,C>` share one lifetime
-  with one Session; do not replace or restore the Session/source generation
+  with one Session; do not replace or restore the Session/source generation,
+  except the narrowly checked `continue_planned_departure` source transition below
 - `new(local, context, limits)` preserves the finite 1-through-512 behavior
 - `new_rolling(local, context, limits, P2pMeshRollingWindow { recent_ticks,
   future_ticks })` explicitly enables rolling retention; finite `first_tick`
@@ -274,6 +275,123 @@ Call `check` before and after every Session/bootstrap mutation. The legacy
 or capacity errors. A terminal driver error makes the source inert; the
 application must stop advancing. Fixed membership failure is terminal even
 when the failed participant's last input was already queued elsewhere.
+
+## Opt-in local quiescence before recovery coordination
+
+`driver.quiesce(&session)` irreversibly blocks fresh admission and output on a
+healthy finite or rolling driver. It keeps existing incoming records drainable
+through the same source and preserves outstanding destination obligations.
+This is a small prerequisite for application-coordinated multisurvivor recovery,
+not a reconnect implementation. The shipped fixed-mesh runner retains its
+existing fail-on-edge-loss behavior and does not use this opt-in API.
+
+The first successful call freezes `P2pMeshQuiescence`: local slot, current local
+verified tick, Session next-send cursor, and three `accepted_remote_max_by_slot`
+values. The maxima cover newly admitted remote records, whether already polled
+or still queued, and survive canonical retirement. They can contain holes and
+include peer-0 defaults for logical slot 2 before its handoff. Ignored retired
+packets do not advance them. A missing maximum does not classify membership.
+The Session cursor is not the maximum submitted through driver `send_local`.
+These observations prove neither contiguous history nor agreed survivor fencing.
+Only three fixed maxima and one frozen summary are added; existing record,
+encoded-byte, per-edge and destination bounds are unchanged.
+
+Callers must independently fence their application/transport routes before
+quiescing. An active flush refuses quiescence without poisoning its in-flight
+FIFO acceptance. The API checks the exact source pointer, local slot,
+three-player P2P configuration and Ready/Unchecked join state. A syncing or
+failed join is rejected because Session may otherwise hold newly authored
+inputs without calling the source. Keep the same Session lifetime, with no
+restore, manual source swap, replacement or new join transition (only the planned
+departure helper below may replace a source): source pointer equality
+cannot enforce those caller preconditions.
+
+After quiescence, receive, fallible driver send, ticket/snapshot installation,
+edge admission and flush return nonterminal `Quiesced` without mutating queues.
+A late disconnect for an already-admitted edge is a no-op; an unknown edge is
+rejected without losing drainable input. This acknowledges no transport data and
+does not close a socket. Pending output is never silently treated as delivered.
+Cancellation remains terminal. `is_quiesced()` records that the transition
+happened, including after later failure; inspect `check()` separately for health.
+
+Use `Session::poll_confirmed` to drain, or non-authoring `step` when simulation
+is needed. Source polling transfers already-admitted records once; it does not
+guarantee local verification, which still requires complete inputs and simulated
+history. Missing records can leave both survivors stalled with different maxima.
+Never call `advance`, default takeover, or another authoring operation while
+quiesced: the source becomes terminal and cannot authorize recovery afterward.
+Continue checking the driver before and after Session operations. Repeated
+quiescence revalidates health, source/configuration, readiness and unchanged send
+cursor, then returns the original frozen summary even after verification moves.
+
+Quiescence itself provides no resume, source replacement, recovery target, survivor selection,
+default-owner election, repair, discovery, or wire change here. Do not construct
+a `DepartureFence` solely from this summary: independently settled routes,
+complete agreed membership and the existing departure protocol remain required.
+
+## Planned slot-2 departure with fully drained survivors
+
+`continue_planned_departure(&mut session, [fence0, fence1], [ack0, ack1],
+survivor_edge)` is an opt-in, narrow three-to-two continuation. It retains the
+three-slot Session and game state, departing only participant 2; participant 0
+becomes the sole author of command-free portable defaults for slot 2. The
+shipped socket runner does not opt in and still fails on edge loss. This is not
+unplanned recovery, missing-history repair, survivor election or arbitrary-N
+membership.
+
+The application must stop authoring, flush and settle actual old transport
+queues while the old driver is live, then pause/fence its application routes and
+quiesce. A successful `try_send` is not proof of transport settlement. Drain
+already admitted input using non-authoring `step` up to (never past) the frozen
+send cursor minus one, then `poll_confirmed`. Positive input delay is supported;
+the original input-delay configuration is preserved, but this does not re-prime
+an ahead-of-head input pipeline.
+
+Both established survivors must reach the exact same verified tick T, predicted
+head T and next-send cursor T+1. No authored tail, retained logical record,
+Session remote maximum or cumulative source admission maximum may exceed T.
+Incoming and pending queues and their byte counters must be empty. The old
+checked grant, both original edges and actual post-grant slot-2 input must exist.
+The exact healthy quiesced source and Ready/Unchecked Session are required;
+restore, replacement, new join and manual source swaps remain unsupported.
+
+Authenticate and exchange both complete survivor fences and verification
+acknowledgments only after settlement. The helper reconstructs a private fixed
+`DepartureBarrier` from exactly one report and acknowledgment for each of 0/1.
+It checks the local frozen slot-2 maximum, both verified ticks, derived target T
+and cutoff T+1, matching checksums and the actual local verified-frame ack.
+Reports remain trusted application assertions, not cryptographic or transport
+proofs. Recovery IDs must be fresh and membership revisions correctly managed.
+
+Supply exactly the other survivor's admitted edge with generation strictly
+greater than every old local edge generation. Both ends must independently agree
+that generation and never reuse it; the departure barrier neither authenticates
+nor binds the edge. The old checked context is inherited unchanged (survivor
+Session join nonce/attempt fields are joiner-only and need not match it). Existing
+ORRM v1 schema, context, recipient and wire generation checks remain unchanged.
+
+All fresh state, the sole edge, portable default encoding and mandatory record/
+byte capacity checks are prepared before mutation. Only owner 0 commits the
+barrier, with an empty default-authoring range, immediately followed by an
+infallible source replacement; peer 1 only replaces its source. Every returned
+error preserves the old Session and driver. The result is
+`P2pMeshPlannedDeparture { fresh_driver, retired_source }`: the fresh source is
+already installed. Old handles keep their old Rc and irreversible quiescence;
+they cannot revive or mutate the fresh generation. Activate fresh routes only
+after both local transitions and transport bindings are complete.
+
+The new source rejects every logical tick below T+1, even records that would
+otherwise be retired. Only 0–1 is admitted; ticket, joiner snapshot and further
+edge admission are blocked. Owner-0 slot-2 records must remain default and
+command-free. There is no retained join grant or phantom joiner backlog pin.
+Rolling mode begins at verified progress and retirement floor T, then advances
+only through the existing locally verified hook; finite mode keeps its old end
+bound. Simulation state, history, checksums, commands and cursor are preserved.
+
+`cargo test -p orr_relay_net --release --test p2p_mesh_departure` covers normal
+command-bearing continuation against an independent tick-zero simulation,
+finite and rolling modes, delay 2, retirement beyond the recent window,
+state-preserving preparation failures and old-generation isolation.
 
 ## Wire formats and limits
 
@@ -367,3 +485,18 @@ retirement, admission pins, stale snapshots, delayed obligations, reentrant
 flushes, retired framing/authority, and exhausted budgets/horizons. These checks
 are scoped to a fixed three-peer room; they do not claim arbitrary-N membership, discovery, distributed consensus,
 repair, production security, or completion of the broader P2P feature.
+
+The `p2p_mesh_departure_quic` integration test adds one finite, input-delay-2
+planned-departure witness: three pinned loopback QUIC connections (six transport
+handles), four command-bearing advances before slot 2 departs and twelve survivor
+advances afterward. Every mesh input/backlog frame is tracked from successful
+queue acceptance to a byte-matched real receive event and public-driver admission;
+all six directions and driver record/byte queues settle before quiescence. Checked
+bootstrap, including the initial historical-state snapshot, and departure
+fences/acks remain in-memory coordinator controls. The QUIC claim covers emitted
+mesh input/backlog packets, not snapshot history or input-delay preconfirmation.
+Both survivors switch to an agreed fresh generation on the settled 0–1 connection,
+with owner-0 command-free defaults for slot 2, and match independent tick-zero
+Arena simulation at every verified checkpoint. This is a bounded healthy data-path
+witness, not distributed control, crash recovery, adversarial-network coverage,
+reconnection, or a new rolling-mode socket test; close completion is only cleanup.
