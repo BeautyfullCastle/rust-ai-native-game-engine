@@ -15,6 +15,7 @@ workspace = true
 [features]
 collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]
 # Explicit saved-project UI admission and read-only preset/font preview.
+collect-ui = ["collect-dodge", "project-ui", "orr_sample/collect-ui"]
 project-ui = ["sprites", "orr_sample/game-ui"]
 navigation = ["terrain", "orr_remote/navigation", "dep:orr_navigation"]
 terrain-physics = ["terrain", "orr_remote/terrain-physics"]

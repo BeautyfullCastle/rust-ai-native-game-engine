@@ -222,6 +222,7 @@ impl ProjectSnapshot {
         if let Some(sidecar) = &entry.sprites {
             plan.add(sidecar, MAX_JSON_BYTES)?;
         }
+        if let Some(document) = entry.ui.as_ref().and_then(|ui| ui.document.as_ref()) { plan.add(document, 64 * 1024)?; }
         for package in lock.packages.values() {
             let object = format!(".orr/packages/objects/{}", package.digest);
             plan.add(&format!("{object}/{PACKAGE_MANIFEST}"), MAX_JSON_BYTES)?;
@@ -268,6 +269,15 @@ impl ProjectSnapshot {
             }
             (None, None) => {}
             _ => return Err("sprite sidecar changed during runtime admission".into()),
+        }
+        #[cfg(feature = "collect-ui")]
+        if let Some(path) = entry.ui.as_ref().and_then(|ui| ui.document.as_ref()) {
+            let super::Prepared::Collect(collect) = &prepared else { return Err("authored UI requires Collect consumer".into()); };
+            let admitted = collect.ui().ok_or("missing admitted Collect UI")?;
+            let mut file = SnapshotFile::read(&root.join(path), path, 64 * 1024)?;
+            if file.source != admitted.path || crate::authored_ui::Document::parse(&file.bytes)? != admitted.document { return Err("UI document changed after runtime admission".into()); }
+            file.role = "ui_document";
+            files.push(file);
         }
         // The initial frame and decoded atlases are no longer needed. Release
         // them before retaining the whole package closure in the snapshot.

@@ -456,26 +456,205 @@ fn collect_progress_noninteractive_syscall_isolation() {
     assert!(!data.exists());
 }
 
-#[cfg(feature="collect-sprites")]
-#[path="common/collect_sprites.rs"]
+#[cfg(feature = "collect-sprites")]
+#[path = "common/collect_sprites.rs"]
 mod sprite_fixture;
-#[cfg(feature="collect-sprites")]
+#[cfg(feature = "collect-sprites")]
 #[test]
-#[ignore="requires exact built sprite runtime/exporter, source-hidden read-only namespace and software GPU"]
+#[ignore = "requires exact built sprite runtime/exporter, source-hidden read-only namespace and software GPU"]
 fn collect_sprite_source_hidden_export_matches_actual_atlas() {
-    let w=Work::new();sprite_fixture::fixture(&w.project);
-    let before=snapshot(&w.project);let bundle=w.export();let bytes=snapshot(&bundle);
-    assert!(bytes.keys().any(|k|k.ends_with("view.json")));
-    assert!(bytes.keys().any(|k|k.ends_with("lantern_keeper.png")));
-    for (name,ticks,held) in [("sprite-initial",0,""),("sprite-idle",36,""),("sprite-won",16,"right")] {
-        let a=w.root.path().join("captures").join(format!("{name}-source.png"));let b=w.root.path().join("captures").join(format!("{name}-export.png"));
-        let text=w.run(&w.runtime,None,ticks,held,Some(&a));assert!(text.contains("software: true"));
-        assert_eq!(text,w.run(&bundle.join("run-collect-dodge"),Some(&bundle),ticks,held,Some(&b)));
-        assert_eq!(fs::read(&a).unwrap(),fs::read(&b).unwrap());
-        let mut reader=png::Decoder::new(std::io::BufReader::new(fs::File::open(&a).unwrap())).read_info().unwrap();let mut pixels=vec![0;reader.output_buffer_size().unwrap()];let info=reader.next_frame(&mut pixels).unwrap();
+    let w = Work::new();
+    sprite_fixture::fixture(&w.project);
+    let before = snapshot(&w.project);
+    let bundle = w.export();
+    let bytes = snapshot(&bundle);
+    assert!(bytes.keys().any(|k| k.ends_with("view.json")));
+    assert!(bytes.keys().any(|k| k.ends_with("lantern_keeper.png")));
+    for (name, ticks, held) in [
+        ("sprite-initial", 0, ""),
+        ("sprite-idle", 36, ""),
+        ("sprite-won", 16, "right"),
+    ] {
+        let a = w
+            .root
+            .path()
+            .join("captures")
+            .join(format!("{name}-source.png"));
+        let b = w
+            .root
+            .path()
+            .join("captures")
+            .join(format!("{name}-export.png"));
+        let text = w.run(&w.runtime, None, ticks, held, Some(&a));
+        assert!(text.contains("software: true"));
+        assert_eq!(
+            text,
+            w.run(
+                &bundle.join("run-collect-dodge"),
+                Some(&bundle),
+                ticks,
+                held,
+                Some(&b)
+            )
+        );
+        assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap());
+        let mut reader = png::Decoder::new(std::io::BufReader::new(fs::File::open(&a).unwrap()))
+            .read_info()
+            .unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut pixels).unwrap();
         // Unique opaque lantern texels never appear in the primitive-square palette.
-        let atlas_pixels=pixels[..info.buffer_size()].chunks_exact(4).filter(|p|p[0].abs_diff(54)<=3&&p[1].abs_diff(154)<=3&&p[2].abs_diff(165)<=3).count();assert!(atlas_pixels>10,"installed atlas pixels absent: {name}");
-        if let Some(dest)=std::env::var_os("ORR_COLLECT_CAPTURES"){let dest=PathBuf::from(dest);fs::create_dir_all(&dest).unwrap();fs::copy(&a,dest.join(a.file_name().unwrap())).unwrap();fs::copy(&b,dest.join(b.file_name().unwrap())).unwrap();}
+        let atlas_pixels = pixels[..info.buffer_size()]
+            .chunks_exact(4)
+            .filter(|p| {
+                p[0].abs_diff(54) <= 3 && p[1].abs_diff(154) <= 3 && p[2].abs_diff(165) <= 3
+            })
+            .count();
+        assert!(atlas_pixels > 10, "installed atlas pixels absent: {name}");
+        if let Some(dest) = std::env::var_os("ORR_COLLECT_CAPTURES") {
+            let dest = PathBuf::from(dest);
+            fs::create_dir_all(&dest).unwrap();
+            fs::copy(&a, dest.join(a.file_name().unwrap())).unwrap();
+            fs::copy(&b, dest.join(b.file_name().unwrap())).unwrap();
+        }
     }
-    assert_eq!(snapshot(&bundle),bytes);assert_eq!(snapshot(&w.project),before);
+    assert_eq!(snapshot(&bundle), bytes);
+    assert_eq!(snapshot(&w.project), before);
+}
+
+#[cfg(feature = "collect-ui")]
+#[test]
+#[ignore = "requires exact UI-enabled built runtime/exporter, namespace isolation and real software GPU"]
+fn collect_authored_ui_export_gpu_workflow() {
+    let w = Work::new();
+    let manifest = w.project.join("orr.project.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    value["schema"] = 3.into();
+    value["progress"] = serde_json::json!({"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"collect-dodge-highscore-v1"});
+    value["entry"]["ui"] = serde_json::json!({"profile":"collect-authored-v1","document":"hud.json","font":{"package":"korean-game-ui","asset":"OrreryKoreanUI.otf"}});
+    fs::write(&manifest, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let mut document = orr_sample::authored_ui::Document::default_collect();
+    // Authored variation survives exact same-document exported presentation.
+    if let orr_sample::authored_ui::Kind::Label { text, .. } = &mut document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "score")
+        .unwrap()
+        .kind
+    {
+        *text = "게임 메뉴".into();
+    }
+    fs::write(w.project.join("hud.json"), document.to_bytes().unwrap()).unwrap();
+    orr_package::Project::open(&w.project, orr_package::Runtime::content_only())
+        .unwrap()
+        .install(&[Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/game_ui_font")
+            .canonicalize()
+            .unwrap()])
+        .unwrap();
+    let before = snapshot(&w.project);
+    let no_ui_source = PathBuf::from(
+        std::env::var_os("ORR_COLLECT_NO_UI_RUNTIME")
+            .expect("mandatory UI acceptance requires separately built no-UI runtime"),
+    );
+    let no_ui = w.root.path().join("tools/no-ui-collect");
+    fs::copy(no_ui_source, &no_ui).unwrap();
+    let rejected = w
+        .isolated(&no_ui, None)
+        .arg("--project")
+        .arg(&w.project)
+        .args(["--headless", "--ticks", "0"])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("does not yet support"));
+    let bundle = w.export();
+    let bundle_before = snapshot(&bundle);
+    assert_eq!(bundle_before["project/hud.json"], before["hud.json"]);
+    assert!(bundle_before.keys().any(|p| p.ends_with("/OFL.txt")));
+    assert!(bundle_before.keys().any(|p| p.ends_with("/COPYRIGHT.txt")));
+    for (name, ticks, held) in [("playing", 0, ""), ("won", 16, "right"), ("lost", 600, "")] {
+        let a = w.root.path().join(format!("{name}-ui-source.png"));
+        let b = w.root.path().join(format!("{name}-ui-export.png"));
+        w.run(&w.runtime, None, ticks, held, Some(&a));
+        w.run(
+            &bundle.join("run-collect-dodge"),
+            Some(&bundle),
+            ticks,
+            held,
+            Some(&b),
+        );
+        assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap());
+        if let Some(dest) = std::env::var_os("ORR_COLLECT_CAPTURES") {
+            fs::create_dir_all(&dest).unwrap();
+            fs::copy(
+                &b,
+                PathBuf::from(dest).join(format!("{name}-authored-ui-export.png")),
+            )
+            .unwrap();
+        }
+    }
+    let test_source = PathBuf::from(
+        std::env::var_os("ORR_PROGRESS_TEST_BIN")
+            .expect("mandatory actual UI restart/progress child test binary"),
+    );
+    fs::create_dir(w.root.path().join("test-tools")).unwrap();
+    let child = w.root.path().join("test-tools/ui-progress-test");
+    fs::copy(test_source, &child).unwrap();
+    let data = w.root.path().join("user-data");
+    fs::create_dir(&data).unwrap();
+    for (mode, root, relocated) in [
+        ("win", w.project.clone(), false),
+        ("relaunch", bundle.join("project"), true),
+    ] {
+        let text = good(
+            w.isolated(&child, if relocated { Some(&bundle) } else { None })
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "collect_progress::tests::isolated_window_progress_child",
+                    "--nocapture",
+                ])
+                .env("ORR_PROGRESS_TEST_PROJECT", root)
+                .env("ORR_PROGRESS_TEST_MODE", mode)
+                .env("XDG_DATA_HOME", &data)
+                .env("HOME", w.root.path().join("home"))
+                .output()
+                .unwrap(),
+        );
+        assert!(
+            text.contains("1 passed"),
+            "actual window constructor/UI restart/progress hook must execute"
+        );
+    }
+    assert!(data.join("orrery/games").is_dir());
+    let ui_manifest = fs::read(&manifest).unwrap();
+    value["entry"].as_object_mut().unwrap().remove("ui");
+    fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    let plain = w.root.path().join("plain.png");
+    w.run(&w.runtime, None, 0, "", Some(&plain));
+    let decode = |path: &Path| {
+        let mut reader = png::Decoder::new(std::io::BufReader::new(fs::File::open(path).unwrap()))
+            .read_info()
+            .unwrap();
+        let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut bytes).unwrap();
+        bytes.truncate(info.buffer_size());
+        bytes
+    };
+    let plain = decode(&plain);
+    let drawn = decode(&w.root.path().join("playing-ui-source.png"));
+    assert!(
+        plain
+            .chunks_exact(4)
+            .zip(drawn.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count()
+            > 100,
+        "actual authored UI must change target pixels"
+    );
+    fs::write(&manifest, ui_manifest).unwrap();
+    assert_eq!(snapshot(&w.project), before);
+    assert_eq!(snapshot(&bundle), bundle_before);
 }

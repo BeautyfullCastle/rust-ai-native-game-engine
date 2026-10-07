@@ -57,7 +57,7 @@ impl Prepared {
             Profile::Arena => crate::project_runtime::PreparedRuntime::open(root)
                 .map(|value| Self::Arena(Box::new(value))),
             #[cfg(feature = "collect-dodge")]
-            Profile::Collect => crate::collect_project::PreparedProject::open_with_presentation(root, crate::collect_project::ProgressSupport::MetadataOnly, crate::collect_project::compiled_sprite_support())
+            Profile::Collect => crate::collect_project::PreparedProject::open_with_ui(root, crate::collect_project::ProgressSupport::MetadataOnly, crate::collect_project::compiled_sprite_support(), cfg!(feature = "collect-ui"))
                 .map(|value| Self::Collect(Box::new(value))),
         }
     }

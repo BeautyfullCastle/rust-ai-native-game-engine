@@ -132,6 +132,10 @@ mod storage {
             };
             eprintln!("{}", self.status);
         }
+        #[cfg(feature = "collect-ui")]
+        pub(crate) fn best(&self) -> Option<u32> {
+            self.store.as_ref().map(|s| s.best())
+        }
         pub(crate) fn status(&self) -> &str {
             &self.status
         }
@@ -259,10 +263,11 @@ mod tests {
     #[test]
     #[ignore = "requires isolated test project and XDG_DATA_HOME"]
     fn isolated_window_progress_child() {
-        let project = PreparedProject::open_with_presentation(
+        let project = PreparedProject::open_with_ui(
             std::env::var_os("ORR_PROGRESS_TEST_PROJECT").expect("explicit project"),
             ProgressSupport::MetadataOnly,
             crate::collect_project::compiled_sprite_support(),
+            cfg!(feature = "collect-ui"),
         )
         .unwrap();
         let mode = std::env::var("ORR_PROGRESS_TEST_MODE").expect("explicit mode");

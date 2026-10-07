@@ -156,6 +156,8 @@ pub struct ProjectEntry {
 pub enum ProjectUiProfile {
     #[serde(rename = "arena-korean-v1")]
     ArenaKoreanV1,
+    #[serde(rename = "collect-authored-v1")]
+    CollectAuthoredV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +165,8 @@ pub enum ProjectUiProfile {
 pub struct ProjectUi {
     pub profile: ProjectUiProfile,
     pub font: ProjectFont,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub document: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -221,6 +225,16 @@ impl ProjectManifest {
                     }
                 }
                 if let Some(ui) = &entry.ui {
+                    match (entry.game, ui.profile, &ui.document) {
+                        (ProjectGame::Arena, ProjectUiProfile::ArenaKoreanV1, None) => {},
+                        (ProjectGame::CollectDodgeV1, ProjectUiProfile::CollectAuthoredV1, Some(document)) => {
+                            portable(document)?;
+                            if document.eq_ignore_ascii_case(&entry.scene) || entry.sprites.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(document)) {
+                                return fail("UI document must differ from scene and sprites");
+                            }
+                        },
+                        _ => return fail("UI profile/document does not match project game"),
+                    }
                     name(&ui.font.package)?;
                     portable(&ui.font.asset)?;
                 }

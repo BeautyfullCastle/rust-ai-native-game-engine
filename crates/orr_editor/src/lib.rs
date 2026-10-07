@@ -113,3 +113,6 @@ pub mod navigation_view;
 
 #[cfg(feature = "project-ui")]
 pub mod project_ui;
+
+#[cfg(feature="collect-ui")]
+pub mod collect_ui_panel;
