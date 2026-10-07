@@ -177,10 +177,73 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         procedural: &RenderList3D,
         models: &[(&orr_model::StaticModel, &[StaticInstance])],
     ) -> Result<(), ImportedSceneError> {
+        self.preflight_cpu(size, camera, lighting, point, procedural, models, 0, 0)
+    }
+
+    /// Mixed static/skinned authoring-frame validation before target resizing or
+    /// GPU cache creation. The static-only `preflight` API remains unchanged.
+    #[cfg(feature = "animation")]
+    #[allow(clippy::too_many_arguments)] // Additive counterpart to the static preflight API.
+    pub fn preflight_mixed(
+        &self,
+        size: (u32, u32),
+        camera: &Camera3D,
+        lighting: &Lighting,
+        point: &PointLightSettings,
+        procedural: &RenderList3D,
+        models: &[(&orr_model::StaticModel, &[StaticInstance])],
+        skinned: &[(&orr_model::animation::AnimatedModel, &[SkinnedInstance<'_>])],
+    ) -> Result<(), ImportedSceneError> {
+        let skinned_draws = skinned
+            .iter()
+            .try_fold(0usize, |count, (model, instances)| {
+                count
+                    .checked_add(
+                        crate::skinned::skinned_draw_count(model, instances.len())
+                            .map_err(ImportedSceneError::Skinned)?,
+                    )
+                    .ok_or(ImportedSceneError::DrawLimit)
+            })?;
+        self.preflight_cpu(
+            size,
+            camera,
+            lighting,
+            point,
+            procedural,
+            models,
+            skinned.len(),
+            skinned_draws,
+        )?;
+        // Admit budgets and static data first, then run potentially expensive
+        // current-pose deformation checks. No GPU state has changed yet.
+        for (model, instances) in skinned {
+            crate::skinned::validate_skinned_instances(model, instances)
+                .map_err(ImportedSceneError::Skinned)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)] // Shared static/mixed admission without API churn.
+    fn preflight_cpu(
+        &self,
+        size: (u32, u32),
+        camera: &Camera3D,
+        lighting: &Lighting,
+        point: &PointLightSettings,
+        procedural: &RenderList3D,
+        models: &[(&orr_model::StaticModel, &[StaticInstance])],
+        extra_batch_count: usize,
+        extra_draw_count: usize,
+    ) -> Result<(), ImportedSceneError> {
         self.validate_target(size, self.format, 1)?;
         prepare_globals(self.format, size, camera, lighting).map_err(ImportedSceneError::Model)?;
         point.validate().map_err(ImportedSceneError::PointLight)?;
-        if models.len() >= MAX_IMPORTED_BATCHES {
+        let model_batch_count = models
+            .len()
+            .checked_add(extra_batch_count)
+            .ok_or(ImportedSceneError::BatchLimit)?;
+        // The procedural list is one additional batch at submission time.
+        if model_batch_count >= MAX_IMPORTED_BATCHES {
             return Err(ImportedSceneError::BatchLimit);
         }
         let mut draws = 0usize;
@@ -195,7 +258,14 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 return Err(ImportedSceneError::DrawLimit);
             }
         }
-        draws += validate_procedural_list(procedural).map_err(ImportedSceneError::Procedural)?;
+        draws = draws
+            .checked_add(extra_draw_count)
+            .ok_or(ImportedSceneError::DrawLimit)?;
+        draws = draws
+            .checked_add(
+                validate_procedural_list(procedural).map_err(ImportedSceneError::Procedural)?,
+            )
+            .ok_or(ImportedSceneError::DrawLimit)?;
         if draws > MAX_IMPORTED_DRAWS {
             return Err(ImportedSceneError::DrawLimit);
         }
@@ -1000,5 +1070,63 @@ mod tests {
         assert_eq!(b.bounds(), b_bounds);
         assert_eq!(scene.depth_size(), Some((32, 32)));
         assert_eq!(scene.depth_generation(), 1);
+    }
+
+    #[cfg(feature = "animation")]
+    #[test]
+    fn mock_mixed_preflight_validates_skinned_pose_before_any_gpu_effect() {
+        let rhi = Mock::default();
+        let animated = || {
+            orr_model::animation_import::import_with_resolver(
+                "fixtures/animated_strip.glb",
+                include_bytes!("../../orr_model/tests/fixtures/animated_strip.glb"),
+                |_| panic!("embedded fixture"),
+            )
+            .unwrap()
+        };
+        let model = animated();
+        let pose = model.rest_pose().unwrap();
+        let foreign_pose = animated().rest_pose().unwrap();
+        let instances = [SkinnedInstance::new(&pose)];
+        let foreign = [SkinnedInstance::new(&foreign_pose)];
+        let scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        let camera = Camera3D::orthographic([0.0, 0.0, 5.0], [0.0; 3], 2.0);
+        let lighting = crate::Lighting {
+            shadows: false,
+            ..Default::default()
+        };
+        let point = PointLightSettings::default();
+        let procedural = RenderList3D::default();
+
+        scene
+            .preflight_mixed(
+                (32, 32),
+                &camera,
+                &lighting,
+                &point,
+                &procedural,
+                &[],
+                &[(&model, &instances)],
+            )
+            .unwrap();
+        assert_eq!(rhi.take(), Effects::default());
+
+        assert!(matches!(
+            scene.preflight_mixed(
+                (64, 64),
+                &camera,
+                &lighting,
+                &point,
+                &procedural,
+                &[],
+                &[(&model, &foreign)],
+            ),
+            Err(ImportedSceneError::Skinned(
+                SkinnedRenderError::InvalidPose(_)
+            ))
+        ));
+        assert_eq!(rhi.take(), Effects::default());
+        assert_eq!(scene.depth_size(), None);
+        assert_eq!(scene.depth_generation(), 0);
     }
 }

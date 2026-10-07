@@ -69,6 +69,13 @@ impl<'a> SkinnedInstance<'a> {
             transform: IDENTITY,
         }
     }
+
+    /// Validate an instance against its immutable asset without a renderer or
+    /// GPU. This is the same pose, external-transform, and current-bound check
+    /// used by frame preparation.
+    pub fn validate_for(&self, model: &AnimatedModel) -> Result<SkinnedBounds, SkinnedRenderError> {
+        validate_skinned_instance(model, self)
+    }
 }
 
 /// Exact world-space bounds of the currently deformed vertices, including the
@@ -312,28 +319,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         &self,
         instance: &SkinnedInstance<'_>,
     ) -> Result<SkinnedBounds, SkinnedRenderError> {
-        validate_placement(instance.transform)?;
-        let deformed = self
-            .model
-            .deform(instance.pose)
-            .map_err(SkinnedRenderError::InvalidPose)?;
-        let mut bounds = SkinnedBounds {
-            min: [f32::INFINITY; 3],
-            max: [f32::NEG_INFINITY; 3],
-        };
-        for primitive in deformed {
-            for vertex in primitive.vertices {
-                let world = Mat4(instance.transform).transform_point4(vertex.position);
-                for (r, value) in world[..3].iter().copied().enumerate() {
-                    if !value.is_finite() || value.abs() > 1.0e9 {
-                        return Err(SkinnedRenderError::InvalidPlacement);
-                    }
-                    bounds.min[r] = bounds.min[r].min(value);
-                    bounds.max[r] = bounds.max[r].max(value);
-                }
-            }
-        }
-        Ok(bounds)
+        instance.validate_for(&self.model)
     }
     pub fn draw(
         &mut self,
@@ -400,13 +386,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
     }
 
     pub(crate) fn draw_count(&self, instance_count: usize) -> Result<usize, SkinnedRenderError> {
-        let count = instance_count
-            .checked_mul(self.geometry.len())
-            .ok_or(SkinnedRenderError::InstanceLimit)?;
-        if instance_count > MAX_SKINNED_INSTANCES || count > MAX_SKINNED_DRAWS {
-            return Err(SkinnedRenderError::InstanceLimit);
-        }
-        Ok(count)
+        skinned_draw_count(&self.model, instance_count)
     }
 
     /// Pure CPU validation; no depth/cache allocation, writes, or bound mutation.
@@ -419,7 +399,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         // before the first GPU write. Failed submission keeps old pixels/bounds.
         let bounds: Vec<_> = instances
             .iter()
-            .map(|i| self.instance_bounds(i))
+            .map(|i| i.validate_for(&self.model))
             .collect::<Result<_, _>>()?;
         let mut objects = Vec::with_capacity(count);
         for instance in instances {
@@ -539,4 +519,59 @@ fn validate_placement(transform: Matrix4) -> Result<Matrix4, SkinnedRenderError>
         return Err(SkinnedRenderError::InvalidPlacement);
     }
     orr_model::normal_matrix(transform).map_err(|_| SkinnedRenderError::InvalidPlacement)
+}
+
+/// Draw-budget validation usable before a GPU renderer or target is created.
+pub(crate) fn skinned_draw_count(
+    model: &AnimatedModel,
+    instance_count: usize,
+) -> Result<usize, SkinnedRenderError> {
+    let count = instance_count
+        .checked_mul(model.source().primitives.len())
+        .ok_or(SkinnedRenderError::InstanceLimit)?;
+    if instance_count > MAX_SKINNED_INSTANCES || count > MAX_SKINNED_DRAWS {
+        return Err(SkinnedRenderError::InstanceLimit);
+    }
+    Ok(count)
+}
+
+/// Validate every pose and placement for one asset without allocating GPU
+/// state. This deliberately shares the exact current-deformation bounds path
+/// used by `SkinnedModelRenderer::prepare_instances`.
+pub(crate) fn validate_skinned_instances(
+    model: &AnimatedModel,
+    instances: &[SkinnedInstance<'_>],
+) -> Result<usize, SkinnedRenderError> {
+    let draws = skinned_draw_count(model, instances.len())?;
+    for instance in instances {
+        instance.validate_for(model)?;
+    }
+    Ok(draws)
+}
+
+fn validate_skinned_instance(
+    model: &AnimatedModel,
+    instance: &SkinnedInstance<'_>,
+) -> Result<SkinnedBounds, SkinnedRenderError> {
+    validate_placement(instance.transform)?;
+    let deformed = model
+        .deform(instance.pose)
+        .map_err(SkinnedRenderError::InvalidPose)?;
+    let mut bounds = SkinnedBounds {
+        min: [f32::INFINITY; 3],
+        max: [f32::NEG_INFINITY; 3],
+    };
+    for primitive in deformed {
+        for vertex in primitive.vertices {
+            let world = Mat4(instance.transform).transform_point4(vertex.position);
+            for (r, value) in world[..3].iter().copied().enumerate() {
+                if !value.is_finite() || value.abs() > 1.0e9 {
+                    return Err(SkinnedRenderError::InvalidPlacement);
+                }
+                bounds.min[r] = bounds.min[r].min(value);
+                bounds.max[r] = bounds.max[r].max(value);
+            }
+        }
+    }
+    Ok(bounds)
 }

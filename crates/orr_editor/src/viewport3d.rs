@@ -31,7 +31,10 @@ impl YardFrame {
         }
     }
     pub fn list(&self, hidden: &[Entity], selected: Option<Entity>) -> RenderList3D {
-        let mut list = RenderList3D {lighting:orr_sample::yard3d_view::yard_lighting(),..RenderList3D::default()};
+        let mut list = RenderList3D {
+            lighting: orr_sample::yard3d_view::yard_lighting(),
+            ..RenderList3D::default()
+        };
         list.lighting.shadows = false;
         let visible: Vec<_> = self
             .items
@@ -119,12 +122,32 @@ pub struct ModelPlacement {
     pub model: std::sync::Arc<orr_model::StaticModel>,
     pub instance: orr_render::StaticInstance,
 }
+#[cfg(feature = "animated-models")]
+pub struct AnimatedPlacement {
+    pub entity: Entity,
+    pub model: std::sync::Arc<orr_model::animation::AnimatedModel>,
+    /// External body-to-world × binding-local TRS. Animated mesh-node
+    /// transforms are carried only in `pose` and must not be multiplied here.
+    pub instance: orr_model::animation::Matrix4,
+    /// Owned sample for this entity at the coherent Yard snapshot time.
+    pub pose: orr_model::animation::Pose,
+}
 #[cfg(feature = "models")]
 struct CachedModel {
     model: std::sync::Arc<orr_model::StaticModel>,
     renderer: orr_render::ModelRenderer<Wgpu>,
     instances: Vec<orr_render::StaticInstance>,
 }
+#[cfg(feature = "animated-models")]
+struct CachedAnimatedModel {
+    model: std::sync::Arc<orr_model::animation::AnimatedModel>,
+    renderer: orr_render::SkinnedModelRenderer<Wgpu>,
+}
+#[cfg(feature = "animated-models")]
+type AnimatedGroup = (
+    std::sync::Arc<orr_model::animation::AnimatedModel>,
+    Vec<(orr_model::animation::Pose, orr_model::animation::Matrix4)>,
+);
 /// Production offscreen renderer, also used verbatim by mandatory GPU tests.
 pub struct Viewport3dGpu {
     target: OffscreenTarget<Wgpu>,
@@ -133,6 +156,8 @@ pub struct Viewport3dGpu {
     imported: orr_render::ImportedSceneRenderer<Wgpu>,
     #[cfg(feature = "models")]
     models: Vec<CachedModel>,
+    #[cfg(feature = "animated-models")]
+    animated_models: Vec<CachedAnimatedModel>,
 }
 impl Viewport3dGpu {
     pub fn new(rhi: &Wgpu, size: (u32, u32)) -> Self {
@@ -144,6 +169,8 @@ impl Viewport3dGpu {
                 .expect("color format"),
             #[cfg(feature = "models")]
             models: Vec::new(),
+            #[cfg(feature = "animated-models")]
+            animated_models: Vec::new(),
         }
     }
     pub fn target(&self) -> &OffscreenTarget<Wgpu> {
@@ -175,7 +202,46 @@ impl Viewport3dGpu {
         camera: &Camera3D,
         placements: &[ModelPlacement],
     ) -> Result<(), String> {
-        // Preflight the complete CPU frame before target allocation or GPU cache changes.
+        #[cfg(feature = "animated-models")]
+        return self.render_composed(size, list, camera, placements, &[]);
+        #[cfg(not(feature = "animated-models"))]
+        self.render_composed(size, list, camera, placements)
+    }
+
+    #[cfg(feature = "animated-models")]
+    pub fn render_mixed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        animated_placements: &[AnimatedPlacement],
+    ) -> Result<(), String> {
+        self.render_composed(size, list, camera, placements, animated_placements)
+    }
+
+    #[cfg(feature = "models")]
+    fn render_composed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        #[cfg(feature = "animated-models")] animated_placements: &[AnimatedPlacement],
+    ) -> Result<(), String> {
+        #[cfg(feature = "animated-models")]
+        let entity_count = placements
+            .len()
+            .checked_add(animated_placements.len())
+            .ok_or("Viewport model entity limit exceeded")?;
+        #[cfg(not(feature = "animated-models"))]
+        let entity_count = placements.len();
+        if entity_count > 256 {
+            return Err("Viewport supports at most 256 model-bound entities".into());
+        }
+
+        // Group by immutable asset identity and own all sampled poses before
+        // building SkinnedInstance slices that borrow those poses.
         let mut groups: Vec<(
             std::sync::Arc<orr_model::StaticModel>,
             Vec<orr_render::StaticInstance>,
@@ -187,13 +253,77 @@ impl Viewport3dGpu {
             {
                 instances.push(placement.instance);
             } else {
+                if groups.len() >= 8 {
+                    return Err("Viewport supports at most eight distinct model assets".into());
+                }
                 groups.push((placement.model.clone(), vec![placement.instance]));
             }
         }
+
+        #[cfg(feature = "animated-models")]
+        let mut animated_groups: Vec<AnimatedGroup> = Vec::new();
+        #[cfg(feature = "animated-models")]
+        for placement in animated_placements {
+            if let Some((_, instances)) = animated_groups
+                .iter_mut()
+                .find(|(model, _)| std::sync::Arc::ptr_eq(model, &placement.model))
+            {
+                instances.push((placement.pose.clone(), placement.instance));
+            } else {
+                if groups.len() + animated_groups.len() >= 8 {
+                    return Err("Viewport supports at most eight distinct model assets".into());
+                }
+                animated_groups.push((
+                    placement.model.clone(),
+                    vec![(placement.pose.clone(), placement.instance)],
+                ));
+            }
+        }
+        #[cfg(feature = "animated-models")]
+        if groups.len() + animated_groups.len() > 8 {
+            return Err("Viewport supports at most eight distinct model assets".into());
+        }
+        #[cfg(not(feature = "animated-models"))]
+        if groups.len() > 8 {
+            return Err("Viewport supports at most eight distinct model assets".into());
+        }
+
         let prepared: Vec<_> = groups
             .iter()
             .map(|(model, instances)| (model.as_ref(), instances.as_slice()))
             .collect();
+        #[cfg(feature = "animated-models")]
+        let skinned_instances: Vec<Vec<orr_render::SkinnedInstance<'_>>> = animated_groups
+            .iter()
+            .map(|(_, instances)| {
+                instances
+                    .iter()
+                    .map(|(pose, transform)| orr_render::SkinnedInstance {
+                        pose,
+                        transform: *transform,
+                    })
+                    .collect()
+            })
+            .collect();
+        #[cfg(feature = "animated-models")]
+        let prepared_skinned: Vec<_> = animated_groups
+            .iter()
+            .zip(&skinned_instances)
+            .map(|((model, _), instances)| (model.as_ref(), instances.as_slice()))
+            .collect();
+        #[cfg(feature = "animated-models")]
+        self.imported
+            .preflight_mixed(
+                size,
+                camera,
+                &list.lighting,
+                &orr_render::PointLightSettings::default(),
+                list,
+                &prepared,
+                &prepared_skinned,
+            )
+            .map_err(|e| e.to_string())?;
+        #[cfg(not(feature = "animated-models"))]
         self.imported
             .preflight(
                 size,
@@ -204,33 +334,68 @@ impl Viewport3dGpu {
                 &prepared,
             )
             .map_err(|e| e.to_string())?;
+
+        // The complete mixed CPU frame has been admitted. GPU cache mutations
+        // and target resizing below can no longer expose an invalid partial frame.
         for model in &mut self.models {
             model.instances.clear();
         }
-        for placement in placements {
+        for (model, instances) in &groups {
             let index = if let Some(index) = self
                 .models
                 .iter()
-                .position(|entry| std::sync::Arc::ptr_eq(&entry.model, &placement.model))
+                .position(|entry| std::sync::Arc::ptr_eq(&entry.model, model))
             {
                 index
             } else {
                 let renderer = orr_render::ModelRenderer::new(
                     self.renderer.rhi().clone(),
                     TARGET_FORMAT,
-                    (*placement.model).clone(),
+                    (**model).clone(),
                 )
                 .map_err(|e| e.to_string())?;
                 self.models.push(CachedModel {
-                    model: placement.model.clone(),
+                    model: model.clone(),
                     renderer,
                     instances: Vec::new(),
                 });
                 self.models.len() - 1
             };
-            self.models[index].instances.push(placement.instance);
+            self.models[index]
+                .instances
+                .extend(instances.iter().copied());
         }
-        self.models.retain(|entry| !entry.instances.is_empty());
+        self.models.retain(|entry| {
+            groups
+                .iter()
+                .any(|(model, _)| std::sync::Arc::ptr_eq(&entry.model, model))
+        });
+
+        #[cfg(feature = "animated-models")]
+        {
+            let mut ordered = Vec::with_capacity(animated_groups.len());
+            for (model, _) in &animated_groups {
+                if let Some(index) = self
+                    .animated_models
+                    .iter()
+                    .position(|entry| std::sync::Arc::ptr_eq(&entry.model, model))
+                {
+                    ordered.push(self.animated_models.swap_remove(index));
+                } else {
+                    let renderer = orr_render::SkinnedModelRenderer::new(
+                        self.renderer.rhi().clone(),
+                        TARGET_FORMAT,
+                        (**model).clone(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    ordered.push(CachedAnimatedModel {
+                        model: model.clone(),
+                        renderer,
+                    });
+                }
+            }
+            self.animated_models = ordered;
+        }
         self.target.resize(size.0, size.1);
         let mut batches = vec![orr_render::ImportedBatch::Procedural {
             renderer: &mut self.renderer,
@@ -240,6 +405,13 @@ impl Viewport3dGpu {
             batches.push(orr_render::ImportedBatch::StaticInstances {
                 renderer: &mut entry.renderer,
                 instances: &entry.instances,
+            });
+        }
+        #[cfg(feature = "animated-models")]
+        for (entry, instances) in self.animated_models.iter_mut().zip(&skinned_instances) {
+            batches.push(orr_render::ImportedBatch::Skinned {
+                renderer: &mut entry.renderer,
+                instances,
             });
         }
         self.imported
@@ -308,6 +480,33 @@ impl GpuViewport3d {
             #[cfg(feature = "models")]
             placements,
         )?;
+        if self.generation != self.gpu.target().generation() {
+            self.generation = self.gpu.target().generation();
+            self.state
+                .renderer
+                .write()
+                .update_egui_texture_from_wgpu_texture(
+                    &self.state.device,
+                    self.gpu.target().sample_view(),
+                    egui_wgpu::wgpu::FilterMode::Linear,
+                    self.id,
+                );
+        }
+        self.has_frame = true;
+        Ok(self.id)
+    }
+
+    #[cfg(feature = "animated-models")]
+    pub fn render_mixed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList3D,
+        camera: &Camera3D,
+        placements: &[ModelPlacement],
+        animated_placements: &[AnimatedPlacement],
+    ) -> Result<egui::TextureId, String> {
+        self.gpu
+            .render_mixed(size, list, camera, placements, animated_placements)?;
         if self.generation != self.gpu.target().generation() {
             self.generation = self.gpu.target().generation();
             self.state

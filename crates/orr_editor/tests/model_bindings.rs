@@ -1,6 +1,8 @@
 #![cfg(feature = "models")]
 
 use orr_editor::model_bindings::{self, Binding, Bindings, Document, LocalTransform, ModelKind};
+#[cfg(feature = "animated-models")]
+use orr_editor::model_bindings::{AnimationDescriptor, PlaybackMode};
 use orr_package::{Project, Runtime};
 use orr_reflect::Guid;
 use std::{
@@ -96,17 +98,25 @@ fn imports_verified_glb_cooks_reloads_and_lists_declared_model_candidates() {
     assert_eq!(loaded.asset(), ASSET);
     assert_eq!(loaded.package_digest().len(), 64);
     assert_eq!(loaded.source_hash().len(), 64);
-    assert!(!loaded.model().source().primitives.is_empty());
-    assert!(!loaded.model().source().images.is_empty());
-    let cooked = loaded.model().to_bytes().unwrap();
+    assert!(!loaded
+        .static_model()
+        .unwrap()
+        .source()
+        .primitives
+        .is_empty());
+    assert!(!loaded.static_model().unwrap().source().images.is_empty());
+    let cooked = loaded.static_model().unwrap().to_bytes().unwrap();
     assert_eq!(
         orr_model::StaticModel::from_bytes(&cooked)
             .unwrap()
             .source(),
-        loaded.model().source()
+        loaded.static_model().unwrap().source()
     );
     let cloned = loaded.clone();
-    assert!(Arc::ptr_eq(cloned.model(), loaded.model()));
+    assert!(Arc::ptr_eq(
+        cloned.static_model().unwrap(),
+        loaded.static_model().unwrap()
+    ));
     let assets = model_bindings::list_assets(temp.path()).unwrap();
     assert_eq!(
         assets
@@ -131,7 +141,7 @@ fn installed_cooked_static_model_loads_without_a_clip_or_animation_capability() 
     std::fs::create_dir(&root).unwrap();
     install(&source, &root);
     let loaded = model_bindings::load_asset(&root, PACKAGE, "cooked.json").unwrap();
-    assert_eq!(loaded.model().source(), imported.source());
+    assert_eq!(loaded.static_model().unwrap().source(), imported.source());
     let binding = Binding::from_asset(
         PACKAGE.into(),
         "cooked.json".into(),
@@ -146,6 +156,207 @@ fn installed_cooked_static_model_loads_without_a_clip_or_animation_capability() 
     let assets = model_bindings::list_assets(&root).unwrap();
     assert!(assets.iter().any(|asset| asset.asset == "cooked.json"));
     assert!(!assets.iter().any(|asset| asset.asset == "settings.json"));
+}
+
+#[test]
+fn legacy_v1_static_bindings_open_and_save_as_v2() {
+    let temp = tempfile::tempdir().unwrap();
+    install(&fixture_dir(), temp.path());
+    let loaded = loaded(temp.path());
+    let binding = binding(&loaded);
+    let path = temp.path().join("legacy.models.json");
+    let legacy = serde_json::json!({
+        "version": 1,
+        "scene": "scene.yaml",
+        "project": ".",
+        "bindings": { "e_00000001": binding }
+    });
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    let mut reopened = Bindings::open(path.clone()).unwrap();
+    assert_eq!(reopened.document().version, 2);
+    assert_eq!(
+        reopened.document().bindings["e_00000001"].kind,
+        ModelKind::Static
+    );
+    assert!(!reopened.dirty());
+    reopened.save().unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["version"], 2);
+    assert_eq!(saved["bindings"]["e_00000001"]["kind"], "static");
+}
+
+#[test]
+fn model_kind_and_animation_descriptor_must_agree() {
+    let temp = tempfile::tempdir().unwrap();
+    install(&fixture_dir(), temp.path());
+    let loaded = loaded(temp.path());
+    let binding = binding(&loaded);
+    let mut value = serde_json::to_value(Document {
+        version: 2,
+        scene: "scene.yaml".into(),
+        project: ".".into(),
+        bindings: [("e_00000001".into(), binding)].into_iter().collect(),
+    })
+    .unwrap();
+    value["bindings"]["e_00000001"]["animation"] = serde_json::json!({
+        "clip_index": 0,
+        "playback": "loop"
+    });
+    let error = serde_json::from_value::<Document>(value.clone())
+        .unwrap()
+        .validate()
+        .unwrap_err();
+    assert!(error.contains("static model binding cannot declare animation"));
+
+    value["bindings"]["e_00000001"]["kind"] = "animated".into();
+    value["bindings"]["e_00000001"]
+        .as_object_mut()
+        .unwrap()
+        .remove("animation");
+    let error = serde_json::from_value::<Document>(value)
+        .unwrap()
+        .validate()
+        .unwrap_err();
+    assert!(error.contains("requires an animation descriptor"));
+}
+
+#[cfg(feature = "animated-models")]
+#[test]
+fn mixed_static_and_animated_bindings_validate_undo_and_reload_in_one_sidecar() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    install(&fixture_dir(), &root);
+    let animation_source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/animation_demo")
+        .canonicalize()
+        .unwrap();
+    install(&animation_source, &root);
+
+    let static_asset =
+        model_bindings::load_asset_for_kind(&root, PACKAGE, ASSET, ModelKind::Static).unwrap();
+    let animated_asset = model_bindings::load_asset_for_kind(
+        &root,
+        "sample-animation",
+        "animated.glb",
+        ModelKind::Animated,
+    )
+    .unwrap();
+    assert_eq!(static_asset.kind(), ModelKind::Static);
+    assert_eq!(animated_asset.kind(), ModelKind::Animated);
+    assert!(animated_asset.animated_model().is_some());
+    assert!(animated_asset.static_model().is_none());
+    assert!(Binding::from_asset(
+        "sample-animation".into(),
+        "animated.glb".into(),
+        &animated_asset,
+        LocalTransform::default(),
+    )
+    .is_err());
+
+    let descriptor = AnimationDescriptor {
+        clip_index: 0,
+        playback: PlaybackMode::Loop,
+    };
+    assert!(Binding::from_animated_asset(
+        "sample-animation".into(),
+        "animated.glb".into(),
+        &animated_asset,
+        AnimationDescriptor {
+            clip_index: u32::MAX,
+            playback: PlaybackMode::Once,
+        },
+        LocalTransform::default(),
+    )
+    .unwrap_err()
+    .contains("clip index"));
+    let animated_binding = Binding::from_animated_asset(
+        "sample-animation".into(),
+        "animated.glb".into(),
+        &animated_asset,
+        descriptor,
+        LocalTransform::default(),
+    )
+    .unwrap();
+    let mut stale = animated_binding.clone();
+    stale.source_hash = "0".repeat(64);
+    assert!(stale
+        .validate(&animated_asset)
+        .unwrap_err()
+        .contains("stale"));
+    let mut invalid_kind = animated_binding.clone();
+    invalid_kind.kind = ModelKind::Static;
+    assert!(invalid_kind.validate(&animated_asset).is_err());
+
+    let static_binding = Binding::from_asset(
+        PACKAGE.into(),
+        ASSET.into(),
+        &static_asset,
+        LocalTransform::default(),
+    )
+    .unwrap();
+    let path = root.join("scene.models.json");
+    let mut bindings = Bindings::create(path.clone(), "scene.yaml".into(), ".".into()).unwrap();
+    bindings
+        .assign_validated(&[guid(1)], &static_binding, &static_asset)
+        .unwrap();
+    bindings
+        .assign_validated(&[guid(2)], &animated_binding, &animated_asset)
+        .unwrap();
+    assert_eq!(bindings.document().bindings.len(), 2);
+    let before_bad_assignment = bindings.document().clone();
+    let mut invalid_clip = animated_binding.clone();
+    invalid_clip.animation.as_mut().unwrap().clip_index = 31;
+    assert!(bindings
+        .assign_validated(&[guid(1)], &invalid_clip, &animated_asset)
+        .is_err());
+    assert_eq!(bindings.document(), &before_bad_assignment);
+
+    bindings.undo();
+    assert!(!bindings
+        .document()
+        .bindings
+        .contains_key(&guid(2).to_string()));
+    bindings.redo();
+    assert_eq!(
+        bindings.document().bindings[&guid(2).to_string()],
+        animated_binding
+    );
+    bindings.save().unwrap();
+    let reopened = Bindings::open(path).unwrap();
+    assert_eq!(reopened.document(), bindings.document());
+    assert_eq!(reopened.document().version, 2);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&reopened.path).unwrap()).unwrap();
+    assert_eq!(saved["bindings"]["e_00000001"]["kind"], "static");
+    assert_eq!(saved["bindings"]["e_00000002"]["kind"], "animated");
+    assert_eq!(
+        saved["bindings"]["e_00000002"]["animation"]["playback"],
+        "loop"
+    );
+    let resolved =
+        model_bindings::load_binding(&root, &reopened.document().bindings[&guid(2).to_string()])
+            .unwrap();
+    assert_eq!(resolved.kind(), ModelKind::Animated);
+    assert_eq!(
+        resolved.animated_model().unwrap().source().clips.len(),
+        animated_asset
+            .animated_model()
+            .unwrap()
+            .source()
+            .clips
+            .len()
+    );
+    let assets = model_bindings::list_assets(&root).unwrap();
+    assert!(assets.iter().any(|item| {
+        item.package == "sample-animation"
+            && item.asset == "animated.glb"
+            && item.kind == ModelKind::Animated
+    }));
+    assert!(assets.iter().any(|item| {
+        item.package == PACKAGE && item.asset == ASSET && item.kind == ModelKind::Static
+    }));
 }
 
 #[test]
@@ -165,7 +376,8 @@ fn declared_external_gltf_resource_import_is_package_scoped() {
     install(&source, &root);
     let loaded = model_bindings::load_asset(&root, PACKAGE, "nested/scene.gltf").unwrap();
     assert!(loaded
-        .model()
+        .static_model()
+        .unwrap()
         .source()
         .dependencies
         .iter()
@@ -441,7 +653,12 @@ fn remove_reinstall_and_changed_package_report_staleness_without_retargeting() {
         .contains("package changed"));
     assert_eq!(bindings.document(), &before);
     assert!(!bindings.dirty());
-    assert!(!original.model().source().primitives.is_empty());
+    assert!(!original
+        .static_model()
+        .unwrap()
+        .source()
+        .primitives
+        .is_empty());
 }
 
 #[test]
@@ -545,7 +762,7 @@ fn oversized_save_preserves_saved_destination_and_undo_redo() {
 }
 
 #[test]
-fn parser_rejects_unsupported_kinds_bad_schema_handles_duplicates_and_invalid_transforms() {
+fn parser_rejects_unknown_or_incomplete_kinds_bad_schema_handles_duplicates_and_invalid_transforms() {
     let temp = tempfile::tempdir().unwrap();
     install(&fixture_dir(), temp.path());
     let loaded = loaded(temp.path());
@@ -559,13 +776,13 @@ fn parser_rejects_unsupported_kinds_bad_schema_handles_duplicates_and_invalid_tr
         let mut value = original.clone();
         value["bindings"]["e_00000001"]["kind"] = kind.into();
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(Bindings::open(path.clone())
-            .err()
-            .unwrap()
-            .contains("only static models are supported"));
+        let error = Bindings::open(path.clone()).err().unwrap();
+        if kind == "animated" {
+            assert!(error.contains("requires an animation descriptor"), "{error}");
+        }
     }
     let mutations: [fn(&mut serde_json::Value); 10] = [
-        |v| v["version"] = 2.into(),
+        |v| v["version"] = 3.into(),
         |v| v["extra"] = true.into(),
         |v| v["scene"] = "/remote/scene.yaml".into(),
         |v| v["project"] = "https://remote/project".into(),
