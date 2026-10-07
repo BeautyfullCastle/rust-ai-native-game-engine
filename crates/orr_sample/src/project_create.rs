@@ -3,6 +3,8 @@
 //! Package installation and runtime admission remain the existing authorities.
 //! Publication never replaces a destination. Ordinary errors clean only the owned
 //! transaction; hostile filesystem races and power-loss durability are not claimed.
+#[cfg(feature = "collect-dodge")]
+mod collect_template;
 mod template;
 #[cfg(test)]
 mod tests;
@@ -21,6 +23,7 @@ use std::{
 };
 
 pub const TEMPLATE: &str = template::ID;
+pub const COLLECT_TEMPLATE: &str = "collect-dodge-2d-v1";
 pub const MAX_SEED_BYTES: usize = 128;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
@@ -50,12 +53,43 @@ pub fn create(options: &CreateOptions) -> Result<CreateReport, String> {
     create_with(options, |_, _| Ok(()), publish_no_replace)
 }
 
+/// Create the closed CollectDodge starter with an explicitly supplied UUIDv4.
+/// The seed never determines this identity; reusing an identity shares progress.
+#[cfg(feature = "collect-dodge")]
+pub fn create_collect(options: &CreateOptions, game_id: &str) -> Result<CreateReport, String> {
+    let progress = orr_package::ProjectProgress {
+        schema: 1,
+        game_id: game_id.into(),
+        profile: orr_package::ProgressProfile::CollectDodgeHighscoreV1,
+    };
+    progress.validate()?;
+    if options.template != COLLECT_TEMPLATE {
+        return Err("expected collect-dodge-2d-v1 template".into());
+    }
+    create_transaction(options, Some(&progress), |_, _| Ok(()), publish_no_replace)
+}
+
 fn create_with(
     options: &CreateOptions,
+    checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
+    publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
+) -> Result<CreateReport, String> {
+    create_transaction(options, None, checkpoint, publish)
+}
+
+fn create_transaction(
+    options: &CreateOptions,
+    progress: Option<&orr_package::ProjectProgress>,
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
-    if options.template != TEMPLATE {
+    if options.template
+        != if progress.is_some() {
+            COLLECT_TEMPLATE
+        } else {
+            TEMPLATE
+        }
+    {
         return Err(format!("unsupported template; expected {TEMPLATE}"));
     }
     if options.seed.is_empty()
@@ -81,13 +115,46 @@ fn create_with(
     fs::create_dir(&source_root).map_err(error)?;
     checkpoint("stage-created", transaction.path())?;
 
-    let (scene, sprites) = template::documents(&options.seed)?;
+    let (scene, sprites, manifest, scene_file, sprite_file, readme) = if let Some(progress) =
+        progress
+    {
+        #[cfg(feature = "collect-dodge")]
+        {
+            let (scene, sprites) = collect_template::documents(&options.seed)?;
+            let manifest = json_line(&serde_json::json!({"schema":3,"engine":"^0.0.1",
+                "entry":{"game":"collect-dodge-v1","scene":"level.scene.yaml","sprites":"level.sprites.json"},
+                "progress":progress}))?;
+            (
+                scene,
+                sprites,
+                manifest,
+                "level.scene.yaml",
+                "level.sprites.json",
+                collect_template::readme(&options.seed, &progress.game_id),
+            )
+        }
+        #[cfg(not(feature = "collect-dodge"))]
+        {
+            let _ = progress;
+            return Err("CollectDodge template requires collect-dodge feature".into());
+        }
+    } else {
+        let (scene, sprites) = template::documents(&options.seed)?;
+        (
+            scene,
+            sprites,
+            MANIFEST.to_vec(),
+            "arena.scene.yaml",
+            "arena.sprites.json",
+            readme(&options.seed),
+        )
+    };
     let entity_guids = scene.entities.keys().cloned().collect();
     let mut expected = BTreeMap::from([
-        ("orr.project.json".into(), MANIFEST.to_vec()),
-        ("arena.scene.yaml".into(), scene.to_yaml().into_bytes()),
-        ("arena.sprites.json".into(), json_line(&sprites)?),
-        ("README.md".into(), readme(&options.seed).into_bytes()),
+        ("orr.project.json".into(), manifest),
+        (scene_file.into(), scene.to_yaml().into_bytes()),
+        (sprite_file.into(), json_line(&sprites)?),
+        ("README.md".into(), readme.into_bytes()),
     ]);
     for (relative, bytes) in &expected {
         write_new(&project_root.join(relative), bytes)?;
@@ -142,8 +209,28 @@ fn create_with(
     fs::remove_dir_all(&source_root).map_err(error)?;
     checkpoint("before-validation", transaction.path())?;
     verify_stage(&project_root, &expected)?;
-    let prepared = PreparedRuntime::open(&project_root)?;
-    let initial_checksum = prepared.initial_frame().checksum();
+    let initial_checksum = if progress.is_some() {
+        #[cfg(feature = "collect-dodge")]
+        {
+            use crate::collect_project::{PreparedProject, ProgressSupport, SpriteSupport};
+            PreparedProject::open_with_presentation(
+                &project_root,
+                ProgressSupport::MetadataOnly,
+                SpriteSupport::Supported,
+            )?
+            .scene()
+            .frame()
+            .checksum()
+        }
+        #[cfg(not(feature = "collect-dodge"))]
+        {
+            return Err("CollectDodge template requires collect-dodge feature".into());
+        }
+    } else {
+        PreparedRuntime::open(&project_root)?
+            .initial_frame()
+            .checksum()
+    };
     checkpoint("before-publish", transaction.path())?;
     verify_stage(&project_root, &expected)?;
     // Recheck ordinary parent changes. RENAME_NOREPLACE itself closes concurrent
@@ -157,7 +244,7 @@ fn create_with(
     drop(transaction);
     Ok(CreateReport {
         output,
-        template: TEMPLATE.into(),
+        template: options.template.clone(),
         seed: options.seed.clone(),
         initial_checksum,
         entity_guids,
