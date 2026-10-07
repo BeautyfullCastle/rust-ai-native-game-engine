@@ -100,3 +100,9 @@ pub mod terrain_pick;
 
 #[cfg(feature = "terrain-physics")]
 pub mod terrain_physics;
+
+#[cfg(feature = "navigation")]
+pub mod navigation_panel;
+
+#[cfg(feature = "navigation")]
+pub mod navigation_view;

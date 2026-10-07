@@ -11,6 +11,9 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 
+mod state;
+pub use state::NavigatorSnapshot;
+
 /// Geometry limits bound every wide intermediate, including squared exact slopes.
 pub const MIN_SPACING_RAW: i64 = 16;
 pub const MAX_SPACING_RAW: i64 = 1 << 32;

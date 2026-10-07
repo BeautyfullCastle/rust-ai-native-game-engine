@@ -3164,6 +3164,7 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_model",
+ "orr_navigation",
  "orr_package",
  "orr_reflect",
  "orr_remote",
@@ -3221,6 +3222,8 @@ dependencies = [
  "bytemuck",
  "orr_ecs",
  "orr_fp",
+ "orr_navigation",
+ "orr_navigation_runtime",
  "orr_physics",
  "orr_physics3d",
  "orr_reflect",
@@ -3268,6 +3271,17 @@ dependencies = [
  "orr_fp",
  "orr_terrain",
  "sha2",
+]
+
+[[package]]
+name = "orr_navigation_runtime"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_fp",
+ "orr_navigation",
+ "orr_terrain",
 ]
 
 [[package]]
@@ -3399,6 +3413,8 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_games",
+ "orr_navigation",
+ "orr_navigation_runtime",
  "orr_physics",
  "orr_reflect",
  "orr_relay_net",

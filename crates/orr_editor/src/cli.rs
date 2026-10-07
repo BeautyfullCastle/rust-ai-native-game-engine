@@ -6,7 +6,7 @@ use crate::game::EditorGame;
 
 /// Usage text.
 pub const USAGE: &str = "\
-orr_editor [--game physics|arena|yard3d|terrain-yard3d] [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
+orr_editor [--game physics|arena|yard3d|terrain-yard3d|navigation-yard3d] [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
            [--screenshot <out.png> [--frames <n>] [--screenshot-settle]] [--size <WxH>]
            [--erp <addr>] [--erp-token <name:token:caps>]... [--erp-dev]
 orr_editor --connect <ws://host:port> [--token <t>] [same flags, but --scene/--erp]
@@ -17,7 +17,7 @@ connected in-process; with --connect, an `orr_remote_host` (or another
 editor's ERP) that is already running.
 
   --scene <file>        scene to open (default scene depends on --game)
-  --game <name>         local game: physics (default), arena, yard3d or terrain-yard3d (terrain-physics feature); cannot be used with --connect
+  --game <name>         local game: physics (default), arena, yard3d or terrain-yard3d (terrain-physics feature) or navigation-yard3d (navigation feature); cannot be used with --connect
   --connect <url>       attach to a running host instead of starting one: the
                         editor then shows and edits THAT host's scene and play
                         session (with --token when it needs one; a dev-mode

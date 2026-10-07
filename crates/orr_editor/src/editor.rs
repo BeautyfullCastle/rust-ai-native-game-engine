@@ -202,6 +202,10 @@ pub struct Editor {
     yard_frame: crate::viewport3d::YardFrame,
     #[cfg(feature = "terrain-physics")]
     terrain_view: crate::terrain_physics::TerrainPhysicsView,
+    #[cfg(feature = "navigation")]
+    navigation_view: crate::navigation_view::NavigationView,
+    #[cfg(feature = "navigation")]
+    navigation_blocker: Option<String>,
     status: Option<Message>,
     log: Vec<Message>,
     // caches of host answers
@@ -308,6 +312,10 @@ impl Editor {
             yard_frame: crate::viewport3d::YardFrame::default(),
             #[cfg(feature = "terrain-physics")]
             terrain_view: crate::terrain_physics::TerrainPhysicsView::default(),
+            #[cfg(feature = "navigation")]
+            navigation_view: crate::navigation_view::NavigationView::default(),
+            #[cfg(feature = "navigation")]
+            navigation_blocker: None,
             status: None,
             log: Vec::new(),
             sim: SimState::default(),
@@ -1287,6 +1295,8 @@ impl Editor {
                 if let Some(error) = self.terrain_view.error.clone() { self.error(error); }
             }
         }
+        #[cfg(feature = "navigation")]
+        if self.game().is_navigation() { self.navigation_view.update(frame); }
         self.checksum = frame.checksum();
         let alive = frame.alive_count();
         self.telemetry.snapshot_extract.record(started.elapsed());
@@ -1499,8 +1509,8 @@ impl Editor {
             self.error("clear the proposal preview before opening a scene");
             return false;
         }
-        if self.game().is_terrain() && self.path().as_deref() != Some(path) {
-            self.error("Terrain collision hosts are bound to their original scene directory. Open another scene with --game terrain-yard3d --scene PATH");
+        if self.game().has_pinned_scene() && self.path().as_deref() != Some(path) {
+            self.error("Pinned terrain/navigation hosts are bound to their original scene directory. Open the other scene in a new local host");
             return false;
         }
         let text = match std::fs::read_to_string(path) {
@@ -1510,7 +1520,7 @@ impl Editor {
                 return false;
             }
         };
-        match self.call("scene.load", if self.game().is_terrain() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
+        match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
                 self.select(None);
                 self.refit = true;
@@ -1540,8 +1550,8 @@ impl Editor {
 
     /// Saves the scene text to `path` and makes it the current path.
     pub fn save_as(&mut self, path: &Path) -> bool {
-        if self.game().is_terrain() {
-            self.error("Terrain collision scene paths are fixed for this host; use Save to preserve its pinned source directory");
+        if self.game().has_pinned_scene() {
+            self.error("Pinned terrain/navigation scene paths are fixed for this host; use Save to preserve its pinned source directory");
             return false;
         }
         self.save_with(json!({"write": true, "path": path.display().to_string()}))
@@ -1830,6 +1840,13 @@ impl Editor {
             && if snapshot.timeline().is_some(){self.yard_rows_tick<=snapshot.tick()}else{self.yard_rows_checksum==Some(snapshot.predicted().checksum())}
     }
 
+    #[cfg(feature = "navigation")]
+    pub fn admitted_navigation(&self) -> &crate::navigation_view::NavigationView { &self.navigation_view }
+    #[cfg(feature = "navigation")]
+    pub(crate) fn navigation_mark_edited(&mut self) { self.mark_edited(); }
+    #[cfg(feature = "navigation")]
+    pub fn set_navigation_blocker(&mut self, blocker: Option<String>) { self.navigation_blocker = blocker; }
+
     /// Nearest collider-proxy selection in the main Yard3D viewport.
     pub fn pick3d(&self, pixel: [f32;2], size:(u32,u32)) -> Option<Target> {
         if !self.yard_rows_coherent(){return None;}
@@ -1838,6 +1855,7 @@ impl Editor {
 
     /// Creates a persisted Yard3D box, or a sphere in the admitted terrain game.
     pub fn spawn_yard_body(&mut self, pos: orr_fp::FPVec3) -> bool {
+        if self.game().is_navigation() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
         if !self.game().is_3d() || self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
             self.error("Yard bodies require editable Yard3D scene mode"); return false;
         }
@@ -2266,6 +2284,13 @@ impl Editor {
     /// Starts a play session from the scene, paused at tick 0. Does nothing
     /// if one already runs.
     pub fn start_play(&mut self) -> bool {
+        #[cfg(feature = "navigation")]
+        if self.game().is_navigation() && self.sim.mode != Mode::Play {
+            let blocker = self.navigation_blocker.clone().or_else(|| {
+                (!self.navigation_view.admitted).then(|| "Build and admit a terrain route before Play".to_string())
+            }).or_else(|| self.navigation_view.error.clone());
+            if let Some(error) = blocker { self.error(error); return false; }
+        }
         #[cfg(feature = "terrain-physics")]
         if self.game().is_terrain() && (!self.terrain_view.admitted || self.terrain_view.error.is_some()) {
             self.error(self.terrain_view.error.clone().unwrap_or_else(|| "Wait for a valid admitted terrain snapshot before Play".into()));

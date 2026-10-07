@@ -70,7 +70,7 @@ impl TerrainPanel {
         result
     }
     fn local_scene(editor: &Editor) -> Result<PathBuf, String> {
-        if editor.game() != EditorGame::Yard3D || !editor.spec().is_local() {
+        if (editor.game() != EditorGame::Yard3D && !editor.game().is_navigation()) || !editor.spec().is_local() {
             return Err("Terrain authoring requires a local Yard3D scene".into());
         }
         let expected = match editor.spec() {
@@ -118,6 +118,8 @@ impl TerrainPanel {
     /// Distinct from model presence: an all-hole terrain still participates in
     /// render compatibility and must disable stale baked lighting.
     pub fn attached_for_editor(&self, editor: &Editor) -> bool {
+        #[cfg(feature = "navigation")]
+        if editor.game().is_navigation() && editor.admitted_navigation().admitted { return true; }
         #[cfg(feature = "terrain-physics")]
         if editor.game().is_terrain() { return editor.admitted_terrain().admitted; }
         self.scene_matches(editor) && self.document.terrain().is_some()
@@ -443,7 +445,7 @@ impl TerrainPanel {
             return;
         }
 
-        if editor.game() != EditorGame::Yard3D {
+        if editor.game() != EditorGame::Yard3D && !editor.game().is_navigation() {
             return;
         }
         self.sync_for_editor(editor);
