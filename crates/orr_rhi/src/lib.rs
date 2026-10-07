@@ -139,7 +139,8 @@ pub struct TextureDesc<'a> {
     /// sampled or read back.
     pub sample_count: u32,
     /// Other formats a view of this texture may use (for example the
-    /// non-sRGB twin of an sRGB texture).
+    /// non-sRGB twin of an sRGB texture). Nonempty lists require
+    /// [`Rhi::texture_view_formats_supported`].
     pub view_formats: &'a [TextureFormat],
 }
 
@@ -427,7 +428,17 @@ pub trait Rhi: Clone + 'static {
     fn create_buffer(&self, desc: &BufferDesc) -> Self::Buffer;
     fn write_buffer(&self, buffer: &Self::Buffer, offset: u64, data: &[u8]);
 
+    /// Whether a texture may declare alternate (sRGB/UNORM twin) view formats.
+    /// This is a downlevel capability, not a requestable device feature.
+    fn texture_view_formats_supported(&self) -> bool;
+
     fn create_texture(&self, desc: &TextureDesc) -> Self::Texture;
+
+    /// Enqueues a GPU-only, byte-preserving copy of a whole single-sample color
+    /// texture. Both textures must have equal dimensions and copy-compatible
+    /// formats (identical, or differing only in sRGB encoding), with COPY_SRC
+    /// and COPY_DST usage respectively. No color conversion or CPU wait occurs.
+    fn copy_texture(&self, source: &Self::Texture, destination: &Self::Texture);
     /// Enqueues a checked upload into mip zero of a single-layer, single-sample
     /// RGBA8 texture created by this backend with `COPY_DST` usage.
     /// Validation errors leave the texture unchanged. A successful write is
