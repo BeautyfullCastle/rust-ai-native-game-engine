@@ -105,6 +105,18 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Required CollectDodge gameplay core and example
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_games --features collect-dodge --test collect_dodge -- --list > collect-dodge-tests.txt
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' collect-dodge-tests.txt)" -eq 17
+          cargo test --locked --release -p orr_games --features collect-dodge --test collect_dodge -- --nocapture 2>&1 | tee collect-dodge-tests.log
+          grep -F 'test result: ok. 17 passed; 0 failed; 0 ignored;' collect-dodge-tests.log
+          cargo run --locked --release -p orr_games --features collect-dodge --example collect_dodge 2>&1 | tee collect-dodge-example.log
+          grep -F 'win -> restart -> hazard loss verified; checksum=a7b61c44ba9f26bd' collect-dodge-example.log
+          cargo clippy --locked -p orr_games --all-features --all-targets -- -D warnings
+
       - name: Verify orr_ffi artifacts (cdylib + staticlib + import library)
         # The C ABI tests always build and verify these, even when the runner
         # has no C compiler. Reuse their artifacts instead of rebuilding with

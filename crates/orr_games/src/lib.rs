@@ -18,3 +18,7 @@ pub mod terrain_yard3d_game;
 
 #[cfg(feature = "navigation")]
 pub mod navigation_yard3d_game;
+
+/// Bounded deterministic collection/dodge game, opt-in and GPU-free.
+#[cfg(feature = "collect-dodge")]
+pub mod collect_dodge_game;

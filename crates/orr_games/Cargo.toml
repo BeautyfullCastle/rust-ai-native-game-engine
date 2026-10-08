@@ -11,6 +11,7 @@ description = "Orrery sim-only sample games (PhysGame 2D physics, Yard3D 3D phys
 workspace = true
 
 [features]
+collect-dodge = []
 navigation = ["dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
 default = []
 terrain-physics = ["dep:orr_terrain_physics3d", "dep:orr_terrain"]
@@ -27,3 +28,7 @@ orr_physics = { path = "../orr_physics" }
 orr_physics3d = { path = "../orr_physics3d" }
 orr_reflect = { path = "../orr_reflect", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }
+
+[[example]]
+name = "collect_dodge"
+required-features = ["collect-dodge"]
