@@ -403,9 +403,9 @@ jobs:
           test -x "$ORR_PROJECT_ONLY_RUNTIME"
           mkdir -p "$ORR_PROJECT_UI_CAPTURE_DIR"
           cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --list > "$RUNNER_TEMP/authored-ui-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/authored-ui-library-list.txt")" -eq 72
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/authored-ui-library-list.txt")" -eq 73
           cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/authored-ui-library.log"
-          grep -F 'test result: ok. 72 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/authored-ui-library.log"
+          grep -F 'test result: ok. 73 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/authored-ui-library.log"
           if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/authored-ui-library.log"; then exit 1; fi
           for specification in project_restart_seed:3 project_ui_boundaries:1 project_ui_compositor:1 project_ui_export:3 project_cli:5; do
             target=${specification%:*}
@@ -452,6 +452,82 @@ jobs:
             ${{ runner.temp }}/no-ui-*.log
             ${{ runner.temp }}/editor-ui-*.txt
             ${{ runner.temp }}/editor-ui-*.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required default-off player settings boundaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --no-default-features --test player_settings_cli -- --list > "$RUNNER_TEMP/player-settings-default-list.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-default-list.txt")" -eq 2
+          grep -Fx 'player_settings_stays_opt_in_and_out_of_editor_and_simulation_dependencies: test' "$RUNNER_TEMP/player-settings-default-list.txt"
+          grep -Fx 'explicit_profile_directory_requires_the_default_off_feature: test' "$RUNNER_TEMP/player-settings-default-list.txt"
+          cargo test --locked --release -p orr_sample --no-default-features --test player_settings_cli -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/player-settings-default.log"
+          grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/player-settings-default.log"
+      # Linux-only persistence is default-off. List and execute this exact
+      # positive feature union: a zero-test/default-only run is not acceptance.
+      # The 118 executions include storage, App input/Restart, CLI no-profile
+      # I/O, separate processes, source-hidden read-only export and real GPU UI.
+      - name: Mandatory player settings persistence lifecycle and GPU acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" -ne 0
+          command -v bwrap
+          bwrap --ro-bind / / -- /bin/true
+          mkdir -p "$ORR_PLAYER_SETTINGS_CAPTURE_DIR"
+          cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --list > "$RUNNER_TEMP/player-settings-library-list.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 108
+          test "$(grep -cE '^player_settings::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 28
+          grep -Fx 'app::player_settings_tests::persisted_widgets_mouse_fire_restart_match_inproc_threaded_and_effective_inputs: test' "$RUNNER_TEMP/player-settings-library-list.txt"
+          grep -Fx 'app::player_settings_tests::saved_mouse_binding_never_leaks_queued_apply_click_or_stale_dpi_layout: test' "$RUNNER_TEMP/player-settings-library-list.txt"
+          cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/player-settings-library.log"
+          grep -F 'test result: ok. 108 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/player-settings-library.log"
+          if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested|without source hiding|source_hiding=false|software GPU unavailable' "$RUNNER_TEMP/player-settings-library.log"; then exit 1; fi
+          for specification in player_settings_cli:6 player_settings_lifecycle:3 player_settings_ui:1; do
+            target=${specification%:*}
+            count=${specification#*:}
+            cargo test --locked --release -p orr_sample --features player-settings,project-export --test "$target" -- --list > "$RUNNER_TEMP/player-settings-$target-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-$target-list.txt")" -eq "$count"
+            case "$target" in
+              player_settings_cli)
+                for name in headless_ignores_profile_discovery_and_explicit_invalid_paths capture_ignores_profile_and_writes_only_the_requested_image external_input_bindings_bypass_profile_before_window_creation exporter_smoke_runs_with_no_home_or_xdg_and_no_player_profile; do
+                  grep -Fx "enabled::$name: test" "$RUNNER_TEMP/player-settings-$target-list.txt"
+                done ;;
+              player_settings_lifecycle)
+                grep -Fx 'settings_survive_distinct_processes_and_no_destructor_shutdown: test' "$RUNNER_TEMP/player-settings-$target-list.txt"
+                grep -Fx 'exported::relocated_read_only_export_uses_external_shared_profile_without_bundle_changes: test' "$RUNNER_TEMP/player-settings-$target-list.txt" ;;
+              player_settings_ui)
+                grep -Fx 'korean_settings_widgets_render_saved_left_mouse_over_authored_scene: test' "$RUNNER_TEMP/player-settings-$target-list.txt" ;;
+            esac
+            cargo test --locked --release -p orr_sample --features player-settings,project-export --test "$target" -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/player-settings-$target.log"
+            grep -F "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/player-settings-$target.log"
+            if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested|without source hiding|source_hiding=false|software GPU unavailable' "$RUNNER_TEMP/player-settings-$target.log"; then exit 1; fi
+          done
+          grep -F 'fresh-process LeftMouse profile retained outside read-only relocated bundle; all bundle bytes unchanged; source_hiding=true' "$RUNNER_TEMP/player-settings-player_settings_lifecycle.log"
+          grep -F 'player settings software adapter:' "$RUNNER_TEMP/player-settings-player_settings_ui.log"
+          test -s "$ORR_PLAYER_SETTINGS_CAPTURE_DIR/player-settings-default.png"
+          test -s "$ORR_PLAYER_SETTINGS_CAPTURE_DIR/player-settings-saved-left-mouse.png"
+        env:
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_EXPORT_HIDE_ROOT: ${{ github.workspace }}
+          ORR_REQUIRE_GPU: "1"
+          ORR_PLAYER_SETTINGS_CAPTURE_DIR: ${{ runner.temp }}/player-settings-captures
+      - name: Strict player settings and editor feature Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked -p orr_sample -p orr_editor --features orr_sample/player-settings,orr_sample/project-export,orr_editor/project-ui --all-targets -- -D warnings
+      - name: Upload player settings acceptance evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: player-settings-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/player-settings-captures
+            ${{ runner.temp }}/player-settings-*.txt
+            ${{ runner.temp }}/player-settings-*.log
           if-no-files-found: error
           retention-days: 7
       # The physics sample's headless benchmark: no window, no GPU. Runs the

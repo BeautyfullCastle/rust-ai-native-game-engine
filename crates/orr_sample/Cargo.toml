@@ -12,6 +12,8 @@ workspace = true
 
 [features]
 default = []
+# Optional Linux player preferences; no simulation or default dependencies.
+player-settings = ["project", "game-ui", "dep:tempfile", "dep:rustix"]
 project-export = ["project", "dep:sha2", "dep:tempfile", "dep:rustix"]
 project = ["sprites", "orr_reflect/scene", "dep:serde", "dep:serde_json", "dep:png17"]
 # Optional native UI needs Rust 1.95 (egui); default remains workspace MSRV.

@@ -14,7 +14,7 @@ use std::{fs, path::Path};
 mod project_fixture;
 use project_fixture::ProjectFixture;
 
-trait Steppable: Bridge<Arena> {
+pub(super) trait Steppable: Bridge<Arena> {
     fn step_one(&mut self);
 }
 impl Steppable for InProc<Arena, PlayHost<Arena>> {
@@ -28,7 +28,7 @@ impl Steppable for Threaded<Arena> {
     }
 }
 
-fn prepare() -> (ProjectFixture, PreparedRuntime) {
+pub(super) fn prepare() -> (ProjectFixture, PreparedRuntime) {
     let fixture = ProjectFixture::new();
     let project = orr_package::Project::open_for_install(
         &fixture.root,
@@ -50,7 +50,7 @@ fn prepare() -> (ProjectFixture, PreparedRuntime) {
     (fixture, prepared)
 }
 
-fn app<B: Bridge<Arena>>(
+pub(super) fn app<B: Bridge<Arena>>(
     bridge: B,
     factory: Box<dyn FnMut() -> Result<B, String>>,
     presentation: crate::project_runtime::ProjectPresentation,
@@ -109,7 +109,7 @@ fn app<B: Bridge<Arena>>(
     }
 }
 
-fn raw(events: Vec<egui::Event>) -> egui::RawInput {
+pub(super) fn raw(events: Vec<egui::Event>) -> egui::RawInput {
     egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -119,7 +119,7 @@ fn raw(events: Vec<egui::Event>) -> egui::RawInput {
         ..Default::default()
     }
 }
-fn click<B: Bridge<Arena>>(app: &mut App<B>, action: Action) {
+pub(super) fn click<B: Bridge<Arena>>(app: &mut App<B>, action: Action) {
     for _ in 0..3 {
         app.ui
             .as_mut()

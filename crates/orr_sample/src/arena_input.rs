@@ -68,6 +68,28 @@ impl ArenaControls {
             ui: false,
         })
     }
+    /// Prepare both adapters before publishing either. Existing focus, pause and
+    /// capture are retained; held inputs and pending edges are discarded.
+    pub fn with_replaced_map(&self, map: ActionMap) -> Result<Self, String> {
+        validate_map(&map)?;
+        let mut system = self.system.clone();
+        let mut gameplay = self.gameplay.clone();
+        system.replace_map(map.clone())?;
+        gameplay.replace_map(map)?;
+        Ok(Self {
+            system,
+            gameplay,
+            paused: self.paused,
+            ui: self.ui,
+        })
+    }
+    pub fn replace_map(&mut self, map: ActionMap) -> Result<(), String> {
+        *self = self.with_replaced_map(map)?;
+        Ok(())
+    }
+    pub fn map(&self) -> &ActionMap {
+        self.gameplay.map()
+    }
     pub fn paused(&self) -> bool {
         self.paused
     }
@@ -190,6 +212,45 @@ pub fn mouse(button: winit::event::MouseButton) -> Option<Button> {
 #[cfg(test)]
 mod menu_tests {
     use super::*;
+    #[test]
+    fn replacement_validates_both_adapters_before_mutation_and_retains_capture_focus() {
+        let mut controls = ArenaControls::new(default_map()).unwrap();
+        controls.button(Button::Keyboard { key: Key::D }, true, false, false);
+        let before = controls.keys();
+        let mut invalid = default_map();
+        invalid.actions.retain(|a| a.name != "pause");
+        assert!(controls.replace_map(invalid).is_err());
+        assert_eq!(controls.keys(), before);
+        assert_eq!(controls.system.map(), &default_map());
+        assert_eq!(controls.gameplay.map(), &default_map());
+        controls.set_focused(false);
+        controls.set_paused(true);
+        controls.set_ui_capture(true);
+        let mut changed = default_map();
+        changed
+            .actions
+            .iter_mut()
+            .find(|a| a.name == "fire")
+            .unwrap()
+            .bindings = vec![Button::Mouse { button: 0 }];
+        controls.replace_map(changed.clone()).unwrap();
+        assert_eq!(controls.system.map(), &changed);
+        assert_eq!(controls.gameplay.map(), &changed);
+        assert!(controls.paused());
+        assert_eq!(controls.keys(), Keys::default());
+        controls.set_paused(false);
+        controls.set_ui_capture(false);
+        controls.button(Button::Mouse { button: 0 }, true, false, false);
+        controls.button(Button::Keyboard { key: Key::P }, true, false, false);
+        assert!(!controls.paused(), "system adapter retains lost focus too");
+        assert_eq!(controls.keys(), Keys::default());
+        controls.set_focused(true);
+        controls.button(Button::Mouse { button: 0 }, true, true, false);
+        assert_eq!(controls.keys(), Keys::default());
+        controls.button(Button::Mouse { button: 0 }, false, false, false);
+        controls.button(Button::Mouse { button: 0 }, true, false, false);
+        assert!(controls.keys().fire);
+    }
     #[test]
     fn explicit_pause_never_synthesizes_remapped_system_action() {
         let mut map = default_map();

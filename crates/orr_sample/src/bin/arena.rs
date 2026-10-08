@@ -15,6 +15,7 @@
 //!   --hold right,fire            optional held keys for project headless smoke
 //!   --capture NEW.png            optional project headless compositor readback (GPU required)
 //!   --sprite-project DIR        installed sample-sprites project (build --features sprites)
+//!   --player-settings-dir ABS_DIR external Arena preference directory (player-settings feature)
 //!   --game-ui-project DIR       installed Korean font project (build --features game-ui)
 //!   --headless                   with --connect --bot: no window, play as a scripted bot (default 30 s)
 //! ```
@@ -63,6 +64,7 @@ fn real_main() -> Result<(), String> {
     let mut bridge_specified = false;
     let mut sprite_project = None;
     let mut game_ui_project = None;
+    let mut player_settings_dir = None;
     let mut input_bindings = None;
     let mut save_input_bindings = None;
     let mut opts = Options {
@@ -107,6 +109,13 @@ fn real_main() -> Result<(), String> {
             }
             "--capture" => capture = Some(std::path::PathBuf::from(value("--capture")?)),
             "--hold" => held = Some(parse_held(&value("--hold")?)?),
+            "--player-settings-dir" => {
+                if player_settings_dir.is_some() {
+                    return Err("--player-settings-dir may be supplied only once".into());
+                }
+                player_settings_dir =
+                    Some(std::path::PathBuf::from(value("--player-settings-dir")?));
+            }
             "--input-bindings" => input_bindings = Some(value("--input-bindings")?),
             "--save-input-bindings" => save_input_bindings = Some(value("--save-input-bindings")?),
             "--game-ui-project" => {
@@ -163,6 +172,14 @@ fn real_main() -> Result<(), String> {
         }
     }
 
+    if player_settings_dir.is_some() {
+        #[cfg(not(feature = "player-settings"))]
+        return Err("--player-settings-dir requires --features player-settings".into());
+        #[cfg(feature = "player-settings")]
+        if project.is_none() {
+            return Err("--player-settings-dir requires --project".into());
+        }
+    }
     if project.is_some() {
         if sprite_project.is_some() || game_ui_project.is_some() || save_input_bindings.is_some() {
             return Err("--project cannot be combined with --sprite-project, --game-ui-project or --save-input-bindings".into());
@@ -234,9 +251,53 @@ fn real_main() -> Result<(), String> {
         let summary = {
             let (seed, presentation, prepared_ui) = prepared.into_launch_parts();
             // Decode/install the already admitted font before spawning the host.
-            let ui = prepared_ui
+            #[allow(unused_mut)]
+            let mut ui = prepared_ui
                 .map(|ui| orr_sample::game_ui::GameUi::from_font(ui.font, true))
                 .transpose()?;
+            // Headless/capture returned above. No settings path or environment
+            // discovery is permitted on those deterministic admission routes.
+            #[cfg(feature = "player-settings")]
+            if let Some(ui) = &mut ui {
+                use orr_sample::player_controls::{resolve_paths, PlayerSettingsSession};
+                let session = if let Some(map) = &opts.input_map {
+                    PlayerSettingsSession::external(map.clone())
+                } else {
+                    let paths = (|| {
+                        let mut protected = vec![root
+                            .canonicalize()
+                            .map_err(|e| format!("project path: {e}"))?];
+                        let cwd = std::env::current_dir()
+                            .map_err(|e| format!("working directory: {e}"))?;
+                        let executable =
+                            std::env::current_exe().map_err(|e| format!("runtime path: {e}"))?;
+                        if let Some(parent) = executable.parent() {
+                            // Export layout is bin/arena beside project and run-arena.
+                            let bundle = if parent.file_name().is_some_and(|name| name == "bin") {
+                                parent.parent().unwrap_or(parent)
+                            } else {
+                                parent
+                            };
+                            protected.push(bundle.to_path_buf());
+                        }
+                        let paths = resolve_paths(player_settings_dir, &protected)?;
+                        if paths.directory() == cwd {
+                            return Err(
+                                "settings directory must not be the working directory".into()
+                            );
+                        }
+                        Ok(paths)
+                    })();
+                    PlayerSettingsSession::open(paths)
+                };
+                eprintln!("player settings: {}", session.status());
+                opts.input_map = Some(session.action_map());
+                ui.set_player_settings(session);
+            } else if player_settings_dir.is_some() {
+                return Err(
+                    "--player-settings-dir requires an authored Korean Arena UI preset".into(),
+                );
+            }
             if threaded {
                 opts.label = "authored project / threaded".into();
                 orr_sample::app::run_project_restartable(

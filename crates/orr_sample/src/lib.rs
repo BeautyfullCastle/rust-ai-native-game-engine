@@ -55,3 +55,8 @@ pub mod project_compositor;
 
 #[cfg(all(feature = "project-export", target_os = "linux", target_arch = "x86_64"))]
 pub mod project_export;
+
+#[cfg(feature = "player-settings")]
+pub mod player_settings;
+#[cfg(feature = "player-settings")]
+pub mod player_controls;
