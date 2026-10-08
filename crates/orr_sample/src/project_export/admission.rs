@@ -98,7 +98,7 @@ impl SnapshotFile {
         if before != after || before.len != bytes.len() as u64 {
             return Err(format!("export source changed while reading: {relative}"));
         }
-        Ok(Self {
+        let snapshot = Self {
             relative: relative.to_owned(),
             sha256: hash(&bytes),
             bytes,
@@ -106,7 +106,13 @@ impl SnapshotFile {
             source,
             identity: before,
             limit,
-        })
+        };
+        // Same-length writes can share timestamps on coarse-grained filesystems.
+        // Require current bytes as well as metadata before admitting the snapshot.
+        snapshot.recheck().map_err(|error| {
+            format!("export source changed while reading: {relative}: {error}")
+        })?;
+        Ok(snapshot)
     }
 
     pub fn recheck(&self) -> Result<(), String> {
@@ -219,6 +225,7 @@ impl ProjectSnapshot {
             plan.add(PACKAGE_LOCK, MAX_JSON_BYTES)?;
         }
         plan.add(&entry.scene, MAX_SCENE_BYTES)?;
+        if let Some(sidecar) = &entry.models { plan.add(sidecar,MAX_JSON_BYTES)?; }
         if let Some(sidecar) = &entry.sprites {
             plan.add(sidecar, MAX_JSON_BYTES)?;
         }
@@ -269,6 +276,14 @@ impl ProjectSnapshot {
             }
             (None, None) => {}
             _ => return Err("sprite sidecar changed during runtime admission".into()),
+        }
+        #[cfg(feature = "room-project")]
+        if let Some(path) = &entry.models {
+            let super::Prepared::Room(room)=&prepared else { return Err("model sidecar requires Room consumer".into()); };
+            let mut file=SnapshotFile::read(&root.join(path),path,MAX_JSON_BYTES)?;
+            let document:orr_model_bindings::model_bindings::Document=serde_json::from_slice(&file.bytes).map_err(|e|format!("export model sidecar: {e}"))?;
+            if file.source!=room.models().path || document!=room.models().document { return Err("model sidecar changed after runtime admission".into()); }
+            file.role="model_sidecar"; files.push(file);
         }
         #[cfg(feature = "collect-ui")]
         if let Some(path) = entry.ui.as_ref().and_then(|ui| ui.document.as_ref()) {
@@ -630,6 +645,18 @@ mod tests {
             Ok(bytes)
         });
         assert!(result.unwrap_err().contains("changed while reading"));
+        // A filesystem can report identical metadata for a same-length write.
+        // Inject stale reader bytes without changing the current file at all,
+        // so rejection must also compare bytes rather than rely on timestamps.
+        assert_eq!(fs::read(&source).unwrap(), b"modified");
+        let identity = regular_metadata(&source, 64).unwrap();
+        let stale = SnapshotFile::read_with(&source, "asset", 64, "package_asset", |_| {
+            Ok(b"original".to_vec())
+        });
+        assert_eq!(regular_metadata(&source, 64).unwrap(), identity);
+        let error = stale.unwrap_err();
+        assert!(error.contains("changed while reading"), "{error}");
+        assert!(error.contains("bytes changed"), "{error}");
     }
 
     #[test]

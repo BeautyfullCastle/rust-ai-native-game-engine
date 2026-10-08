@@ -281,7 +281,8 @@ impl eframe::App for EditorApp {
         self.frames += 1;
 
         // Disarm before ingesting a late claim/update; focus returning is not intent.
-        let input_focus = ctx.memory(|m| m.focused()) == Some(egui::Id::new("arena_keyboard_viewport"));
+        let keyboard_viewport = if self.editor.game().is_room() { "room_keyboard_viewport" } else { "arena_keyboard_viewport" };
+        let input_focus = ctx.memory(|m| m.focused()) == Some(egui::Id::new(keyboard_viewport));
         let outside_click = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !self.ui.viewport_rect.is_some_and(|r| r.contains(p))));
         if !input_focus || outside_click || self.ui.dialog.is_some() || ctx.input(|i| !i.focused || i.key_pressed(Key::Escape)) {
             self.editor.release_control();
@@ -515,7 +516,7 @@ impl EditorApp {
                 }
                 if ui.add_enabled(phase != Phase::Off, egui::Button::new("Release control")).clicked() { self.editor.release_control(); }
                 if self.editor.input_cleanup_pending() && ui.button("Reconnect control").clicked() { self.editor.restart(); }
-                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if self.editor.game().is_collect() { "Active · WASD/arrows · press Space to restart · Escape releases" } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
+                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if self.editor.game().is_room() { "Active · WASD/arrows · E interact · Escape releases" } else if self.editor.game().is_collect() { "Active · WASD/arrows · press Space to restart · Escape releases" } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
             });
         }
     }
@@ -783,7 +784,41 @@ impl EditorApp {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
             }
         }
-        let (rect,resp)=ui.allocate_exact_size(ui.available_size(),Sense::click_and_drag());
+        #[cfg(feature="room-project")]
+        if self.editor.game().is_room() {
+            let run=self.editor.snapshot().map(|snapshot|*snapshot.predicted().singleton::<orr_sample::room_game::RoomRun>());
+            ui.horizontal(|ui| {
+                if let Some(run)=run {
+                    ui.label(if run.won!=0 { "Escaped!" } else if run.key_collected!=0 { "Key collected · Find exit and press E" } else { "Exit locked · Find key and press E" });
+                }
+                if ui.add_enabled(self.editor.mode()==Mode::Play,egui::Button::new("Restart room")).clicked() {
+                    self.editor.stop();
+                    if self.editor.mode()==Mode::Edit { self.editor.play(); }
+                    self.ui.take_control=false;
+                }
+            });
+        }
+        let (rect,resp)=if self.editor.game().is_room() {
+            let (rect,_)=ui.allocate_exact_size(ui.available_size(),Sense::hover());
+            (rect,ui.interact(rect,egui::Id::new("room_keyboard_viewport"),Sense::click_and_drag()))
+        } else { ui.allocate_exact_size(ui.available_size(),Sense::click_and_drag()) };
+        if self.editor.game().is_room() {
+            if self.ui.take_control {
+                self.ui.take_control=false;
+                if self.ui.dialog.is_none() && ui.input(|i|i.focused) { resp.request_focus(); self.editor.take_control(0,true); }
+            }
+            let focused=resp.has_focus() && self.ui.dialog.is_none() && ui.input(|i|i.focused && !i.key_pressed(Key::Escape));
+            let keys=ui.input(|i|crate::editor::input::Keys {
+                x:i8::from(i.key_down(Key::D)||i.key_down(Key::ArrowRight))-i8::from(i.key_down(Key::A)||i.key_down(Key::ArrowLeft)),
+                y:i8::from(i.key_down(Key::W)||i.key_down(Key::ArrowUp))-i8::from(i.key_down(Key::S)||i.key_down(Key::ArrowDown)),
+                fire:i.key_down(Key::E),
+            });
+            self.editor.arena_keys(focused,keys);
+            if resp.has_focus() {
+                let controlled=focused && self.editor.input_phase()==crate::editor::input::Phase::Active;
+                ui.memory_mut(|memory|memory.set_focus_lock_filter(resp.id,egui::EventFilter { horizontal_arrows:controlled,vertical_arrows:controlled,..Default::default() }));
+            }
+        }
         let ppp=ui.ctx().pixels_per_point();
         let px=(((rect.width()*ppp).round() as u32).clamp(1,8192),((rect.height()*ppp).round() as u32).clamp(1,8192));
         self.ui.viewport_rect=Some(rect);self.ui.viewport_px=px;
