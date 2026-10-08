@@ -702,7 +702,13 @@ mod tests {
     #[test]
     fn invalid_transaction_is_atomic_and_absolute_paths_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(Bindings::create(dir.path().join("x"), "/absolute".into(), ".".into()).is_err());
+        for invalid in ["/absolute", "//server/share", r"\rooted", r"C:\absolute", "C:relative"] {
+            assert!(Bindings::create(dir.path().join("x"), invalid.into(), ".".into()).is_err());
+            assert!(Bindings::create(dir.path().join("x"), "scene".into(), invalid.into()).is_err());
+        }
+        for valid in ["scene", "nested/scene.yaml", "../scene.yaml"] {
+            assert!(Bindings::create(dir.path().join("x"), valid.into(), ".".into()).is_ok());
+        }
         let mut bindings =
             Bindings::create(dir.path().join("x"), "scene".into(), ".".into()).unwrap();
         let before = bindings.document().clone();
