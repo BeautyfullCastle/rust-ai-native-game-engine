@@ -263,3 +263,55 @@ fn transaction_rollback_restores_snapshot_even_after_asset_disappears() {
         .unwrap();
     assert_eq!(created, Guid::from_u32(2));
 }
+
+struct SourceBound;
+impl BakeAdmission for SourceBound {
+    fn admit_source(&self, text: &str) -> Result<(), EditError> {
+        if text.len() > 128 {
+            Err(EditError::Invalid("source byte bound".into()))
+        } else {
+            Ok(())
+        }
+    }
+    fn admit(&self, _: &Scene, _: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
+        Ok(())
+    }
+}
+#[test]
+fn optional_source_policy_runs_before_parse_and_atomic_reload() {
+    let mut registry = ComponentRegistryBuilder::new();
+    registry.register_singleton::<FrameRng>("FrameRng");
+    let registry = registry.build();
+    let text = "schema: orr.scene/1\nsingletons: {}\nentities: {}\n";
+    let huge = format!("{text}{}", " ".repeat(256));
+    assert!(EditorDoc::from_yaml_with_admission(
+        &huge,
+        TypeRegistry::new(),
+        registry.clone(),
+        7,
+        Some(Arc::new(SourceBound))
+    )
+    .err()
+    .unwrap()
+    .to_string()
+    .contains("source byte bound"));
+    let mut doc = EditorDoc::from_yaml_with_admission(
+        text,
+        TypeRegistry::new(),
+        registry.clone(),
+        7,
+        Some(Arc::new(SourceBound)),
+    )
+    .unwrap();
+    let before = state(&doc);
+    assert!(doc
+        .load_yaml(&huge)
+        .unwrap_err()
+        .to_string()
+        .contains("source byte bound"));
+    assert_eq!(state(&doc), before);
+    // Existing/no-policy hosts retain their previous accepted input behavior.
+    let mut legacy = EditorDoc::from_yaml(&huge, TypeRegistry::new(), registry, 7).unwrap();
+    legacy.load_yaml(&huge).unwrap();
+    assert_eq!(legacy.to_yaml(), huge);
+}

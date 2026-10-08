@@ -5,6 +5,8 @@
 //! attest its source/capabilities. The smoke only checks this project on this host.
 //! Inputs are read-only; this detects ordinary changes, not hostile filesystem races.
 mod admission;
+mod profile;
+use profile::{Profile, Prepared};
 
 use crate::project_publish::publish_no_replace;
 #[cfg(test)]
@@ -107,8 +109,22 @@ pub fn export(options: &ExportOptions) -> Result<ExportReport, String> {
     )
 }
 
+/// Export a CollectDodgeV1 project through the same guarded transaction pipeline.
+#[cfg(feature = "collect-dodge")]
+pub fn export_collect(options: &ExportOptions) -> Result<ExportReport, String> {
+    export_profile_with(options, Profile::Collect, |_| Ok(()), |command| run_bounded(command, SMOKE_TIMEOUT, MAX_SMOKE_OUTPUT))
+}
+
 fn export_with(
     options: &ExportOptions,
+    checkpoint: impl FnMut(&str) -> Result<(), String>,
+    smoke: impl FnOnce(&mut Command) -> Result<Vec<u8>, String>,
+) -> Result<ExportReport, String> {
+    export_profile_with(options, Profile::Arena, checkpoint, smoke)
+}
+fn export_profile_with(
+    options: &ExportOptions,
+    profile: Profile,
     mut checkpoint: impl FnMut(&str) -> Result<(), String>,
     smoke: impl FnOnce(&mut Command) -> Result<Vec<u8>, String>,
 ) -> Result<ExportReport, String> {
@@ -137,7 +153,7 @@ fn export_with(
             );
         }
     }
-    let project = ProjectSnapshot::open(&options.project)?;
+    let project = match profile { Profile::Arena => ProjectSnapshot::open(&options.project)?, #[cfg(feature = "collect-dodge")] Profile::Collect => ProjectSnapshot::open_profile(&options.project, profile)? };
     let runtime_path = check_path(&options.runtime, false)?;
     if fs::metadata(&runtime_path)
         .map_err(error)?
@@ -151,7 +167,7 @@ fn export_with(
                 .into(),
         );
     }
-    let binary = SnapshotFile::read(&runtime_path, "bin/arena", MAX_BINARY_BYTES)?;
+    let binary = SnapshotFile::read(&runtime_path, profile.binary(), MAX_BINARY_BYTES)?;
     if binary.sha256 != options.runtime_sha256 {
         return Err("trusted runtime SHA256 does not match expected hash".into());
     }
@@ -166,7 +182,7 @@ fn export_with(
     let mut files = Vec::new();
     write_payload(
         stage.path(),
-        "bin/arena",
+        profile.binary(),
         "runtime",
         &binary.bytes,
         0o755,
@@ -186,15 +202,15 @@ fn export_with(
     }
     write_payload(
         stage.path(),
-        LAUNCHER_NAME,
+        profile.launcher_name(),
         "launcher",
-        LAUNCHER,
+        profile.launcher(),
         0o755,
         &mut files,
     )?;
     checkpoint("before-validation")?;
-    let staged = crate::project_runtime::PreparedRuntime::open(stage.path().join("project"))?;
-    if staged.initial_frame().checksum() != project.initial_checksum {
+    let staged = Prepared::open(&stage.path().join("project"), profile)?;
+    if staged.checksum() != project.initial_checksum {
         return Err("staged project initial checksum changed".into());
     }
     // The smoke uses only the copied, hash-checked artifact and staged project.
@@ -202,12 +218,12 @@ fn export_with(
     let cwd = stage.path().join(".smoke-cwd");
     fs::create_dir(&cwd).map_err(error)?;
     verify_staged_file(
-        &stage.path().join("bin/arena"),
+        &stage.path().join(profile.binary()),
         binary.bytes.len() as u64,
         &binary.sha256,
         0o755,
     )?;
-    let mut command = Command::new(stage.path().join("bin/arena"));
+    let mut command = Command::new(stage.path().join(profile.binary()));
     command.env_clear();
     command
         .arg("--project")
@@ -217,13 +233,13 @@ fn export_with(
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY");
     let stdout = smoke(&mut command)?;
-    validate_smoke(&stdout, &staged)?;
+    if stdout != staged.smoke()? { return Err("trusted runtime smoke output does not match staged project".into()); }
     fs::remove_dir(&cwd).map_err(|e| format!("smoke cwd must remain empty: {e}"))?;
     checkpoint("after-validation")?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let payload = ManifestPayload {
         exporter_version: env!("CARGO_PKG_VERSION").into(),
-        profile: "arena-authored-linux-x86_64-v1".into(),
+        profile: profile.name().into(),
         entry: project.entry.clone(),
         packages: project.package_identities.clone(),
         files,
@@ -238,8 +254,8 @@ fn export_with(
         initial_checksum: format!("0x{:016x}", project.initial_checksum),
     };
     let canonical = serde_json::to_vec(&payload).map_err(error)?;
-    let mut digest_bytes = Vec::with_capacity(DOMAIN.len() + canonical.len());
-    digest_bytes.extend_from_slice(DOMAIN);
+    let mut digest_bytes = Vec::with_capacity(profile.domain().len() + canonical.len());
+    digest_bytes.extend_from_slice(profile.domain());
     digest_bytes.extend_from_slice(&canonical);
     let manifest = ExportManifest {
         schema: 1,
@@ -376,6 +392,7 @@ fn expected_smoke(prepared: &crate::project_runtime::PreparedRuntime) -> Result<
     }
     Ok(expected.into_bytes())
 }
+#[cfg(test)]
 fn validate_smoke(
     stdout: &[u8],
     prepared: &crate::project_runtime::PreparedRuntime,
@@ -671,6 +688,44 @@ mod tests {
                 })
                 .unwrap()
         }
+    }
+
+    #[cfg(feature = "collect-dodge")]
+    fn collect_fixture() -> Fixture {
+        let fixture = Fixture::new();
+        fs::write(fixture.options.project.join("orr.project.json"),include_bytes!("../../../assets/collect_dodge_project/orr.project.json")).unwrap();
+        fs::write(fixture.options.project.join("level.scene.yaml"),include_bytes!("../../../scenes/collect_dodge_v1.scene.yaml")).unwrap();
+        fixture
+    }
+    #[cfg(feature = "collect-dodge")]
+    #[test]
+    fn collect_profile_is_explicit_and_preserves_closed_transaction() {
+        let fixture = collect_fixture();
+        assert!(export_with(&fixture.options, |_|Ok(()), |_|Ok(Vec::new())).is_err(), "Arena exporter must not accept another game");
+        fixture.no_stage();
+        let expected = Prepared::open(&fixture.options.project,Profile::Collect).unwrap().smoke().unwrap();
+        assert!(export_profile_with(&fixture.options,Profile::Collect,|_|Ok(()),|_|Ok(b"wrong runtime\n".to_vec())).is_err());
+        fixture.no_stage();
+        for point in ["admitted","binary-copied","content-copied","before-validation","after-validation","before-publish"] {
+            assert!(export_profile_with(&fixture.options,Profile::Collect,|name|if name==point {Err("injected".into())}else{Ok(())},|_|Ok(expected.clone())).is_err());
+            fixture.no_stage();
+        }
+        let result=export_profile_with(&fixture.options,Profile::Collect,|_|Ok(()),|_|Ok(expected.clone())).unwrap();
+        assert_eq!(result.manifest.payload.profile,"collect-dodge-authored-linux-x86_64-v1");
+        assert_eq!(result.project_files,2);
+        assert!(result.output.join("bin/collect_dodge").is_file());
+        assert!(result.output.join("run-collect-dodge").is_file());
+        assert!(!result.output.join("project/arena.scene.yaml").exists());
+        let bytes=fs::read(result.output.join(MANIFEST_NAME)).unwrap();
+        assert!(export_profile_with(&fixture.options,Profile::Collect,|_|Ok(()),|_|Ok(expected.clone())).is_err());
+        assert_eq!(fs::read(result.output.join(MANIFEST_NAME)).unwrap(),bytes);
+    }
+    #[cfg(feature = "collect-dodge")]
+    #[test]
+    fn collect_profile_rejects_arena_before_smoke() {
+        let fixture=Fixture::new();
+        assert!(export_profile_with(&fixture.options,Profile::Collect,|_|Ok(()),|_|panic!("wrong game must not execute runtime")).is_err());
+        fixture.no_stage();
     }
 
     #[test]

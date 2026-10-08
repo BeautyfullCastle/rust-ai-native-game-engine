@@ -1,0 +1,17 @@
+# CollectDodgeV1 initial-only scene. Space/restart is a fresh input edge.
+schema: orr.scene/1
+singletons:
+  CollectDodgeV1::Run: { time_limit_ticks: 600 }
+entities:
+  e_00000001:
+    name: player
+    CollectDodgeV1::Actor: { position: [0, 0], velocity: [0, 0], kind: 0, ordinal: 0 }
+  e_00000002:
+    name: first_collectible
+    CollectDodgeV1::Actor: { position: [10, 0], velocity: [0, 0], kind: 1, ordinal: 0 }
+  e_00000003:
+    name: second_collectible
+    CollectDodgeV1::Actor: { position: [20, 0], velocity: [0, 0], kind: 1, ordinal: 1 }
+  e_00000004:
+    name: hazard
+    CollectDodgeV1::Actor: { position: [0, 12], velocity: [0, 0], kind: 2, ordinal: 0 }

@@ -34,6 +34,8 @@ fn main() {
         orr_editor::project::PreparedProject::open(root)
             .unwrap_or_else(|error| fail(&format!("--project: {error}")))
     });
+    #[cfg(feature = "collect-dodge")]
+    let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open(root).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
@@ -60,6 +62,10 @@ fn main() {
             let spec = project.as_ref().map_or_else(standalone, |project| project.host_spec());
             #[cfg(not(feature = "sprites"))]
             let spec = standalone();
+            #[cfg(feature = "collect-dodge")]
+            let spec = collect_project.as_ref().map_or(spec.clone(), |project| HostSpec::PreparedCollect {
+                scene: project.path().to_path_buf(), text:project.scene().text().to_owned(), listen:None,debug_hooks:false,
+            });
             match listen {
                 Some(cfg) => spec.with_listener(cfg),
                 None => spec,

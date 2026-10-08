@@ -50,16 +50,17 @@ fn message(opcode: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn interrupted_websocket_read_resumes_the_same_response() {
+fn pending_websocket_read_resumes_the_same_response() {
     let text = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
     let bytes = message(1, text.as_bytes());
     // Before a header, within the header, and within the payload.
-    for split in [0, 1, 2, 10, bytes.len() - 1] {
+    for (kind, split) in [ErrorKind::Interrupted, ErrorKind::WouldBlock, ErrorKind::TimedOut]
+        .into_iter().flat_map(|kind| [0, 1, 2, 10, bytes.len() - 1].map(|split| (kind, split))) {
         let mut reads = Vec::new();
         if split > 0 {
             reads.push(Ok(bytes[..split].to_vec()));
         }
-        reads.extend([Err(ErrorKind::Interrupted.into()), Err(ErrorKind::Interrupted.into()), Ok(bytes[split..].to_vec())]);
+        reads.extend([Err(kind.into()), Err(kind.into()), Ok(bytes[split..].to_vec())]);
         let mut ws = socket(reads);
         let mut queue = VecDeque::new();
         assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none(), "split {split}");
@@ -74,19 +75,41 @@ fn interrupted_websocket_read_resumes_the_same_response() {
 }
 
 #[test]
-fn interrupted_websocket_frame_preserves_the_queue() {
+fn pending_websocket_frame_preserves_the_queue() {
     let frame = orr_viewstream::ViewFrame { flags: 0, tick: 1, verified_tick: 1, seq: 1, rollback: None, entities: Vec::new(), props: Vec::new() }.encode();
     let bytes = message(2, &frame);
-    let mut ws = socket(vec![Ok(bytes[..5].to_vec()), Err(ErrorKind::Interrupted.into()), Ok(bytes[5..].to_vec())]);
-    let mut queue = VecDeque::from([Incoming::Error("already queued".into())]);
-    assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
-    assert_eq!(queue.len(), 1);
-    assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
-    assert_eq!(queue.len(), 2);
-    assert!(matches!(queue.pop_front(), Some(Incoming::Error(e)) if e == "already queued"));
-    assert!(matches!(queue.pop_front(), Some(Incoming::Frame(f)) if f == frame));
-    assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
-    assert!(queue.is_empty(), "the completed frame is queued only once");
+    for kind in [ErrorKind::Interrupted, ErrorKind::WouldBlock, ErrorKind::TimedOut] {
+        let mut ws = socket(vec![Ok(bytes[..5].to_vec()), Err(kind.into()), Err(kind.into()), Ok(bytes[5..].to_vec())]);
+        let mut queue = VecDeque::from([Incoming::Error("already queued".into())]);
+        assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
+        assert_eq!(queue.len(), 1);
+        let calls = ws.get_ref().read_calls;
+        assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
+        assert_eq!(ws.get_ref().read_calls, calls + 1, "each pending read yields to the outer deadline");
+        assert_eq!(queue.len(), 1);
+        assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
+        assert_eq!(queue.len(), 2);
+        assert!(matches!(queue.pop_front(), Some(Incoming::Error(e)) if e == "already queued"));
+        assert!(matches!(queue.pop_front(), Some(Incoming::Frame(f)) if f == frame));
+        assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
+        assert!(queue.is_empty(), "the completed frame is queued only once");
+        assert!(ws.get_ref().writes.is_empty());
+    }
+}
+
+#[test]
+fn pending_read_preserves_a_fragmented_websocket_message() {
+    let mut first = message(1, b"first ");
+    first[0] &= !0x80; // The text message continues in another WebSocket frame.
+    for kind in [ErrorKind::Interrupted, ErrorKind::WouldBlock, ErrorKind::TimedOut] {
+        let mut ws = socket(vec![Ok(first.clone()), Err(kind.into()), Ok(message(0, b"second"))]);
+        let mut queue = VecDeque::new();
+        assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
+        assert_eq!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().as_deref(), Some("first second"));
+        assert!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().is_none());
+        assert!(queue.is_empty());
+        assert!(ws.get_ref().writes.is_empty());
+    }
 }
 
 #[test]
@@ -125,7 +148,7 @@ fn tcp_hex_notification_classifies_a_v2_3d_frame() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let mut source = SocketSource {
-        wire: Wire::Tcp { reader: BufReader::new(client), partial: Vec::new() },
+        wire: Wire::Tcp { reader: BufReader::new(DeadlineStream { tcp: client, deadline: Instant::now() }), partial: Vec::new() },
         schema: String::new(),
         next_id: 1,
         queue: VecDeque::new(),
@@ -173,7 +196,7 @@ fn v1_event_batch_remains_accepted_for_a_v2_schema() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let mut source = SocketSource {
-        wire: Wire::Tcp { reader: BufReader::new(client), partial: Vec::new() },
+        wire: Wire::Tcp { reader: BufReader::new(DeadlineStream { tcp: client, deadline: Instant::now() }), partial: Vec::new() },
         schema: r#"{"format":"orrery.viewstream","version":2,"game":"Yard3D","frame3d":{"message_type":3,"record_len":88}}"#.into(),
         next_id: 1,
         queue: VecDeque::new(),
@@ -193,9 +216,18 @@ fn websocket_read_keeps_timeouts_recoverable_and_real_failures_fatal() {
         assert!(read_ws_text_or_queue(&mut ws, &mut VecDeque::new()).unwrap().is_none(), "{kind:?}");
         assert_eq!(ws.get_ref().read_calls, 1);
     }
-    let mut ws = socket(vec![Err(ErrorKind::ConnectionReset.into())]);
-    let error = read_ws_text_or_queue(&mut ws, &mut VecDeque::new()).unwrap_err();
-    assert!(error.starts_with("connection:"), "{error}");
+    // Windows 997 is an overlapped operation, not a readiness timeout. It must
+    // remain fatal even when a scripted stream produces it on another platform.
+    for failure in [ErrorKind::ConnectionReset.into(), io::Error::from_raw_os_error(997)] {
+        let mut ws = socket(vec![Err(failure)]);
+        let error = read_ws_text_or_queue(&mut ws, &mut VecDeque::new()).unwrap_err();
+        assert!(error.starts_with("connection:"), "{error}");
+        assert_eq!(ws.get_ref().read_calls, 1);
+    }
+    let mut invalid = message(1, b"invalid reserved bit");
+    invalid[0] |= 0x40;
+    let mut ws = socket(vec![Ok(invalid)]);
+    assert!(read_ws_text_or_queue(&mut ws, &mut VecDeque::new()).unwrap_err().starts_with("connection:"));
     let mut ws = socket(vec![Ok(message(8, &[]))]);
     assert_eq!(read_ws_text_or_queue(&mut ws, &mut VecDeque::new()).unwrap_err(), "the host closed the connection");
 }
@@ -219,8 +251,79 @@ fn endpoint_defaults_ipv6_and_sensitive_url_parts() {
 fn deadline_stream_expires_before_another_read_or_write() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let _peer = listener.accept().unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.write_all(&[7]).unwrap();
     let mut stream = DeadlineStream { tcp, deadline: Instant::now() - Duration::from_millis(1) };
     assert_eq!(stream.read(&mut [0]).unwrap_err().kind(), ErrorKind::TimedOut);
     assert_eq!(stream.write(&[1]).unwrap_err().kind(), ErrorKind::TimedOut);
+    stream.deadline = Instant::now() + Duration::from_secs(1);
+    let mut byte = [0];
+    assert_eq!(stream.read(&mut byte).unwrap(), 1);
+    assert_eq!(byte, [7], "an expired deadline must not consume even already-ready data");
+}
+
+#[test]
+fn tcp_poll_keeps_partial_lines_and_queued_messages_on_the_same_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    let mut source = SocketSource {
+        wire: Wire::Tcp { reader: BufReader::new(DeadlineStream { tcp, deadline: Instant::now() }), partial: Vec::new() },
+        schema: String::new(),
+        next_id: 1,
+        queue: VecDeque::from([Incoming::Error("already queued".into())]),
+        target: "tcp://127.0.0.1".into(),
+        client: None,
+    };
+    let poll = Duration::from_millis(20);
+    assert!(source.read_text_or_queue(poll).unwrap().is_none());
+    peer.write_all(b"first ").unwrap();
+    assert!(source.read_text_or_queue(poll).unwrap().is_none());
+    assert!(source.read_text_or_queue(poll).unwrap().is_none());
+    assert_eq!(source.queue.len(), 1);
+    peer.write_all(b"line\nsecond line\n").unwrap();
+    assert_eq!(source.read_text_or_queue(Duration::from_secs(1)).unwrap().as_deref(), Some("first line"));
+    assert_eq!(source.read_text_or_queue(Duration::from_secs(1)).unwrap().as_deref(), Some("second line"));
+    assert!(source.read_text_or_queue(poll).unwrap().is_none(), "each line arrives once");
+    assert!(matches!(source.queue.pop_front(), Some(Incoming::Error(e)) if e == "already queued"));
+    #[cfg(windows)]
+    if let Wire::Tcp { reader, .. } = &source.wire {
+        assert_eq!(reader.get_ref().tcp.read_timeout().unwrap(), None, "Windows polling must not arm SO_RCVTIMEO");
+    }
+    drop(peer);
+    assert_eq!(source.read_text_or_queue(Duration::from_secs(1)).unwrap_err(), "the host closed the connection");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_readiness_timeout_preserves_partial_websocket_and_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    let mut ws = WebSocket::from_raw_socket(DeadlineStream { tcp, deadline: Instant::now() }, Role::Client, None);
+    let mut queue = VecDeque::from([Incoming::Error("already queued".into())]);
+    let text = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+    let bytes = message(1, text.as_bytes());
+    let poll = |ws: &mut WebSocket<DeadlineStream>, queue: &mut VecDeque<Incoming>| {
+        let deadline = Instant::now() + Duration::from_millis(20);
+        ws.get_mut().deadline = deadline;
+        assert!(read_ws_text_or_queue(ws, queue).unwrap().is_none());
+        assert_eq!(ws.get_ref().deadline, deadline, "partial reads must not restart the absolute deadline");
+        assert_eq!(ws.get_ref().tcp.read_timeout().unwrap(), None, "a readiness timeout must not cancel a receive");
+    };
+    poll(&mut ws, &mut queue);
+    peer.write_all(&bytes[..1]).unwrap(); // An incomplete WebSocket header.
+    poll(&mut ws, &mut queue);
+    poll(&mut ws, &mut queue);
+    peer.write_all(&bytes[1..10]).unwrap(); // A complete header and partial payload.
+    poll(&mut ws, &mut queue);
+    assert_eq!(queue.len(), 1);
+    peer.write_all(&bytes[10..]).unwrap();
+    ws.get_mut().deadline = Instant::now() + Duration::from_secs(1);
+    assert_eq!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap().as_deref(), Some(text));
+    poll(&mut ws, &mut queue);
+    assert!(matches!(queue.pop_front(), Some(Incoming::Error(e)) if e == "already queued"));
+    peer.write_all(&message(8, &[])).unwrap();
+    ws.get_mut().deadline = Instant::now() + Duration::from_secs(1);
+    assert_eq!(read_ws_text_or_queue(&mut ws, &mut queue).unwrap_err(), "the host closed the connection");
 }

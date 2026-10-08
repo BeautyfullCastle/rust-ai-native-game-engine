@@ -628,6 +628,97 @@ jobs:
       - name: Strict generator export settings and editor feature Clippy
         if: runner.os == 'Linux'
         run: cargo clippy --locked -p orr_sample -p orr_editor --no-default-features --features orr_sample/project-create,orr_sample/project-export,orr_sample/player-settings,orr_sample/input-actions,orr_sample/game-ui,orr_editor/project-ui --all-targets -- -D warnings
+      - name: Required authored Collect CPU and admission counts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_count() {
+            local label=$1 expected=$2
+            shift 2
+            "$@" -- --list "${selection[@]}" > "$RUNNER_TEMP/collect-authored-$label-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-authored-$label-list.txt")" -eq "$expected"
+            "$@" -- --test-threads=1 --nocapture "${selection[@]}" 2>&1 | tee "$RUNNER_TEMP/collect-authored-$label.log"
+            python3 - "$expected" "$RUNNER_TEMP/collect-authored-$label.log" "$label" <<'PYCOUNTS'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[2]).read_text()
+          rows = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;', text, re.M)
+          if sys.argv[3] == "package":
+              assert text.count("test result:") == 2, "unexpected or malformed package summary"
+              assert rows == [("1", "0", "0"), (sys.argv[1], "0", "0")], rows
+          else:
+              assert rows and sum(int(row[0]) for row in rows) == int(sys.argv[1]), (sys.argv[2], rows)
+          assert all(int(failed) == 0 and int(ignored) == 0 for _, failed, ignored in rows), rows
+          assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
+          PYCOUNTS
+          }
+          selection=()
+          check_count sample-library 61 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
+          unset ORR_PACKAGE_FIFO_TEST_ROOT
+          check_count package 20 cargo test --locked --release -p orr_package --lib
+          check_count editor-collect-library 4 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --lib collect
+          selection=(--skip collect_actual_editor_gpu_edit_save_play_reopen)
+          check_count editor-collect-cpu 2 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --test collect_dodge
+          selection=()
+          check_count editor-local-arena 6 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --test local_arena
+          check_count remote 6 cargo test --locked --release -p orr_remote --features collect-dodge --test collect_authored
+          check_count edit-admission 6 cargo test --locked --release -p orr_edit --test bake_admission
+          check_count games 23 cargo test --locked --release -p orr_games --features collect-dodge --lib --test golden --test collect_dodge
+          check_count default-editor-cli 8 cargo test --locked --release -p orr_editor --no-default-features --lib cli::tests::
+      - name: Build and pin production Collect runtime and exporter
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" -ne 0
+          command -v bwrap
+          bwrap --ro-bind / / -- /bin/true
+          rustc -vV | grep -Fx 'host: x86_64-unknown-linux-gnu'
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/collect-authored-candidate.txt"
+          cargo build --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --bin collect_dodge --bin orr_export_collect
+          # The actual Editor acceptance requires its trusted tools inside the
+          # workspace it subsequently hides; copies survive later Cargo builds.
+          mkdir "$GITHUB_WORKSPACE/target/collect-authored-tools"
+          for binary in collect_dodge orr_export_collect; do
+            cp "${CARGO_TARGET_DIR:-target}/release/$binary" "$GITHUB_WORKSPACE/target/collect-authored-tools/$binary"
+            test -x "$GITHUB_WORKSPACE/target/collect-authored-tools/$binary"
+            cmp "${CARGO_TARGET_DIR:-target}/release/$binary" "$GITHUB_WORKSPACE/target/collect-authored-tools/$binary"
+          done
+          sha256sum "$GITHUB_WORKSPACE/target/collect-authored-tools/collect_dodge" "$GITHUB_WORKSPACE/target/collect-authored-tools/orr_export_collect" > "$RUNNER_TEMP/collect-authored-tools.sha256"
+          cat "$RUNNER_TEMP/collect-authored-tools.sha256"
+      - name: Mandatory Collect source-hidden export and actual Editor GPU proofs
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$ORR_COLLECT_RUNTIME"
+          test -x "$ORR_COLLECT_EXPORTER"
+          sha256sum -c "$RUNNER_TEMP/collect-authored-tools.sha256"
+          cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --test collect_project_export -- --ignored --list > "$RUNNER_TEMP/collect-authored-export-ignored.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-authored-export-ignored.txt")" -eq 2
+          grep -Fx 'collect_real_export_cpu_workflow: test' "$RUNNER_TEMP/collect-authored-export-ignored.txt"
+          grep -Fx 'collect_real_export_gpu_workflow: test' "$RUNNER_TEMP/collect-authored-export-ignored.txt"
+          for name in collect_real_export_cpu_workflow collect_real_export_gpu_workflow; do
+            cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --test collect_project_export "$name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/collect-authored-$name.log"
+            grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/collect-authored-$name.log"
+          done
+          cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --test collect_dodge -- --ignored --list > "$RUNNER_TEMP/collect-authored-editor-ignored.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-authored-editor-ignored.txt")" -eq 1
+          grep -Fx 'collect_actual_editor_gpu_edit_save_play_reopen: test' "$RUNNER_TEMP/collect-authored-editor-ignored.txt"
+          cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --test collect_dodge collect_actual_editor_gpu_edit_save_play_reopen -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/collect-authored-editor-gpu.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/collect-authored-editor-gpu.log"
+          if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/collect-authored-collect_real_export_cpu_workflow.log" "$RUNNER_TEMP/collect-authored-collect_real_export_gpu_workflow.log" "$RUNNER_TEMP/collect-authored-editor-gpu.log"; then exit 1; fi
+          sha256sum -c "$RUNNER_TEMP/collect-authored-tools.sha256"
+        env:
+          ORR_COLLECT_RUNTIME: ${{ github.workspace }}/target/collect-authored-tools/collect_dodge
+          ORR_COLLECT_EXPORTER: ${{ github.workspace }}/target/collect-authored-tools/orr_export_collect
+          ORR_COLLECT_CAPTURES: ${{ runner.temp }}/collect-authored-captures
+          ORR_REQUIRE_GPU: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+      - name: Strict six-crate authored Collect and optional 3D feature Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked -p orr_sample -p orr_editor -p orr_remote -p orr_edit -p orr_package -p orr_games --no-default-features --features orr_sample/collect-dodge,orr_sample/project-create,orr_sample/project-export,orr_sample/player-settings,orr_sample/input-actions,orr_sample/game-ui,orr_editor/collect-dodge,orr_editor/project-ui,orr_editor/animated-models,orr_editor/terrain-physics,orr_editor/navigation,orr_editor/irradiance-probes,orr_remote/collect-dodge,orr_remote/terrain-physics,orr_remote/navigation,orr_games/collect-dodge,orr_games/terrain-physics,orr_games/navigation --all-targets -- -D warnings
       - name: Upload generated Arena acceptance evidence
         if: ${{ always() && runner.os == 'Linux' }}
         uses: actions/upload-artifact@v4
@@ -638,6 +729,13 @@ jobs:
             ${{ runner.temp }}/new-arena-*-list.txt
             ${{ runner.temp }}/new-arena-*.log
             ${{ runner.temp }}/new-arena-tools.sha256
+            ${{ runner.temp }}/collect-authored-*-list.txt
+            ${{ runner.temp }}/collect-authored-*.log
+            ${{ runner.temp }}/collect-authored-tools.sha256
+            ${{ runner.temp }}/collect-authored-export-ignored.txt
+            ${{ runner.temp }}/collect-authored-editor-ignored.txt
+            ${{ runner.temp }}/collect-authored-captures
+            ${{ runner.temp }}/collect-authored-candidate.txt
           if-no-files-found: error
           retention-days: 7
       # The physics sample's headless benchmark: no window, no GPU. Runs the

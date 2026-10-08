@@ -95,6 +95,8 @@ impl ModelPanel {
                     | crate::backend::HostSpec::LocalGame { scene, .. } => scene,
                     #[cfg(feature = "sprites")]
                     crate::backend::HostSpec::PreparedArena { scene, .. } => scene.path(),
+                    #[cfg(feature = "collect-dodge")]
+                    crate::backend::HostSpec::PreparedCollect { .. } => return false,
                     crate::backend::HostSpec::Remote { .. } => return false,
                 };
                 if !local_path
@@ -127,6 +129,8 @@ impl ModelPanel {
             | crate::backend::HostSpec::LocalGame { scene, .. } => scene,
             #[cfg(feature = "sprites")]
             crate::backend::HostSpec::PreparedArena { scene, .. } => scene.path(),
+            #[cfg(feature = "collect-dodge")]
+            crate::backend::HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
             crate::backend::HostSpec::Remote { .. } => {
                 return Err("Remote scene paths are not local authority".into())
             }

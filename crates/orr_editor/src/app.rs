@@ -489,13 +489,17 @@ impl EditorApp {
                 ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
             }
         });
-        if self.editor.game() == crate::game::EditorGame::Arena {
+        if self.editor.game().has_keyboard() {
             ui.horizontal_wrapped(|ui| {
                 use crate::editor::input::Phase;
                 let phase = self.editor.input_phase();
+                #[cfg(feature = "collect-dodge")]
+                if self.editor.game().is_collect() {
+                    if let Some(snapshot) = self.editor.snapshot() { let run = snapshot.predicted().singleton::<orr_sample::collect_game::CollectRun>(); ui.label(format!("{} · Score {}/{}", orr_sample::collect_view::status(run), run.score, run.goal)); }
+                }
                 ui.label("Keyboard player slot");
                 ui.add_enabled(phase == Phase::Off, egui::DragValue::new(&mut self.ui.input_player).range(0..=self.editor.sim().player_count.saturating_sub(1)));
-                if self.editor.mode() == Mode::Edit && ui.add_enabled(
+                if self.editor.game() == crate::game::EditorGame::Arena && self.editor.mode() == Mode::Edit && ui.add_enabled(
                         self.editor.can_mutate() && self.editor.previewing().is_none() && phase == Phase::Off,
                         egui::Button::new("+ Player"),
                 ).on_hover_text("Create a player in this unused slot at the viewport center.").clicked() {
@@ -507,7 +511,7 @@ impl EditorApp {
                 }
                 if ui.add_enabled(phase != Phase::Off, egui::Button::new("Release control")).clicked() { self.editor.release_control(); }
                 if self.editor.input_cleanup_pending() && ui.button("Reconnect control").clicked() { self.editor.restart(); }
-                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => "Active · WASD/arrows · hold Space to fire · Escape releases", Phase::Releasing => "Releasing…" });
+                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if self.editor.game().is_collect() { "Active · WASD/arrows · press Space to restart · Escape releases" } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
             });
         }
     }
@@ -871,7 +875,7 @@ impl EditorApp {
 
     fn viewport(&mut self, ui: &mut Ui) {
         if self.editor.game().is_3d() { self.yard_viewport(ui);return; }
-        let (rect, resp) = if self.editor.game() == crate::game::EditorGame::Arena {
+        let (rect, resp) = if self.editor.game().has_keyboard() {
             let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
             (rect, ui.interact(rect, egui::Id::new("arena_keyboard_viewport"), Sense::click_and_drag()))
         } else {
@@ -890,8 +894,16 @@ impl EditorApp {
             y: i8::from(i.key_down(Key::W) || i.key_down(Key::ArrowUp)) - i8::from(i.key_down(Key::S) || i.key_down(Key::ArrowDown)),
             fire: i.key_down(Key::Space),
         });
+        if self.editor.game().is_collect() && focused {
+            let edges = ui.input(|i| i.events.iter().filter_map(|event| match event {
+                egui::Event::Key { key:Key::Space, pressed, repeat:false, .. } => Some(*pressed), _ => None,
+            }).collect::<Vec<_>>());
+            for pressed in edges {
+                self.editor.collect_space_event(focused, pressed);
+            }
+        }
         self.editor.arena_keys(focused, keys);
-        if self.editor.game() == crate::game::EditorGame::Arena && resp.has_focus() {
+        if self.editor.game().has_keyboard() && resp.has_focus() {
             // Arrow movement belongs to managed gameplay, not egui's focus
             // navigation. Tab/Escape still release focus normally.
             let controlled = focused && self.editor.input_phase() == crate::editor::input::Phase::Active;
@@ -951,7 +963,7 @@ impl EditorApp {
                 let p = [w[0] + drag.offset[0], w[1] + drag.offset[1]];
                 if let (Some(x), Some(y)) = (fp_of_f64(f64::from(p[0])), fp_of_f64(f64::from(p[1]))) {
                     if let Some(owner) = self.editor.movement_owner() {
-                        self.editor.set_field(&owner, "pos", Value::Vec2(FPVec2::new(x, y)));
+                        self.editor.set_field(&owner, self.editor.game().position_field(), Value::Vec2(FPVec2::new(x, y)));
                     }
                 }
             }

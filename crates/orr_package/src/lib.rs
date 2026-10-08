@@ -117,6 +117,8 @@ pub struct ProjectManifest {
 pub enum ProjectGame {
     #[serde(rename = "arena")]
     Arena,
+    #[serde(rename = "collect-dodge-v1")]
+    CollectDodgeV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

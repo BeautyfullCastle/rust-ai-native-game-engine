@@ -43,6 +43,7 @@ editor's ERP) that is already running.
                         scene_edit, sim_control (comma separated) or all
   --erp-dev             no tokens, every client has every capability
                         (loopback addresses only)
+  --collect-project DIR validated CollectDodgeV1 project (collect-dodge feature)
 ";
 
 /// Parsed flags.
@@ -50,6 +51,8 @@ editor's ERP) that is already running.
 pub struct Args {
     /// `--project`: an explicitly saved project, with no default-path fallback.
     pub project: Option<PathBuf>,
+    /// Dedicated versioned CollectDodge project route.
+    pub collect_project: Option<PathBuf>,
     /// Optional local game selection. `None` preserves the PhysGame default.
     pub game: Option<EditorGame>,
     /// `--scene`.
@@ -82,7 +85,7 @@ pub struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Self { project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
+        Self { collect_project: None, project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -95,6 +98,10 @@ impl Args {
         while let Some(a) = it.next() {
             let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value\n\n{USAGE}"));
             match a.as_str() {
+                "--collect-project" => {
+                    if out.collect_project.is_some() { return Err("--collect-project may only be supplied once".into()); }
+                    out.collect_project = Some(PathBuf::from(value("--collect-project")?));
+                }
                 "--project" => {
                     if out.project.is_some() {
                         return Err("--project may only be supplied once".into());
@@ -122,6 +129,10 @@ impl Args {
                 "-h" | "--help" => return Err(USAGE.to_string()),
                 other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
             }
+        }
+        if out.collect_project.is_some() {
+            if !cfg!(feature = "collect-dodge") { return Err("--collect-project requires collect-dodge feature".into()); }
+            if out.project.is_some() || out.scene.is_some() || out.game.is_some() || out.connect.is_some() || out.script.is_some() { return Err("--collect-project cannot be combined with --project, --scene, --game, --connect or --script".into()); }
         }
         if out.project.is_some() {
             if out.scene.is_some() || out.game.is_some() || out.connect.is_some() || out.script.is_some() {
@@ -179,6 +190,21 @@ mod tests {
     fn parses_connect() {
         let a = parse("--connect ws://127.0.0.1:7790 --token s3 --screenshot /tmp/a.png").unwrap();
         assert_eq!((a.connect.as_deref(), a.token.as_deref()), (Some("ws://127.0.0.1:7790"), Some("s3")));
+    }
+
+    #[test]
+    fn collect_project_has_one_authority_in_every_option_order() {
+        for other in ["--project a", "--scene a", "--game arena", "--connect ws://localhost:9", "--script a"] {
+            for text in [format!("--collect-project a {other}"), format!("{other} --collect-project a")] {
+                assert!(parse(&text).is_err(), "accepted {text}");
+            }
+        }
+        assert!(parse("--collect-project a --collect-project b").is_err());
+        assert!(parse("--collect-project").is_err());
+        #[cfg(feature = "collect-dodge")]
+        assert_eq!(parse("--collect-project a").unwrap().collect_project, Some(PathBuf::from("a")));
+        #[cfg(not(feature = "collect-dodge"))]
+        assert!(parse("--collect-project a").unwrap_err().contains("collect-dodge feature"));
     }
 
     #[test]

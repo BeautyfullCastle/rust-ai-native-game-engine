@@ -209,6 +209,8 @@ fn participating_input_key(
         HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => scene,
         #[cfg(feature = "sprites")]
         HostSpec::PreparedArena { scene, .. } => scene.path(),
+        #[cfg(feature = "collect-dodge")]
+        HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
         HostSpec::Remote { .. } => return Err("Remote scene has no local bake input key".into()),
     };
     if editor.sim().scene_path.as_deref() != expected.to_str() {
@@ -397,6 +399,8 @@ fn capture(
         HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => scene,
         #[cfg(feature = "sprites")]
         HostSpec::PreparedArena { scene, .. } => scene.path(),
+        #[cfg(feature = "collect-dodge")]
+        HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
         HostSpec::Remote { .. } => return Err("Remote paths cannot authorize a bake".into()),
     };
     if editor.sim().scene_path.as_deref() != expected.to_str() {
