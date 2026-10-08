@@ -1,0 +1,270 @@
+{
+  "room-ui-schema": {
+    "names": [
+      "authored_ui::room_profile_tests::room_profile_is_explicit_and_collect_default_stays_closed",
+      "authored_ui::room_profile_tests::room_schema_rejects_cross_bindings_unknown_duplicate_and_bad_geometry"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        2,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "room-ui",
+    "target": "--lib",
+    "filter": "authored_ui::room_profile_tests::"
+  },
+  "room-ui-widgets": {
+    "names": [
+      "collect_ui::room_tests::room_focus_dpi_and_release_without_press_do_not_activate",
+      "collect_ui::room_tests::room_widgets_title_menu_win_restart_and_profile_values"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        2,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "room-ui",
+    "target": "--lib",
+    "filter": "collect_ui::room_tests::"
+  },
+  "room-ui-input-scale": {
+    "names": [
+      "room_app::room_pointer_capture_tests::key_capture_uses_physical_position_after_scale_without_cursor_move"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "room-ui",
+    "target": "--lib",
+    "filter": "room_app::room_pointer_capture_tests::"
+  },
+  "room-ui-native-app": {
+    "names": [
+      "room_app::room_ui_app_tests::native_app_widget_restart_uses_owned_frame_camera_and_neutral_controls"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "room-ui,project-create",
+    "target": "--lib",
+    "filter": "room_app::room_ui_app_tests::"
+  },
+  "room-ui-admission": {
+    "names": [
+      "room_document_wrong_profile_and_reserved_alias_rejected",
+      "room_ui_template_admission_closed_profiles_and_owned_restart",
+      "unsupported_consumer_rejects_before_reading_package_or_scene_bytes"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "room-ui,project-create",
+    "target": "--test room_ui_project",
+    "filter": ""
+  },
+  "room-ui-editor-widgets": {
+    "names": [
+      "collect_ui_panel::room_panel_tests::room_widgets_edit_undo_save_reopen_and_share_runtime_document"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_editor",
+    "features": "room-ui,project-create",
+    "target": "--lib",
+    "filter": "collect_ui_panel::room_panel_tests::"
+  },
+  "room-ui-editor-source-lifecycle": {
+    "names": [
+      "actual_editor_failed_open_preserves_but_open_aba_and_save_as_retire_ui",
+      "actual_external_erp_load_retires_room_ui_and_manifest_change_blocks_save",
+      "actual_external_save_aba_before_editor_pump_permanently_retires_room_ui"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_editor",
+    "features": "room-ui,project-create",
+    "target": "--test room_ui_lifecycle",
+    "filter": ""
+  },
+  "collect-schema-compatible": {
+    "names": [
+      "authored_ui::tests::boundaries_are_inclusive",
+      "authored_ui::tests::default_round_trip_and_complete_vocabulary",
+      "authored_ui::tests::rejects_duplicate_fields_including_null_and_tags",
+      "authored_ui::tests::rejects_geometry_outside_bounds_and_wrong_types",
+      "authored_ui::tests::rejects_hierarchy_errors",
+      "authored_ui::tests::rejects_invalid_ids_and_text",
+      "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
+      "authored_ui::tests::rejects_unknown_fields_variants_and_expressions"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        8,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "collect-ui,room-ui",
+    "target": "--lib",
+    "filter": "authored_ui::tests::"
+  },
+  "collect-widgets-compatible": {
+    "names": [
+      "collect_ui::tests::clipped_container_only_occludes_its_visible_intersection",
+      "collect_ui::tests::font_validation_uses_actual_document_not_only_default_corpus",
+      "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
+      "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
+      "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+      "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
+      "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
+      "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
+      "collect_ui::tests::resize_and_dpi_cancel_press_and_use_fresh_anchored_bounds",
+      "collect_ui::tests::restart_waits_through_zero_tick_terminal_snapshots_until_acknowledged",
+      "collect_ui::tests::terminal_transition_discards_old_click_and_menu_remains_open",
+      "collect_ui::tests::viewport_clip_excludes_offscreen_button_area"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        12,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "collect-ui,room-ui",
+    "target": "--lib",
+    "filter": "collect_ui::tests::"
+  },
+  "collect-editor-compatible": {
+    "names": [
+      "collect_ui_panel::tests::headless_widgets_edit_undo_save_reopen_and_share_runtime_document",
+      "collect_ui_panel::tests::invalid_or_missing_font_glyph_edit_is_atomic_and_history_bounded",
+      "collect_ui_panel::tests::property_edit_undo_save_and_reopen",
+      "collect_ui_panel::tests::save_rejects_external_edit_and_nonregular_target",
+      "collect_ui_panel::tests::save_rejects_symlink_and_replaced_directory",
+      "collect_ui_panel::tests::subtree_removal_and_bounded_add_are_validated"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        6,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_editor",
+    "features": "collect-ui,room-ui",
+    "target": "--lib",
+    "filter": "collect_ui_panel::tests::"
+  },
+  "room-ui-composited-gpu": {
+    "names": [
+      "room_app::room_ui_gpu_tests::room_ui_composited_title_play_key_win_and_projection_preserve_frame"
+    ],
+    "ignored_names": [
+      "room_app::room_ui_gpu_tests::room_ui_composited_title_play_key_win_and_projection_preserve_frame"
+    ],
+    "run_ignored": true,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "room-ui,project-create",
+    "target": "--lib",
+    "filter": "room_app::room_ui_gpu_tests::"
+  },
+  "room-ui-source-hidden-export": {
+    "names": [
+      "room::generated_room_ui_real_export_source_hidden_gpu_workflow"
+    ],
+    "ignored_names": [
+      "room::generated_room_ui_real_export_source_hidden_gpu_workflow"
+    ],
+    "run_ignored": true,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_sample",
+    "features": "room-ui,project-create,project-export",
+    "target": "--test new_room_project",
+    "filter": "room::generated_room_ui_real_export_source_hidden_gpu_workflow"
+  },
+  "room-ui-save-transition-producer": {
+    "names": [
+      "scene_save_path_transition_flag_is_exact_in_list_and_watch"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "package": "orr_remote",
+    "features": "",
+    "target": "--test activity",
+    "filter": "scene_save_path_transition_flag_is_exact_in_list_and_watch",
+    "execution": "exact"
+  }
+}

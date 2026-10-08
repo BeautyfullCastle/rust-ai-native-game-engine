@@ -118,7 +118,7 @@ class DeterminismWorkflowTests(unittest.TestCase):
             {"os": "macos-latest", "name": "macos-latest-arm64"},
             {"os": "ubuntu-24.04-arm", "name": "ubuntu-24.04-arm64"},
         ])
-        self.assertEqual(self.jobs["sample-build"]["strategy"]["matrix"]["os"], ["ubuntu-latest", "windows-latest"])
+        self.assertEqual(self.jobs["sample-build"]["strategy"]["matrix"]["os"], ["ubuntu-22.04", "windows-latest"])
         self.assertFalse(self.jobs["sample-build"]["strategy"]["fail-fast"])
         self.assert_required_command(self.jobs["sample-build"], SAMPLE_TEST)
 

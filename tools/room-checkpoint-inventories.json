@@ -1,0 +1,263 @@
+{
+  "room-goldens": {
+    "names": [
+      "room_escape_game::tests::admission_rejects_hostile_hidden_fields_missing_roles_and_anonymous_entities",
+      "room_escape_game::tests::canonical_setup_and_initial_only_admission",
+      "room_escape_game::tests::hostile_samples_are_wholly_neutral",
+      "room_escape_game::tests::key_then_exit_requires_separate_edges_and_won_freezes",
+      "room_escape_game::tests::movement_bounds_each_segment_before_casting",
+      "room_escape_game::tests::only_connected_slot_zero_controls_player",
+      "room_escape_game::tests::rejects_noncanonical_and_unbounded_authoring_before_math",
+      "room_escape_game::tests::snapshot_replay_and_initial_frame_restart_match_exact_bytes",
+      "room_escape_game::tests::wall_blocks_key_interaction_and_exit_stays_locked",
+      "room_escape_game::tests::walls_stop_motion_and_diagonal_is_normalized"
+    ],
+    "ignored_names": [],
+    "passed": 10,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        10,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/room-goldens.log"
+  },
+  "package-closure": {
+    "names": [
+      "project_identity::tests::canonical_roundtrip",
+      "project_identity::tests::checkpoint_profile_requires_object_without_changing_collect_sequence_compatibility",
+      "project_identity::tests::fork_is_explicit_distinct_validated_and_pure",
+      "project_identity::tests::rejects_duplicate_unknown_missing_null_and_invalid_types",
+      "project_identity::tests::rejects_noncanonical_and_unsafe_identities",
+      "project_identity::tests::rejects_unsupported_schema_and_profiles",
+      "project_identity::tests::room_checkpoint_identity_roundtrip_and_fork_preserve_profile",
+      "tests::ancestor_links_and_reserved_manifest_subtrees_are_rejected",
+      "tests::bounds_reject_before_large_reads_and_graph_walks",
+      "tests::candidate_dependencies_are_transitive_and_pruned",
+      "tests::canonical_paths_check_root_and_each_existing_component",
+      "tests::checked_install_injected_failures_keep_old_lock",
+      "tests::checked_install_requires_both_exact_locks_and_keeps_callback_failures_atomic",
+      "tests::competing_writer_cannot_modify_authority",
+      "tests::dependency_conflict_cycle_and_failure_preserve_lock",
+      "tests::digest_ignores_json_layout_and_source_location",
+      "tests::exact_versions_and_engine_rejected_before_mutation",
+      "tests::fifo_inputs_fail_without_blocking",
+      "tests::forged_lock_digest_file_map_and_unreachable_package_are_rejected",
+      "tests::host_capability_inventory_is_required_for_asset_reads",
+      "tests::install_load_remove_reinstall_identity_and_source_isolation",
+      "tests::legacy_manifest_and_entry_sequence_decoders_are_preserved",
+      "tests::project_entry_contract_rejects_ambiguous_unsupported_and_unsafe_metadata",
+      "tests::project_schemas_preserve_metadata_and_only_describe_entry_content",
+      "tests::project_ui_is_strict_optional_metadata_without_activation_authority",
+      "tests::reject_nonportable_colliding_and_hook_manifests",
+      "tests::schema_four_requires_object_manifest_and_entry_in_any_field_order",
+      "tests::schema_four_room_checkpoint_is_closed_and_preserves_legacy_schemas",
+      "tests::schema_three_requires_valid_explicit_collect_progress",
+      "tests::sha256_uses_canonical_lowercase_hex",
+      "tests::shape_aware_manifest_retains_strict_field_decoding",
+      "tests::staged_object_and_lock_publish_failures_preserve_active_state",
+      "tests::symlinks_at_source_object_and_lock_are_rejected",
+      "tests::tamper_and_writer_failure_preserve_authority"
+    ],
+    "ignored_names": [],
+    "passed": 34,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ],
+      [
+        34,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/package-closure.log"
+  },
+  "default-off": {
+    "names": [
+      "room_project::checkpoint_tests::checkpoint_default_off_rejects_before_content_or_storage_access",
+      "room_project::checkpoint_tests::invalid_checkpoint_metadata_fails_before_content_admission"
+    ],
+    "ignored_names": [],
+    "passed": 2,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        2,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/default-off.log"
+  },
+  "store": {
+    "names": [
+      "room_checkpoint_store::tests::ancestor_symlink_is_never_traversed",
+      "room_checkpoint_store::tests::change_after_publication_is_reported_as_uncertain",
+      "room_checkpoint_store::tests::checkpoint_round_trip_and_durable_reset_are_not_max_merged",
+      "room_checkpoint_store::tests::concurrent_session_is_readonly_even_after_owner_drops",
+      "room_checkpoint_store::tests::environment_paths_are_external_partitioned_and_bounded",
+      "room_checkpoint_store::tests::failures_before_publication_preserve_old_state_and_cleanup_stage",
+      "room_checkpoint_store::tests::fifo_slot_and_lock_are_rejected_without_blocking",
+      "room_checkpoint_store::tests::future_state_arriving_during_staging_is_never_replaced",
+      "room_checkpoint_store::tests::invalid_envelopes_are_preserved_by_save_and_reset",
+      "room_checkpoint_store::tests::key_must_be_uuid_v4",
+      "room_checkpoint_store::tests::lock_symlink_is_not_followed",
+      "room_checkpoint_store::tests::publication_without_confirmed_fsync_is_uncertain_and_disables_retries",
+      "room_checkpoint_store::tests::readonly_and_shared_writable_paths_do_not_save_even_as_root",
+      "room_checkpoint_store::tests::readonly_directory_can_resume_without_creating_or_mutating_files",
+      "room_checkpoint_store::tests::replaced_lock_inode_prevents_commit",
+      "room_checkpoint_store::tests::replaced_session_directory_does_not_receive_checkpoint",
+      "room_checkpoint_store::tests::slot_symlinks_and_hardlinks_are_preserved"
+    ],
+    "ignored_names": [],
+    "passed": 17,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        17,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/store.log"
+  },
+  "host-processes": {
+    "names": [
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_actual_egui_resume_restart_newgame_and_held_pointer",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_app_fresh_process_roundtrip_and_nonprofile_routes",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_exported_app_process",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_failed_durable_reset_preserves_live_frame",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_gpu_actual_app_acquire_resume_and_win_overlay",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_process_blocked_reset_child",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_process_child",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_process_lock_contention_and_readonly_reset_preserve_save",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_real_acquisition_restart_resume_reset_and_held_input",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_semantic_digest_ignores_cosmetics_and_wall_guid_order_but_tracks_gameplay"
+    ],
+    "ignored_names": [
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_exported_app_process",
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_gpu_actual_app_acquire_resume_and_win_overlay"
+    ],
+    "passed": 8,
+    "ignored": 2,
+    "expected_summary_rows": [
+      [
+        8,
+        0,
+        2
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/host-processes.log"
+  },
+  "semantic-rules": {
+    "names": [
+      "room_checkpoint::tests::rules_revision_separates_checkpoint_namespace_without_touching_scene"
+    ],
+    "ignored_names": [],
+    "passed": 1,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/semantic-rules.log"
+  },
+  "admitted-profile": {
+    "names": [
+      "room_project::checkpoint_tests::checkpoint_default_off_rejects_before_content_or_storage_access",
+      "room_project::checkpoint_tests::invalid_checkpoint_metadata_fails_before_content_admission",
+      "room_project::checkpoint_tests::metadata_only_admission_preserves_legacy_scene_and_owns_checkpoint"
+    ],
+    "ignored_names": [],
+    "passed": 3,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/admitted-profile.log"
+  },
+  "creator": {
+    "names": [
+      "project_create::checkpoint_tests::explicit_room_checkpoint_roundtrip_and_template_gate"
+    ],
+    "ignored_names": [],
+    "passed": 1,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/creator.log"
+  },
+  "editor-widgets": {
+    "names": [
+      "room_checkpoint_panel::tests::fifo_manifest_rejected_without_blocking_and_staged_write_is_pinned",
+      "room_checkpoint_panel::tests::invalid_identity_stale_manifest_and_retired_source_fail_closed",
+      "room_checkpoint_panel::tests::play_widgets_are_read_only_and_open_preserves_legacy_bytes",
+      "room_checkpoint_panel::tests::symlink_and_replaced_directory_cannot_receive_save",
+      "room_checkpoint_panel::tests::unsupported_checkpoint_font_cannot_enable_or_rewrite_legacy_manifest",
+      "room_checkpoint_panel::tests::widgets_enable_save_undo_reopen_preserve_scene_and_sidecars"
+    ],
+    "ignored_names": [],
+    "passed": 6,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        6,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/ci/contracts.8YDm8sB0/editor-widgets.log"
+  },
+  "metadata-only-window-rejected": {
+    "names": [
+      "room_project::checkpoint_tests::metadata_only_admission_preserves_legacy_scene_and_owns_checkpoint"
+    ],
+    "ignored_names": [],
+    "passed": 1,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/14-unsupported-window-consumer.log"
+  },
+  "app-gpu": {
+    "names": [
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_gpu_actual_app_acquire_resume_and_win_overlay"
+    ],
+    "ignored_names": [
+      "room_app::room_checkpoint_acceptance_tests::checkpoint_gpu_actual_app_acquire_resume_and_win_overlay"
+    ],
+    "passed": 1,
+    "ignored": 0,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "source_log": "room-checkpoint-evidence/final-chooser/gpu-export.TFFoHGDs/app-gpu.log"
+  }
+}

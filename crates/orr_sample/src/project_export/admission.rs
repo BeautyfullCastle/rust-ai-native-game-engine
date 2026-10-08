@@ -668,6 +668,7 @@ mod tests {
             Ok(bytes)
         });
         assert!(result.unwrap_err().contains("changed while reading"));
+
         // A filesystem can report identical metadata for a same-length write.
         // Inject stale reader bytes without changing the current file at all,
         // so rejection must also compare bytes rather than rely on timestamps.
