@@ -922,6 +922,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The fixture checker must execute positively even without ptrace support.
+          name=collect_progress_syscall_trace_guard_rejects_profile_access
+          cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --test collect_project_export "$name" -- --exact --list > "$RUNNER_TEMP/collect-progress-trace-guard-list.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-trace-guard-list.txt")" -eq 1
+          grep -Fx "$name: test" "$RUNNER_TEMP/collect-progress-trace-guard-list.txt"
+          cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --test collect_project_export "$name" -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/collect-progress-trace-guard.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/collect-progress-trace-guard.log"
           # This gate must fail on absent/denied syscall observation. Never alter ptrace,
           # namespaces, AppArmor, capabilities or privilege settings to force it through.
           if ! command -v strace >/dev/null 2>&1; then
