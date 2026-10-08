@@ -13,6 +13,8 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+collect-audio = ["collect-dodge", "sprites", "orr_sample/collect-audio"]
+collect-audio-native = ["collect-audio", "orr_sample/collect-audio-native"]
 navigation-project = ["navigation", "orr_sample/navigation-project"]
 room-checkpoint = ["room-ui", "orr_sample/room-checkpoint", "dep:rustix"]
 # Optional new-project creator for explicit authoring and acceptance workflows.

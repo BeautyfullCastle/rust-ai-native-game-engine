@@ -225,6 +225,7 @@ impl ProjectSnapshot {
             plan.add(PACKAGE_LOCK, MAX_JSON_BYTES)?;
         }
         plan.add(&entry.scene, MAX_SCENE_BYTES)?;
+        if let Some(sidecar) = &entry.audio { plan.add(sidecar, 4096)?; }
         if let Some(sidecar) = &entry.models { plan.add(sidecar,MAX_JSON_BYTES)?; }
         if let Some(sidecar) = &entry.camera { plan.add(sidecar,4096)?; }
         if let Some(sidecar) = &entry.sprites {
@@ -329,8 +330,26 @@ impl ProjectSnapshot {
             file.role = "navigation_terrain";
             files.push(file);
         }
+        #[cfg(feature="collect-audio")]
+        if let Some(path) = &entry.audio {
+            let super::Prepared::Collect(collect) = &prepared else { return Err("audio requires explicit Collect consumer".into()); };
+            let audio = collect.audio().ok_or("missing admitted audio")?;
+            let mut file = SnapshotFile::read(&root.join(path), path, crate::collect_audio::MAX_BYTES as u64)?;
+            if file.source != audio.path || file.bytes != audio.bytes { return Err("audio changed after runtime admission".into()); }
+            file.role = "audio_sidecar";
+            files.push(file);
+        }
         // The initial frame and decoded atlases are no longer needed. Release
         // them before retaining the whole package closure in the snapshot.
+        #[cfg(feature="collect-audio")]
+        let audio_package = match &prepared {
+            super::Prepared::Collect(collect) => collect.audio().map(|audio| audio.package.clone()),
+            _ => None,
+        };
+        #[cfg(feature="collect-audio")]
+        if let Some(audio) = &audio_package {
+            if lock.packages.get(&audio.locked.manifest.name) != Some(&audio.locked) { return Err("audio package changed after admission".into()); }
+        }
         drop(prepared);
         let mut retained_bytes: u64 = files.iter().map(|f| f.bytes.len() as u64).sum();
         for (name, package) in &lock.packages {
@@ -342,6 +361,10 @@ impl ProjectSnapshot {
                 .map_err(|e| format!("export installed manifest: {e}"))?;
             if stored != package.manifest {
                 return Err("installed package manifest changed after verification".into());
+            }
+            #[cfg(feature="collect-audio")]
+            if let Some(audio) = audio_package.as_ref().filter(|audio|audio.locked.manifest.name == *name) {
+                if file.bytes != audio.manifest_bytes { return Err("audio package manifest changed from owned admission".into()); }
             }
             add_snapshot(&mut files, &mut retained_bytes, file)?;
             for (path, expected) in &package.files {
@@ -355,6 +378,10 @@ impl ProjectSnapshot {
                 )?;
                 if &file.sha256 != expected {
                     return Err(format!("package asset changed from pinned lock: {path}"));
+                }
+                #[cfg(feature="collect-audio")]
+                if let Some(audio) = audio_package.as_ref().filter(|audio|audio.locked.manifest.name == *name) {
+                    if audio.files.get(path) != Some(&file.bytes) { return Err("audio package bytes changed from owned admission".into()); }
                 }
                 add_snapshot(&mut files, &mut retained_bytes, file)?;
             }

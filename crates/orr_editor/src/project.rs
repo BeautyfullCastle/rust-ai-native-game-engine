@@ -93,6 +93,13 @@ impl PreparedProject {
 /// Install an already-admitted Collect presentation without rereading project files.
 #[cfg(feature="collect-dodge")]
 pub fn install_collect_presentation(app: &mut EditorApp, mut project: orr_sample::collect_project::PreparedProject, ctx: &egui::Context) {
+    #[cfg(feature="collect-audio")]
+    if let Some(audio) = project.take_audio() {
+        match crate::collect_audio_panel::Panel::new(audio, &mut app.editor) {
+            Ok(panel) => app.collect_audio = Some(panel),
+            Err(error) => app.editor.error(error),
+        }
+    }
     #[cfg(feature="collect-ui")]
     if let Some(ui) = project.take_ui() {
         let mut fonts = egui::FontDefinitions::default();

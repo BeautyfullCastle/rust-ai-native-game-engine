@@ -201,6 +201,8 @@ impl ScreenshotJob {
 
 /// The editor window.
 pub struct EditorApp {
+    #[cfg(feature="collect-audio")]
+    pub collect_audio: Option<crate::collect_audio_panel::Panel>,
     /// The state machine.
     pub editor: Editor,
     /// Window-only state.
@@ -243,7 +245,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(all(feature="room-checkpoint",target_os="linux"))] room_checkpoint: None, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), # [cfg(any(feature="collect-ui", feature="room-ui"))] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="collect-audio")] collect_audio: None, #[cfg(all(feature="room-checkpoint",target_os="linux"))] room_checkpoint: None, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), # [cfg(any(feature="collect-ui", feature="room-ui"))] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Deliberately restrict HDR for compatibility. This one-way builder must
@@ -647,6 +649,8 @@ impl EditorApp {
         if let Some(preview) = &self.project_ui { preview.show(ui); }
         # [cfg(any(feature="collect-ui", feature="room-ui"))]
         if let Some(panel) = &mut self.collect_ui { panel.show(ui, !self.editor.is_playing_mode()); }
+        #[cfg(feature="collect-audio")]
+        if let Some(panel) = &mut self.collect_audio { panel.show(ui, &mut self.editor); }
         #[cfg(feature = "animated-models")]
         if ui.add_enabled(self.editor.game() == crate::game::EditorGame::Arena && self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
         #[cfg(feature="room-project")]

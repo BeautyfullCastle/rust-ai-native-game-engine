@@ -1,0 +1,103 @@
+name: collect-audio
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  collect-audio-linux:
+    # Temporary supported bwrap profile, shared with the existing sample/navigation gates.
+    # Noble denied UID mapping; retain isolation and all GPU/native assertions.
+    # Migrate before the 2027-03-23 brownouts; 22.04 retires on 2027-04-17.
+    # Migration: https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/154
+    # https://github.com/actions/runner-images/issues/14254
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: 1
+      CARGO_BUILD_JOBS: 2
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install explicit software GPU and sandbox prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers bubblewrap
+          # Mesa packaging can use either an architecture-qualified or plain basename.
+          # Select only the installed Lavapipe manifest and fail closed on ambiguity.
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -f "${lavapipe[0]}" && test -r "${lavapipe[0]}"
+          printf 'Installed Lavapipe manifest: %s\n' "${lavapipe[0]}"
+          cat "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+          # Reject an incompatible namespace environment before lengthy compilation.
+          # Never change security controls or elevate the isolated runtime to pass this gate.
+          test "$(id -u)" -ne 0
+          command -v bwrap
+          bwrap --die-with-parent --ro-bind / / -- /bin/true
+      - name: Default consumers remain isolated
+        run: |
+          cargo check --locked --release -p orr_sample -p orr_editor
+          cargo check --locked --release -p orr_sample --features project-export
+          cargo test --locked --release -p orr_editor --test deps
+          cargo tree --locked -p orr_editor --no-default-features --edges normal > default-editor-tree.txt
+          if grep -E '(orr_audio|kira |cpal )' default-editor-tree.txt; then exit 1; fi
+      - name: Real mixer and strict package gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audio-evidence
+          python tools/test_collect_audio_results.py
+          cargo test --locked --release -p orr_audio --lib -- --nocapture 2>&1 | tee audio-evidence/core.log
+          python tools/check_collect_audio_results.py core audio-evidence/core.log
+          cargo test --locked --release -p orr_package --lib 2>&1 | tee audio-evidence/package.log
+          cargo test --locked --release -p orr_sample --features collect-audio --lib collect_audio -- --nocapture 2>&1 | tee audio-evidence/sample.log
+          python tools/check_collect_audio_results.py sample audio-evidence/sample.log
+          cargo test --locked --release -p orr_asset_fixture --features audio --lib 2>&1 | tee audio-evidence/fixture.log
+      - name: Creator and actual editor widgets and Play
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --features project-create --lib project_create::audio_tests -- --nocapture 2>&1 | tee audio-evidence/creator-default.log
+          python tools/check_collect_audio_results.py creator_default audio-evidence/creator-default.log
+          cargo test --locked --release -p orr_sample --features collect-audio,collect-sprites,project-create --lib project_create::audio_tests -- --nocapture 2>&1 | tee audio-evidence/creator.log
+          python tools/check_collect_audio_results.py creator audio-evidence/creator.log
+          cargo test --locked --release -p orr_editor --features collect-audio --test collect_audio -- --skip actual_audio_editor_gpu_play_and_pcm --nocapture 2>&1 | tee audio-evidence/editor.log
+          python tools/check_collect_audio_results.py editor audio-evidence/editor.log
+      - name: Mandatory actual software GPU editor
+        shell: bash
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          export ORR_COLLECT_AUDIO_CAPTURES="$PWD/audio-evidence/captures"
+          cargo test --locked --release -p orr_editor --features collect-audio --test collect_audio actual_audio_editor_gpu_play_and_pcm -- --ignored --exact --nocapture 2>&1 | tee audio-evidence/editor-gpu.log
+          python tools/check_collect_audio_results.py editor_gpu audio-evidence/editor-gpu.log
+      - name: Production exporter and source-hidden read-only runtime PCM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p orr_sample --features collect-audio,project-export --bin collect_dodge --bin orr_export_collect_audio
+          export ORR_COLLECT_AUDIO_RUNTIME="$PWD/target/release/collect_dodge"
+          export ORR_COLLECT_AUDIO_EXPORTER="$PWD/target/release/orr_export_collect_audio"
+          cargo test --locked --release -p orr_sample --features collect-audio,project-export --test collect_audio_export -- --ignored --nocapture 2>&1 | tee audio-evidence/export.log
+          python tools/check_collect_audio_results.py export audio-evidence/export.log
+      - name: Strict lint and explicit native output build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --release -p orr_audio -p orr_package -p orr_asset_fixture -p orr_sample -p orr_editor --features orr_asset_fixture/audio,orr_sample/collect-audio,orr_sample/collect-sprites,orr_sample/project-create,orr_sample/project-export,orr_editor/collect-audio --all-targets -- -D warnings
+          cargo check --locked --release -p orr_editor -p orr_sample --features orr_editor/collect-audio-native,orr_sample/collect-audio-native
+          cargo test --locked --release -p orr_sample --features collect-audio-native --lib collect_audio_output::tests::authored_off_auto_and_required_are_explicit_device_policies -- --exact --nocapture 2>&1 | tee audio-evidence/native-off.log
+          python tools/check_collect_audio_results.py native_off audio-evidence/native-off.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collect-audio-evidence
+          path: audio-evidence
+          if-no-files-found: error

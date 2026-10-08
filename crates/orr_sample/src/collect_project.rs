@@ -228,6 +228,8 @@ pub struct PreparedProject {
     scene: PreparedScene,
     progress: Option<orr_package::ProjectProgress>,
     sprites: Option<crate::project::PreparedSprites>,
+    #[cfg(feature = "collect-audio")]
+    audio: Option<crate::collect_audio::PreparedAudio>,
     #[cfg(feature = "collect-ui")]
     ui: Option<PreparedCollectUi>,
 }
@@ -254,9 +256,21 @@ impl PreparedProject {
         sprites: SpriteSupport,
         ui_supported: bool,
     ) -> Result<Self, String> {
-        let project = orr_package::Project::open(root.as_ref(), sprite_runtime(sprites))
+        Self::open_with_audio(root, support, sprites, ui_supported, false)
+    }
+    pub fn open_with_audio(
+        root: impl AsRef<Path>,
+        support: ProgressSupport,
+        sprites: SpriteSupport,
+        ui_supported: bool,
+        audio_supported: bool,
+    ) -> Result<Self, String> {
+        let mut runtime = sprite_runtime(sprites);
+        if audio_supported && cfg!(feature = "collect-audio") {
+            runtime.capabilities.insert("collect-audio".into());
+        }
+        let project = orr_package::Project::open(root.as_ref(), runtime)
             .map_err(|e| e.to_string())?;
-        let lock = project.verify().map_err(|e| e.to_string())?;
         let manifest = project
             .manifest()
             .ok_or("CollectDodgeV1 requires schema-2/3 project manifest")?;
@@ -280,6 +294,13 @@ impl PreparedProject {
         if manifest.progress.is_some() && support == ProgressSupport::Unsupported {
             return Err("this consuming route does not support collect progress metadata".into());
         }
+        if entry.audio.is_some() && (!audio_supported || !cfg!(feature = "collect-audio")) {
+            return Err("this consuming route does not support Collect audio".into());
+        }
+        #[cfg(feature = "collect-audio")]
+        let audio = entry.audio.as_ref().map(|path| crate::collect_audio::PreparedAudio::load(&project, path)).transpose()?;
+        // Enforce the audio consumer's tighter whole-package limits before the generic verifier reads assets.
+        let lock = project.verify().map_err(|e| e.to_string())?;
         let progress = manifest.progress.clone();
         let root = project.root().to_path_buf();
         #[cfg(feature = "collect-ui")]
@@ -350,6 +371,8 @@ impl PreparedProject {
             scene,
             progress,
             sprites,
+            #[cfg(feature = "collect-audio")]
+            audio,
             #[cfg(feature = "collect-ui")]
             ui,
         })
@@ -362,6 +385,10 @@ impl PreparedProject {
     pub fn take_ui(&mut self) -> Option<PreparedCollectUi> {
         self.ui.take()
     }
+    #[cfg(feature = "collect-audio")]
+    pub fn audio(&self) -> Option<&crate::collect_audio::PreparedAudio> { self.audio.as_ref() }
+    #[cfg(feature = "collect-audio")]
+    pub fn take_audio(&mut self) -> Option<crate::collect_audio::PreparedAudio> { self.audio.take() }
     pub fn sprites(&self) -> Option<&crate::project::PreparedSprites> {
         self.sprites.as_ref()
     }

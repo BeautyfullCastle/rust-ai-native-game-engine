@@ -7,6 +7,13 @@ use orr_sample::physics_game::PhysGame;
 use std::path::PathBuf;
 pub use orr_sample::editor_view::Drawable;
 
+/// Closed presentation events survive the game adapter; simulation remains read-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentationEvent {
+    #[cfg(feature = "collect-audio")]
+    Collect(orr_sample::collect_game::CollectEvent),
+}
+
 /// Games with a compiled frame decoder, reflection and viewport mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorGame {
@@ -206,8 +213,8 @@ impl EditorStream {
         }
     }
 
-    pub fn poll_view(&mut self) -> ViewUpdate<()> {
-        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => normalize(s.poll_view()), #[cfg(feature = "room-project")] Self::RoomEscape(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => normalize(s.poll_view()) }
+    pub fn poll_view(&mut self) -> ViewUpdate<PresentationEvent> {
+        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => normalize_collect(s.poll_view()), #[cfg(feature = "room-project")] Self::RoomEscape(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => normalize(s.poll_view()) }
     }
 
     #[cfg(test)]
@@ -233,14 +240,31 @@ impl EditorStream {
     }
 }
 
-fn normalize<E>(update: ViewUpdate<E>) -> ViewUpdate<()> {
+fn normalize<E>(update: ViewUpdate<E>) -> ViewUpdate<PresentationEvent> {
     ViewUpdate {
         snapshot: update.snapshot,
         resync: update.resync,
         // Editor owns no gameplay effects; still drain every game's events.
         events: update.events.into_iter().filter_map(|event| match event {
             BridgeEvent::Lifecycle(life) => Some(BridgeEvent::Lifecycle(life)),
+            BridgeEvent::ViewResynced(resync) => Some(BridgeEvent::ViewResynced(resync)),
             _ => None,
         }).collect(),
     }
+}
+
+#[cfg(feature = "collect-dodge")]
+fn normalize_collect(update: ViewUpdate<orr_sample::collect_game::CollectEvent>) -> ViewUpdate<PresentationEvent> {
+    #[cfg(not(feature = "collect-audio"))]
+    { normalize(update) }
+    #[cfg(feature = "collect-audio")]
+    { ViewUpdate { snapshot: update.snapshot, resync: update.resync, events: update.events.into_iter().map(|event| match event {
+        BridgeEvent::Sim { key, status } => BridgeEvent::Sim { key, status: match status {
+            orr_bridge::EventStatus::Predicted(event) => orr_bridge::EventStatus::Predicted(PresentationEvent::Collect(event)),
+            orr_bridge::EventStatus::Verified(event) => orr_bridge::EventStatus::Verified(PresentationEvent::Collect(event)),
+            orr_bridge::EventStatus::Canceled => orr_bridge::EventStatus::Canceled,
+        } },
+        BridgeEvent::Lifecycle(life) => BridgeEvent::Lifecycle(life),
+        BridgeEvent::ViewResynced(resync) => BridgeEvent::ViewResynced(resync),
+    }).collect() } }
 }

@@ -9,6 +9,8 @@ pub(crate) enum Profile {
     Room,
     #[cfg(feature = "collect-dodge")]
     Collect,
+    #[cfg(feature = "collect-audio")]
+    CollectAudio,
 }
 impl Profile {
     pub fn runtime(self) -> orr_package::Runtime {
@@ -19,6 +21,9 @@ impl Profile {
             Self::Navigation => crate::navigation_project::compiled_runtime(),
             Self::Arena => crate::project_runtime::compiled_runtime(),
             #[cfg(feature = "collect-dodge")]
+            #[cfg(feature = "collect-audio")]
+            Self::CollectAudio => { let mut runtime = crate::collect_project::sprite_runtime(crate::collect_project::compiled_sprite_support()); runtime.capabilities.insert("collect-audio".into()); runtime },
+            #[cfg(feature="collect-dodge")]
             Self::Collect => crate::collect_project::sprite_runtime(
                 crate::collect_project::compiled_sprite_support(),
             ),
@@ -33,6 +38,7 @@ impl Profile {
             Self::Arena => "bin/arena",
             #[cfg(feature = "collect-dodge")]
             Self::Collect => "bin/collect_dodge",
+            #[cfg(feature="collect-audio")] Self::CollectAudio => "bin/collect_dodge",
         }
     }
     pub fn launcher_name(self) -> &'static str {
@@ -44,10 +50,11 @@ impl Profile {
             Self::Arena => super::LAUNCHER_NAME,
             #[cfg(feature = "collect-dodge")]
             Self::Collect => "run-collect-dodge",
+            #[cfg(feature="collect-audio")] Self::CollectAudio => "run-collect-dodge",
         }
     }
     pub fn launcher(self) -> &'static [u8] {
-        match self { #[cfg(feature="room-project")] Self::Room=>b"#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\nexec \"$root/bin/room_escape\" --project \"$root/project\" \"$@\"\n", #[cfg(feature="navigation-project")] Self::Navigation=>b"#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\nexec \"$root/bin/navigation_playground\" --project \"$root/project\" \"$@\"\n", Self::Arena=>super::LAUNCHER,#[cfg(feature="collect-dodge")]Self::Collect=>b"#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\nexec \"$root/bin/collect_dodge\" --project \"$root/project\" \"$@\"\n"}
+        match self { #[cfg(feature="collect-audio")] Self::CollectAudio=> Self::Collect.launcher(), #[cfg(feature="room-project")] Self::Room=>b"#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\nexec \"$root/bin/room_escape\" --project \"$root/project\" \"$@\"\n", #[cfg(feature="navigation-project")] Self::Navigation=>b"#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\nexec \"$root/bin/navigation_playground\" --project \"$root/project\" \"$@\"\n", Self::Arena=>super::LAUNCHER,#[cfg(feature="collect-dodge")]Self::Collect=>b"#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\nexec \"$root/bin/collect_dodge\" --project \"$root/project\" \"$@\"\n"}
     }
     pub fn name(self) -> &'static str {
         match self {
@@ -58,6 +65,7 @@ impl Profile {
             Self::Arena => "arena-authored-linux-x86_64-v1",
             #[cfg(feature = "collect-dodge")]
             Self::Collect => "collect-dodge-authored-linux-x86_64-v1",
+            #[cfg(feature="collect-audio")] Self::CollectAudio => "collect-dodge-audio-linux-x86_64-v1",
         }
     }
     pub fn domain(self) -> &'static [u8] {
@@ -69,6 +77,7 @@ impl Profile {
             Self::Arena => super::DOMAIN,
             #[cfg(feature = "collect-dodge")]
             Self::Collect => b"orrery.collect-dodge.export.content.v1\0",
+            #[cfg(feature="collect-audio")] Self::CollectAudio => b"orrery.collect-dodge.audio.export.content.v1\0",
         }
     }
 }
@@ -101,6 +110,9 @@ impl Prepared {
             Profile::Arena => crate::project_runtime::PreparedRuntime::open(root)
                 .map(|value| Self::Arena(Box::new(value))),
             #[cfg(feature = "collect-dodge")]
+            #[cfg(feature="collect-audio")]
+            Profile::CollectAudio => crate::collect_project::PreparedProject::open_with_audio(root, crate::collect_project::ProgressSupport::MetadataOnly, crate::collect_project::compiled_sprite_support(), cfg!(feature="collect-ui"), true).map(|value|Self::Collect(Box::new(value))),
+            #[cfg(feature="collect-dodge")]
             Profile::Collect => crate::collect_project::PreparedProject::open_with_ui(
                 root,
                 crate::collect_project::ProgressSupport::MetadataOnly,

@@ -8,10 +8,10 @@
 
 use crate::{sha256, ArtifactBytes, Error, Impact, PreparedFixture, Result, IMPACT_ID};
 use orr_asset::{AssetRef, Domain, Manifest};
-use orr_audio::{AudioConfig, AudioStats, Clip, OfflineAudio};
+use orr_audio::{pcm16, AudioConfig, AudioStats, Clip, OfflineAudio};
 use orr_bridge::ViewUpdate;
 
-pub const SAMPLE_RATE: u32 = 48_000;
+pub const SAMPLE_RATE: u32 = pcm16::SAMPLE_RATE;
 pub const MAX_DECODED_BYTES: usize = 4 * 1024 * 1024;
 const STEREO_FRAME_BYTES: usize = 2 * std::mem::size_of::<f32>();
 
@@ -111,7 +111,8 @@ impl ClipBank {
             ..PreloadStats::default()
         };
         // Admit the whole bank before any decoded sample allocation. Every
-        // payload has an exact validated 8-byte header and 1..=48000 i16 frames.
+        // payload has an exact validated 8-byte header, 1..=48000 i16 frames,
+        // and the shared decoder's bounded peak before any conversion begins.
         for entry in manifest.entries() {
             let bytes = usize::try_from(entry.payload_len).map_err(|_| Error::BudgetExceeded)?;
             stats.cooked_bytes = bounded_add(
@@ -119,7 +120,13 @@ impl ClipBank {
                 bytes,
                 orr_asset::MAX_VIEW_PAYLOAD_BYTES as usize,
             )?;
-            let decoded = ((bytes - 8) / 2)
+            let object = bundle
+                .objects
+                .iter()
+                .find(|object| object.sha256 == entry.payload_sha256)
+                .ok_or(Error::MissingArtifact)?;
+            let frames = pcm16::validate(object.bytes).map_err(Error::Audio)?;
+            let decoded = (frames as usize)
                 .checked_mul(STEREO_FRAME_BYTES)
                 .ok_or(Error::BudgetExceeded)?;
             stats.decoded_bytes = bounded_add(stats.decoded_bytes, decoded, MAX_DECODED_BYTES)?;
@@ -135,14 +142,7 @@ impl ClipBank {
             // after whole-bank admission and immediately before conversion.
             #[cfg(feature = "decode-memory-probe")]
             on_conversion();
-            let frames = object.bytes[8..]
-                .chunks_exact(2)
-                .map(|sample| {
-                    let value = f32::from(i16::from_le_bytes([sample[0], sample[1]])) / 32768.0;
-                    [value, value]
-                })
-                .collect();
-            let clip = Clip::from_stereo(SAMPLE_RATE, frames).map_err(Error::Audio)?;
+            let clip = pcm16::decode(object.bytes).map_err(Error::Audio)?;
             clips.push((entry.id, clip));
         }
         Ok(Self { clips, stats })

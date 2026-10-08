@@ -109,6 +109,11 @@ pub fn export(options: &ExportOptions) -> Result<ExportReport, String> {
     )
 }
 
+#[cfg(feature="collect-audio")]
+pub fn export_collect_audio(options: &ExportOptions) -> Result<ExportReport, String> {
+    export_profile_with(options, Profile::CollectAudio, |_| Ok(()), |command| run_bounded(command, SMOKE_TIMEOUT, MAX_SMOKE_OUTPUT))
+}
+
 /// Export a CollectDodgeV1 project through the same guarded transaction pipeline.
 #[cfg(feature = "collect-dodge")]
 pub fn export_collect(options: &ExportOptions) -> Result<ExportReport, String> {
@@ -163,7 +168,7 @@ fn export_profile_with(
             );
         }
     }
-    let project = match profile { #[cfg(feature="navigation-project")] Profile::Navigation => ProjectSnapshot::open_profile(&options.project,profile)?, #[cfg(feature="room-project")] Profile::Room => ProjectSnapshot::open_profile(&options.project,profile)?, Profile::Arena => ProjectSnapshot::open(&options.project)?, #[cfg(feature = "collect-dodge")] Profile::Collect => ProjectSnapshot::open_profile(&options.project, profile)? };
+    let project = match profile { #[cfg(feature="collect-audio")] Profile::CollectAudio => ProjectSnapshot::open_profile(&options.project, profile)?, #[cfg(feature="navigation-project")] Profile::Navigation => ProjectSnapshot::open_profile(&options.project,profile)?, #[cfg(feature="room-project")] Profile::Room => ProjectSnapshot::open_profile(&options.project,profile)?, Profile::Arena => ProjectSnapshot::open(&options.project)?, #[cfg(feature = "collect-dodge")] Profile::Collect => ProjectSnapshot::open_profile(&options.project, profile)? };
     let runtime_path = check_path(&options.runtime, false)?;
     if fs::metadata(&runtime_path)
         .map_err(error)?

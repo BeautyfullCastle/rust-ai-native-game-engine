@@ -35,7 +35,7 @@ fn main() {
             .unwrap_or_else(|error| fail(&format!("--project: {error}")))
     });
     #[cfg(feature = "collect-dodge")]
-    let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_ui(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }, cfg!(feature="collect-ui")).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
+    let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_audio(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }, cfg!(feature="collect-ui"), cfg!(feature="collect-audio")).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
     #[cfg(feature="room-project")]
     let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open_with_options(root, cfg!(feature="room-ui"), if cfg!(all(feature="room-checkpoint",target_os="linux")) { orr_sample::room_project::CheckpointSupport::MetadataOnly } else { orr_sample::room_project::CheckpointSupport::Disabled }).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
     #[cfg(feature = "navigation-project")]

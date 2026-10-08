@@ -1,0 +1,53 @@
+{
+  "core": [
+    "pcm16::tests::accepts_exact_frame_and_peak_boundaries_and_owns_stereo",
+    "pcm16::tests::rejects_malformed_headers_lengths_counts_and_peaks_without_panicking",
+    "tests::bounded_gain_is_applied_by_the_real_mixer_without_changing_shared_pcm",
+    "tests::stop_transients_keeps_identity_and_consumed_muted_events_until_real_restart",
+    "tests::stopping_transients_preserves_lifecycle_retirement_and_voice_bounds"
+  ],
+  "sample": [
+    "collect_audio::tests::strict_closed_json_rejects_all_ambiguous_shapes",
+    "collect_audio::tests::strict_versions_ids_and_paths_are_checked_before_package_lookup",
+    "collect_audio::tests::real_owned_bank_admits_two_distinct_clips_and_survives_source_removal",
+    "collect_audio::tests::compiled_capability_and_matching_collect_entry_are_required",
+    "collect_audio::tests::every_package_byte_and_manifest_identity_are_verified",
+    "collect_audio::tests::malformed_oram_and_payload_fail_even_with_fresh_valid_package_hashes",
+    "collect_audio::tests::cumulative_pcm_budget_is_admitted_before_conversion",
+    "collect_audio::tests::sidecar_file_and_owned_package_reads_respect_tighter_bounds",
+    "collect_audio::tests::symlink_and_directory_inputs_are_never_followed",
+    "collect_audio_output::tests::actual_installed_clips_assignment_gain_and_mute_change_real_pcm",
+    "collect_audio_output::tests::authored_off_auto_and_required_are_explicit_device_policies",
+    "collect_audio_output::tests::authoritative_collect_events_restart_and_every_frame_are_identical_with_audio",
+    "collect_audio_output::tests::late_duplicates_and_muted_updates_keep_event_identity_after_authored_edits",
+    "collect_audio_output::tests::cancellation_pause_seek_and_source_replacement_use_owned_audio_lifetimes",
+    "collect_audio::tests::fifo_sidecars_and_package_files_fail_without_blocking"
+  ],
+  "editor": [
+    "actual_audio_widgets_assign_preview_undo_redo_save_reopen",
+    "actual_editor_play_receives_authoritative_pickups_once",
+    "failed_audio_save_and_same_path_restart_retire_old_panel",
+    "audio_save_rejects_external_package_replacement_without_overwriting_sidecar"
+  ],
+  "editor_gpu": [
+    "actual_audio_editor_gpu_play_and_pcm"
+  ],
+  "export": [
+    "actual_audio_export_relocation_readonly_owned_pcm_and_off_policy"
+  ],
+  "creator": [
+    "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
+    "project_create::audio_tests::enabled::audio_template_is_deterministic_with_real_install_reopen_and_exact_owned_assets",
+    "project_create::audio_tests::enabled::new_audio_template_requires_explicit_valid_identity_and_preserves_existing_output",
+    "project_create::audio_tests::enabled::every_audio_creator_checkpoint_and_publish_failure_preserves_other_content",
+    "project_create::audio_tests::enabled::corrupted_audio_source_and_sidecar_cannot_be_published",
+    "project_create::audio_tests::enabled::concurrent_destination_is_preserved_and_only_owned_transaction_is_cleaned"
+  ],
+  "creator_default": [
+    "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
+    "project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists"
+  ],
+  "native_off": [
+    "collect_audio_output::tests::authored_off_auto_and_required_are_explicit_device_policies"
+  ]
+}
