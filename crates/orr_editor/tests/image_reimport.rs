@@ -305,7 +305,9 @@ fn frame(h: &mut Harness<'_, EditorApp>, name: &str) -> Frame {
     };
     assert!(frame
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|pixel| pixel[0] > 40 || pixel[1] > 40 || pixel[2] > 40));
     if let Some(directory) = std::env::var_os("ORR_PROJECT_CAPTURE_DIR") {
         std::fs::create_dir_all(&directory).unwrap();
