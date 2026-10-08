@@ -163,7 +163,7 @@ fn create_transaction(
         {
             let scene = room_template::scene(&options.seed)?;
             let manifest = json_line(&serde_json::json!({"schema":2,"engine":"^0.0.1",
-                "entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json"}}))?;
+                "entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json","camera":"room.camera.json"}}))?;
             (
                 scene,
                 Vec::new(),
@@ -197,6 +197,8 @@ fn create_transaction(
     if !with_room {
         expected.insert(sidecar_file.into(), sidecar_bytes);
     }
+    #[cfg(feature = "room-project")]
+    if with_room { expected.insert("room.camera.json".into(), crate::room_camera::Document::readable_default().to_bytes()?); }
     #[cfg(feature = "collect-ui")]
     if with_ui {
         expected.insert(

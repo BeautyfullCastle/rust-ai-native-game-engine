@@ -98,6 +98,8 @@ pub mod image_reimport;
 #[cfg(feature = "room-project")]
 pub mod room_project;
 #[cfg(feature = "room-project")]
+pub mod room_camera;
+#[cfg(feature = "room-project")]
 pub use orr_games::room_escape_game as room_game;
 
 #[cfg(feature = "room-project")]

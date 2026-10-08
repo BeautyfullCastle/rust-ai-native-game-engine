@@ -125,7 +125,15 @@ pub struct PreparedModels {
     pub document: Document,
     pub assets: BTreeMap<(String, String), LoadedAsset>,
 }
+pub struct PreparedRoomCamera {
+    pub path: PathBuf,
+    pub document: crate::room_camera::Document,
+    pub bytes: Vec<u8>,
+    pub manifest_bytes: Vec<u8>,
+    pub manifest_path: PathBuf,
+}
 pub struct PreparedProject {
+    camera: Option<PreparedRoomCamera>,
     root: PathBuf,
     path: PathBuf,
     scene: PreparedScene,
@@ -148,6 +156,27 @@ impl PreparedProject {
         {
             return Err("room requires schema2 room-escape-v1 without sprites/UI/progress".into());
         }
+        let camera = if let Some(relative) = &entry.camera {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, crate::room_camera::MAX_BYTES as u64)?;
+            let document = crate::room_camera::Document::parse(&bytes)?;
+            let manifest_path = project.root().join("orr.project.json");
+            let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
+            let pinned: orr_package::ProjectManifest = serde_json::from_slice(&manifest_bytes)
+                .map_err(|e| format!("room camera manifest: {e}"))?;
+            if pinned != *manifest {
+                return Err("room manifest changed during camera admission".into());
+            }
+            Some(PreparedRoomCamera {
+                path,
+                document,
+                bytes,
+                manifest_bytes,
+                manifest_path,
+            })
+        } else {
+            None
+        };
         let models_relative = entry.models.as_ref().ok_or("room model sidecar missing")?;
         // First profile places the existing sidecar at the root. Its local hints
         // cannot redirect project identity or escape the admitted root.
@@ -210,11 +239,18 @@ impl PreparedProject {
             &models,
         )?;
         Ok(Self {
+            camera,
             root: project.root().to_path_buf(),
             path,
             scene,
             models,
         })
+    }
+    pub fn camera(&self) -> Option<&PreparedRoomCamera> {
+        self.camera.as_ref()
+    }
+    pub fn take_camera(&mut self) -> Option<PreparedRoomCamera> {
+        self.camera.take()
     }
     pub fn root(&self) -> &Path {
         &self.root

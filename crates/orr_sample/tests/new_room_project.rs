@@ -571,6 +571,20 @@ mod room {
             fs::read(second.join("orr.export.json")).unwrap(),
             "manifest must be byte deterministic across export destinations"
         );
+        let camera_path=w.project.join("room.camera.json");
+        let original_camera=fs::read(&camera_path).unwrap();
+        let mut camera=orr_sample::room_camera::Document::parse(&original_camera).unwrap();
+        camera.target[0]+=1.0;
+        fs::write(&camera_path,camera.to_bytes().unwrap()).unwrap();
+        assert_eq!(PreparedProject::open(&w.project).unwrap().scene().frame().checksum(),initial);
+        let changed=w.temp.path().join("camera changed export");
+        good(w.export_command(&changed).output().unwrap());
+        let old:serde_json::Value=serde_json::from_slice(&fs::read(staged.join("orr.export.json")).unwrap()).unwrap();
+        let new:serde_json::Value=serde_json::from_slice(&fs::read(changed.join("orr.export.json")).unwrap()).unwrap();
+        assert!(old["content_digest"].is_string());
+        assert_ne!(old["content_digest"],new["content_digest"],"camera bytes must affect canonical export identity");
+        assert_eq!(fs::read(changed.join("project/room.camera.json")).unwrap(),camera.to_bytes().unwrap());
+        fs::write(&camera_path,&original_camera).unwrap();fs::remove_dir_all(changed).unwrap();
         let bundle = w.temp.path().join("relocated room");
         fs::rename(staged, &bundle).unwrap();
         // Do not leave another unhidden export available as a fallback.
@@ -585,7 +599,7 @@ mod room {
                 "export changed exact admitted project/package bytes: {path}"
             );
         }
-        for path in ["orr.project.json", "room.scene.yaml", "room.models.json"] {
+        for path in ["orr.project.json", "room.scene.yaml", "room.models.json", "room.camera.json"] {
             assert_eq!(
                 fs::read(bundle.join("project").join(path)).unwrap(),
                 fs::read(w.project.join(path)).unwrap()
@@ -752,4 +766,22 @@ mod room {
             fs::copy(bundle.join("orr.export.json"), dest.join("orr.export.json")).unwrap();
         }
     }
+}
+
+#[cfg(all(feature="room-project",feature="project-export"))]
+#[test]
+fn generated_camera_only_edit_preserves_game_identity() {
+    use orr_sample::{project_create::{create,CreateOptions},room_project::PreparedProject};
+    let temp=tempfile::tempdir().unwrap();
+    let root=temp.path().join("room");
+    create(&CreateOptions{output:root.clone(),template:"room-escape-3d-v1".into(),seed:"camera-test".into()}).unwrap();
+    let before=PreparedProject::open(&root).unwrap();
+    let frame=before.scene().frame().to_bytes();
+    let original=std::fs::read(root.join("room.camera.json")).unwrap();
+    let mut doc=before.camera().unwrap().document.clone();doc.target[0]=1.0;
+    std::fs::write(root.join("room.camera.json"),doc.to_bytes().unwrap()).unwrap();
+    let after=PreparedProject::open(&root).unwrap();
+    assert_eq!(after.scene().frame().to_bytes(),frame);
+    assert_ne!(after.camera().unwrap().bytes,original);
+    // Full exported-content digest change is asserted by the production export acceptance.
 }
