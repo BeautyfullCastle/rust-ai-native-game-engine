@@ -129,6 +129,9 @@ pub struct ActivityEntry {
     pub error: Option<String>,
     /// True for a read-only request (a UI can collapse these).
     pub read: bool,
+    /// A successful `scene.save` changed the host's scene path. Omitted on the
+    /// wire otherwise; derived from the committed effect, never request fields.
+    pub scene_path_changed: bool,
     /// GUIDs (or handles) of the entities the request touched.
     pub entities: Vec<String>,
     /// The proposal the request was about (`p2`).
@@ -153,6 +156,9 @@ impl ActivityEntry {
         o.insert("summary".into(), json!(self.summary));
         o.insert("ok".into(), json!(self.ok));
         o.insert("read".into(), json!(self.read));
+        if self.scene_path_changed {
+            o.insert("scene_path_changed".into(), json!(true));
+        }
         if let Some(e) = &self.error {
             o.insert("error".into(), json!(e));
         }
@@ -315,6 +321,7 @@ pub(crate) fn build<G: Game>(
         ok,
         error: result.as_ref().err().map(|e| e.message.clone()),
         read,
+        scene_path_changed: false,
         entities,
         proposal,
         change,

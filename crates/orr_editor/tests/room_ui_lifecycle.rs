@@ -168,3 +168,183 @@ fn actual_external_erp_load_retires_room_ui_and_manifest_change_blocks_save() {
     assert!(h.state_mut().collect_ui.as_mut().unwrap().save().is_err());
     assert_eq!(fs::read(ui).unwrap(), bytes);
 }
+
+const SAVE_TRACE_CLIENT: &str = "room-ui-save-aba";
+
+fn trace_external_save(
+    client: &mut orr_remote::ErpClient,
+    case: &str,
+    params: serde_json::Value,
+    succeeds: bool,
+    read_only: bool,
+    expected_path: &std::path::Path,
+) -> Option<serde_json::Value> {
+    // A synchronous response is the completion barrier for this exact request.
+    // This client never pumps the Editor or its separate notification queue.
+    let result = client.call("scene.save", params.clone());
+    assert_eq!(result.is_ok(), succeeds, "{case}: {result:?}");
+    if !succeeds {
+        assert!(
+            matches!(&result, Err(orr_remote::ClientError::Rpc(error)) if error.kind() == Some("io"))
+        );
+    }
+    let error = result.as_ref().err().map(ToString::to_string);
+    let reply = result.ok();
+    let state = client.call("sim.state", serde_json::Value::Null).unwrap();
+    assert_eq!(state["scene_path"], expected_path.display().to_string());
+    let history = client
+        .call(
+            "activity.list",
+            serde_json::json!({"include_reads": true, "limit": 200}),
+        )
+        .unwrap();
+    let entry = history["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|entry| entry["client"] == SAVE_TRACE_CLIENT && entry["method"] == "scene.save")
+        .expect("completed save must have an attributable activity entry");
+    assert_eq!(entry["ok"], succeeds, "{case}: {entry}");
+    assert_eq!(entry["read"], read_only, "{case}: {entry}");
+    assert_eq!(entry["kind"], if read_only { "read" } else { "edit" });
+    if matches!(case, "a-to-b" | "b-to-a") {
+        assert_eq!(entry["scene_path_changed"], true, "{case}: {entry}");
+    } else {
+        assert!(entry.get("scene_path_changed").is_none(), "{case}: {entry}");
+    }
+    eprintln!(
+        "room-ui-save-trace {}",
+        serde_json::json!({
+            "case": case,
+            "request": params,
+            "reply_written": reply.as_ref().and_then(|value| value.get("written")),
+            "rpc_error": error,
+            "state_scene_path": state["scene_path"],
+            "activity": entry,
+        })
+    );
+    reply
+}
+
+#[test]
+fn actual_external_save_aba_before_editor_pump_permanently_retires_room_ui() {
+    let fixture = Fixture::new();
+    let mut h = fixture.app();
+    let edited = pending(&mut h);
+    h.state_mut().editor.sync();
+    let a = fixture.root.join("room.scene.yaml");
+    let b = fixture.root.join("external.scene.yaml");
+    let ui = fixture.root.join("room.ui.json");
+    let original_ui = fs::read(&ui).unwrap();
+    let failed = fixture.root.join("missing-directory/failed.scene.yaml");
+    {
+        let client = h
+            .state_mut()
+            .editor
+            .agent_client(SAVE_TRACE_CLIENT)
+            .unwrap();
+        let reply = trace_external_save(
+            client,
+            "no-write",
+            serde_json::json!({"write": false, "path": b}),
+            true,
+            true,
+            &a,
+        )
+        .unwrap();
+        assert!(reply.get("written").is_none());
+        assert!(!b.exists());
+        assert!(
+            trace_external_save(
+                client,
+                "failed-write",
+                serde_json::json!({"write": true, "path": failed}),
+                false,
+                false,
+                &a,
+            )
+            .is_none()
+        );
+        assert!(!failed.exists());
+        let reply = trace_external_save(
+            client,
+            "same-path",
+            serde_json::json!({"write": true, "path": a}),
+            true,
+            false,
+            &a,
+        )
+        .unwrap();
+        assert_eq!(reply["written"], a.display().to_string());
+        assert_eq!(
+            fs::read_to_string(&a).unwrap(),
+            reply["text"].as_str().unwrap()
+        );
+    }
+    h.state_mut().editor.sync();
+    assert!(h.state_mut().collect_ui.as_mut().unwrap().room_active());
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &edited);
+    assert_eq!(fs::read(&ui).unwrap(), original_ui);
+
+    // No Editor pump, sync, call, or harness step is allowed inside this block.
+    // Both successful writes and their ordered response/state/activity barriers
+    // complete on the external ERP client before the Editor can observe either.
+    {
+        let client = h
+            .state_mut()
+            .editor
+            .agent_client(SAVE_TRACE_CLIENT)
+            .unwrap();
+        assert!(!b.exists());
+        let away = trace_external_save(
+            client,
+            "a-to-b",
+            serde_json::json!({"write": true, "path": b}),
+            true,
+            false,
+            &b,
+        )
+        .unwrap();
+        assert_eq!(away["written"], b.display().to_string());
+        assert_eq!(
+            fs::read_to_string(&b).unwrap(),
+            away["text"].as_str().unwrap()
+        );
+        // Prove the B-to-A request performs a real write, not only a path update.
+        fs::write(
+            &a,
+            "test sentinel: the external save must replace these bytes",
+        )
+        .unwrap();
+        let back = trace_external_save(
+            client,
+            "b-to-a",
+            serde_json::json!({"write": true, "path": a}),
+            true,
+            false,
+            &a,
+        )
+        .unwrap();
+        assert_eq!(back["written"], a.display().to_string());
+        assert_eq!(
+            fs::read_to_string(&a).unwrap(),
+            back["text"].as_str().unwrap()
+        );
+        assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap());
+    }
+    assert_eq!(h.state().editor.path().as_ref(), Some(&a));
+    h.state_mut().editor.sync();
+    let panel = h.state_mut().collect_ui.as_mut().unwrap();
+    assert!(
+        !panel.room_active(),
+        "successful external Save As A-to-B-to-A must retire the Room UI even when the Editor only observes final path A"
+    );
+    assert!(panel.apply_document(edited.clone()).is_err());
+    assert!(!panel.undo());
+    assert!(panel.save().is_err());
+    assert_eq!(panel.document(), &edited);
+    assert_eq!(fs::read(&ui).unwrap(), original_ui);
+    h.state_mut().editor.sync();
+    assert!(!h.state_mut().collect_ui.as_mut().unwrap().room_active());
+}

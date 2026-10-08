@@ -49,7 +49,8 @@ case "$mode" in
     run_test room-ui-native-app 1 0 cargo test --release --locked -p orr_sample --features room-ui,project-create --lib room_app::room_ui_app_tests::
     run_test room-ui-admission 3 0 cargo test --release --locked -p orr_sample --features room-ui,project-create --test room_ui_project
     run_test room-ui-editor-widgets 1 0 cargo test --release --locked -p orr_editor --features room-ui,project-create --lib collect_ui_panel::room_panel_tests::
-    run_test room-ui-editor-source-lifecycle 2 0 cargo test --release --locked -p orr_editor --features room-ui,project-create --test room_ui_lifecycle
+    run_test room-ui-save-path-producer 1 0 cargo test --release --locked -p orr_remote --test activity scene_save_path_transition_flag_is_exact_in_list_and_watch -- --exact --test-threads=1 --nocapture
+    run_test room-ui-editor-source-lifecycle 3 0 cargo test --release --locked -p orr_editor --features room-ui,project-create --test room_ui_lifecycle
     # Exercise unified optional features without changing any default feature or lint.
     run_command optional-features-clippy cargo clippy --release --locked \
       -p orr_games -p orr_package -p orr_model_bindings -p orr_sample -p orr_remote -p orr_editor \

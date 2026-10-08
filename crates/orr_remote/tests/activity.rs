@@ -186,6 +186,175 @@ fn watch_activity_pushes_new_entries() {
 }
 
 #[test]
+fn scene_save_path_transition_flag_is_exact_in_list_and_watch() {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    struct SaveRoot(PathBuf);
+    impl Drop for SaveRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "orr-save-path-activity-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&path).unwrap();
+    let root = SaveRoot(path);
+    let a = root.0.join("a.scene.yaml");
+    let b = root.0.join("b.scene.yaml");
+    let failed = root.0.join("missing/failed.scene.yaml");
+    fs::write(&a, demo_text()).unwrap();
+    let mut cfg = ServerConfig::new(Auth::Tokens(vec![
+        token("save-author", "save-token", "read,scene_edit"),
+        token("save-observer", "watch-token", "read"),
+    ]));
+    cfg.limits.scene_path = Some(a.clone());
+    cfg.limits.allow_scene_paths = true;
+    let host = TestHost::start(cfg);
+    let mut agent = host.client("save-token");
+    let mut watcher = host.client("watch-token");
+    watcher
+        .call(
+            "watch.subscribe",
+            json!({"topics": ["activity"], "include_reads": true}),
+        )
+        .unwrap();
+    let mut listed = Vec::new();
+    for (index, (label, params, succeeds, read_only, changed, expected_path)) in [
+        (
+            "no-write",
+            json!({"write": false, "path": b}),
+            true,
+            true,
+            false,
+            &a,
+        ),
+        (
+            "failed-write",
+            json!({"write": true, "path": failed}),
+            false,
+            false,
+            false,
+            &a,
+        ),
+        (
+            "same-path",
+            json!({"write": true, "path": a}),
+            true,
+            false,
+            false,
+            &a,
+        ),
+        (
+            "implicit-current-path",
+            json!({"write": true}),
+            true,
+            false,
+            false,
+            &a,
+        ),
+        (
+            "a-to-b",
+            json!({"write": true, "path": b}),
+            true,
+            false,
+            true,
+            &b,
+        ),
+        (
+            "b-to-a",
+            json!({"write": true, "path": a}),
+            true,
+            false,
+            true,
+            &a,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if label == "a-to-b" {
+            assert!(!b.exists());
+        }
+        if label == "b-to-a" {
+            fs::write(&a, "sentinel overwritten by completed save").unwrap();
+        }
+        match agent.call("scene.save", params) {
+            Ok(reply) => {
+                assert!(succeeds, "{label}: {reply}");
+                if read_only {
+                    assert!(reply.get("written").is_none());
+                    assert!(!b.exists());
+                } else {
+                    assert_eq!(reply["written"], expected_path.display().to_string());
+                    assert_eq!(
+                        fs::read_to_string(expected_path).unwrap(),
+                        reply["text"].as_str().unwrap()
+                    );
+                }
+            }
+            Err(orr_remote::ClientError::Rpc(error)) => {
+                assert!(!succeeds, "{label}: {error}");
+                assert_eq!(error.kind(), Some("io"));
+                assert!(!failed.exists());
+            }
+            Err(error) => {
+                panic!("{label}: transport failure instead of a completed request: {error}")
+            }
+        }
+        // Ordered responses prove the effect and its activity entry are final.
+        let state = agent.call("sim.state", J::Null).unwrap();
+        assert_eq!(state["scene_path"], expected_path.display().to_string());
+        listed = list(&mut agent, json!({"include_reads": true}))
+            .into_iter()
+            .filter(|entry| entry["client"] == "save-author" && entry["method"] == "scene.save")
+            .collect();
+        assert_eq!(listed.len(), index + 1);
+        let entry = listed.last().unwrap();
+        assert_eq!(entry["ok"], succeeds, "{label}: {entry}");
+        assert_eq!(entry["read"], read_only, "{label}: {entry}");
+        assert_eq!(entry["kind"], if read_only { "read" } else { "edit" });
+        if changed {
+            assert_eq!(entry["scene_path_changed"], true, "{label}: {entry}");
+        } else {
+            assert!(
+                entry.get("scene_path_changed").is_none(),
+                "{label}: {entry}"
+            );
+        }
+        assert!(entry.get("scene_path").is_none() && entry.get("written").is_none());
+    }
+    // Consume actual notifications until all six completed saves arrive. No
+    // delay-based assumption or polling retry can substitute for these events.
+    let mut pushed = Vec::new();
+    while pushed.len() < listed.len() {
+        let note = watcher
+            .wait_notification("watch.activity", Duration::from_secs(5))
+            .unwrap()
+            .expect("completed saves must be published to the subscribed observer");
+        pushed.extend(
+            note["params"]["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["client"] == "save-author" && entry["method"] == "scene.save")
+                .cloned(),
+        );
+    }
+    assert_eq!(
+        pushed, listed,
+        "list and watch must expose the same per-transition metadata"
+    );
+}
+
+#[test]
 fn connect_disconnect_and_a_refused_token_are_recorded() {
     let host = TestHost::standard();
     let mut c = host.client("tok-all");

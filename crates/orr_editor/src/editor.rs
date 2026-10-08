@@ -1022,7 +1022,9 @@ impl Editor {
             }
             "watch.activity" => {
                 if let Some(list) = params.get("entries").and_then(J::as_array) {
-                    if list.iter().any(|entry| entry["method"] == "scene.load" && entry["ok"] == true) {
+                    if list.iter().any(|entry| entry["ok"] == true
+                        && (entry["method"] == "scene.load"
+                            || (entry["method"] == "scene.save" && entry["scene_path_changed"] == true))) {
                         self.clear_room_camera();
                         self.select(None);
                     }
