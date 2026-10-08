@@ -369,8 +369,8 @@ fn production_editor_irradiance_import_author_save_reopen_and_toggles_preserve_h
     apply(&mut h, authored.clone());
     let on = capture(&mut h, &mut reference, "probe-authored-on");
     let changed = on
-        .chunks_exact(4)
-        .zip(off.chunks_exact(4))
+        .as_chunks::<4>().0.iter()
+        .zip(off.as_chunks::<4>().0.iter())
         .filter(|(a, b)| a != b)
         .count();
     assert!(
