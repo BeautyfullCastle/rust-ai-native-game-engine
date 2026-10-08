@@ -17,6 +17,7 @@ tests() {
 }
 features=room-checkpoint,project-create,project-export
 if [[ $mode == contracts ]]; then
+ run syscall-checker-fixtures python3 tools/test_room_checkpoint_syscall.py
  tests room-goldens 10 0 cargo test --release --locked -p orr_games --features room-escape --lib room_escape_game::tests::
  tests package-closure 34 0 cargo test --release --locked -p orr_package --lib
  tests default-off 2 0 cargo test --release --locked -p orr_sample --features room-project --lib room_project::checkpoint_tests::

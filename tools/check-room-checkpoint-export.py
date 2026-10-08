@@ -15,6 +15,8 @@ import shutil
 import subprocess
 import tempfile
 
+from room_checkpoint_syscall import check_syscall_proof
+
 P = argparse.ArgumentParser()
 for name in ('creator', 'runtime', 'exporter', 'app-tests', 'evidence', 'workspace'):
     P.add_argument('--' + name, required=True, type=Path)
@@ -74,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
             '--bind',data,data,'--bind',captures,captures,'--bind',traces,traces,
             '--setenv','HOME',home,'--setenv','XDG_DATA_HOME',data,'--chdir','/']
     def isolated(name, command):
-        traced = ['strace','-f','-qq','-yy','-o',traces/(name+'.trace'),'-e','trace=%file,fsync,fdatasync,flock'] if a.syscall else []
+        traced = ['strace','-f','-qq','-yy','-o',traces/(name+'.trace'),'-e','trace=%file,fchdir,write,writev,pwrite64,pwritev,pwritev2,fsync,fdatasync,flock'] if a.syscall else []
         return run(name, base+['--']+traced+command,env)
     smoke = isolated('readonly-export-smoke', [bundle/'run-room-escape','--headless','--ticks','0','--capture',captures/'smoke.png'])
     assert 'room key: 0 won: 0' in smoke and (captures/'smoke.png').is_file()
@@ -96,27 +98,11 @@ with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
     shutil.copyfile(bundle/'orr.export.json', evidence/'orr.export.json')
     shutil.copyfile(captures/'smoke.png', evidence/'smoke.png')
     if a.syscall:
-        smoke_trace=(traces/'readonly-export-smoke.trace').read_text()
-        # Reject both successful and failed profile-directory probes, including
-        # descriptor-relative traversal whose failed result has no resolved path.
-        def attempted_path(path):
-            return str(path) in smoke_trace or any(
-                '<'+str(path.parent)+'>' in line and '"'+path.name+'"' in line
-                for line in smoke_trace.splitlines())
-        # HOME exists but is read-only in the namespace. Reject even an early
-        # failed fallback traversal, before an orrery/checkpoint filename appears.
-        profile_attempt = any(attempted_path(path) for path in (
-            data, home/'.local', home/'.local/share'))
-        assert not profile_attempt and 'checkpoint.json' not in smoke_trace and 'checkpoint.lock' not in smoke_trace, 'headless/capture attempted XDG or HOME fallback profile I/O'
-        acquire_trace=(traces/'acquire.trace').read_text()
         profile_match = re.search(r' profile=(\S+) status=', (evidence/'acquire.log').read_text())
         assert profile_match and Path(profile_match[1]).is_relative_to(data)
-        profile = profile_match[1]
-        successful=[line for line in acquire_trace.splitlines() if re.search(r'= 0(?:\s|$)',line)]
-        assert any('flock(' in line and 'checkpoint.lock' in line and profile in line for line in successful), 'no successful profile lock'
-        assert any('renameat(' in line and 'checkpoint.json' in line and profile in line for line in successful), 'no successful atomic checkpoint publication'
-        assert any('fsync(' in line and '.checkpoint-stage-' in line and profile in line for line in successful), 'no successful staged data fsync'
-        assert any('fsync(' in line and '<'+profile+'>' in line for line in successful), 'no successful profile directory fsync'
+        check_syscall_proof((traces/'readonly-export-smoke.trace').read_text(),
+                            (traces/'acquire.trace').read_text(), data, home,
+                            Path(profile_match[1]))
         for trace in traces.iterdir(): shutil.copyfile(trace,evidence/trace.name)
     (evidence/'result.json').write_text(json.dumps({'source_hidden':True,'bundle_readonly':True,'bundle_hashes_unchanged':True,'app_processes':4,'native_window':False,'physical_gpu':False,'syscall_proof':a.syscall},indent=2)+'\n')
 print('PASS: exported runtime smoke and 4 source-hidden App checkpoint processes; bundle unchanged')
