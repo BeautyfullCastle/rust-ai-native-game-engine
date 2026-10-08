@@ -129,3 +129,13 @@ from an empty working directory. The parent process never changes its cwd or
 renames repository directories, so parallel tests remain isolated. Without this
 flag, relocation still runs in an empty-cwd subprocess, but does not claim that
 absolute source-repository paths were physically inaccessible.
+
+## Optional saved UI preview
+
+`--features project-ui` explicitly opts this editor into admission of the closed
+`arena-korean-v1` preset and locked font reference in `entry.ui`. Merely
+unifying the sample crate's `game-ui` feature does not enable editor support.
+The inspector provides a read-only preset/font preview with the admitted bytes.
+It neither authors UI nor overlays game widgets in the editor viewport. Existing
+scene/sprite edits and saves retain project metadata, and editor Restart continues
+to reload the saved scene. See [saved project UI](authored-project-ui.md).

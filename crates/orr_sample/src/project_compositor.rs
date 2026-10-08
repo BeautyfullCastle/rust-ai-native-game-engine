@@ -10,8 +10,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::project_sprites::{Asset, AssetKey};
 use orr_render::{
-    Camera, RenderList, Renderer, SpriteDrawList, SpriteInstance, SpriteRenderer,
     orr_rhi::{Acquire, Rhi, TextureFormat, Wgpu, WgpuOptions},
+    Camera, RenderList, Renderer, SpriteDrawList, SpriteInstance, SpriteRenderer,
 };
 use winit::window::Window;
 
@@ -119,6 +119,21 @@ impl<R: Rhi> ProjectCompositor<R> {
         }
         Ok(())
     }
+
+    /// Paint a presentation overlay on the same target after all ordered runs.
+    /// The caller retains pending texture work when no target was acquired.
+    pub fn draw_with_overlay(
+        &mut self,
+        view: &R::TextureView,
+        size: (u32, u32),
+        shapes: &RenderList,
+        sprites: &[SpriteDraw],
+        camera: &Camera,
+        overlay: impl FnOnce(&R, &R::TextureView, (u32, u32)) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.draw(view, size, shapes, sprites, camera)?;
+        overlay(self.shapes.rhi(), view, size)
+    }
 }
 
 fn validate_camera(camera: &Camera) -> Result<(), String> {
@@ -225,12 +240,22 @@ impl ProjectWindow {
         sprites: &[SpriteDraw],
         camera: &Camera,
     ) -> Result<(), String> {
+        self.render_with_overlay(shapes, sprites, camera, |_, _, _| Ok(()))
+    }
+
+    pub fn render_with_overlay(
+        &mut self,
+        shapes: &RenderList,
+        sprites: &[SpriteDraw],
+        camera: &Camera,
+        overlay: impl FnOnce(&Wgpu, &<Wgpu as Rhi>::TextureView, (u32, u32)) -> Result<(), String>,
+    ) -> Result<(), String> {
         let Acquire::Frame(frame) = self.rhi.acquire_frame(&mut self.surface) else {
             return Ok(());
         };
         let view = self.rhi.frame_view(&frame);
         self.compositor
-            .draw(view, self.size, shapes, sprites, camera)?;
+            .draw_with_overlay(view, self.size, shapes, sprites, camera, overlay)?;
         self.rhi.present(frame);
         Ok(())
     }

@@ -213,3 +213,30 @@ mod enabled {
         );
     }
 }
+
+#[cfg(all(feature = "project", not(feature = "game-ui")))]
+#[test]
+fn authored_ui_rejects_before_thread_audio_window_and_at_zero_ticks() {
+    let fixture = project_fixture::ProjectFixture::new();
+    let path = fixture.root.join("orr.project.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["entry"]["ui"] = serde_json::json!({"profile":"arena-korean-v1","font":{
+        "package":"korean-game-ui", "asset":"OrreryKoreanUI.otf"}});
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    for route in [
+        vec!["--headless", "--ticks", "0"],
+        vec!["--bridge", "threaded", "--audio", "required"],
+    ] {
+        let mut args = vec!["--project", fixture.root.to_str().unwrap()];
+        args.extend(route);
+        let error = diagnostic(run(&args, fixture.root.parent().unwrap()));
+        assert!(error.contains("UI"), "{error}");
+        assert!(
+            !error.contains("audio:")
+                && !error.contains("event loop")
+                && !error.contains("start project thread"),
+            "{error}"
+        );
+    }
+}

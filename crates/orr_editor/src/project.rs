@@ -26,18 +26,33 @@ pub struct PreparedProject {
     root: PathBuf,
     scene: PreparedArenaScene,
     sprites: Option<PreparedSprites>,
+    ui: Option<orr_sample::project::PreparedUi>,
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
-        let prepared =
-            orr_sample::project::PreparedProject::open(root, sprite_bindings::compiled_runtime())?;
-        let (root, scene, sprites) = prepared.into_parts();
+        // This application's own opt-in is authoritative, even if another
+        // dependency happens to unify orr_sample/game-ui into the build.
+        let support = if cfg!(feature = "project-ui") {
+            orr_sample::project::UiSupport::Supported
+        } else {
+            orr_sample::project::UiSupport::Unsupported
+        };
+        let prepared = orr_sample::project::PreparedProject::open_with_ui(
+            root,
+            sprite_bindings::compiled_runtime(),
+            support,
+        )?;
+        let (root, scene, sprites, ui) = prepared.into_parts();
         let sprites = sprites.map(|s| (Bindings::from_document(s.path, s.document), s.assets));
         Ok(Self {
             root,
             scene,
             sprites,
+            ui,
         })
+    }
+    pub fn ui(&self) -> Option<&orr_sample::project::PreparedUi> {
+        self.ui.as_ref()
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -64,6 +79,10 @@ impl PreparedProject {
         ctx: &egui::Context,
     ) -> EditorApp {
         let mut app = EditorApp::new(editor, render_state);
+        #[cfg(feature = "project-ui")]
+        if let Some(ui) = self.ui {
+            app.project_ui = Some(crate::project_ui::Preview::install(ui, ctx));
+        }
         if let Some((bindings, assets)) = self.sprites {
             app.sprites.install_prepared(ctx, bindings, assets);
         }

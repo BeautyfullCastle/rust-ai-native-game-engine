@@ -2,7 +2,7 @@
 //! thread, window or GPU is created. The editor is not a runtime dependency.
 use crate::{
     arena_view::{arena_bridge_config, arena_floor, editor_drawables},
-    project::{arena_types, PreparedProject},
+    project::{arena_types, PreparedProject, UiSupport},
     project_compositor::SpriteDraw,
     project_playback::{Observation, PlaybackState, Position, SnapshotPlayback},
     project_sprites::{Asset, AssetKey, Document},
@@ -42,12 +42,59 @@ pub fn compiled_runtime() -> orr_package::Runtime {
 
 pub struct PreparedRuntime {
     project: PreparedProject,
-    initial: Frame,
+    restart_seed: AuthoredRestartSeed,
     index: SceneIndex,
+}
+
+/// An immutable, admitted Arena launch seed.
+///
+/// Cloning this value preserves the exact scene baked at admission. Every
+/// launch or restart makes a fresh `PlaySession` from this
+/// same frame and config; it never consults project files or creates a bot.
+#[derive(Clone)]
+pub struct AuthoredRestartSeed {
+    initial: Frame,
+    config: PlayConfig,
+}
+impl AuthoredRestartSeed {
+    fn new(initial: Frame) -> Self {
+        let mut config = PlayConfig::new(PLAYERS, SEED, TICK_RATE);
+        config.game_id = "Arena".into();
+        config.build_id = build_id();
+        config.start_paused = false;
+        Self { initial, config }
+    }
+
+    pub fn initial_frame(&self) -> &Frame {
+        &self.initial
+    }
+
+    /// The admitted fixed launch configuration, including the unchanged Arena
+    /// build identity, seed, tick rate, and two human-controlled slots.
+    pub fn config(&self) -> &PlayConfig {
+        &self.config
+    }
+
+    pub fn session(&self) -> Result<PlaySession<Arena>, String> {
+        PlaySession::from_frame(self.config.clone(), &self.initial)
+            .map_err(|e| format!("Arena session: {e}"))
+    }
+
+    pub fn bridge(&self) -> Result<InProc<Arena, PlayHost<Arena>>, String> {
+        Ok(InProc::new(
+            PlayHost::new(self.session()?, PlayerSlot(0)),
+            arena_bridge_config(),
+        ))
+    }
 }
 impl PreparedRuntime {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
-        let project = PreparedProject::open(root, compiled_runtime())?;
+        let ui_support = if cfg!(feature = "game-ui") {
+            UiSupport::Supported
+        } else {
+            UiSupport::Unsupported
+        };
+        let project = PreparedProject::open_with_ui(root, compiled_runtime(), ui_support)?;
         let registry = Simulation::<Arena>::build_registry();
         let mut initial = Frame::new(registry);
         initial.set_singleton(FrameRng::new(SEED));
@@ -58,12 +105,12 @@ impl PreparedRuntime {
             .map_err(|e| format!("Arena scene bake: {e}"))?;
         Ok(Self {
             project,
-            initial,
+            restart_seed: AuthoredRestartSeed::new(initial),
             index,
         })
     }
     pub fn initial_frame(&self) -> &Frame {
-        &self.initial
+        self.restart_seed.initial_frame()
     }
     pub fn index(&self) -> &SceneIndex {
         &self.index
@@ -71,27 +118,40 @@ impl PreparedRuntime {
     pub fn project(&self) -> &PreparedProject {
         &self.project
     }
+    pub fn restart_seed(&self) -> &AuthoredRestartSeed {
+        &self.restart_seed
+    }
     /// Every new run starts from admitted bytes, with no automatic bot or live reread.
     pub fn session(&self) -> Result<PlaySession<Arena>, String> {
-        let mut cfg = PlayConfig::new(PLAYERS, SEED, TICK_RATE);
-        cfg.game_id = "Arena".into();
-        cfg.build_id = build_id();
-        cfg.start_paused = false;
-        PlaySession::from_frame(cfg, &self.initial).map_err(|e| format!("Arena session: {e}"))
+        self.restart_seed.session()
     }
     pub fn bridge(&self) -> Result<InProc<Arena, PlayHost<Arena>>, String> {
-        Ok(InProc::new(
-            PlayHost::new(self.session()?, PlayerSlot(0)),
-            arena_bridge_config(),
-        ))
+        self.restart_seed.bridge()
     }
     pub fn into_parts(self) -> Result<(PlaySession<Arena>, ProjectPresentation), String> {
-        let session = self.session()?;
-        let (_, _, sprites) = self.project.into_parts();
+        let (seed, presentation, ui) = self.into_launch_parts();
+        if ui.is_some() {
+            return Err(
+                "authored project declares UI; use into_launch_parts for a UI-aware launch".into(),
+            );
+        }
+        Ok((seed.session()?, presentation))
+    }
+
+    /// Consume the admitted launch package while retaining the immutable seed
+    /// needed by app-level restart factories and the optional admitted UI font.
+    pub fn into_launch_parts(
+        self,
+    ) -> (
+        AuthoredRestartSeed,
+        ProjectPresentation,
+        Option<crate::project::PreparedUi>,
+    ) {
+        let (_, _, sprites, ui) = self.project.into_parts();
         let (document, assets) =
             sprites.map_or((None, BTreeMap::new()), |s| (Some(s.document), s.assets));
-        Ok((
-            session,
+        (
+            self.restart_seed,
             ProjectPresentation {
                 index: self.index,
                 document,
@@ -102,7 +162,8 @@ impl PreparedRuntime {
                 shapes: RenderList::new(),
                 sprites: Vec::new(),
             },
-        ))
+            ui,
+        )
     }
 }
 
@@ -256,7 +317,10 @@ pub fn headless(
     if ticks > 6000 {
         return Err("--ticks must be between 0 and 6000".into());
     }
-    let (session, mut presentation) = prepared.into_parts()?;
+    let (seed, mut presentation, admitted_ui) = prepared.into_launch_parts();
+    let session = seed.session()?;
+    #[cfg(not(feature = "game-ui"))]
+    drop(admitted_ui);
     let mut bridge = InProc::new(PlayHost::new(session, PlayerSlot(0)), arena_bridge_config());
     let initial = bridge
         .snapshot()
@@ -292,6 +356,10 @@ pub fn headless(
     }
     if let Some(path) = capture {
         use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu, WgpuOptions};
+        #[cfg(feature = "game-ui")]
+        let mut game_ui = admitted_ui
+            .map(|ui| crate::game_ui::GameUi::from_font(ui.font, true))
+            .transpose()?;
         let gpu = Wgpu::headless(WgpuOptions::default())?;
         println!(
             "project capture adapter: {} (software: {})",
@@ -306,6 +374,50 @@ pub fn headless(
             TextureFormat::Rgba8UnormSrgb,
             presentation.assets(),
         )?;
+        #[cfg(feature = "game-ui")]
+        {
+            let mut overlay = game_ui
+                .as_ref()
+                .map(|_| crate::game_ui_gpu::GpuOverlay::new(&gpu, TextureFormat::Rgba8UnormSrgb));
+            let mut pending = crate::game_ui_gpu::PendingOverlay::default();
+            compositor.draw_with_overlay(
+                target.render_view(),
+                size,
+                presentation.shapes(),
+                presentation.sprites(),
+                &presentation.camera,
+                |gpu, view, size| {
+                    if let (Some(game_ui), Some(overlay)) = (game_ui.as_mut(), overlay.as_mut()) {
+                        let screen = egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(size.0 as f32, size.1 as f32),
+                        );
+                        let hud = crate::game_ui::Hud {
+                            tick: snapshot.tick(),
+                            verified_tick: snapshot.tick(),
+                            rollbacks: 0,
+                        };
+                        // Anchored egui windows need sizing passes before their
+                        // button geometry settles. Keep every texture epoch so
+                        // the final stable frame has its font atlas available.
+                        for pass in 0..3 {
+                            let input = egui::RawInput {
+                                screen_rect: Some(screen),
+                                // Fixed presentation-only time settles egui's opening
+                                // fade without sleeping or advancing the simulation.
+                                time: Some(f64::from(pass) * 0.5),
+                                ..Default::default()
+                            };
+                            let (output, _) = game_ui.show(input, hud);
+                            pending.push(output)?;
+                        }
+                        pending.paint(overlay, gpu, view, size, &game_ui.context)?;
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        #[cfg(not(feature = "game-ui"))]
         compositor.draw(
             target.render_view(),
             size,

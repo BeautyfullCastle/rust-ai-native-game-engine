@@ -370,6 +370,90 @@ jobs:
             ${{ runner.temp }}/export-integration-tests.log
           if-no-files-found: error
           retention-days: 7
+      - name: Build independent UI-free authored Arena fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$RUNNER_TEMP/arena-default-no-project"
+          cargo build --locked --release -p orr_sample --no-default-features --features project,input-actions --bin arena
+          cp target/release/arena "$RUNNER_TEMP/arena-project-without-ui"
+          test -x "$RUNNER_TEMP/arena-project-without-ui"
+          sha256sum "$RUNNER_TEMP/arena-default-no-project" "$RUNNER_TEMP/arena-project-without-ui"
+      - name: Required UI-free authored restart and rejection tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for specification in project_restart_seed:2 project_cli:6 project_ui_export:1; do
+            target=${specification%:*}
+            count=${specification#*:}
+            cargo test --locked --release -p orr_sample --no-default-features --features project-export,input-actions --test "$target" -- --list > "$RUNNER_TEMP/no-ui-$target-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/no-ui-$target-list.txt")" -eq "$count"
+            cargo test --locked --release -p orr_sample --no-default-features --features project-export,input-actions --test "$target" -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/no-ui-$target.log"
+            grep -F "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/no-ui-$target.log"
+            if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/no-ui-$target.log"; then exit 1; fi
+          done
+      - name: Mandatory authored UI admission restart composition and export
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$ORR_EXPORT_DEFAULT_RUNTIME"
+          test -x "$ORR_PROJECT_ONLY_RUNTIME"
+          mkdir -p "$ORR_PROJECT_UI_CAPTURE_DIR"
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --list > "$RUNNER_TEMP/authored-ui-library-list.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/authored-ui-library-list.txt")" -eq 72
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/authored-ui-library.log"
+          grep -F 'test result: ok. 72 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/authored-ui-library.log"
+          if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/authored-ui-library.log"; then exit 1; fi
+          for specification in project_restart_seed:3 project_ui_boundaries:1 project_ui_compositor:1 project_ui_export:3 project_cli:5; do
+            target=${specification%:*}
+            count=${specification#*:}
+            cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --test "$target" -- --list > "$RUNNER_TEMP/authored-ui-$target-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/authored-ui-$target-list.txt")" -eq "$count"
+            cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --test "$target" -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/authored-ui-$target.log"
+            grep -F "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/authored-ui-$target.log"
+            if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/authored-ui-$target.log"; then exit 1; fi
+          done
+        env:
+          ORR_EXPORT_DEFAULT_RUNTIME: ${{ runner.temp }}/arena-default-no-project
+          ORR_PROJECT_ONLY_RUNTIME: ${{ runner.temp }}/arena-project-without-ui
+          ORR_REQUIRE_PROJECT_ONLY_RUNTIME: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_EXPORT_HIDE_ROOT: ${{ github.workspace }}
+          ORR_REQUIRE_GPU: "1"
+          ORR_PROJECT_UI_CAPTURE_DIR: ${{ runner.temp }}/authored-ui-captures
+      - name: Required independent editor UI opt-in boundaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for features in sprites project-ui sprites,orr_sample/game-ui; do
+            label=${features//\//-}
+            cargo test --locked --release -p orr_editor --no-default-features --features "$features" --test project_ui -- --list > "$RUNNER_TEMP/editor-ui-$label-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/editor-ui-$label-list.txt")" -eq 1
+            cargo test --locked --release -p orr_editor --no-default-features --features "$features" --test project_ui -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/editor-ui-$label.log"
+            grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/editor-ui-$label.log"
+          done
+      - name: Strict authored UI and editor feature Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked -p orr_sample -p orr_editor --features orr_sample/project-export,orr_sample/input-actions,orr_sample/game-ui,orr_editor/project-ui --all-targets -- -D warnings
+      - name: Upload authored UI acceptance evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: authored-ui-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/authored-ui-captures
+            ${{ runner.temp }}/authored-ui-*.txt
+            ${{ runner.temp }}/authored-ui-*.log
+            ${{ runner.temp }}/no-ui-*.txt
+            ${{ runner.temp }}/no-ui-*.log
+            ${{ runner.temp }}/editor-ui-*.txt
+            ${{ runner.temp }}/editor-ui-*.log
+          if-no-files-found: error
+          retention-days: 7
       # The physics sample's headless benchmark: no window, no GPU. Runs the
       # physics game through the bridge with rollbacks (the checksum tests
       # are in `crates/orr_sample/tests/physics_e2e.rs`, run above).

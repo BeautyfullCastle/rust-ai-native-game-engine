@@ -3,8 +3,10 @@
 This optional tool packages one existing schema-2 Arena project and an explicitly
 trusted, already-built Linux x86-64 runtime. It does not build game code, invoke
 Cargo, download/install packages, or create a release/network build identity.
-`#104` remains partial: templates, authored UI/font composition, other targets,
-installers and general distribution compliance are separate work.
+`#104` remains partial: templates, other targets, installers and general distribution
+compliance are separate work. [Saved Korean UI/font presets](authored-project-ui.md)
+require `game-ui` in both the exporter and the supplied trusted runtime; a project-only
+runtime rejects the declared UI even for the zero-tick compatibility check.
 
 ## Build and run
 
@@ -21,6 +23,15 @@ sha256sum target/release/arena
   --source-revision YOUR_DECLARED_REVISION \
   --output /existing/parent/new-export
 ```
+
+For a project declaring `entry.ui`, build both binaries with UI support instead:
+
+```sh
+cargo build --release -p orr_sample --features project-export,game-ui --bin arena --bin orr_export_arena
+```
+
+Then use that newly measured runtime and the UI-enabled project in the same export
+command. See [the saved preset contract](authored-project-ui.md) for its metadata.
 
 `--trusted-runtime` is an operator assertion: **you must already trust the supplied
 executable**. Never use an unknown executable just because its hash matches a
@@ -66,6 +77,12 @@ The package manager remains the only activation/version/digest authority:
 exporter neither resolves a second dependency graph nor prunes assets by current
 sprite usage. The fixture has **nine** exported project files: its package license
 and currently unused `lantern_keeper.rgba` stay included; its root README does not.
+For a UI-enabled project, the existing font package contributes its exact font,
+`OFL.txt`, `COPYRIGHT.txt`, `font-manifest.json`, `corpus.txt` and package manifest.
+The font remains OFL-1.1 with its separate notices; it is not regenerated or moved
+outside the package closure. Neither the package metadata nor this exporter
+establishes general distribution compliance.
+
 Inactive objects, unrelated root files, package writer/staging files, source
 repositories, build trees and caches are not recursively copied.
 
