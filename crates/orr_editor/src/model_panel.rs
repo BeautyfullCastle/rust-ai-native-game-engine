@@ -33,6 +33,7 @@ pub struct ModelPanel {
     seen_scene: Option<String>,
     error: Option<String>,
     reserved_scene_models: usize,
+    room_identity: Option<(PathBuf, String)>,
 }
 impl Default for ModelPanel {
     fn default() -> Self {
@@ -54,33 +55,90 @@ impl Default for ModelPanel {
             seen_scene: None,
             error: None,
             reserved_scene_models: 0,
+            room_identity: None,
         }
     }
 }
 impl ModelPanel {
+    /// Install an admitted immutable room presentation without reopening files.
+    #[cfg(feature = "room-project")]
+    pub fn install_room(
+        &mut self,
+        prepared: orr_sample::room_project::PreparedModels,
+    ) -> Result<(), String> {
+        let mut loaded = BTreeMap::new();
+        for (guid, binding) in &prepared.document.bindings {
+            let asset = prepared
+                .assets
+                .get(&(binding.package.clone(), binding.asset.clone()))
+                .ok_or("admitted model missing")?;
+            binding.validate(asset)?;
+            loaded.insert(guid.clone(), asset.clone());
+        }
+        orr_sample::room_project::validate_decoded_model_budget(loaded.values())?;
+        if prepared.document.project != "." {
+            return Err("Room sidecar project must be exactly '.'".into());
+        }
+        let identity = (prepared.path.clone(), prepared.document.scene.clone());
+        let bindings = Bindings::from_document(prepared.path, prepared.document)?;
+        self.room_identity = Some(identity);
+        self.project = bindings
+            .path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .display()
+            .to_string();
+        self.bindings = Some(bindings);
+        self.loaded = loaded;
+        self.error = None;
+        Ok(())
+    }
     /// Reserve the bounded scene-owned terrain slot before model mutations.
-    pub fn reserve_scene_models(&mut self, count: usize) { self.reserved_scene_models = count; }
+    pub fn reserve_scene_models(&mut self, count: usize) {
+        self.reserved_scene_models = count;
+    }
     pub fn terrain_admission_error(&self) -> Option<String> {
         let bindings = self.bindings.as_ref()?;
         let mut identities = std::collections::BTreeSet::new();
         let mut draws = 7usize; // Five procedural kinds plus terrain and query marker.
         for (guid, binding) in &bindings.document().bindings {
-            identities.insert((binding.kind == ModelKind::Animated, &binding.package, &binding.asset, &binding.package_digest, &binding.source_hash));
-            let Some(asset) = self.loaded.get(guid) else { return Some("Wait for verified model assets before editing terrain".into()); };
+            identities.insert((
+                binding.kind == ModelKind::Animated,
+                &binding.package,
+                &binding.asset,
+                &binding.package_digest,
+                &binding.source_hash,
+            ));
+            let Some(asset) = self.loaded.get(guid) else {
+                return Some("Wait for verified model assets before editing terrain".into());
+            };
             let count = match binding.kind {
-                ModelKind::Static => asset.static_model().map_or(0, |model| model.source().primitives.len()),
+                ModelKind::Static => asset
+                    .static_model()
+                    .map_or(0, |model| model.source().primitives.len()),
                 ModelKind::Animated => {
-                    #[cfg(feature="animated-models")]
-                    { asset.animated_model().map_or(0, |model| model.source().primitives.len()) }
-                    #[cfg(not(feature="animated-models"))]
-                    { 0 }
+                    #[cfg(feature = "animated-models")]
+                    {
+                        asset
+                            .animated_model()
+                            .map_or(0, |model| model.source().primitives.len())
+                    }
+                    #[cfg(not(feature = "animated-models"))]
+                    {
+                        0
+                    }
                 }
             };
             draws = draws.saturating_add(count);
         }
-        if bindings.document().bindings.len() >= 256 || identities.len() >= 8 || draws > orr_render::imported_scene::MAX_IMPORTED_DRAWS {
+        if bindings.document().bindings.len() >= 256
+            || identities.len() >= 8
+            || draws > orr_render::imported_scene::MAX_IMPORTED_DRAWS
+        {
             Some("Terrain needs one shared viewport asset/instance slot and up to two draws; remove an entity model binding first".into())
-        } else { None }
+        } else {
+            None
+        }
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -88,13 +146,17 @@ impl ModelPanel {
     }
     pub fn scene_matches(&self, editor: &Editor) -> bool {
         editor.spec().is_local()
-            && editor.game() == EditorGame::Yard3D
+            && (editor.game() == EditorGame::Yard3D || editor.game().is_room())
             && self.bindings.as_ref().is_some_and(|b| {
                 let local_path: &std::path::Path = match editor.spec() {
                     crate::backend::HostSpec::Local { scene, .. }
                     | crate::backend::HostSpec::LocalGame { scene, .. } => scene,
                     #[cfg(feature = "sprites")]
                     crate::backend::HostSpec::PreparedArena { scene, .. } => scene.path(),
+                    #[cfg(feature = "collect-dodge")]
+                    crate::backend::HostSpec::PreparedCollect { .. } => return false,
+                    #[cfg(feature = "room-project")]
+                    crate::backend::HostSpec::PreparedRoom { scene, .. } => scene,
                     crate::backend::HostSpec::Remote { .. } => return false,
                 };
                 if !local_path
@@ -119,7 +181,9 @@ impl ModelPanel {
             && editor.previewing().is_none()
     }
     fn local_scene(editor: &Editor) -> Result<PathBuf, String> {
-        if !editor.spec().is_local() || editor.game() != EditorGame::Yard3D {
+        if !editor.spec().is_local()
+            || (editor.game() != EditorGame::Yard3D && !editor.game().is_room())
+        {
             return Err("Model bindings require a local Yard3D scene".into());
         }
         let expected: &std::path::Path = match editor.spec() {
@@ -127,6 +191,12 @@ impl ModelPanel {
             | crate::backend::HostSpec::LocalGame { scene, .. } => scene,
             #[cfg(feature = "sprites")]
             crate::backend::HostSpec::PreparedArena { scene, .. } => scene.path(),
+            #[cfg(feature = "collect-dodge")]
+            crate::backend::HostSpec::PreparedCollect { .. } => {
+                return Err("CollectDodge does not support local 3D asset authoring".into())
+            }
+            #[cfg(feature = "room-project")]
+            crate::backend::HostSpec::PreparedRoom { scene, .. } => scene,
             crate::backend::HostSpec::Remote { .. } => {
                 return Err("Remote scene paths are not local authority".into())
             }
@@ -161,7 +231,21 @@ impl ModelPanel {
                     .into(),
             );
         }
-        let path = Self::sidecar(&scene);
+        let path = if editor.game().is_room() {
+            if create {
+                return Err(
+                    "Room model sidecar is declared by its project; edit the admitted bindings"
+                        .into(),
+                );
+            }
+            self.room_identity
+                .as_ref()
+                .ok_or("Open the room project first")?
+                .0
+                .clone()
+        } else {
+            Self::sidecar(&scene)
+        };
         let candidate = if create {
             if path.exists() {
                 return Err("Bindings already exist; use Open model bindings".into());
@@ -177,15 +261,67 @@ impl ModelPanel {
         if !candidate.matches_scene(&scene.to_string_lossy()) {
             return Err("Model sidecar names another scene".into());
         }
-        let loaded = Self::load_all(&candidate)?;
-        Self::validate_candidate(editor, candidate.document(), &loaded, self.reserved_scene_models)?;
+        let loaded = Self::load_all(&candidate, self.room_identity.as_ref())?;
+        Self::validate_candidate(
+            editor,
+            candidate.document(),
+            &loaded,
+            self.reserved_scene_models,
+        )?;
         self.bindings = Some(candidate);
         self.loaded = loaded;
         self.candidate = None;
         self.error = None;
         Ok(())
     }
-    fn load_all(bindings: &Bindings) -> Result<BTreeMap<String, LoadedAsset>, String> {
+    fn validate_room_identity(
+        bindings: &Bindings,
+        identity: &(PathBuf, String),
+    ) -> Result<(), String> {
+        if bindings.path != identity.0
+            || bindings.document().project != "."
+            || bindings.document().scene != identity.1
+        {
+            return Err(
+                "Room model sidecar must name the exact admitted project and entry scene".into(),
+            );
+        }
+        Ok(())
+    }
+    fn load_all(
+        bindings: &Bindings,
+        room_identity: Option<&(PathBuf, String)>,
+    ) -> Result<BTreeMap<String, LoadedAsset>, String> {
+        #[cfg(feature = "room-project")]
+        if let Some(identity) = room_identity {
+            Self::validate_room_identity(bindings, identity)?;
+            let root = identity.0.parent().ok_or("Room project root missing")?;
+            let project =
+                orr_package::Project::open(root, orr_sample::room_project::compiled_runtime())
+                    .map_err(|e| e.to_string())?;
+            let before = project.verify().map_err(|e| e.to_string())?;
+            let mut out = BTreeMap::new();
+            let mut unique = BTreeMap::new();
+            for (guid, binding) in &bindings.document().bindings {
+                if binding.kind != ModelKind::Static || binding.animation.is_some() {
+                    return Err("Room supports static bindings only".into());
+                }
+                let key = (binding.package.clone(), binding.asset.clone());
+                if !unique.contains_key(&key) {
+                    let asset = model_bindings::load_binding_from_project(&project, binding)?;
+                    unique.insert(key.clone(), asset);
+                    orr_sample::room_project::validate_decoded_model_budget(unique.values())?;
+                }
+                binding.validate(&unique[&key])?;
+                out.insert(guid.clone(), unique[&key].clone());
+            }
+            if before != project.verify().map_err(|e| e.to_string())? {
+                return Err("Room active lock changed during model load; retry".into());
+            }
+            return Ok(out);
+        }
+        #[cfg(not(feature = "room-project"))]
+        let _ = room_identity;
         if bindings.document().bindings.len() > 256 {
             return Err("Viewport supports at most 256 model-bound entities".into());
         }
@@ -220,8 +356,13 @@ impl ModelPanel {
             );
         }
         let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
-        let loaded = Self::load_all(bindings)?;
-        Self::validate_candidate(editor, bindings.document(), &loaded, self.reserved_scene_models)?;
+        let loaded = Self::load_all(bindings, self.room_identity.as_ref())?;
+        Self::validate_candidate(
+            editor,
+            bindings.document(),
+            &loaded,
+            self.reserved_scene_models,
+        )?;
         self.loaded = loaded;
         Ok(())
     }
@@ -235,15 +376,48 @@ impl ModelPanel {
             );
         }
         self.candidate = None;
-        let root = self
-            .bindings
-            .as_ref()
-            .ok_or("Open model bindings first")?
-            .project_root()?;
-        let loaded =
-            model_bindings::load_asset_for_kind(&root, &self.package, &self.asset, self.kind)?;
+        if editor.game().is_room() && self.kind != ModelKind::Static {
+            return Err("Room v1 supports static models only".into());
+        }
+        let loaded = self.load_requested()?;
         self.candidate = Some((self.package.clone(), self.asset.clone(), self.kind, loaded));
         Ok(())
+    }
+    fn load_requested(&self) -> Result<LoadedAsset, String> {
+        let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
+        #[cfg(feature = "room-project")]
+        if let Some(identity) = &self.room_identity {
+            Self::validate_room_identity(bindings, identity)?;
+            if self.kind != ModelKind::Static {
+                return Err("Room supports static bindings only".into());
+            }
+            let project = orr_package::Project::open(
+                identity.0.parent().ok_or("Room root missing")?,
+                orr_sample::room_project::compiled_runtime(),
+            )
+            .map_err(|e| e.to_string())?;
+            let before = project.verify().map_err(|e| e.to_string())?;
+            // Validate all retained identities against this same consuming project/lock.
+            for binding in bindings.document().bindings.values() {
+                model_bindings::load_binding_from_project(&project, binding)?;
+            }
+            let loaded = model_bindings::load_asset_from_project(
+                &project,
+                &self.package,
+                &self.asset,
+                self.kind,
+            )?;
+            if before != project.verify().map_err(|e| e.to_string())? {
+                return Err("Room active lock changed during assignment; retry".into());
+            }
+            return Ok(loaded);
+        }
+        model_bindings::load_asset_for_kind(
+            &bindings.project_root()?,
+            &self.package,
+            &self.asset,
+            self.kind,
+        )
     }
     pub fn assign(&mut self, editor: &Editor) -> Result<(), String> {
         if !self.editable(editor) {
@@ -267,21 +441,7 @@ impl ModelPanel {
         {
             return Err("Selected entity has no Yard3D body pose".into());
         }
-        let project_root = self
-            .bindings
-            .as_ref()
-            .ok_or("Open model bindings first")?
-            .project_root()?;
-        // Re-read and verify the requested package contents at assignment
-        // time. The transient candidate only drives clip UI; field edits or an
-        // installed-package replacement cannot turn that preview cache into
-        // assignment authority.
-        let loaded = model_bindings::load_asset_for_kind(
-            &project_root,
-            &self.package,
-            &self.asset,
-            self.kind,
-        )?;
+        let loaded = self.load_requested()?;
         if self
             .candidate
             .as_ref()
@@ -345,10 +505,57 @@ impl ModelPanel {
         let mut candidate_loaded = self.loaded.clone();
         candidate_loaded.insert(guid.to_string(), loaded.clone());
         candidate_loaded.retain(|guid, _| candidate.bindings.contains_key(guid));
-        Self::validate_candidate(editor, &candidate, &candidate_loaded, self.reserved_scene_models)?;
+        Self::validate_candidate(
+            editor,
+            &candidate,
+            &candidate_loaded,
+            self.reserved_scene_models,
+        )?;
         bindings.assign_validated(std::slice::from_ref(&guid), &binding, &loaded)?;
         self.loaded = candidate_loaded;
         Ok(())
+    }
+    /// Validate the complete proposed state before touching document or history.
+    pub fn remove(&mut self, editor: &Editor) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("Model removal requires local Edit mode".into());
+        }
+        let guid = editor.selected_guid().ok_or("Select a model binding")?;
+        let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
+        let mut candidate = bindings.document().clone();
+        candidate.bindings.remove(&guid.to_string());
+        let mut loaded = self.loaded.clone();
+        loaded.retain(|key, _| candidate.bindings.contains_key(key));
+        if editor.game().is_room() {
+            Self::validate_candidate(editor, &candidate, &loaded, self.reserved_scene_models)?;
+        }
+        bindings.remove(&[guid])?;
+        self.loaded = loaded;
+        Ok(())
+    }
+    pub fn save(&mut self, editor: &Editor) -> Result<(), String> {
+        if editor.game().is_room() {
+            if !self.editable(editor) {
+                return Err("Room model save requires the admitted scene in Edit mode".into());
+            }
+            let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
+            let identity = self
+                .room_identity
+                .as_ref()
+                .ok_or("Open the room project first")?;
+            Self::validate_room_identity(bindings, identity)?;
+            let loaded = Self::load_all(bindings, Some(identity))?;
+            Self::validate_candidate(
+                editor,
+                bindings.document(),
+                &loaded,
+                self.reserved_scene_models,
+            )?;
+        }
+        self.bindings
+            .as_mut()
+            .ok_or("Open model bindings first")?
+            .save()
     }
     /// Sidecar undo/redo is independent of scene undo and preserves the previous
     /// valid binding/cache if restored content cannot be verified.
@@ -361,8 +568,13 @@ impl ModelPanel {
         let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
         let previous = bindings.document().clone();
         bindings.undo();
-        match Self::load_all(bindings).and_then(|loaded| {
-            Self::validate_candidate(editor, bindings.document(), &loaded, self.reserved_scene_models)?;
+        match Self::load_all(bindings, self.room_identity.as_ref()).and_then(|loaded| {
+            Self::validate_candidate(
+                editor,
+                bindings.document(),
+                &loaded,
+                self.reserved_scene_models,
+            )?;
             Ok(loaded)
         }) {
             Ok(loaded) => {
@@ -386,8 +598,13 @@ impl ModelPanel {
         let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
         let previous = bindings.document().clone();
         bindings.redo();
-        match Self::load_all(bindings).and_then(|loaded| {
-            Self::validate_candidate(editor, bindings.document(), &loaded, self.reserved_scene_models)?;
+        match Self::load_all(bindings, self.room_identity.as_ref()).and_then(|loaded| {
+            Self::validate_candidate(
+                editor,
+                bindings.document(),
+                &loaded,
+                self.reserved_scene_models,
+            )?;
             Ok(loaded)
         }) {
             Ok(loaded) => {
@@ -454,8 +671,26 @@ impl ModelPanel {
         if !editor.yard_rows_coherent() {
             return Err("Wait for the current host GUID map before changing model bindings".into());
         }
-        if document.bindings.len().saturating_add(reserved_scene_models) > 256 {
+        if document
+            .bindings
+            .len()
+            .saturating_add(reserved_scene_models)
+            > 256
+        {
             return Err("Viewport model binding limit reached".into());
+        }
+        if editor.game().is_room()
+            && (document.bindings.is_empty()
+                || document.bindings.len() > 68
+                || document.bindings.values().any(|binding| {
+                    binding.kind != ModelKind::Static || binding.animation.is_some()
+                }))
+        {
+            return Err("Room v1 requires1..=68 static model bindings".into());
+        }
+        #[cfg(feature = "room-project")]
+        if editor.game().is_room() {
+            orr_sample::room_project::validate_decoded_model_budget(loaded.values())?;
         }
         let mut identities = std::collections::BTreeSet::new();
         let mut draws = 5_usize.saturating_add(reserved_scene_models.saturating_mul(2));
@@ -477,18 +712,35 @@ impl ModelPanel {
                 .ok_or("Missing verified model cache entry")?;
             binding.validate(asset)?;
             let local = binding.transform;
-            let row_pose = editor
+            let row = editor
                 .rows()
                 .iter()
-                .find(|row| row.guid.as_ref().is_some_and(|g| g.to_string() == *guid))
-                .and_then(|row| {
-                    editor
-                        .yard_frame()
-                        .poses
+                .find(|row| row.guid.as_ref().is_some_and(|g| g.to_string() == *guid));
+            if editor.game().is_room() {
+                let row = row.ok_or("Room model binding GUID is absent from the current scene")?;
+                let frame = editor
+                    .snapshot()
+                    .ok_or("Room snapshot missing")?
+                    .predicted();
+                // Presentation may hide a collected key. Admission instead checks
+                // the coherent GUID map against the actual entity generation/body.
+                if !frame.exists(row.entity)
+                    || !row
+                        .components
                         .iter()
-                        .find(|(e, _)| *e == row.entity)
-                        .map(|(_, pose)| *pose)
-                });
+                        .any(|component| component == "orr_physics3d::Body")
+                {
+                    return Err("Room model binding has no current scene body".into());
+                }
+            }
+            let row_pose = row.and_then(|row| {
+                editor
+                    .yard_frame()
+                    .poses
+                    .iter()
+                    .find(|(e, _)| *e == row.entity)
+                    .map(|(_, pose)| *pose)
+            });
             let draw_count = match binding.kind {
                 ModelKind::Static => {
                     let model = asset
@@ -501,6 +753,21 @@ impl ModelPanel {
                     }
                     .validate_for(model)
                     .map_err(|e| e.to_string())?;
+                    if editor.game().is_room() {
+                        for x in [-16.0, 16.0] {
+                            for y in [-4.0, 4.0] {
+                                for z in [-16.0, 16.0] {
+                                    let pose = orr_view::Transform3 {
+                                        pos: orr_view::Vec3::new(x, y, z),
+                                        rot: orr_view::Quat::IDENTITY,
+                                    };
+                                    Self::instance(pose, local).validate_for(model).map_err(
+                                        |e| format!("room reachable model placement: {e}"),
+                                    )?;
+                                }
+                            }
+                        }
+                    }
                     if let Some(pose) = row_pose {
                         Self::instance(pose, local)
                             .validate_for(model)
@@ -705,7 +972,7 @@ impl ModelPanel {
     }
 
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
-        if editor.game() != EditorGame::Yard3D {
+        if editor.game() != EditorGame::Yard3D && !editor.game().is_room() {
             return;
         }
         self.sync_scene(editor);
@@ -737,7 +1004,7 @@ impl ModelPanel {
                             ui.label("Model kind");
                             ui.selectable_value(&mut self.kind, ModelKind::Static, "Static");
                             #[cfg(feature = "animated-models")]
-                            ui.selectable_value(&mut self.kind, ModelKind::Animated, "Animated");
+                            if !editor.game().is_room() { ui.selectable_value(&mut self.kind, ModelKind::Animated, "Animated"); }
                         });
                         ui.horizontal(|ui| { ui.label("Package"); ui.text_edit_singleline(&mut self.package); });
                         ui.horizontal(|ui| { ui.label("Asset"); ui.text_edit_singleline(&mut self.asset); });
@@ -774,10 +1041,7 @@ impl ModelPanel {
                         if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new(assign_label)).clicked() { self.error = self.assign(editor).err(); }
                         ui.horizontal(|ui| {
                             if ui.button("Remove model").clicked() {
-                                if let (Some(bindings), Some(guid)) = (&mut self.bindings, editor.selected_guid()) {
-                                    self.error = bindings.remove(&[guid]).err();
-                                    self.loaded.retain(|key, _| bindings.document().bindings.contains_key(key));
-                                }
+                                self.error = self.remove(editor).err();
                             }
                             if ui.button("Undo model").clicked() { self.error = self.undo(editor).err(); }
                             if ui.button("Redo model").clicked() { self.error = self.redo(editor).err(); }
@@ -785,7 +1049,7 @@ impl ModelPanel {
                         });
                     });
                     // An old sidecar remains saveable after Save As changes scene identity.
-                    if ui.button("Save model bindings").clicked() { if let Some(bindings) = &mut self.bindings { self.error = bindings.save().err(); } }
+                    if ui.button("Save model bindings").clicked() { self.error = self.save(editor).err(); }
                     if self.bindings.as_ref().is_some_and(Bindings::dirty) { ui.colored_label(egui::Color32::YELLOW, "Model bindings have unsaved changes (scene Save does not save these)"); }
                     if self.confirm_discard {
                         ui.colored_label(egui::Color32::YELLOW, "Discard unsaved model bindings?");

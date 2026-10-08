@@ -43,6 +43,7 @@ editor's ERP) that is already running.
                         scene_edit, sim_control (comma separated) or all
   --erp-dev             no tokens, every client has every capability
                         (loopback addresses only)
+  --room-project DIR   validated RoomEscapeV1 project (room-project feature)
   --collect-project DIR validated CollectDodgeV1 project (collect-dodge feature)
 ";
 
@@ -53,6 +54,7 @@ pub struct Args {
     pub project: Option<PathBuf>,
     /// Dedicated versioned CollectDodge project route.
     pub collect_project: Option<PathBuf>,
+    pub room_project: Option<PathBuf>,
     /// Optional local game selection. `None` preserves the PhysGame default.
     pub game: Option<EditorGame>,
     /// `--scene`.
@@ -85,7 +87,7 @@ pub struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Self { collect_project: None, project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
+        Self { collect_project: None, room_project: None, project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -98,6 +100,10 @@ impl Args {
         while let Some(a) = it.next() {
             let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value\n\n{USAGE}"));
             match a.as_str() {
+                "--room-project" => {
+                    if out.room_project.is_some() { return Err("--room-project may only be supplied once".into()); }
+                    out.room_project=Some(PathBuf::from(value("--room-project")?));
+                }
                 "--collect-project" => {
                     if out.collect_project.is_some() { return Err("--collect-project may only be supplied once".into()); }
                     out.collect_project = Some(PathBuf::from(value("--collect-project")?));
@@ -128,6 +134,13 @@ impl Args {
                 "--token" => out.token = Some(value("--token")?),
                 "-h" | "--help" => return Err(USAGE.to_string()),
                 other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
+            }
+        }
+        if let Some(root) = &out.room_project {
+            if !cfg!(feature="room-project") { return Err("--room-project requires room-project feature".into()); }
+            if root.as_os_str().is_empty() { return Err("--room-project requires a nonempty directory".into()); }
+            if out.project.is_some() || out.collect_project.is_some() || out.scene.is_some() || out.game.is_some() || out.connect.is_some() || out.script.is_some() {
+                return Err("--room-project cannot be combined with another project, scene, game, connect or script".into());
             }
         }
         if out.collect_project.is_some() {
@@ -248,4 +261,25 @@ mod tests {
         assert!(!parse("--screenshot out.png --frames 30").unwrap().screenshot_settle);
         assert!(parse("--screenshot out.png --frames 30 --screenshot-settle").unwrap().screenshot_settle);
     }
+    #[test]
+    fn room_project_route_requires_its_explicit_feature() {
+        #[cfg(feature="room-project")]
+        {
+            let args=parse("--room-project authored-room").unwrap();
+            assert_eq!(args.room_project,Some(PathBuf::from("authored-room")));
+            assert!(args.project.is_none() && args.collect_project.is_none() && args.game.is_none());
+            assert!(Args::parse(["--room-project".into(),String::new()]).is_err());
+        }
+        #[cfg(not(feature="room-project"))]
+        assert!(parse("--room-project authored-room").unwrap_err().contains("room-project feature"));
+    }
+    #[test]
+    fn room_project_rejects_conflicting_authorities_in_either_order() {
+        for other in ["--project another","--collect-project another","--scene scene.yaml","--game arena","--connect ws://127.0.0.1:7790","--script commands.txt"] {
+            assert!(parse(&format!("--room-project room {other}")).is_err(),"{other}");
+            assert!(parse(&format!("{other} --room-project room")).is_err(),"{other}");
+        }
+        assert!(parse("--room-project one --room-project two").is_err());
+    }
+
 }

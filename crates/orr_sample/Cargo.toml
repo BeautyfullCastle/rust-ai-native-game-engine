@@ -11,6 +11,7 @@ default-run = "arena"
 workspace = true
 
 [features]
+room-project = ["project", "orr_games/room-escape", "dep:orr_model", "dep:orr_model_bindings", "orr_render/imported-scene"]
 # Explicit Linux authoring transaction; does not execute the exporter or runtime.
 image-reimport = ["project-export", "collect-sprites", "dep:semver"]
 linked-prefabs = ["collect-dodge", "orr_reflect/linked-prefabs"]
@@ -34,6 +35,8 @@ audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+orr_model = { path = "../orr_model", optional = true }
+orr_model_bindings = { path = "../orr_model_bindings", optional = true }
 semver = { version = "1", optional = true }
 sha2 = { version = "0.11", optional = true }
 tempfile = { version = "3", optional = true }
@@ -127,4 +130,16 @@ test = false
 name = "orr_export_collect"
 path = "src/bin/orr_export_collect.rs"
 required-features = ["collect-dodge", "project-export"]
+test = false
+
+[[bin]]
+name = "room_escape"
+path = "src/bin/room_escape.rs"
+required-features = ["room-project"]
+test = false
+
+[[bin]]
+name = "orr_export_room"
+path = "src/bin/orr_export_room.rs"
+required-features = ["room-project", "project-export"]
 test = false

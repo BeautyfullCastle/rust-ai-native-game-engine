@@ -298,6 +298,7 @@ impl Editor {
         let types = Arc::new(backend.game.types());
         let mut input = input::Input::new(backend.managed_input);
         input.collect_dodge = backend.game.is_collect();
+        input.room_escape = backend.game.is_room();
         let mut e = Self {
             input,
             backend,
@@ -1298,6 +1299,11 @@ impl Editor {
         self.bodies = self.backend.game.drawables(frame);
         if self.game().is_3d() {
             self.yard_frame = crate::viewport3d::YardFrame::extract(frame);
+            #[cfg(feature = "room-project")]
+            if self.game().is_room() {
+                self.yard_frame.items = orr_sample::room_view::items(frame);
+                self.yard_frame.poses.retain(|(entity,_)| self.yard_frame.items.iter().any(|item|item.entity==*entity));
+            }
             if (s.timeline().is_none()&&self.yard_rows_checksum!=Some(frame.checksum())) || (s.timeline().is_some()&&self.yard_rows_tick>s.tick()) {self.dirty.rows=true;}
         }
         #[cfg(feature = "terrain-physics")]

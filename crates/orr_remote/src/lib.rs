@@ -123,3 +123,6 @@ pub mod navigation_yard3d;
 
 #[cfg(feature = "collect-dodge")]
 pub mod collect_dodge;
+
+#[cfg(feature = "room-project")]
+pub mod room_escape;

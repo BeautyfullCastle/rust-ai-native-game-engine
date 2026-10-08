@@ -209,6 +209,34 @@ jobs:
             target/linked-prefab-evidence/captures/*.txt
           if-no-files-found: error
           retention-days: 7
+      - name: RoomEscapeV1 contracts and optional feature combinations
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 90
+        run: tools/check-room-project.sh contracts
+      - name: RoomEscapeV1 actual GPU and source-hidden production export
+        # Reuse the required Mesa and bubblewrap installation above.
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+        run: tools/check-room-project.sh gpu
+      - name: Upload RoomEscapeV1 acceptance evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-project-evidence-${{ matrix.os }}
+          path: |
+            target/room-project-evidence/**/*.log
+            target/room-project-evidence/**/*.sha256
+            target/room-project-evidence/**/*.txt
+            target/room-project-evidence/**/*.png
+            target/room-project-evidence/**/orr.export.json
+          if-no-files-found: error
+          retention-days: 7
       - if: runner.os == 'Linux'
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:

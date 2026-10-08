@@ -17,6 +17,7 @@ pub(super) struct Input {
     pub phase: Phase,
     pub enabled: bool,
     pub collect_dodge: bool,
+    pub room_escape: bool,
     pending_restarts: u8,
     restart_armed: bool,
     observed_restart: bool,
@@ -74,7 +75,7 @@ impl Input {
     }
     fn effective_keys(&self) -> Keys {
         let mut keys = self.latest;
-        if self.collect_dodge && !self.restart_armed { keys.fire = false; }
+        if (self.collect_dodge || self.room_escape) && !self.restart_armed { keys.fire = false; }
         if self.collect_dodge && self.pending_restarts > 0 { keys.fire = !self.observed_restart; }
         keys
     }
@@ -123,7 +124,7 @@ impl Input {
             g.sequence = g.sequence.checked_add(1)?;
             let mut params = json!({"player":g.player,"grant":g.grant,"generation":g.generation,"sequence":g.sequence.to_string()});
             let method = match op {
-                Op::Value => { params["value"] = if self.collect_dodge { json!({"x":self.latest.x,"y":self.latest.y,"buttons":if self.effective_keys().fire {vec!["restart"]}else{vec![]}}) } else { self.latest.value() }; self.sent = Some(self.effective_keys()); "sim.input_value" },
+                Op::Value => { params["value"] = if self.room_escape { json!({"move_x":self.latest.x,"move_z":-self.latest.y,"buttons":if self.effective_keys().fire {vec!["interact"]}else{vec![]}}) } else if self.collect_dodge { json!({"x":self.latest.x,"y":self.latest.y,"buttons":if self.effective_keys().fire {vec!["restart"]}else{vec![]}}) } else { self.latest.value() }; self.sent = Some(self.effective_keys()); "sim.input_value" },
                 Op::Renew => "sim.input_renew",
                 Op::Release => "sim.input_release",
                 Op::Claim => unreachable!(),
@@ -254,4 +255,22 @@ mod collect_tests {
         i.keys(Keys{fire:true,..Default::default()});assert_eq!(i.pending_restarts,0);assert!(!i.effective_keys().fire);
     }
 
+}
+
+#[cfg(all(test,feature="room-project"))]
+mod room_input_tests {
+    use super::*;
+    #[test]
+    fn room_claim_and_reclaim_require_neutral_interact_before_fresh_press() {
+        let mut input=Input::new(true); input.room_escape=true;
+        let held=Keys { fire:true,..Keys::default() };
+        input.claim(0); input.keys(held);
+        assert!(!input.effective_keys().fire,"claim must not turn old held E into a press");
+        input.keys(Keys::default()); input.keys(held);
+        assert!(input.effective_keys().fire);
+        input.release(); input.off(); input.claim(0); input.keys(held);
+        assert!(!input.effective_keys().fire,"reclaim must require a release again");
+        input.keys(Keys::default()); input.keys(held);
+        assert!(input.effective_keys().fire);
+    }
 }
