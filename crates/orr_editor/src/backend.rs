@@ -330,7 +330,9 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
     let name = d.pointer("/engine/game").and_then(J::as_str).ok_or("host discovery is missing explicit engine.game")?;
     let game = EditorGame::from_name(name)?;
     let build_id = d.pointer("/engine/build_id").and_then(J::as_str).filter(|s| !s.is_empty()).ok_or("host discovery is missing engine.build_id")?.to_string();
-    let schema: J = serde_json::from_str(&game.types().json_schema()).map_err(|e| format!("compiled schema: {e}"))?;
+    let types = game.types();
+    let schema_text = if cfg!(feature = "linked-prefabs") { types.json_schema() } else { types.legacy_json_schema() };
+    let schema: J = serde_json::from_str(&schema_text).map_err(|e| format!("compiled schema: {e}"))?;
     let actual = erp.call("registry.schema", J::Null).map_err(|e| format!("registry.schema: {e}"))?;
     if actual.get("schema") != Some(&schema) {
         return Err(format!("{name} reflected schema mismatch: host descriptors differ from this editor"));
@@ -352,4 +354,28 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
 
 fn delivery(game: EditorGame, local: bool) -> ViewDeliveryMode {
     if local || (game.has_keyboard() || game.is_3d()) { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced }
+}
+
+#[cfg(all(test, feature = "collect-dodge", not(feature = "linked-prefabs")))]
+mod linked_unified_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_consumer_discovery_stays_legacy() {
+        if std::env::var_os("ORR_REQUIRE_LINKED_PARSER").is_some() {
+            let linked = include_str!("../../orr_remote/tests/linked_prefab_boundary.scene.yaml");
+            assert!(orr_reflect::Scene::parse(linked, &orr_sample::collect_project::types()).is_ok());
+        }
+        let spec = HostSpec::PreparedCollect {
+            scene: PathBuf::from("inert-discovery-fixture.scene.yaml"),
+            text: include_str!("../../../scenes/collect_dodge_v1.scene.yaml").into(),
+            listen: None,
+            debug_hooks: false,
+        };
+        // This invokes actual local host discovery and exact schema comparison.
+        let mut backend = Backend::connect(&spec).unwrap();
+        let result = backend.erp.call("registry.schema", J::Null).unwrap();
+        assert_eq!(result["schema"]["properties"]["schema"]["const"], "orr.scene/1");
+        assert!(result["schema"]["properties"].get("prefabs").is_none());
+    }
 }

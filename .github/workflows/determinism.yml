@@ -183,6 +183,32 @@ jobs:
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Linked Collect prefab contracts and feature boundaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: tools/check-linked-prefabs.sh contracts
+      - name: Install linked-prefab namespace acceptance dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y -q bubblewrap
+      - name: Linked Collect actual editor GPU and source-hidden export
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+        run: tools/check-linked-prefabs.sh gpu
+      - name: Upload linked prefab acceptance evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linked-prefab-evidence-${{ matrix.os }}
+          path: |
+            target/linked-prefab-evidence/*.log
+            target/linked-prefab-evidence/*.sha256
+            target/linked-prefab-evidence/captures/*.png
+            target/linked-prefab-evidence/captures/*.txt
+          if-no-files-found: error
+          retention-days: 7
       - if: runner.os == 'Linux'
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:

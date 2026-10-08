@@ -47,6 +47,9 @@ mod checks;
 mod diff;
 mod doc;
 mod error;
+mod fragment;
+#[cfg(feature = "linked-prefabs")]
+mod linked_prefab;
 mod op;
 mod play;
 mod proposal;
@@ -61,6 +64,11 @@ pub use diff::{
 };
 pub use doc::{BakeAdmission, EditorDoc};
 pub use error::EditError;
+pub use fragment::{
+    FragmentInstance, FragmentTranslation2D, SceneFragment, FRAGMENT_MAX_BYTES,
+    FRAGMENT_MAX_COMPONENTS, FRAGMENT_MAX_DEPTH, FRAGMENT_MAX_ENTITIES, FRAGMENT_MAX_STRING_BYTES,
+    FRAGMENT_MAX_VALUES,
+};
 pub use op::{Applied, HistoryEntry, Op, Origin};
 pub use play::{PlayController, StoppedPlay};
 pub use proposal::{Accepted, ProposalDiff, ProposalId, ProposalInfo, ProposalState};

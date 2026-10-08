@@ -23,7 +23,10 @@ pub(super) fn write_scene(scene: &Scene) -> String {
         push_comment(&mut out, 0, line);
     }
     out.push_str("schema: ");
+    #[cfg(not(feature = "linked-prefabs"))]
     out.push_str(SCENE_SCHEMA);
+    #[cfg(feature = "linked-prefabs")]
+    out.push_str(if scene.prefab_links.is_empty() { SCENE_SCHEMA } else { "orr.scene/2" });
     out.push('\n');
 
     if !scene.singletons.is_empty() {
@@ -60,6 +63,8 @@ pub(super) fn write_scene(scene: &Scene) -> String {
             }
         }
     }
+    #[cfg(feature = "linked-prefabs")]
+    super::linked::write_links(scene, &mut out);
     out
 }
 
@@ -224,7 +229,7 @@ pub(super) fn fmt_string(s: &str) -> String {
     }
 }
 
-fn quote(s: &str) -> String {
+pub(super) fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

@@ -13,6 +13,7 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+linked-prefabs = ["collect-dodge", "dep:tempfile", "orr_remote/linked-prefabs", "orr_sample/linked-prefabs", "orr_reflect/linked-prefabs"]
 collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]
 # Explicit saved-project UI admission and read-only preset/font preview.
 collect-ui = ["collect-dodge", "project-ui", "orr_sample/collect-ui"]

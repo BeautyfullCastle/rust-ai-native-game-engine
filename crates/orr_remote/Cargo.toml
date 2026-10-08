@@ -11,6 +11,7 @@ description = "Orrery ERP (Engine Remote Protocol): JSON-RPC server for the edit
 workspace = true
 
 [features]
+linked-prefabs = ["orr_edit/linked-prefabs", "orr_reflect/linked-prefabs", "orr_sample?/linked-prefabs"]
 collect-dodge = ["sample-host", "orr_sample/collect-dodge"]
 navigation = ["sample-host", "dep:orr_games", "orr_games/navigation", "dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
 terrain-physics = ["sample-host", "dep:orr_games", "orr_games/terrain-physics", "dep:orr_terrain_physics3d", "dep:orr_terrain"]

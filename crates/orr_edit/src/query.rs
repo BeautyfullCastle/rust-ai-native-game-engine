@@ -184,7 +184,8 @@ impl<'a> View<'a> {
 
     /// The JSON Schema (draft 2020-12) of scene files for this registry.
     pub fn json_schema(&self) -> String {
-        self.types.json_schema()
+        if cfg!(feature = "linked-prefabs") { self.types.json_schema() }
+        else { self.types.legacy_json_schema() }
     }
 
     /// The JSON Schema of one component or singleton.

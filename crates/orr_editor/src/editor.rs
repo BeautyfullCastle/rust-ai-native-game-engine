@@ -1156,6 +1156,12 @@ impl Editor {
         self.dirty.singletons = true;
     }
 
+    /// Schedule authoritative cache/frame refresh after a successful prefab ERP edit.
+    #[cfg(feature = "linked-prefabs")]
+    pub(crate) fn prefab_mark_edited(&mut self) {
+        self.mark_edited();
+    }
+
     fn mark_edited(&mut self) {
         self.mark_changed();
         self.dirty.history = true;

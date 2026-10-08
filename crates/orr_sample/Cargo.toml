@@ -11,6 +11,7 @@ default-run = "arena"
 workspace = true
 
 [features]
+linked-prefabs = ["collect-dodge", "orr_reflect/linked-prefabs"]
 # Explicit consuming-route opt-in; unrelated unified sprite dependencies do not enable it.
 collect-ui = ["collect-dodge", "game-ui"]
 collect-sprites = ["collect-dodge"]

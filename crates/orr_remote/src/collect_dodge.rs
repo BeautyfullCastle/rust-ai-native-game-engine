@@ -20,6 +20,9 @@ impl BakeAdmission for InitialAdmission {
         Ok(())
     }
     fn admit(&self, scene: &Scene, frame: &mut Frame, index: &SceneIndex) -> Result<(), EditError> {
+        if scene.has_prefab_links() && !cfg!(feature = "linked-prefabs") {
+            return Err(EditError::Invalid("this host was built without linked-prefabs support".into()));
+        }
         project::admit_initial(scene, frame, index).map_err(EditError::Invalid)
     }
     fn allow_play_edits(&self) -> bool {

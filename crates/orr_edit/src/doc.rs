@@ -36,6 +36,9 @@ pub trait BakeAdmission: Send + Sync {
     }
 }
 
+#[cfg(feature = "linked-prefabs")]
+type PrefabMetadata = std::collections::BTreeMap<orr_reflect::Guid, orr_reflect::PrefabLink>;
+
 /// One applied op with what is needed to run it again and to take it back.
 #[derive(Clone, Debug)]
 struct Step {
@@ -45,6 +48,8 @@ struct Step {
 
 #[derive(Clone, Debug)]
 struct Entry {
+    #[cfg(feature = "linked-prefabs")]
+    prefab_metadata: Option<(PrefabMetadata, PrefabMetadata)>,
     id: u64,
     label: String,
     origin: Origin,
@@ -269,6 +274,8 @@ impl EditorDoc {
         let mut out = Scene {
             singletons: self.scene.singletons.clone(),
             entities: self.scene.entities.clone(),
+            #[cfg(feature = "linked-prefabs")]
+            prefab_links: self.scene.prefab_links.clone(),
             ..Scene::default()
         };
         out.carry_comments_from(&self.scene);
@@ -363,7 +370,7 @@ impl EditorDoc {
             }
         }
         let old_guid = self.next_guid;
-        let backup = self.admission.as_ref().map(|_| self.scene.clone());
+        let backup = (self.admission.is_some() || self.scene.has_prefab_links()).then(|| self.scene.clone());
         let op = self.with_guid(op);
         let done = match scene_ops::apply(&mut self.scene, &self.types, &op) {
             Ok(done) => done,
@@ -401,6 +408,8 @@ impl EditorDoc {
                 let id = self.next_id;
                 self.next_id += 1;
                 self.undo.push(Entry {
+                #[cfg(feature = "linked-prefabs")]
+                prefab_metadata: None,
                     id,
                     label: step.forward.describe(),
                     origin,
@@ -423,7 +432,7 @@ impl EditorDoc {
     ) -> Result<Vec<Applied>, EditError> {
         // Preserve the existing transaction/rollback semantics, including
         // conservative revision invalidation on a rejected proposal preview.
-        if self.admission.is_some() {
+        if self.admission.is_some() || self.scene.has_prefab_links() {
             self.apply_atomic_batch(label, ops, origin)
         } else {
             self.apply_batch_in_place(label, ops, origin)
@@ -441,6 +450,38 @@ impl EditorDoc {
         origin: Origin,
     ) -> Result<Vec<Applied>, EditError> {
         self.stage_atomically(|staged| staged.apply_batch_in_place(label, ops, origin))
+    }
+
+    /// Linked authoring transaction: individual op type/reference checks, then
+    /// one final metadata + scene bake/admission and a single undo entry.
+    #[cfg(feature = "linked-prefabs")]
+    pub(crate) fn apply_linked_batch(
+        &mut self,
+        label: &str,
+        ops: Vec<Op>,
+        links: PrefabMetadata,
+        origin: Origin,
+    ) -> Result<(), EditError> {
+        self.stage_atomically(|staged| {
+            let before = staged.scene.prefab_links.clone();
+            let mut steps = Vec::new();
+            for op in ops {
+                let op = staged.with_guid(op);
+                let done = scene_ops::apply(&mut staged.scene, &staged.types, &op)?;
+                if done.changed { steps.push(Step { forward: done.forward, inverse: done.inverse }); }
+            }
+            if steps.is_empty() && before == links { return Ok(()); }
+            staged.scene.prefab_links = links.clone();
+            staged.rebake()?;
+            let id = staged.next_id;
+            staged.next_id += 1;
+            staged.undo.push(Entry {
+                id, label: label.into(), origin, steps,
+                prefab_metadata: Some((before, links)),
+            });
+            staged.redo.clear();
+            Ok(())
+        })
     }
 
     /// Stages edits while retaining live document identity and proposal state.
@@ -532,7 +573,7 @@ impl EditorDoc {
         if self.tx.is_some() {
             return Err(EditError::TxOpen);
         }
-        let snapshot = self.admission.as_ref().map(|_| TxSnapshot {
+        let snapshot = (self.admission.is_some() || self.scene.has_prefab_links()).then(|| TxSnapshot {
             scene: self.scene.clone(), frame: self.frame.clone(), index: self.index.clone(),
             next_guid: self.next_guid, revision: self.revision, redo: self.redo.clone(),
         });
@@ -552,6 +593,8 @@ impl EditorDoc {
             let id = self.next_id;
             self.next_id += 1;
             self.undo.push(Entry {
+                #[cfg(feature = "linked-prefabs")]
+                prefab_metadata: None,
                 id,
                 label: tx.label,
                 origin: tx.origin,
@@ -594,12 +637,18 @@ impl EditorDoc {
             return Err(EditError::TxOpen);
         }
         let entry = self.undo.pop().ok_or(EditError::NothingToUndo)?;
+        #[cfg(feature = "linked-prefabs")]
+        let old_links = self.scene.prefab_links.clone();
+        #[cfg(feature = "linked-prefabs")]
+        if let Some((before, _)) = &entry.prefab_metadata { self.scene.prefab_links = before.clone(); }
         match self.revert(&entry.steps) {
             Ok(()) => {
                 self.redo.push(entry);
                 Ok(())
             }
             Err(e) => {
+                #[cfg(feature = "linked-prefabs")]
+                { self.scene.prefab_links = old_links; }
                 self.undo.push(entry);
                 Err(e)
             }
@@ -612,6 +661,10 @@ impl EditorDoc {
             return Err(EditError::TxOpen);
         }
         let entry = self.redo.pop().ok_or(EditError::NothingToRedo)?;
+        #[cfg(feature = "linked-prefabs")]
+        let old_links = self.scene.prefab_links.clone();
+        #[cfg(feature = "linked-prefabs")]
+        if let Some((_, after)) = &entry.prefab_metadata { self.scene.prefab_links = after.clone(); }
         let ops: Vec<&Op> = entry.steps.iter().map(|s| &s.forward).collect();
         match self.run_all(ops) {
             Ok(()) => {
@@ -619,6 +672,8 @@ impl EditorDoc {
                 Ok(())
             }
             Err(e) => {
+                #[cfg(feature = "linked-prefabs")]
+                { self.scene.prefab_links = old_links; }
                 self.redo.push(entry);
                 Err(e)
             }
@@ -661,6 +716,8 @@ impl EditorDoc {
     /// Applies ops in order with one preview sync at the end; all or nothing.
     fn run_all(&mut self, ops: Vec<&Op>) -> Result<(), EditError> {
         let backup = self.scene.clone();
+        #[cfg(feature = "linked-prefabs")]
+        let preview = (self.frame.clone(), self.index.clone(), self.revision);
         let mut effects = Vec::with_capacity(ops.len());
         for op in ops {
             match scene_ops::apply(&mut self.scene, &self.types, op) {
@@ -673,6 +730,9 @@ impl EditorDoc {
         }
         if let Err(e) = self.sync(&effects) {
             self.scene = backup;
+            #[cfg(feature = "linked-prefabs")]
+            { self.frame = preview.0; self.index = preview.1; self.revision = preview.2; }
+            #[cfg(not(feature = "linked-prefabs"))]
             if self.admission.is_none() {
                 let _ = self.rebake();
             }
@@ -691,6 +751,8 @@ impl EditorDoc {
         if self.admission.is_some() {
             return self.rebake();
         }
+        #[cfg(feature = "linked-prefabs")]
+        if !self.scene.prefab_links.is_empty() { return self.rebake(); }
         self.revision += 1;
         if effects.iter().any(|e| matches!(e, Effect::Structural)) {
             return self.rebake();
@@ -803,6 +865,9 @@ fn bake(
     seed: u64,
     admission: Option<&dyn BakeAdmission>,
 ) -> Result<(Frame, SceneIndex), EditError> {
+    if scene.has_prefab_links() && !cfg!(feature = "linked-prefabs") {
+        return Err(EditError::Invalid("this editor core was built without linked-prefabs support".into()));
+    }
     let mut frame = Frame::new(registry.clone());
     if registry.singleton_id::<FrameRng>().is_some() {
         frame.set_singleton(FrameRng::new(seed));

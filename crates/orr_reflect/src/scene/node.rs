@@ -104,8 +104,49 @@ enum Frame {
     Map { pos: Pos, entries: Vec<(Node, Node)>, key: Option<Node> },
 }
 
+// Large legacy documents remain accepted. For oversized inputs, inspect only
+// the event stream first, without building a potentially large tree. A linked
+// schema is rejected before entity decoding or baseline parsing regardless of
+// top-level key order. Syntax and depth errors are rejected during this pass.
+#[cfg(feature = "linked-prefabs")]
+fn reject_oversized_linked(src: &str) -> Result<(), Diag> {
+    if src.len() <= 64 * 1024 { return Ok(()); }
+    let mut depth = 0usize;
+    let mut key: Option<String> = None;
+    for result in Parser::new_from_str(src) {
+        let (event, span) = result.map_err(|e| {
+            let m = e.marker();
+            Diag::new(Pos { line: m.line(), col: m.col() + 1 }, format!("YAML syntax error: {}", e.info()))
+        })?;
+        match event {
+            Event::MappingStart(..) | Event::SequenceStart(..) => {
+                if depth >= MAX_DEPTH {
+                    return Err(Diag::new(Pos::of(&span), format!("nesting is deeper than {MAX_DEPTH} levels")));
+                }
+                if depth == 1 { key = None; }
+                depth += 1;
+            }
+            Event::MappingEnd | Event::SequenceEnd => { depth = depth.saturating_sub(1); }
+            Event::Scalar(text, ..) if depth == 1 => {
+                if let Some(k) = key.take() {
+                    if k == "schema" && text == "orr.scene/2" {
+                        return Err(Diag::new(Pos::of(&span), "orr.scene/2 exceeds 64 KiB"));
+                    }
+                    // Continue through the entire event stream: a malformed
+                    // duplicate schema/2 later in the input must not trigger
+                    // construction of a large legacy-looking node tree.
+                } else { key = Some(text.into_owned()); }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Parses `src` into one node tree, or fails with the first problem.
 pub fn parse(src: &str) -> Result<Node, Diag> {
+    #[cfg(feature = "linked-prefabs")]
+    reject_oversized_linked(src)?;
     let parser = Parser::new_from_str(src);
     let mut stack: Vec<Frame> = Vec::new();
     let mut root: Option<Node> = None;

@@ -9,6 +9,9 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+linked-prefabs = ["orr_reflect/linked-prefabs"]
+
 [dependencies]
 orr_fp = { path = "../orr_fp" }
 orr_ecs = { path = "../orr_ecs" }
