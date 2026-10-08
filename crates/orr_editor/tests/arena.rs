@@ -594,7 +594,7 @@ fn capture_erp_frame(agent: &mut orr_remote::ErpClient, state: &J, discovery: &J
     assert!(info.width >= 800 && info.height >= 600 && info.width <= 2048 && info.height <= 2048);
     assert!(u64::from(info.width) * u64::from(info.height) <= 1_048_576);
     let first = &pixels[..4];
-    assert!(pixels[..info.buffer_size()].chunks_exact(4).filter(|pixel| *pixel != first).count() > 1000,
+    assert!(pixels[..info.buffer_size()].as_chunks::<4>().0.iter().filter(|pixel| *pixel != first).count() > 1000,
         "actual app framebuffer must contain rendered UI and scene pixels");
     image
 }
