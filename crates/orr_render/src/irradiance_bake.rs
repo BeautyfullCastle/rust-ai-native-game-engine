@@ -1331,9 +1331,9 @@ mod tests {
                 PI / 4.0,
                 PI / 4.0,
             ][band];
-            for channel in 0..3 {
+            for (channel, &coefficient) in irradiance_sh[band].iter().enumerate() {
                 close(
-                    irradiance_sh[band][channel] as f64,
+                    coefficient as f64,
                     literal[band] * 0.7 * (channel + 1) as f64 * convolution,
                     3e-7,
                 );

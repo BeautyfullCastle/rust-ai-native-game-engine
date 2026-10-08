@@ -716,7 +716,7 @@ fn append_procedural(
         double_sided: false,
     });
     let position = item.transform.pos.to_array();
-    for tri in mesh.indices.chunks_exact(3) {
+    for tri in mesh.indices.as_chunks::<3>().0.iter() {
         cancelled(cancel)?;
         let vertices = tri.map_vertices(&mesh.vertices);
         let positions = vertices.map(|v| {
@@ -854,7 +854,7 @@ fn append_model(
         };
         let world = external.mul(&Mat4(primitive.transform));
         let normal = orr_model::normal_matrix(world.0).map_err(|e| e.to_string())?;
-        for indices in primitive.indices.chunks_exact(3) {
+        for indices in primitive.indices.as_chunks::<3>().0.iter() {
             cancelled(cancel)?;
             let mut vertices = indices.map_vertices(&primitive.vertices);
             // ModelRenderer uploads flipped winding for mirrored imported
