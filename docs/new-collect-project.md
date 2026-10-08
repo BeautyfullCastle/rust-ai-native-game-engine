@@ -59,9 +59,11 @@ cargo test --release -p orr_sample --features project-create --test new_arena_cl
 cargo test --release -p orr_sample --features project-create,project-export,collect-progress,collect-sprites --lib
 ```
 
-The first three invocations currently execute 17, 5 and 5 tests respectively.
-The joint sample library executes 105 tests, with two explicit opt-in tests not
-counted as passed. The generated progress workflow explicitly executes the
+At the PR #142 checkpoint, the first three invocations executed 17, 5 and 5
+tests respectively. That joint sample library executed 105 tests, with two
+explicit opt-in tests not counted as passed. These are historical results, not
+current positive-count gates; the additional UI-template capability tests change
+the relevant test inventories. The explicit UI profile below has separate gates. The generated progress workflow explicitly executes the
 isolated App child; it does not establish the separate syscall-isolation gate.
 The editor acceptance target `new_collect_workflow` requires each of its three
 named ignored tests to be selected individually with `--ignored --exact` and
