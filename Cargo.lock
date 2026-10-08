@@ -3179,6 +3179,7 @@ dependencies = [
  "orr_terrain_view",
  "orr_view",
  "png 0.17.16",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2",

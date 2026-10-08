@@ -143,7 +143,26 @@ pub struct PreparedRoomUi {
     pub font: Vec<u8>,
 }
 
+/// Explicit consuming-route support, never inferred from unified dependencies.
+/// MetadataOnly admits a checkpoint declaration but performs no profile storage
+/// or environment access. Consumers opt in only when built for checkpoint use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CheckpointSupport {
+    #[default]
+    Disabled,
+    MetadataOnly,
+}
+
+/// Shared font requirement for checkpoint admission and explicit editor enable.
+#[cfg(feature = "room-ui")]
+pub fn validate_checkpoint_font(font: &[u8]) -> Result<(), String> {
+    let corpus: String = (b' '..=b'~').map(char::from).collect();
+    crate::game_ui::GameUi::validate_font_with_corpus(font, &corpus)
+}
+
 pub struct PreparedProject {
+    manifest_bytes: Vec<u8>,
+    checkpoint: Option<orr_package::ProjectProgress>,
     #[cfg(feature = "room-ui")]
     ui: Option<PreparedRoomUi>,
     camera: Option<PreparedRoomCamera>,
@@ -158,17 +177,46 @@ impl PreparedProject {
     }
 
     pub fn open_with_ui(root: impl AsRef<Path>, ui_supported: bool) -> Result<Self, String> {
+        Self::open_with_options(root, ui_supported, CheckpointSupport::Disabled)
+    }
+
+    pub fn open_with_options(
+        root: impl AsRef<Path>,
+        ui_supported: bool,
+        checkpoint_support: CheckpointSupport,
+    ) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), compiled_runtime())
             .map_err(|e| e.to_string())?;
         let manifest = project.manifest().ok_or("room project manifest missing")?;
+        let manifest_path = project.root().join("orr.project.json");
+        let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
+        let pinned_manifest: orr_package::ProjectManifest =
+            serde_json::from_slice(&manifest_bytes).map_err(|e| e.to_string())?;
+        if &pinned_manifest != manifest {
+            return Err("room manifest changed during admission; retry".into());
+        }
         let entry = manifest.entry.as_ref().ok_or("room entry missing")?;
-        if manifest.schema != 2
+        let checkpoint = match (manifest.schema, &manifest.progress, checkpoint_support) {
+            (2, None, _) => None,
+            (4, Some(progress), CheckpointSupport::MetadataOnly)
+                if progress.profile == orr_package::ProgressProfile::RoomKeyCheckpointV1 =>
+            {
+                progress.validate()?;
+                Some(progress.clone())
+            }
+            _ => {
+                return Err(
+                    "room checkpoint requires schema4 and explicit checkpoint consumer support"
+                        .into(),
+                )
+            }
+        };
+        if !matches!(manifest.schema, 2 | 4)
             || entry.game != orr_package::ProjectGame::RoomEscapeV1
             || entry.sprites.is_some()
             || (entry.ui.is_some() && (!ui_supported || !cfg!(feature = "room-ui")))
-            || manifest.progress.is_some()
         {
-            return Err("room requires schema2 room-escape-v1, no sprites/progress, and explicit UI consumer support".into());
+            return Err("room requires schema2/4 room-escape-v1, no sprites, and explicit UI consumer support".into());
         }
         let before = project
             .verify()
@@ -207,6 +255,9 @@ impl PreparedProject {
                     &document,
                     crate::authored_ui::Profile::Room,
                 )?;
+                if checkpoint.is_some() {
+                    validate_checkpoint_font(&font)?;
+                }
                 let manifest_path = project.root().join("orr.project.json");
                 let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
                 let pinned: orr_package::ProjectManifest =
@@ -306,7 +357,12 @@ impl PreparedProject {
             scene.index(),
             &models,
         )?;
+        if crate::project::read_regular(&manifest_path, 1024 * 1024)? != manifest_bytes {
+            return Err("room manifest changed during admission; retry".into());
+        }
         Ok(Self {
+            manifest_bytes,
+            checkpoint,
             #[cfg(feature = "room-ui")]
             ui,
             camera,
@@ -323,6 +379,12 @@ impl PreparedProject {
     #[cfg(feature = "room-ui")]
     pub fn take_ui(&mut self) -> Option<PreparedRoomUi> {
         self.ui.take()
+    }
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
+    }
+    pub fn checkpoint(&self) -> Option<&orr_package::ProjectProgress> {
+        self.checkpoint.as_ref()
     }
     pub fn camera(&self) -> Option<&PreparedRoomCamera> {
         self.camera.as_ref()
@@ -396,4 +458,147 @@ fn add_bytes(total: usize, count: usize, stride: usize) -> Result<usize, String>
         .checked_mul(stride)
         .and_then(|n| total.checked_add(n))
         .ok_or_else(|| "room decoded model size overflow".into())
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use std::fs;
+
+    fn manifest() -> serde_json::Value {
+        serde_json::json!({
+            "schema":4,"engine":"*",
+            "entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json",
+                "ui":{"profile":"room-authored-v1","document":"room.ui.json","font":{"package":"font","asset":"font.otf"}}},
+            "progress":{"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"room-key-checkpoint-v1"}
+        })
+    }
+
+    #[test]
+    fn checkpoint_default_off_rejects_before_content_or_storage_access() {
+        assert_eq!(CheckpointSupport::default(), CheckpointSupport::Disabled);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let bytes = serde_json::to_vec(&manifest()).unwrap();
+        fs::write(root.join("orr.project.json"), &bytes).unwrap();
+        // No lock, scene, UI, model, or profile directory exists: the explicit
+        // consuming-route decision must precede every content read.
+        for result in [
+            PreparedProject::open(&root),
+            PreparedProject::open_with_ui(&root, true),
+            PreparedProject::open_with_options(&root, true, CheckpointSupport::Disabled),
+        ] {
+            let error = result.err().expect("default-off checkpoint admission");
+            assert!(
+                error.contains("explicit checkpoint consumer support"),
+                "{error}"
+            );
+        }
+        let error =
+            PreparedProject::open_with_options(&root, false, CheckpointSupport::MetadataOnly)
+                .err()
+                .expect("checkpoint cannot grant UI support");
+        assert!(error.contains("explicit UI consumer support"), "{error}");
+        assert_eq!(fs::read(root.join("orr.project.json")).unwrap(), bytes);
+        assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn invalid_checkpoint_metadata_fails_before_content_admission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!({"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"collect-dodge-highscore-v1"}),
+            serde_json::json!({"schema":1,"game_id":"../profile","profile":"room-key-checkpoint-v1"}),
+            serde_json::json!({"schema":2,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"room-key-checkpoint-v1"}),
+        ] {
+            let mut candidate = manifest();
+            candidate["progress"] = value;
+            fs::write(
+                root.join("orr.project.json"),
+                serde_json::to_vec(&candidate).unwrap(),
+            )
+            .unwrap();
+            assert!(orr_package::Project::open(&root, compiled_runtime()).is_err());
+            assert!(PreparedProject::open_with_options(
+                &root,
+                true,
+                CheckpointSupport::MetadataOnly
+            )
+            .is_err());
+        }
+        let valid = manifest();
+        let duplicate = format!(
+            "{{\"progress\":{},{}",
+            valid["progress"],
+            &valid.to_string()[1..]
+        );
+        fs::write(root.join("orr.project.json"), duplicate).unwrap();
+        assert!(
+            PreparedProject::open_with_options(&root, true, CheckpointSupport::MetadataOnly)
+                .is_err()
+        );
+        assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    #[cfg(all(
+        feature = "room-ui",
+        feature = "project-create",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
+    #[test]
+    fn metadata_only_admission_preserves_legacy_scene_and_owns_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap().join("room checkpoint");
+        crate::project_create::create(&crate::project_create::CreateOptions {
+            output: root.clone(),
+            template: crate::project_create::ROOM_UI_TEMPLATE.into(),
+            seed: "checkpoint-admission".into(),
+        })
+        .unwrap();
+        let legacy = PreparedProject::open_with_ui(&root, true).unwrap();
+        assert!(legacy.checkpoint().is_none());
+        let opted_in_legacy =
+            PreparedProject::open_with_options(&root, true, CheckpointSupport::MetadataOnly)
+                .unwrap();
+        assert!(opted_in_legacy.checkpoint().is_none());
+        let path = root.join("orr.project.json");
+        let mut upgraded: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        upgraded["schema"] = 4.into();
+        upgraded["progress"] = manifest()["progress"].clone();
+        let bytes = serde_json::to_vec(&upgraded).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(PreparedProject::open_with_ui(&root, true).is_err());
+        let checkpoint =
+            PreparedProject::open_with_options(&root, true, CheckpointSupport::MetadataOnly)
+                .unwrap();
+        assert_eq!(
+            checkpoint.scene().frame().to_bytes(),
+            legacy.scene().frame().to_bytes()
+        );
+        assert_eq!(
+            checkpoint.camera().unwrap().bytes,
+            legacy.camera().unwrap().bytes
+        );
+        assert_eq!(checkpoint.ui().unwrap().font, legacy.ui().unwrap().font);
+        let identity = checkpoint.checkpoint().unwrap().clone();
+        assert_eq!(
+            identity.profile,
+            orr_package::ProgressProfile::RoomKeyCheckpointV1
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(checkpoint.checkpoint(), Some(&identity));
+        assert_eq!(
+            checkpoint.scene().simulation().unwrap().frame().checksum(),
+            legacy.scene().frame().checksum()
+        );
+        #[cfg(not(all(feature = "room-checkpoint", target_os = "linux")))]
+        assert!(crate::room_app::run_window(checkpoint)
+            .unwrap_err()
+            .contains("requires the Linux room-checkpoint consumer"));
+    }
 }

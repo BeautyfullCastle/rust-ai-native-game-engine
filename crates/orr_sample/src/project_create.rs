@@ -76,6 +76,22 @@ pub fn create_collect(options: &CreateOptions, game_id: &str) -> Result<CreateRe
     create_transaction(options, Some(&progress), |_, _| Ok(()), publish_no_replace)
 }
 
+/// Explicitly opt an authored Room UI starter into key checkpoint metadata.
+/// UUID identity is supplied by the caller, never derived from the authoring seed.
+#[cfg(feature = "room-checkpoint")]
+pub fn create_room_checkpoint(options: &CreateOptions, game_id: &str) -> Result<CreateReport, String> {
+    if options.template != ROOM_UI_TEMPLATE {
+        return Err("Room checkpoint requires room-escape-ui-3d-v1 template".into());
+    }
+    let progress = orr_package::ProjectProgress {
+        schema: 1,
+        game_id: game_id.into(),
+        profile: orr_package::ProgressProfile::RoomKeyCheckpointV1,
+    };
+    progress.validate()?;
+    create_transaction(options, Some(&progress), |_, _| Ok(()), publish_no_replace)
+}
+
 fn create_with(
     options: &CreateOptions,
     checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
@@ -128,7 +144,7 @@ fn create_transaction(
     checkpoint("stage-created", transaction.path())?;
 
     let (scene, sidecar_bytes, manifest, scene_file, sidecar_file, readme) = if let Some(progress) =
-        progress
+        progress.filter(|_| !with_room)
     {
         #[cfg(feature = "collect-dodge")]
         {
@@ -172,6 +188,12 @@ fn create_transaction(
                 manifest["entry"]["ui"] = serde_json::json!({"profile":"room-authored-v1","document":"room.ui.json","font":{"package":"korean-game-ui","asset":"OrreryKoreanUI.otf"}});
                 manifest
             } else { manifest };
+            let manifest = if let Some(progress) = progress {
+                let mut manifest = manifest;
+                manifest["schema"] = serde_json::json!(4);
+                manifest["progress"] = serde_json::to_value(progress).map_err(error)?;
+                manifest
+            } else { manifest };
             let manifest = json_line(&manifest)?;
             (
                 scene,
@@ -199,6 +221,12 @@ fn create_transaction(
             readme(&options.seed),
         )
     };
+    let readme = if with_room && progress.is_some() {
+        readme.replace("No game/progress identity or persistent save is created.", "Explicit key-checkpoint metadata is enabled; native play uses a user-local checkpoint.")
+            .replace("No score/progress persistence.", "Explicit Room key-checkpoint persistence is enabled.")
+            .replace("Same template/tool/seed reproduces bytes;", "Same template/tool/seed and explicit game UUID reproduce bytes;")
+            + "\nBuild with room-checkpoint. Resume loads the saved key checkpoint; New Game clears that checkpoint. Editor Play never accesses the profile. Copying this UUID shares progress; use a fresh UUID for an independent game.\n"
+    } else { readme };
     let entity_guids = scene.entities.keys().cloned().collect();
     let mut expected = BTreeMap::from([
         ("orr.project.json".into(), manifest),
@@ -311,7 +339,7 @@ fn create_transaction(
     fs::remove_dir_all(&source_root).map_err(error)?;
     checkpoint("before-validation", transaction.path())?;
     verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room)?;
-    let initial_checksum = if progress.is_some() {
+    let initial_checksum = if progress.is_some() && !with_room {
         #[cfg(feature = "collect-dodge")]
         {
             use crate::collect_project::{PreparedProject, ProgressSupport, SpriteSupport};
@@ -332,7 +360,7 @@ fn create_transaction(
     } else if with_room {
         #[cfg(feature = "room-project")]
         {
-            crate::room_project::PreparedProject::open_with_ui(&project_root, with_ui)?
+            crate::room_project::PreparedProject::open_with_options(&project_root, with_ui, if progress.is_some() { crate::room_project::CheckpointSupport::MetadataOnly } else { crate::room_project::CheckpointSupport::Disabled })?
                 .scene()
                 .frame()
                 .checksum()
@@ -516,4 +544,34 @@ fn verify_profile_stage(
 
 fn readme(seed: &str) -> String {
     format!("# New Arena project\n\nTemplate: {TEMPLATE}\nGenerator: {}\nAuthoring seed: {seed}\n\nThis is the existing two-player Arena simulation with sprite idle/walk bindings,\nzero scores and camera follow. It is an editable starter, not a finished collect/dodge game.\n\nOpen with a sprites-enabled `orr_editor --project /absolute/path/to/this-project`.\nRun with a project-enabled `arena --project /absolute/path/to/this-project`.\nUse the existing `orr_export_arena` tool with a trusted prebuilt runtime to export.\n\nThe same seed/template/tool version reproduces these bytes; choose another seed\nfor different authored entity GUIDs. This does not create a new game, network,\nsave or score identity. Runtime remains Arena, seed 42, 60 Hz, two player slots.\nPlayer preferences intentionally remain shared under arena-controls-v1.\n\nThe MIT notice is retained in arena.scene.yaml header comments and the installed\nsample-sprites LICENSE.txt. No assets were regenerated, downloaded or executed.\nNo HOME/XDG settings, caches, captures, replays or editor state were copied.\n", env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(all(test, feature = "room-checkpoint"))]
+mod checkpoint_tests {
+    use super::*;
+    #[test]
+    fn explicit_room_checkpoint_roundtrip_and_template_gate() {
+        let dir=tempfile::tempdir().unwrap();
+        let options=CreateOptions {output:dir.path().join("room"),template:ROOM_UI_TEMPLATE.into(),seed:"checkpoint".into()};
+        let id="12345678-1234-4234-9234-123456789abc";
+        assert!(create_room_checkpoint(&options,"bad").is_err());
+        assert!(!options.output.exists());
+        let report=create_room_checkpoint(&options,id).unwrap();
+        let second=CreateOptions {output:dir.path().join("second"),..options.clone()};
+        let second_report=create_room_checkpoint(&second,id).unwrap();
+        assert_eq!(report.initial_checksum,second_report.initial_checksum);
+        for file in ["orr.project.json","room.scene.yaml","room.models.json","room.camera.json","room.ui.json","README.md"] {
+            assert_eq!(std::fs::read(options.output.join(file)).unwrap(),std::fs::read(second.output.join(file)).unwrap());
+        }
+        let third=CreateOptions {output:dir.path().join("third"),..options.clone()};
+        let third_report=create_room_checkpoint(&third,"12345678-1234-4234-9234-123456789abd").unwrap();
+        assert_eq!(report.initial_checksum,third_report.initial_checksum);
+        assert_eq!(std::fs::read(options.output.join("room.scene.yaml")).unwrap(),std::fs::read(third.output.join("room.scene.yaml")).unwrap());
+        let project=crate::room_project::PreparedProject::open_with_options(&options.output,true,crate::room_project::CheckpointSupport::MetadataOnly).unwrap();
+        assert_eq!(project.checkpoint().unwrap().game_id,id);
+        assert!(crate::room_project::PreparedProject::open_with_ui(&options.output,true).is_err());
+        let other=CreateOptions {output:dir.path().join("wrong"),template:ROOM_TEMPLATE.into(),seed:"checkpoint".into()};
+        assert!(create_room_checkpoint(&other,id).unwrap_err().contains("room-escape-ui"));
+        assert!(!other.output.exists());
+    }
 }

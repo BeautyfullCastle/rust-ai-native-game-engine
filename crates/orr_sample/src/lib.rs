@@ -107,3 +107,8 @@ pub mod room_view;
 
 #[cfg(feature = "room-project")]
 pub mod room_app;
+
+#[cfg(feature = "room-checkpoint")]
+pub mod room_checkpoint;
+#[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
+pub mod room_checkpoint_store;

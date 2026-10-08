@@ -185,15 +185,15 @@ impl ProjectSnapshot {
             .map_err(|e| format!("export project: {e}"))?;
         let manifest = project
             .manifest()
-            .ok_or("export requires a schema-2/3 authored project")?;
+            .ok_or("export requires a schema-2/3/4 authored project")?;
         let pinned_manifest: orr_package::ProjectManifest =
             serde_json::from_slice(&manifest_file.bytes)
                 .map_err(|e| format!("export project manifest: {e}"))?;
         if manifest != &pinned_manifest {
             return Err("project manifest changed during export admission".into());
         }
-        if !matches!(manifest.schema, 2 | 3) {
-            return Err("export requires a schema-2/3 authored project".into());
+        if !matches!(manifest.schema, 2..=4) {
+            return Err("export requires a schema-2/3/4 authored project".into());
         }
         let entry = manifest
             .entry

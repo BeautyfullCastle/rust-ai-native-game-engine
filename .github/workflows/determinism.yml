@@ -224,6 +224,40 @@ jobs:
           ORR_REQUIRE_GPU: "1"
           ORR_REQUIRE_PROJECT_ISOLATION: "1"
         run: tools/check-room-project.sh gpu
+      - name: Room key checkpoint CPU and editor contracts
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        run: tools/check-room-checkpoint.sh contracts
+      - name: Room key checkpoint GPU and source-hidden export
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+        run: tools/check-room-checkpoint.sh gpu-export
+      - name: Room key checkpoint syscall proof
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 45
+        run: |
+          sudo apt-get install -y -q strace
+          tools/check-room-checkpoint.sh syscall
+      - name: Upload Room key checkpoint evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-checkpoint-evidence-${{ matrix.os }}
+          path: |
+            target/room-checkpoint-evidence/**/*.log
+            target/room-checkpoint-evidence/**/*.json
+            target/room-checkpoint-evidence/**/*.txt
+            target/room-checkpoint-evidence/**/*.sha256
+            target/room-checkpoint-evidence/**/*.png
+            target/room-checkpoint-evidence/**/*.trace
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload RoomEscapeV1 acceptance evidence
         if: always() && runner.os == 'Linux' && runner.arch == 'X64'
         uses: actions/upload-artifact@v4

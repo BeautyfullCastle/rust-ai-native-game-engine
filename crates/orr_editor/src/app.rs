@@ -231,6 +231,8 @@ pub struct EditorApp {
     pub collect_ui: Option<crate::collect_ui_panel::Panel>,
     #[cfg(feature="room-project")]
     pub room_camera: Option<crate::room_camera_panel::Panel>,
+    #[cfg(all(feature="room-checkpoint",target_os="linux"))]
+    pub room_checkpoint: Option<crate::room_checkpoint_panel::Panel>,
     #[cfg(feature = "linked-prefabs")]
     pub linked_prefabs: crate::linked_prefab_panel::Panel,
     #[cfg(feature = "animated-models")]
@@ -241,7 +243,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), # [cfg(any(feature="collect-ui", feature="room-ui"))] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(all(feature="room-checkpoint",target_os="linux"))] room_checkpoint: None, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), # [cfg(any(feature="collect-ui", feature="room-ui"))] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Deliberately restrict HDR for compatibility. This one-way builder must
@@ -655,6 +657,12 @@ impl EditorApp {
                     && self.editor.previewing().is_none() && self.editor.yard_rows_coherent();
                 if panel.show(ui, editable) { let _ = self.editor.install_room_camera(panel.document().clone()); }
             }
+        }
+        #[cfg(all(feature="room-checkpoint",target_os="linux"))]
+        if let Some(panel) = &mut self.room_checkpoint {
+            let editable = self.editor.mode()==Mode::Edit && self.editor.can_mutate()
+                && self.editor.previewing().is_none() && self.editor.yard_rows_coherent();
+            panel.show(ui, editable);
         }
         let count = self.editor.selected_guids().len();
         if count>0&&self.editor.game().is_3d() {ui.label("Single 3D selection · Esc to clear");}
