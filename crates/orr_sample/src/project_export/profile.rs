@@ -1,7 +1,7 @@
 //! Closed export consumers. A profile never enables a game's optional capabilities.
 use std::path::Path;
 #[derive(Clone, Copy)]
-pub(super) enum Profile {
+pub(crate) enum Profile {
     Arena,
     #[cfg(feature = "collect-dodge")]
     Collect,
@@ -46,7 +46,7 @@ impl Profile {
         }
     }
 }
-pub(super) enum Prepared {
+pub(crate) enum Prepared {
     Arena(Box<crate::project_runtime::PreparedRuntime>),
     #[cfg(feature = "collect-dodge")]
     Collect(Box<crate::collect_project::PreparedProject>),

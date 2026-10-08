@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Explicit Linux authoring transaction; does not execute the exporter or runtime.
+image-reimport = ["project-export", "collect-sprites", "dep:semver"]
 linked-prefabs = ["collect-dodge", "orr_reflect/linked-prefabs"]
 # Explicit consuming-route opt-in; unrelated unified sprite dependencies do not enable it.
 collect-ui = ["collect-dodge", "game-ui"]
@@ -32,6 +34,7 @@ audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+semver = { version = "1", optional = true }
 sha2 = { version = "0.11", optional = true }
 tempfile = { version = "3", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
