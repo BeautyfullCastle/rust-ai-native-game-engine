@@ -317,6 +317,18 @@ impl ProjectSnapshot {
             file.role = "ui_document";
             files.push(file);
         }
+        #[cfg(feature = "navigation-project")]
+        if let super::Prepared::Navigation(navigation) = &prepared {
+            let relative = navigation.terrain_path().strip_prefix(&root).map_err(|_| "navigation terrain escaped project")?.to_str().ok_or("navigation terrain path must be UTF-8")?;
+            plan.add(relative, orr_terrain::MAX_FILE_BYTES as u64)?;
+            plan.preflight(&root)?;
+            let mut file = SnapshotFile::read(navigation.terrain_path(), relative, orr_terrain::MAX_FILE_BYTES as u64)?;
+            if file.source != navigation.terrain_path() || file.bytes != navigation.terrain_bytes() {
+                return Err("navigation terrain changed after runtime admission".into());
+            }
+            file.role = "navigation_terrain";
+            files.push(file);
+        }
         // The initial frame and decoded atlases are no longer needed. Release
         // them before retaining the whole package closure in the snapshot.
         drop(prepared);

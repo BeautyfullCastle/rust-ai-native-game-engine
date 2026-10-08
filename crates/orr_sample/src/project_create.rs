@@ -8,6 +8,8 @@ mod collect_template;
 #[cfg(feature = "room-project")]
 mod room_template;
 mod template;
+#[cfg(feature = "navigation-project")]
+mod navigation_template;
 #[cfg(test)]
 mod tests;
 #[cfg(any(feature = "collect-ui", feature = "room-ui"))]
@@ -26,6 +28,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+pub const NAVIGATION_TEMPLATE: &str = "terrain-point-route-3d-v1";
 pub const TEMPLATE: &str = template::ID;
 pub const COLLECT_TEMPLATE: &str = "collect-dodge-2d-v1";
 pub const COLLECT_UI_TEMPLATE: &str = "collect-dodge-ui-2d-v1";
@@ -106,13 +109,15 @@ fn create_transaction(
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
+    let with_navigation = options.template == NAVIGATION_TEMPLATE;
+    if with_navigation && !cfg!(feature = "navigation-project") { return Err("Terrain point-route template requires navigation-project feature".into()); }
     let with_ui = options.template == COLLECT_UI_TEMPLATE || options.template == ROOM_UI_TEMPLATE;
     let with_room = options.template == ROOM_TEMPLATE || options.template == ROOM_UI_TEMPLATE;
     if with_room && !cfg!(feature = "room-project") {
         return Err("Room template requires room-project feature".into());
     }
     if (progress.is_some() && options.template != COLLECT_TEMPLATE && !with_ui)
-        || (progress.is_none() && options.template != TEMPLATE && !with_room)
+        || (progress.is_none() && options.template != TEMPLATE && !with_room && !with_navigation)
     {
         return Err(format!("unsupported template; expected {TEMPLATE}"));
     }
@@ -176,6 +181,15 @@ fn create_transaction(
             let _ = progress;
             return Err("CollectDodge template requires collect-dodge feature".into());
         }
+    } else if with_navigation {
+        #[cfg(feature = "navigation-project")]
+        {
+            let terrain = navigation_template::terrain(&options.seed)?;
+            let manifest = serde_json::json!({"schema":2,"engine":"^0.0.1","entry":{"game":"terrain-point-route-3d-v1","scene":"navigation.scene.yaml"}});
+            (navigation_template::scene(&options.seed)?, terrain.cook(), json_line(&manifest)?, "navigation.scene.yaml", "terrain.orrt", navigation_template::readme(&options.seed))
+        }
+        #[cfg(not(feature = "navigation-project"))]
+        { return Err("Terrain point-route template requires navigation-project feature".into()); }
     } else if with_room {
         #[cfg(feature = "room-project")]
         {
@@ -268,6 +282,7 @@ fn create_transaction(
     } else {
         sources
     };
+    let sources = if with_navigation { Vec::new() } else { sources };
     let mut roots = Vec::new();
     for (name, source) in &sources {
         let root = source_root.join(name);
@@ -286,10 +301,12 @@ fn create_transaction(
     } else {
         runtime
     };
+    #[cfg(feature = "navigation-project")]
+    let runtime = if with_navigation { crate::navigation_project::compiled_runtime() } else { runtime };
     let project = orr_package::Project::open(&project_root, runtime).map_err(error)?;
-    let lock = project
-        .install(&roots)
-        .map_err(|e| format!("starter package installation: {e}"))?;
+    let lock = if with_navigation { orr_package::Lock::default() } else {
+        project.install(&roots).map_err(|e| format!("starter package installation: {e}"))?
+    };
     checkpoint("installed", transaction.path())?;
     let verified = project
         .verify()
@@ -300,7 +317,7 @@ fn create_transaction(
     {
         return Err("starter active lock differs from the closed bundle".into());
     }
-    expected.insert("orr.packages.lock.json".into(), json_line(&lock)?);
+    if !with_navigation { expected.insert("orr.packages.lock.json".into(), json_line(&lock)?); }
     for (name, source) in sources {
         let package = lock
             .packages
@@ -357,6 +374,11 @@ fn create_transaction(
         {
             return Err("CollectDodge template requires collect-dodge feature".into());
         }
+    } else if with_navigation {
+        #[cfg(feature = "navigation-project")]
+        { crate::navigation_project::PreparedProject::open(&project_root)?.scene().frame().checksum() }
+        #[cfg(not(feature = "navigation-project"))]
+        { return Err("Terrain point-route template requires navigation-project feature".into()); }
     } else if with_room {
         #[cfg(feature = "room-project")]
         {

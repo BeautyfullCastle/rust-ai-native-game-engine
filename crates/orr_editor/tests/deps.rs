@@ -114,7 +114,7 @@ fn terrain_authoring_stays_optional_and_simulation_integration_is_explicit() {
 fn navigation_is_optional_and_independent_of_terrain_physics() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let editor = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    assert!(editor.contains("navigation = [\"terrain\", \"orr_remote/navigation\", \"dep:orr_navigation\"]"));
+    assert!(editor.contains("navigation = [\"terrain\", \"orr_remote/navigation\", \"dep:orr_navigation\", \"dep:orr_navigation_view\"]"));
     assert!(editor.contains("default = []"));
     for name in ["orr_fp", "orr_ecs", "orr_sim", "orr_session", "orr_physics3d"] {
         let manifest = std::fs::read_to_string(root.join(format!("../{name}/Cargo.toml"))).unwrap();

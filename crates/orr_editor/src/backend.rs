@@ -67,6 +67,9 @@ pub enum HostSpec {
     /// Initial RoomEscape project bytes admitted before host startup.
     #[cfg(feature = "room-project")]
     PreparedRoom { scene: PathBuf, text: String, listen: Option<ServerConfig>, debug_hooks: bool },
+    /// Owned scene and terrain bytes admitted before host startup.
+    #[cfg(feature = "navigation-project")]
+    PreparedNavigation { project_root: PathBuf, scene: PathBuf, text: String, terrain_bytes: Vec<u8>, reload: bool, listen: Option<ServerConfig>, debug_hooks: bool },
     /// A host in another process.
     Remote {
         /// `ws://host:port` of its ERP server.
@@ -97,6 +100,8 @@ impl HostSpec {
             HostSpec::PreparedCollect { listen: current, .. } => *current = Some(listen),
             #[cfg(feature = "room-project")]
             HostSpec::PreparedRoom { listen: current, .. } => *current = Some(listen),
+            #[cfg(feature = "navigation-project")]
+            HostSpec::PreparedNavigation { listen: current, .. } => *current = Some(listen),
             HostSpec::Remote { .. } => {}
         }
         self
@@ -129,6 +134,8 @@ impl HostSpec {
             HostSpec::PreparedRoom { listen, debug_hooks, .. } => {
                 *self = HostSpec::LocalGame { scene:path,game:EditorGame::RoomEscape,listen:listen.clone(),debug_hooks:*debug_hooks }; true
             }
+            #[cfg(feature = "navigation-project")]
+            HostSpec::PreparedNavigation { scene, .. } => *scene == path,
             HostSpec::Remote { .. } => false,
         }
     }
@@ -215,6 +222,20 @@ impl Backend {
             HostSpec::PreparedRoom { scene, text, listen, debug_hooks } => {
                 Self::connect_local(spec,scene,text.clone(),EditorGame::RoomEscape,listen,*debug_hooks)
             }
+            #[cfg(feature = "navigation-project")]
+            HostSpec::PreparedNavigation { project_root, scene, text, reload, listen, debug_hooks, .. } => {
+                let reopened;
+                let launch = if *reload {
+                    let project = orr_sample::navigation_project::PreparedProject::open(project_root)?;
+                    if project.path() != scene { return Err("navigation project entry scene changed; open a new editor explicitly".into()); }
+                    reopened = HostSpec::PreparedNavigation { project_root: project_root.clone(), scene: scene.clone(), text: project.scene().text().to_owned(), terrain_bytes: project.terrain_bytes().to_vec(), reload: false, listen: listen.clone(), debug_hooks: *debug_hooks };
+                    &reopened
+                } else { spec };
+                let launch_text = if let HostSpec::PreparedNavigation { text, .. } = launch { text.clone() } else { text.clone() };
+                let mut backend = Self::connect_local(launch, scene, launch_text, EditorGame::NavigationYard3D, listen, *debug_hooks)?;
+                backend.spec = HostSpec::PreparedNavigation { project_root: project_root.clone(), scene: scene.clone(), text: String::new(), terrain_bytes: Vec::new(), reload: true, listen: listen.clone(), debug_hooks: *debug_hooks };
+                Ok(backend)
+            }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());
                 let mut erp = match token {
@@ -268,7 +289,16 @@ impl Backend {
             #[cfg(feature = "terrain-physics")]
             EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.to_path_buf(), cfg)?,
             #[cfg(feature = "navigation")]
-            EditorGame::NavigationYard3D => orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+            EditorGame::NavigationYard3D => {
+                #[cfg(feature = "navigation-project")]
+                if let HostSpec::PreparedNavigation { terrain_bytes, .. } = spec {
+                    orr_remote::navigation_yard3d::spawn_navigation_yard3d_owned_host(scene.to_path_buf(), text, terrain_bytes.clone(), cfg)?
+                } else {
+                    orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.to_path_buf(), cfg)?
+                }
+                #[cfg(not(feature = "navigation-project"))]
+                orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.to_path_buf(), cfg)?
+            },
         };
         let connector = host.connector();
         let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
@@ -291,6 +321,8 @@ impl Backend {
     pub fn frame_stream(&self, source: &str) -> Result<EditorStream, String> {
         let mut rc = match &self.spec {
             HostSpec::Local { .. } | HostSpec::LocalGame { .. } => RemoteConfig::new(""),
+            #[cfg(feature = "navigation-project")]
+            HostSpec::PreparedNavigation { .. } => RemoteConfig::new(""),
             #[cfg(feature = "room-project")]
             HostSpec::PreparedRoom { .. } => RemoteConfig::new(""),
             #[cfg(feature = "collect-dodge")]

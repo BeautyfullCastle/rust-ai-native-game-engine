@@ -157,6 +157,8 @@ impl ModelPanel {
                     crate::backend::HostSpec::PreparedCollect { .. } => return false,
                     #[cfg(feature = "room-project")]
                     crate::backend::HostSpec::PreparedRoom { scene, .. } => scene,
+        #[cfg(feature = "navigation-project")]
+        crate::backend::HostSpec::PreparedNavigation { scene, .. } => scene,
                     crate::backend::HostSpec::Remote { .. } => return false,
                 };
                 if !local_path
@@ -197,6 +199,8 @@ impl ModelPanel {
             }
             #[cfg(feature = "room-project")]
             crate::backend::HostSpec::PreparedRoom { scene, .. } => scene,
+        #[cfg(feature = "navigation-project")]
+        crate::backend::HostSpec::PreparedNavigation { scene, .. } => scene,
             crate::backend::HostSpec::Remote { .. } => {
                 return Err("Remote scene paths are not local authority".into())
             }

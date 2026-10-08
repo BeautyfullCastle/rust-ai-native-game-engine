@@ -3388,6 +3388,60 @@ jobs:
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --low --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d_low.png"
 
+  navigation-playground:
+    # Independent optional creation gates run in parallel with the existing sample matrix.
+    # Retain its temporary supported bwrap runner pin; no security-setting changes.
+    name: terrain point-route creation (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      ORR_NAVIGATION_EVIDENCE: /tmp/orr-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: terrain-point-route
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install existing software rendering and namespace prerequisites
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt_options=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2)
+          sudo apt-get "${apt_options[@]}" update -q
+          sudo apt-get "${apt_options[@]}" install -y -q mesa-vulkan-drivers bubblewrap
+      - name: Required terrain point-route admission creator editor and default-off contracts
+        timeout-minutes: 80
+        shell: bash
+        run: tools/check-navigation-playground.sh contracts
+      - name: Required terrain point-route software GPU and source-hidden readonly export
+        timeout-minutes: 60
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+        run: tools/check-navigation-playground.sh gpu-export
+      - name: Upload terrain point-route evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terrain-point-route-evidence-linux
+          path: |
+            /tmp/orr-navigation-${{ github.run_id }}-${{ github.run_attempt }}/**/*.log
+            /tmp/orr-navigation-${{ github.run_id }}-${{ github.run_attempt }}/**/*.jsonl
+            /tmp/orr-navigation-${{ github.run_id }}-${{ github.run_attempt }}/**/*.json
+            /tmp/orr-navigation-${{ github.run_id }}-${{ github.run_attempt }}/**/*.txt
+            /tmp/orr-navigation-${{ github.run_id }}-${{ github.run_attempt }}/**/*.sha256
+            /tmp/orr-navigation-${{ github.run_id }}-${{ github.run_attempt }}/**/*.png
+          if-no-files-found: error
+          retention-days: 7
+
   wasm32:
     name: wasm32-wasip1 (wasmtime)
     runs-on: ubuntu-latest
@@ -3603,7 +3657,7 @@ jobs:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
     # target and the sample graphics/audio/editor matrix must pass the gate.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build]
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, navigation-playground]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -3616,9 +3670,10 @@ jobs:
           ANDROID_ARM64_RESULT: ${{ needs['android-arm64'].result }}
           BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
+          NAVIGATION_RESULT: ${{ needs['navigation-playground'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT NAVIGATION_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then
@@ -3633,6 +3688,7 @@ jobs:
           echo "All native matrix legs, wasm32-wasip1 (including SIMD), and"
           echo "aarch64-linux-android passed their pinned golden-checksum assertions."
           echo "Chromium passed native/wasm checkpoint comparisons and required GPU views."
+          echo "Independent terrain point-route creation, software GPU and readonly export gates passed."
           echo "Both sample-build matrix legs passed their graphics/audio/editor checks,"
           echo "including required Linux software-GPU and Arena native-window smoke tests."
           echo "The targets assert the same constants in orr_fp, orr_session,"

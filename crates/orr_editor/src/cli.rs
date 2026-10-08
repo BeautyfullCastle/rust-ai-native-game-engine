@@ -43,6 +43,7 @@ editor's ERP) that is already running.
                         scene_edit, sim_control (comma separated) or all
   --erp-dev             no tokens, every client has every capability
                         (loopback addresses only)
+  --navigation-project DIR closed Terrain point-route project (navigation-project feature)
   --room-project DIR   validated RoomEscapeV1 project (room-project feature)
   --collect-project DIR validated CollectDodgeV1 project (collect-dodge feature)
 ";
@@ -55,6 +56,7 @@ pub struct Args {
     /// Dedicated versioned CollectDodge project route.
     pub collect_project: Option<PathBuf>,
     pub room_project: Option<PathBuf>,
+    pub navigation_project: Option<PathBuf>,
     /// Optional local game selection. `None` preserves the PhysGame default.
     pub game: Option<EditorGame>,
     /// `--scene`.
@@ -87,7 +89,7 @@ pub struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Self { collect_project: None, room_project: None, project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
+        Self { navigation_project: None, collect_project: None, room_project: None, project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -100,6 +102,10 @@ impl Args {
         while let Some(a) = it.next() {
             let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value\n\n{USAGE}"));
             match a.as_str() {
+                "--navigation-project" => {
+                    if out.navigation_project.is_some() { return Err("--navigation-project may only be supplied once".into()); }
+                    out.navigation_project = Some(PathBuf::from(value("--navigation-project")?));
+                }
                 "--room-project" => {
                     if out.room_project.is_some() { return Err("--room-project may only be supplied once".into()); }
                     out.room_project=Some(PathBuf::from(value("--room-project")?));
@@ -134,6 +140,13 @@ impl Args {
                 "--token" => out.token = Some(value("--token")?),
                 "-h" | "--help" => return Err(USAGE.to_string()),
                 other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
+            }
+        }
+        if let Some(root) = &out.navigation_project {
+            if !cfg!(feature = "navigation-project") { return Err("--navigation-project requires navigation-project feature".into()); }
+            if root.as_os_str().is_empty() { return Err("--navigation-project requires a nonempty directory".into()); }
+            if out.project.is_some() || out.collect_project.is_some() || out.room_project.is_some() || out.scene.is_some() || out.game.is_some() || out.connect.is_some() || out.script.is_some() {
+                return Err("--navigation-project cannot be combined with another project, scene, game, connect or script".into());
             }
         }
         if let Some(root) = &out.room_project {

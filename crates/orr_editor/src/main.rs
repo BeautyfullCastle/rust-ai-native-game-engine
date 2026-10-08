@@ -38,6 +38,8 @@ fn main() {
     let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_ui(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }, cfg!(feature="collect-ui")).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
     #[cfg(feature="room-project")]
     let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open_with_options(root, cfg!(feature="room-ui"), if cfg!(all(feature="room-checkpoint",target_os="linux")) { orr_sample::room_project::CheckpointSupport::MetadataOnly } else { orr_sample::room_project::CheckpointSupport::Disabled }).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
+    #[cfg(feature = "navigation-project")]
+    let navigation_project = args.navigation_project.as_ref().map(|root| orr_sample::navigation_project::PreparedProject::open(root).unwrap_or_else(|error| fail(&format!("--navigation-project: {error}"))));
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
@@ -72,6 +74,10 @@ fn main() {
             let spec=room_project.as_ref().map_or(spec.clone(),|project|HostSpec::PreparedRoom {
                 scene:project.path().to_path_buf(),text:project.scene().text().to_owned(),listen:None,debug_hooks:false,
             });
+            #[cfg(feature = "navigation-project")]
+            let spec = navigation_project.as_ref().map_or(spec.clone(), |project| HostSpec::PreparedNavigation {
+                project_root: project.root().to_path_buf(), reload: false, scene: project.path().to_path_buf(), text: project.scene().text().to_owned(), terrain_bytes: project.terrain_bytes().to_vec(), listen: None, debug_hooks: false,
+            });
             match listen {
                 Some(cfg) => spec.with_listener(cfg),
                 None => spec,
@@ -79,6 +85,10 @@ fn main() {
         }
     };
     let mut editor = Editor::start(&spec).unwrap_or_else(|e| fail(&e));
+    #[cfg(feature = "navigation-project")]
+    if let Some(project) = &navigation_project {
+        editor.camera3d = orr_sample::navigation_project_view::NavigationCamera::new(orr_bridge::FrameView::of(project.scene().frame())).unwrap_or_else(|error| fail(&error)).orbit;
+    }
     if let (Some(_), Some((url, _))) = (args.erp, editor.erp_status()) {
         println!("ERP: {url}");
     }

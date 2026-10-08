@@ -112,3 +112,10 @@ pub mod room_app;
 pub mod room_checkpoint;
 #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
 pub mod room_checkpoint_store;
+
+#[cfg(feature = "navigation-project")]
+pub mod navigation_project;
+#[cfg(feature = "navigation-project")]
+pub mod navigation_project_view;
+#[cfg(feature = "navigation-project")]
+pub mod navigation_app;

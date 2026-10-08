@@ -198,6 +198,8 @@ pub enum ProjectGame {
     CollectDodgeV1,
     #[serde(rename = "room-escape-v1")]
     RoomEscapeV1,
+    #[serde(rename = "terrain-point-route-3d-v1")]
+    TerrainPointRoute3dV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -336,6 +338,12 @@ impl ProjectManifest {
                     && (!matches!(self.schema, 2 | 4) || entry.sprites.is_some() || entry.models.is_none())
                 {
                     return fail("room-escape-v1 requires schema 2 or 4 and models, without sprites");
+                }
+                if entry.game == ProjectGame::TerrainPointRoute3dV1
+                    && (self.schema != 2 || entry.sprites.is_some() || entry.models.is_some()
+                        || entry.camera.is_some() || entry.ui.is_some() || self.progress.is_some())
+                {
+                    return fail("terrain-point-route-3d-v1 requires schema 2 without sprites/models/camera/UI/progress");
                 }
                 if let Some(ui) = &entry.ui {
                     match (entry.game, ui.profile, &ui.document) {
