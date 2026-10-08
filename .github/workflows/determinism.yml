@@ -530,6 +530,104 @@ jobs:
             ${{ runner.temp }}/player-settings-*.log
           if-no-files-found: error
           retention-days: 7
+      # PR137: append after the PR136 player-settings evidence step. These five
+      # mandatory Linux steps leave every earlier feature configuration intact.
+      - name: Required bounded Arena generator library and CLI tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" -ne 0
+          cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --list > "$RUNNER_TEMP/new-arena-library-list.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 63
+          test "$(grep -cE '^project_create::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 13
+          cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-library.log"
+          grep -F 'test result: ok. 63 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-library.log"
+          cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --list > "$RUNNER_TEMP/new-arena-cli-list.txt"
+          test "$(grep -cE '^[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-cli-list.txt")" -eq 3
+          cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-cli.log"
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-cli.log"
+          if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/new-arena-library.log" "$RUNNER_TEMP/new-arena-cli.log"; then exit 1; fi
+      - name: Build and pin actual Arena generator runtime and exporter
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v bwrap
+          bwrap --ro-bind / / -- /bin/true
+          rustc -vV | grep -Fx 'host: x86_64-unknown-linux-gnu'
+          cargo build --locked --release -p orr_sample --no-default-features --features project-create,project-export --bin orr_new_arena --bin arena --bin orr_export_arena
+          mkdir "$RUNNER_TEMP/new-arena-tools"
+          for binary in orr_new_arena arena orr_export_arena; do
+            cp "target/release/$binary" "$RUNNER_TEMP/new-arena-tools/$binary"
+            test -x "$RUNNER_TEMP/new-arena-tools/$binary"
+            cmp "target/release/$binary" "$RUNNER_TEMP/new-arena-tools/$binary"
+          done
+          sha256sum "$RUNNER_TEMP/new-arena-tools/orr_new_arena" "$RUNNER_TEMP/new-arena-tools/arena" "$RUNNER_TEMP/new-arena-tools/orr_export_arena" > "$RUNNER_TEMP/new-arena-tools.sha256"
+          cat "$RUNNER_TEMP/new-arena-tools.sha256"
+      - name: Mandatory generated Arena CPU and GPU source-hidden workflows
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Mask the complete build workspace, including neighboring checkouts.
+          export ORR_EXPORT_HIDE_ROOT="$(cd "$GITHUB_WORKSPACE/.." && pwd -P)"
+          test -x "$ORR_NEW_ARENA_BIN"
+          test -x "$ORR_NEW_ARENA_RUNTIME"
+          test -x "$ORR_NEW_ARENA_EXPORTER"
+          sha256sum --check "$RUNNER_TEMP/new-arena-tools.sha256"
+          mkdir "$ORR_PROJECT_CAPTURE_DIR"
+          for kind in cpu gpu; do
+            name="generated_arena_${kind}_workflow"
+            cargo test --locked --release -p orr_editor --no-default-features --features sprites --test new_arena_workflow "$name" -- --ignored --exact --list > "$RUNNER_TEMP/new-arena-$kind-list.txt"
+            test "$(grep -cE '^[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-$kind-list.txt")" -eq 1
+            grep -Fx "$name: test" "$RUNNER_TEMP/new-arena-$kind-list.txt"
+            cargo test --locked --release -p orr_editor --no-default-features --features sprites --test new_arena_workflow "$name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-$kind.log"
+            grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-$kind.log"
+            grep -F "generated Arena ${kind^^} workflow passed: edited checksum 0x" "$RUNNER_TEMP/new-arena-$kind.log"
+            if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested|without source hiding|source_hiding=false|software GPU unavailable' "$RUNNER_TEMP/new-arena-$kind.log"; then exit 1; fi
+          done
+          python3 - <<'PY'
+          import os, pathlib, struct
+          root = pathlib.Path(os.environ['ORR_PROJECT_CAPTURE_DIR'])
+          expected = {
+              'generated-editor-edited.png', 'generated-editor-playing.png',
+              'generated-runtime-initial.png', 'generated-runtime-moved.png',
+              'generated-export-initial.png', 'generated-export-moved.png',
+          }
+          assert {path.name for path in root.iterdir()} == expected
+          for name in sorted(expected):
+              path = root / name
+              data = path.read_bytes()
+              assert len(data) > 33 and data[:8] == b'\x89PNG\r\n\x1a\n', path
+              assert data[12:16] == b'IHDR', path
+              width, height = struct.unpack('>II', data[16:24])
+              assert width > 0 and height > 0, path
+              print(f'{name}: {width}x{height}, {len(data)} bytes')
+          PY
+        env:
+          ORR_NEW_ARENA_BIN: ${{ runner.temp }}/new-arena-tools/orr_new_arena
+          ORR_NEW_ARENA_RUNTIME: ${{ runner.temp }}/new-arena-tools/arena
+          ORR_NEW_ARENA_EXPORTER: ${{ runner.temp }}/new-arena-tools/orr_export_arena
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_REQUIRE_GPU: "1"
+          ORR_PROJECT_CAPTURE_DIR: ${{ runner.temp }}/new-arena-captures
+      - name: Strict generator export settings and editor feature Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked -p orr_sample -p orr_editor --no-default-features --features orr_sample/project-create,orr_sample/project-export,orr_sample/player-settings,orr_sample/input-actions,orr_sample/game-ui,orr_editor/project-ui --all-targets -- -D warnings
+      - name: Upload generated Arena acceptance evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-arena-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/new-arena-captures
+            ${{ runner.temp }}/new-arena-*-list.txt
+            ${{ runner.temp }}/new-arena-*.log
+            ${{ runner.temp }}/new-arena-tools.sha256
+          if-no-files-found: error
+          retention-days: 7
       # The physics sample's headless benchmark: no window, no GPU. Runs the
       # physics game through the bridge with rollbacks (the checksum tests
       # are in `crates/orr_sample/tests/physics_e2e.rs`, run above).

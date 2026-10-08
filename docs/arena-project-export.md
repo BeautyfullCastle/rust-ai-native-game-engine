@@ -3,8 +3,9 @@
 This optional tool packages one existing schema-2 Arena project and an explicitly
 trusted, already-built Linux x86-64 runtime. It does not build game code, invoke
 Cargo, download/install packages, or create a release/network build identity.
-`#104` remains partial: templates, other targets, installers and general distribution
-compliance are separate work. [Saved Korean UI/font presets](authored-project-ui.md)
+`#104` remains partial: [one offline Arena starter](new-arena-project.md) is now
+available separately; other templates, targets, installers and general distribution
+compliance remain separate work. [Saved Korean UI/font presets](authored-project-ui.md)
 require `game-ui` in both the exporter and the supplied trusted runtime; a project-only
 runtime rejects the declared UI even for the zero-tick compatibility check.
 
