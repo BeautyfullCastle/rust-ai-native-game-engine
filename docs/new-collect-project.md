@@ -78,3 +78,49 @@ project creation. Initial workflow-test compilation and lint failures were
 repaired without suppressions; an Arena-only build disk-guard interruption was
 retained and its retry passed after verified released-cache cleanup. Required
 remote feature CI and development integration are separate gates.
+
+## Explicit authored-UI template
+
+`collect-dodge-ui-2d-v1` is a separate opt-in profile; the existing no-UI
+`collect-dodge-2d-v1` and `arena-2d-v1` output contracts do not change.
+Build the generator with `project-create,collect-ui`, then use:
+
+```sh
+orr_new_arena --output /absolute/new-game --template collect-dodge-ui-2d-v1 \
+  --seed my-authored-namespace --game-id 12345678-1234-4234-8234-123456789abc
+```
+
+Supply your own canonical UUIDv4 for a distinct game's high-score namespace.
+Reusing a UUID deliberately shares progress; a seed only namespaces authored
+entity GUIDs. Opening, copying and exporting retain the existing identity.
+The new profile namespaces entities by its own template ID and includes
+`level.ui.json`, the strict default `collect-authored-v1` document. Its actual
+Korean font is installed through `Project.install`, alongside the sprite package,
+from build-bundled allowlisted bytes. There are no downloads, generated locks,
+user font scanning, scripts, or compilation during creation.
+
+The font remains separately OFL-licensed, with unchanged OFL, copyright, corpus
+and source-manifest files in the installed/exported package closure. Only the
+exact bundled 1,891,888-byte font (pinned SHA-256
+`91c7e75ac1b54a3571a305d259a2f486b88289853baef90753506855f5c5dd08`)
+receives a per-file limit exception in this profile. Other files keep the 1 MiB
+limit, the total stays 2 MiB, and the closed profile permits at most 17 files;
+old profiles keep their 16-file limit. Ordinary transaction cleanup and atomic
+no-replace publication remain unchanged.
+
+Build the editor with `collect-ui` and sprites support; open with
+`orr_editor --collect-project /absolute/new-game`. Edit the UI text/layout through
+the existing properties controls, Undo, Save, then reopen. Runtime/export require
+`collect-ui,collect-sprites,collect-progress` (exporter also `project-export`).
+A host without UI capability rejects the declared UI rather than discarding it.
+Title Play, score/phase/best labels and Menu/Continue/Restart consume the saved
+bounded document. Menus block controls while simulation keeps ticking.
+
+This connects the existing optional UI authoring route to project generation;
+it is not a general template/plugin system, native-device qualification or full
+#94 game acceptance. Simulation remains UI/GPU/font-free. Required acceptance
+includes generator CLI and old-profile negatives, exact package/identity/byte
+closure, actual EditorApp edits/save/reopen, source-hidden read-only exported
+execution, software GPU pixel evidence, and isolated high-score save/relaunch.
+The three explicit `new_collect_ui_workflow` ignored test gates must be executed
+with `--ignored --exact`; merely compiling or listing them is not a pass.

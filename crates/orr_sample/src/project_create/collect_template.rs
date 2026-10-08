@@ -4,7 +4,7 @@ use orr_reflect::{Guid, Scene};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-pub(super) fn documents(seed: &str) -> Result<(Scene, Document), String> {
+pub(super) fn documents_for(seed: &str, template: &str) -> Result<(Scene, Document), String> {
     let mut scene = Scene::parse(
         include_str!("../../../../scenes/collect_dodge_v1.scene.yaml"),
         &crate::collect_project::types(),
@@ -43,7 +43,7 @@ pub(super) fn documents(seed: &str) -> Result<(Scene, Document), String> {
     };
     let mut digest = Sha256::new();
     digest.update(b"orrery.collect.project-create.guid.v1\0");
-    for part in [super::COLLECT_TEMPLATE, env!("CARGO_PKG_VERSION"), seed] {
+    for part in [template, env!("CARGO_PKG_VERSION"), seed] {
         digest.update((part.len() as u32).to_le_bytes());
         digest.update(part.as_bytes());
     }
@@ -69,6 +69,10 @@ pub(super) fn documents(seed: &str) -> Result<(Scene, Document), String> {
     sprites.validate()?;
     Ok((scene, sprites))
 }
-pub(super) fn readme(seed: &str, game_id: &str) -> String {
-    format!("Orrery CollectDodge starter\nTemplate: {}\nAuthoring seed: {seed}\nProgress game_id: {game_id}\n\nMove with arrow keys/WASD; collect both items before 600 ticks, avoid the hazard. Space restarts.\nEdit level.scene.yaml and level.sprites.json through the CollectDodge editor.\nThe explicit UUIDv4 is the progress namespace. Choose a fresh UUID for a new game; copying or exporting this project intentionally retains identity. The seed only namespaces authored entities.\nBuild the editor with --features collect-dodge,sprites; open with orr_editor --collect-project /absolute/project. Build the standalone collect_dodge binary with --features collect-progress,collect-sprites; run collect_dodge --project /absolute/project. Schema 3 requires a CollectDodge host with declared progress and sprite support. Linux standalone collect-progress stores completed scores in user data, never this project; editor/headless/capture do not submit scores.\nThis closed generator installs bundled MIT assets offline; no downloads, scripts or compilation.\n", super::COLLECT_TEMPLATE)
+pub(super) fn readme_for(seed: &str, game_id: &str, template: &str) -> String {
+    let mut text = format!("Orrery CollectDodge starter\nTemplate: {}\nAuthoring seed: {seed}\nProgress game_id: {game_id}\n\nMove with arrow keys/WASD; collect both items before 600 ticks, avoid the hazard. Space restarts.\nEdit level.scene.yaml and level.sprites.json through the CollectDodge editor.\nThe explicit UUIDv4 is the progress namespace. Choose a fresh UUID for a new game; copying or exporting this project intentionally retains identity. The seed only namespaces authored entities.\nBuild the editor with --features collect-dodge,sprites; open with orr_editor --collect-project /absolute/project. Build the standalone collect_dodge binary with --features collect-progress,collect-sprites; run collect_dodge --project /absolute/project. Schema 3 requires a CollectDodge host with declared progress and sprite support. Linux standalone collect-progress stores completed scores in user data, never this project; editor/headless/capture do not submit scores.\nThis closed generator installs bundled MIT assets offline; no downloads, scripts or compilation.\n", template);
+    if template == super::COLLECT_UI_TEMPLATE {
+        text.push_str("\nThis explicit UI profile also installs the separately OFL-licensed korean-game-ui font package and level.ui.json. Enable collect-ui in generator/editor/runtime; edit UI properties in the editor, then Save and reopen. Title Play, Menu/Continue, Won/Lost Restart use the existing bounded actions. Menus block controls while simulation continues ticking. Font OFL/COPYRIGHT/corpus/source manifest stay in the package closure.\n");
+    }
+    text
 }

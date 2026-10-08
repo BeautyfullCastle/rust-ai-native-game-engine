@@ -298,3 +298,43 @@ fn generator_without_collect_feature_rejects_collect_template() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("requires collect-dodge feature"));
     assert!(!output.exists());
 }
+
+#[test]
+fn collect_ui_profile_has_explicit_capability_and_identity_boundary() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let output = root.join("collect-ui");
+    let result = command(&root)
+        .arg("--output")
+        .arg(&output)
+        .args([
+            "--template",
+            "collect-dodge-ui-2d-v1",
+            "--seed",
+            "cli-ui-seed",
+            "--game-id",
+            "12345678-1234-4234-8234-123456789abc",
+        ])
+        .output()
+        .unwrap();
+    if cfg!(feature = "collect-ui") {
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(output.join("level.ui.json").is_file());
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.join("orr.project.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["entry"]["ui"]["profile"], "collect-authored-v1");
+        assert_eq!(
+            manifest["progress"]["game_id"],
+            "12345678-1234-4234-8234-123456789abc"
+        );
+    } else {
+        assert!(!result.status.success());
+        assert!(!output.exists());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("requires collect-"));
+    }
+}
