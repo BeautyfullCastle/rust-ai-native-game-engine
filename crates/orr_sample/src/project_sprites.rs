@@ -85,7 +85,7 @@ pub struct Document {
 }
 pub fn relative(path: &str) -> bool {
     !path.is_empty()
-        && !Path::new(path).is_absolute()
+        && !Path::new(path).has_root()
         && !path.contains('\\')
         && !path.contains(':')
 }
