@@ -1,10 +1,12 @@
-//! Offline creation of closed, versioned Arena and opt-in Collect starters on Linux.
+//! Offline creation of closed Arena, Collect and Room starters on Linux.
 //!
 //! Package installation and runtime admission remain the existing authorities.
 //! Publication never replaces a destination. Ordinary errors clean only the owned
 //! transaction; hostile filesystem races and power-loss durability are not claimed.
 #[cfg(feature = "collect-dodge")]
 mod collect_template;
+#[cfg(feature = "room-project")]
+mod room_template;
 mod template;
 #[cfg(test)]
 mod tests;
@@ -27,6 +29,7 @@ use std::{
 pub const TEMPLATE: &str = template::ID;
 pub const COLLECT_TEMPLATE: &str = "collect-dodge-2d-v1";
 pub const COLLECT_UI_TEMPLATE: &str = "collect-dodge-ui-2d-v1";
+pub const ROOM_TEMPLATE: &str = "room-escape-3d-v1";
 pub const MAX_SEED_BYTES: usize = 128;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
@@ -87,8 +90,12 @@ fn create_transaction(
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
     let with_ui = options.template == COLLECT_UI_TEMPLATE;
+    let with_room = options.template == ROOM_TEMPLATE;
+    if with_room && !cfg!(feature = "room-project") {
+        return Err("Room template requires room-project feature".into());
+    }
     if (progress.is_some() && options.template != COLLECT_TEMPLATE && !with_ui)
-        || (progress.is_none() && options.template != TEMPLATE)
+        || (progress.is_none() && options.template != TEMPLATE && !with_room)
     {
         return Err(format!("unsupported template; expected {TEMPLATE}"));
     }
@@ -118,7 +125,7 @@ fn create_transaction(
     fs::create_dir(&source_root).map_err(error)?;
     checkpoint("stage-created", transaction.path())?;
 
-    let (scene, sprites, manifest, scene_file, sprite_file, readme) = if let Some(progress) =
+    let (scene, sidecar_bytes, manifest, scene_file, sidecar_file, readme) = if let Some(progress) =
         progress
     {
         #[cfg(feature = "collect-dodge")]
@@ -139,7 +146,7 @@ fn create_transaction(
             let manifest = json_line(&manifest)?;
             (
                 scene,
-                sprites,
+                json_line(&sprites)?,
                 manifest,
                 "level.scene.yaml",
                 "level.sprites.json",
@@ -151,11 +158,30 @@ fn create_transaction(
             let _ = progress;
             return Err("CollectDodge template requires collect-dodge feature".into());
         }
+    } else if with_room {
+        #[cfg(feature = "room-project")]
+        {
+            let scene = room_template::scene(&options.seed)?;
+            let manifest = json_line(&serde_json::json!({"schema":2,"engine":"^0.0.1",
+                "entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json"}}))?;
+            (
+                scene,
+                Vec::new(),
+                manifest,
+                "room.scene.yaml",
+                "room.models.json",
+                room_template::readme(&options.seed),
+            )
+        }
+        #[cfg(not(feature = "room-project"))]
+        {
+            return Err("Room template requires room-project feature".into());
+        }
     } else {
         let (scene, sprites) = template::documents(&options.seed)?;
         (
             scene,
-            sprites,
+            json_line(&sprites)?,
             MANIFEST.to_vec(),
             "arena.scene.yaml",
             "arena.sprites.json",
@@ -166,9 +192,11 @@ fn create_transaction(
     let mut expected = BTreeMap::from([
         ("orr.project.json".into(), manifest),
         (scene_file.into(), scene.to_yaml().into_bytes()),
-        (sprite_file.into(), json_line(&sprites)?),
         ("README.md".into(), readme.into_bytes()),
     ]);
+    if !with_room {
+        expected.insert(sidecar_file.into(), sidecar_bytes);
+    }
     #[cfg(feature = "collect-ui")]
     if with_ui {
         expected.insert(
@@ -181,6 +209,12 @@ fn create_transaction(
         checkpoint("project-file-written", transaction.path())?;
     }
     let sources = vec![(template::PACKAGE, template::SOURCE)];
+    #[cfg(feature = "room-project")]
+    let sources = if with_room {
+        vec![(room_template::PACKAGE, room_template::SOURCE)]
+    } else {
+        sources
+    };
     #[cfg(feature = "collect-ui")]
     let sources = if with_ui {
         let mut sources = sources;
@@ -200,7 +234,14 @@ fn create_transaction(
         roots.push(root);
     }
     checkpoint("before-install", transaction.path())?;
-    let project = orr_package::Project::open(&project_root, compiled_runtime()).map_err(error)?;
+    let runtime = compiled_runtime();
+    #[cfg(feature = "room-project")]
+    let runtime = if with_room {
+        crate::room_project::compiled_runtime()
+    } else {
+        runtime
+    };
+    let project = orr_package::Project::open(&project_root, runtime).map_err(error)?;
     let lock = project
         .install(&roots)
         .map_err(|e| format!("starter package installation: {e}"))?;
@@ -242,6 +283,14 @@ fn create_transaction(
             expected.insert(format!("{object}/{relative}"), bytes.to_vec());
         }
     }
+    #[cfg(feature = "room-project")]
+    if with_room {
+        let models = room_template::models(&project, &scene)?;
+        let bytes = json_line(&models)?;
+        write_new(&project_root.join(sidecar_file), &bytes)?;
+        expected.insert(sidecar_file.into(), bytes);
+        checkpoint("room-models-written", transaction.path())?;
+    }
     fs::remove_dir_all(&source_root).map_err(error)?;
     checkpoint("before-validation", transaction.path())?;
     verify_profile_stage(&project_root, &expected, with_ui)?;
@@ -262,6 +311,18 @@ fn create_transaction(
         #[cfg(not(feature = "collect-dodge"))]
         {
             return Err("CollectDodge template requires collect-dodge feature".into());
+        }
+    } else if with_room {
+        #[cfg(feature = "room-project")]
+        {
+            crate::room_project::PreparedProject::open(&project_root)?
+                .scene()
+                .frame()
+                .checksum()
+        }
+        #[cfg(not(feature = "room-project"))]
+        {
+            return Err("Room template requires room-project feature".into());
         }
     } else {
         PreparedRuntime::open(&project_root)?
