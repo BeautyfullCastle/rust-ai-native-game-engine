@@ -4,7 +4,12 @@ on:
   workflow_dispatch:
 jobs:
   collect-audio-linux:
-    runs-on: ubuntu-latest
+    # Temporary supported bwrap profile, shared with the existing sample/navigation gates.
+    # Noble denied UID mapping; retain isolation and all GPU/native assertions.
+    # Migrate before the 2027-03-23 brownouts; 22.04 retires on 2027-04-17.
+    # Migration: https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/154
+    # https://github.com/actions/runner-images/issues/14254
+    runs-on: ubuntu-22.04
     env:
       CARGO_TERM_COLOR: never
       RUST_BACKTRACE: 1
@@ -31,6 +36,11 @@ jobs:
           printf 'Installed Lavapipe manifest: %s\n' "${lavapipe[0]}"
           cat "${lavapipe[0]}"
           printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+          # Reject an incompatible namespace environment before lengthy compilation.
+          # Never change security controls or elevate the isolated runtime to pass this gate.
+          test "$(id -u)" -ne 0
+          command -v bwrap
+          bwrap --die-with-parent --ro-bind / / -- /bin/true
       - name: Default consumers remain isolated
         run: |
           cargo check --locked --release -p orr_sample -p orr_editor
