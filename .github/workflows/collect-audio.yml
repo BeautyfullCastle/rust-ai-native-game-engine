@@ -10,7 +10,6 @@ jobs:
       RUST_BACKTRACE: 1
       CARGO_BUILD_JOBS: 2
       WGPU_BACKEND: vulkan
-      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,9 +18,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install explicit software GPU and sandbox prerequisites
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers bubblewrap
+          # Mesa packaging can use either an architecture-qualified or plain basename.
+          # Select only the installed Lavapipe manifest and fail closed on ambiguity.
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -f "${lavapipe[0]}" && test -r "${lavapipe[0]}"
+          printf 'Installed Lavapipe manifest: %s\n' "${lavapipe[0]}"
+          cat "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
       - name: Default consumers remain isolated
         run: |
           cargo check --locked --release -p orr_sample -p orr_editor

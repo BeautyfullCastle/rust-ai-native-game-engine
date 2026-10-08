@@ -1960,7 +1960,7 @@ impl Editor {
         #[cfg(feature="collect-audio")]
         {
             self.collect_audio = None;
-            let _ = self.collect_audio_source.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |value| Some(value.saturating_add(1)));
+            let _ = self.collect_audio_source.try_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |value| Some(value.saturating_add(1)));
         }
         // Reuse the source-retirement hook for camera-free authored Room UI too.
         #[cfg(feature="room-ui")]
