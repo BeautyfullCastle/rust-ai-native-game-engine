@@ -151,7 +151,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Temporary hosted-runner compatibility pin for required bubblewrap mount isolation.
+        # ubuntu-latest denied UID mapping; no security setting or isolation assertion is changed.
+        # Migrate back to a current compatible runner before 2027-04-17 (22.04 removal):
+        # https://github.com/actions/runner-images/issues/14254
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
