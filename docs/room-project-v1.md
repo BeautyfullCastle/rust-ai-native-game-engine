@@ -103,3 +103,53 @@ and richer 3D authoring. This profile does not claim those. It is separate from 
 original #2 denominator of 22 follow-ups.
 
 Plan: https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/104#issuecomment-6051552622
+
+## Explicit new-project template (Linux)
+
+Build `orr_new_arena` with `--features project-create,room-project`, then run:
+
+```sh
+orr_new_arena --output /absolute/new-room --template room-escape-3d-v1 --seed room-01
+orr_editor --room-project /absolute/new-room
+room_escape --project /absolute/new-room
+```
+
+The existing parent directory must be real and the destination absent. Creation
+uses the same bounded, atomic no-replace transaction as the Arena/Collect creator.
+The default generator has no Room support; this explicit profile requires
+`room-project`. It neither changes default features nor adds simulation APIs.
+
+The closed schema-2 starter has seven actors from the canonical Room initial
+configuration and two static `foreground.glb` bindings (player/key). It installs
+`sample-imported-scene` using `Project.install` and the complete immutable bundled
+package manifest/GLBs/CC0 license/inert generation script. Asset digest bindings
+are derived from the installed package, never invented or copied from a stale
+lock. No downloads, generator-script execution or compilation occurs. The normal
+Room admission validates the finished scene and sidecar before publication.
+
+Same template/tool/seed reproduces project bytes. A different seed changes all
+entity GUIDs while preserving sorted entity order and initial Frame checksum.
+The seed does not create game, network, settings or progress identity. Room has
+no persistent progress/save contract and rejects `--game-id`. Existing Arena and
+Collect templates retain their output contracts and bounded file limits.
+
+Move with WASD/arrows, press E near the key then the exit, and R to restart the
+admitted authored initial state. Existing initial wide framing and orbit/pan/zoom
+controls are unchanged. These procedural/static fixture meshes and flat-room
+controller do not complete the wider #94 skinned-character, HUD/audio,
+checkpoint, material and 3D authoring acceptance.
+
+Creator regressions and real workflow checks:
+
+```sh
+cargo test --release -p orr_sample --features project-create --test new_room_project
+cargo test --release -p orr_sample --features project-create,room-project --lib project_create
+cargo test --release -p orr_sample --features project-create,room-project --test new_room_project
+cargo test --release -p orr_editor --features project-create,room-project --test new_room_project
+```
+
+The dedicated ignored GPU/source-isolation workflows must be invoked explicitly
+with `--ignored --exact`, mandatory GPU/isolation flags and the trusted prebuilt
+runtime/exporter paths documented in their test files. An ignored test is not a
+pass. Focused local acceptance is distinct from exact-head required CI and shared
+development integration.

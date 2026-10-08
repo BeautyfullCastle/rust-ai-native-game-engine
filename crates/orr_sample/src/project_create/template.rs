@@ -100,6 +100,26 @@ pub(super) fn remap(
     sprites: &mut Document,
     mapping: &BTreeMap<Guid, Guid>,
 ) -> Result<(), String> {
+    remap_scene(scene, mapping)?;
+    fn guid(text: &str, mapping: &BTreeMap<Guid, Guid>) -> Result<String, String> {
+        mapping
+            .get(&Guid::parse(text)?)
+            .map(ToString::to_string)
+            .ok_or_else(|| format!("template reference has no GUID mapping: {text}"))
+    }
+    sprites.bindings = std::mem::take(&mut sprites.bindings)
+        .into_iter()
+        .map(|(old, binding)| Ok((guid(&old, mapping)?, binding)))
+        .collect::<Result<_, String>>()?;
+    sprites.camera_follow = sprites
+        .camera_follow
+        .as_deref()
+        .map(|old| guid(old, mapping))
+        .transpose()?;
+    Ok(())
+}
+
+pub(super) fn remap_scene(scene: &mut Scene, mapping: &BTreeMap<Guid, Guid>) -> Result<(), String> {
     fn guid(text: &str, mapping: &BTreeMap<Guid, Guid>) -> Result<String, String> {
         mapping
             .get(&Guid::parse(text)?)
@@ -159,14 +179,5 @@ pub(super) fn remap(
         comments.insert(key, lines);
     }
     scene.comments = comments;
-    sprites.bindings = std::mem::take(&mut sprites.bindings)
-        .into_iter()
-        .map(|(old, binding)| Ok((guid(&old, mapping)?, binding)))
-        .collect::<Result<_, String>>()?;
-    sprites.camera_follow = sprites
-        .camera_follow
-        .as_deref()
-        .map(|old| guid(old, mapping))
-        .transpose()?;
     Ok(())
 }
