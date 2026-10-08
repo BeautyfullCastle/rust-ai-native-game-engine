@@ -16,10 +16,11 @@ use kira::backend::Backend;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::sound::PlaybackState;
 use kira::track::MainTrackBuilder;
-use kira::{AudioManager, AudioManagerSettings, Capacities, Frame, Tween};
+use kira::{AudioManager, AudioManagerSettings, Capacities, Decibels, Frame, Tween};
 use orr_bridge::{BridgeEvent, EventKey, EventStatus, Lifecycle, ViewResync, ViewUpdate};
 
 mod offline;
+pub mod pcm16;
 pub use offline::OfflineBackend;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +66,27 @@ impl Clip {
             settings: StaticSoundSettings::default(),
             slice: None,
         }))
+    }
+
+    /// Set this clip instance's linear gain in thousandths (0..=1000).
+    ///
+    /// PCM remains shared and unchanged. Gain is applied by Kira's real sound
+    /// settings when the clip starts; already playing voices are unaffected.
+    pub fn with_gain_milli(mut self, gain: u16) -> Result<Self, AudioError> {
+        if gain > 1000 {
+            return Err(AudioError("clip gain must be in 0..=1000".into()));
+        }
+        let volume = if gain == 0 {
+            Decibels::SILENCE
+        } else {
+            let decibels = 20.0 * (f32::from(gain) / 1000.0).log10();
+            // Kira treats -60 dB itself as silence. Keep gain 1 audible at
+            // approximately 0.001 amplitude using the next float above -60.
+            let minimum = f32::from_bits(Decibels::SILENCE.0.to_bits() - 1);
+            Decibels(decibels.max(minimum))
+        };
+        self.0.settings = self.0.settings.volume(volume);
+        Ok(self)
     }
 }
 
@@ -234,6 +256,17 @@ impl<B: Backend> EventAudio<B> {
             .stats
             .completed
             .saturating_add((before - self.voices.len()) as u64);
+    }
+
+    /// Fade all current one-shots without forgetting their completion history,
+    /// source owner or lifecycle state. Repeated calls do not restart fades.
+    ///
+    /// For muting, also keep consuming updates while mapping cues to `None`.
+    /// This records muted events so unmuting cannot replay their confirmations.
+    /// Fading voices still count against the voice limit until reaped.
+    pub fn stop_transients(&mut self) {
+        self.stop_voices();
+        self.reap();
     }
 
     /// Stop all owned voices with the short cancel fade, forget identity history.
@@ -468,3 +501,6 @@ impl<B: Backend> Drop for EventAudio<B> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

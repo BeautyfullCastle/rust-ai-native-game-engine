@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "name": "collect-audio-v1",
+  "version": "1.0.0",
+  "engine": "^0.0.1",
+  "capabilities": [
+    "collect-audio"
+  ],
+  "dependencies": {},
+  "files": [
+    "LICENSE.txt",
+    "cooked/objects/46a3ffa90212574047f6ad40c51c5e81d5644bb4d1a232a73c42d246a78f3eb2.bin",
+    "cooked/objects/ca829e3288092ebbe47cacc91a5ff6187e0a16711e380cad2a779e50f5b0318a.bin",
+    "cooked/view.manifest.bin",
+    "generate.py",
+    "index.json",
+    "source/pickup.json",
+    "source/pickup_alt.json"
+  ]
+}

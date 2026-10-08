@@ -1,0 +1,7 @@
+{
+  "format": "orr.asset-index/1",
+  "entries": [
+    {"id":"a_0000000000003001","type":"view.impact_pcm16","schema_version":1,"source":"source/pickup.json"},
+    {"id":"a_0000000000003002","type":"view.impact_pcm16","schema_version":1,"source":"source/pickup_alt.json"}
+  ]
+}

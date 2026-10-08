@@ -1,0 +1,27 @@
+Collect audio v1: original procedural sounds
+Copyright 2026 Orrery contributors
+SPDX-License-Identifier: CC0-1.0
+
+The two audio clips, their source descriptions, generator, and generated binary
+manifests in this directory are original content made for this repository. They
+contain no sampled recordings, third-party sound effects, or external media.
+
+CC0 1.0 Universal Public Domain Dedication
+
+To the extent possible under law, the contributors have waived all copyright
+and related or neighboring rights to this content under CC0 1.0 Universal.
+You may copy, modify, distribute, redistribute, perform, and use this content,
+including commercially, without asking permission or providing attribution.
+
+Where a waiver is not legally effective, the contributors grant each recipient
+a royalty-free, worldwide, nonexclusive, irrevocable license to exercise all
+copyright and related rights in this content for any purpose, in any medium,
+for the maximum duration permitted by applicable law.
+
+The content is provided as-is, without any warranties, express or implied,
+including fitness for a particular purpose, merchantability, non-infringement,
+or absence of defects. No patent or trademark rights are waived or licensed.
+Nothing in this dedication implies endorsement of any use by a contributor.
+
+Full CC0 1.0 Universal legal terms:
+https://creativecommons.org/publicdomain/zero/1.0/legalcode

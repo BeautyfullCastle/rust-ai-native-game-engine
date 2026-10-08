@@ -228,6 +228,9 @@ pub struct ProjectEntry {
         deserialize_with = "present_ui"
     )]
     pub ui: Option<ProjectUi>,
+    /// Optional Collect-only, presentation-only audio document.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub audio: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -345,6 +348,23 @@ impl ProjectManifest {
                 {
                     return fail("terrain-point-route-3d-v1 requires schema 2 without sprites/models/camera/UI/progress");
                 }
+                if let Some(audio) = &entry.audio {
+                    portable(audio)?;
+                    if entry.game != ProjectGame::CollectDodgeV1
+                        || !matches!(self.schema, 2 | 3)
+                        || audio.contains('/') || audio.starts_with('.')
+                        || audio.eq_ignore_ascii_case("orr.project.json")
+                        || audio.eq_ignore_ascii_case("orr.packages.lock.json")
+                        || audio.eq_ignore_ascii_case(&entry.scene)
+                        || entry.sprites.as_ref().is_some_and(|p| p.eq_ignore_ascii_case(audio))
+                        || entry.models.as_ref().is_some_and(|p| p.eq_ignore_ascii_case(audio))
+                        || entry.camera.as_ref().is_some_and(|p| p.eq_ignore_ascii_case(audio))
+                        || entry.ui.as_ref().and_then(|ui| ui.document.as_ref())
+                            .is_some_and(|p| p.eq_ignore_ascii_case(audio))
+                    {
+                        return fail("audio requires a distinct root-level Collect presentation document");
+                    }
+                }
                 if let Some(ui) = &entry.ui {
                     match (entry.game, ui.profile, &ui.document) {
                         (ProjectGame::Arena, ProjectUiProfile::ArenaKoreanV1, None) => {},
@@ -377,6 +397,16 @@ impl ProjectManifest {
         }
         compatible(&self.engine, runtime)
     }
+}
+
+/// Exact owned package bytes admitted against one authoritative lock snapshot.
+/// Consumers retain this value rather than resolving paths again during playback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageSnapshot {
+    /// Exact installed orr.package.json bytes, checked against the locked metadata.
+    pub manifest_bytes: Vec<u8>,
+    pub locked: LockedPackage,
+    pub files: BTreeMap<String, Vec<u8>>,
 }
 
 pub struct Project {
@@ -512,6 +542,62 @@ impl Project {
         }
         Ok(bytes)
     }
+    /// Read a portable project-relative regular file within a caller's tighter bound.
+    /// Rejects symlink ancestors, FIFOs/devices and oversize inputs before opening.
+    pub fn read_file_bounded(&self, path: &str, limit: u64) -> Result<Vec<u8>> {
+        if !self.enforce_capabilities {
+            return fail("file loading requires a compiled host capability inventory");
+        }
+        portable(path)?;
+        if path.split('/').next().is_some_and(|part| part.eq_ignore_ascii_case(".orr")) {
+            return fail("installed package files require checked package asset admission");
+        }
+        read_bounded(&self.root.join(path), limit.min(MAX_FILE))
+    }
+
+    /// Capture exact immutable package identity and all declared bytes using one lock
+    /// read. Bounds are enforced before each allocation and cannot widen global limits.
+    /// Concurrent hostile filesystem replacement remains outside the package boundary.
+    pub fn read_package_bounded(
+        &self,
+        package: &str,
+        max_files: usize,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+    ) -> Result<PackageSnapshot> {
+        if !self.enforce_capabilities {
+            return fail("asset loading requires a compiled host capability inventory");
+        }
+        let lock = self.list()?;
+        let locked = lock.packages.get(package)
+            .ok_or_else(|| Error(format!("missing package: {package}")))?.clone();
+        if locked.files.len() > max_files.min(MAX_FILES) {
+            return fail("package exceeds consuming file-count bound");
+        }
+        let root = self.object(&locked);
+        let max_total_bytes = max_total_bytes.min(MAX_TOTAL);
+        let max_file_bytes = max_file_bytes.min(MAX_FILE);
+        let manifest_bytes = read_bounded(
+            &root.join(MANIFEST), MAX_JSON.min(max_file_bytes).min(max_total_bytes),
+        )?;
+        let stored: Manifest = serde_json::from_slice(&manifest_bytes)?;
+        if stored != locked.manifest {
+            return fail("installed manifest changed");
+        }
+        let mut total = manifest_bytes.len() as u64;
+        let mut files = BTreeMap::new();
+        for (path, expected) in &locked.files {
+            let limit = max_file_bytes.min(max_total_bytes.saturating_sub(total));
+            let bytes = read_bounded(&root.join(path), limit)?;
+            total += bytes.len() as u64;
+            if hash(&bytes) != *expected {
+                return fail(format!("installed content changed: {path}"));
+            }
+            files.insert(path.clone(), bytes);
+        }
+        Ok(PackageSnapshot { manifest_bytes, locked, files })
+    }
+
     /// Select each supplied source directly, resolving dependencies from active objects.
     pub fn install(&self, sources: &[PathBuf]) -> Result<Lock> {
         self.install_with_dependencies(sources, &[])
@@ -1898,6 +1984,57 @@ mod tests {
             r#"{"schema":4,"engine":"*","entry":42}"#,
         ] {
             assert!(serde_json::from_str::<ProjectManifest>(malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn collect_audio_metadata_is_optional_closed_and_noncolliding() {
+        let base = serde_json::json!({"schema":2,"engine":"*","entry":{
+            "game":"collect-dodge-v1","scene":"scene.yaml","audio":"collect.audio.json"
+        }});
+        let accepted = |value: serde_json::Value| {
+            serde_json::from_value::<ProjectManifest>(value)
+                .is_ok_and(|manifest| manifest.validate(&Runtime::content_only()).is_ok())
+        };
+        assert!(accepted(base.clone()));
+        let mut missing = base.clone(); missing["entry"].as_object_mut().unwrap().remove("audio");
+        assert!(accepted(missing));
+        for audio in ["scene.yaml", "SCENE.YAML", "orr.project.json", "orr.packages.lock.json",
+            "../audio.json", "sub/audio.json", ".audio.json", "NUL", ""] {
+            let mut bad = base.clone(); bad["entry"]["audio"] = audio.into(); assert!(!accepted(bad), "{audio}");
+        }
+        for game in ["arena", "room-escape-v1", "terrain-point-route-3d-v1"] {
+            let mut bad = base.clone(); bad["entry"]["game"] = game.into(); assert!(!accepted(bad));
+        }
+        for path_field in ["sprites", "models", "camera"] {
+            let mut bad = base.clone(); bad["entry"][path_field] = "COLLECT.AUDIO.JSON".into(); assert!(!accepted(bad));
+        }
+        let mut bad = base.clone(); bad["entry"]["ui"] = serde_json::json!({
+            "profile":"collect-authored-v1", "document":"COLLECT.AUDIO.JSON",
+            "font":{"package":"font", "asset":"font.otf"}
+        }); assert!(!accepted(bad));
+        let mut null = base.clone(); null["entry"]["audio"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ProjectManifest>(null).is_err());
+        let duplicate = r#"{"schema":2,"engine":"*","entry":{"game":"collect-dodge-v1","scene":"scene.yaml","audio":"audio.json","audio":"audio.json"}}"#;
+        assert!(serde_json::from_str::<ProjectManifest>(duplicate).is_err());
+        let mut progress = base;
+        progress["schema"] = 3.into();
+        progress["progress"] = serde_json::json!({"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"collect-dodge-highscore-v1"});
+        assert!(accepted(progress));
+    }
+
+    #[test]
+    fn bounded_project_file_reads_cannot_bypass_install_or_package_capabilities() {
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        fs::write(temp.path().join("view.json"), b"{}").unwrap();
+        let installer = Project::open_for_install(temp.path(), Runtime::content_only().engine_version).unwrap();
+        assert!(installer.read_file_bounded("view.json", 4096).is_err());
+        let host = Project::open(temp.path(), Runtime::content_only()).unwrap();
+        assert_eq!(host.read_file_bounded("view.json", 4096).unwrap(), b"{}");
+        for path in [".orr/packages/objects/example/file", ".ORR/packages/file"] {
+            fs::create_dir_all(temp.path().join(path).parent().unwrap()).unwrap();
+            fs::write(temp.path().join(path), b"private package bytes").unwrap();
+            assert!(host.read_file_bounded(path, 4096).unwrap_err().to_string().contains("checked package asset admission"));
         }
     }
 

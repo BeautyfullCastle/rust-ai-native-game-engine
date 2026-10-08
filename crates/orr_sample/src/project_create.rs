@@ -8,10 +8,14 @@ mod collect_template;
 #[cfg(feature = "room-project")]
 mod room_template;
 mod template;
+#[cfg(feature="collect-audio")]
+mod audio_template;
 #[cfg(feature = "navigation-project")]
 mod navigation_template;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod audio_tests;
 #[cfg(any(feature = "collect-ui", feature = "room-ui"))]
 mod ui_template;
 
@@ -31,6 +35,7 @@ use std::{
 pub const NAVIGATION_TEMPLATE: &str = "terrain-point-route-3d-v1";
 pub const TEMPLATE: &str = template::ID;
 pub const COLLECT_TEMPLATE: &str = "collect-dodge-2d-v1";
+pub const COLLECT_AUDIO_TEMPLATE: &str = "collect-dodge-audio-2d-v1";
 pub const COLLECT_UI_TEMPLATE: &str = "collect-dodge-ui-2d-v1";
 pub const ROOM_UI_TEMPLATE: &str = "room-escape-ui-3d-v1";
 pub const ROOM_TEMPLATE: &str = "room-escape-3d-v1";
@@ -73,8 +78,8 @@ pub fn create_collect(options: &CreateOptions, game_id: &str) -> Result<CreateRe
         profile: orr_package::ProgressProfile::CollectDodgeHighscoreV1,
     };
     progress.validate()?;
-    if options.template != COLLECT_TEMPLATE && options.template != COLLECT_UI_TEMPLATE {
-        return Err("expected collect-dodge-2d-v1 or collect-dodge-ui-2d-v1 template".into());
+    if options.template != COLLECT_TEMPLATE && options.template != COLLECT_UI_TEMPLATE && options.template != COLLECT_AUDIO_TEMPLATE {
+        return Err("expected collect-dodge-2d-v1, collect-dodge-ui-2d-v1 or collect-dodge-audio-2d-v1 template".into());
     }
     create_transaction(options, Some(&progress), |_, _| Ok(()), publish_no_replace)
 }
@@ -109,6 +114,8 @@ fn create_transaction(
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
+    let with_audio = options.template == COLLECT_AUDIO_TEMPLATE;
+    if with_audio && !cfg!(feature="collect-audio") { return Err("Collect audio template requires collect-audio feature".into()); }
     let with_navigation = options.template == NAVIGATION_TEMPLATE;
     if with_navigation && !cfg!(feature = "navigation-project") { return Err("Terrain point-route template requires navigation-project feature".into()); }
     let with_ui = options.template == COLLECT_UI_TEMPLATE || options.template == ROOM_UI_TEMPLATE;
@@ -116,7 +123,7 @@ fn create_transaction(
     if with_room && !cfg!(feature = "room-project") {
         return Err("Room template requires room-project feature".into());
     }
-    if (progress.is_some() && options.template != COLLECT_TEMPLATE && !with_ui)
+    if (progress.is_some() && options.template != COLLECT_TEMPLATE && !with_ui && !with_audio)
         || (progress.is_none() && options.template != TEMPLATE && !with_room && !with_navigation)
     {
         return Err(format!("unsupported template; expected {TEMPLATE}"));
@@ -166,6 +173,8 @@ fn create_transaction(
             } else {
                 manifest
             };
+            #[cfg(feature="collect-audio")]
+            let manifest = if with_audio { let mut manifest=manifest; manifest["entry"]["audio"]="level.audio.json".into(); manifest } else { manifest };
             let manifest = json_line(&manifest)?;
             (
                 scene,
@@ -241,6 +250,7 @@ fn create_transaction(
             .replace("Same template/tool/seed reproduces bytes;", "Same template/tool/seed and explicit game UUID reproduce bytes;")
             + "\nBuild with room-checkpoint. Resume loads the saved key checkpoint; New Game clears that checkpoint. Editor Play never accesses the profile. Copying this UUID shares progress; use a fresh UUID for an independent game.\n"
     } else { readme };
+    let readme = if with_audio { format!("{readme}\nPickup audio: build editor with collect-audio (add collect-audio-native for device output). Runtime needs collect-audio,collect-sprites,collect-progress; device output additionally needs collect-audio-native and --audio auto|required (default off). Use --headless --ticks 180 --hold right --audio-render-check for real no-device PCM proof. Export with orr_export_collect_audio, built with collect-audio,collect-sprites,project-export. The original pickup package is CC0; its explicit LICENSE.txt, generator and source documents are included in the installed package.\n") } else { readme };
     let entity_guids = scene.entities.keys().cloned().collect();
     let mut expected = BTreeMap::from([
         ("orr.project.json".into(), manifest),
@@ -263,6 +273,8 @@ fn create_transaction(
     if with_ui && with_room {
         expected.insert("room.ui.json".into(), crate::authored_ui::Document::default_room().to_bytes_for(crate::authored_ui::Profile::Room)?);
     }
+    #[cfg(feature="collect-audio")]
+    if with_audio { expected.insert("level.audio.json".into(),crate::collect_audio::Document::default_collect().to_bytes()?); }
     for (relative, bytes) in &expected {
         write_new(&project_root.join(relative), bytes)?;
         checkpoint("project-file-written", transaction.path())?;
@@ -282,12 +294,15 @@ fn create_transaction(
     } else {
         sources
     };
+    #[cfg(feature="collect-audio")]
+    let sources = if with_audio { let mut sources=sources; sources.push((audio_template::PACKAGE,audio_template::SOURCE)); sources } else { sources };
     let sources = if with_navigation { Vec::new() } else { sources };
     let mut roots = Vec::new();
     for (name, source) in &sources {
         let root = source_root.join(name);
         fs::create_dir(&root).map_err(error)?;
         for (relative, bytes) in *source {
+            if with_audio { fs::create_dir_all(root.join(relative).parent().ok_or("source parent missing")?).map_err(error)?; }
             write_profile_file(&root.join(relative), bytes, with_ui)?;
             checkpoint("source-file-written", transaction.path())?;
         }
@@ -303,6 +318,7 @@ fn create_transaction(
     };
     #[cfg(feature = "navigation-project")]
     let runtime = if with_navigation { crate::navigation_project::compiled_runtime() } else { runtime };
+    let runtime = if with_audio { let mut runtime=runtime; runtime.capabilities.insert("collect-audio".into()); runtime } else { runtime };
     let project = orr_package::Project::open(&project_root, runtime).map_err(error)?;
     let lock = if with_navigation { orr_package::Lock::default() } else {
         project.install(&roots).map_err(|e| format!("starter package installation: {e}"))?
@@ -355,16 +371,17 @@ fn create_transaction(
     }
     fs::remove_dir_all(&source_root).map_err(error)?;
     checkpoint("before-validation", transaction.path())?;
-    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room)?;
+    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room, with_audio)?;
     let initial_checksum = if progress.is_some() && !with_room {
         #[cfg(feature = "collect-dodge")]
         {
             use crate::collect_project::{PreparedProject, ProgressSupport, SpriteSupport};
-            PreparedProject::open_with_ui(
+            PreparedProject::open_with_audio(
                 &project_root,
                 ProgressSupport::MetadataOnly,
                 SpriteSupport::Supported,
                 with_ui,
+                with_audio,
             )?
             .scene()
             .frame()
@@ -397,7 +414,7 @@ fn create_transaction(
             .checksum()
     };
     checkpoint("before-publish", transaction.path())?;
-    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room)?;
+    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room, with_audio)?;
     // Recheck ordinary parent changes. RENAME_NOREPLACE itself closes concurrent
     // destination creation, including an empty directory or dangling symlink.
     if destination(&options.output)? != output {
@@ -500,12 +517,13 @@ fn verify_profile_stage(
     expected: &BTreeMap<String, Vec<u8>>,
     with_ui: bool,
     with_room_ui: bool,
+    with_audio: bool,
 ) -> Result<(), String> {
     let root_metadata = fs::symlink_metadata(root).map_err(error)?;
     if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
         return Err("starter stage root must be a nonsymlink directory".into());
     }
-    if expected.len() > if with_room_ui { 18 } else if with_ui { 17 } else { MAX_FILES }
+    if expected.len() > if with_audio { 32 } else if with_room_ui { 18 } else if with_ui { 17 } else { MAX_FILES }
         || expected.values().map(Vec::len).sum::<usize>() > MAX_TOTAL_BYTES
     {
         return Err("starter payload exceeds transaction limits".into());

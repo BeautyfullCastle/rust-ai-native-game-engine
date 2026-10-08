@@ -23,7 +23,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-pub const HELP: &str = "collect_dodge --project DIR [--headless --ticks 0..6000 [--hold right,up] [--capture NEW.png]]\nWindow: WASD/arrows move, Space restarts on a fresh press, Escape quits.\nHeadless directions: left,right,up,down,restart. Capture requires a software GPU adapter.";
+pub const HELP: &str = "collect_dodge --project DIR [--headless --ticks 0..6000 [--hold right,up] [--capture NEW.png]]\nAudio: --audio-render-check proves real offline PCM in headless mode. --audio off|auto|required (default off; native output requires collect-audio-native).\nWindow: WASD/arrows move, Space restarts on a fresh press, Escape quits.\nHeadless directions: left,right,up,down,restart. Capture requires a software GPU adapter.";
 #[derive(Debug)]
 pub struct Options {
     pub project: PathBuf,
@@ -31,12 +31,16 @@ pub struct Options {
     pub ticks: u32,
     pub held: CollectInput,
     pub capture: Option<PathBuf>,
+    pub audio: crate::arena_audio::AudioMode,
+    pub audio_render_check: bool,
 }
 impl Options {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut args = args.into_iter();
         let (mut project, mut ticks, mut hold, mut capture) = (None, None, None, None);
         let mut headless = false;
+        let mut audio = crate::arena_audio::AudioMode::Off;
+        let mut audio_render_check = false;
         let mut seen = BTreeSet::new();
         while let Some(arg) = args.next() {
             if !seen.insert(arg.clone()) {
@@ -47,6 +51,8 @@ impl Options {
                     project = Some(PathBuf::from(args.next().ok_or("--project requires DIR")?))
                 }
                 "--headless" => headless = true,
+                "--audio-render-check" => audio_render_check = true,
+                "--audio" => audio = args.next().ok_or("--audio requires off|auto|required")?.parse()?,
                 "--ticks" => {
                     ticks = Some(
                         args.next()
@@ -71,6 +77,9 @@ impl Options {
         if !headless && (ticks.is_some() || hold.is_some() || capture.is_some()) {
             return Err("--ticks, --hold and --capture require --headless".into());
         }
+        if audio_render_check && (!headless || !cfg!(feature="collect-audio")) { return Err("--audio-render-check needs headless and collect-audio".into()); }
+        if headless && audio != crate::arena_audio::AudioMode::Off { return Err("headless audio policy must be off (no device)".into()); }
+        if !cfg!(feature="collect-audio") && audio != crate::arena_audio::AudioMode::Off { return Err("Collect audio support is not built".into()); }
         if headless && ticks.is_none() {
             return Err("--headless requires explicit --ticks 0..6000".into());
         }
@@ -90,6 +99,8 @@ impl Options {
             ticks,
             held: hold.unwrap_or_default(),
             capture,
+            audio,
+            audio_render_check,
         })
     }
 }
@@ -147,21 +158,23 @@ pub fn run(options: Options) -> Result<(), String> {
     } else {
         crate::collect_project::ProgressSupport::Unsupported
     };
-    let project = PreparedProject::open_with_ui(
+    let project = PreparedProject::open_with_audio(
         &options.project,
         support,
         crate::collect_project::compiled_sprite_support(),
         cfg!(feature = "collect-ui"),
+        cfg!(feature = "collect-audio"),
     )?;
     if options.headless {
-        headless(
+        headless_with_audio_check(
             &project,
             options.ticks,
             options.held,
             options.capture.as_deref(),
+            options.audio_render_check,
         )
     } else {
-        run_window(project)
+        run_window_with_audio(project, options.audio)
     }
 }
 
@@ -278,6 +291,8 @@ type WindowBridge = InProc<CollectDodgeV1, crate::collect_progress_host::Progres
 #[cfg(not(all(feature = "collect-progress", target_os = "linux")))]
 type WindowBridge = LocalBridge;
 struct App {
+    #[cfg(feature="collect-audio")]
+    audio: Option<crate::collect_audio_output::Playback>,
     bridge: WindowBridge,
     #[cfg(all(feature = "collect-progress", target_os = "linux"))]
     progress: crate::collect_progress::ProgressSession,
@@ -371,6 +386,10 @@ impl App {
         #[cfg(all(feature = "collect-progress", target_os = "linux"))]
         self.persist_completed();
         let update = self.bridge.poll_view(); // Drain events, including after terminal states.
+        #[cfg(feature="collect-audio")]
+        if let Some(audio) = &mut self.audio {
+            if let Err(error) = audio.update(0, &update, |event| event.kind == game::EVENT_COLLECTED) { self.fail(event_loop, error); return; }
+        }
         if let Some(snapshot) = &update.snapshot {
             #[cfg(feature = "collect-ui")]
             if snapshot.tick() > self.keys.observed_tick
@@ -582,6 +601,8 @@ fn window_app(project: &PreparedProject) -> Result<App, String> {
     #[cfg(all(feature = "collect-progress", target_os = "linux"))]
     let progress = crate::collect_progress::ProgressSession::open(project);
     Ok(App {
+        #[cfg(feature="collect-audio")]
+        audio: project.audio().cloned().map(|p| crate::collect_audio_output::Playback::open(p,crate::arena_audio::AudioMode::Off)).transpose()?,
         bridge,
         #[cfg(all(feature = "collect-progress", target_os = "linux"))]
         progress,
@@ -602,7 +623,19 @@ fn window_app(project: &PreparedProject) -> Result<App, String> {
     })
 }
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
+    run_window_with_audio(project, crate::arena_audio::AudioMode::Off)
+}
+fn run_window_with_audio(project: PreparedProject, mode: crate::arena_audio::AudioMode) -> Result<(), String> {
     let mut app = window_app(&project)?;
+    #[cfg(feature="collect-audio")]
+    {
+        app.audio = project.audio().cloned().map(|p| crate::collect_audio_output::Playback::open(p,mode)).transpose()?;
+        if let Some(audio) = &app.audio { eprintln!("Collect audio: {}",audio.status()); }
+        else if mode == crate::arena_audio::AudioMode::Required { return Err("required audio needs an authored pickup cue".into()); }
+        else if mode == crate::arena_audio::AudioMode::Auto { eprintln!("Collect audio: unavailable: no authored pickup cue"); }
+    }
+    #[cfg(not(feature="collect-audio"))]
+    if mode != crate::arena_audio::AudioMode::Off { return Err("Collect audio support is not built".into()); }
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
@@ -614,9 +647,18 @@ pub fn headless(
     held: CollectInput,
     capture: Option<&Path>,
 ) -> Result<(), String> {
+    headless_with_audio_check(project,ticks,held,capture,false)
+}
+fn headless_with_audio_check(project: &PreparedProject, ticks:u32, held:CollectInput, capture:Option<&Path>, audio_render_check:bool) -> Result<(),String> {
     if ticks > 6000 {
         return Err("--ticks must be between 0 and 6000".into());
     }
+    #[cfg(feature="collect-audio")]
+    let mut audio = if audio_render_check { Some(crate::collect_audio_output::Playback::offline(project.audio().cloned().ok_or("audio render check requires an authored pickup cue")?)?) } else { None };
+    #[cfg(feature="collect-audio")]
+    let (mut audio_peak, mut audio_frames) = (0.0f32, 0u64);
+    #[cfg(not(feature="collect-audio"))]
+    if audio_render_check { return Err("Collect audio support is not built".into()); }
     let mut bridge = bridge(project)?;
     let initial = bridge.snapshot().ok_or("missing initial snapshot")?;
     let mut presentation = project.presentation();
@@ -630,8 +672,16 @@ pub fn headless(
         .map_err(|e| e.to_string())?;
     for _ in 0..ticks {
         bridge.step(1);
-        let _ = bridge.poll_view();
-        presentation.update(bridge.snapshot().as_ref())?;
+        let update = bridge.poll_view();
+        #[cfg(feature="collect-audio")]
+        if let Some(audio) = &mut audio {
+            audio.update(0,&update,|event|event.kind==game::EVENT_COLLECTED)?;
+            let mut pcm = [0.0;1600];
+            audio.render(&mut pcm)?;
+            for sample in pcm { if !sample.is_finite() || sample.abs()>1.0 { return Err("offline Kira output invalid".into()); } audio_peak=audio_peak.max(sample.abs()); }
+            audio_frames += 800;
+        }
+        presentation.update(update.snapshot.as_ref())?;
     }
     let snapshot = bridge.snapshot().ok_or("missing snapshot")?;
     let frame = snapshot.predicted();
@@ -641,6 +691,11 @@ pub fn headless(
         frame.checksum(),
         collect_view::title(frame)
     );
+    #[cfg(feature="collect-audio")]
+    if let Some(audio) = &audio {
+        if audio.stats().started==0 || audio_peak==0.0 { return Err("audio render check observed no audible authoritative pickup".into()); }
+        println!("collect audio: offline Kira; device=none; pickups={}; frames={audio_frames}; peak={audio_peak:.8}",audio.stats().started);
+    }
     if let Some(path) = capture {
         use orr_render::orr_rhi::{Rhi, TextureFormat, WgpuOptions};
         let gpu = Wgpu::headless(WgpuOptions {

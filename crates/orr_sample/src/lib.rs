@@ -119,3 +119,8 @@ pub mod navigation_project;
 pub mod navigation_project_view;
 #[cfg(feature = "navigation-project")]
 pub mod navigation_app;
+
+#[cfg(feature = "collect-audio")]
+pub mod collect_audio;
+#[cfg(feature = "collect-audio")]
+pub mod collect_audio_output;

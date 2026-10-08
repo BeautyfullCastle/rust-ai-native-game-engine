@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+collect-audio = ["collect-dodge", "audio", "dep:orr_asset", "dep:sha2"]
+collect-audio-native = ["collect-audio", "orr_audio/native"]
 # Closed optional host/view adapter for Frame-owned point navigation.
 navigation-project = ["project", "orr_games/navigation", "dep:orr_navigation", "dep:orr_navigation_runtime", "dep:orr_terrain", "dep:orr_terrain_view", "dep:orr_navigation_view", "dep:orr_model", "orr_render/imported-scene"]
 # Default-off Linux window checkpoint consumer; persistence stays outside simulation.
@@ -40,6 +42,7 @@ audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+orr_asset = { path = "../orr_asset", optional = true }
 orr_navigation = { path = "../orr_navigation", optional = true }
 orr_navigation_runtime = { path = "../orr_navigation_runtime", optional = true }
 orr_terrain = { path = "../orr_terrain", optional = true }
@@ -170,4 +173,10 @@ test = false
 name = "orr_new_navigation"
 path = "src/bin/orr_new_navigation.rs"
 required-features = ["navigation-project", "project-create"]
+test = false
+
+[[bin]]
+name = "orr_export_collect_audio"
+path = "src/bin/orr_export_collect_audio.rs"
+required-features = ["collect-audio", "project-export"]
 test = false

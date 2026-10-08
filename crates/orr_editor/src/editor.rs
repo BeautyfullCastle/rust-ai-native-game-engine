@@ -205,6 +205,10 @@ pub struct Editor {
     room_camera_scene: Option<std::path::PathBuf>,
     #[cfg(feature="room-ui")]
     room_ui_source: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(feature="collect-audio")]
+    collect_audio: Option<orr_sample::collect_audio_output::Playback>,
+    #[cfg(feature="collect-audio")]
+    collect_audio_source: std::sync::Arc<std::sync::atomic::AtomicU64>,
     yard_frame: crate::viewport3d::YardFrame,
     #[cfg(feature = "terrain-physics")]
     terrain_view: crate::terrain_physics::TerrainPhysicsView,
@@ -318,6 +322,8 @@ impl Editor {
             camera: Camera::new([0.0, 0.0], 20.0),
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
+            #[cfg(feature="collect-audio")] collect_audio: None,
+            #[cfg(feature="collect-audio")] collect_audio_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature="room-ui")] room_ui_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
             yard_frame: crate::viewport3d::YardFrame::default(),
@@ -1187,6 +1193,8 @@ impl Editor {
     }
 
     fn connection_lost(&mut self, err: &str) {
+        #[cfg(feature="collect-audio")]
+        if let Some(audio) = &mut self.collect_audio { audio.stop(); }
         if self.down.is_some() {
             return;
         }
@@ -1262,6 +1270,12 @@ impl Editor {
         // terminal Disconnected notification, which otherwise has no reason.
         if let Some(reason) = failure {
             self.connection_lost(&reason);
+        }
+        #[cfg(feature="collect-audio")]
+        if let Some(audio) = &mut self.collect_audio {
+            if let Err(error) = audio.update(0, &update, |event| matches!(event, crate::game::PresentationEvent::Collect(event) if event.kind == orr_sample::collect_game::EVENT_COLLECTED)) {
+                self.error(error);
+            }
         }
         self.apply_view_update(update);
         if !self.backend.bridge.is_alive() {
@@ -1932,7 +1946,22 @@ impl Editor {
     #[cfg(feature="room-ui")]
     pub(crate) fn room_ui_source_token(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> { self.room_ui_source.clone() }
 
+    #[cfg(feature="collect-audio")]
+    pub fn install_collect_audio(&mut self, prepared: orr_sample::collect_audio::PreparedAudio, mode: orr_sample::collect_audio_output::AudioMode) -> Result<(), String> {
+        if !self.game().is_collect() || !self.spec().is_local() { return Err("Collect audio requires its local authored scene".into()); }
+        self.collect_audio = Some(orr_sample::collect_audio_output::Playback::open(prepared, mode)?);
+        Ok(())
+    }
+    #[cfg(feature="collect-audio")]
+    pub fn collect_audio_mut(&mut self) -> Option<&mut orr_sample::collect_audio_output::Playback> { self.collect_audio.as_mut() }
+    #[cfg(feature="collect-audio")]
+    pub fn collect_audio_source_token(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> { self.collect_audio_source.clone() }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature="collect-audio")]
+        {
+            self.collect_audio = None;
+            let _ = self.collect_audio_source.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |value| Some(value.saturating_add(1)));
+        }
         // Reuse the source-retirement hook for camera-free authored Room UI too.
         #[cfg(feature="room-ui")]
         { let _ = self.room_ui_source.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |value| Some(value.saturating_add(1))); }

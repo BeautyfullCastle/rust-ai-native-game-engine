@@ -3484,6 +3484,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "lz4_flex",
+ "orr_asset",
  "orr_audio",
  "orr_bridge",
  "orr_ecs",

@@ -125,3 +125,6 @@ pub mod room_camera_panel;
 
 #[cfg(all(feature="room-checkpoint",target_os="linux"))]
 pub mod room_checkpoint_panel;
+
+#[cfg(feature="collect-audio")]
+pub mod collect_audio_panel;
