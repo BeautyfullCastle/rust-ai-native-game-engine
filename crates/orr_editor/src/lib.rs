@@ -128,3 +128,6 @@ pub mod room_checkpoint_panel;
 
 #[cfg(feature="collect-audio")]
 pub mod collect_audio_panel;
+
+#[cfg(feature="room-character")]
+pub mod room_character_panel;

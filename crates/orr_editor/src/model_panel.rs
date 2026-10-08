@@ -34,6 +34,7 @@ pub struct ModelPanel {
     error: Option<String>,
     reserved_scene_models: usize,
     room_identity: Option<(PathBuf, String)>,
+    room_character_enabled: bool,
 }
 impl Default for ModelPanel {
     fn default() -> Self {
@@ -56,6 +57,7 @@ impl Default for ModelPanel {
             error: None,
             reserved_scene_models: 0,
             room_identity: None,
+            room_character_enabled: false,
         }
     }
 }
@@ -66,6 +68,14 @@ impl ModelPanel {
         &mut self,
         prepared: orr_sample::room_project::PreparedModels,
     ) -> Result<(), String> {
+        let animated = prepared.document.bindings.values().any(|binding| binding.kind == ModelKind::Animated);
+        if animated && !cfg!(feature="room-character") {
+            return Err("Room animated models require explicit editor room-character support".into());
+        }
+        #[cfg(feature="room-character")]
+        if animated != prepared.character.is_some() {
+            return Err("Room animated models require an admitted character descriptor".into());
+        }
         let mut loaded = BTreeMap::new();
         for (guid, binding) in &prepared.document.bindings {
             let asset = prepared
@@ -81,6 +91,8 @@ impl ModelPanel {
         }
         let identity = (prepared.path.clone(), prepared.document.scene.clone());
         let bindings = Bindings::from_document(prepared.path, prepared.document)?;
+        #[cfg(feature="room-character")]
+        { self.room_character_enabled = prepared.character.is_some(); }
         self.room_identity = Some(identity);
         self.project = bindings
             .path
@@ -265,7 +277,7 @@ impl ModelPanel {
         if !candidate.matches_scene(&scene.to_string_lossy()) {
             return Err("Model sidecar names another scene".into());
         }
-        let loaded = Self::load_all(&candidate, self.room_identity.as_ref())?;
+        let loaded = Self::load_all(&candidate, self.room_identity.as_ref(), self.room_character_enabled)?;
         Self::validate_candidate(
             editor,
             candidate.document(),
@@ -295,19 +307,20 @@ impl ModelPanel {
     fn load_all(
         bindings: &Bindings,
         room_identity: Option<&(PathBuf, String)>,
+        character_enabled: bool,
     ) -> Result<BTreeMap<String, LoadedAsset>, String> {
         #[cfg(feature = "room-project")]
         if let Some(identity) = room_identity {
             Self::validate_room_identity(bindings, identity)?;
             let root = identity.0.parent().ok_or("Room project root missing")?;
             let project =
-                orr_package::Project::open(root, orr_sample::room_project::compiled_runtime())
+                orr_package::Project::open(root, orr_sample::room_project::compiled_runtime_with_character(character_enabled))
                     .map_err(|e| e.to_string())?;
             let before = project.verify().map_err(|e| e.to_string())?;
             let mut out = BTreeMap::new();
             let mut unique = BTreeMap::new();
             for (guid, binding) in &bindings.document().bindings {
-                if binding.kind != ModelKind::Static || binding.animation.is_some() {
+                if (binding.kind != ModelKind::Static || binding.animation.is_some()) && !character_enabled {
                     return Err("Room supports static bindings only".into());
                 }
                 let key = (binding.package.clone(), binding.asset.clone());
@@ -325,7 +338,7 @@ impl ModelPanel {
             return Ok(out);
         }
         #[cfg(not(feature = "room-project"))]
-        let _ = room_identity;
+        let _ = (room_identity, character_enabled);
         if bindings.document().bindings.len() > 256 {
             return Err("Viewport supports at most 256 model-bound entities".into());
         }
@@ -360,7 +373,7 @@ impl ModelPanel {
             );
         }
         let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
-        let loaded = Self::load_all(bindings, self.room_identity.as_ref())?;
+        let loaded = Self::load_all(bindings, self.room_identity.as_ref(), self.room_character_enabled)?;
         Self::validate_candidate(
             editor,
             bindings.document(),
@@ -380,7 +393,7 @@ impl ModelPanel {
             );
         }
         self.candidate = None;
-        if editor.game().is_room() && self.kind != ModelKind::Static {
+        if editor.game().is_room() && self.kind != ModelKind::Static && !self.room_character_enabled {
             return Err("Room v1 supports static models only".into());
         }
         let loaded = self.load_requested()?;
@@ -392,12 +405,12 @@ impl ModelPanel {
         #[cfg(feature = "room-project")]
         if let Some(identity) = &self.room_identity {
             Self::validate_room_identity(bindings, identity)?;
-            if self.kind != ModelKind::Static {
+            if self.kind != ModelKind::Static && !self.room_character_enabled {
                 return Err("Room supports static bindings only".into());
             }
             let project = orr_package::Project::open(
                 identity.0.parent().ok_or("Room root missing")?,
-                orr_sample::room_project::compiled_runtime(),
+                orr_sample::room_project::compiled_runtime_with_character(self.room_character_enabled),
             )
             .map_err(|e| e.to_string())?;
             let before = project.verify().map_err(|e| e.to_string())?;
@@ -537,7 +550,7 @@ impl ModelPanel {
         self.loaded = loaded;
         Ok(())
     }
-    pub fn save(&mut self, editor: &Editor) -> Result<(), String> {
+    pub(crate) fn validate_save(&self, editor: &Editor) -> Result<(), String> {
         if editor.game().is_room() {
             if !self.editable(editor) {
                 return Err("Room model save requires the admitted scene in Edit mode".into());
@@ -548,7 +561,7 @@ impl ModelPanel {
                 .as_ref()
                 .ok_or("Open the room project first")?;
             Self::validate_room_identity(bindings, identity)?;
-            let loaded = Self::load_all(bindings, Some(identity))?;
+            let loaded = Self::load_all(bindings, Some(identity), self.room_character_enabled)?;
             Self::validate_candidate(
                 editor,
                 bindings.document(),
@@ -556,10 +569,20 @@ impl ModelPanel {
                 self.reserved_scene_models,
             )?;
         }
-        self.bindings
-            .as_mut()
-            .ok_or("Open model bindings first")?
-            .save()
+        Ok(())
+    }
+    pub fn save(&mut self, editor: &Editor) -> Result<(), String> {
+        self.validate_save(editor)?;
+        #[cfg(feature="room-character")]
+        if let Some(character) = editor.room_character() {
+            let identity=self.room_identity.as_ref().ok_or("Room identity missing")?;
+            let root=identity.0.parent().ok_or("Room root missing")?;
+            let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(root,cfg!(feature="room-ui"),orr_sample::room_project::CheckpointSupport::MetadataOnly,true)?;
+            if prepared.character().map(|c| &c.document) != Some(character) {
+                return Err("Use Save character and model bindings for changed character clips".into());
+            }
+        }
+        self.bindings.as_mut().ok_or("Open model bindings first")?.save()
     }
     /// Sidecar undo/redo is independent of scene undo and preserves the previous
     /// valid binding/cache if restored content cannot be verified.
@@ -572,7 +595,7 @@ impl ModelPanel {
         let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
         let previous = bindings.document().clone();
         bindings.undo();
-        match Self::load_all(bindings, self.room_identity.as_ref()).and_then(|loaded| {
+        match Self::load_all(bindings, self.room_identity.as_ref(), self.room_character_enabled).and_then(|loaded| {
             Self::validate_candidate(
                 editor,
                 bindings.document(),
@@ -602,7 +625,7 @@ impl ModelPanel {
         let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
         let previous = bindings.document().clone();
         bindings.redo();
-        match Self::load_all(bindings, self.room_identity.as_ref()).and_then(|loaded| {
+        match Self::load_all(bindings, self.room_identity.as_ref(), self.room_character_enabled).and_then(|loaded| {
             Self::validate_candidate(
                 editor,
                 bindings.document(),
@@ -683,12 +706,16 @@ impl ModelPanel {
         {
             return Err("Viewport model binding limit reached".into());
         }
+        let character_enabled = {
+            #[cfg(feature="room-character")] { editor.room_character().is_some() }
+            #[cfg(not(feature="room-character"))] { false }
+        };
         if editor.game().is_room()
             && (document.bindings.is_empty()
                 || document.bindings.len() > 68
-                || document.bindings.values().any(|binding| {
+                || (!character_enabled && document.bindings.values().any(|binding| {
                     binding.kind != ModelKind::Static || binding.animation.is_some()
-                }))
+                })))
         {
             return Err("Room v1 requires1..=68 static model bindings".into());
         }
@@ -697,6 +724,10 @@ impl ModelPanel {
             orr_sample::room_project::validate_decoded_model_budget(loaded.values())?;
         }
         let mut identities = std::collections::BTreeSet::new();
+        #[cfg(feature="room-character")]
+        if let Some(character) = editor.room_character() {
+            Self::validate_room_character(editor, character, document, loaded)?;
+        }
         let mut draws = 5_usize.saturating_add(reserved_scene_models.saturating_mul(2));
         for (guid, binding) in &document.bindings {
             identities.insert((
@@ -861,6 +892,54 @@ impl ModelPanel {
             })
             .collect()
     }
+    /// Validate both presentation documents before committing a character edit.
+    #[cfg(feature="room-character")]
+    pub fn apply_character_mapping(&mut self, editor: &mut Editor, character: &orr_sample::room_character::Document) -> Result<(), String> {
+        if !self.editable(editor) { return Err("Character authoring requires coherent local Edit mode".into()); }
+        let bindings = self.bindings.as_ref().ok_or("Room model bindings missing")?;
+        let mut candidate = bindings.document().clone();
+        let binding = candidate.bindings.get_mut(&character.player).ok_or("Character player model missing")?;
+        binding.animation = Some(AnimationDescriptor { clip_index: character.searching, playback: PlaybackMode::Loop });
+        let changed = binding.clone();
+        Self::validate_room_character(editor, character, &candidate, &self.loaded)?;
+        let loaded = self.loaded.get(&character.player).ok_or("Character asset missing")?;
+        let guid = orr_reflect::Guid::parse(&character.player)?;
+        self.bindings.as_mut().unwrap().assign_validated(&[guid], &changed, loaded)?;
+        editor.install_room_character(character.clone())?;
+        Ok(())
+    }
+    #[cfg(feature = "room-character")]
+    pub fn validate_room_character(
+        editor: &Editor,
+        character: &orr_sample::room_character::Document,
+        document: &model_bindings::Document,
+        loaded: &BTreeMap<String, LoadedAsset>,
+    ) -> Result<(), String> {
+        if !editor.game().is_room() || !editor.spec().is_local() || !editor.yard_rows_coherent() {
+            return Err("Room character requires a coherent local Room snapshot".into());
+        }
+        let snapshot = editor.snapshot().ok_or("Room character requires a coherent snapshot")?;
+        let mut index = orr_reflect::SceneIndex::default();
+        for row in editor.rows() {
+            if let Some(guid) = &row.guid {
+                index.insert(guid.clone(), row.entity);
+            }
+        }
+        let assets = loaded.values().map(|asset| {
+            ((asset.package().to_owned(), asset.asset().to_owned()), asset.clone())
+        }).collect();
+        let models = orr_sample::room_project::PreparedModels {
+            // This admission is CPU-only; no filesystem path is read or written.
+            path: PathBuf::new(),
+            document: document.clone(),
+            assets,
+            character: Some(character.clone()),
+        };
+        // Use the exact runtime closure, aggregate budget and composed placement
+        // checks, including all three clips at reachable room corners. Clip edits
+        // must not save a document which the native consumer rejects on reopen.
+        orr_sample::room_view::admit_presentation(snapshot.predicted(), &index, &models)
+    }
     /// Animated bindings are sampled at an absolute time from the same
     /// immutable Yard snapshot used for body poses. Edit/Stop returns the
     /// asset's rest pose; Play tick 0 and Seek 0 sample clip time zero.
@@ -875,38 +954,65 @@ impl ModelPanel {
         let Some(snapshot) = editor.snapshot() else {
             return Ok(Vec::new());
         };
+        let room_animation = editor.game().is_room()
+            && bindings.document().bindings.values().any(|binding| binding.kind == ModelKind::Animated);
+        #[cfg(not(feature="room-character"))]
+        if room_animation { return Err("Room animated rendering requires explicit editor room-character support".into()); }
+        #[cfg(feature="room-character")]
+        let room_character = if room_animation {
+            Some(editor.room_character().ok_or("Room animated rendering requires an installed character descriptor; reopen the project")?)
+        } else { None };
         let mut placements = Vec::new();
         for (guid, binding) in &bindings.document().bindings {
             if binding.kind != ModelKind::Animated {
                 continue;
+            }
+            #[cfg(feature="room-character")]
+            if room_character.is_some_and(|character| character.player != *guid) {
+                return Err("Room animated binding differs from admitted player".into());
             }
             let Some(row) = editor
                 .rows()
                 .iter()
                 .find(|row| row.guid.as_ref().is_some_and(|g| g.to_string() == *guid))
             else {
+                if room_animation { return Err("Room character GUID is absent from the coherent scene".into()); }
                 continue;
             };
+            #[cfg(feature="room-character")]
+            if room_character.is_some()
+                && !snapshot.predicted().get::<orr_sample::room_game::RoomActor>(row.entity)
+                    .is_some_and(|actor| actor.kind == orr_sample::room_game::PLAYER) {
+                return Err("Room character GUID no longer names the current PLAYER; reopen or repair the project".into());
+            }
             let Some((_, body_pose)) = editor
                 .yard_frame()
                 .poses
                 .iter()
                 .find(|(entity, _)| *entity == row.entity)
             else {
+                if room_animation { return Err("Room character has no current generation-bearing body pose".into()); }
                 continue;
             };
             let Some(loaded) = self.loaded.get(guid) else {
+                if room_animation { return Err("Room character verified asset cache is missing".into()); }
                 continue;
             };
-            if binding.validate(loaded).is_err() {
+            if let Err(error) = binding.validate(loaded) {
+                if room_animation { return Err(format!("Room character binding/cache mismatch: {error}")); }
                 continue;
             }
             let Some(model) = loaded.animated_model().cloned() else {
+                if room_animation { return Err("Room character cache is not animated".into()); }
                 continue;
             };
             let animation = binding
                 .animation
                 .ok_or_else(|| format!("{guid}: animated binding has no clip descriptor"))?;
+            #[cfg(feature="room-character")]
+            let animation = if let Some(character) = room_character {
+                AnimationDescriptor { clip_index: character.clip(orr_sample::room_character::state(snapshot.predicted())), playback: PlaybackMode::Loop }
+            } else { animation };
             let duration = model
                 .source()
                 .clips
@@ -939,6 +1045,10 @@ impl ModelPanel {
                     .rest_pose()
                     .map_err(|e| format!("{guid}: sample rest pose: {e}"))?,
             };
+            #[cfg(feature="room-character")]
+            let pose = if let Some(character) = room_character {
+                orr_sample::room_character::sample_pose(character, &model, snapshot.predicted(), snapshot.tick_rate(), playback_time.is_none())?
+            } else { pose };
             placements.push(AnimatedPlacement {
                 entity: row.entity,
                 instance: Self::animated_instance(*body_pose, binding.transform),
@@ -1008,7 +1118,7 @@ impl ModelPanel {
                             ui.label("Model kind");
                             ui.selectable_value(&mut self.kind, ModelKind::Static, "Static");
                             #[cfg(feature = "animated-models")]
-                            if !editor.game().is_room() { ui.selectable_value(&mut self.kind, ModelKind::Animated, "Animated"); }
+                            if !editor.game().is_room() || self.room_character_enabled { ui.selectable_value(&mut self.kind, ModelKind::Animated, "Animated"); }
                         });
                         ui.horizontal(|ui| { ui.label("Package"); ui.text_edit_singleline(&mut self.package); });
                         ui.horizontal(|ui| { ui.label("Asset"); ui.text_edit_singleline(&mut self.asset); });

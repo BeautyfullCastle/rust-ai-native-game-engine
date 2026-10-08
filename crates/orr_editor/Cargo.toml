@@ -13,6 +13,7 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+room-character = ["room-project", "animated-models", "orr_sample/room-character"]
 collect-audio = ["collect-dodge", "sprites", "orr_sample/collect-audio"]
 collect-audio-native = ["collect-audio", "orr_sample/collect-audio-native"]
 navigation-project = ["navigation", "orr_sample/navigation-project"]

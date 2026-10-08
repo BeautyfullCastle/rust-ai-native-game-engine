@@ -116,14 +116,28 @@ pub fn validate_document(scene: &Scene) -> Result<(), String> {
 
 /// Explicit closed consuming-route inventory; unified animation/UI features grant no support.
 pub fn compiled_runtime() -> orr_package::Runtime {
+    compiled_runtime_with_character(false)
+}
+pub fn compiled_runtime_with_character(character_supported: bool) -> orr_package::Runtime {
     let mut runtime = orr_package::Runtime::content_only();
+    if character_supported && cfg!(feature = "room-character") { runtime.capabilities.insert("animation".into()); }
     runtime.capabilities.insert("models".into());
     runtime
 }
 pub struct PreparedModels {
+    #[cfg(feature = "room-character")]
+    pub character: Option<crate::room_character::Document>,
     pub path: PathBuf,
     pub document: Document,
     pub assets: BTreeMap<(String, String), LoadedAsset>,
+}
+#[cfg(feature = "room-character")]
+pub struct PreparedRoomCharacter {
+    pub path: PathBuf,
+    pub document: crate::room_character::Document,
+    pub bytes: Vec<u8>,
+    pub manifest_bytes: Vec<u8>,
+    pub manifest_path: PathBuf,
 }
 pub struct PreparedRoomCamera {
     pub path: PathBuf,
@@ -166,6 +180,8 @@ pub struct PreparedProject {
     #[cfg(feature = "room-ui")]
     ui: Option<PreparedRoomUi>,
     camera: Option<PreparedRoomCamera>,
+    #[cfg(feature = "room-character")]
+    character: Option<PreparedRoomCharacter>,
     root: PathBuf,
     path: PathBuf,
     scene: PreparedScene,
@@ -185,7 +201,14 @@ impl PreparedProject {
         ui_supported: bool,
         checkpoint_support: CheckpointSupport,
     ) -> Result<Self, String> {
-        let project = orr_package::Project::open(root.as_ref(), compiled_runtime())
+        Self::open_with_capabilities(root, ui_supported, checkpoint_support, false)
+    }
+    /// Consumer support is explicit; unified dependencies cannot enable character admission.
+    pub fn open_with_capabilities(
+        root: impl AsRef<Path>, ui_supported: bool,
+        checkpoint_support: CheckpointSupport, character_supported: bool,
+    ) -> Result<Self, String> {
+        let project = orr_package::Project::open(root.as_ref(), compiled_runtime_with_character(character_supported))
             .map_err(|e| e.to_string())?;
         let manifest = project.manifest().ok_or("room project manifest missing")?;
         let manifest_path = project.root().join("orr.project.json");
@@ -196,6 +219,9 @@ impl PreparedProject {
             return Err("room manifest changed during admission; retry".into());
         }
         let entry = manifest.entry.as_ref().ok_or("room entry missing")?;
+        if entry.character.is_some() && !(character_supported && cfg!(feature = "room-character")) {
+            return Err("room character requires explicit character consumer support".into());
+        }
         let checkpoint = match (manifest.schema, &manifest.progress, checkpoint_support) {
             (2, None, _) => None,
             (4, Some(progress), CheckpointSupport::MetadataOnly)
@@ -296,6 +322,14 @@ impl PreparedProject {
         } else {
             None
         };
+        #[cfg(feature = "room-character")]
+        let character = entry.character.as_ref().map(|relative| {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, crate::room_character::MAX_BYTES as u64)?;
+            let document = crate::room_character::Document::parse(&bytes)?;
+            Ok::<_, String>(PreparedRoomCharacter { path, document, bytes,
+                manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone() })
+        }).transpose()?;
         let models_relative = entry.models.as_ref().ok_or("room model sidecar missing")?;
         // First profile places the existing sidecar at the root. Its local hints
         // cannot redirect project identity or escape the admitted root.
@@ -324,7 +358,8 @@ impl PreparedProject {
             if scene.index.entity(&guid).is_none() {
                 return Err("room model binding GUID is absent from scene".into());
             }
-            if binding.kind != ModelKind::Static || binding.animation.is_some() {
+            if (binding.kind != ModelKind::Static || binding.animation.is_some())
+                && !(character_supported && entry.character.is_some() && cfg!(feature = "room-character")) {
                 return Err("room v1 supports explicit static model bindings only".into());
             }
             let key = (binding.package.clone(), binding.asset.clone());
@@ -347,7 +382,13 @@ impl PreparedProject {
         if before != after {
             return Err("room active lock changed during admission; retry".into());
         }
+        #[cfg(feature = "room-character")]
+        if let Some(character) = &character {
+            character.document.validate_bindings(orr_bridge::FrameView::of(scene.frame()), scene.index(), &document, &assets)?;
+        }
         let models = PreparedModels {
+            #[cfg(feature = "room-character")]
+            character: character.as_ref().map(|c| c.document.clone()),
             path: model_path,
             document,
             assets,
@@ -366,6 +407,8 @@ impl PreparedProject {
             #[cfg(feature = "room-ui")]
             ui,
             camera,
+            #[cfg(feature = "room-character")]
+            character,
             root: project.root().to_path_buf(),
             path,
             scene,
@@ -386,6 +429,10 @@ impl PreparedProject {
     pub fn checkpoint(&self) -> Option<&orr_package::ProjectProgress> {
         self.checkpoint.as_ref()
     }
+    #[cfg(feature = "room-character")]
+    pub fn character(&self) -> Option<&PreparedRoomCharacter> { self.character.as_ref() }
+    #[cfg(feature = "room-character")]
+    pub fn take_character(&mut self) -> Option<PreparedRoomCharacter> { self.character.take() }
     pub fn camera(&self) -> Option<&PreparedRoomCamera> {
         self.camera.as_ref()
     }
@@ -421,6 +468,13 @@ pub fn validate_decoded_model_budget<'a>(
         }
         if identities.len() > MAX_MODEL_ASSETS {
             return Err("room model asset limit exceeded".into());
+        }
+        #[cfg(feature = "room-character")]
+        if let Some(model) = asset.animated_model() {
+            decoded = decoded.checked_add(crate::room_character::decoded_model_bytes(model)?)
+                .ok_or("room model aggregate overflow")?;
+            if decoded > MAX_DECODED_MODEL_BYTES { return Err("room aggregate decoded model limit exceeded".into()); }
+            continue;
         }
         let model = asset.static_model().ok_or("room requires static model")?;
         let source = model.source();

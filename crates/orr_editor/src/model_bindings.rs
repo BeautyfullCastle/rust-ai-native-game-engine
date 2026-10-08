@@ -102,6 +102,10 @@ impl Bindings {
         &self.document
     }
 
+    #[cfg(feature="room-character")]
+    pub(crate) fn saved_document(&self) -> &Document { &self.saved }
+    #[cfg(feature="room-character")]
+    pub(crate) fn mark_current_saved(&mut self) { self.saved = self.document.clone(); }
     pub fn dirty(&self) -> bool {
         self.document != self.saved || !self.path.exists()
     }

@@ -16,7 +16,7 @@ impl Profile {
     pub fn runtime(self) -> orr_package::Runtime {
         match self {
             #[cfg(feature = "room-project")]
-            Self::Room => crate::room_project::compiled_runtime(),
+            Self::Room => crate::room_project::compiled_runtime_with_character(cfg!(feature = "room-character")),
             #[cfg(feature = "navigation-project")]
             Self::Navigation => crate::navigation_project::compiled_runtime(),
             Self::Arena => crate::project_runtime::compiled_runtime(),
@@ -94,7 +94,7 @@ impl Prepared {
     pub fn open(root: &Path, profile: Profile) -> Result<Self, String> {
         match profile {
             #[cfg(feature = "room-project")]
-            Profile::Room => crate::room_project::PreparedProject::open_with_options(
+            Profile::Room => crate::room_project::PreparedProject::open_with_capabilities(
                 root,
                 cfg!(feature = "room-ui"),
                 if cfg!(all(feature = "room-checkpoint", target_os = "linux")) {
@@ -102,6 +102,7 @@ impl Prepared {
                 } else {
                     crate::room_project::CheckpointSupport::Disabled
                 },
+                cfg!(feature = "room-character"),
             )
             .map(|value| Self::Room(Box::new(value))),
             #[cfg(feature = "navigation-project")]

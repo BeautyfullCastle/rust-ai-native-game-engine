@@ -205,6 +205,9 @@ pub enum ProjectGame {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectEntry {
+    /// Optional Room-only state-selected character clip document.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub character: Option<String>,
     /// Optional Room-only presentation camera document.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
     pub camera: Option<String>,
@@ -320,6 +323,18 @@ impl ProjectManifest {
                     if sprites.eq_ignore_ascii_case(&entry.scene) {
                         return fail("entry scene and sprite sidecar must be different files");
                     }
+                }
+                if let Some(character) = &entry.character {
+                    portable(character)?;
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 4)
+                        || character.contains('/') || character.starts_with('.')
+                        || character.eq_ignore_ascii_case("orr.project.json")
+                        || character.eq_ignore_ascii_case("orr.packages.lock.json")
+                        || character.eq_ignore_ascii_case(&entry.scene)
+                        || entry.models.as_ref().is_some_and(|p| p.eq_ignore_ascii_case(character))
+                        || entry.camera.as_ref().is_some_and(|p| p.eq_ignore_ascii_case(character))
+                        || entry.ui.as_ref().and_then(|ui| ui.document.as_ref()).is_some_and(|p| p.eq_ignore_ascii_case(character))
+                    { return fail("character requires a distinct root-level Room presentation document"); }
                 }
                 if let Some(camera) = &entry.camera {
                     portable(camera)?;

@@ -116,7 +116,7 @@ fn step(sim: &mut Simulation<RoomEscapeV1>, input: RoomInput) {
     sim.step(&inputs);
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let project = PreparedProject::open_with_options(
+    let project = PreparedProject::open_with_capabilities(
         &options.project,
         cfg!(feature = "room-ui"),
         if cfg!(all(feature = "room-checkpoint", target_os = "linux")) {
@@ -124,6 +124,7 @@ pub fn run(options: Options) -> Result<(), String> {
         } else {
             crate::room_project::CheckpointSupport::Disabled
         },
+        cfg!(feature = "room-character"),
     )?;
     if options.headless {
         headless(
@@ -1315,3 +1316,7 @@ mod room_pointer_capture_tests {
 ))]
 #[path = "room_checkpoint_acceptance_tests.rs"]
 mod room_checkpoint_acceptance_tests;
+
+#[cfg(all(test, feature = "room-character"))]
+#[path = "room_character_app_tests.rs"]
+mod character_acceptance_tests;
