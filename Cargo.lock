@@ -3492,8 +3492,11 @@ dependencies = [
  "orr_web",
  "png 0.17.16",
  "png 0.18.1",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "ttf-parser",
  "winit",
 ]
