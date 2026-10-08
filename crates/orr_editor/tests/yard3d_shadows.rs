@@ -147,7 +147,7 @@ fn save(name: &str, size: (u32, u32), rgba: &[u8]) {
         let mut file =
             std::fs::File::create(Path::new(&directory).join(format!("{name}.ppm"))).unwrap();
         write!(file, "P6\n{} {}\n255\n", size.0, size.1).unwrap();
-        for pixel in rgba.chunks_exact(4) {
+        for pixel in rgba.as_chunks::<4>().0.iter() {
             file.write_all(&pixel[..3]).unwrap();
         }
     }
@@ -208,9 +208,9 @@ fn capture(
         .unwrap();
     let unshadowed = reference.read_rgba8();
     let changed = shadowed
-        .chunks_exact(4)
-        .zip(unshadowed.chunks_exact(4))
-        .filter(|(on, off)| darkened(on, off))
+        .as_chunks::<4>().0.iter()
+        .zip(unshadowed.as_chunks::<4>().0.iter())
+        .filter(|(on, off)| darkened(*on, *off))
         .count();
     eprintln!("{name}: {changed} shadow-darkened main-viewport pixels");
     assert!(
@@ -350,16 +350,16 @@ fn production_yard_shared_shadows_follow_coherent_pause_step_seek_stop_and_reloa
     let thirty = capture(&mut harness, &mut reference, "shadows-step30", &expected[2]);
     let moving_shadow_on_fixed_receiver = zero
         .shadowed
-        .chunks_exact(4)
-        .zip(zero.unshadowed.chunks_exact(4))
+        .as_chunks::<4>().0.iter()
+        .zip(zero.unshadowed.as_chunks::<4>().0.iter())
         .zip(
             thirty
                 .shadowed
-                .chunks_exact(4)
-                .zip(thirty.unshadowed.chunks_exact(4)),
+                .as_chunks::<4>().0.iter()
+                .zip(thirty.unshadowed.as_chunks::<4>().0.iter()),
         )
         .filter(|((on_zero, off_zero), (on_thirty, off_thirty))| {
-            off_zero == off_thirty && darkened(on_zero, off_zero) != darkened(on_thirty, off_thirty)
+            off_zero == off_thirty && darkened(*on_zero, *off_zero) != darkened(*on_thirty, *off_thirty)
         })
         .count();
     eprintln!(

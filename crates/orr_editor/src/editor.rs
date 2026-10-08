@@ -1433,7 +1433,13 @@ impl Editor {
             self.inflight.details.push(id.clone());
             self.post("proposal.get", json!({"id": id}), Pend::Detail(id));
         }
-        if !self.inflight.clients && self.last_clients.is_none_or(|t| now.duration_since(t) >= CLIENTS_EVERY) {
+        // A new periodic poll would make a settled capture appear busy between
+        // its GPU ticket and readback/encoding completion. Keep existing replies
+        // and all state refreshes flowing; only defer this timer for live tickets.
+        if !self.inflight.clients
+            && self.last_clients.is_none_or(|t| now.duration_since(t) >= CLIENTS_EVERY)
+            && !self.screenshot_validations.keys().any(|serial| self.screenshot_is_active(*serial))
+        {
             self.last_clients = Some(now);
             self.inflight.clients = true;
             let since = self.feed.last_seq;
@@ -2593,5 +2599,176 @@ mod tick_state_refresh_tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(editor.capture_snapshot_matches(wanted));
+    }
+}
+
+#[cfg(test)]
+mod screenshot_poll_tests {
+    use super::*;
+    use crate::app::EditorApp;
+    use egui::{Color32, ColorImage, Event, Pos2, Rect, ViewportId};
+    use egui_kittest::Harness;
+    use orr_remote::{Auth, ScreenshotOptions, ScreenshotService, ServerConfig};
+
+    // No renderer/readback: use the real UI pump and ERP owner with synthetic
+    // screenshot events. The native framebuffer smoke remains the GPU check.
+    fn paused_play_harness() -> (Harness<'static, EditorApp>, ErpClient) {
+        let spec = HostSpec::Local {
+            scene: default_scene_path(),
+            listen: Some(ServerConfig::new(Auth::DevNoAuth)),
+            debug_hooks: false,
+        };
+        let mut editor = Editor::start(&spec).unwrap();
+        assert!(editor.start_play());
+        editor.call("sim.step", json!({"n":20})).unwrap();
+        editor.sync();
+        assert_eq!(editor.capture_view_state().mode, ViewMode::Play);
+        assert_eq!(editor.capture_view_state().tick, 20);
+        assert!(editor.capture_view_state().paused);
+        let url = editor.erp_status().unwrap().0;
+        let mut harness = Harness::builder()
+            .with_size([960.0, 720.0])
+            .renderer(egui_kittest::LazyRenderer::Uninitialized {
+                textures_delta: Default::default(),
+                builder: None,
+            })
+            .build_eframe(move |_cc| EditorApp::new(editor, None));
+        harness.input_mut().viewports.get_mut(&ViewportId::ROOT).unwrap().inner_rect =
+            Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 720.0)));
+        harness.run_steps(3);
+        (harness, ErpClient::connect(&url, None).unwrap())
+    }
+
+    fn screenshot_command(harness: &Harness<'_, EditorApp>) -> Option<u64> {
+        harness.output().viewport_output.get(&ViewportId::ROOT)?.commands.iter().find_map(|command| {
+            let egui::ViewportCommand::Screenshot(data) = command else { return None };
+            data.data.as_ref()?.downcast_ref::<u64>().copied()
+        })
+    }
+
+    fn request_capture(harness: &mut Harness<'_, EditorApp>, agent: &mut ErpClient, timeout_ms: u64) -> (u64, u64) {
+        let id = agent.post("view.screenshot", json!({"target":"app_framebuffer", "timeout_ms":timeout_ms})).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            harness.run_steps(1);
+            if let Some(ticket) = screenshot_command(harness) {
+                assert!(!harness.state().editor.inflight.clients);
+                assert_eq!(harness.state().editor.screenshot_waiting_for(), None);
+                return (id, ticket);
+            }
+            agent.poll().unwrap();
+            assert!(agent.take_response(id).is_none(), "capture completed before issuing its screenshot ticket");
+            assert!(Instant::now() < deadline, "editor never issued a screenshot ticket");
+            std::thread::yield_now();
+        }
+    }
+
+    fn deliver_screenshot(harness: &mut Harness<'_, EditorApp>, ticket: u64) {
+        harness.input_mut().events.retain(|event| !matches!(event, Event::Screenshot { .. }));
+        harness.input_mut().events.push(Event::Screenshot {
+            viewport_id: ViewportId::ROOT,
+            user_data: egui::UserData::new(ticket),
+            image: Arc::new(ColorImage::filled([960, 720], Color32::from_rgb(24, 80, 144))),
+        });
+        harness.run_steps(1);
+    }
+
+    fn wait_response(harness: &mut Harness<'_, EditorApp>, agent: &mut ErpClient, id: u64) -> Result<J, orr_remote::RpcError> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            agent.poll().unwrap();
+            if let Some(response) = agent.take_response(id) {
+                return response;
+            }
+            harness.run_steps(1);
+            assert!(screenshot_command(harness).is_none(), "capture must finish using its original ticket");
+            assert!(Instant::now() < deadline, "screenshot response did not arrive");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn paused_capture_survives_due_client_poll_and_resumes_polling() {
+        let (mut harness, mut agent) = paused_play_harness();
+        let state = agent.call("sim.state", J::Null).unwrap();
+        let (id, ticket) = request_capture(&mut harness, &mut agent, 5000);
+        let frame_seq = harness.state().editor.capture_snapshot_seq();
+        // Force the periodic deadline between the ticket and its event. The
+        // event frame pumps first, so an eager poll leaves Pend::Clients queued
+        // exactly when capture_pass_still_current checks model readiness.
+        harness.state_mut().editor.last_clients = None;
+        deliver_screenshot(&mut harness, ticket);
+        let poll_deferred_while_encoding = harness.state().editor.last_clients.is_none();
+        let image = wait_response(&mut harness, &mut agent, id).expect("unchanged paused capture must succeed without retry");
+        assert!(poll_deferred_while_encoding, "defer the due poll while the image encodes");
+        assert_eq!(image["status"], "captured");
+        assert_eq!(image["mode"], "play");
+        assert_eq!(image["paused"], true);
+        assert_eq!(image["tick"], "20");
+        assert_eq!(image["epoch"], state["epoch"].as_u64().unwrap().to_string());
+        assert_eq!(image["checksum"], state["checksum"]);
+        assert_eq!(image["frame_seq"], frame_seq.unwrap().to_string());
+        assert_eq!(parse_capture_state(&agent.call("sim.state", J::Null).unwrap()), parse_capture_state(&state));
+        harness.run_steps(1);
+        assert!(harness.state().editor.screenshot_validations.is_empty());
+        assert!(harness.state().editor.last_clients.is_some(), "the overdue poll must resume after completion");
+    }
+
+    #[test]
+    fn paused_capture_still_rejects_sim_step_after_ticket() {
+        let (mut harness, mut agent) = paused_play_harness();
+        let before = agent.call("sim.state", J::Null).unwrap();
+        let (id, ticket) = request_capture(&mut harness, &mut agent, 5000);
+        harness.state_mut().editor.last_clients = None;
+        let changed = agent.call("sim.step", json!({"n":1})).unwrap();
+        assert_eq!(changed["head_tick"], 21);
+        assert_ne!(changed["checksum"], before["checksum"]);
+        deliver_screenshot(&mut harness, ticket);
+        let error = wait_response(&mut harness, &mut agent, id).unwrap_err();
+        assert_eq!(error.kind(), Some("view_stale"), "{error}");
+    }
+
+    #[test]
+    fn client_poll_resumes_when_screenshot_validation_is_cancelled() {
+        let mut editor = Editor::open(&default_scene_path()).unwrap();
+        editor.sync();
+        let (service, owner) = ScreenshotService::pair();
+        editor.backend.screenshot_owner = Some(owner);
+        let request = service.submit(
+            ScreenshotOptions { max_width: 960, max_height: 720 },
+            editor.capture_view_state(),
+            Instant::now() + Duration::from_secs(5),
+        ).unwrap();
+        editor.begin_screenshot_validation(&request).unwrap();
+        editor.last_clients = None;
+        editor.send_refreshes();
+        assert!(!editor.inflight.clients, "defer periodic polling during validation");
+        service.cancel(request.serial);
+        // Cancellation must unblock the timer even before the UI removes the
+        // abandoned validation entry or consumes a late screenshot event.
+        assert!(editor.screenshot_validations.contains_key(&request.serial));
+        editor.send_refreshes();
+        assert!(editor.inflight.clients);
+        assert!(editor.pending.values().any(|pending| matches!(pending.kind, Pend::Clients)));
+        editor.cancel_screenshot_validation(request.serial);
+    }
+
+    #[test]
+    fn client_poll_resumes_when_screenshot_ticket_expires() {
+        let (mut harness, mut agent) = paused_play_harness();
+        let (id, ticket) = request_capture(&mut harness, &mut agent, 1000);
+        harness.state_mut().editor.last_clients = None;
+        harness.run_steps(1);
+        assert!(harness.state().editor.last_clients.is_none());
+        let error = wait_response(&mut harness, &mut agent, id).unwrap_err();
+        assert_eq!(error.kind(), Some("view_timeout"), "{error}");
+        harness.run_steps(1);
+        assert!(harness.state().editor.screenshot_validations.is_empty());
+        assert!(harness.state().editor.last_clients.is_some(), "an expired ticket must not suspend client polling");
+        // Expiry resumes polling but must retain the physical GPU permit until
+        // its exact late event arrives, as in the integration timeout coverage.
+        let busy = agent.call_err("view.screenshot", json!({"target":"app_framebuffer"}));
+        assert_eq!(busy.kind(), Some("view_busy"));
+        deliver_screenshot(&mut harness, ticket);
     }
 }

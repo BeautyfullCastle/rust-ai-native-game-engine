@@ -132,7 +132,7 @@ fn to_hex(bytes: &[u8]) -> String {
 enum Wire {
     Ws(Box<WebSocket<SocketIo>>),
     /// Newline-delimited JSON; `partial` keeps a line that a read timeout cut in two.
-    Tcp { reader: BufReader<TcpStream>, partial: Vec<u8> },
+    Tcp { reader: BufReader<DeadlineStream>, partial: Vec<u8> },
 }
 
 /// An interrupted/timed-out read yields to the caller so its existing deadline is still checked.
@@ -244,11 +244,54 @@ impl DeadlineStream {
         self.deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())
             .ok_or_else(|| std::io::ErrorKind::TimedOut.into())
     }
+
+    /// A Windows receive timeout can leave the connection indeterminate. Time out
+    /// a readiness wait instead, before starting a receive on this single-reader socket.
+    /// See https://learn.microsoft.com/en-us/windows/win32/winsock/sol-socket-socket-options.
+    #[cfg(windows)]
+    fn wait_readable(&self) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{select, WSAGetLastError, FD_SET, SOCKET_ERROR, TIMEVAL, WSAEINTR};
+
+        loop {
+            let remaining = self.remaining()?;
+            // select changes the descriptor set, so rebuild it on interruption.
+            let mut read = FD_SET { fd_count: 1, fd_array: [0; 64] };
+            read.fd_array[0] = self.tcp.as_raw_socket() as _;
+            let timeout = TIMEVAL {
+                tv_sec: remaining.as_secs().min(i32::MAX as u64) as i32,
+                tv_usec: remaining.subsec_micros() as i32,
+            };
+            // SAFETY: the socket stays owned and live, and all pointers refer to
+            // initialized storage valid for this synchronous call. Winsock was
+            // initialized by TcpStream. No other reader owns or clones this socket.
+            let result = unsafe { select(0, &mut read, std::ptr::null_mut(), std::ptr::null_mut(), &timeout) };
+            if result == SOCKET_ERROR {
+                // SAFETY: read the current thread's error immediately after select failed.
+                let code = unsafe { WSAGetLastError() };
+                if code == WSAEINTR {
+                    continue; // Retry only an interrupted wait, against the same deadline.
+                }
+                return Err(std::io::Error::from_raw_os_error(code));
+            }
+            if result == 0 {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            // Readability includes EOF/reset. recv reports those normally. With no
+            // competing reader, the ready bytes cannot be drained before our recv.
+            // Check the original deadline again, even when select found ready data.
+            self.remaining()?;
+            return Ok(());
+        }
+    }
 }
 
 impl Read for DeadlineStream {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         loop {
+            #[cfg(windows)]
+            self.wait_readable()?;
+            #[cfg(not(windows))]
             self.tcp.set_read_timeout(Some(self.remaining()?))?;
             match self.tcp.read(bytes) {
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -383,8 +426,7 @@ impl SocketSource {
             };
             Wire::Ws(Box::new(sock))
         } else {
-            stream.set_write_timeout(Some(Duration::from_secs(30))).map_err(|_| "cannot set write deadline")?;
-            Wire::Tcp { reader: BufReader::new(stream), partial: Vec::new() }
+            Wire::Tcp { reader: BufReader::new(DeadlineStream { tcp: stream, deadline: end }), partial: Vec::new() }
         };
         let mut s = SocketSource { wire, schema: String::new(), next_id: 1, queue: VecDeque::new(), target: endpoint.display, client: None };
         if let Some(t) = token {
@@ -421,6 +463,7 @@ impl SocketSource {
             },
             Wire::Tcp { reader, .. } => {
                 let s = reader.get_mut();
+                s.deadline = Instant::now() + Duration::from_secs(30);
                 s.write_all(text.as_bytes()).and_then(|()| s.write_all(b"\n")).map_err(|e| format!("send: {e}"))
             }
         }
@@ -461,7 +504,7 @@ impl SocketSource {
                 read_ws_text_or_queue(ws, &mut self.queue)
             }
             Wire::Tcp { reader, partial } => {
-                let _ = reader.get_ref().set_read_timeout(Some(timeout.max(Duration::from_millis(1))));
+                reader.get_mut().deadline = Instant::now() + timeout.max(Duration::from_millis(1));
                 match reader.read_until(b'\n', partial) {
                     Ok(0) => Err("the host closed the connection".into()),
                     Ok(_) if partial.ends_with(b"\n") => {
