@@ -3,7 +3,8 @@
 This optional adapter follows the [game core](collect-dodge-v1.md). It remains
 partial #94/#104. It includes strict admission, an ERP/editor adapter, primitive square rendering,
 a standalone window/headless runtime and a Linux trusted-runtime folder exporter.
-The full roadmap still needs sprite/UI authoring and stable high-score persistence.
+The full roadmap still needs sprite/UI authoring. The separate default-off
+[progress slice](collect-progress-v1.md) adds explicit identity and local high scores.
 
 ## Closed, initial-only schema
 
@@ -59,8 +60,9 @@ malformed/hidden fields and size/name limits, and atomic rejection preserving
 source/frame/history. Existing-game no-policy input behavior must remain intact.
 Graphical EditorApp controls and exported runtime have separate mandatory
 acceptance commands below. Software-GPU captures do not prove physical native
-window input or Windows-local acceptance. High-score persistence awaits stable
-project/save identity and is not implemented here.
+window input or Windows-local acceptance. This base adapter has no persistence;
+explicit identity and local high scores require the separate
+[progress feature](collect-progress-v1.md).
 
 ## Run and edit
 

@@ -1,5 +1,8 @@
 //! Offline, content-only packages. No script execution, downloads or Cargo edits.
 //! The application supplies its real compiled capabilities through [`Runtime`].
+mod project_identity;
+pub use project_identity::{format_game_id, ProgressProfile, ProjectProgress};
+
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -95,9 +98,9 @@ impl Runtime {
         }
     }
 }
-/// Project metadata. Schema 1 remains metadata-only; schema 2 selects exactly
-/// one saved entry scene. Neither schema selects packages: the lock is the
-/// only authority for package activation and exact versions.
+/// Project metadata. Schema 1 remains metadata-only; schema 2 selects one
+/// entry scene; schema 3 adds explicit CollectDodge progress identity. None
+/// selects packages: the lock alone controls package activation and versions.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectManifest {
@@ -109,6 +112,12 @@ pub struct ProjectManifest {
         deserialize_with = "present_entry"
     )]
     pub entry: Option<ProjectEntry>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_progress"
+    )]
+    pub progress: Option<ProjectProgress>,
 }
 
 /// Closed launch profiles supported by the project contract. This is metadata,
@@ -181,11 +190,29 @@ fn present_ui<'de, D: serde::Deserializer<'de>>(
     ProjectUi::deserialize(d).map(Some)
 }
 
+fn present_progress<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<ProjectProgress>, D::Error> {
+    ProjectProgress::deserialize(d).map(Some)
+}
+
 impl ProjectManifest {
     fn validate(&self, runtime: &Runtime) -> Result<()> {
+        match (self.schema, &self.progress) {
+            (1 | 2, None) => {}
+            (3, Some(progress)) => {
+                if let Err(message) = progress.validate() {
+                    return fail(&message);
+                }
+                if self.entry.as_ref().map(|e| e.game) != Some(ProjectGame::CollectDodgeV1) {
+                    return fail("schema-3 progress requires collect-dodge-v1");
+                }
+            }
+            _ => return fail("progress metadata requires schema 3 and schema 3 requires progress"),
+        }
         match (self.schema, &self.entry) {
             (1, None) => {}
-            (2, Some(entry)) => {
+            (2 | 3, Some(entry)) => {
                 portable(&entry.scene)?;
                 if let Some(sprites) = &entry.sprites {
                     portable(sprites)?;
@@ -199,7 +226,7 @@ impl ProjectManifest {
                 }
             }
             (1, Some(_)) => return fail("schema-1 projects cannot contain entry metadata"),
-            (2, None) => return fail("schema-2 projects require an entry"),
+            (2 | 3, None) => return fail("schema-2 projects require an entry"),
             _ => return fail("unsupported project schema"),
         }
         compatible(&self.engine, runtime)
@@ -1417,5 +1444,35 @@ mod tests {
         fs::rename(&locked, &saved).unwrap();
         symlink(saved, locked).unwrap();
         assert!(p.list().is_err());
+    }
+    #[test]
+    fn schema_three_requires_valid_explicit_collect_progress() {
+        let valid = serde_json::json!({"schema":3,"engine":"*","entry":{"game":"collect-dodge-v1","scene":"level.yaml"},"progress":{"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"collect-dodge-highscore-v1"}});
+        let runtime = Runtime::content_only();
+        let manifest: ProjectManifest = serde_json::from_value(valid.clone()).unwrap();
+        manifest.validate(&runtime).unwrap();
+        for schema in [1, 2, 4] {
+            let mut bad = valid.clone();
+            bad["schema"] = schema.into();
+            assert!(serde_json::from_value::<ProjectManifest>(bad)
+                .unwrap()
+                .validate(&runtime)
+                .is_err());
+        }
+        let mut bad = valid.clone();
+        bad.as_object_mut().unwrap().remove("progress");
+        assert!(serde_json::from_value::<ProjectManifest>(bad)
+            .unwrap()
+            .validate(&runtime)
+            .is_err());
+        let mut bad = valid.clone();
+        bad["entry"]["game"] = "arena".into();
+        assert!(serde_json::from_value::<ProjectManifest>(bad)
+            .unwrap()
+            .validate(&runtime)
+            .is_err());
+        let mut bad = valid;
+        bad["progress"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ProjectManifest>(bad).is_err());
     }
 }

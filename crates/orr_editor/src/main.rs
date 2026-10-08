@@ -35,7 +35,7 @@ fn main() {
             .unwrap_or_else(|error| fail(&format!("--project: {error}")))
     });
     #[cfg(feature = "collect-dodge")]
-    let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open(root).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
+    let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_progress(root, orr_sample::collect_project::ProgressSupport::MetadataOnly).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
