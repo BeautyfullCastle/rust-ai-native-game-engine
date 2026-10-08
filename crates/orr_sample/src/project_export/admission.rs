@@ -98,7 +98,7 @@ impl SnapshotFile {
         if before != after || before.len != bytes.len() as u64 {
             return Err(format!("export source changed while reading: {relative}"));
         }
-        Ok(Self {
+        let snapshot = Self {
             relative: relative.to_owned(),
             sha256: hash(&bytes),
             bytes,
@@ -106,7 +106,13 @@ impl SnapshotFile {
             source,
             identity: before,
             limit,
-        })
+        };
+        // Same-length writes can share timestamps on coarse-grained filesystems.
+        // Require current bytes as well as metadata before admitting the snapshot.
+        snapshot.recheck().map_err(|error| {
+            format!("export source changed while reading: {relative}: {error}")
+        })?;
+        Ok(snapshot)
     }
 
     pub fn recheck(&self) -> Result<(), String> {
@@ -620,6 +626,19 @@ mod tests {
             Ok(bytes)
         });
         assert!(result.unwrap_err().contains("changed while reading"));
+
+        // A filesystem can report identical metadata for a same-length write.
+        // Inject stale reader bytes without changing the current file at all,
+        // so rejection must also compare bytes rather than rely on timestamps.
+        assert_eq!(fs::read(&source).unwrap(), b"modified");
+        let identity = regular_metadata(&source, 64).unwrap();
+        let stale = SnapshotFile::read_with(&source, "asset", 64, "package_asset", |_| {
+            Ok(b"original".to_vec())
+        });
+        assert_eq!(regular_metadata(&source, 64).unwrap(), identity);
+        let error = stale.unwrap_err();
+        assert!(error.contains("changed while reading"), "{error}");
+        assert!(error.contains("bytes changed"), "{error}");
     }
 
     #[test]
