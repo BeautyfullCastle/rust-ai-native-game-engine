@@ -29,6 +29,10 @@ webpki-roots = "1"
 crossterm = "0.29"
 libloading = { version = "0.8", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# Readiness waits avoid cancelling ordinary receives with SO_RCVTIMEO.
+windows-sys = { version = "=0.61.2", features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # Test hosts only (an in-process ERP host with the physics demo, the Rust bridge for the reference result).

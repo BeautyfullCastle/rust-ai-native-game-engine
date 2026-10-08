@@ -255,7 +255,7 @@ fn scene_terrain_hole_reveals_entity_model_and_filled_neighbor_occludes_it() {
         .unwrap()
         .source()
         .clone();
-    for rgba in source.images[0].rgba8.chunks_exact_mut(4) {
+    for rgba in source.images[0].rgba8.as_chunks_mut::<4>().0 {
         rgba.copy_from_slice(&[220, 30, 30, 255]);
     }
     let rear = Arc::new(orr_model::StaticModel::new(source).unwrap());
