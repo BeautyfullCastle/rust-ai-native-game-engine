@@ -152,10 +152,10 @@ impl IrradiancePanel {
         if editor.game() != EditorGame::Yard3D || !editor.spec().is_local() {
             return Err("Irradiance authoring requires a local Yard3D scene".into());
         }
-        let expected = match editor.spec() {
+        let expected: &std::path::Path = match editor.spec() {
             HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => scene,
             #[cfg(feature = "sprites")]
-            HostSpec::PreparedArena { scene, .. } => &scene.path,
+            HostSpec::PreparedArena { scene, .. } => scene.path(),
             HostSpec::Remote { .. } => {
                 return Err("Remote paths are not local asset authority".into())
             }
@@ -166,10 +166,10 @@ impl IrradiancePanel {
             .as_ref()
             .map(PathBuf::from)
             .ok_or("Save the local scene first")?;
-        if &reported != expected {
+        if reported.as_path() != expected {
             return Err("Wait for the local scene path to synchronize".into());
         }
-        Ok(expected.clone())
+        Ok(expected.to_path_buf())
     }
     pub fn scene_matches(&self, editor: &Editor) -> bool {
         Self::local_scene(editor).ok().is_some_and(|scene| {

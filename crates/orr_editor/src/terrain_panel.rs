@@ -73,10 +73,10 @@ impl TerrainPanel {
         if (editor.game() != EditorGame::Yard3D && !editor.game().is_navigation()) || !editor.spec().is_local() {
             return Err("Terrain authoring requires a local Yard3D scene".into());
         }
-        let expected = match editor.spec() {
+        let expected: &std::path::Path = match editor.spec() {
             HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => scene,
             #[cfg(feature = "sprites")]
-            HostSpec::PreparedArena { scene, .. } => &scene.path,
+            HostSpec::PreparedArena { scene, .. } => scene.path(),
             HostSpec::Remote { .. } => {
                 return Err("Remote paths are not local terrain authority".into())
             }
@@ -87,14 +87,14 @@ impl TerrainPanel {
             .as_ref()
             .map(PathBuf::from)
             .ok_or("Save the local scene before opening terrain")?;
-        if &reported != expected {
+        if reported.as_path() != expected {
             return Err("Wait for the local scene path to synchronize".into());
         }
         if !expected.is_file() {
             return Err("Save the local scene to a regular file before opening terrain".into());
         }
         // The document validates the lexical path and rejects symlinks itself.
-        Ok(expected.clone())
+        Ok(expected.to_path_buf())
     }
     fn require_context(editor: &Editor) -> Result<PathBuf, String> {
         let scene = Self::local_scene(editor)?;

@@ -41,3 +41,14 @@ pub mod arena_input;
 pub mod game_ui;
 #[cfg(feature = "game-ui")]
 pub mod game_ui_gpu;
+
+#[cfg(feature = "project")]
+pub mod project_sprites;
+#[cfg(feature = "project")]
+pub mod project;
+#[cfg(feature = "project")]
+pub mod project_playback;
+#[cfg(feature = "project")]
+pub mod project_runtime;
+#[cfg(feature = "project")]
+pub mod project_compositor;

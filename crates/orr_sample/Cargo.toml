@@ -12,6 +12,7 @@ workspace = true
 
 [features]
 default = []
+project = ["sprites", "orr_reflect/scene", "dep:serde", "dep:serde_json", "dep:png17"]
 # Optional native UI needs Rust 1.95 (egui); default remains workspace MSRV.
 game-ui = ["input-actions", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:orr_package", "dep:ttf-parser"]
 input-actions = ["dep:orr_input"]
@@ -20,6 +21,9 @@ audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+png17 = { package = "png", version = "0.17", optional = true }
 ttf-parser = { version = "=0.25.1", optional = true }
 egui = { version = "=0.36.2", optional = true }
 egui-wgpu = { version = "=0.36.2", optional = true }

@@ -3490,7 +3490,10 @@ dependencies = [
  "orr_view",
  "orr_viewstream",
  "orr_web",
+ "png 0.17.16",
  "png 0.18.1",
+ "serde",
+ "serde_json",
  "ttf-parser",
  "winit",
 ]

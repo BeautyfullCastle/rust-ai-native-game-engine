@@ -77,6 +77,8 @@ struct WindowUi {
 
 enum ArenaRenderer {
     Shapes(Box<WindowRenderer<Wgpu>>),
+    #[cfg(feature = "project")]
+    Project(Box<crate::project_compositor::ProjectWindow>),
     #[cfg(feature = "sprites")]
     Sprites(Box<crate::sprite_scene::SpriteWindow>),
 }
@@ -84,6 +86,8 @@ impl ArenaRenderer {
     #[cfg(feature = "game-ui")]
     fn ui_gpu(&self) -> crate::game_ui_gpu::GpuOverlay {
         match self {
+            #[cfg(feature = "project")]
+            Self::Project(r) => crate::game_ui_gpu::GpuOverlay::new(r.rhi(), r.format()),
             Self::Shapes(r) => {
                 crate::game_ui_gpu::GpuOverlay::new(r.renderer.rhi(), r.renderer.format())
             }
@@ -94,6 +98,8 @@ impl ArenaRenderer {
     fn adapter_name(&self) -> String {
         match self {
             Self::Shapes(renderer) => renderer.adapter_name(),
+            #[cfg(feature = "project")]
+            Self::Project(renderer) => renderer.adapter_name(),
             #[cfg(feature = "sprites")]
             Self::Sprites(renderer) => renderer.adapter_name(),
         }
@@ -101,6 +107,8 @@ impl ArenaRenderer {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
             Self::Shapes(renderer) => renderer.resize(width, height),
+            #[cfg(feature = "project")]
+            Self::Project(renderer) => renderer.resize(width, height),
             #[cfg(feature = "sprites")]
             Self::Sprites(renderer) => renderer.resize(width, height),
         }
@@ -115,6 +123,8 @@ struct App<B: Bridge<Arena>> {
     ui: Option<crate::game_ui::GameUi>,
     #[cfg(feature = "sprites")]
     sprites: Option<crate::sprite_scene::SpriteScene>,
+    #[cfg(feature = "project")]
+    project: Option<crate::project_runtime::ProjectPresentation>,
     audio: ArenaAudio,
     view: ViewWorld<ArenaExtractor>,
     opts: Options,
@@ -283,6 +293,14 @@ impl<B: Bridge<Arena>> App<B> {
         }
         self.list.clear();
         extract_items(&self.items, &mut self.list);
+        #[cfg(feature = "project")]
+        if let Some(project) = &mut self.project {
+            if let Err(error) = project.update(snapshot.as_ref()) {
+                self.error = Some(error);
+                event_loop.exit();
+                return;
+            }
+        }
         #[cfg(feature = "game-ui")]
         if let (Some(ui), Some(gfx)) = (&mut self.ui, &mut self.gfx) {
             if let Some(window_ui) = &mut gfx.ui {
@@ -325,6 +343,17 @@ impl<B: Bridge<Arena>> App<B> {
         if let Some(gfx) = &mut self.gfx {
             let camera = Camera::new([0.0, 0.0], 2100.0);
             match &mut gfx.renderer {
+                #[cfg(feature = "project")]
+                ArenaRenderer::Project(renderer) => {
+                    let project = self.project.as_ref().expect("project renderer");
+                    if let Err(error) =
+                        renderer.render(project.shapes(), project.sprites(), &project.camera)
+                    {
+                        self.error = Some(error);
+                        event_loop.exit();
+                        return;
+                    }
+                }
                 ArenaRenderer::Shapes(renderer) => {
                     #[cfg(feature = "game-ui")]
                     if let (Some(window_ui), Some(ui)) = (&mut gfx.ui, &self.ui) {
@@ -462,6 +491,16 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
             }
         };
         let create_renderer = || {
+            #[cfg(feature = "project")]
+            if let Some(project) = &self.project {
+                return crate::project_compositor::ProjectWindow::new(
+                    window.clone(),
+                    self.opts.vsync,
+                    project.assets(),
+                )
+                .map(Box::new)
+                .map(ArenaRenderer::Project);
+            }
             #[cfg(feature = "sprites")]
             if let Some(scene) = &self.sprites {
                 return crate::sprite_scene::SpriteWindow::new(
@@ -649,6 +688,8 @@ pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String
         None,
         #[cfg(feature = "game-ui")]
         None,
+        #[cfg(feature = "project")]
+        None,
     )
 }
 
@@ -666,6 +707,8 @@ pub fn run_sprites<B: Bridge<Arena>>(
         Some(scene),
         #[cfg(feature = "game-ui")]
         None,
+        #[cfg(feature = "project")]
+        None,
     )
 }
 
@@ -674,6 +717,7 @@ fn run_inner<B: Bridge<Arena>>(
     opts: Options,
     #[cfg(feature = "sprites")] sprites: Option<crate::sprite_scene::SpriteScene>,
     #[cfg(feature = "game-ui")] restart: Option<Box<dyn FnMut() -> Result<B, String>>>,
+    #[cfg(feature = "project")] project: Option<crate::project_runtime::ProjectPresentation>,
 ) -> Result<Summary, String> {
     let audio = ArenaAudio::open(opts.audio)?;
     eprintln!("audio: {}", audio.status());
@@ -711,6 +755,8 @@ fn run_inner<B: Bridge<Arena>>(
         ui,
         #[cfg(feature = "sprites")]
         sprites,
+        #[cfg(feature = "project")]
+        project,
         audio,
         view: ViewWorld::new(extractor, opts.view),
         opts,
@@ -771,6 +817,8 @@ pub fn run_restartable<B: Bridge<Arena> + 'static>(
         #[cfg(feature = "sprites")]
         sprites,
         Some(Box::new(factory)),
+        #[cfg(feature = "project")]
+        None,
     )
 }
 
@@ -802,6 +850,8 @@ mod game_ui_tests {
             ui: None,
             #[cfg(feature = "sprites")]
             sprites: None,
+            #[cfg(feature = "project")]
+            project: None,
             audio: ArenaAudio::open(AudioMode::Off).unwrap(),
             view: ViewWorld::new(
                 ArenaExtractor {
@@ -864,4 +914,28 @@ mod game_ui_tests {
         app.restart = None;
         assert!(app.restart_local().unwrap_err().contains("unavailable"));
     }
+}
+
+/// Runs an admitted authored scene through the same input/window loop.
+#[cfg(feature = "project")]
+pub fn run_project<B: Bridge<Arena>>(
+    bridge: B,
+    opts: Options,
+    project: crate::project_runtime::ProjectPresentation,
+) -> Result<Summary, String> {
+    #[cfg(feature = "game-ui")]
+    if opts.game_ui_project.is_some() {
+        return Err("--project cannot be combined with --game-ui-project in this slice".into());
+    }
+    if opts.relay.is_some() {
+        return Err("--project cannot use a relay".into());
+    }
+    run_inner(
+        bridge,
+        opts,
+        None,
+        #[cfg(feature = "game-ui")]
+        None,
+        Some(project),
+    )
 }

@@ -151,7 +151,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Temporary hosted-runner compatibility pin for required bubblewrap mount isolation.
+        # ubuntu-latest denied UID mapping; no security setting or isolation assertion is changed.
+        # Migrate back to a current compatible runner before 2027-04-17 (22.04 removal):
+        # https://github.com/actions/runner-images/issues/14254
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -167,6 +171,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --all-targets
+      - name: Authored Arena CPU and standalone CLI regressions
+        run: cargo test --locked --release -p orr_sample --features project,input-actions --lib --test project_runtime --test project_cli --test input_actions -- --test-threads=1
+      - name: Authored Arena mixed UI CLI rejection regressions
+        run: cargo test --locked --release -p orr_sample --features project,input-actions,game-ui --test project_cli -- --test-threads=1
+      - name: Saved editor and authored runtime parity
+        run: cargo test --locked --release -p orr_editor --features sprites --lib --test deps --test runtime_project --test saved_project --test arena_sprites -- --test-threads=1
+      - name: Strict authored Arena mixed-feature Clippy
+        run: cargo clippy --locked -p orr_sample --features project,input-actions,game-ui --all-targets -- -D warnings
+      - name: Strict saved-project editor Clippy
+        run: cargo clippy --locked -p orr_editor --features sprites --all-targets -- -D warnings
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
       - run: cargo test -p orr_audio --release
@@ -216,6 +230,44 @@ jobs:
         run: cargo test -p orr_editor --release --test gpu
         env:
           ORR_REQUIRE_GPU: "1"
+      - name: Provision repository-hidden authored runtime proof
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+      - name: Mandatory authored runtime compositor readback
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_sample --features project,input-actions,game-ui --test project_compositor_gpu -- --test-threads=1 --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+          ORR_PROJECT_CAPTURE_DIR: ${{ runner.temp }}/authored-runtime-captures
+      - name: Copied standalone Arena binary without source repository
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --features project,input-actions --test project_cli -- --list > "$RUNNER_TEMP/project-cli-tests.txt"
+          grep -Fx 'enabled::copied_standalone_binary_runs_without_repository_paths: test' "$RUNNER_TEMP/project-cli-tests.txt"
+          cargo test --locked --release -p orr_sample --features project,input-actions --test project_cli enabled::copied_standalone_binary_runs_without_repository_paths -- --exact --test-threads=1 --nocapture
+        env:
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+      - name: Mandatory saved-project editor presentation regressions
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_editor --features sprites --test saved_project_gpu --test arena_sprites_gpu -- --test-threads=1 --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_PROJECT_CAPTURE_DIR: ${{ runner.temp }}/saved-editor-captures
+          ORR_SPRITE_CAPTURE_DIR: ${{ runner.temp }}/saved-editor-sprite-captures
+      - name: Upload authored runtime and saved editor GPU evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: authored-runtime-gpu-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/authored-runtime-captures
+            ${{ runner.temp }}/saved-editor-captures
+            ${{ runner.temp }}/saved-editor-sprite-captures
+          if-no-files-found: error
+          retention-days: 7
       # The physics sample's headless benchmark: no window, no GPU. Runs the
       # physics game through the bridge with rollbacks (the checksum tests
       # are in `crates/orr_sample/tests/physics_e2e.rs`, run above).

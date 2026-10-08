@@ -141,7 +141,7 @@ fn saved_projects_reuse_optional_sprite_packages_without_new_core_dependencies()
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(manifest.contains("default = []"));
-    assert!(manifest.contains("sprites = [\"dep:orr_sprite\", \"dep:orr_package\", \"dep:serde\", \"dep:tempfile\"]"));
+    assert!(manifest.contains("sprites = [\"dep:orr_sprite\", \"dep:orr_package\", \"dep:serde\", \"dep:tempfile\", \"orr_sample/project\"]"));
     for name in ["orr_sprite", "orr_package"] {
         let line = manifest.lines().find(|line| line.starts_with(&format!("{name} ="))).unwrap();
         assert!(line.contains("optional = true"), "{name} must remain optional");
