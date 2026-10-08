@@ -147,6 +147,7 @@ impl Document {
     }
 }
 
+#[derive(Clone)]
 pub struct Asset {
     pub document: SpriteDocument,
     pub rgba: Vec<u8>,

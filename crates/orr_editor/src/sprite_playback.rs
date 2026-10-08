@@ -46,6 +46,7 @@ fn resolve_position(rows: &[EntityRow], bodies: &[Drawable], guid: &str) -> Opti
 /// camera pose captured on entering Play if follow was actually applied.
 #[derive(Default)]
 pub struct SpritePlayback {
+    #[cfg(feature="collect-dodge")] collect_elapsed: Option<u32>,
     document: Option<Document>,
     scene: Option<PathBuf>,
     scene_matches: bool,
@@ -100,6 +101,7 @@ impl SpritePlayback {
     }
 
     fn reset_observations(&mut self) {
+        #[cfg(feature="collect-dodge")] { self.collect_elapsed = None; }
         self.sampler.reset();
         self.follow.stop();
     }
@@ -157,7 +159,7 @@ impl SpritePlayback {
         let Some(document) = document else {
             return;
         };
-        if !scene_matches || editor.game() != EditorGame::Arena || editor.previewing().is_some() {
+        if !scene_matches || (editor.game() != EditorGame::Arena && !editor.game().is_collect()) || editor.previewing().is_some() {
             self.reset_observations();
             return;
         }
@@ -189,6 +191,12 @@ impl SpritePlayback {
             self.diagnostic =
                 Some("Waiting for the scene GUID map to match the displayed snapshot".into());
             return;
+        }
+        #[cfg(feature="collect-dodge")]
+        if editor.game().is_collect() {
+            let elapsed = snapshot.predicted().singleton::<orr_sample::collect_game::CollectRun>().elapsed_ticks;
+            if self.collect_elapsed.is_some_and(|previous| elapsed < previous) { self.sampler.reset(); }
+            self.collect_elapsed = Some(elapsed);
         }
         let observation = Observation {
             seq: snapshot.seq(),

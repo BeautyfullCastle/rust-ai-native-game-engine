@@ -90,6 +90,14 @@ impl PreparedProject {
     }
 }
 
+/// Install an already-admitted Collect presentation without rereading project files.
+#[cfg(feature="collect-dodge")]
+pub fn install_collect_presentation(app: &mut EditorApp, mut project: orr_sample::collect_project::PreparedProject, ctx: &egui::Context) {
+    if let Some(sprites) = project.take_sprites() {
+        app.sprites.install_prepared(ctx, Bindings::from_document(sprites.path, sprites.document), sprites.assets);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

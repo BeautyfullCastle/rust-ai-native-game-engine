@@ -1,4 +1,5 @@
 //! Standalone, local-only authored CollectDodgeV1 player.
+use crate::project_compositor::ProjectWindow;
 use crate::{
     collect_game::{self as game, CollectDodgeV1, CollectInput},
     collect_project::PreparedProject,
@@ -7,7 +8,6 @@ use crate::{
 use orr_bridge::{Bridge, BridgeConfig, InProc, PlayHost, PlayerSlot};
 use orr_fp::FP;
 use orr_render::orr_rhi::Wgpu;
-use orr_render::{extract_items, RenderList, WindowRenderer};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -133,7 +133,11 @@ pub fn run(options: Options) -> Result<(), String> {
     } else {
         crate::collect_project::ProgressSupport::Unsupported
     };
-    let project = PreparedProject::open_with_progress(&options.project, support)?;
+    let project = PreparedProject::open_with_presentation(
+        &options.project,
+        support,
+        crate::collect_project::compiled_sprite_support(),
+    )?;
     if options.headless {
         headless(
             &project,
@@ -235,7 +239,8 @@ struct App {
     bridge: WindowBridge,
     #[cfg(all(feature = "collect-progress", target_os = "linux"))]
     progress: crate::collect_progress::ProgressSession,
-    gfx: Option<(Arc<Window>, WindowRenderer<Wgpu>)>,
+    gfx: Option<(Arc<Window>, ProjectWindow)>,
+    presentation: crate::project_runtime::ProjectPresentation,
     keys: Keys,
     last: Instant,
     error: Option<String>,
@@ -274,13 +279,22 @@ impl App {
         }
         if let (Some(snapshot), Some((window, renderer))) = (update.snapshot, self.gfx.as_mut()) {
             let frame = snapshot.predicted();
-            let mut list = RenderList::new();
-            extract_items(&collect_view::render_items(frame), &mut list);
+            if let Err(error) = self.presentation.update(Some(&snapshot)) {
+                self.fail(event_loop, error);
+                return;
+            }
             let title = collect_view::title(frame);
             #[cfg(all(feature = "collect-progress", target_os = "linux"))]
             let title = format!("{title} | {}", self.progress.status());
             window.set_title(&title);
-            renderer.render(&list, &collect_view::scene_camera(frame));
+            if let Err(error) = renderer.render(
+                self.presentation.shapes(),
+                self.presentation.sprites(),
+                &self.presentation.camera,
+            ) {
+                self.error = Some(error);
+                event_loop.exit();
+            }
         }
     }
 }
@@ -299,8 +313,7 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        let size = window.inner_size();
-        match WindowRenderer::new(window.clone(), (size.width, size.height), true) {
+        match ProjectWindow::new(window.clone(), true, self.presentation.assets()) {
             Ok(renderer) => {
                 println!("collect adapter: {}", renderer.adapter_name());
                 self.keys.focus(window.has_focus());
@@ -365,6 +378,7 @@ fn window_app(project: &PreparedProject) -> Result<App, String> {
         #[cfg(all(feature = "collect-progress", target_os = "linux"))]
         progress,
         gfx: None,
+        presentation: project.presentation(),
         keys: Keys::default(),
         last: Instant::now(),
         error: None,
@@ -388,6 +402,8 @@ pub fn headless(
     }
     let mut bridge = bridge(project)?;
     let initial = bridge.snapshot().ok_or("missing initial snapshot")?;
+    let mut presentation = project.presentation();
+    presentation.update(Some(&initial))?;
     println!(
         "collect initial checksum: 0x{:016x}",
         initial.predicted().checksum()
@@ -398,6 +414,7 @@ pub fn headless(
     for _ in 0..ticks {
         bridge.step(1);
         let _ = bridge.poll_view();
+        presentation.update(bridge.snapshot().as_ref())?;
     }
     let snapshot = bridge.snapshot().ok_or("missing snapshot")?;
     let frame = snapshot.predicted();
@@ -423,10 +440,18 @@ pub fn headless(
         let size = (1024, 1024);
         let target =
             orr_render::OffscreenTarget::new(&gpu, size.0, size.1, TextureFormat::Rgba8UnormSrgb);
-        let mut renderer = orr_render::Renderer::new(gpu.clone(), TextureFormat::Rgba8UnormSrgb);
-        let mut list = RenderList::new();
-        extract_items(&collect_view::render_items(frame), &mut list);
-        target.render(&mut renderer, &list, &collect_view::scene_camera(frame));
+        let mut compositor = crate::project_compositor::ProjectCompositor::new(
+            gpu.clone(),
+            TextureFormat::Rgba8UnormSrgb,
+            presentation.assets(),
+        )?;
+        compositor.draw(
+            target.render_view(),
+            size,
+            presentation.shapes(),
+            presentation.sprites(),
+            &presentation.camera,
+        )?;
         let rgba = target.read_rgba8();
         let file = std::fs::File::create_new(path)
             .map_err(|e| format!("capture {}: {e}", path.display()))?;

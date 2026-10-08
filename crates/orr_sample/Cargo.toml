@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Explicit consuming-route opt-in; unrelated unified sprite dependencies do not enable it.
+collect-sprites = ["collect-dodge"]
 collect-progress = ["collect-dodge", "dep:sha2", "dep:tempfile", "dep:rustix"]
 collect-dodge = ["project", "orr_games/collect-dodge"]
 default = []

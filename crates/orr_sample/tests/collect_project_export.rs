@@ -597,3 +597,27 @@ fn collect_progress_noninteractive_syscall_isolation() {
     assert!(!w.progress.host_path("isolated progress data").exists());
     assert!(!w.progress.host_path("isolated home").exists());
 }
+
+#[cfg(feature="collect-sprites")]
+#[path="common/collect_sprites.rs"]
+mod sprite_fixture;
+#[cfg(feature="collect-sprites")]
+#[test]
+#[ignore="requires exact built sprite runtime/exporter, source-hidden read-only namespace and software GPU"]
+fn collect_sprite_source_hidden_export_matches_actual_atlas() {
+    let w=Work::new();sprite_fixture::fixture(&w.project);
+    let before=snapshot(&w.project);let bundle=w.export();let bytes=snapshot(&bundle);
+    assert!(bytes.keys().any(|k|k.ends_with("view.json")));
+    assert!(bytes.keys().any(|k|k.ends_with("lantern_keeper.png")));
+    for (name,ticks,held) in [("sprite-initial",0,""),("sprite-idle",36,""),("sprite-won",16,"right")] {
+        let a=w.root.path().join("captures").join(format!("{name}-source.png"));let b=w.root.path().join("captures").join(format!("{name}-export.png"));
+        let text=w.run(&w.runtime,None,ticks,held,Some(&a));assert!(text.contains("software: true"));
+        assert_eq!(text,w.run(&bundle.join("run-collect-dodge"),Some(&bundle),ticks,held,Some(&b)));
+        assert_eq!(fs::read(&a).unwrap(),fs::read(&b).unwrap());
+        let mut reader=png::Decoder::new(std::io::BufReader::new(fs::File::open(&a).unwrap())).read_info().unwrap();let mut pixels=vec![0;reader.output_buffer_size().unwrap()];let info=reader.next_frame(&mut pixels).unwrap();
+        // Unique opaque lantern texels never appear in the primitive-square palette.
+        let atlas_pixels=pixels[..info.buffer_size()].chunks_exact(4).filter(|p|p[0].abs_diff(54)<=3&&p[1].abs_diff(154)<=3&&p[2].abs_diff(165)<=3).count();assert!(atlas_pixels>10,"installed atlas pixels absent: {name}");
+        if let Some(dest)=std::env::var_os("ORR_COLLECT_CAPTURES"){let dest=PathBuf::from(dest);fs::create_dir_all(&dest).unwrap();fs::copy(&a,dest.join(a.file_name().unwrap())).unwrap();fs::copy(&b,dest.join(b.file_name().unwrap())).unwrap();}
+    }
+    assert_eq!(snapshot(&bundle),bytes);assert_eq!(snapshot(&w.project),before);
+}
