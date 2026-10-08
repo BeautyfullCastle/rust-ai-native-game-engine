@@ -151,7 +151,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Temporary hosted-runner compatibility pin for required bubblewrap mount isolation.
+        # ubuntu-latest denied UID mapping; no security setting or isolation assertion is changed.
+        # Migrate back to a current compatible runner before 2027-04-17 (22.04 removal):
+        # https://github.com/actions/runner-images/issues/14254
+        os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -167,6 +171,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - run: cargo clippy -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --all-targets
+      - name: Authored Arena CPU and standalone CLI regressions
+        run: cargo test --locked --release -p orr_sample --features project,input-actions --lib --test project_runtime --test project_cli --test input_actions -- --test-threads=1
+      - name: Authored Arena mixed UI CLI rejection regressions
+        run: cargo test --locked --release -p orr_sample --features project,input-actions,game-ui --test project_cli -- --test-threads=1
+      - name: Saved editor and authored runtime parity
+        run: cargo test --locked --release -p orr_editor --features sprites --lib --test deps --test runtime_project --test saved_project --test arena_sprites -- --test-threads=1
+      - name: Strict authored Arena mixed-feature Clippy
+        run: cargo clippy --locked -p orr_sample --features project,input-actions,game-ui --all-targets -- -D warnings
+      - name: Strict saved-project editor Clippy
+        run: cargo clippy --locked -p orr_editor --features sprites --all-targets -- -D warnings
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
       - run: cargo test -p orr_audio --release
@@ -187,12 +201,259 @@ jobs:
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:
           ORR_REQUIRE_GPU: "1"
+      # HDR is an explicit required acceptance lane, not an optional adapter
+      # smoke test. Keep each feature configuration separate: animated-models
+      # deliberately excludes the static-only editor test via its cfg.
+      - name: Required HDR RHI software-adapter acceptance (1 test)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_rhi --features gpu-tests --test hdr_texture -- --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+      - name: Required HDR renderer acceptance (11 tests)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_render --features imported-scene,animation --test hdr -- --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+      - name: Required HDR animated editor acceptance (3 tests)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_editor --features animated-models --test yard3d_hdr -- --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+      - name: Required HDR static-only editor acceptance (1 test)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_editor --features models --test yard3d_hdr_static -- --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
       # The editor's GPU tests (viewport pixels read back, the app rendered by
       # egui_kittest's wgpu renderer) on the same software adapter.
       - if: runner.os == 'Linux'
         run: cargo test -p orr_editor --release --test gpu
         env:
           ORR_REQUIRE_GPU: "1"
+      - name: Provision repository-hidden authored runtime proof
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+      - name: Mandatory authored runtime compositor readback
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_sample --features project,input-actions,game-ui --test project_compositor_gpu -- --test-threads=1 --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+          ORR_PROJECT_CAPTURE_DIR: ${{ runner.temp }}/authored-runtime-captures
+      - name: Copied standalone Arena binary without source repository
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --features project,input-actions --test project_cli -- --list > "$RUNNER_TEMP/project-cli-tests.txt"
+          grep -Fx 'enabled::copied_standalone_binary_runs_without_repository_paths: test' "$RUNNER_TEMP/project-cli-tests.txt"
+          cargo test --locked --release -p orr_sample --features project,input-actions --test project_cli enabled::copied_standalone_binary_runs_without_repository_paths -- --exact --test-threads=1 --nocapture
+        env:
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+      - name: Mandatory saved-project editor presentation regressions
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release -p orr_editor --features sprites --test saved_project_gpu --test arena_sprites_gpu -- --test-threads=1 --nocapture
+        env:
+          ORR_REQUIRE_GPU: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_PROJECT_CAPTURE_DIR: ${{ runner.temp }}/saved-editor-captures
+          ORR_SPRITE_CAPTURE_DIR: ${{ runner.temp }}/saved-editor-sprite-captures
+      - name: Upload authored runtime and saved editor GPU evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: authored-runtime-gpu-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/authored-runtime-captures
+            ${{ runner.temp }}/saved-editor-captures
+            ${{ runner.temp }}/saved-editor-sprite-captures
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build trusted feature-disabled Arena export fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" -ne 0
+          command -v bwrap
+          bwrap --ro-bind / / -- /bin/true
+          rustc -vV | grep -Fx 'host: x86_64-unknown-linux-gnu'
+          python3 - <<'PY'
+          import os, pathlib, tempfile
+          with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as directory:
+              probe = pathlib.Path(directory) / 'permission-probe'
+              probe.write_bytes(b'permission-denial')
+              probe.chmod(0)
+              try:
+                  try:
+                      probe.read_bytes()
+                  except PermissionError:
+                      pass
+                  else:
+                      raise AssertionError('export acceptance needs real mode-000 permission denial')
+              finally:
+                  probe.chmod(0o600)
+          PY
+          cargo build --locked --release -p orr_sample --no-default-features --bin arena
+          cp target/release/arena "$RUNNER_TEMP/arena-default-no-project"
+          test -x "$RUNNER_TEMP/arena-default-no-project"
+          sha256sum "$RUNNER_TEMP/arena-default-no-project"
+          python3 - "$RUNNER_TEMP/arena-default-no-project" <<'PYELF'
+          import pathlib, struct, sys
+          with pathlib.Path(sys.argv[1]).open('rb') as binary:
+              header = binary.read(64)
+              assert header[:6] == b'\x7fELF\x02\x01'
+              assert struct.unpack_from('<H', header, 18)[0] == 62
+              table = struct.unpack_from('<Q', header, 32)[0]
+              size, count = struct.unpack_from('<HH', header, 54)
+              assert size >= 56 and count > 0
+              interpreters = []
+              for index in range(count):
+                  binary.seek(table + index * size)
+                  entry = binary.read(56)
+                  if struct.unpack_from('<I', entry)[0] == 3:
+                      offset = struct.unpack_from('<Q', entry, 8)[0]
+                      length = struct.unpack_from('<Q', entry, 32)[0]
+                      assert 1 < length <= 4096
+                      binary.seek(offset)
+                      interpreter = binary.read(length)
+                      assert interpreter.startswith(b'/') and interpreter.endswith(b'\0')
+                      interpreters.append(pathlib.Path(interpreter[:-1].decode()))
+              assert len(interpreters) == 1 and interpreters[0].is_file()
+          PYELF
+      - name: Required export admission and transaction tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib project_export:: -- --list > "$RUNNER_TEMP/export-unit-list.txt"
+          test "$(grep -cE '^project_export::[[:alnum:]_:]+: test$' "$RUNNER_TEMP/export-unit-list.txt")" -eq 25
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib project_export:: -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/export-unit-tests.log"
+          grep -F 'test result: ok. 25 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/export-unit-tests.log"
+          if grep -E 'SKIP|source-hiding acceptance not requested' "$RUNNER_TEMP/export-unit-tests.log"; then
+            echo '::error::A required export unit path was skipped'
+            exit 1
+          fi
+      - name: Mandatory exported-folder CLI isolation and GPU acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$ORR_EXPORT_DEFAULT_RUNTIME"
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --test project_export -- --list > "$RUNNER_TEMP/export-integration-list.txt"
+          test "$(grep -cE '^[[:alnum:]_]+: test$' "$RUNNER_TEMP/export-integration-list.txt")" -eq 17
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --test project_export -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/export-integration-tests.log"
+          grep -F 'test result: ok. 17 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/export-integration-tests.log"
+          if grep -E 'SKIP|source-hiding acceptance not requested' "$RUNNER_TEMP/export-integration-tests.log"; then
+            echo '::error::A required export acceptance path was skipped'
+            exit 1
+          fi
+        env:
+          ORR_EXPORT_DEFAULT_RUNTIME: ${{ runner.temp }}/arena-default-no-project
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_EXPORT_HIDE_ROOT: ${{ github.workspace }}
+          ORR_REQUIRE_GPU: "1"
+          ORR_PROJECT_CAPTURE_DIR: ${{ runner.temp }}/exported-arena-captures
+      - name: Strict mixed export feature Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked -p orr_sample --features project-export,input-actions,game-ui --all-targets -- -D warnings
+      - name: Upload exported-folder acceptance evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: exported-arena-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/exported-arena-captures
+            ${{ runner.temp }}/export-unit-list.txt
+            ${{ runner.temp }}/export-unit-tests.log
+            ${{ runner.temp }}/export-integration-list.txt
+            ${{ runner.temp }}/export-integration-tests.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build independent UI-free authored Arena fixture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$RUNNER_TEMP/arena-default-no-project"
+          cargo build --locked --release -p orr_sample --no-default-features --features project,input-actions --bin arena
+          cp target/release/arena "$RUNNER_TEMP/arena-project-without-ui"
+          test -x "$RUNNER_TEMP/arena-project-without-ui"
+          sha256sum "$RUNNER_TEMP/arena-default-no-project" "$RUNNER_TEMP/arena-project-without-ui"
+      - name: Required UI-free authored restart and rejection tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for specification in project_restart_seed:2 project_cli:6 project_ui_export:1; do
+            target=${specification%:*}
+            count=${specification#*:}
+            cargo test --locked --release -p orr_sample --no-default-features --features project-export,input-actions --test "$target" -- --list > "$RUNNER_TEMP/no-ui-$target-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/no-ui-$target-list.txt")" -eq "$count"
+            cargo test --locked --release -p orr_sample --no-default-features --features project-export,input-actions --test "$target" -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/no-ui-$target.log"
+            grep -F "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/no-ui-$target.log"
+            if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/no-ui-$target.log"; then exit 1; fi
+          done
+      - name: Mandatory authored UI admission restart composition and export
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$ORR_EXPORT_DEFAULT_RUNTIME"
+          test -x "$ORR_PROJECT_ONLY_RUNTIME"
+          mkdir -p "$ORR_PROJECT_UI_CAPTURE_DIR"
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --list > "$RUNNER_TEMP/authored-ui-library-list.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/authored-ui-library-list.txt")" -eq 72
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/authored-ui-library.log"
+          grep -F 'test result: ok. 72 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/authored-ui-library.log"
+          if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/authored-ui-library.log"; then exit 1; fi
+          for specification in project_restart_seed:3 project_ui_boundaries:1 project_ui_compositor:1 project_ui_export:3 project_cli:5; do
+            target=${specification%:*}
+            count=${specification#*:}
+            cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --test "$target" -- --list > "$RUNNER_TEMP/authored-ui-$target-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/authored-ui-$target-list.txt")" -eq "$count"
+            cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --test "$target" -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/authored-ui-$target.log"
+            grep -F "test result: ok. $count passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/authored-ui-$target.log"
+            if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/authored-ui-$target.log"; then exit 1; fi
+          done
+        env:
+          ORR_EXPORT_DEFAULT_RUNTIME: ${{ runner.temp }}/arena-default-no-project
+          ORR_PROJECT_ONLY_RUNTIME: ${{ runner.temp }}/arena-project-without-ui
+          ORR_REQUIRE_PROJECT_ONLY_RUNTIME: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_EXPORT_HIDE_ROOT: ${{ github.workspace }}
+          ORR_REQUIRE_GPU: "1"
+          ORR_PROJECT_UI_CAPTURE_DIR: ${{ runner.temp }}/authored-ui-captures
+      - name: Required independent editor UI opt-in boundaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for features in sprites project-ui sprites,orr_sample/game-ui; do
+            label=${features//\//-}
+            cargo test --locked --release -p orr_editor --no-default-features --features "$features" --test project_ui -- --list > "$RUNNER_TEMP/editor-ui-$label-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/editor-ui-$label-list.txt")" -eq 1
+            cargo test --locked --release -p orr_editor --no-default-features --features "$features" --test project_ui -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/editor-ui-$label.log"
+            grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/editor-ui-$label.log"
+          done
+      - name: Strict authored UI and editor feature Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked -p orr_sample -p orr_editor --features orr_sample/project-export,orr_sample/input-actions,orr_sample/game-ui,orr_editor/project-ui --all-targets -- -D warnings
+      - name: Upload authored UI acceptance evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: authored-ui-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/authored-ui-captures
+            ${{ runner.temp }}/authored-ui-*.txt
+            ${{ runner.temp }}/authored-ui-*.log
+            ${{ runner.temp }}/no-ui-*.txt
+            ${{ runner.temp }}/no-ui-*.log
+            ${{ runner.temp }}/editor-ui-*.txt
+            ${{ runner.temp }}/editor-ui-*.log
+          if-no-files-found: error
+          retention-days: 7
       # The physics sample's headless benchmark: no window, no GPU. Runs the
       # physics game through the bridge with rollbacks (the checksum tests
       # are in `crates/orr_sample/tests/physics_e2e.rs`, run above).
@@ -360,6 +621,8 @@ jobs:
     # is not needed for determinism; docs/mobile.md says what a real device run adds.
     name: aarch64-linux-android (NDK + qemu-user)
     runs-on: ubuntu-latest
+    env:
+      ORR_ANDROID_NDK_VERSION: 29.0.14206865
     steps:
       - uses: actions/checkout@v4
 
@@ -370,17 +633,28 @@ jobs:
 
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
+        with:
+          key: android-ndk-${{ env.ORR_ANDROID_NDK_VERSION }}
 
       - name: Install qemu-user
-        run: sudo apt-get update -q && sudo apt-get install -y -q qemu-user
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt_options=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2)
+          sudo apt-get "${apt_options[@]}" update -q
+          sudo apt-get "${apt_options[@]}" install -y -q qemu-user
 
       - name: cargo build (sim crates + games) for aarch64-linux-android
         # Library builds need no linker, so this also works without an NDK.
         run: cargo build --release --target aarch64-linux-android -p orr_fp -p orr_ecs -p orr_sim -p orr_proto -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_games --lib
 
       - name: golden tests on aarch64-linux-android under qemu-aarch64
-        # The runner image has the NDK (ANDROID_NDK_LATEST_HOME); `crt-static` makes the test binaries
-        # runnable by qemu-user without Android's dynamic linker. Doc tests are not cross-run.
+        # Pin the previously passing NDK: r30's static libc duplicates Rust's rust_eh_personality.
+        # Temporary CI-only compatibility pin: r29 is upstream-unsupported.
+        # Revalidate a supported NDK before replacing it; this is not a product-runtime requirement.
+        # `crt-static` runs these binaries under qemu-user without Android's dynamic linker.
+        # Doc tests are not cross-run.
         # `--test-threads=1`: a multi-threaded test harness in a static bionic binary under qemu-user
         # segfaults about one run in three (thread start-up in the emulator, not our code; the same binaries
         # passed 12 of 12 runs single-threaded).
@@ -388,8 +662,32 @@ jobs:
           CARGO_TARGET_AARCH64_LINUX_ANDROID_RUNNER: qemu-aarch64
           CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: -C target-feature=+crt-static
         run: |
-          NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}}"
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$SDK" ]]; then
+            echo "::error::Android SDK root is unavailable"
+            exit 1
+          fi
+          NDK="$SDK/ndk/$ORR_ANDROID_NDK_VERSION"
+          if [[ ! -r "$NDK/source.properties" ]]; then
+            echo "::error::Pinned NDK $ORR_ANDROID_NDK_VERSION is missing at $NDK"
+            exit 1
+          fi
+          REVISION=$(sed -n 's/^Pkg\.Revision[[:space:]]*=[[:space:]]*//p' "$NDK/source.properties" | tr -d '\r')
+          if [[ "$REVISION" != "$ORR_ANDROID_NDK_VERSION" ]]; then
+            echo "::error::Expected NDK $ORR_ANDROID_NDK_VERSION, found '$REVISION' at $NDK"
+            exit 1
+          fi
           BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in aarch64-linux-android24-clang llvm-ar; do
+            if [[ ! -x "$BIN/$tool" ]]; then
+              echo "::error::Pinned NDK tool is unavailable: $BIN/$tool"
+              exit 1
+            fi
+          done
+          test -r "$BIN/../sysroot/usr/lib/aarch64-linux-android/libc.a"
+          echo "Using Android NDK $REVISION at $NDK"
+          "$BIN/aarch64-linux-android24-clang" --version
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
           export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
           export AR_aarch64_linux_android="$BIN/llvm-ar"
