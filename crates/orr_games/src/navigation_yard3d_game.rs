@@ -13,6 +13,143 @@ use crate::yard3d_game::{NoCommand, NoEvent, YardInput};
 
 pub const PIN_NAME: &str = "NavigationScenePin";
 
+/// The editor may deliberately stage an empty scene; a consuming runtime may not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionMode {
+    EditorStaging,
+    RequiredPin,
+}
+
+/// Pure pre-read admission shared by local editor and closed project consumers.
+/// `authored_entities` and `explicit_pin` describe the document before baking.
+/// No path is resolved or opened here, and failure never changes the Frame.
+pub fn admission_pin(
+    frame: &Frame,
+    authored_entities: usize,
+    explicit_pin: bool,
+    mode: AdmissionMode,
+) -> Result<Option<NavigationScenePin>, String> {
+    if authored_entities != 0 || frame.alive_count() != 0 {
+        return Err("NavigationYard3D rejects every authored entity, body and collider".into());
+    }
+    if bytemuck::bytes_of(frame.singleton::<NavigationStepStatus>())
+        .iter()
+        .any(|&byte| byte != 0)
+    {
+        return Err("runtime failure status cannot be authored into a scene".into());
+    }
+    let pin = *frame.singleton::<NavigationScenePin>();
+    if !explicit_pin || bytemuck::bytes_of(&pin).iter().all(|&byte| byte == 0) {
+        return match mode {
+            AdmissionMode::EditorStaging => Ok(None),
+            AdmissionMode::RequiredPin => {
+                Err("navigation runtime requires an explicit nonzero scene pin".into())
+            }
+        };
+    }
+    validate_relative_source(pin.source()?)?;
+    pin.identity()?;
+    if pin.agent.distance_per_tick <= FP::ZERO {
+        return Err("navigation distance per tick must be positive".into());
+    }
+    Ok(Some(pin))
+}
+
+/// Portable path syntax only. The host separately rejects symlinks and special
+/// files while resolving this path relative to the original scene directory.
+pub fn validate_relative_source(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.contains('\\')
+        || path.contains(':')
+        || path.contains('\0')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == ".." || part == ".orr")
+        || !path.ends_with(".orrt")
+        || path.rsplit('/').next() == Some(".orrt")
+    {
+        return Err("navigation source must be a confined scene-relative .orrt path".into());
+    }
+    Ok(())
+}
+
+/// Closed playground presentation contract, deliberately separate from the
+/// wider legacy headless admission. Check every vertex, including intermediate
+/// heights and hole vertices, before any route arithmetic or GPU conversion.
+pub fn validate_project_bounds(
+    terrain: &Terrain,
+    agent: NavigationAgentSpec,
+) -> Result<(), String> {
+    const LIMIT_RAW: i64 = 256 * 65536;
+    let bounded = |value: FP| (-LIMIT_RAW..=LIMIT_RAW).contains(&value.raw());
+    if terrain.width() > orr_navigation_runtime::MAX_SIDE
+        || terrain.depth() > orr_navigation_runtime::MAX_SIDE
+    {
+        return Err("navigation terrain exceeds the 17 by 17 point-agent scope".into());
+    }
+    if agent
+        .start
+        .into_iter()
+        .chain(agent.goal)
+        .any(|v| !bounded(v))
+    {
+        return Err("navigation project start and goal must be within +/-256".into());
+    }
+    for index in 0..terrain.width() * terrain.depth() {
+        if terrain
+            .vertex_position(index)
+            .is_none_or(|position| position.into_iter().any(|v| !bounded(v)))
+        {
+            return Err("navigation project terrain XYZ must all be within +/-256".into());
+        }
+    }
+    Ok(())
+}
+
+/// Admit an owned terrain snapshot using full asset/terrain/graph identity.
+/// This preserves the wider existing headless coordinate contract; a bounded
+/// presentation consumer must enforce its own narrower bounds before calling.
+pub fn admit_scene(
+    frame: &mut Frame,
+    authored_entities: usize,
+    explicit_pin: bool,
+    terrain_bytes: Option<&[u8]>,
+    mode: AdmissionMode,
+) -> Result<(), String> {
+    let Some(pin) = admission_pin(frame, authored_entities, explicit_pin, mode)? else {
+        return Ok(());
+    };
+    let bytes = terrain_bytes.ok_or("navigation pinned terrain bytes are missing")?;
+    let terrain = Terrain::load(bytes).map_err(|e| e.to_string())?;
+    if terrain.asset_id() != pin.identity()? {
+        return Err("navigation asset identity does not match the scene pin".into());
+    }
+    if terrain.revision() != pin.terrain_revision {
+        return Err("navigation full terrain SHA-256 revision does not match the scene pin".into());
+    }
+    if terrain.width() > orr_navigation_runtime::MAX_SIDE
+        || terrain.depth() > orr_navigation_runtime::MAX_SIDE
+    {
+        return Err("navigation terrain exceeds the 17 by 17 point-agent scope".into());
+    }
+    let graph = TerrainGraph::build(
+        &terrain,
+        AgentProfile {
+            max_slope: pin.agent.max_slope,
+            radius: FP::ZERO,
+            headroom: FP::ZERO,
+            max_step: FP::ZERO,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    if graph.revision() != pin.graph_revision {
+        return Err("navigation full graph SHA-256 revision does not match the scene pin".into());
+    }
+    NavigationRuntime::admit(frame, &terrain, &graph, pin.agent.to_runtime())
+        .map_err(|e| e.to_string())?;
+    validate_scene_frame(frame)
+}
+
 /// The one point agent authored with this scene. Only slope is configurable:
 /// radius, headroom, and step clearance are precisely zero.
 #[repr(C)]
@@ -211,5 +348,175 @@ impl System<NavigationYard3D> for NavigationStep {
             status.error_len = length as u32;
             ctx.frame.set_singleton(status);
         }
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use orr_fp::fp;
+    use orr_sim::Simulation;
+
+    fn fixture() -> (Frame, Vec<u8>) {
+        let terrain =
+            Terrain::load(include_bytes!("../../../scenes/navigation/point_demo.orrt")).unwrap();
+        let agent = NavigationAgentSpec {
+            start: [fp!(0.25), fp!(0.75)],
+            goal: [fp!(0.75), fp!(0.25)],
+            max_slope: FP::ONE,
+            distance_per_tick: fp!(0.125),
+        };
+        let graph = TerrainGraph::build(&terrain, AgentProfile::default()).unwrap();
+        let mut frame = Frame::new(Simulation::<NavigationYard3D>::build_registry());
+        frame.set_singleton(
+            NavigationScenePin::new("navigation/point_demo.orrt", &terrain, &graph, agent).unwrap(),
+        );
+        (frame, terrain.cook())
+    }
+
+    #[test]
+    fn editor_staging_is_explicitly_distinct_from_required_runtime_pin() {
+        let mut frame = Frame::new(Simulation::<NavigationYard3D>::build_registry());
+        let before = frame.to_bytes();
+        admit_scene(&mut frame, 0, false, None, AdmissionMode::EditorStaging).unwrap();
+        assert_eq!(frame.to_bytes(), before);
+        assert!(admit_scene(&mut frame, 0, false, None, AdmissionMode::RequiredPin).is_err());
+        assert!(admit_scene(&mut frame, 0, true, None, AdmissionMode::RequiredPin).is_err());
+        assert_eq!(frame.to_bytes(), before);
+    }
+
+    #[test]
+    fn full_revisions_identity_and_authored_state_are_checked_before_mutation() {
+        for field in [
+            "terrain", "graph", "identity", "distance", "status", "entity", "tail",
+        ] {
+            let (mut frame, bytes) = fixture();
+            let mut pin = *frame.singleton::<NavigationScenePin>();
+            match field {
+                "terrain" => pin.terrain_revision[31] ^= 1,
+                "graph" => pin.graph_revision[31] ^= 1,
+                "identity" => pin.asset_id[0] ^= 1,
+                "distance" => pin.agent.distance_per_tick = FP::ZERO,
+                "status" => frame.singleton_mut::<NavigationStepStatus>().failed = 1,
+                "entity" => {
+                    frame.spawn();
+                }
+                "tail" => pin.source_path[255] = 1,
+                _ => unreachable!(),
+            }
+            frame.set_singleton(pin);
+            let before = frame.to_bytes();
+            assert!(
+                admit_scene(
+                    &mut frame,
+                    0,
+                    true,
+                    Some(&bytes),
+                    AdmissionMode::RequiredPin
+                )
+                .is_err(),
+                "{field}"
+            );
+            assert_eq!(frame.to_bytes(), before, "{field}");
+        }
+        let (mut frame, bytes) = fixture();
+        assert!(admit_scene(
+            &mut frame,
+            1,
+            true,
+            Some(&bytes),
+            AdmissionMode::RequiredPin
+        )
+        .is_err());
+        assert!(admit_scene(&mut frame, 0, true, None, AdmissionMode::RequiredPin).is_err());
+        admit_scene(
+            &mut frame,
+            0,
+            true,
+            Some(&bytes),
+            AdmissionMode::RequiredPin,
+        )
+        .unwrap();
+        validate_scene_frame(&frame).unwrap();
+        assert_eq!(frame.alive_count(), 1);
+    }
+
+    #[test]
+    fn portable_pin_paths_reject_every_escape_spelling() {
+        for path in [
+            "",
+            "/a.orrt",
+            "../a.orrt",
+            "a/../b.orrt",
+            "./a.orrt",
+            "a//b.orrt",
+            "a\\b.orrt",
+            "C:a.orrt",
+            ".orr/a.orrt",
+            "a\0.orrt",
+            "a.ORRT",
+            ".orrt",
+        ] {
+            assert!(validate_relative_source(path).is_err(), "{path:?}");
+        }
+        validate_relative_source("navigation/point_demo.orrt").unwrap();
+    }
+
+    #[test]
+    fn closed_bounds_check_intermediate_xyz_but_do_not_narrow_headless_admission() {
+        let (mut frame, _) = fixture();
+        let mut agent = frame.singleton::<NavigationScenePin>().agent;
+        let origin = fp!(300);
+        let terrain = Terrain::new(
+            "wide".into(),
+            2,
+            2,
+            [origin; 2],
+            FP::ONE,
+            vec![FP::ZERO; 4],
+            vec![false],
+        )
+        .unwrap();
+        agent.start = [origin + fp!(0.25), origin + fp!(0.75)];
+        agent.goal = [origin + fp!(0.75), origin + fp!(0.25)];
+        let graph = TerrainGraph::build(&terrain, AgentProfile::default()).unwrap();
+        frame.set_singleton(NavigationScenePin::new("wide.orrt", &terrain, &graph, agent).unwrap());
+        assert!(validate_project_bounds(&terrain, agent).is_err());
+        admit_scene(
+            &mut frame,
+            0,
+            true,
+            Some(&terrain.cook()),
+            AdmissionMode::RequiredPin,
+        )
+        .unwrap();
+
+        agent.start = [FP::ZERO; 2];
+        agent.goal = [FP::ONE; 2];
+        let mut heights = vec![FP::ZERO; 9];
+        heights[4] = fp!(256);
+        let at_limit = Terrain::new(
+            "bounds".into(),
+            3,
+            3,
+            [FP::ZERO; 2],
+            FP::ONE,
+            heights.clone(),
+            vec![false; 4],
+        )
+        .unwrap();
+        validate_project_bounds(&at_limit, agent).unwrap();
+        heights[4] = FP::from_raw(fp!(256).raw() + 1);
+        let over_limit = Terrain::new(
+            "bounds".into(),
+            3,
+            3,
+            [FP::ZERO; 2],
+            FP::ONE,
+            heights,
+            vec![false; 4],
+        )
+        .unwrap();
+        assert!(validate_project_bounds(&over_limit, agent).is_err());
     }
 }

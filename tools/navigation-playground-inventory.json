@@ -1,0 +1,305 @@
+{
+  "project-admission": {
+    "source": "crates/orr_sample/src/navigation_project.rs",
+    "package": "orr_sample",
+    "target": [
+      "--lib"
+    ],
+    "features": [
+      "navigation-project",
+      "project-create",
+      "project-export"
+    ],
+    "filter": "navigation_project::tests::",
+    "skip": [],
+    "exact": false,
+    "names": [
+      "navigation_project::tests::closed_manifest_rejects_wrong_games_versions_and_unrelated_profiles",
+      "navigation_project::tests::closed_scene_rejects_staging_entities_status_and_tampered_full_pins",
+      "navigation_project::tests::exact_frame_session_simulation_parity_survives_every_source_deletion",
+      "navigation_project::tests::manifest_rejects_positional_struct_arrays_and_duplicate_fields",
+      "navigation_project::tests::project_admission_checks_interior_height_before_route_or_presentation",
+      "navigation_project::tests::symlinks_and_fifos_are_rejected_before_opening",
+      "navigation_project::tests::traversal_missing_tampered_and_oversize_files_are_rejected"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 7,
+    "ignored": 0
+  },
+  "app-cpu": {
+    "source": "crates/orr_sample/src/navigation_app.rs",
+    "package": "orr_sample",
+    "target": [
+      "--lib"
+    ],
+    "features": [
+      "navigation-project",
+      "project-create",
+      "project-export"
+    ],
+    "filter": "navigation_app::tests::",
+    "skip": [
+      "navigation_app::tests::production_software_gpu_start_mid_reached_pause_restart_resize"
+    ],
+    "exact": false,
+    "names": [
+      "navigation_app::tests::capture_rejects_existing_evidence_and_invalid_pixel_count",
+      "navigation_app::tests::cli_is_closed_and_capture_is_bounded",
+      "navigation_app::tests::production_app_pause_restart_and_focus_use_retained_initial_frame"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 3,
+    "ignored": 0
+  },
+  "template": {
+    "source": "crates/orr_sample/tests/navigation_template.rs",
+    "package": "orr_sample",
+    "target": [
+      "--test",
+      "navigation_template"
+    ],
+    "features": [
+      "navigation-project",
+      "project-create",
+      "project-export"
+    ],
+    "filter": "",
+    "skip": [],
+    "exact": false,
+    "names": [
+      "disconnected_holes_and_unwalkable_slope_fail_without_mutating_admitted_state",
+      "generated_project_is_byte_deterministic_owned_and_package_free",
+      "visible_hole_detour_reaches_exact_goal_with_surface_y_seek_restart_and_replay"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 3,
+    "ignored": 0
+  },
+  "pure-admission": {
+    "source": "crates/orr_games/src/navigation_yard3d_game.rs",
+    "package": "orr_games",
+    "target": [
+      "--lib"
+    ],
+    "features": [
+      "navigation"
+    ],
+    "filter": "navigation_yard3d_game::admission_tests::",
+    "skip": [],
+    "exact": false,
+    "names": [
+      "navigation_yard3d_game::admission_tests::closed_bounds_check_intermediate_xyz_but_do_not_narrow_headless_admission",
+      "navigation_yard3d_game::admission_tests::editor_staging_is_explicitly_distinct_from_required_runtime_pin",
+      "navigation_yard3d_game::admission_tests::full_revisions_identity_and_authored_state_are_checked_before_mutation",
+      "navigation_yard3d_game::admission_tests::portable_pin_paths_reject_every_escape_spelling"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 4,
+    "ignored": 0
+  },
+  "remote-owned": {
+    "source": "crates/orr_remote/src/navigation_yard3d.rs",
+    "package": "orr_remote",
+    "target": [
+      "--lib"
+    ],
+    "features": [
+      "navigation"
+    ],
+    "filter": "navigation_yard3d::owned_admission_tests::",
+    "skip": [],
+    "exact": false,
+    "names": [
+      "navigation_yard3d::owned_admission_tests::owned_start_never_reopens_files_and_later_bakes_require_current_source",
+      "navigation_yard3d::owned_admission_tests::owned_start_rejects_noncanonical_paths_and_empty_staging"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 2,
+    "ignored": 0
+  },
+  "package-manifest": {
+    "source": "crates/orr_package/tests/navigation_project_manifest.rs",
+    "package": "orr_package",
+    "target": [
+      "--test",
+      "navigation_project_manifest"
+    ],
+    "features": [],
+    "filter": "navigation_profile_accepts_only_schema_two_without_foreign_descriptors",
+    "skip": [],
+    "exact": true,
+    "names": [
+      "navigation_profile_accepts_only_schema_two_without_foreign_descriptors"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 1,
+    "ignored": 0
+  },
+  "editor-default-off": {
+    "source": "crates/orr_editor/tests/navigation_project_guards.rs",
+    "package": "orr_editor",
+    "target": [
+      "--test",
+      "navigation_project_guards"
+    ],
+    "features": [],
+    "filter": "navigation_project_requires_explicit_feature_and_unique_authority",
+    "skip": [],
+    "exact": true,
+    "names": [
+      "navigation_project_requires_explicit_feature_and_unique_authority"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 1,
+    "ignored": 0
+  },
+  "editor-enabled-guards": {
+    "source": "crates/orr_editor/tests/navigation_project_guards.rs",
+    "package": "orr_editor",
+    "target": [
+      "--test",
+      "navigation_project_guards"
+    ],
+    "features": [
+      "navigation-project",
+      "project-create"
+    ],
+    "filter": "navigation_project_requires_explicit_feature_and_unique_authority",
+    "skip": [],
+    "exact": true,
+    "names": [
+      "navigation_project_requires_explicit_feature_and_unique_authority"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 1,
+    "ignored": 0
+  },
+  "editor-cpu": {
+    "source": "crates/orr_editor/tests/navigation_project_editor.rs",
+    "package": "orr_editor",
+    "target": [
+      "--test",
+      "navigation_project_editor"
+    ],
+    "features": [
+      "navigation-project",
+      "project-create"
+    ],
+    "filter": "",
+    "skip": [
+      "generated_project_production_editor_gpu_start_mid_reached_and_resize"
+    ],
+    "exact": false,
+    "names": [
+      "generated_project_widget_edits_build_save_undo_reopen_and_frame_parity",
+      "prepared_initial_host_uses_owned_bytes_and_reopen_observes_current_source"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 2,
+    "ignored": 0
+  },
+  "app-gpu": {
+    "source": "crates/orr_sample/src/navigation_app.rs",
+    "package": "orr_sample",
+    "target": [
+      "--lib"
+    ],
+    "features": [
+      "navigation-project",
+      "project-create",
+      "project-export"
+    ],
+    "filter": "navigation_app::tests::production_software_gpu_start_mid_reached_pause_restart_resize",
+    "skip": [],
+    "exact": true,
+    "names": [
+      "navigation_app::tests::production_software_gpu_start_mid_reached_pause_restart_resize"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 1,
+    "ignored": 0
+  },
+  "editor-gpu": {
+    "source": "crates/orr_editor/tests/navigation_project_editor.rs",
+    "package": "orr_editor",
+    "target": [
+      "--test",
+      "navigation_project_editor"
+    ],
+    "features": [
+      "navigation-project",
+      "project-create"
+    ],
+    "filter": "generated_project_production_editor_gpu_start_mid_reached_and_resize",
+    "skip": [],
+    "exact": true,
+    "names": [
+      "generated_project_production_editor_gpu_start_mid_reached_and_resize"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 1,
+    "ignored": 0
+  },
+  "readonly-export": {
+    "source": "crates/orr_sample/tests/navigation_export.rs",
+    "package": "orr_sample",
+    "target": [
+      "--test",
+      "navigation_export"
+    ],
+    "features": [
+      "navigation-project",
+      "project-create",
+      "project-export"
+    ],
+    "filter": "navigation_real_export_source_hidden_readonly_gpu_parity_restart_and_tamper",
+    "skip": [],
+    "exact": true,
+    "names": [
+      "navigation_real_export_source_hidden_readonly_gpu_parity_restart_and_tamper"
+    ],
+    "ignored_names": [
+      "navigation_real_export_source_hidden_readonly_gpu_parity_restart_and_tamper"
+    ],
+    "run_ignored": true,
+    "passed": 1,
+    "ignored": 0
+  },
+  "legacy-remote": {
+    "source": "crates/orr_remote/tests/navigation_yard3d.rs",
+    "package": "orr_remote",
+    "target": [
+      "--test",
+      "navigation_yard3d"
+    ],
+    "features": [
+      "navigation"
+    ],
+    "filter": "",
+    "skip": [],
+    "exact": false,
+    "names": [
+      "blank_canvas_is_editable_but_has_no_silent_navigation_fallback",
+      "corrupted_frame_handles_fail_closed_without_panicking_or_moving",
+      "deleted_source_cannot_change_play_seek_restore_or_replay",
+      "fixture_has_one_derived_agent_complete_route_and_reopens_identically",
+      "internal_source_symlink_is_rejected_without_mutating_document",
+      "stale_pin_unsafe_path_and_authored_entities_are_atomic"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "passed": 6,
+    "ignored": 0
+  }
+}

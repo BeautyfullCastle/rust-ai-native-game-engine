@@ -3,8 +3,9 @@
 use crate::{GameHooks, HostLimits, LocalHost, ServerConfig, ViewStreamHook};
 use orr_ecs::Frame;
 use orr_edit::{BakeAdmission, EditError, EditorDoc};
-use orr_navigation::{AgentProfile, Navigator, TerrainGraph};
-use orr_navigation_runtime::{NavigationRuntime, RuntimeAgent, RuntimeState};
+use orr_games::navigation_yard3d_game::{self as game, AdmissionMode};
+use orr_navigation::{Navigator, TerrainGraph};
+use orr_navigation_runtime::{RuntimeAgent, RuntimeState};
 use orr_reflect::{Scene, SceneIndex, TypeRegistry};
 use orr_sim::Simulation;
 use orr_terrain::Terrain;
@@ -13,7 +14,7 @@ use std::{
     fs::{self, File},
     io::Read,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 pub use crate::yard3d::{YARD_BUILD_ID, YARD_PLAYERS, YARD_SEED, YARD_TICK_RATE};
@@ -44,9 +45,9 @@ impl LocalNavigationAdmission {
         })
     }
 
-    fn read_pin(&self, pin: &NavigationScenePin) -> Result<Terrain, String> {
+    fn read_pin(&self, pin: &NavigationScenePin) -> Result<Vec<u8>, String> {
         let relative = pin.source()?;
-        validate_relative_source(relative)?;
+        game::validate_relative_source(relative)?;
         let path = absolute_regular_file(&self.root.join(relative))?;
         if !path.starts_with(&self.root) {
             return Err("navigation source escaped the scene directory".into());
@@ -63,91 +64,37 @@ impl LocalNavigationAdmission {
         if bytes.len() > orr_terrain::MAX_FILE_BYTES {
             return Err("navigation terrain source exceeds byte limit".into());
         }
-        let terrain = Terrain::load(&bytes).map_err(|e| e.to_string())?;
-        if terrain.asset_id() != pin.identity()? {
-            return Err("navigation asset identity does not match the scene pin".into());
-        }
-        if terrain.revision() != pin.terrain_revision {
-            return Err(
-                "navigation full terrain SHA-256 revision does not match the scene pin".into(),
-            );
-        }
-        if terrain.width() > orr_navigation_runtime::MAX_SIDE
-            || terrain.depth() > orr_navigation_runtime::MAX_SIDE
-        {
-            return Err("navigation terrain exceeds the 17 by 17 point-agent scope".into());
-        }
-        Ok(terrain)
+        Ok(bytes)
     }
 }
 impl BakeAdmission for LocalNavigationAdmission {
     fn admit(&self, scene: &Scene, frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
         let fail = |message: String| EditError::Invalid(format!("navigation admission: {message}"));
-        if !scene.entities.is_empty() || frame.alive_count() != 0 {
-            return Err(fail(
-                "NavigationYard3D rejects every authored entity, body and collider".into(),
-            ));
-        }
-        if bytemuck::bytes_of(frame.singleton::<NavigationStepStatus>())
-            .iter()
-            .any(|&byte| byte != 0)
-        {
-            return Err(fail(
-                "runtime failure status cannot be authored into a scene".into(),
-            ));
-        }
-        let pin = *frame.singleton::<NavigationScenePin>();
         let explicit_pin = scene.singletons.iter().any(|(name, _)| name == PIN_NAME);
-        if !explicit_pin || bytemuck::bytes_of(&pin).iter().all(|&byte| byte == 0) {
-            // An empty document is a deliberate edit-only staging state. It
-            // cannot play: the first runtime tick records an authoritative error.
-            return Ok(());
-        }
-        if pin.agent.distance_per_tick <= orr_fp::FP::ZERO {
-            return Err(fail("navigation distance per tick must be positive".into()));
-        }
-        let terrain = self.read_pin(&pin).map_err(fail)?;
-        let profile = AgentProfile {
-            max_slope: pin.agent.max_slope,
-            radius: orr_fp::FP::ZERO,
-            headroom: orr_fp::FP::ZERO,
-            max_step: orr_fp::FP::ZERO,
-        };
-        let graph = TerrainGraph::build(&terrain, profile).map_err(|e| fail(e.to_string()))?;
-        if graph.revision() != pin.graph_revision {
-            return Err(fail(
-                "navigation full graph SHA-256 revision does not match the scene pin".into(),
-            ));
-        }
-        NavigationRuntime::admit(frame, &terrain, &graph, pin.agent.to_runtime())
-            .map_err(|e| fail(e.to_string()))?;
-        orr_games::navigation_yard3d_game::validate_scene_frame(frame).map_err(fail)
+        let pin = game::admission_pin(
+            frame,
+            scene.entities.len(),
+            explicit_pin,
+            AdmissionMode::EditorStaging,
+        )
+        .map_err(fail)?;
+        let bytes = pin
+            .as_ref()
+            .map(|pin| self.read_pin(pin))
+            .transpose()
+            .map_err(fail)?;
+        game::admit_scene(
+            frame,
+            scene.entities.len(),
+            explicit_pin,
+            bytes.as_deref(),
+            AdmissionMode::EditorStaging,
+        )
+        .map_err(fail)
     }
     fn allow_play_edits(&self) -> bool {
         false
     }
-}
-
-fn validate_relative_source(path: &str) -> Result<(), String> {
-    if path.is_empty()
-        || path.contains('\\')
-        || path.contains(':')
-        || path.contains('\0')
-        || path.starts_with('/')
-        || path
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == ".." || part == ".orr")
-        || Path::new(path).extension().and_then(|x| x.to_str()) != Some("orrt")
-    {
-        return Err("navigation source must be a confined scene-relative .orrt path".into());
-    }
-    if !Path::new(path)
-        .components()
-        .all(|part| matches!(part, Component::Normal(_)))
-    {
-        return Err("navigation source has an unsupported path component".into());
-    }
-    Ok(())
 }
 
 fn absolute_regular_file(path: &Path) -> Result<PathBuf, String> {
@@ -201,6 +148,102 @@ pub fn navigation_yard3d_doc_from_path(path: &Path) -> Result<EditorDoc, String>
         fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     navigation_yard3d_doc_from_yaml(&yaml, admission)
         .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Captured startup bytes are consumed exactly once. Every later explicit edit
+/// or rebake reopens the current confined source and checks its complete pin.
+struct OwnedNavigationAdmission {
+    live: LocalNavigationAdmission,
+    initial: Mutex<Option<Vec<u8>>>,
+}
+impl BakeAdmission for OwnedNavigationAdmission {
+    fn admit_source(&self, text: &str) -> Result<(), EditError> {
+        if text.len() > 256 * 1024 {
+            return Err(EditError::Invalid(
+                "navigation scene exceeds 256 KiB".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn admit(&self, scene: &Scene, frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
+        let fail = |message: String| EditError::Invalid(format!("navigation admission: {message}"));
+        if scene.has_prefab_links()
+            || !scene.entities.is_empty()
+            || scene.singletons.len() != 1
+            || scene.singletons[0].0 != PIN_NAME
+        {
+            return Err(fail("navigation project requires only an explicit NavigationScenePin and no entities or prefabs".into()));
+        }
+        let pin = game::admission_pin(frame, 0, true, AdmissionMode::RequiredPin)
+            .map_err(fail)?
+            .ok_or_else(|| fail("navigation project pin missing".into()))?;
+        let captured = self
+            .initial
+            .lock()
+            .map_err(|_| fail("navigation initial admission unavailable".into()))?
+            .take();
+        let bytes = match captured {
+            Some(bytes) => bytes,
+            None => self.live.read_pin(&pin).map_err(fail)?,
+        };
+        let terrain = Terrain::load(&bytes).map_err(|e| fail(e.to_string()))?;
+        game::validate_project_bounds(&terrain, pin.agent).map_err(fail)?;
+        game::admit_scene(frame, 0, true, Some(&bytes), AdmissionMode::RequiredPin).map_err(fail)
+    }
+
+    fn allow_play_edits(&self) -> bool {
+        false
+    }
+}
+
+/// Start a closed project document entirely from admitted owned bytes. The path
+/// is already canonical in PreparedProject and is used only as future authority;
+/// startup does not reopen the scene, terrain, or its containing directory.
+pub fn navigation_yard3d_doc_from_owned(
+    path: &Path,
+    text: &str,
+    terrain_bytes: Vec<u8>,
+) -> Result<EditorDoc, String> {
+    let normalized: PathBuf = path.components().collect();
+    if !path.is_absolute()
+        || path.file_name().is_none()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+        || normalized.as_os_str() != path.as_os_str()
+    {
+        return Err("owned navigation scene path must be absolute and normalized".into());
+    }
+    let root = path
+        .parent()
+        .ok_or("navigation scene needs a parent directory")?
+        .to_path_buf();
+    EditorDoc::from_yaml_with_admission(
+        text,
+        navigation_yard3d_types(),
+        Simulation::<NavigationYard3D>::build_registry(),
+        YARD_SEED,
+        Some(Arc::new(OwnedNavigationAdmission {
+            live: LocalNavigationAdmission { root },
+            initial: Mutex::new(Some(terrain_bytes)),
+        })),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn spawn_navigation_yard3d_owned_host(
+    path: PathBuf,
+    text: String,
+    terrain_bytes: Vec<u8>,
+    mut cfg: ServerConfig,
+) -> Result<LocalHost, String> {
+    LocalHost::spawn::<NavigationYard3D>(move || {
+        let doc = navigation_yard3d_doc_from_owned(&path, &text, terrain_bytes)?;
+        cfg.limits.scene_path = Some(path);
+        configure_navigation_yard3d(&mut cfg.limits);
+        Ok((doc, cfg))
+    })
 }
 
 pub fn configure_navigation_yard3d(limits: &mut HostLimits) {
@@ -290,4 +333,74 @@ pub fn navigation_from_view(frame: orr_bridge::FrameView<'_>) -> Result<Navigati
 }
 pub fn terrain_from_view(frame: orr_bridge::FrameView<'_>) -> Result<Terrain, String> {
     navigation_from_view(frame).map(|view| view.terrain)
+}
+
+#[cfg(test)]
+mod owned_admission_tests {
+    use super::*;
+
+    const YAML: &str = include_str!("../../../scenes/navigation_point.scene.yaml");
+    const TERRAIN: &[u8] = include_bytes!("../../../scenes/navigation/point_demo.orrt");
+
+    #[test]
+    fn owned_start_never_reopens_files_and_later_bakes_require_current_source() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        struct Temporary(PathBuf);
+        impl Drop for Temporary {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "orr-navigation-owned-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        fs::create_dir(&root).unwrap();
+        let _temporary = Temporary(root.clone());
+        let path = root.join("point.scene.yaml");
+        let mut doc = navigation_yard3d_doc_from_owned(&path, YAML, TERRAIN.to_vec()).unwrap();
+        let before = doc.frame().to_bytes();
+        assert_eq!(doc.frame().alive_count(), 1);
+        assert!(!path.exists());
+        assert!(doc.rebake().is_err());
+        assert_eq!(doc.frame().to_bytes(), before);
+        fs::create_dir(root.join("navigation")).unwrap();
+        let terrain_path = root.join("navigation/point_demo.orrt");
+        fs::write(&terrain_path, TERRAIN).unwrap();
+        doc.rebake().unwrap();
+        assert_eq!(doc.frame().to_bytes(), before);
+        fs::write(&terrain_path, b"tampered after startup").unwrap();
+        assert!(doc.rebake().is_err());
+        assert_eq!(doc.frame().to_bytes(), before);
+        // Valid disk bytes never substitute for rejected initial owned bytes.
+        fs::write(&terrain_path, TERRAIN).unwrap();
+        assert!(
+            navigation_yard3d_doc_from_owned(&path, YAML, b"bad captured bytes".to_vec()).is_err()
+        );
+    }
+
+    #[test]
+    fn owned_start_rejects_noncanonical_paths_and_empty_staging() {
+        for path in [
+            "relative.scene.yaml",
+            "/tmp/../point.scene.yaml",
+            "/tmp//point.scene.yaml",
+            "/tmp/./point.scene.yaml",
+        ] {
+            assert!(
+                navigation_yard3d_doc_from_owned(Path::new(path), YAML, TERRAIN.to_vec()).is_err(),
+                "{path}"
+            );
+        }
+        assert!(navigation_yard3d_doc_from_owned(
+            Path::new("/tmp/point.scene.yaml"),
+            "schema: orr.scene/1\nsingletons: {}\nentities: {}\n",
+            TERRAIN.to_vec()
+        )
+        .is_err());
+    }
 }

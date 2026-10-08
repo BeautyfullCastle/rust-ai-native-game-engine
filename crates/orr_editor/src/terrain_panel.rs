@@ -81,6 +81,8 @@ impl TerrainPanel {
             HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
             #[cfg(feature = "room-project")]
             HostSpec::PreparedRoom { scene, .. } => scene,
+        #[cfg(feature = "navigation-project")]
+        HostSpec::PreparedNavigation { scene, .. } => scene,
             HostSpec::Remote { .. } => {
                 return Err("Remote paths are not local terrain authority".into())
             }

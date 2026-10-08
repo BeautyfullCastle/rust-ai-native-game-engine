@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Closed optional host/view adapter for Frame-owned point navigation.
+navigation-project = ["project", "orr_games/navigation", "dep:orr_navigation", "dep:orr_navigation_runtime", "dep:orr_terrain", "dep:orr_terrain_view", "dep:orr_navigation_view", "dep:orr_model", "orr_render/imported-scene"]
 # Default-off Linux window checkpoint consumer; persistence stays outside simulation.
 room-checkpoint = ["room-ui", "dep:sha2", "dep:tempfile", "dep:rustix"]
 room-project = ["project", "orr_games/room-escape", "dep:orr_model", "dep:orr_model_bindings", "orr_render/imported-scene"]
@@ -38,6 +40,11 @@ audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+orr_navigation = { path = "../orr_navigation", optional = true }
+orr_navigation_runtime = { path = "../orr_navigation_runtime", optional = true }
+orr_terrain = { path = "../orr_terrain", optional = true }
+orr_terrain_view = { path = "../orr_terrain_view", optional = true }
+orr_navigation_view = { path = "../orr_navigation_view", optional = true }
 orr_model = { path = "../orr_model", optional = true }
 orr_model_bindings = { path = "../orr_model_bindings", optional = true }
 semver = { version = "1", optional = true }
@@ -145,4 +152,22 @@ test = false
 name = "orr_export_room"
 path = "src/bin/orr_export_room.rs"
 required-features = ["room-project", "project-export"]
+test = false
+
+[[bin]]
+name = "navigation_playground"
+path = "src/bin/navigation_playground.rs"
+required-features = ["navigation-project"]
+test = false
+
+[[bin]]
+name = "orr_export_navigation"
+path = "src/bin/orr_export_navigation.rs"
+required-features = ["navigation-project", "project-export"]
+test = false
+
+[[bin]]
+name = "orr_new_navigation"
+path = "src/bin/orr_new_navigation.rs"
+required-features = ["navigation-project", "project-create"]
 test = false
