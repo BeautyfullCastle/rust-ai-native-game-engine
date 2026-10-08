@@ -114,7 +114,7 @@ pub mod navigation_view;
 #[cfg(feature = "project-ui")]
 pub mod project_ui;
 
-#[cfg(feature="collect-ui")]
+# [cfg(any(feature="collect-ui", feature="room-ui"))]
 pub mod collect_ui_panel;
 
 #[cfg(feature = "linked-prefabs")]

@@ -132,7 +132,20 @@ pub struct PreparedRoomCamera {
     pub manifest_bytes: Vec<u8>,
     pub manifest_path: PathBuf,
 }
+#[cfg(feature = "room-ui")]
+#[derive(Clone)]
+pub struct PreparedRoomUi {
+    pub scene_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub manifest_bytes: Vec<u8>,
+    pub path: PathBuf,
+    pub document: crate::authored_ui::Document,
+    pub font: Vec<u8>,
+}
+
 pub struct PreparedProject {
+    #[cfg(feature = "room-ui")]
+    ui: Option<PreparedRoomUi>,
     camera: Option<PreparedRoomCamera>,
     root: PathBuf,
     path: PathBuf,
@@ -141,21 +154,76 @@ pub struct PreparedProject {
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
+        Self::open_with_ui(root, false)
+    }
+
+    pub fn open_with_ui(root: impl AsRef<Path>, ui_supported: bool) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), compiled_runtime())
             .map_err(|e| e.to_string())?;
-        let before = project
-            .verify()
-            .map_err(|e| format!("room active lock: {e}"))?;
         let manifest = project.manifest().ok_or("room project manifest missing")?;
         let entry = manifest.entry.as_ref().ok_or("room entry missing")?;
         if manifest.schema != 2
             || entry.game != orr_package::ProjectGame::RoomEscapeV1
             || entry.sprites.is_some()
-            || entry.ui.is_some()
+            || (entry.ui.is_some() && (!ui_supported || !cfg!(feature = "room-ui")))
             || manifest.progress.is_some()
         {
-            return Err("room requires schema2 room-escape-v1 without sprites/UI/progress".into());
+            return Err("room requires schema2 room-escape-v1, no sprites/progress, and explicit UI consumer support".into());
         }
+        let before = project
+            .verify()
+            .map_err(|e| format!("room active lock: {e}"))?;
+        #[cfg(feature = "room-ui")]
+        let ui = entry
+            .ui
+            .as_ref()
+            .map(|descriptor| {
+                if descriptor.profile != orr_package::ProjectUiProfile::RoomAuthoredV1 {
+                    return Err("Room UI profile mismatch".into());
+                }
+                let path = crate::project::entry_file(
+                    project.root(),
+                    descriptor
+                        .document
+                        .as_ref()
+                        .ok_or("Room UI document missing")?,
+                )?;
+                let document = crate::authored_ui::Document::parse_for(
+                    &crate::project::read_regular(&path, crate::authored_ui::MAX_BYTES as u64)?,
+                    crate::authored_ui::Profile::Room,
+                )?;
+                let package = before
+                    .packages
+                    .get(&descriptor.font.package)
+                    .ok_or("Room UI font package absent from active lock")?;
+                if !package.manifest.files.contains(&descriptor.font.asset) {
+                    return Err("Room UI font absent from package manifest".into());
+                }
+                let font = project
+                    .read_asset(&descriptor.font.package, &descriptor.font.asset)
+                    .map_err(|e| e.to_string())?;
+                crate::collect_ui::CollectUi::validate_font_for(
+                    &font,
+                    &document,
+                    crate::authored_ui::Profile::Room,
+                )?;
+                let manifest_path = project.root().join("orr.project.json");
+                let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
+                let pinned: orr_package::ProjectManifest =
+                    serde_json::from_slice(&manifest_bytes).map_err(|e| e.to_string())?;
+                if pinned != *manifest {
+                    return Err("Room manifest changed during UI admission".into());
+                }
+                Ok::<_, String>(PreparedRoomUi {
+                    scene_path: crate::project::entry_file(project.root(), &entry.scene)?,
+                    manifest_path,
+                    manifest_bytes,
+                    path,
+                    document,
+                    font,
+                })
+            })
+            .transpose()?;
         let camera = if let Some(relative) = &entry.camera {
             let path = crate::project::entry_file(project.root(), relative)?;
             let bytes = crate::project::read_regular(&path, crate::room_camera::MAX_BYTES as u64)?;
@@ -239,12 +307,22 @@ impl PreparedProject {
             &models,
         )?;
         Ok(Self {
+            #[cfg(feature = "room-ui")]
+            ui,
             camera,
             root: project.root().to_path_buf(),
             path,
             scene,
             models,
         })
+    }
+    #[cfg(feature = "room-ui")]
+    pub fn ui(&self) -> Option<&PreparedRoomUi> {
+        self.ui.as_ref()
+    }
+    #[cfg(feature = "room-ui")]
+    pub fn take_ui(&mut self) -> Option<PreparedRoomUi> {
+        self.ui.take()
     }
     pub fn camera(&self) -> Option<&PreparedRoomCamera> {
         self.camera.as_ref()

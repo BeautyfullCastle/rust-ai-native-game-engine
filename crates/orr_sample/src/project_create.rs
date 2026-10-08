@@ -10,7 +10,7 @@ mod room_template;
 mod template;
 #[cfg(test)]
 mod tests;
-#[cfg(feature = "collect-ui")]
+#[cfg(any(feature = "collect-ui", feature = "room-ui"))]
 mod ui_template;
 
 use crate::{
@@ -29,6 +29,7 @@ use std::{
 pub const TEMPLATE: &str = template::ID;
 pub const COLLECT_TEMPLATE: &str = "collect-dodge-2d-v1";
 pub const COLLECT_UI_TEMPLATE: &str = "collect-dodge-ui-2d-v1";
+pub const ROOM_UI_TEMPLATE: &str = "room-escape-ui-3d-v1";
 pub const ROOM_TEMPLATE: &str = "room-escape-3d-v1";
 pub const MAX_SEED_BYTES: usize = 128;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -89,8 +90,8 @@ fn create_transaction(
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
-    let with_ui = options.template == COLLECT_UI_TEMPLATE;
-    let with_room = options.template == ROOM_TEMPLATE;
+    let with_ui = options.template == COLLECT_UI_TEMPLATE || options.template == ROOM_UI_TEMPLATE;
+    let with_room = options.template == ROOM_TEMPLATE || options.template == ROOM_UI_TEMPLATE;
     if with_room && !cfg!(feature = "room-project") {
         return Err("Room template requires room-project feature".into());
     }
@@ -99,9 +100,10 @@ fn create_transaction(
     {
         return Err(format!("unsupported template; expected {TEMPLATE}"));
     }
-    if with_ui && !cfg!(feature = "collect-ui") {
+    if with_ui && !with_room && !cfg!(feature = "collect-ui") {
         return Err("Collect UI template requires collect-ui feature".into());
     }
+    if options.template == ROOM_UI_TEMPLATE && !cfg!(feature = "room-ui") { return Err("Room UI template requires room-ui feature".into()); }
     if options.seed.is_empty()
         || options.seed.len() > MAX_SEED_BYTES
         || !options
@@ -162,15 +164,24 @@ fn create_transaction(
         #[cfg(feature = "room-project")]
         {
             let scene = room_template::scene(&options.seed)?;
-            let manifest = json_line(&serde_json::json!({"schema":2,"engine":"^0.0.1",
-                "entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json","camera":"room.camera.json"}}))?;
+            let manifest = serde_json::json!({"schema":2,"engine":"^0.0.1",
+                "entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json","camera":"room.camera.json"}});
+            #[cfg(feature = "room-ui")]
+            let manifest = if with_ui {
+                let mut manifest = manifest;
+                manifest["entry"]["ui"] = serde_json::json!({"profile":"room-authored-v1","document":"room.ui.json","font":{"package":"korean-game-ui","asset":"OrreryKoreanUI.otf"}});
+                manifest
+            } else { manifest };
+            let manifest = json_line(&manifest)?;
             (
                 scene,
                 Vec::new(),
                 manifest,
                 "room.scene.yaml",
                 "room.models.json",
-                room_template::readme(&options.seed),
+                if with_ui {
+                    format!("{}\nRoom HUD profile: room-authored-v1. Build editor/runtime with room-ui; edit room.ui.json using the bounded UI panel. The installed Korean font package is retained under OFL/COPYRIGHT notices. Menu pauses controls only; Restart restores the admitted Frame and camera. No score/progress persistence.\n", room_template::readme(&options.seed).replace(ROOM_TEMPLATE, ROOM_UI_TEMPLATE).replace("Richer HUD remains separate work.", "The bounded authored HUD is enabled."))
+                } else { room_template::readme(&options.seed) },
             )
         }
         #[cfg(not(feature = "room-project"))]
@@ -200,11 +211,15 @@ fn create_transaction(
     #[cfg(feature = "room-project")]
     if with_room { expected.insert("room.camera.json".into(), crate::room_camera::Document::readable_default().to_bytes()?); }
     #[cfg(feature = "collect-ui")]
-    if with_ui {
+    if with_ui && !with_room {
         expected.insert(
             "level.ui.json".into(),
             json_line(&crate::authored_ui::Document::default_collect())?,
         );
+    }
+    #[cfg(feature = "room-ui")]
+    if with_ui && with_room {
+        expected.insert("room.ui.json".into(), crate::authored_ui::Document::default_room().to_bytes_for(crate::authored_ui::Profile::Room)?);
     }
     for (relative, bytes) in &expected {
         write_new(&project_root.join(relative), bytes)?;
@@ -217,7 +232,7 @@ fn create_transaction(
     } else {
         sources
     };
-    #[cfg(feature = "collect-ui")]
+    #[cfg(any(feature = "collect-ui", feature = "room-ui"))]
     let sources = if with_ui {
         let mut sources = sources;
         sources.push((ui_template::PACKAGE, ui_template::SOURCE));
@@ -295,7 +310,7 @@ fn create_transaction(
     }
     fs::remove_dir_all(&source_root).map_err(error)?;
     checkpoint("before-validation", transaction.path())?;
-    verify_profile_stage(&project_root, &expected, with_ui)?;
+    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room)?;
     let initial_checksum = if progress.is_some() {
         #[cfg(feature = "collect-dodge")]
         {
@@ -317,7 +332,7 @@ fn create_transaction(
     } else if with_room {
         #[cfg(feature = "room-project")]
         {
-            crate::room_project::PreparedProject::open(&project_root)?
+            crate::room_project::PreparedProject::open_with_ui(&project_root, with_ui)?
                 .scene()
                 .frame()
                 .checksum()
@@ -332,7 +347,7 @@ fn create_transaction(
             .checksum()
     };
     checkpoint("before-publish", transaction.path())?;
-    verify_profile_stage(&project_root, &expected, with_ui)?;
+    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room)?;
     // Recheck ordinary parent changes. RENAME_NOREPLACE itself closes concurrent
     // destination creation, including an empty directory or dangling symlink.
     if destination(&options.output)? != output {
@@ -363,7 +378,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     write_profile_file(path, bytes, false)
 }
 fn file_limit(path: &Path, bytes: &[u8], with_ui: bool) -> usize {
-    #[cfg(feature = "collect-ui")]
+    #[cfg(any(feature = "collect-ui", feature = "room-ui"))]
     if with_ui
         && path
             .file_name()
@@ -434,12 +449,13 @@ fn verify_profile_stage(
     root: &Path,
     expected: &BTreeMap<String, Vec<u8>>,
     with_ui: bool,
+    with_room_ui: bool,
 ) -> Result<(), String> {
     let root_metadata = fs::symlink_metadata(root).map_err(error)?;
     if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
         return Err("starter stage root must be a nonsymlink directory".into());
     }
-    if expected.len() > if with_ui { 17 } else { MAX_FILES }
+    if expected.len() > if with_room_ui { 18 } else if with_ui { 17 } else { MAX_FILES }
         || expected.values().map(Vec::len).sum::<usize>() > MAX_TOTAL_BYTES
     {
         return Err("starter payload exceeds transaction limits".into());

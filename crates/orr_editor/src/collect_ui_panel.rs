@@ -1,8 +1,7 @@
 //! Editor-owned UI history. Saving atomically replaces only the admitted UI
 //! document; it is not a transaction with the scene or project manifest.
 use orr_sample::{
-    authored_ui::{Action, Binding, Document, Kind, Node, Screen, MAX_BYTES, MAX_NODES},
-    collect_project::PreparedCollectUi,
+    authored_ui::{Action, Binding, Document, Kind, Node, Profile, Screen, MAX_BYTES, MAX_NODES},
     collect_ui::CollectUi,
 };
 use std::{
@@ -14,7 +13,18 @@ use std::{
 
 const MAX_UNDO: usize = 32;
 
+#[cfg(feature = "room-ui")]
+struct RoomPin {
+    scene: PathBuf,
+    manifest: PathBuf,
+    bytes: Vec<u8>,
+    activation: Option<(std::sync::Arc<std::sync::atomic::AtomicU64>, u64)>,
+    retired: bool,
+}
 pub struct Panel {
+    #[cfg(feature = "room-ui")]
+    room: Option<RoomPin>,
+    profile: Profile,
     path: PathBuf,
     root: Result<RootPin, String>,
     document: Document,
@@ -74,16 +84,110 @@ fn checked_file(path: &Path) -> Result<(), String> {
 }
 
 impl Panel {
-    pub fn new(prepared: PreparedCollectUi) -> Self {
-        let parent = prepared.path.parent().unwrap_or(Path::new("."));
+    #[cfg(feature = "collect-ui")]
+    pub fn new(prepared: orr_sample::collect_project::PreparedCollectUi) -> Self {
+        Self::new_for(
+            prepared.path,
+            prepared.document,
+            prepared.font,
+            Profile::Collect,
+        )
+    }
+    #[cfg(feature = "room-ui")]
+    pub fn new_room(prepared: orr_sample::room_project::PreparedRoomUi) -> Self {
+        let mut panel = Self::new_for(
+            prepared.path,
+            prepared.document,
+            prepared.font,
+            Profile::Room,
+        );
+        panel.room = Some(RoomPin {
+            scene: prepared.scene_path,
+            manifest: prepared.manifest_path,
+            bytes: prepared.manifest_bytes,
+            activation: None,
+            retired: false,
+        });
+        panel
+    }
+    #[cfg(feature = "room-ui")]
+    pub fn bind_room(&mut self, editor: &crate::Editor) -> Result<(), String> {
+        let room = self.room.as_mut().ok_or("Room UI source pin missing")?;
+        if room.retired || room.activation.is_some() {
+            return Err("Room UI cannot be rebound; reopen the project".into());
+        }
+        if !editor.game().is_room()
+            || !editor.spec().is_local()
+            || editor.path().as_ref() != Some(&room.scene)
+        {
+            return Err("Room UI requires its admitted local scene".into());
+        }
+        let token = editor.room_ui_source_token();
+        let epoch = token.load(std::sync::atomic::Ordering::SeqCst);
+        if epoch == u64::MAX {
+            return Err("Room source generation exhausted; reopen editor".into());
+        }
+        room.activation = Some((token, epoch));
+        self.check_room_active()
+    }
+    #[cfg(feature = "room-ui")]
+    pub fn room_active(&mut self) -> bool {
+        self.check_room_active().is_ok()
+    }
+
+    fn check_room_active(&mut self) -> Result<(), String> {
+        #[cfg(feature = "room-ui")]
+        if self.profile == Profile::Room {
+            let room = self
+                .room
+                .as_mut()
+                .ok_or("Room UI is not bound to an editor source")?;
+            let active = room.activation.as_ref().is_some_and(|(token, epoch)| {
+                *epoch != u64::MAX && token.load(std::sync::atomic::Ordering::SeqCst) == *epoch
+            });
+            if room.retired || !active {
+                room.retired = true;
+                return Err("Room UI source retired; reopen the project".into());
+            }
+        }
+        Ok(())
+    }
+    fn check_room_manifest(&mut self) -> Result<(), String> {
+        self.check_room_active()?;
+        #[cfg(feature = "room-ui")]
+        if let Some(room) = &self.room {
+            let metadata = std::fs::symlink_metadata(&room.manifest).map_err(|e| e.to_string())?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() != room.bytes.len() as u64
+            {
+                return Err("Room UI manifest changed; reopen the project".into());
+            }
+            let mut bytes = Vec::new();
+            File::open(&room.manifest)
+                .map_err(|e| e.to_string())?
+                .take(room.bytes.len() as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes != room.bytes {
+                return Err("Room UI manifest changed; reopen the project".into());
+            }
+        }
+        Ok(())
+    }
+    fn new_for(path: PathBuf, document: Document, font: Vec<u8>, profile: Profile) -> Self {
+        let parent = path.parent().unwrap_or(Path::new("."));
         let root = RootPin::new(parent);
         let error = root.as_ref().err().cloned();
         Self {
-            path: prepared.path,
+            #[cfg(feature = "room-ui")]
+            room: None,
+            path,
+            profile,
             root,
-            saved: prepared.document.clone(),
-            document: prepared.document,
-            font: prepared.font,
+            saved: document.clone(),
+            document,
+            font,
             undo: Vec::new(),
             selected: None,
             error,
@@ -95,9 +199,10 @@ impl Panel {
     }
 
     pub fn apply_document(&mut self, candidate: Document) -> Result<(), String> {
+        self.check_room_active()?;
         // Validate the entire candidate before changing the live document/history.
-        CollectUi::validate_font(&self.font, &candidate)?;
-        candidate.to_bytes()?;
+        CollectUi::validate_font_for(&self.font, &candidate, self.profile)?;
+        candidate.to_bytes_for(self.profile)?;
         if candidate != self.document {
             if self.undo.len() == MAX_UNDO {
                 self.undo.remove(0);
@@ -112,6 +217,9 @@ impl Panel {
     }
 
     pub fn undo(&mut self) -> bool {
+        if self.check_room_active().is_err() {
+            return false;
+        }
         if let Some(previous) = self.undo.pop() {
             self.document = previous;
             self.selected = self
@@ -124,8 +232,9 @@ impl Panel {
     }
 
     pub fn save(&mut self) -> Result<(), String> {
-        CollectUi::validate_font(&self.font, &self.document)?;
-        let bytes = self.document.to_bytes()?;
+        self.check_room_manifest()?;
+        CollectUi::validate_font_for(&self.font, &self.document, self.profile)?;
+        let bytes = self.document.to_bytes_for(self.profile)?;
         let parent = self.path.parent().unwrap_or(Path::new("."));
         let pin = self.root.as_ref().map_err(Clone::clone)?;
         pin.recheck(parent)?;
@@ -137,7 +246,7 @@ impl Panel {
             .take(MAX_BYTES as u64 + 1)
             .read_to_end(&mut current)
             .map_err(|e| e.to_string())?;
-        if Document::parse(&current)? != self.saved {
+        if Document::parse_for(&current, self.profile)? != self.saved {
             return Err("UI document changed on disk; reopen the project before saving".into());
         }
         let mut temp = tempfile::NamedTempFile::new_in(&pin.path).map_err(|e| e.to_string())?;
@@ -148,168 +257,196 @@ impl Panel {
         // checks detect changed paths; they do not claim hostile-race isolation.
         pin.recheck(parent)?;
         checked_file(&self.path)?;
+        self.check_room_manifest()?;
         temp.persist(&self.path).map_err(|e| e.to_string())?;
         self.saved = self.document.clone();
         Ok(())
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, editable: bool) {
-        ui.collapsing("Collect UI document", |ui| {
-            ui.label(format!(
-                "{} nodes{}",
-                self.document.nodes.len(),
-                if self.document != self.saved {
-                    " (unsaved)"
-                } else {
-                    ""
+        if let Err(error) = self.check_room_active() {
+            self.error = Some(error.clone());
+            ui.label(error);
+            return;
+        }
+        ui.collapsing(
+            if self.profile == Profile::Room {
+                "Room UI document"
+            } else {
+                "Collect UI document"
+            },
+            |ui| {
+                ui.label(format!(
+                    "{} nodes{}",
+                    self.document.nodes.len(),
+                    if self.document != self.saved {
+                        " (unsaved)"
+                    } else {
+                        ""
+                    }
+                ));
+                if !editable {
+                    ui.label("UI authoring is read-only during Play");
                 }
-            ));
-            if !editable {
-                ui.label("UI authoring is read-only during Play");
-            }
-            ui.add_enabled_ui(editable, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.undo.is_empty(), egui::Button::new("Undo UI edit"))
-                        .clicked()
-                    {
-                        self.undo();
-                        self.error = None;
-                    }
-                    if ui.button("Save UI document").clicked() {
-                        self.error = self.save().err();
-                    }
+                ui.add_enabled_ui(editable, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!self.undo.is_empty(), egui::Button::new("Undo UI edit"))
+                            .clicked()
+                        {
+                            self.undo();
+                            self.error = None;
+                        }
+                        if ui.button("Save UI document").clicked() {
+                            self.error = self.save().err();
+                        }
+                    });
                 });
-            });
-            egui::ComboBox::new("collect_ui_selected", "UI node")
-                .selected_text(
-                    self.selected
-                        .and_then(|i| self.document.nodes.get(i))
-                        .map(|n| n.id.as_str())
-                        .unwrap_or("Select node"),
-                )
-                .show_ui(ui, |ui| {
-                    for (index, node) in self.document.nodes.iter().enumerate() {
-                        ui.selectable_value(&mut self.selected, Some(index), &node.id);
-                    }
-                });
-            ui.add_enabled_ui(editable, |ui| {
-                let mut candidate = self.document.clone();
-                let mut changed = false;
-                if let Some(index) = self.selected.filter(|i| *i < candidate.nodes.len()) {
-                    let node = &mut candidate.nodes[index];
-                    ui.label(format!("Stable id: {}", node.id));
-                    ui.label(format!(
-                        "Parent: {}",
-                        node.parent.as_deref().unwrap_or("viewport")
-                    ));
-                    changed |= choice(
-                        ui,
-                        "Screen",
-                        &mut node.screen,
-                        &[
-                            Screen::Title,
-                            Screen::Playing,
-                            Screen::Menu,
-                            Screen::Terminal,
-                        ],
-                    );
-                    for (label, values) in [
-                        ("Anchor (0..1000)", &mut node.anchor),
-                        ("Size (1..4096)", &mut node.size),
-                    ] {
+                egui::ComboBox::new("collect_ui_selected", "UI node")
+                    .selected_text(
+                        self.selected
+                            .and_then(|i| self.document.nodes.get(i))
+                            .map(|n| n.id.as_str())
+                            .unwrap_or("Select node"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (index, node) in self.document.nodes.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected, Some(index), &node.id);
+                        }
+                    });
+                ui.add_enabled_ui(editable, |ui| {
+                    let mut candidate = self.document.clone();
+                    let mut changed = false;
+                    if let Some(index) = self.selected.filter(|i| *i < candidate.nodes.len()) {
+                        let node = &mut candidate.nodes[index];
+                        ui.label(format!("Stable id: {}", node.id));
+                        ui.label(format!(
+                            "Parent: {}",
+                            node.parent.as_deref().unwrap_or("viewport")
+                        ));
+                        changed |= choice(
+                            ui,
+                            "Screen",
+                            &mut node.screen,
+                            &[
+                                Screen::Title,
+                                Screen::Playing,
+                                Screen::Menu,
+                                Screen::Terminal,
+                            ],
+                        );
+                        for (label, values) in [
+                            ("Anchor (0..1000)", &mut node.anchor),
+                            ("Size (1..4096)", &mut node.size),
+                        ] {
+                            ui.horizontal(|ui| {
+                                ui.label(label);
+                                for value in values {
+                                    changed |= ui.add(egui::DragValue::new(value)).changed();
+                                }
+                            });
+                        }
                         ui.horizontal(|ui| {
-                            ui.label(label);
-                            for value in values {
+                            ui.label("Offset (-4096..4096)");
+                            for value in &mut node.offset {
                                 changed |= ui.add(egui::DragValue::new(value)).changed();
                             }
                         });
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Offset (-4096..4096)");
-                        for value in &mut node.offset {
-                            changed |= ui.add(egui::DragValue::new(value)).changed();
+                        match &mut node.kind {
+                            Kind::Label { text, binding } => {
+                                ui.label("Literal text (128 characters max)");
+                                changed |= ui.text_edit_singleline(text).changed();
+                                changed |= choice(
+                                    ui,
+                                    "Binding",
+                                    binding,
+                                    &[
+                                        None,
+                                        Some(if self.profile == Profile::Room {
+                                            Binding::KeyAcquired
+                                        } else {
+                                            Binding::Score
+                                        }),
+                                        Some(if self.profile == Profile::Room {
+                                            Binding::RoomPhase
+                                        } else {
+                                            Binding::Phase
+                                        }),
+                                        Some(if self.profile == Profile::Room {
+                                            Binding::ExitState
+                                        } else {
+                                            Binding::Best
+                                        }),
+                                    ],
+                                );
+                            }
+                            Kind::Button { text, action } => {
+                                ui.label("Button text (128 characters max)");
+                                changed |= ui.text_edit_singleline(text).changed();
+                                changed |= choice(
+                                    ui,
+                                    "Action",
+                                    action,
+                                    &[
+                                        Action::Play,
+                                        Action::Menu,
+                                        Action::Continue,
+                                        Action::Restart,
+                                        Action::Quit,
+                                    ],
+                                );
+                            }
+                            Kind::Container => {
+                                ui.label("Container: children inherit this coordinate space");
+                            }
                         }
-                    });
-                    match &mut node.kind {
-                        Kind::Label { text, binding } => {
-                            ui.label("Literal text (128 characters max)");
-                            changed |= ui.text_edit_singleline(text).changed();
-                            changed |= choice(
-                                ui,
-                                "Binding",
-                                binding,
-                                &[
-                                    None,
-                                    Some(Binding::Score),
-                                    Some(Binding::Phase),
-                                    Some(Binding::Best),
-                                ],
-                            );
-                        }
-                        Kind::Button { text, action } => {
-                            ui.label("Button text (128 characters max)");
-                            changed |= ui.text_edit_singleline(text).changed();
-                            changed |= choice(
-                                ui,
-                                "Action",
-                                action,
-                                &[
-                                    Action::Play,
-                                    Action::Menu,
-                                    Action::Continue,
-                                    Action::Restart,
-                                    Action::Quit,
-                                ],
-                            );
-                        }
-                        Kind::Container => {
-                            ui.label("Container: children inherit this coordinate space");
-                        }
-                    }
-                    if ui.button("Remove node and descendants").clicked() {
-                        remove_subtree(&mut candidate, index);
-                        self.selected = None;
-                        changed = true;
-                    }
-                }
-                ui.horizontal(|ui| {
-                    for (name, kind) in [
-                        (
-                            "Add label",
-                            Kind::Label {
-                                text: "Label".into(),
-                                binding: None,
-                            },
-                        ),
-                        (
-                            "Add button",
-                            Kind::Button {
-                                text: "Play".into(),
-                                action: Action::Play,
-                            },
-                        ),
-                        ("Add container", Kind::Container),
-                    ] {
-                        if ui
-                            .add_enabled(candidate.nodes.len() < MAX_NODES, egui::Button::new(name))
-                            .clicked()
-                        {
-                            add_node(&mut candidate, self.selected, kind);
-                            self.selected = Some(candidate.nodes.len() - 1);
+                        if ui.button("Remove node and descendants").clicked() {
+                            remove_subtree(&mut candidate, index);
+                            self.selected = None;
                             changed = true;
                         }
                     }
+                    ui.horizontal(|ui| {
+                        for (name, kind) in [
+                            (
+                                "Add label",
+                                Kind::Label {
+                                    text: "Label".into(),
+                                    binding: None,
+                                },
+                            ),
+                            (
+                                "Add button",
+                                Kind::Button {
+                                    text: "Play".into(),
+                                    action: Action::Play,
+                                },
+                            ),
+                            ("Add container", Kind::Container),
+                        ] {
+                            if ui
+                                .add_enabled(
+                                    candidate.nodes.len() < MAX_NODES,
+                                    egui::Button::new(name),
+                                )
+                                .clicked()
+                            {
+                                add_node(&mut candidate, self.selected, kind);
+                                self.selected = Some(candidate.nodes.len() - 1);
+                                changed = true;
+                            }
+                        }
+                    });
+                    if changed {
+                        self.error = self.apply_document(candidate).err();
+                    }
                 });
-                if changed {
-                    self.error = self.apply_document(candidate).err();
+                if let Some(error) = &self.error {
+                    ui.colored_label(egui::Color32::RED, error);
                 }
-            });
-            if let Some(error) = &self.error {
-                ui.colored_label(egui::Color32::RED, error);
-            }
-            ui.label("Saves this UI file only. Scene and project metadata are unchanged.");
-        });
+                ui.label("Saves this UI file only. Scene and project metadata are unchanged.");
+            },
+        );
     }
 }
 
@@ -365,9 +502,10 @@ fn remove_subtree(document: &mut Document, index: usize) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "collect-ui"))]
 mod tests {
     use super::*;
+    use orr_sample::collect_project::PreparedCollectUi;
     fn fixture() -> (tempfile::TempDir, PreparedCollectUi) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("collect.ui.json");
@@ -575,5 +713,126 @@ mod tests {
         std::fs::write(&path, prepared.document.to_bytes().unwrap()).unwrap();
         assert!(panel.save().is_err());
         std::fs::remove_dir_all(moved).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "room-ui", feature = "project-create"))]
+mod room_panel_tests {
+    use super::*;
+    fn fixture() -> (tempfile::TempDir, orr_sample::room_project::PreparedRoomUi) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("room");
+        orr_sample::project_create::create(&orr_sample::project_create::CreateOptions {
+            output: root.clone(),
+            template: orr_sample::project_create::ROOM_UI_TEMPLATE.into(),
+            seed: "editor-ui".into(),
+        })
+        .unwrap();
+        let mut project =
+            orr_sample::room_project::PreparedProject::open_with_ui(&root, true).unwrap();
+        (dir, project.take_ui().unwrap())
+    }
+    #[test]
+    fn room_widgets_edit_undo_save_reopen_and_share_runtime_document() {
+        use egui::accesskit::Role;
+        use egui_kittest::{kittest::Queryable, Harness};
+        let (_dir, prepared) = fixture();
+        let path = prepared.path.clone();
+        let font = prepared.font.clone();
+        let original = prepared.document.clone();
+        let scene = prepared.scene_path.clone();
+        let editor = crate::Editor::start(&crate::HostSpec::PreparedRoom {
+            scene: scene.clone(),
+            text: std::fs::read_to_string(&scene).unwrap(),
+            listen: None,
+            debug_hooks: false,
+        })
+        .unwrap();
+        let mut panel = Panel::new_room(prepared);
+        panel.bind_room(&editor).unwrap();
+        let mut installed = false;
+        let installed_font = font.clone();
+        let mut h = Harness::builder()
+            .with_size([1000.0, 1000.0])
+            .build_ui_state(
+                move |ui, panel: &mut Panel| {
+                    if !installed {
+                        let mut definitions = egui::FontDefinitions::default();
+                        definitions.font_data.insert(
+                            "collect-editor-test".into(),
+                            egui::FontData::from_owned(installed_font.clone()).into(),
+                        );
+                        definitions
+                            .families
+                            .entry(egui::FontFamily::Proportional)
+                            .or_default()
+                            .insert(0, "collect-editor-test".into());
+                        ui.ctx().set_fonts(definitions);
+                        installed = true;
+                    }
+                    panel.show(ui, true);
+                },
+                panel,
+            );
+        h.run_steps(3);
+        h.get_by_label("Room UI document").click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::ComboBox, "UI node").click();
+        h.run_steps(3);
+        h.get_by_label("title").click();
+        h.run_steps(3);
+
+        // Select-all and type through the accessible TextInput. DragValue
+        // controls have their own spin-button role, so this is the text field.
+        h.get_by_role(Role::TextInput).focus();
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(2);
+        h.get_by_role(Role::TextInput)
+            .type_text("Edited through UI");
+        h.run_steps(3);
+        let edited = h.state().document().clone();
+        assert!(
+            matches!(&edited.nodes.iter().find(|node| node.id == "title").unwrap().kind, Kind::Label { text, .. } if text == "Edited through UI")
+        );
+        assert_ne!(edited, original);
+        assert!(h.state().error.is_none(), "{:?}", h.state().error);
+
+        h.get_by_label("Undo UI edit").click();
+        h.run_steps(3);
+        assert_eq!(h.state().document(), &original);
+
+        h.get_by_role(Role::TextInput).focus();
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(2);
+        h.get_by_role(Role::TextInput)
+            .type_text("Edited through UI");
+        h.run_steps(3);
+        assert_eq!(h.state().document(), &edited);
+        h.get_by_label("Save UI document").click();
+        h.run_steps(3);
+        assert!(h.state().error.is_none(), "{:?}", h.state().error);
+        let reopened = Document::parse_for(&std::fs::read(&path).unwrap(), Profile::Room).unwrap();
+        assert_eq!(reopened, edited);
+        let runtime = CollectUi::new_for(reopened.clone(), font.clone(), Profile::Room).unwrap();
+        assert_eq!(runtime.document(), &edited);
+        let mut reloaded =
+            orr_sample::room_project::PreparedProject::open_with_ui(path.parent().unwrap(), true)
+                .unwrap();
+        let mut reopened_panel = Panel::new_room(reloaded.take_ui().unwrap());
+        reopened_panel.bind_room(&editor).unwrap();
+        assert_eq!(reopened_panel.document(), runtime.document());
+
+        // Actual Add/Remove widgets maintain the same bounded history.
+        h.get_by_label("Add label").click();
+        h.run_steps(3);
+        assert_eq!(h.state().document().nodes.len(), edited.nodes.len() + 1);
+        h.get_by_label("Remove node and descendants").click();
+        h.run_steps(3);
+        assert_eq!(h.state().document(), &edited);
+        h.get_by_label("Undo UI edit").click();
+        h.run_steps(3);
+        assert_eq!(h.state().document().nodes.len(), edited.nodes.len() + 1);
     }
 }

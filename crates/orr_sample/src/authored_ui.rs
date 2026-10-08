@@ -75,6 +75,9 @@ pub enum Binding {
     Score,
     Phase,
     Best,
+    KeyAcquired,
+    ExitState,
+    RoomPhase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,20 +99,96 @@ pub enum Screen {
     Terminal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    Collect,
+    Room,
+}
+
+// Room's new wire profile is object-only. Deserializing through MapAccess
+// preserves the typed duplicate/unknown-field checks; no lossy Value round trip.
+// Keep the historical Collect decoder unchanged.
+struct MapOnly<T>(T);
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+            type Value = MapOnly<T>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a Room UI JSON object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(MapOnly)
+            }
+        }
+        deserializer.deserialize_map(Visitor(std::marker::PhantomData))
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomDocumentWire {
+    schema: u32,
+    nodes: Vec<MapOnly<RoomNodeWire>>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomNodeWire {
+    id: String,
+    parent: Option<String>,
+    kind: MapOnly<Kind>,
+    screen: Screen,
+    anchor: [u16; 2],
+    offset: [i16; 2],
+    size: [u16; 2],
+}
+fn parse_room_object(bytes: &[u8]) -> Result<Document, serde_json::Error> {
+    let MapOnly(wire): MapOnly<RoomDocumentWire> = serde_json::from_slice(bytes)?;
+    Ok(Document {
+        schema: wire.schema,
+        nodes: wire
+            .nodes
+            .into_iter()
+            .map(|MapOnly(node)| Node {
+                id: node.id,
+                parent: node.parent,
+                kind: node.kind.0,
+                screen: node.screen,
+                anchor: node.anchor,
+                offset: node.offset,
+                size: node.size,
+            })
+            .collect(),
+    })
+}
+
 impl Document {
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        Self::parse_for(bytes, Profile::Collect)
+    }
+
+    pub fn parse_for(bytes: &[u8], profile: Profile) -> Result<Self, String> {
         if bytes.len() > MAX_BYTES {
             return Err("Collect UI exceeds 64 KiB".into());
         }
         // Decode straight into strict structs, not Value: Value would silently
         // discard duplicate JSON keys before schema validation could see them.
-        let document: Self = serde_json::from_slice(bytes)
-            .map_err(|error| format!("invalid Collect UI JSON: {error}"))?;
-        document.validate()?;
+        let document: Self = match profile {
+            Profile::Collect => serde_json::from_slice(bytes),
+            Profile::Room => parse_room_object(bytes),
+        }
+        .map_err(|error| format!("invalid authored UI JSON: {error}"))?;
+        document.validate_for(profile)?;
         Ok(document)
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_for(Profile::Collect)
+    }
+
+    pub fn validate_for(&self, profile: Profile) -> Result<(), String> {
         if self.schema != SCHEMA {
             return Err(format!("unsupported Collect UI schema {}", self.schema));
         }
@@ -131,6 +210,19 @@ impl Document {
                 || node.size.iter().any(|v| !(1..=4096).contains(v))
             {
                 return Err(format!("UI node {} has out-of-range geometry", node.id));
+            }
+            if let Kind::Label {
+                binding: Some(binding),
+                ..
+            } = &node.kind
+            {
+                let room = matches!(
+                    binding,
+                    Binding::KeyAcquired | Binding::ExitState | Binding::RoomPhase
+                );
+                if room != (profile == Profile::Room) {
+                    return Err("UI binding does not match consuming profile".into());
+                }
             }
             match &node.kind {
                 Kind::Label { text, .. } | Kind::Button { text, .. } => {
@@ -165,7 +257,11 @@ impl Document {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
-        self.validate()?;
+        self.to_bytes_for(Profile::Collect)
+    }
+
+    pub fn to_bytes_for(&self, profile: Profile) -> Result<Vec<u8>, String> {
+        self.validate_for(profile)?;
         let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
         if bytes.len() > MAX_BYTES {
             return Err("Collect UI exceeds 64 KiB".into());
@@ -176,7 +272,13 @@ impl Document {
     /// Complete authored text plus characters used by the fixed runtime values.
     /// Consumers can construct a font atlas without interpreting authored text.
     pub fn corpus(&self) -> String {
-        let mut result = String::from("0123456789 /:- PLAYING WON LOST: hazard LOST: time INVALID Best Score Phase unavailable");
+        self.corpus_for(Profile::Collect)
+    }
+    pub fn corpus_for(&self, profile: Profile) -> String {
+        let mut result = String::from(match profile {
+            Profile::Collect => "0123456789 /:- PLAYING WON LOST: hazard LOST: time INVALID Best Score Phase unavailable",
+            Profile::Room => "ACQUIRED MISSING LOCKED UNLOCKED WON PLAYING INVALID",
+        });
         for node in &self.nodes {
             if let Kind::Label { text, .. } | Kind::Button { text, .. } = &node.kind {
                 result.push(' ');
@@ -184,6 +286,76 @@ impl Document {
             }
         }
         result
+    }
+
+    pub fn default_room() -> Self {
+        let mut document = Self::default_collect();
+        for node in &mut document.nodes {
+            if let Kind::Label { text, binding } = &mut node.kind {
+                match binding {
+                    Some(Binding::Score) => {
+                        *text = "Key:".into();
+                        *binding = Some(Binding::KeyAcquired);
+                    }
+                    Some(Binding::Best) => {
+                        *text = "Exit:".into();
+                        *binding = Some(Binding::ExitState);
+                    }
+                    Some(Binding::Phase) => {
+                        *text = "Room:".into();
+                        *binding = Some(Binding::RoomPhase);
+                    }
+                    None if node.id == "title" => *text = "Room Escape".into(),
+                    _ => {}
+                }
+            }
+        }
+        for node in &mut document.nodes {
+            node.id = match node.id.as_str() {
+                "title_best" => "title_exit",
+                "score" => "key",
+                "phase" => "room_phase",
+                "result_score" => "result_key",
+                "result_best" => "result_exit",
+                other => other,
+            }
+            .into();
+        }
+        if let Some(menu) = document.nodes.iter_mut().find(|node| node.id == "menu") {
+            menu.offset[1] = 140;
+        }
+        document.nodes.push(Node {
+            id: "exit".into(),
+            parent: None,
+            kind: Kind::Label {
+                text: "Exit:".into(),
+                binding: Some(Binding::ExitState),
+            },
+            screen: Screen::Playing,
+            anchor: [500, 0],
+            offset: [-160, 96],
+            size: [320, 36],
+        });
+        let mut backgrounds = Vec::new();
+        for (id, screen, y, height) in [
+            ("title_background", Screen::Title, 40, 230),
+            ("playing_background", Screen::Playing, 0, 190),
+            ("menu_background", Screen::Menu, 40, 216),
+            ("terminal_background", Screen::Terminal, 40, 254),
+        ] {
+            backgrounds.push(Node {
+                id: id.into(),
+                parent: None,
+                kind: Kind::Container,
+                screen,
+                anchor: [500, 0],
+                offset: [-174, y],
+                size: [348, height],
+            });
+        }
+        backgrounds.append(&mut document.nodes);
+        document.nodes = backgrounds;
+        document
     }
 
     pub fn default_collect() -> Self {
@@ -581,5 +753,48 @@ mod tests {
                 Document::parse(format!("{{\"schema\":1,\"nodes\":[{n}]}}").as_bytes()).is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod room_profile_tests {
+    use super::*;
+
+    #[test]
+    fn room_profile_is_explicit_and_collect_default_stays_closed() {
+        let room = Document::default_room();
+        assert!(room.validate().is_err());
+        assert!(room.to_bytes().is_err());
+        let bytes = room.to_bytes_for(Profile::Room).unwrap();
+        assert!(Document::parse(&bytes).is_err());
+        assert_eq!(Document::parse_for(&bytes, Profile::Room).unwrap(), room);
+        assert!(Document::default_collect()
+            .validate_for(Profile::Room)
+            .is_err());
+    }
+
+    #[test]
+    fn room_schema_rejects_cross_bindings_unknown_duplicate_and_bad_geometry() {
+        let base = Document::default_room();
+        for binding in [Binding::Score, Binding::Phase, Binding::Best] {
+            let mut doc = base.clone();
+            doc.nodes[0].kind = Kind::Label {
+                text: "bad".into(),
+                binding: Some(binding),
+            };
+            assert!(doc.validate_for(Profile::Room).is_err());
+        }
+        for bad in [
+            br#"[1,[]]"#.as_slice(),
+            br#"{"schema":1,"nodes":[["x",null,{"type":"label","text":"Room","binding":null},"title",[0,0],[0,0],[100,30]]]}"#.as_slice(),
+            br#"{"schema":1,"nodes":[{"id":"x","parent":null,"kind":["container"],"screen":"title","anchor":[0,0],"offset":[0,0],"size":[100,30]}]}"#.as_slice(),
+            br#"{"schema":1,"nodes":[{"id":"x","parent":null,"kind":{"type":"container"},"screen":"title","anchor":[0,0],"offset":[0,0],"size":[100,30]},{"id":"child","parent":"x","kind":["label","x",null],"screen":"title","anchor":[0,0],"offset":[0,0],"size":[50,20]}]}"#.as_slice(),
+            br#"{"schema":1,"schema":1,"nodes":[]}"#.as_slice(),
+            br#"{"schema":1,"nodes":[],"callback":"run"}"#.as_slice(),
+            br#"{"schema":1,"nodes":[{"id":"x","parent":null,"kind":{"type":"container","extra":1},"screen":"playing","anchor":[0,0],"offset":[0,0],"size":[10,10]}]}"#.as_slice(),
+        ] { assert!(Document::parse_for(bad, Profile::Room).is_err()); }
+        let mut doc = base;
+        doc.nodes[0].size = [0, 1];
+        assert!(doc.validate_for(Profile::Room).is_err());
     }
 }

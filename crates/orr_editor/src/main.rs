@@ -37,7 +37,7 @@ fn main() {
     #[cfg(feature = "collect-dodge")]
     let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_ui(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }, cfg!(feature="collect-ui")).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
     #[cfg(feature="room-project")]
-    let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open(root).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
+    let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open_with_ui(root, cfg!(feature="room-ui")).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
@@ -124,6 +124,12 @@ fn main() {
             }
             #[cfg(feature="room-project")]
             if let Some(mut project)=room_project {
+                #[cfg(feature="room-ui")]
+                if let Some(ui) = project.take_ui() {
+                    let mut panel = orr_editor::collect_ui_panel::Panel::new_room(ui);
+                    panel.bind_room(&app.editor).unwrap_or_else(|error|fail(&error));
+                    app.collect_ui = Some(panel);
+                }
                 if let Some(camera)=project.take_camera() {
                     app.editor.install_room_camera(camera.document.clone()).unwrap_or_else(|error|fail(&error));
                     app.room_camera=Some(orr_editor::room_camera_panel::Panel::new(camera));

@@ -20,6 +20,7 @@ image-reimport = ["sprites", "orr_sample/image-reimport"]
 linked-prefabs = ["collect-dodge", "dep:tempfile", "orr_remote/linked-prefabs", "orr_sample/linked-prefabs", "orr_reflect/linked-prefabs"]
 collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]
 # Explicit saved-project UI admission and read-only preset/font preview.
+room-ui = ["room-project", "project-ui", "orr_sample/room-ui"]
 collect-ui = ["collect-dodge", "project-ui", "orr_sample/collect-ui"]
 project-ui = ["sprites", "orr_sample/game-ui"]
 navigation = ["terrain", "orr_remote/navigation", "dep:orr_navigation"]

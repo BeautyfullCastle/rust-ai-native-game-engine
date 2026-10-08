@@ -1,11 +1,48 @@
 //! Authored collect-game UI. Layout and pointer ownership stay entirely in the view.
-use crate::authored_ui::{Action, Binding, Document, Kind, Screen};
+use crate::authored_ui::{Action, Binding, Document, Kind, Profile, Screen};
 
 #[derive(Clone, Debug, Default)]
 pub struct Hud {
     pub score: u32,
     pub phase: u32,
     pub best: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RoomHud {
+    pub key_acquired: bool,
+    pub won: bool,
+}
+
+enum Values {
+    Collect(Hud),
+    Room(RoomHud),
+}
+impl Values {
+    fn phase(&self) -> u32 {
+        match self {
+            Self::Collect(h) => h.phase,
+            Self::Room(h) => u32::from(h.won),
+        }
+    }
+    fn value(&self, binding: Binding) -> String {
+        match (self, binding) {
+            (Self::Collect(h), Binding::Score) => h.score.to_string(),
+            (Self::Collect(h), Binding::Phase) => phase_text(h.phase).into(),
+            (Self::Collect(h), Binding::Best) => h.best.clone(),
+            (Self::Room(h), Binding::KeyAcquired) => if h.key_acquired {
+                "ACQUIRED"
+            } else {
+                "MISSING"
+            }
+            .into(),
+            (Self::Room(h), Binding::ExitState) => {
+                if h.key_acquired { "UNLOCKED" } else { "LOCKED" }.into()
+            }
+            (Self::Room(h), Binding::RoomPhase) => if h.won { "WON" } else { "PLAYING" }.into(),
+            _ => "INVALID".into(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -18,6 +55,7 @@ struct Placed {
 pub struct CollectUi {
     pub context: egui::Context,
     document: Document,
+    profile: Profile,
     screen: Screen,
     placed: Vec<Placed>,
     pressed: Option<String>,
@@ -30,7 +68,11 @@ pub struct CollectUi {
 
 impl CollectUi {
     pub fn new(document: Document, font: Vec<u8>) -> Result<Self, String> {
-        Self::validate_font(&font, &document)?;
+        Self::new_for(document, font, Profile::Collect)
+    }
+
+    pub fn new_for(document: Document, font: Vec<u8>, profile: Profile) -> Result<Self, String> {
+        Self::validate_font_for(&font, &document, profile)?;
         let context = egui::Context::default();
         let mut definitions = egui::FontDefinitions::default();
         definitions.font_data.insert(
@@ -48,6 +90,7 @@ impl CollectUi {
         Ok(Self {
             context,
             document,
+            profile,
             screen: Screen::Title,
             placed: Vec::new(),
             pressed: None,
@@ -61,8 +104,16 @@ impl CollectUi {
 
     /// Validate schema and the complete authored/dynamic text corpus without a GPU context.
     pub fn validate_font(font: &[u8], document: &Document) -> Result<(), String> {
-        document.validate()?;
-        crate::game_ui::GameUi::validate_font_with_corpus(font, &document.corpus())
+        Self::validate_font_for(font, document, Profile::Collect)
+    }
+
+    pub fn validate_font_for(
+        font: &[u8],
+        document: &Document,
+        profile: Profile,
+    ) -> Result<(), String> {
+        document.validate_for(profile)?;
+        crate::game_ui::GameUi::validate_font_with_corpus(font, &document.corpus_for(profile))
     }
 
     /// The validated document is immutable; construct a new UI to load an edit.
@@ -191,16 +242,45 @@ impl CollectUi {
     }
 
     pub fn show(&mut self, input: egui::RawInput, hud: Hud) -> (egui::FullOutput, Option<Action>) {
-        self.phase = hud.phase;
-        if hud.phase == 0 {
+        assert_eq!(
+            self.profile,
+            Profile::Collect,
+            "Collect data cannot drive Room UI"
+        );
+        self.show_values(input, Values::Collect(hud))
+    }
+
+    pub fn show_room(
+        &mut self,
+        input: egui::RawInput,
+        hud: RoomHud,
+    ) -> (egui::FullOutput, Option<Action>) {
+        assert_eq!(
+            self.profile,
+            Profile::Room,
+            "Room data cannot drive Collect UI"
+        );
+        self.show_values(input, Values::Room(hud))
+    }
+
+    fn show_values(
+        &mut self,
+        input: egui::RawInput,
+        values: Values,
+    ) -> (egui::FullOutput, Option<Action>) {
+        let phase = values.phase();
+        self.phase = phase;
+        if phase == 0 {
             self.awaiting_restart = false;
         }
         let terminal_change =
-            self.screen == Screen::Playing && hud.phase != 0 && !self.awaiting_restart;
+            self.screen == Screen::Playing && phase != 0 && !self.awaiting_restart;
         if terminal_change {
             self.screen = Screen::Terminal;
             self.invalidate_pointer_layout();
         }
+        let room_layout_transition = self.profile == Profile::Room
+            && (self.pointer_layout_stale || self.input_layout_changed(&input));
         if self.input_layout_changed(&input) {
             self.invalidate_pointer_layout();
         }
@@ -225,7 +305,7 @@ impl CollectUi {
                     button: egui::PointerButton::Primary,
                     pressed,
                     ..
-                } if !terminal_change => {
+                } if !terminal_change && !room_layout_transition => {
                     let hit = self.hit_button(*pos);
                     if *pressed {
                         self.pressed = hit.map(|index| self.document.nodes[index].id.clone());
@@ -280,11 +360,7 @@ impl CollectUi {
                         );
                     }
                     Kind::Label { text, binding } => {
-                        let value = binding.as_ref().map(|binding| match binding {
-                            Binding::Score => hud.score.to_string(),
-                            Binding::Phase => phase_text(hud.phase).to_owned(),
-                            Binding::Best => hud.best.clone(),
-                        });
+                        let value = binding.as_ref().map(|binding| values.value(*binding));
                         let text =
                             value.map_or_else(|| text.clone(), |value| format!("{text} {value}"));
                         // v1 labels are top-left aligned and wrap at their authored
@@ -311,6 +387,7 @@ impl CollectUi {
                         let response = ui.put(placed.rect, egui::Button::new(text));
                         if keyboard_activation
                             && !terminal_change
+                            && !room_layout_transition
                             && response.clicked()
                             && response.has_focus()
                             // Conservative v1 keyboard policy: the visible rectangle's
@@ -785,5 +862,112 @@ mod tests {
         let mut document = Document::default_collect();
         document.schema = 99;
         assert!(CollectUi::new(document, font()).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "room-ui"))]
+mod room_tests {
+    use super::*;
+    fn input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+    fn frame(ui: &mut CollectUi, events: Vec<egui::Event>, hud: RoomHud) -> Option<Action> {
+        let (output, action) = ui.show_room(input(events), hud);
+        assert!(!output.shapes.is_empty());
+        output.drop_without_applying_deltas();
+        action
+    }
+    fn click(ui: &mut CollectUi, action: Action, hud: RoomHud) -> Option<Action> {
+        frame(ui, vec![], hud);
+        let placed = ui.placed.iter().find(|p| matches!(ui.document.nodes[p.index].kind, Kind::Button { action: a, .. } if a == action)).unwrap();
+        let point = placed.rect.intersect(placed.clip).center();
+        let event = |pressed| egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        assert_eq!(
+            frame(ui, vec![egui::Event::PointerMoved(point), event(true)], hud),
+            None
+        );
+        frame(ui, vec![event(false)], hud)
+    }
+    #[test]
+    fn room_widgets_title_menu_win_restart_and_profile_values() {
+        let font = include_bytes!("../../../assets/game_ui_font/OrreryKoreanUI.otf").to_vec();
+        let mut ui = CollectUi::new_for(Document::default_room(), font, Profile::Room).unwrap();
+        let playing = RoomHud::default();
+        assert_eq!(ui.screen(), Screen::Title);
+        for action in [Action::Play, Action::Menu, Action::Continue] {
+            assert_eq!(click(&mut ui, action, playing), Some(action));
+            ui.apply(action);
+            ui.acknowledge_restart();
+        }
+        let won = RoomHud {
+            key_acquired: true,
+            won: true,
+        };
+        frame(&mut ui, vec![], won);
+        assert_eq!(ui.screen(), Screen::Terminal);
+        assert_eq!(click(&mut ui, Action::Restart, won), Some(Action::Restart));
+        ui.apply(Action::Restart);
+        frame(&mut ui, vec![], won);
+        assert_eq!(ui.screen(), Screen::Playing); // old terminal frame cannot undo pending restart
+        ui.acknowledge_restart();
+        frame(&mut ui, vec![], playing);
+        assert_eq!(ui.screen(), Screen::Playing);
+        assert_eq!(Values::Room(won).value(Binding::KeyAcquired), "ACQUIRED");
+        assert_eq!(Values::Room(won).value(Binding::ExitState), "UNLOCKED");
+        assert_eq!(Values::Room(won).value(Binding::RoomPhase), "WON");
+    }
+    #[test]
+    fn room_focus_dpi_and_release_without_press_do_not_activate() {
+        let font = include_bytes!("../../../assets/game_ui_font/OrreryKoreanUI.otf").to_vec();
+        let mut ui = CollectUi::new_for(Document::default_room(), font, Profile::Room).unwrap();
+        let hud = RoomHud::default();
+        frame(&mut ui, vec![], hud);
+        let point = ui
+            .placed
+            .iter()
+            .find(|p| {
+                matches!(
+                    ui.document.nodes[p.index].kind,
+                    Kind::Button {
+                        action: Action::Play,
+                        ..
+                    }
+                )
+            })
+            .unwrap()
+            .rect
+            .center();
+        let event = |pressed| egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut ui, vec![event(true)], hud);
+        ui.invalidate_pointer_layout();
+        assert_eq!(frame(&mut ui, vec![event(false)], hud), None);
+        assert_eq!(frame(&mut ui, vec![event(false)], hud), None);
+        let mut changed = input(vec![event(true), event(false)]);
+        changed
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .native_pixels_per_point = Some(2.0);
+        let (output, action) = ui.show_room(changed, hud);
+        output.drop_without_applying_deltas();
+        assert_eq!(action, None);
+        assert_eq!(ui.screen(), Screen::Title);
     }
 }

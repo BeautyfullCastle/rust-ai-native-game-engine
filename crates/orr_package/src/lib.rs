@@ -166,6 +166,8 @@ pub enum ProjectUiProfile {
     ArenaKoreanV1,
     #[serde(rename = "collect-authored-v1")]
     CollectAuthoredV1,
+    #[serde(rename = "room-authored-v1")]
+    RoomAuthoredV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,13 +251,24 @@ impl ProjectManifest {
                     }
                 }
                 if entry.game == ProjectGame::RoomEscapeV1
-                    && (self.schema != 2 || entry.sprites.is_some() || entry.ui.is_some() || entry.models.is_none())
+                    && (self.schema != 2 || entry.sprites.is_some() || entry.models.is_none())
                 {
-                    return fail("room-escape-v1 requires schema 2 and models, without sprites/UI/progress");
+                    return fail("room-escape-v1 requires schema 2 and models, without sprites/progress");
                 }
                 if let Some(ui) = &entry.ui {
                     match (entry.game, ui.profile, &ui.document) {
                         (ProjectGame::Arena, ProjectUiProfile::ArenaKoreanV1, None) => {},
+                        (ProjectGame::RoomEscapeV1, ProjectUiProfile::RoomAuthoredV1, Some(document)) => {
+                            portable(document)?;
+                            if document.contains('/') || document.starts_with('.')
+                                || document.eq_ignore_ascii_case("orr.project.json")
+                                || document.eq_ignore_ascii_case("orr.packages.lock.json")
+                                || document.eq_ignore_ascii_case(&entry.scene)
+                                || entry.models.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(document))
+                                || entry.camera.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(document)) {
+                                return fail("Room UI requires a distinct root-level document");
+                            }
+                        },
                         (ProjectGame::CollectDodgeV1, ProjectUiProfile::CollectAuthoredV1, Some(document)) => {
                             portable(document)?;
                             if document.eq_ignore_ascii_case(&entry.scene) || entry.sprites.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(document)) {

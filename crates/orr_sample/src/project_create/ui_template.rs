@@ -37,6 +37,7 @@ pub(super) fn is_bundled_font(bytes: &[u8]) -> bool {
             .collect::<String>()
             == "91c7e75ac1b54a3571a305d259a2f486b88289853baef90753506855f5c5dd08"
 }
+#[cfg(feature = "collect-ui")]
 pub(super) fn descriptor() -> serde_json::Value {
     serde_json::json!({"profile":"collect-authored-v1","document":"level.ui.json",
         "font":{"package":PACKAGE,"asset":"OrreryKoreanUI.otf"}})
