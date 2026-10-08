@@ -46,6 +46,7 @@ use std::{
 };
 const TEMPLATE: &str = "collect-dodge-2d-v1";
 const GAME_ID: &str = "12345678-1234-4234-8234-123456789abc";
+const PROFILE_FIXTURE_ROOT: &str = "/tmp";
 fn repository() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -57,6 +58,7 @@ fn tempdir() -> tempfile::TempDir {
 }
 struct Workflow {
     root: tempfile::TempDir,
+    profile: tempfile::TempDir,
     generator: PathBuf,
     runtime: PathBuf,
     exporter: PathBuf,
@@ -66,6 +68,7 @@ struct Workflow {
 
 impl Workflow {
     fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
         let root = tempdir();
         fs::create_dir(root.path().join("tools")).unwrap();
         fs::create_dir(root.path().join("empty cwd")).unwrap();
@@ -107,6 +110,10 @@ impl Workflow {
             runtime: copied[1].clone(),
             exporter: copied[2].clone(),
             root,
+            profile: tempfile::Builder::new()
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap(),
             original_bins,
             hidden_workspace,
         }
@@ -151,6 +158,12 @@ impl Workflow {
                 "/dev/null",
                 "--bind",
             ])
+            // Host-root ancestors can be unmapped in bwrap's user namespace.
+            // Use a separate private parent before restoring Work; aliasing
+            // Work itself would expose the source and tools hidden below.
+            .arg(self.profile.path())
+            .arg(PROFILE_FIXTURE_ROOT)
+            .arg("--bind")
             .arg(self.root.path())
             .arg(self.root.path());
         for directory in &hidden {
@@ -171,8 +184,11 @@ impl Workflow {
         command
             .arg(executable)
             .current_dir(self.root.path().join("empty cwd"))
-            .env("XDG_DATA_HOME", self.root.path().join("user data"))
-            .env("HOME", self.root.path().join("user home"))
+            .env(
+                "XDG_DATA_HOME",
+                Path::new(PROFILE_FIXTURE_ROOT).join("user data"),
+            )
+            .env("HOME", Path::new(PROFILE_FIXTURE_ROOT).join("user home"))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY");
         command
@@ -873,7 +889,7 @@ fn export_and_relocate(work: &Workflow, root: &Path, initial: u64, gpu: bool) ->
     assert_eq!(snapshot(root), source);
     assert_eq!(snapshot(&bundle), bundle_before);
     assert!(
-        !work.root.path().join("user data").exists(),
+        !work.profile.path().join("user data").exists(),
         "headless/export must never create user progress"
     );
     bundle
@@ -982,7 +998,7 @@ fn generated_collect_progress_workflow() {
         )
         .unwrap();
     }
-    let data = work.root.path().join("user data");
+    let data = work.profile.path().join("user data");
     assert!(data.join("orrery/games").is_dir());
     assert!(!snapshot(&data).is_empty());
     assert_eq!(snapshot(&project), source);

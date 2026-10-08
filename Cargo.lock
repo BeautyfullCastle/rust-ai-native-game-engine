@@ -3621,6 +3621,7 @@ dependencies = [
  "serde_json",
  "tungstenite",
  "webpki-roots",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
