@@ -34,8 +34,13 @@ case "$mode" in
     run_test runtime-input 3 0 cargo test --release --locked -p orr_sample --features room-project --lib room_app::tests::
     run_test room-view-contracts 2 0 cargo test --release --locked -p orr_sample --features room-project --lib room_view::tests::
     # Enable export here too, so invalid model admission must fail before its smoke run.
-    run_test project-admission 7 1 cargo test --release --locked -p orr_sample --features room-project,project-export --test room_project
-    run_test editor-workflow 2 1 cargo test --release --locked -p orr_editor --features room-project --test room_project_workflow
+    run_test project-admission 10 1 cargo test --release --locked -p orr_sample --features room-project,project-export --test room_project
+    run_test editor-workflow 4 2 cargo test --release --locked -p orr_editor --features room-project --test room_project_workflow
+    run_test camera-schema 9 0 cargo test --release --locked -p orr_sample --features room-project --lib room_camera::tests::
+    # Build the schema tests with editor's arbitrary_precision dependency too.
+    run_test camera-schema-unified 9 0 cargo test --release --locked -p orr_sample -p orr_editor --features orr_sample/room-project,orr_editor/room-project --lib room_camera::tests::
+    run_test camera-editor-panel 9 0 cargo test --release --locked -p orr_editor --features room-project --lib room_camera_panel::tests::
+    run_test generated-room-camera 3 1 cargo test --release --locked -p orr_sample --features room-project,project-create,project-export --test new_room_project
     run_test editor-model-admission 3 0 cargo test --release --locked -p orr_editor --features room-project --test room_model_admission
     # Exercise unified optional features without changing any default feature or lint.
     run_command optional-features-clippy cargo clippy --release --locked \
@@ -46,12 +51,13 @@ case "$mode" in
   gpu)
     command -v bwrap
     run_command namespace-preflight bwrap --ro-bind / / -- /bin/true
-    run_command production-tools cargo build --release --locked -p orr_sample --features room-project,project-export --bin room_escape --bin orr_export_room
+    run_command production-tools cargo build --release --locked -p orr_sample --features room-project,project-export,project-create --bin room_escape --bin orr_export_room --bin orr_new_arena
     target=${CARGO_TARGET_DIR:-target}
     mkdir -p "$evidence/built-tools" "$evidence/captures/editor"
     cp "$target/release/room_escape" "$evidence/built-tools/room_escape"
     cp "$target/release/orr_export_room" "$evidence/built-tools/orr_export_room"
-    sha256sum "$evidence/built-tools/room_escape" "$evidence/built-tools/orr_export_room" | tee "$evidence/built-tools.sha256"
+    cp "$target/release/orr_new_arena" "$evidence/built-tools/orr_new_arena"
+    sha256sum "$evidence/built-tools/room_escape" "$evidence/built-tools/orr_export_room" "$evidence/built-tools/orr_new_arena" | tee "$evidence/built-tools.sha256"
     ORR_REQUIRE_GPU=1 \
       run_test sample-gpu-readback 1 0 cargo test --release --locked -p orr_sample --features room-project,project-export --test room_project owned_real_model_offscreen_readback_is_nonblank_and_read_only -- --ignored --exact --nocapture
     ORR_ROOM_CAPTURE_DIR="$evidence/captures/editor" \
@@ -65,6 +71,17 @@ case "$mode" in
     ORR_REQUIRE_GPU=1 \
     ORR_REQUIRE_PROJECT_ISOLATION=1 \
       run_test production-source-hidden-export 1 0 cargo test --release --locked -p orr_sample --features room-project,project-export --test room_export room_real_export_source_hidden_gpu_workflow -- --ignored --exact --nocapture
+    ORR_ROOM_CAPTURE_DIR="$evidence/captures/editor" ORR_REQUIRE_GPU=1 \
+      run_test camera-editor-gpu 1 0 cargo test --release --locked -p orr_editor --features room-project --test room_project_workflow authored_camera_viewport_projection_picking_and_invalid_preservation -- --ignored --exact --nocapture
+    ORR_ROOM_CREATOR="$evidence/built-tools/orr_new_arena" \
+    ORR_ROOM_RUNTIME="$evidence/built-tools/room_escape" \
+    ORR_ROOM_EXPORTER="$evidence/built-tools/orr_export_room" \
+    ORR_ROOM_EXPORT_CAPTURE_DIR="$evidence/camera-export" \
+    ORR_REQUIRE_GPU=1 ORR_REQUIRE_PROJECT_ISOLATION=1 \
+      run_test camera-generated-source-hidden-export 1 0 cargo test --release --locked -p orr_sample --features room-project,project-create,project-export --test new_room_project room::generated_room_real_export_source_hidden_gpu_workflow -- --ignored --exact --nocapture
+    for capture in authored-camera-landscape authored-camera-invalid-retained authored-camera-manual authored-camera-reset authored-camera-projection-error authored-camera-portrait authored-camera-resize-return; do
+      test -s "$evidence/captures/editor/$capture.png"
+    done
     # Require persisted proof as well as test counts; missing captures fail CI.
     for capture in room-editor-bound room-editor-models-offscreen; do
       test -s "$evidence/captures/editor/$capture.png"
@@ -73,6 +90,11 @@ case "$mode" in
       test -s "$evidence/export/captures/$capture.png"
     done
     test -s "$evidence/export/orr.export.json"
-    sha256sum "$evidence/captures/editor/"*.png "$evidence/export/captures/"*.png "$evidence/export/orr.export.json" | tee "$evidence/captures.sha256"
+    for capture in initial-source initial-export moved-source moved-export interacted-source interacted-export no-models; do
+      test -s "$evidence/camera-export/captures/$capture.png"
+    done
+    test -s "$evidence/camera-export/orr.export.json"
+    test -s "$evidence/camera-export/authored-project/room.camera.json"
+    sha256sum "$evidence/captures/editor/"*.png "$evidence/export/captures/"*.png "$evidence/export/orr.export.json" "$evidence/camera-export/captures/"*.png "$evidence/camera-export/orr.export.json" "$evidence/camera-export/authored-project/room.camera.json" | tee "$evidence/captures.sha256"
     ;;
 esac

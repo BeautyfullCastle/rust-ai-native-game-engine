@@ -64,7 +64,8 @@ impl Fixture {
         }
     }
     fn app(&self, gpu: bool) -> Harness<'static, EditorApp> {
-        let prepared = PreparedProject::open(&self.root).unwrap();
+        let mut prepared = PreparedProject::open(&self.root).unwrap();
+        let camera=prepared.take_camera().expect("generated template declares camera");
         let (_, path, scene, models) = prepared.into_parts();
         let mut editor = Editor::start(&HostSpec::PreparedRoom {
             scene: path,
@@ -75,6 +76,7 @@ impl Fixture {
         .unwrap();
         editor.sync();
         assert_eq!(editor.game(), EditorGame::RoomEscape);
+        editor.install_room_camera(camera.document.clone()).unwrap();
         let builder = Harness::builder()
             .with_size([1400.0, 1000.0])
             .with_step_dt(1.0 / 60.0);
@@ -82,12 +84,14 @@ impl Fixture {
             builder.wgpu().build_eframe(move |cc| {
                 let mut app = EditorApp::new(editor, cc.wgpu_render_state.clone());
                 app.models.install_room(models).unwrap();
+                app.room_camera=Some(orr_editor::room_camera_panel::Panel::new(camera));
                 app
             })
         } else {
             builder.build_eframe(move |_| {
                 let mut app = EditorApp::new(editor, None);
                 app.models.install_room(models).unwrap();
+                app.room_camera=Some(orr_editor::room_camera_panel::Panel::new(camera));
                 app
             })
         }

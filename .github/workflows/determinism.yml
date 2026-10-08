@@ -235,6 +235,7 @@ jobs:
             target/room-project-evidence/**/*.txt
             target/room-project-evidence/**/*.png
             target/room-project-evidence/**/orr.export.json
+            target/room-project-evidence/**/room.camera.json
           if-no-files-found: error
           retention-days: 7
       - if: runner.os == 'Linux'

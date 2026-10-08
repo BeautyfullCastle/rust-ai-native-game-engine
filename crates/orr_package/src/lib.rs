@@ -135,6 +135,9 @@ pub enum ProjectGame {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectEntry {
+    /// Optional Room-only presentation camera document.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub camera: Option<String>,
     pub game: ProjectGame,
     /// Portable path relative to the project root.
     pub scene: String,
@@ -228,6 +231,16 @@ impl ProjectManifest {
                     if sprites.eq_ignore_ascii_case(&entry.scene) {
                         return fail("entry scene and sprite sidecar must be different files");
                     }
+                }
+                if let Some(camera) = &entry.camera {
+                    portable(camera)?;
+                    if entry.game != ProjectGame::RoomEscapeV1 || self.schema != 2
+                        || camera.contains('/') || camera.starts_with('.')
+                        || camera.eq_ignore_ascii_case("orr.project.json")
+                        || camera.eq_ignore_ascii_case("orr.packages.lock.json")
+                        || camera.eq_ignore_ascii_case(&entry.scene)
+                        || entry.models.as_ref().is_some_and(|p| p.eq_ignore_ascii_case(camera))
+                    { return fail("camera requires a distinct root-level Room presentation document"); }
                 }
                 if let Some(models) = &entry.models {
                     portable(models)?;

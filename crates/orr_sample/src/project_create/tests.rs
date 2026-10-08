@@ -882,7 +882,8 @@ mod room_template_tests {
         let b = create(&room(temp.path(), "b", "room-seed")).unwrap();
         let c = create(&room(temp.path(), "c", "other-seed")).unwrap();
         assert_eq!(files(&a.output), files(&b.output));
-        assert_eq!(files(&a.output).len(), 10);
+        assert_eq!(files(&a.output).len(), 11);
+        assert!(a.output.join("room.camera.json").is_file());
         assert_eq!(a.entity_guids.len(), 7);
         assert_eq!(a.initial_checksum, c.initial_checksum);
         assert!(a

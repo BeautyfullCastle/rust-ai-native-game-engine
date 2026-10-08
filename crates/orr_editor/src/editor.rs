@@ -199,6 +199,10 @@ pub struct Editor {
     /// The viewport camera (world units, y up).
     pub camera: Camera,
     pub camera3d: orr_render::OrbitCamera,
+    #[cfg(feature="room-project")]
+    room_camera: Option<orr_sample::room_camera::Document>,
+    #[cfg(feature="room-project")]
+    room_camera_scene: Option<std::path::PathBuf>,
     yard_frame: crate::viewport3d::YardFrame,
     #[cfg(feature = "terrain-physics")]
     terrain_view: crate::terrain_physics::TerrainPhysicsView,
@@ -310,6 +314,8 @@ impl Editor {
             scene_edit_allowed,
             batch_uncertain: false,
             camera: Camera::new([0.0, 0.0], 20.0),
+            #[cfg(feature="room-project")] room_camera: None,
+            #[cfg(feature="room-project")] room_camera_scene: None,
             camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
             yard_frame: crate::viewport3d::YardFrame::default(),
             #[cfg(feature = "terrain-physics")]
@@ -851,6 +857,9 @@ impl Editor {
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
+        if self.game().is_room() {
+            #[cfg(feature="room-project")] if self.has_room_camera() { self.reset_room_camera(); return; }
+        }
         if self.game().is_3d() { self.camera3d = orr_render::OrbitCamera::new([0.0,2.0,0.0],0.55,0.5,16.0); return; }
         if self.game().is_collect() {
             let mut low = [f32::INFINITY; 2]; let mut high = [f32::NEG_INFINITY; 2];
@@ -1011,6 +1020,7 @@ impl Editor {
             "watch.activity" => {
                 if let Some(list) = params.get("entries").and_then(J::as_array) {
                     if list.iter().any(|entry| entry["method"] == "scene.load" && entry["ok"] == true) {
+                        self.clear_room_camera();
                         self.select(None);
                     }
                     self.feed.push(list.iter().filter_map(FeedEntry::from_json).collect());
@@ -1102,7 +1112,9 @@ impl Editor {
 
     fn apply_state(&mut self, v: &J) {
         let was = self.sim.mode;
-        self.sim = SimState::from_json(v);
+        let next=SimState::from_json(v);
+        if self.sim.scene_path != next.scene_path { self.clear_room_camera(); }
+        self.sim = next;
         if was != self.sim.mode {
             self.mark_changed();
         }
@@ -1541,6 +1553,7 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
+                self.clear_room_camera();
                 self.select(None);
                 self.refit = true;
                 if self.game() == EditorGame::Arena {
@@ -1584,6 +1597,8 @@ impl Editor {
         match self.call("scene.save", params) {
             Ok(r) => {
                 let written = r.get("written").and_then(J::as_str).unwrap_or_default().to_string();
+                #[cfg(feature="room-project")]
+                if self.room_camera_scene.as_ref().is_some_and(|path| path != Path::new(&written)) { self.clear_room_camera(); }
                 self.sim.scene_path = Some(written.clone());
                 if !written.is_empty() {
                     self.backend.spec.set_local_scene_path(PathBuf::from(&written));
@@ -1866,10 +1881,60 @@ impl Editor {
     #[cfg(feature = "navigation")]
     pub fn set_navigation_blocker(&mut self, blocker: Option<String>) { self.navigation_blocker = blocker; }
 
+    #[cfg(feature="room-project")]
+    pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
+        document.validate()?;
+        for size in [(1,16384),(16384,1),(800,600)] { document.camera(&document.orbit(),size)?; }
+        if !self.game().is_room() || !self.spec().is_local() { return Err("camera requires a local Room project".into()); }
+        self.camera3d = document.orbit();
+        self.room_camera = Some(document);
+        self.room_camera_scene = self.path();
+        Ok(())
+    }
+    pub fn has_room_camera(&self) -> bool {
+        #[cfg(feature="room-project")]
+        { self.game().is_room() && self.spec().is_local() && self.room_camera.is_some()
+            && self.room_camera_scene == self.path() }
+        #[cfg(not(feature="room-project"))]
+        { false }
+    }
+    pub fn presentation_camera3d(&self, size:(u32,u32)) -> Result<orr_render::Camera3D,String> {
+        #[cfg(feature="room-project")]
+        if self.has_room_camera() { return self.room_camera.as_ref().unwrap().camera(&self.camera3d,size); }
+        let _ = size;
+        Ok(self.camera3d.camera())
+    }
+    pub fn orbit3d(&mut self, delta:[f32;2]) {
+        #[cfg(feature="room-project")]
+        if self.has_room_camera() { self.room_camera.as_ref().unwrap().orbit_delta(&mut self.camera3d,delta); return; }
+        self.camera3d.orbit(delta);
+    }
+    pub fn pan3d(&mut self, delta:[f32;2],size:(u32,u32)) {
+        #[cfg(feature="room-project")]
+        if self.has_room_camera() { self.room_camera.as_ref().unwrap().pan(&mut self.camera3d,delta,size); return; }
+        self.camera3d.pan(delta,size);
+    }
+    pub fn zoom3d(&mut self, delta:f32) {
+        #[cfg(feature="room-project")]
+        if self.has_room_camera() { self.room_camera.as_ref().unwrap().zoom(&mut self.camera3d,delta); return; }
+        self.camera3d.zoom(delta);
+    }
+    fn clear_room_camera(&mut self) {
+        #[cfg(feature="room-project")]
+        if self.room_camera.take().is_some() {
+            self.room_camera_scene = None;
+            self.camera3d = orr_render::OrbitCamera::new([0.0,2.0,0.0],0.55,0.5,16.0);
+        }
+    }
+    pub fn reset_room_camera(&mut self) {
+        #[cfg(feature="room-project")]
+        if self.has_room_camera() { self.camera3d=self.room_camera.as_ref().unwrap().orbit(); }
+    }
+
     /// Nearest collider-proxy selection in the main Yard3D viewport.
     pub fn pick3d(&self, pixel: [f32;2], size:(u32,u32)) -> Option<Target> {
         if !self.yard_rows_coherent(){return None;}
-        self.yard_frame.pick(&self.camera3d.camera(),pixel,size,&self.rows)
+        self.yard_frame.pick(&self.presentation_camera3d(size).ok()?,pixel,size,&self.rows)
     }
 
     /// Creates a persisted Yard3D box, or a sphere in the admitted terrain game.
@@ -2448,6 +2513,10 @@ impl Editor {
         if fresh.game() == self.game() {
             fresh.camera = self.camera;
             fresh.initial_camera_fit = false;
+        }
+        #[cfg(feature="room-project")]
+        if self.has_room_camera() && fresh.game().is_room() && fresh.path()==self.path() {
+            let _ = fresh.install_room_camera(self.room_camera.as_ref().unwrap().clone());
         }
         fresh.feed.filter = self.feed.filter;
         fresh.agent.expand_methods = std::mem::take(&mut self.agent.expand_methods);
