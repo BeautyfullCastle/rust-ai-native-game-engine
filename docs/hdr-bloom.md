@@ -32,10 +32,10 @@ The existing `gpu3d` suite's 20 `VIEW_FORMATS` failures and four ignored measure
 
 ### Focused local checks
 
-The new HDR GPU tests intentionally fail if an adapter is unavailable; they have no ignored or silent-skip success path. Existing suites may retain their independent `ORR_REQUIRE_GPU=1` admission convention. Use the default supported backend unless separately verifying a particular API; forcing an unavailable Vulkan adapter is not evidence of a renderer defect.
+The RHI `hdr_texture` target requires `gpu-tests` and runs explicitly with all renderer and editor HDR suites in the required Linux `sample-build` job after Mesa provisioning. Native determinism jobs retain the RHI library and unrelated default targets without requiring a software adapter on macOS. The new HDR GPU tests intentionally fail if an adapter is unavailable; they have no ignored or silent-skip success path. Existing suites may retain their independent `ORR_REQUIRE_GPU=1` admission convention. Use the default supported backend unless separately verifying a particular API; forcing an unavailable Vulkan adapter is not evidence of a renderer defect.
 
 ```sh
-cargo test --release --locked -p orr_rhi --lib --test hdr_texture
+cargo test --release --locked -p orr_rhi --features gpu-tests --lib --test hdr_texture
 ORR_REQUIRE_GPU=1 cargo test --release --locked -p orr_render --features imported-scene,animation --lib --test hdr --test imported_scene --test models --test skinned_model
 ORR_REQUIRE_GPU=1 cargo test --release --locked -p orr_editor --features animated-models --test yard3d_hdr
 ORR_REQUIRE_GPU=1 cargo test --release --locked -p orr_editor --features models --test yard3d_hdr_static

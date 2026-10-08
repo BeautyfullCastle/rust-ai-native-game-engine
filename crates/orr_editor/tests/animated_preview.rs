@@ -68,7 +68,7 @@ fn capture(name: &str, size: (u32, u32), rgba: &[u8]) {
     let mut file = std::fs::File::create(directory.join(format!("{name}.ppm")))
         .expect("create PPM animation capture");
     write!(file, "P6\n{} {}\n255\n", size.0, size.1).unwrap();
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0.iter() {
         file.write_all(&pixel[..3]).unwrap();
     }
 }
@@ -201,7 +201,7 @@ fn actual_skinned_preview_readback_changes_rest_midpoint_and_key_and_resizes() {
     assert_eq!(rest_pixels.len(), 96 * 96 * 4);
     let background = &rest_pixels[..3];
     let foreground_pixels = rest_pixels
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .filter(|pixel| pixel[..3] != *background)
         .count();
     assert!(
