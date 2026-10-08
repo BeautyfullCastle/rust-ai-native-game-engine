@@ -42,10 +42,19 @@ case "$mode" in
     run_test camera-editor-panel 9 0 cargo test --release --locked -p orr_editor --features room-project --lib room_camera_panel::tests::
     run_test generated-room-camera 3 1 cargo test --release --locked -p orr_sample --features room-project,project-create,project-export --test new_room_project
     run_test editor-model-admission 3 0 cargo test --release --locked -p orr_editor --features room-project --test room_model_admission
+    # Explicit Room HUD consumers; cross-profile/default routes stay closed.
+    run_test room-ui-schema 2 0 cargo test --release --locked -p orr_sample --features room-ui --lib authored_ui::room_profile_tests::
+    run_test room-ui-widgets 2 0 cargo test --release --locked -p orr_sample --features room-ui --lib collect_ui::room_tests::
+    run_test room-ui-input-scale 1 0 cargo test --release --locked -p orr_sample --features room-ui --lib room_app::room_pointer_capture_tests::
+    run_test room-ui-native-app 1 0 cargo test --release --locked -p orr_sample --features room-ui,project-create --lib room_app::room_ui_app_tests::
+    run_test room-ui-admission 3 0 cargo test --release --locked -p orr_sample --features room-ui,project-create --test room_ui_project
+    run_test room-ui-editor-widgets 1 0 cargo test --release --locked -p orr_editor --features room-ui,project-create --lib collect_ui_panel::room_panel_tests::
+    run_test room-ui-save-path-producer 1 0 cargo test --release --locked -p orr_remote --test activity scene_save_path_transition_flag_is_exact_in_list_and_watch -- --exact --test-threads=1 --nocapture
+    run_test room-ui-editor-source-lifecycle 3 0 cargo test --release --locked -p orr_editor --features room-ui,project-create --test room_ui_lifecycle
     # Exercise unified optional features without changing any default feature or lint.
     run_command optional-features-clippy cargo clippy --release --locked \
       -p orr_games -p orr_package -p orr_model_bindings -p orr_sample -p orr_remote -p orr_editor \
-      --features orr_games/room-escape,orr_sample/room-project,orr_sample/project-export,orr_editor/room-project,orr_editor/animated-models,orr_editor/terrain-physics,orr_editor/navigation,orr_editor/irradiance-probes,orr_editor/collect-ui,orr_editor/linked-prefabs,orr_editor/image-reimport \
+      --features orr_games/room-escape,orr_sample/room-project,orr_sample/project-export,orr_editor/room-project,orr_editor/room-ui,orr_editor/project-create,orr_sample/room-ui,orr_editor/animated-models,orr_editor/terrain-physics,orr_editor/navigation,orr_editor/irradiance-probes,orr_editor/collect-ui,orr_editor/linked-prefabs,orr_editor/image-reimport \
       --all-targets -- -D warnings
     ;;
   gpu)
@@ -79,6 +88,31 @@ case "$mode" in
     ORR_ROOM_EXPORT_CAPTURE_DIR="$evidence/camera-export" \
     ORR_REQUIRE_GPU=1 ORR_REQUIRE_PROJECT_ISOLATION=1 \
       run_test camera-generated-source-hidden-export 1 0 cargo test --release --locked -p orr_sample --features room-project,project-create,project-export --test new_room_project room::generated_room_real_export_source_hidden_gpu_workflow -- --ignored --exact --nocapture
+    # Build a separate explicit UI-capable consumer; do not overwrite the
+    # original no-UI production tool proof or remove any earlier gate.
+    run_command room-ui-production-tools cargo build --release --locked -p orr_sample --features room-ui,project-export,project-create --bin room_escape --bin orr_export_room --bin orr_new_arena
+    mkdir -p "$evidence/ui-built-tools"
+    cp "$target/release/room_escape" "$evidence/ui-built-tools/room_escape"
+    cp "$target/release/orr_export_room" "$evidence/ui-built-tools/orr_export_room"
+    cp "$target/release/orr_new_arena" "$evidence/ui-built-tools/orr_new_arena"
+    sha256sum "$evidence/ui-built-tools/"* | tee "$evidence/ui-built-tools.sha256"
+    ORR_ROOM_UI_CAPTURE_DIR="$evidence/captures/room-ui" ORR_REQUIRE_GPU=1 \
+      run_test room-ui-composited-gpu 1 0 cargo test --release --locked -p orr_sample --features room-ui,project-create --lib room_app::room_ui_gpu_tests::room_ui_composited_title_play_key_win_and_projection_preserve_frame -- --ignored --exact --nocapture
+    ORR_ROOM_CREATOR="$evidence/ui-built-tools/orr_new_arena" \
+    ORR_ROOM_RUNTIME="$evidence/ui-built-tools/room_escape" \
+    ORR_ROOM_EXPORTER="$evidence/ui-built-tools/orr_export_room" \
+    ORR_ROOM_EXPORT_CAPTURE_DIR="$evidence/ui-export" \
+    ORR_REQUIRE_GPU=1 ORR_REQUIRE_PROJECT_ISOLATION=1 \
+      run_test room-ui-source-hidden-export 1 0 cargo test --release --locked -p orr_sample --features room-ui,project-create,project-export --test new_room_project room::generated_room_ui_real_export_source_hidden_gpu_workflow -- --ignored --exact --nocapture
+    for size in 1024x768 480x800; do
+      for state in title playing key won; do test -s "$evidence/captures/room-ui/$state-$size.png"; done
+    done
+    for capture in initial-source initial-export moved-source moved-export interacted-source interacted-export no-models; do
+      test -s "$evidence/ui-export/captures/$capture.png"
+    done
+    test -s "$evidence/ui-export/orr.export.json"
+    test -s "$evidence/ui-export/authored-project/room.ui.json"
+    sha256sum "$evidence/captures/room-ui/"*.png "$evidence/ui-export/captures/"*.png "$evidence/ui-export/orr.export.json" "$evidence/ui-export/authored-project/room.ui.json" | tee "$evidence/room-ui-captures.sha256"
     for capture in authored-camera-landscape authored-camera-invalid-retained authored-camera-manual authored-camera-reset authored-camera-projection-error authored-camera-portrait authored-camera-resize-return; do
       test -s "$evidence/captures/editor/$capture.png"
     done

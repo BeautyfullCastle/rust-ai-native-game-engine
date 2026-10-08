@@ -203,6 +203,8 @@ pub struct Editor {
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
     room_camera_scene: Option<std::path::PathBuf>,
+    #[cfg(feature="room-ui")]
+    room_ui_source: std::sync::Arc<std::sync::atomic::AtomicU64>,
     yard_frame: crate::viewport3d::YardFrame,
     #[cfg(feature = "terrain-physics")]
     terrain_view: crate::terrain_physics::TerrainPhysicsView,
@@ -316,6 +318,7 @@ impl Editor {
             camera: Camera::new([0.0, 0.0], 20.0),
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
+            #[cfg(feature="room-ui")] room_ui_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
             yard_frame: crate::viewport3d::YardFrame::default(),
             #[cfg(feature = "terrain-physics")]
@@ -1019,7 +1022,9 @@ impl Editor {
             }
             "watch.activity" => {
                 if let Some(list) = params.get("entries").and_then(J::as_array) {
-                    if list.iter().any(|entry| entry["method"] == "scene.load" && entry["ok"] == true) {
+                    if list.iter().any(|entry| entry["ok"] == true
+                        && (entry["method"] == "scene.load"
+                            || (entry["method"] == "scene.save" && entry["scene_path_changed"] == true))) {
                         self.clear_room_camera();
                         self.select(None);
                     }
@@ -1597,8 +1602,7 @@ impl Editor {
         match self.call("scene.save", params) {
             Ok(r) => {
                 let written = r.get("written").and_then(J::as_str).unwrap_or_default().to_string();
-                #[cfg(feature="room-project")]
-                if self.room_camera_scene.as_ref().is_some_and(|path| path != Path::new(&written)) { self.clear_room_camera(); }
+                if self.sim.scene_path.as_deref() != Some(written.as_str()) { self.clear_room_camera(); }
                 self.sim.scene_path = Some(written.clone());
                 if !written.is_empty() {
                     self.backend.spec.set_local_scene_path(PathBuf::from(&written));
@@ -1919,7 +1923,13 @@ impl Editor {
         if self.has_room_camera() { self.room_camera.as_ref().unwrap().zoom(&mut self.camera3d,delta); return; }
         self.camera3d.zoom(delta);
     }
+    #[cfg(feature="room-ui")]
+    pub(crate) fn room_ui_source_token(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> { self.room_ui_source.clone() }
+
     fn clear_room_camera(&mut self) {
+        // Reuse the source-retirement hook for camera-free authored Room UI too.
+        #[cfg(feature="room-ui")]
+        { let _ = self.room_ui_source.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |value| Some(value.saturating_add(1))); }
         #[cfg(feature="room-project")]
         if self.room_camera.take().is_some() {
             self.room_camera_scene = None;

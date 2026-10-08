@@ -299,7 +299,8 @@ mod room {
         originals: Vec<PathBuf>,
     }
     impl Work {
-        fn new() -> Self {
+        fn new() -> Self { Self::new_for("room-escape-3d-v1") }
+        fn new_for(template: &str) -> Self {
             for key in ["ORR_REQUIRE_GPU", "ORR_REQUIRE_PROJECT_ISOLATION"] {
                 assert_eq!(
                     std::env::var(key).as_deref(),
@@ -368,7 +369,7 @@ mod room {
                     .arg(&project)
                     .args([
                         "--template",
-                        "room-escape-3d-v1",
+                        template,
                         "--seed",
                         "new-room-export-acceptance",
                     ])
@@ -422,7 +423,7 @@ mod room {
             let admitted = PreparedScene::parse(&yaml).unwrap();
             assert_ne!(admitted.frame().checksum(), original.frame().checksum());
             // Retain the creator's real installed package and GUID-keyed model sidecar.
-            PreparedProject::open(&project).unwrap();
+            PreparedProject::open_with_ui(&project, template == "room-escape-ui-3d-v1").unwrap();
             work
         }
 
@@ -555,8 +556,37 @@ mod room {
     #[test]
     #[ignore = "requires explicit exact production tools, real GPU and source-hidden read-only Linux namespace"]
     fn generated_room_real_export_source_hidden_gpu_workflow() {
-        let w = Work::new();
-        let initial = PreparedProject::open(&w.project)
+        export_workflow(Work::new(), false);
+    }
+    #[cfg(feature = "room-ui")]
+    #[test]
+    #[ignore = "requires exact production Room UI tools and mandatory source-hidden GPU export"]
+    fn generated_room_ui_real_export_source_hidden_gpu_workflow() {
+        export_workflow(Work::new_for("room-escape-ui-3d-v1"), true);
+    }
+    // Camera offsets are view-only floats; simulation checksums stay exact.
+    #[allow(clippy::float_arithmetic)]
+    fn export_workflow(w: Work, with_ui: bool) {
+        if with_ui {
+            let path = w.project.join("room.ui.json");
+            let original = fs::read(&path).unwrap();
+            for (index, malformed) in [
+                r#"[1,[]]"#,
+                r#"{"schema":1,"nodes":[["x",null,{"type":"label","text":"Room","binding":null},"title",[0,0],[0,0],[100,30]]]}"#,
+                r#"{"schema":1,"nodes":[{"id":"x","parent":null,"kind":["container"],"screen":"title","anchor":[0,0],"offset":[0,0],"size":[100,30]}]}"#,
+                r#"{"schema":1,"nodes":[{"id":"x","parent":null,"kind":{"type":"container"},"screen":"title","anchor":[0,0],"offset":[0,0],"size":[100,30]},{"id":"child","parent":"x","kind":["label","x",null],"screen":"title","anchor":[0,0],"offset":[0,0],"size":[50,20]}]}"#,
+            ].into_iter().enumerate() {
+                fs::write(&path, malformed).unwrap();
+                let capture = w.temp.path().join(format!("malformed-{index}.png"));
+                bad(w.runtime_command(None, 0, "", &capture).output().unwrap(), "Room UI JSON object");
+                assert!(!capture.exists());
+                let output = w.temp.path().join(format!("malformed-export-{index}"));
+                bad(w.export_command(&output).output().unwrap(), "Room UI JSON object");
+                assert!(!output.exists(), "malformed UI cannot publish an export");
+            }
+            fs::write(path, original).unwrap();
+        }
+        let initial = PreparedProject::open_with_ui(&w.project, with_ui)
             .unwrap()
             .scene()
             .frame()
@@ -576,7 +606,7 @@ mod room {
         let mut camera=orr_sample::room_camera::Document::parse(&original_camera).unwrap();
         camera.target[0]+=1.0;
         fs::write(&camera_path,camera.to_bytes().unwrap()).unwrap();
-        assert_eq!(PreparedProject::open(&w.project).unwrap().scene().frame().checksum(),initial);
+        assert_eq!(PreparedProject::open_with_ui(&w.project, with_ui).unwrap().scene().frame().checksum(),initial);
         let changed=w.temp.path().join("camera changed export");
         good(w.export_command(&changed).output().unwrap());
         let old:serde_json::Value=serde_json::from_slice(&fs::read(staged.join("orr.export.json")).unwrap()).unwrap();

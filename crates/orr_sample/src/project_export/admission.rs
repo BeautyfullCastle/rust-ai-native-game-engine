@@ -297,12 +297,23 @@ impl ProjectSnapshot {
             if file.source!=room.models().path || document!=room.models().document { return Err("model sidecar changed after runtime admission".into()); }
             file.role="model_sidecar"; files.push(file);
         }
-        #[cfg(feature = "collect-ui")]
+        #[cfg(any(feature = "collect-ui", feature = "room-ui"))]
         if let Some(path) = entry.ui.as_ref().and_then(|ui| ui.document.as_ref()) {
-            let super::Prepared::Collect(collect) = &prepared else { return Err("authored UI requires Collect consumer".into()); };
-            let admitted = collect.ui().ok_or("missing admitted Collect UI")?;
+            let (admitted_path, admitted_document, profile) = match &prepared {
+                #[cfg(feature = "collect-ui")]
+                super::Prepared::Collect(collect) => {
+                    let ui = collect.ui().ok_or("missing admitted Collect UI")?;
+                    (&ui.path, &ui.document, crate::authored_ui::Profile::Collect)
+                }
+                #[cfg(feature = "room-ui")]
+                super::Prepared::Room(room) => {
+                    let ui = room.ui().ok_or("missing admitted Room UI")?;
+                    (&ui.path, &ui.document, crate::authored_ui::Profile::Room)
+                }
+                _ => return Err("authored UI requires an explicit supported consumer".into()),
+            };
             let mut file = SnapshotFile::read(&root.join(path), path, 64 * 1024)?;
-            if file.source != admitted.path || crate::authored_ui::Document::parse(&file.bytes)? != admitted.document { return Err("UI document changed after runtime admission".into()); }
+            if &file.source != admitted_path || &crate::authored_ui::Document::parse_for(&file.bytes, profile)? != admitted_document { return Err("UI document changed after runtime admission".into()); }
             file.role = "ui_document";
             files.push(file);
         }

@@ -909,6 +909,7 @@ impl ErpServer {
             ok,
             error: (!ok).then(|| "the token was refused".to_string()),
             read: false,
+            scene_path_changed: false,
             entities: Vec::new(),
             proposal: None,
             change: None,
@@ -1454,7 +1455,7 @@ impl ErpServer {
             c.requests += 1;
         }
         if recorded {
-            let entry = activity::build(
+            let mut entry = activity::build(
                 target,
                 &client,
                 method,
@@ -1463,6 +1464,13 @@ impl ErpServer {
                 pre,
                 fx.verify.take(),
             );
+            // Capture each successful path transition before consuming its
+            // effect. Sampling only the final path loses Save As A-to-B-to-A.
+            entry.scene_path_changed = result.is_ok()
+                && method == "scene.save"
+                && fx.scene_path.as_ref().is_some_and(|path| {
+                    self.cfg.limits.scene_path.as_ref() != Some(path)
+                });
             self.push_activity(entry);
         }
         match fx.tx {

@@ -116,7 +116,7 @@ fn step(sim: &mut Simulation<RoomEscapeV1>, input: RoomInput) {
     sim.step(&inputs);
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let project = PreparedProject::open(&options.project)?;
+    let project = PreparedProject::open_with_ui(&options.project, cfg!(feature = "room-ui"))?;
     if options.headless {
         headless(
             &project,
@@ -170,6 +170,38 @@ pub fn headless(
                 None => room_view::camera(size),
             },
         )?;
+        #[cfg(feature = "room-ui")]
+        if let Some(prepared) = project.ui() {
+            let mut ui = crate::collect_ui::CollectUi::new_for(
+                prepared.document.clone(),
+                prepared.font.clone(),
+                crate::authored_ui::Profile::Room,
+            )?;
+            // Headless captures show authoritative playing/terminal state; no UI action is executed.
+            ui.apply(crate::authored_ui::Action::Continue);
+            let mut overlay = crate::game_ui_gpu::GpuOverlay::new(&gpu, room_view::TARGET_FORMAT);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(size.0 as f32, size.1 as f32),
+                )),
+                ..Default::default()
+            };
+            let (output, _) = ui.show_room(
+                input,
+                crate::collect_ui::RoomHud {
+                    key_acquired: run.key_collected != 0,
+                    won: run.won != 0,
+                },
+            );
+            overlay.paint(
+                &gpu,
+                renderer.target().render_view(),
+                size,
+                &ui.context,
+                output,
+            )?;
+        }
         let rgba = renderer.read_rgba8();
         if rgba.len() != (size.0 * size.1 * 4) as usize {
             return Err("GPU capture returned an invalid image size".into());
@@ -188,6 +220,21 @@ pub fn headless(
         println!("room capture adapter: {}", gpu.adapter_name());
     }
     Ok(())
+}
+
+#[cfg(feature = "room-ui")]
+fn ui_pointer_input(
+    position: Option<winit::dpi::PhysicalPosition<f64>>,
+    scale: f32,
+) -> egui::RawInput {
+    let mut input = egui::RawInput::default();
+    let point = position
+        .filter(|p| scale.is_finite() && scale > 0.0 && p.x.is_finite() && p.y.is_finite())
+        .map(|p| egui::pos2(p.x as f32 / scale, p.y as f32 / scale));
+    input
+        .events
+        .push(point.map_or(egui::Event::PointerGone, egui::Event::PointerMoved));
+    input
 }
 
 #[derive(Default)]
@@ -251,7 +298,21 @@ struct Graphics {
     size: (u32, u32),
     format: TextureFormat,
 }
+#[cfg(feature = "room-ui")]
+struct WindowUi {
+    state: egui_winit::State,
+    gpu: crate::game_ui_gpu::GpuOverlay,
+    pending: crate::game_ui_gpu::PendingOverlay,
+}
 struct App {
+    #[cfg(feature = "room-ui")]
+    ui: Option<crate::collect_ui::CollectUi>,
+    #[cfg(feature = "room-ui")]
+    window_ui: Option<WindowUi>,
+    #[cfg(feature = "room-ui")]
+    quit: bool,
+    #[cfg(feature = "room-ui")]
+    ui_pointer: Option<winit::dpi::PhysicalPosition<f64>>,
     project: PreparedProject,
     sim: Simulation<RoomEscapeV1>,
     graphics: Option<Graphics>,
@@ -281,7 +342,81 @@ impl App {
         self.last = Instant::now();
         Ok(())
     }
+    #[cfg(feature = "room-ui")]
+    fn ui_frame(&mut self, input: egui::RawInput) -> Result<Vec<egui::FullOutput>, String> {
+        let run = self.sim.frame().singleton::<RoomRun>();
+        let ui = self.ui.as_mut().ok_or("Room UI is not admitted")?;
+        let mut fresh_input = input.clone();
+        fresh_input.events.clear();
+        let (mut output, action) = ui.show_room(
+            input,
+            crate::collect_ui::RoomHud {
+                key_acquired: run.key_collected != 0,
+                won: run.won != 0,
+            },
+        );
+        if let Some(action) = action {
+            self.apply_ui_action(action)?;
+            if !self.quit {
+                // Keep texture epochs in order, but never paint pre-action terminal
+                // geometry over a freshly restarted Frame/camera.
+                output.shapes.clear();
+                let run = self.sim.frame().singleton::<RoomRun>();
+                let (fresh, repeated_action) = self.ui.as_mut().expect("admitted UI").show_room(
+                    fresh_input,
+                    crate::collect_ui::RoomHud {
+                        key_acquired: run.key_collected != 0,
+                        won: run.won != 0,
+                    },
+                );
+                debug_assert!(repeated_action.is_none(), "no event replay after action");
+                return Ok(vec![output, fresh]);
+            }
+        }
+        Ok(vec![output])
+    }
+    #[cfg(feature = "room-ui")]
+    fn apply_ui_action(&mut self, action: crate::authored_ui::Action) -> Result<(), String> {
+        if action == crate::authored_ui::Action::Quit {
+            self.quit = true;
+            return Ok(());
+        }
+        if matches!(
+            action,
+            crate::authored_ui::Action::Restart | crate::authored_ui::Action::Play
+        ) {
+            self.restart()?; // Authoritative synchronous Frame and declared-camera replacement.
+        }
+        self.keys.clear();
+        self.drag = None;
+        self.cursor = None;
+        if let Some(ui) = &mut self.ui {
+            ui.apply(action);
+            ui.acknowledge_restart();
+        }
+        Ok(())
+    }
+    #[cfg(feature = "room-ui")]
+    fn draw_ui(&mut self) -> Result<(), String> {
+        let input = match (&mut self.window_ui, &self.graphics) {
+            (Some(window_ui), Some(g)) => window_ui.state.take_egui_input(&g.window),
+            _ => return Ok(()),
+        };
+        for mut output in self.ui_frame(input)? {
+            if let (Some(window_ui), Some(g)) = (&mut self.window_ui, &self.graphics) {
+                window_ui
+                    .state
+                    .handle_platform_output(&g.window, std::mem::take(&mut output.platform_output));
+                window_ui.pending.push(output)?;
+            } else {
+                output.drop_without_applying_deltas();
+            }
+        }
+        Ok(())
+    }
     fn draw(&mut self) -> Result<(), String> {
+        #[cfg(feature = "room-ui")]
+        self.draw_ui()?;
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last);
         self.last = now;
@@ -296,7 +431,15 @@ impl App {
             self.accumulated += elapsed.min(Duration::from_millis(250));
             let interval = Duration::from_secs_f64(1.0 / f64::from(TICK_RATE));
             while self.accumulated >= interval {
-                step(&mut self.sim, self.keys.sample());
+                #[cfg(feature = "room-ui")]
+                let blocked = self.ui.as_ref().is_some_and(|ui| ui.blocks_controls());
+                #[cfg(not(feature = "room-ui"))]
+                let blocked = false;
+                let input = self.keys.sample();
+                step(
+                    &mut self.sim,
+                    if blocked { RoomInput::default() } else { input },
+                );
                 self.accumulated -= interval;
             }
         } else {
@@ -322,6 +465,12 @@ impl App {
                     sample_count: 1,
                 },
             )?;
+            #[cfg(feature = "room-ui")]
+            if let (Some(ui), Some(window_ui)) = (&self.ui, &mut self.window_ui) {
+                window_ui
+                    .pending
+                    .paint(&mut window_ui.gpu, &g.rhi, view, g.size, &ui.context)?;
+            }
             g.rhi.present(surface_frame);
         }
         Ok(())
@@ -368,6 +517,22 @@ impl ApplicationHandler for App {
         })();
         match result {
             Ok(g) => {
+                #[cfg(feature = "room-ui")]
+                if let Some(ui) = &mut self.ui {
+                    ui.invalidate_pointer_layout();
+                    self.window_ui = Some(WindowUi {
+                        state: egui_winit::State::new(
+                            ui.context.clone(),
+                            egui::ViewportId::ROOT,
+                            g.window.as_ref(),
+                            Some(g.window.scale_factor() as f32),
+                            g.window.theme(),
+                            None,
+                        ),
+                        gpu: crate::game_ui_gpu::GpuOverlay::new(&g.rhi, g.format),
+                        pending: Default::default(),
+                    });
+                }
                 self.focused = g.window.has_focus();
                 self.graphics = Some(g);
                 self.last = Instant::now();
@@ -386,6 +551,42 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.graphics.as_ref().is_none_or(|g| g.window.id() != id) {
             return;
+        }
+        #[cfg(feature = "room-ui")]
+        match &event {
+            WindowEvent::CursorMoved { position, .. } => self.ui_pointer = Some(*position),
+            WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => self.ui_pointer = None,
+            _ => {}
+        }
+        #[cfg(feature = "room-ui")]
+        let ui_capture = if let (Some(ui), Some(window_ui), Some(g)) =
+            (&mut self.ui, &mut self.window_ui, &self.graphics)
+        {
+            let response = window_ui.state.on_window_event(&g.window, &event);
+            if matches!(
+                event,
+                WindowEvent::Focused(_)
+                    | WindowEvent::Resized(_)
+                    | WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                ui.invalidate_pointer_layout();
+            }
+            let pending = ui_pointer_input(
+                self.ui_pointer,
+                egui_winit::pixels_per_point(&ui.context, &g.window),
+            );
+            response.consumed
+                || ui.blocks_controls()
+                || ui.context.egui_wants_keyboard_input()
+                || ui.pending_pointer_over_ui(&pending)
+        } else {
+            false
+        };
+        #[cfg(not(feature = "room-ui"))]
+        let ui_capture = false;
+        if ui_capture {
+            self.keys.clear();
+            self.drag = None;
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -431,7 +632,7 @@ impl ApplicationHandler for App {
                         event.state == ElementState::Pressed,
                         is_synthetic,
                         event.repeat,
-                        self.focused,
+                        self.focused && !ui_capture,
                     );
                     if fresh {
                         match code {
@@ -446,7 +647,7 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::CursorMoved { position, .. } if self.focused => {
+            WindowEvent::CursorMoved { position, .. } if self.focused && !ui_capture => {
                 let next = [position.x as f32, position.y as f32];
                 if let Some(previous) = self.cursor {
                     let delta = [next[0] - previous[0], next[1] - previous[1]];
@@ -471,14 +672,14 @@ impl ApplicationHandler for App {
                 }
                 self.cursor = Some(next);
             }
-            WindowEvent::MouseInput { state, button, .. } if self.focused => {
+            WindowEvent::MouseInput { state, button, .. } if self.focused && !ui_capture => {
                 self.drag = if state == ElementState::Pressed {
                     Some(button)
                 } else {
                     None
                 };
             }
-            WindowEvent::MouseWheel { delta, .. } if self.focused => {
+            WindowEvent::MouseWheel { delta, .. } if self.focused && !ui_capture => {
                 let steps = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
@@ -492,6 +693,10 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.draw() {
                     self.fail(event_loop, e);
+                }
+                #[cfg(feature = "room-ui")]
+                if self.quit {
+                    event_loop.exit();
                 }
             }
             _ => {}
@@ -513,25 +718,49 @@ impl ApplicationHandler for App {
         ));
     }
 }
+impl App {
+    fn new(project: PreparedProject) -> Result<Self, String> {
+        let sim = project.scene().simulation()?;
+        let orbit = project.camera().map_or_else(
+            || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
+            |camera| camera.document.orbit(),
+        );
+        #[cfg(feature = "room-ui")]
+        let ui = project
+            .ui()
+            .map(|ui| {
+                crate::collect_ui::CollectUi::new_for(
+                    ui.document.clone(),
+                    ui.font.clone(),
+                    crate::authored_ui::Profile::Room,
+                )
+            })
+            .transpose()?;
+        Ok(Self {
+            #[cfg(feature = "room-ui")]
+            ui,
+            #[cfg(feature = "room-ui")]
+            window_ui: None,
+            #[cfg(feature = "room-ui")]
+            quit: false,
+            #[cfg(feature = "room-ui")]
+            ui_pointer: None,
+            project,
+            sim,
+            graphics: None,
+            keys: Keys::default(),
+            focused: false,
+            last: Instant::now(),
+            accumulated: Duration::ZERO,
+            orbit,
+            drag: None,
+            cursor: None,
+            error: None,
+        })
+    }
+}
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
-    let sim = project.scene().simulation()?;
-    let orbit = project.camera().map_or_else(
-        || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
-        |camera| camera.document.orbit(),
-    );
-    let mut app = App {
-        project,
-        sim,
-        graphics: None,
-        keys: Keys::default(),
-        focused: false,
-        last: Instant::now(),
-        accumulated: Duration::ZERO,
-        orbit,
-        drag: None,
-        cursor: None,
-        error: None,
-    };
+    let mut app = App::new(project)?;
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::WaitUntil(
         Instant::now() + Duration::from_millis(16),
@@ -592,5 +821,314 @@ mod tests {
         keys.event(KeyCode::KeyW, true, false, false, true);
         assert_eq!(keys.sample(), RoomInput::default());
         assert_eq!(keys.sample().move_z, -1);
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "room-ui",
+    feature = "project-create",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+mod room_ui_app_tests {
+    use super::*;
+    use crate::authored_ui::{Action, Screen};
+    fn render(app: &mut App, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let outputs = app.ui_frame(input).unwrap();
+        if outputs.len() == 2 {
+            assert!(
+                outputs[0].shapes.is_empty(),
+                "pre-action geometry must not be painted"
+            );
+            if app.ui.as_ref().unwrap().screen() == Screen::Playing {
+                fn text(shape: &egui::Shape, found: &mut String) {
+                    match shape {
+                        egui::Shape::Text(t) => found.push_str(t.galley.text()),
+                        egui::Shape::Vec(shapes) => {
+                            for shape in shapes {
+                                text(shape, found);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let mut visible = String::new();
+                for shape in &outputs[1].shapes {
+                    text(&shape.shape, &mut visible);
+                }
+                assert!(
+                    visible.contains("메뉴"),
+                    "Playing output must be regenerated after action: {visible}"
+                );
+                assert!(
+                    !visible.contains("다시 시작"),
+                    "old terminal restart button leaked into new Frame"
+                );
+            }
+        }
+        for output in outputs {
+            output.drop_without_applying_deltas();
+        }
+    }
+    fn click(app: &mut App, id: &str) {
+        render(app, vec![]);
+        let ui = app.ui.as_ref().unwrap();
+        let node = ui
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap();
+        let point = egui::pos2(
+            800.0 * f32::from(node.anchor[0]) / 1000.0
+                + f32::from(node.offset[0])
+                + f32::from(node.size[0]) / 2.0,
+            f32::from(node.offset[1]) + f32::from(node.size[1]) / 2.0,
+        );
+        let event = |pressed| egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        render(app, vec![egui::Event::PointerMoved(point), event(true)]);
+        render(app, vec![event(false)]);
+    }
+    #[test]
+    fn native_app_widget_restart_uses_owned_frame_camera_and_neutral_controls() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("room");
+        crate::project_create::create(&crate::project_create::CreateOptions {
+            output: root.clone(),
+            template: crate::project_create::ROOM_UI_TEMPLATE.into(),
+            seed: "native-app-ui".into(),
+        })
+        .unwrap();
+        let prepared = PreparedProject::open_with_ui(&root, true).unwrap();
+        let initial = prepared.scene().frame().checksum();
+        let declared = prepared.camera().unwrap().document.clone();
+        let mut app = App::new(prepared).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(app.ui.as_ref().unwrap().screen(), Screen::Title);
+        click(&mut app, "play");
+        assert_eq!(app.sim.frame().checksum(), initial);
+        assert_eq!(app.ui.as_ref().unwrap().screen(), Screen::Playing);
+        assert!(app.keys.event(KeyCode::KeyE, true, false, false, true));
+        click(&mut app, "menu");
+        assert_eq!(app.keys.sample(), RoomInput::default());
+        assert!(app.ui.as_ref().unwrap().blocks_controls());
+        assert!(!app.keys.event(KeyCode::KeyE, true, false, true, true));
+        click(&mut app, "continue");
+        assert_eq!(app.keys.sample().buttons, 0);
+        app.keys.event(KeyCode::KeyE, false, false, false, true);
+        assert!(app.keys.event(KeyCode::KeyE, true, false, false, true));
+        app.orbit.yaw += 0.5;
+        app.sim.frame_mut().singleton_mut::<RoomRun>().key_collected = 1;
+        app.sim.frame_mut().singleton_mut::<RoomRun>().won = 1;
+        render(&mut app, vec![]);
+        assert_eq!(app.ui.as_ref().unwrap().screen(), Screen::Terminal);
+        click(&mut app, "restart");
+        assert_eq!(app.sim.frame().checksum(), initial);
+        assert_eq!(app.orbit.yaw, declared.orbit().yaw);
+        assert_eq!(app.keys.sample(), RoomInput::default());
+        assert_eq!(app.ui.as_ref().unwrap().screen(), Screen::Playing);
+        assert!(!app.quit);
+        app.apply_ui_action(Action::Quit).unwrap();
+        assert!(app.quit);
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "room-ui",
+    feature = "project-create",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+mod room_ui_gpu_tests {
+    use super::*;
+    #[test]
+    #[ignore = "mandatory software/physical GPU adapter and explicit capture directory"]
+    fn room_ui_composited_title_play_key_win_and_projection_preserve_frame() {
+        assert_eq!(std::env::var("ORR_REQUIRE_GPU").as_deref(), Ok("1"));
+        let output =
+            PathBuf::from(std::env::var_os("ORR_ROOM_UI_CAPTURE_DIR").expect("capture directory"));
+        std::fs::create_dir_all(&output).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("gpu room");
+        crate::project_create::create(&crate::project_create::CreateOptions {
+            output: root.clone(),
+            template: crate::project_create::ROOM_UI_TEMPLATE.into(),
+            seed: "room-ui-gpu".into(),
+        })
+        .unwrap();
+        let project = PreparedProject::open_with_ui(&root, true).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        let gpu = Wgpu::headless(WgpuOptions::default()).unwrap();
+        let prepared = project.ui().unwrap();
+        for size in [(1024, 768), (480, 800)] {
+            let mut renderer = RoomRenderer::new(&gpu, size, project.models()).unwrap();
+            let camera = project
+                .camera()
+                .unwrap()
+                .document
+                .camera(&project.camera().unwrap().document.orbit(), size)
+                .unwrap();
+            let mut sim = project.scene().simulation().unwrap();
+            let mut ui = crate::collect_ui::CollectUi::new_for(
+                prepared.document.clone(),
+                prepared.font.clone(),
+                crate::authored_ui::Profile::Room,
+            )
+            .unwrap();
+            let mut overlay = crate::game_ui_gpu::GpuOverlay::new(&gpu, room_view::TARGET_FORMAT);
+            for (name, hud) in [
+                ("title", crate::collect_ui::RoomHud::default()),
+                ("playing", crate::collect_ui::RoomHud::default()),
+                (
+                    "key",
+                    crate::collect_ui::RoomHud {
+                        key_acquired: true,
+                        won: false,
+                    },
+                ),
+                (
+                    "won",
+                    crate::collect_ui::RoomHud {
+                        key_acquired: true,
+                        won: true,
+                    },
+                ),
+            ] {
+                if name == "playing" {
+                    ui.apply(crate::authored_ui::Action::Continue);
+                }
+                {
+                    let run = sim.frame_mut().singleton_mut::<RoomRun>();
+                    run.key_collected = u32::from(hud.key_acquired);
+                    run.won = u32::from(hud.won);
+                }
+                let frame = sim.frame();
+                let initial = frame.checksum();
+                renderer
+                    .render(
+                        FrameView::of(frame),
+                        project.scene().index(),
+                        project.models(),
+                        &camera,
+                    )
+                    .unwrap();
+                let baseline = renderer.read_rgba8();
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(size.0 as f32, size.1 as f32),
+                    )),
+                    ..Default::default()
+                };
+                let (paint, action) = ui.show_room(raw, hud);
+                assert!(action.is_none());
+                overlay
+                    .paint(
+                        &gpu,
+                        renderer.target().render_view(),
+                        size,
+                        &ui.context,
+                        paint,
+                    )
+                    .unwrap();
+                let pixels = renderer.read_rgba8();
+                let changed = pixels
+                    .chunks_exact(4)
+                    .zip(baseline.chunks_exact(4))
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert!(
+                    changed > 400,
+                    "real overlay pixels absent: {name} {changed}"
+                );
+                assert_eq!(frame.checksum(), initial);
+                let path = output.join(format!("{name}-{}x{}.png", size.0, size.1));
+                let file = std::fs::File::create(path).unwrap();
+                let mut encoder = png17::Encoder::new(file, size.0, size.1);
+                encoder.set_color(png17::ColorType::Rgba);
+                encoder.set_depth(png17::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .unwrap()
+                    .write_image_data(&pixels)
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "room-ui"))]
+mod room_pointer_capture_tests {
+    use super::*;
+    #[test]
+    fn key_capture_uses_physical_position_after_scale_without_cursor_move() {
+        use crate::authored_ui::{Document, Kind, Node, Profile, Screen};
+        let document = Document {
+            schema: 1,
+            nodes: vec![Node {
+                id: "panel".into(),
+                parent: None,
+                kind: Kind::Container,
+                screen: Screen::Title,
+                anchor: [0, 0],
+                offset: [100, 100],
+                size: [100, 100],
+            }],
+        };
+        let mut ui = crate::collect_ui::CollectUi::new_for(
+            document,
+            include_bytes!("../../../assets/game_ui_font/OrreryKoreanUI.otf").to_vec(),
+            Profile::Room,
+        )
+        .unwrap();
+        let physical = winit::dpi::PhysicalPosition::new(300.0, 300.0);
+        let mut raw = ui_pointer_input(Some(physical), 1.0);
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        ));
+        ui.show_room(raw, Default::default())
+            .0
+            .drop_without_applying_deltas();
+        let mut resized = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        resized
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .native_pixels_per_point = Some(2.0);
+        // The scale/redraw does not generate a physical CursorMoved.
+        ui.show_room(resized, Default::default())
+            .0
+            .drop_without_applying_deltas();
+        assert!(ui.pending_pointer_over_ui(&ui_pointer_input(Some(physical), 2.0)));
+        assert!(!ui.pending_pointer_over_ui(&ui_pointer_input(Some(physical), 1.0)));
+        let mut keys = Keys::default();
+        let captured = ui.pending_pointer_over_ui(&ui_pointer_input(Some(physical), 2.0));
+        assert!(!keys.event(KeyCode::KeyE, true, false, false, !captured));
+        assert_eq!(keys.sample().buttons, 0);
+        keys.event(KeyCode::KeyE, false, false, false, true);
+        assert!(keys.event(KeyCode::KeyE, true, false, false, true));
+        assert_eq!(keys.sample().buttons, INTERACT);
     }
 }
