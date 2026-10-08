@@ -4,7 +4,7 @@
 //! before using its identity, and supply a fresh identity for an explicit fork.
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectProgress {
     pub schema: u32,
@@ -12,11 +12,62 @@ pub struct ProjectProgress {
     pub profile: ProgressProfile,
 }
 
+// Preserve the existing Collect sequence decoder, while the new Room profile
+// admits only an object. Deserializing through MapAccess retains duplicate checks.
+impl<'de> Deserialize<'de> for ProjectProgress {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: u32,
+            game_id: String,
+            profile: ProgressProfile,
+        }
+        impl From<Wire> for ProjectProgress {
+            fn from(value: Wire) -> Self {
+                Self {
+                    schema: value.schema,
+                    game_id: value.game_id,
+                    profile: value.profile,
+                }
+            }
+        }
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = ProjectProgress;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("project progress object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(Into::into)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let value = Wire::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
+                if value.profile == ProgressProfile::RoomKeyCheckpointV1 {
+                    return Err(serde::de::Error::custom(
+                        "Room checkpoint progress must be an object",
+                    ));
+                }
+                Ok(value.into())
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// Closed inventory of supported progress formats, not a capability grant.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProgressProfile {
     #[serde(rename = "collect-dodge-highscore-v1")]
     CollectDodgeHighscoreV1,
+    #[serde(rename = "room-key-checkpoint-v1")]
+    RoomKeyCheckpointV1,
 }
 
 impl ProjectProgress {
@@ -231,5 +282,43 @@ mod tests {
             ..original
         };
         assert!(invalid.fork_with_game_id(OTHER_ID.into()).is_err());
+    }
+    #[test]
+    fn room_checkpoint_identity_roundtrip_and_fork_preserve_profile() {
+        let value = ProjectProgress {
+            profile: ProgressProfile::RoomKeyCheckpointV1,
+            ..progress()
+        };
+        value.validate().unwrap();
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(json.contains("room-key-checkpoint-v1"));
+        assert_eq!(
+            serde_json::from_str::<ProjectProgress>(&json).unwrap(),
+            value
+        );
+        let fork = value.fork_with_game_id(OTHER_ID.into()).unwrap();
+        assert_eq!(fork.profile, ProgressProfile::RoomKeyCheckpointV1);
+        assert_eq!(fork.game_id, OTHER_ID);
+        for field in ["schema", "game_id", "profile"] {
+            let valid = serde_json::to_value(&value).unwrap();
+            let duplicate = format!("{{\"{field}\":{},{}", valid[field], &json[1..]);
+            assert!(serde_json::from_str::<ProjectProgress>(&duplicate).is_err());
+            let mut null = valid.clone();
+            null[field] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<ProjectProgress>(null).is_err());
+            let mut missing = valid;
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ProjectProgress>(missing).is_err());
+        }
+    }
+    #[test]
+    fn checkpoint_profile_requires_object_without_changing_collect_sequence_compatibility() {
+        let room = format!(r#"[1,"{ID}","room-key-checkpoint-v1"]"#);
+        assert!(serde_json::from_str::<ProjectProgress>(&room).is_err());
+        let collect = format!(r#"[1,"{ID}","collect-dodge-highscore-v1"]"#);
+        assert_eq!(
+            serde_json::from_str::<ProjectProgress>(&collect).unwrap(),
+            progress()
+        );
     }
 }

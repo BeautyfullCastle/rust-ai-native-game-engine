@@ -116,7 +116,15 @@ fn step(sim: &mut Simulation<RoomEscapeV1>, input: RoomInput) {
     sim.step(&inputs);
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let project = PreparedProject::open_with_ui(&options.project, cfg!(feature = "room-ui"))?;
+    let project = PreparedProject::open_with_options(
+        &options.project,
+        cfg!(feature = "room-ui"),
+        if cfg!(all(feature = "room-checkpoint", target_os = "linux")) {
+            crate::room_project::CheckpointSupport::MetadataOnly
+        } else {
+            crate::room_project::CheckpointSupport::Disabled
+        },
+    )?;
     if options.headless {
         headless(
             &project,
@@ -304,7 +312,18 @@ struct WindowUi {
     gpu: crate::game_ui_gpu::GpuOverlay,
     pending: crate::game_ui_gpu::PendingOverlay,
 }
+#[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckpointAction {
+    Resume,
+    NewGame,
+    Continue,
+    Restart,
+    Quit,
+}
 struct App {
+    #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
+    checkpoint: Option<crate::room_checkpoint::CheckpointSession>,
     #[cfg(feature = "room-ui")]
     ui: Option<crate::collect_ui::CollectUi>,
     #[cfg(feature = "room-ui")]
@@ -330,6 +349,13 @@ impl App {
         self.error = Some(error);
         event_loop.exit();
     }
+    fn step_authoritative(&mut self, input: RoomInput) {
+        step(&mut self.sim, input);
+        #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
+        if let Some(checkpoint) = &mut self.checkpoint {
+            checkpoint.observe(*self.sim.frame().singleton::<RoomRun>());
+        }
+    }
     fn restart(&mut self) -> Result<(), String> {
         self.sim = self.project.scene().simulation()?;
         if let Some(camera) = self.project.camera() {
@@ -344,6 +370,17 @@ impl App {
     }
     #[cfg(feature = "room-ui")]
     fn ui_frame(&mut self, input: egui::RawInput) -> Result<Vec<egui::FullOutput>, String> {
+        #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
+        if self.checkpoint.is_some()
+            && self.ui.as_ref().is_some_and(|ui| {
+                matches!(
+                    ui.screen(),
+                    crate::authored_ui::Screen::Title | crate::authored_ui::Screen::Menu
+                )
+            })
+        {
+            return self.checkpoint_ui_frame(input);
+        }
         let run = self.sim.frame().singleton::<RoomRun>();
         let ui = self.ui.as_mut().ok_or("Room UI is not admitted")?;
         let mut fresh_input = input.clone();
@@ -420,10 +457,10 @@ impl App {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last);
         self.last = now;
-        let Some(g) = &mut self.graphics else {
+        let Some(size) = self.graphics.as_ref().map(|g| g.size) else {
             return Ok(());
         };
-        if g.size.0 == 0 || g.size.1 == 0 {
+        if size.0 == 0 || size.1 == 0 {
             self.accumulated = Duration::ZERO;
             return Ok(());
         }
@@ -436,15 +473,16 @@ impl App {
                 #[cfg(not(feature = "room-ui"))]
                 let blocked = false;
                 let input = self.keys.sample();
-                step(
-                    &mut self.sim,
-                    if blocked { RoomInput::default() } else { input },
-                );
+                self.step_authoritative(if blocked { RoomInput::default() } else { input });
                 self.accumulated -= interval;
             }
         } else {
             self.accumulated = Duration::ZERO;
         }
+        let g = self
+            .graphics
+            .as_mut()
+            .expect("graphics checked before stepping");
         let run = self.sim.frame().singleton::<RoomRun>();
         g.window.set_title(&format!("Room Escape | key: {} | {} | WASD/arrows move, E interact, R restart, Esc quit | mouse orbit/pan/zoom", run.key_collected, if run.won != 0 { "WON" } else if run.key_collected == 0 { "exit locked" } else { "exit unlocked" }));
         // The backend reconfigures lost/outdated surfaces and returns Skip.
@@ -476,6 +514,129 @@ impl App {
         Ok(())
     }
 }
+
+#[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
+impl App {
+    fn checkpoint_ui_frame(
+        &mut self,
+        input: egui::RawInput,
+    ) -> Result<Vec<egui::FullOutput>, String> {
+        let checkpoint = self.checkpoint.as_ref().ok_or("checkpoint missing")?;
+        let ui = self
+            .ui
+            .as_mut()
+            .ok_or("checkpoint requires authored Room UI")?;
+        let menu = ui.screen() == crate::authored_ui::Screen::Menu;
+        // The checkpoint chooser owns pointer input; discard authored hit regions.
+        ui.invalidate_pointer_layout();
+        let context = ui.context.clone();
+        let available = checkpoint.available();
+        let status = checkpoint.status().to_owned();
+        let mut action = None;
+        let mut fresh_input = input.clone();
+        fresh_input.events.clear();
+        let mut output = context.run_ui(input, |root| {
+            let width = root.available_width().min(440.0);
+            root.add_space(12.0);
+            root.horizontal(|row| {
+                row.add_space(((row.available_width() - width) * 0.5).max(0.0));
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(16, 22, 32))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(row, |panel| {
+                        let content_width = (width - 24.0).max(1.0);
+                        panel.set_min_width(content_width);
+                        panel.set_max_width(content_width);
+                        panel.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                        panel.spacing_mut().button_padding = egui::vec2(14.0, 10.0);
+                        panel.spacing_mut().item_spacing.y = 7.0;
+                        panel.vertical_centered(|root| {
+                            root.heading("Room checkpoint");
+                            root.label(&status);
+                            root.label(
+                    "Resume restores the key at the authored spawn. New Game clears the saved key.",
+                );
+                            if root
+                                .add_enabled(available, egui::Button::new("Resume"))
+                                .clicked()
+                            {
+                                action = Some(CheckpointAction::Resume);
+                            }
+                            if root.button("New Game").clicked() {
+                                action = Some(CheckpointAction::NewGame);
+                            }
+                            if menu && root.button("Continue current session").clicked() {
+                                action = Some(CheckpointAction::Continue);
+                            }
+                            if root
+                                .button("Restart session (does not clear checkpoint)")
+                                .clicked()
+                            {
+                                action = Some(CheckpointAction::Restart);
+                            }
+                            if root.button("Quit").clicked() {
+                                action = Some(CheckpointAction::Quit);
+                            }
+                        });
+                    });
+            });
+        });
+        if let Some(action) = action {
+            self.apply_checkpoint_action(action)?;
+            if !self.quit {
+                output.shapes.clear();
+                let mut outputs = vec![output];
+                outputs.extend(self.ui_frame(fresh_input)?);
+                return Ok(outputs);
+            }
+        }
+        Ok(vec![output])
+    }
+    fn apply_checkpoint_action(&mut self, action: CheckpointAction) -> Result<(), String> {
+        match action {
+            CheckpointAction::Quit => {
+                self.quit = true;
+                return Ok(());
+            }
+            CheckpointAction::NewGame => {
+                if !self
+                    .checkpoint
+                    .as_mut()
+                    .ok_or("checkpoint missing")?
+                    .new_game()
+                {
+                    return Ok(());
+                }
+                self.restart()?;
+            }
+            CheckpointAction::Resume => {
+                if !self.checkpoint.as_ref().is_some_and(|s| s.available()) {
+                    return Ok(());
+                }
+                self.restart()?;
+                self.sim = crate::room_checkpoint::restore(&self.project, true)?;
+            }
+            CheckpointAction::Restart => self.restart()?,
+            CheckpointAction::Continue => {}
+        }
+        self.keys.clear();
+        self.drag = None;
+        self.cursor = None;
+        self.accumulated = Duration::ZERO;
+        self.last = Instant::now();
+        if let Some(ui) = &mut self.ui {
+            ui.apply(if action == CheckpointAction::Continue {
+                crate::authored_ui::Action::Continue
+            } else {
+                crate::authored_ui::Action::Play
+            });
+            ui.acknowledge_restart();
+        }
+        Ok(())
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.graphics.is_some() {
@@ -737,6 +898,8 @@ impl App {
             })
             .transpose()?;
         Ok(Self {
+            #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
+            checkpoint: None,
             #[cfg(feature = "room-ui")]
             ui,
             #[cfg(feature = "room-ui")]
@@ -760,7 +923,17 @@ impl App {
     }
 }
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
+    // Metadata admission is intentionally available to non-persisting tooling;
+    // it must not grant support to this public standalone consuming route.
+    #[cfg(not(all(feature = "room-checkpoint", target_os = "linux")))]
+    if project.checkpoint().is_some() {
+        return Err("Room checkpoint runtime requires the Linux room-checkpoint consumer".into());
+    }
     let mut app = App::new(project)?;
+    #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
+    {
+        app.checkpoint = crate::room_checkpoint::CheckpointSession::open(&app.project);
+    }
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::WaitUntil(
         Instant::now() + Duration::from_millis(16),
@@ -1132,3 +1305,13 @@ mod room_pointer_capture_tests {
         assert_eq!(keys.sample().buttons, INTERACT);
     }
 }
+
+#[cfg(all(
+    test,
+    feature = "room-checkpoint",
+    feature = "project-create",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+#[path = "room_checkpoint_acceptance_tests.rs"]
+mod room_checkpoint_acceptance_tests;

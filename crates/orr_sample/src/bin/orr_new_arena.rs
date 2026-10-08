@@ -1,6 +1,6 @@
 //! Create one offline, versioned Arena starter with an explicit authoring seed.
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
-const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game.\nWith collect-ui enabled, collect-dodge-ui-2d-v1 also installs the authored UI and Korean font.\nA reused UUID shares high-score identity; the seed does not create or change game identity.\n\nWith room-project enabled: --template room-escape-3d-v1 --seed KEY creates a closed static-model RoomEscapeV1 starter. No --game-id or progress/save identity is accepted.";
+const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game.\nWith collect-ui enabled, collect-dodge-ui-2d-v1 also installs the authored UI and Korean font.\nA reused UUID shares high-score identity; the seed does not create or change game identity.\n\nWith room-project enabled: --template room-escape-3d-v1 --seed KEY creates a closed static-model RoomEscapeV1 starter. No --game-id is accepted. With room-checkpoint enabled, --template room-escape-ui-3d-v1 --room-checkpoint UUID explicitly enables key checkpoints using a canonical lowercase UUIDv4. A new UUID gives an independent game; reusing it shares checkpoints.";
 fn main() {
     if let Err((code, error)) = run() {
         eprintln!("error: {error}");
@@ -27,7 +27,26 @@ fn run() -> Result<(), (i32, String)> {
                 .into_string()
                 .map_err(|_| (2, "seed must be ASCII".into()))?,
         };
-        let report = if options.template == orr_sample::project_create::COLLECT_TEMPLATE
+        if args.contains_key("--room-checkpoint") && args.contains_key("--game-id") {
+            return Err((
+                2,
+                "--room-checkpoint cannot be combined with --game-id".into(),
+            ));
+        }
+        let report = if let Some(game_id) = args.get("--room-checkpoint") {
+            let game_id = game_id
+                .to_str()
+                .ok_or((2, "checkpoint UUID must be UTF-8".into()))?;
+            #[cfg(feature = "room-checkpoint")]
+            {
+                orr_sample::project_create::create_room_checkpoint(&options, game_id)
+            }
+            #[cfg(not(feature = "room-checkpoint"))]
+            {
+                let _ = game_id;
+                Err("Room checkpoint requires room-checkpoint feature".into())
+            }
+        } else if options.template == orr_sample::project_create::COLLECT_TEMPLATE
             || options.template == orr_sample::project_create::COLLECT_UI_TEMPLATE
         {
             let game_id = args
@@ -73,7 +92,10 @@ fn parse(args: Vec<OsString>) -> Result<BTreeMap<String, OsString>, String> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let option = arg.to_str().ok_or("option names must be UTF-8")?;
-        if !matches!(option, "--output" | "--template" | "--seed" | "--game-id") {
+        if !matches!(
+            option,
+            "--output" | "--template" | "--seed" | "--game-id" | "--room-checkpoint"
+        ) {
             return Err(format!("unknown option {option}; use --help for usage"));
         }
         if options.contains_key(option) {

@@ -64,7 +64,7 @@ impl Prepared {
     pub fn open(root: &Path, profile: Profile) -> Result<Self, String> {
         match profile {
             #[cfg(feature="room-project")]
-            Profile::Room => crate::room_project::PreparedProject::open_with_ui(root, cfg!(feature = "room-ui")).map(|value|Self::Room(Box::new(value))),
+            Profile::Room => crate::room_project::PreparedProject::open_with_options(root, cfg!(feature = "room-ui"), if cfg!(all(feature = "room-checkpoint", target_os = "linux")) { crate::room_project::CheckpointSupport::MetadataOnly } else { crate::room_project::CheckpointSupport::Disabled }).map(|value|Self::Room(Box::new(value))),
             Profile::Arena => crate::project_runtime::PreparedRuntime::open(root)
                 .map(|value| Self::Arena(Box::new(value))),
             #[cfg(feature = "collect-dodge")]
