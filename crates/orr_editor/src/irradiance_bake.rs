@@ -1062,7 +1062,10 @@ impl BakeOutput {
 }
 
 /// The hashes were verified in a worker. These cheap same-file stamps detect
-/// edits/removals between verification, commit and subsequent viewport frames.
+/// metadata-visible edits/removals at commit and on subsequent viewport frames.
+/// They do not rehash bytes: same-size edits preserving every observed metadata
+/// field can remain unnoticed indefinitely unless a full worker verification
+/// is triggered again; viewport frames do not schedule periodic rehashing.
 /// Stamps are never part of the canonical portable content fingerprint.
 #[derive(Clone, Debug)]
 pub struct VerifiedBakeSources {
@@ -1070,8 +1073,15 @@ pub struct VerifiedBakeSources {
 }
 impl VerifiedBakeSources {
     pub fn verify_current(&self) -> Result<(), String> {
+        self.verify_current_with(FileStamp::read)
+    }
+
+    fn verify_current_with(
+        &self,
+        read_stamp: impl Fn(&Path) -> Result<FileStamp, String>,
+    ) -> Result<(), String> {
         for stamp in &self.stamps {
-            if FileStamp::read(&stamp.path)? != *stamp {
+            if read_stamp(&stamp.path)? != *stamp {
                 return Err("Baked model source/package changed; bake is stale".into());
             }
         }
@@ -2000,6 +2010,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("source.bin");
         std::fs::write(&file, b"original").unwrap();
+        // Exercise a metadata-visible edit without relying on wall-clock
+        // precision for two immediate writes of equal-length contents.
+        let original_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800);
+        let source_file = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+        source_file.set_modified(original_modified).unwrap();
         let digest = hex_digest(&Sha256::digest(b"original"));
         let deadline = Instant::now() + Duration::from_secs(2);
         let stamp = verify_file(&file, &digest, &AtomicBool::new(false), deadline, &mut 0).unwrap();
@@ -2008,10 +2023,45 @@ mod tests {
         };
         verified.verify_current().unwrap();
         std::fs::write(&file, b"tampered").unwrap();
+        source_file
+            .set_modified(original_modified + Duration::from_secs(60))
+            .unwrap();
+        assert_ne!(
+            verified.stamps[0].modified,
+            FileStamp::read(&file).unwrap().modified,
+            "the fixture must establish a metadata-visible edit"
+        );
         assert!(verified.verify_current().is_err());
         assert!(verify_file(&file, &digest, &AtomicBool::new(false), deadline, &mut 0).is_err());
         assert!(verify_file(&file, &digest, &AtomicBool::new(true), deadline, &mut 0).is_err());
         assert!(check_deadline(&AtomicBool::new(false), Instant::now()).is_err());
+    }
+
+    #[test]
+    fn unchanged_metadata_does_not_prove_current_source_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("source.bin");
+        std::fs::write(&file, b"original").unwrap();
+        let digest = hex_digest(&Sha256::digest(b"original"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let stamp = verify_file(&file, &digest, &AtomicBool::new(false), deadline, &mut 0).unwrap();
+        let verified = VerifiedBakeSources {
+            stamps: vec![stamp.clone()],
+        };
+        std::fs::write(&file, b"tampered").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"tampered");
+        assert!(verify_file(&file, &digest, &AtomicBool::new(false), deadline, &mut 0).is_err());
+        // A coarse or frozen metadata clock may report the entire old stamp
+        // for a same-size in-place rewrite, independently of the changed bytes.
+        assert!(
+            verified
+                .verify_current_with(|path| {
+                    assert_eq!(path, file);
+                    Ok(stamp.clone())
+                })
+                .is_ok(),
+            "the metadata guard cannot detect changed bytes with an unchanged stamp"
+        );
     }
 
     #[test]

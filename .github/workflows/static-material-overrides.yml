@@ -53,7 +53,8 @@ jobs:
       - name: Effective bake color and pending/completed invalidation
         run: |
           set -euo pipefail
-          cargo test --locked --release -p orr_editor --features irradiance-probes,animated-models --lib irradiance_bake::tests
+          cargo test --locked --release -p orr_editor --features irradiance-probes,animated-models --lib irradiance_bake::tests 2>&1 | tee material-evidence/bake-library.log
+          grep -F "test result: ok. 13 passed; 0 failed; 0 ignored;" material-evidence/bake-library.log
           cargo test --locked --release -p orr_editor --features irradiance-probes,animated-models --test yard3d_static_bake -- --exact material_override_invalidates_pending_and_completed_bakes_and_reset_restores_identity 2>&1 | tee material-evidence/bake.log
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" material-evidence/bake.log
       - name: Mandatory renderer and real editor GPU

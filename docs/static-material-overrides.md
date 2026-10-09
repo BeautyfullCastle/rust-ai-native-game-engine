@@ -41,6 +41,16 @@ Irradiance baking uses the same effective factors, including separate per-instan
 bake materials. Both runtime and portable bake identities include overrides,
 so an authored material change invalidates stale bake output.
 
+Bake workers verify source and package content hashes. The existing commit and
+viewport freshness checks use file length, timestamps and file identity rather
+than reading all source bytes again. An external same-size edit that preserves
+every observed metadata field can therefore leave an already verified bake
+visible indefinitely unless later full worker validation is triggered. The
+viewport does not periodically rehash these bytes. Bounded background content
+revalidation or a stronger immutable-source policy is a separate follow-up;
+this slice does not add per-frame asset hashing. Apply and Reset still invalidate
+the bake through the authored input fingerprint.
+
 ## Verification and limits
 
 The focused tests exercise schema rejection, used-slot admission, immutable
