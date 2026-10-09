@@ -8,12 +8,48 @@ import shutil
 import tempfile
 import unittest
 
+from check_navigation_playground_gate import rust_test_names
 import room_project_gate as gate
 import test_room_template_gate as fixtures
 from test_room_template_gate import log_for, png
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORIES = json.loads(gate.INVENTORY.read_text())
+CHARACTER_VIEW_TESTS = [
+    'room_view::tests::character::authored_character_poses_are_read_only_and_share_exact_generation_placement',
+    'room_view::tests::character::character_requires_one_player_binding_and_every_mapped_clip',
+    'room_view::tests::character::mixed_character_depth_visibility_repeat_resize_and_failure_are_atomic',
+]
+
+
+def check_room_view_source_inventory(source):
+    """Keep default Room tests distinct from the explicitly gated character lane."""
+    actual = rust_test_names(source, 'room_view')
+    assert len(actual) == len(set(actual)), 'duplicate qualified Room test'
+    # Bind the required attribute to the actual module, not a matching comment,
+    # string, or unrelated module. The lexical scanner identifies this inserted
+    # test's scope and ignores comments and literals without executing Rust.
+    guarded = list(re.finditer(
+        r'#\[cfg\(feature\s*=\s*"room-character"\)\]\s*mod\s+character\s*\{', source))
+    assert len(guarded) == 1, 'one explicit room-character module guard required'
+    probe = '__room_character_inventory_scope_probe'
+    assert probe not in source
+    position = guarded[0].end()
+    probed = rust_test_names(source[:position] + f'\n#[test] fn {probe}() {{}}\n' + source[position:], 'room_view')
+    assert probed.count('room_view::tests::character::' + probe) == 1, 'guard must own the nested character test module'
+    character = [name for name in actual if name.startswith('room_view::tests::character::')]
+    assert sorted(character) == CHARACTER_VIEW_TESTS, 'exact character lane source inventory'
+    default = [name for name in actual if name not in character]
+    assert sorted(default) == INVENTORIES['room-view-contracts']['names'], 'exact default Room source inventory'
+    declarations = re.findall(r'#\[test\]\s*((?:#\[[^\n]*\]\s*)*)fn\s+(\w+)\s*\(', source)
+    ignored = []
+    for qualified in actual:
+        attributes = [attributes for attributes, name in declarations if name == qualified.rsplit('::', 1)[1]]
+        assert len(attributes) == 1, ('ambiguous Room test attributes', qualified)
+        if '#[ignore' in attributes[0]:
+            ignored.append(qualified)
+    assert sorted(name for name in ignored if name in default) == INVENTORIES['room-view-contracts']['ignored_names']
+    assert sorted(name for name in ignored if name in character) == [CHARACTER_VIEW_TESTS[2]], 'character GPU test must remain explicitly ignored'
 
 
 def unified_log(mode):
@@ -41,6 +77,9 @@ class RoomProjectGateTests(unittest.TestCase):
                    ('editor-model-admission', 'orr_editor/tests/room_model_admission.rs', '')]
         for lane, path, prefix in sources:
             source = (ROOT / 'crates' / path).read_text()
+            if lane == 'room-view-contracts':
+                check_room_view_source_inventory(source)
+                continue
             if lane == 'runtime-input':
                 source = source.split('mod tests {', 1)[1].split('\nmod room_ui_app_tests {', 1)[0]
             names = [(prefix + name, '#[ignore' in attributes)
@@ -59,6 +98,35 @@ class RoomProjectGateTests(unittest.TestCase):
         self.assertEqual(INVENTORIES['camera-schema-unified']['harness_rows'], [
             {'package': 'orr_editor', 'names': [], 'summary': [0, 0, 0]},
             {'package': 'orr_sample', 'names': INVENTORIES['camera-schema']['names'], 'summary': [9, 0, 0]}])
+
+    def test_room_view_character_scope_is_explicit_and_cannot_hide_default_growth(self):
+        default = ''.join(f'    #[test]\n    fn {name.rsplit("::", 1)[1]}() {{}}\n'
+                          for name in INVENTORIES['room-view-contracts']['names'])
+        character = ''.join('        #[test]\n' + ('        #[ignore = "software GPU"]\n' if index == 2 else '')
+                            + f'        fn {name.rsplit("::", 1)[1]}() {{}}\n'
+                            for index, name in enumerate(CHARACTER_VIEW_TESTS))
+        guard = '#[cfg(feature = "room-character")]'
+        valid = '#[cfg(test)]\nmod tests {\n' + default + '    ' + guard + '\n    mod character {\n' + character + '    }\n}\n'
+        check_room_view_source_inventory(valid)
+        first = '        #[test]\n        fn ' + CHARACTER_VIEW_TESTS[0].rsplit('::', 1)[1] + '() {}\n'
+        moved = valid.replace(first, '').replace('    ' + guard, first.replace('        ', '    ') + '    ' + guard)
+        cases = {
+            'unguarded': valid.replace(guard, ''),
+            'wrong feature': valid.replace('feature = "room-character"', 'feature = "room-project"'),
+            'wrong module': valid.replace('mod character {', 'mod other {'),
+            'wrong parent module': valid.replace('mod tests {', 'mod unrelated {'),
+            'moved to default module': moved,
+            'missing nested test': valid.replace(first, ''),
+            'extra default test': valid.replace('    ' + guard, '    #[test]\n    fn unexpected_default() {}\n    ' + guard),
+            'unrelated unguarded nested module': valid.replace('    ' + guard, '    mod unrelated {\n        #[test]\n        fn unexpected_nested_default() {}\n    }\n    ' + guard),
+            'extra nested test': valid.replace('mod character {', 'mod character {\n        #[test]\n        fn unexpected_character() {}'),
+            'missing GPU ignore': valid.replace('        #[ignore = "software GPU"]\n', ''),
+            'comment guard decoy': '// ' + guard + '\n// mod character {\n' + valid.replace(guard, ''),
+            'literal guard decoy': 'const DECOY: &str = r#"' + guard + '\nmod character {"#;\n' + valid.replace(guard, ''),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                check_room_view_source_inventory(source)
 
     def test_every_lane_requires_exact_lists_outcomes_and_complete_summaries(self):
         for lane, expected in INVENTORIES.items():
