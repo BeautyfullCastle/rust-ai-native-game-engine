@@ -30,6 +30,10 @@ pub struct SpritePanel {
     pub scale: f32,
     loaded: BTreeMap<(String, String), Loaded>,
     error: Option<String>,
+    #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+    pub replacement_image: String,
+    #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+    pub replacement_version: String,
     preview_playing: bool,
     preview_started: f64,
 }
@@ -47,6 +51,10 @@ impl Default for SpritePanel {
             scale: 0.05,
             loaded: BTreeMap::new(),
             error: None,
+            #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+            replacement_image: String::new(),
+            #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+            replacement_version: String::new(),
             preview_playing: false,
             preview_started: 0.0,
         }
@@ -157,7 +165,10 @@ impl SpritePanel {
     }
 
     fn replace_assets(&mut self, ctx: &egui::Context, assets: BTreeMap<(String, String), Asset>) {
-        let loaded = assets.into_iter().map(|(key, asset)| {
+        self.loaded = Self::prepare_loaded(ctx, assets);
+    }
+    fn prepare_loaded(ctx: &egui::Context, assets: BTreeMap<(String, String), Asset>) -> BTreeMap<(String, String), Loaded> {
+        assets.into_iter().map(|(key, asset)| {
             let atlas = asset.document.atlas();
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [atlas.width as usize, atlas.height as usize], &asset.rgba,
@@ -166,8 +177,41 @@ impl SpritePanel {
                 format!("sprite:{}:{}", key.0, key.1), image, egui::TextureOptions::NEAREST,
             );
             (key, Loaded { asset, texture })
-        }).collect();
+        }).collect()
+    }
+    #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+    pub fn reimport_image(&mut self, ctx: &egui::Context, editor: &Editor) -> Result<(), String> {
+        if !self.editable(editor) || editor.is_dirty() || editor.sim().in_tx
+            || editor.screenshot_waiting_for().is_some() || !editor.has_local_screenshot_owner() {
+            return Err("image reimport requires a clean settled local scene in Edit".into());
+        }
+        let bindings = self.bindings.as_ref().ok_or("open saved sprite bindings first")?;
+        if bindings.dirty() { return Err("save sprite bindings before image reimport".into()); }
+        let root = sprite_bindings::resolve_project(bindings.base(), &bindings.document().project)?;
+        let transaction = orr_sample::image_reimport::prepare(&orr_sample::image_reimport::Options {
+            project: root, package: self.package.clone(), document: self.document.clone(),
+            image: PathBuf::from(&self.replacement_image), version: self.replacement_version.clone(),
+            consumer: orr_sample::image_reimport::Consumer { collect: editor.game().is_collect(),
+                ui: (editor.game() == EditorGame::Arena && cfg!(feature = "project-ui"))
+                    || (editor.game().is_collect() && cfg!(feature = "collect-ui")) },
+        })?;
+        let checked_file = |path: &std::path::Path| -> Result<PathBuf, String> {
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+            Ok(sprite_bindings::resolve_project(parent, ".")?.join(path.file_name().ok_or("missing local file name")?))
+        };
+        let scene_path = editor.sim().scene_path.as_deref().ok_or("saved scene required")?;
+        if transaction.document() != bindings.document()
+            || transaction.sidecar_path() != checked_file(&bindings.path)?
+            || transaction.scene_path() != checked_file(std::path::Path::new(scene_path))?
+            || transaction.initial_checksum() != editor.checksum() {
+            return Err("saved project differs from the displayed scene or sprite bindings; reopen before reimport".into());
+        }
+        let loaded = Self::prepare_loaded(ctx, transaction.assets().clone());
+        transaction.commit()?;
+        // No filesystem reads or fallible operations after active lock publication.
+        // Retain Bindings and both Undo stacks, frame, selection and playback cursor.
         self.loaded = loaded;
+        Ok(())
     }
     pub fn reload(&mut self, ctx: &egui::Context) -> Result<(), String> {
         let bindings = self.bindings.as_ref().ok_or("open a view sidecar first")?;
@@ -372,6 +416,15 @@ impl SpritePanel {
                     }
                     self.report(result);
                 }
+                #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+                ui.collapsing("Explicit PNG replacement", |ui| {
+                    ui.weak("Same dimensions and sprite layout only. New immutable package version; not a scene Undo operation.");
+                    ui.label("Replacement PNG path"); ui.text_edit_singleline(&mut self.replacement_image);
+                    ui.label("New package version"); ui.text_edit_singleline(&mut self.replacement_version);
+                    if ui.button("Replace atlas with new package version").clicked() {
+                        let result = self.reimport_image(ui.ctx(), editor); self.report(result);
+                    }
+                });
                 let key = (self.package.clone(), self.document.clone());
                 if let Some(loaded) = self.loaded.get(&key) {
                     egui::ComboBox::from_label("Sprite source").selected_text(format!("{:?}", self.source)).show_ui(ui, |ui| {

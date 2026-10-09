@@ -184,9 +184,30 @@ class DeterminismWorkflowTests(unittest.TestCase):
         })
         sample = self.jobs["sample-build"]
         self.assertEqual(sample["name"], "sample build (${{ matrix.os }})")
-        self.assertFalse(any("linked prefab" in step.get("name", "").lower()
-                             or "linked-prefab" in step.get("run", "")
+        self.assert_no_migrated_linked_prefab_steps(sample)
+
+    def assert_no_migrated_linked_prefab_steps(self, sample):
+        # Reimport acceptance retains its linked-prefabs Cargo feature dependency.
+        migrated_names = {step["name"] for step in self.jobs["sample-linked-prefabs"]["steps"][4:]}
+        self.assertFalse(any(step.get("name") in migrated_names
+                             or "tools/check-linked-prefabs.sh" in step.get("run", "")
                              for step in sample["steps"]))
+
+    def test_linked_prefab_migration_allows_required_downstream_feature(self):
+        step = {
+            "name": "Required downstream image reimport acceptance",
+            "run": "cargo test --locked -p orr_sample --features image-reimport,linked-prefabs --lib",
+        }
+        self.assert_required(step)
+        self.assert_no_migrated_linked_prefab_steps({"steps": [step]})
+
+    def test_linked_prefab_migration_rejects_renamed_helper_invocation(self):
+        for lane in ("contracts", "gpu"):
+            with self.subTest(lane=lane), self.assertRaises(AssertionError):
+                self.assert_no_migrated_linked_prefab_steps({"steps": [{
+                    "name": "Renamed downstream acceptance",
+                    "run": f"tools/check-linked-prefabs.sh {lane}",
+                }]})
 
     def test_linked_prefab_inventory_audit_rejects_false_success(self):
         # Execute only the unchanged script's embedded Python auditor with

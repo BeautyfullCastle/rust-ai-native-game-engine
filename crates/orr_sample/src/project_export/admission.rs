@@ -9,12 +9,12 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub(super) const MAX_PROJECT_BYTES: u64 = 256 * 1024 * 1024;
-pub(super) const MAX_PROJECT_FILES: usize = 8192;
-pub(super) const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-pub(super) const MAX_JSON_BYTES: u64 = 1024 * 1024;
-pub(super) const MAX_SCENE_BYTES: u64 = 4 * 1024 * 1024;
-pub(super) const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_PROJECT_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_PROJECT_FILES: usize = 8192;
+pub(crate) const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_JSON_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_SCENE_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 512;
 const MAX_PATH_COMPONENTS: usize = 32;
 const MAX_COMPONENT_BYTES: usize = 100;
@@ -25,7 +25,7 @@ const PACKAGE_MANIFEST: &str = "orr.package.json";
 /// Intentionally not serializable: source paths and source metadata never enter
 /// the exported manifest. Hardlinks are allowed on input but are not retained.
 #[derive(Debug)]
-pub(super) struct SnapshotFile {
+pub(crate) struct SnapshotFile {
     pub relative: String,
     pub bytes: Vec<u8>,
     pub sha256: String,
@@ -148,7 +148,7 @@ impl SnapshotFile {
     }
 }
 
-pub(super) struct ProjectSnapshot {
+pub(crate) struct ProjectSnapshot {
     pub root: PathBuf,
     pub files: Vec<SnapshotFile>,
     pub entry: orr_package::ProjectEntry,
@@ -412,7 +412,7 @@ fn require_absent_lock(root: &Path) -> Result<(), String> {
 
 /// Check the supplied spelling, including every ancestor, before canonicalizing.
 /// In particular, a symlink must not be made invisible through canonicalization.
-pub(super) fn check_path(path: &Path, expect_dir: bool) -> Result<PathBuf, String> {
+pub(crate) fn check_path(path: &Path, expect_dir: bool) -> Result<PathBuf, String> {
     if path.as_os_str().is_empty() {
         return Err("empty filesystem path".into());
     }
@@ -452,7 +452,7 @@ pub(super) fn check_path(path: &Path, expect_dir: bool) -> Result<PathBuf, Strin
     fs::canonicalize(&absolute).map_err(|e| format!("canonical export path: {e}"))
 }
 
-pub(super) fn validate_relative(relative: &str) -> Result<(), String> {
+pub(crate) fn validate_relative(relative: &str) -> Result<(), String> {
     if relative.is_empty()
         || relative.len() > MAX_PATH_BYTES
         || !relative.is_ascii()
@@ -527,7 +527,7 @@ fn ensure_stable_read(
     Ok(())
 }
 
-pub(super) fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 fn hex(bytes: &[u8]) -> String {

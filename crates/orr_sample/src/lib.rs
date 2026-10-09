@@ -91,3 +91,6 @@ mod collect_progress;
 
 #[cfg(all(feature = "collect-progress", target_os = "linux"))]
 mod collect_progress_host;
+
+#[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+pub mod image_reimport;

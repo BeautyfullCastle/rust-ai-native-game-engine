@@ -391,11 +391,37 @@ impl Project {
         sources: &[PathBuf],
         candidates: &[PathBuf],
     ) -> Result<Lock> {
+        self.install_transaction(sources, candidates, None, None, || Ok(()))
+    }
+    /// Activate precisely a preflighted candidate, only while the complete old
+    /// lock still matches. The callback runs under the writer guard immediately
+    /// before publication; an error retains the old active lock. Object staging
+    /// may leave unreachable immutable objects. No fallible work follows rename.
+    pub fn install_checked(
+        &self,
+        sources: &[PathBuf],
+        expected: &Lock,
+        approved: &Lock,
+        before_publish: impl FnOnce() -> std::result::Result<(), String>,
+    ) -> Result<Lock> {
+        self.install_transaction(sources, &[], Some(expected), Some(approved), before_publish)
+    }
+    fn install_transaction(
+        &self,
+        sources: &[PathBuf],
+        candidates: &[PathBuf],
+        expected: Option<&Lock>,
+        approved: Option<&Lock>,
+        before_publish: impl FnOnce() -> std::result::Result<(), String>,
+    ) -> Result<Lock> {
         if sources.is_empty() || sources.len() + candidates.len() > MAX_PACKAGES {
             return fail("supply 1..128 local package directories");
         }
         let _guard = self.writer()?;
         let previous = self.verify()?;
+        if expected.is_some_and(|expected| expected != &previous) {
+            return fail("active package lock changed since preparation");
+        }
         let mut direct = previous.direct;
         let mut available = previous.packages;
         let mut snapshots = BTreeMap::new();
@@ -433,11 +459,15 @@ impl Project {
             direct,
             packages,
         };
+        if approved.is_some_and(|approved| approved != &lock) {
+            return fail("candidate package lock differs from preflighted content");
+        }
         for p in lock.packages.values() {
             if let Some(files) = snapshots.get(&p.digest) {
                 self.store(p, files)?;
             }
         }
+        before_publish().map_err(Error)?;
         self.publish(&lock)?;
         Ok(lock)
     }
@@ -1253,6 +1283,49 @@ mod tests {
             assert!(!tmp.path().join(".orr/packages/writer.lock").exists());
         }
         p.install(&[src]).unwrap();
+    }
+    #[test]
+    fn checked_install_requires_both_exact_locks_and_keeps_callback_failures_atomic() {
+        let tmp = fixture_dir();
+        let src = source(tmp.path(), "art", &[]);
+        let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
+        let old = p.install(std::slice::from_ref(&src)).unwrap();
+        let bytes = fs::read(tmp.path().join(LOCK)).unwrap();
+        edit(&src, |m| m.version = "2.0.0".into());
+        let candidate = inspect(&src, &Runtime::content_only()).unwrap();
+        let mut approved = old.clone();
+        approved.direct.insert("art".into(), "2.0.0".into());
+        approved.packages.insert("art".into(), candidate);
+        assert!(p.install_checked(std::slice::from_ref(&src), &Lock::default(), &approved, || panic!("stale callback")).is_err());
+        assert!(p.install_checked(std::slice::from_ref(&src), &old, &old, || panic!("unapproved callback")).is_err());
+        let failure = p.install_checked(std::slice::from_ref(&src), &old, &approved, || {
+            assert_eq!(p.verify().unwrap(), old);
+            assert!(p.object(&approved.packages["art"]).exists());
+            assert!(p.writer().is_err());
+            Err("document changed".into())
+        }).unwrap_err();
+        assert!(failure.to_string().contains("document changed"));
+        assert_eq!(fs::read(tmp.path().join(LOCK)).unwrap(), bytes);
+        assert_eq!(p.verify().unwrap(), old);
+        assert_eq!(p.install_checked(&[src], &old, &approved, || Ok(())).unwrap(), approved);
+    }
+    #[test]
+    fn checked_install_injected_failures_keep_old_lock() {
+        for point in ["object-stage", "lock-publish"] {
+            let tmp = fixture_dir();
+            let src = source(tmp.path(), "art", &[]);
+            let p = Project::open(tmp.path(), Runtime::content_only()).unwrap();
+            let old = p.install(std::slice::from_ref(&src)).unwrap();
+            let bytes = fs::read(tmp.path().join(LOCK)).unwrap();
+            edit(&src, |m| m.version = "2.0.0".into());
+            let mut approved = old.clone();
+            approved.direct.insert("art".into(), "2.0.0".into());
+            approved.packages.insert("art".into(), inspect(&src, &Runtime::content_only()).unwrap());
+            FAILURE_POINT.with(|current| current.set(point));
+            assert!(p.install_checked(&[src], &old, &approved, || Ok(())).unwrap_err().to_string().contains("injected failure"));
+            assert_eq!(fs::read(tmp.path().join(LOCK)).unwrap(), bytes);
+            assert_eq!(p.verify().unwrap(), old);
+        }
     }
     #[test]
     fn competing_writer_cannot_modify_authority() {

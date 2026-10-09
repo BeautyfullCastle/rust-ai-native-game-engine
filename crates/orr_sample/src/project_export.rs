@@ -4,8 +4,8 @@
 //! declared revision and successful smoke output do not authenticate that code or
 //! attest its source/capabilities. The smoke only checks this project on this host.
 //! Inputs are read-only; this detects ordinary changes, not hostile filesystem races.
-mod admission;
-mod profile;
+pub(crate) mod admission;
+pub(crate) mod profile;
 use profile::{Profile, Prepared};
 
 use crate::project_publish::publish_no_replace;
