@@ -199,6 +199,10 @@ pub struct Editor {
     /// The viewport camera (world units, y up).
     pub camera: Camera,
     pub camera3d: orr_render::OrbitCamera,
+    #[cfg(feature="room-character")]
+    room_character: Option<orr_sample::room_character::Document>,
+    #[cfg(feature="room-character")]
+    room_character_scene: Option<std::path::PathBuf>,
     #[cfg(feature="room-project")]
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
@@ -320,6 +324,8 @@ impl Editor {
             scene_edit_allowed,
             batch_uncertain: false,
             camera: Camera::new([0.0, 0.0], 20.0),
+            #[cfg(feature="room-character")] room_character: None,
+            #[cfg(feature="room-character")] room_character_scene: None,
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
             #[cfg(feature="collect-audio")] collect_audio: None,
@@ -1905,6 +1911,18 @@ impl Editor {
     #[cfg(feature = "navigation")]
     pub fn set_navigation_blocker(&mut self, blocker: Option<String>) { self.navigation_blocker = blocker; }
 
+    #[cfg(feature="room-character")]
+    pub fn install_room_character(&mut self, document: orr_sample::room_character::Document) -> Result<(), String> {
+        document.validate()?;
+        if !self.game().is_room() || !self.spec().is_local() { return Err("character requires a local Room project".into()); }
+        self.room_character = Some(document);
+        self.room_character_scene = self.path();
+        Ok(())
+    }
+    #[cfg(feature="room-character")]
+    pub fn room_character(&self) -> Option<&orr_sample::room_character::Document> {
+        if self.game().is_room() && self.spec().is_local() && self.room_character_scene == self.path() { self.room_character.as_ref() } else { None }
+    }
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
         document.validate()?;
@@ -1957,6 +1975,8 @@ impl Editor {
     #[cfg(feature="collect-audio")]
     pub fn collect_audio_source_token(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> { self.collect_audio_source.clone() }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature="room-character")]
+        { self.room_character = None; self.room_character_scene = None; }
         #[cfg(feature="collect-audio")]
         {
             self.collect_audio = None;
@@ -2559,6 +2579,8 @@ impl Editor {
             fresh.camera = self.camera;
             fresh.initial_camera_fit = false;
         }
+        #[cfg(feature="room-character")]
+        if fresh.game().is_room() && fresh.path()==self.path() { if let Some(character)=self.room_character() { let _ = fresh.install_room_character(character.clone()); } }
         #[cfg(feature="room-project")]
         if self.has_room_camera() && fresh.game().is_room() && fresh.path()==self.path() {
             let _ = fresh.install_room_camera(self.room_camera.as_ref().unwrap().clone());

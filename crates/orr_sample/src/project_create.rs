@@ -7,6 +7,8 @@
 mod collect_template;
 #[cfg(feature = "room-project")]
 mod room_template;
+#[cfg(feature="room-character")]
+mod character_template;
 mod template;
 #[cfg(feature="collect-audio")]
 mod audio_template;
@@ -38,6 +40,7 @@ pub const COLLECT_TEMPLATE: &str = "collect-dodge-2d-v1";
 pub const COLLECT_AUDIO_TEMPLATE: &str = "collect-dodge-audio-2d-v1";
 pub const COLLECT_UI_TEMPLATE: &str = "collect-dodge-ui-2d-v1";
 pub const ROOM_UI_TEMPLATE: &str = "room-escape-ui-3d-v1";
+pub const ROOM_CHARACTER_TEMPLATE: &str = "room-escape-character-3d-v1";
 pub const ROOM_TEMPLATE: &str = "room-escape-3d-v1";
 pub const MAX_SEED_BYTES: usize = 128;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -119,7 +122,9 @@ fn create_transaction(
     let with_navigation = options.template == NAVIGATION_TEMPLATE;
     if with_navigation && !cfg!(feature = "navigation-project") { return Err("Terrain point-route template requires navigation-project feature".into()); }
     let with_ui = options.template == COLLECT_UI_TEMPLATE || options.template == ROOM_UI_TEMPLATE;
-    let with_room = options.template == ROOM_TEMPLATE || options.template == ROOM_UI_TEMPLATE;
+    let with_character = options.template == ROOM_CHARACTER_TEMPLATE;
+    if with_character && !cfg!(feature="room-character") { return Err("Room character template requires room-character feature".into()); }
+    let with_room = options.template == ROOM_TEMPLATE || options.template == ROOM_UI_TEMPLATE || with_character;
     if with_room && !cfg!(feature = "room-project") {
         return Err("Room template requires room-project feature".into());
     }
@@ -211,6 +216,7 @@ fn create_transaction(
                 manifest["entry"]["ui"] = serde_json::json!({"profile":"room-authored-v1","document":"room.ui.json","font":{"package":"korean-game-ui","asset":"OrreryKoreanUI.otf"}});
                 manifest
             } else { manifest };
+            let manifest = if with_character { let mut manifest=manifest; manifest["entry"]["character"]=serde_json::json!("room.character.json"); manifest } else { manifest };
             let manifest = if let Some(progress) = progress {
                 let mut manifest = manifest;
                 manifest["schema"] = serde_json::json!(4);
@@ -226,7 +232,7 @@ fn create_transaction(
                 "room.models.json",
                 if with_ui {
                     format!("{}\nRoom HUD profile: room-authored-v1. Build editor/runtime with room-ui; edit room.ui.json using the bounded UI panel. The installed Korean font package is retained under OFL/COPYRIGHT notices. Menu pauses controls only; Restart restores the admitted Frame and camera. No score/progress persistence.\n", room_template::readme(&options.seed).replace(ROOM_TEMPLATE, ROOM_UI_TEMPLATE).replace("Richer HUD remains separate work.", "The bounded authored HUD is enabled."))
-                } else { room_template::readme(&options.seed) },
+                } else if with_character { format!("{}\nCharacter template: {}. Build editor, runtime and exporter with room-character. The installed original CC0 Key Courier has three looping clips selected by the authoritative searching/carrying-key/escaped state. Character and model sidecars are presentation only.\n",room_template::readme(&options.seed),ROOM_CHARACTER_TEMPLATE) } else { room_template::readme(&options.seed) },
             )
         }
         #[cfg(not(feature = "room-project"))]
@@ -296,6 +302,8 @@ fn create_transaction(
     };
     #[cfg(feature="collect-audio")]
     let sources = if with_audio { let mut sources=sources; sources.push((audio_template::PACKAGE,audio_template::SOURCE)); sources } else { sources };
+    #[cfg(feature="room-character")]
+    let sources = if with_character { let mut sources=sources; sources.push((character_template::PACKAGE,character_template::SOURCE)); sources } else { sources };
     let sources = if with_navigation { Vec::new() } else { sources };
     let mut roots = Vec::new();
     for (name, source) in &sources {
@@ -312,7 +320,7 @@ fn create_transaction(
     let runtime = compiled_runtime();
     #[cfg(feature = "room-project")]
     let runtime = if with_room {
-        crate::room_project::compiled_runtime()
+        crate::room_project::compiled_runtime_with_character(with_character)
     } else {
         runtime
     };
@@ -364,6 +372,14 @@ fn create_transaction(
     #[cfg(feature = "room-project")]
     if with_room {
         let models = room_template::models(&project, &scene)?;
+        #[cfg(feature="room-character")]
+        let models = if with_character {
+            let (models, character) = character_template::documents(&project, &scene, models)?;
+            let bytes = character.to_bytes()?;
+            write_new(&project_root.join("room.character.json"), &bytes)?;
+            expected.insert("room.character.json".into(), bytes);
+            models
+        } else { models };
         let bytes = json_line(&models)?;
         write_new(&project_root.join(sidecar_file), &bytes)?;
         expected.insert(sidecar_file.into(), bytes);
@@ -371,7 +387,7 @@ fn create_transaction(
     }
     fs::remove_dir_all(&source_root).map_err(error)?;
     checkpoint("before-validation", transaction.path())?;
-    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room, with_audio)?;
+    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room, with_audio, with_character)?;
     let initial_checksum = if progress.is_some() && !with_room {
         #[cfg(feature = "collect-dodge")]
         {
@@ -399,7 +415,7 @@ fn create_transaction(
     } else if with_room {
         #[cfg(feature = "room-project")]
         {
-            crate::room_project::PreparedProject::open_with_options(&project_root, with_ui, if progress.is_some() { crate::room_project::CheckpointSupport::MetadataOnly } else { crate::room_project::CheckpointSupport::Disabled })?
+            crate::room_project::PreparedProject::open_with_capabilities(&project_root, with_ui, if progress.is_some() { crate::room_project::CheckpointSupport::MetadataOnly } else { crate::room_project::CheckpointSupport::Disabled }, with_character)?
                 .scene()
                 .frame()
                 .checksum()
@@ -414,7 +430,7 @@ fn create_transaction(
             .checksum()
     };
     checkpoint("before-publish", transaction.path())?;
-    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room, with_audio)?;
+    verify_profile_stage(&project_root, &expected, with_ui, with_ui && with_room, with_audio, with_character)?;
     // Recheck ordinary parent changes. RENAME_NOREPLACE itself closes concurrent
     // destination creation, including an empty directory or dangling symlink.
     if destination(&options.output)? != output {
@@ -518,12 +534,13 @@ fn verify_profile_stage(
     with_ui: bool,
     with_room_ui: bool,
     with_audio: bool,
+    with_character: bool,
 ) -> Result<(), String> {
     let root_metadata = fs::symlink_metadata(root).map_err(error)?;
     if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
         return Err("starter stage root must be a nonsymlink directory".into());
     }
-    if expected.len() > if with_audio { 32 } else if with_room_ui { 18 } else if with_ui { 17 } else { MAX_FILES }
+    if expected.len() > if with_audio { 32 } else if with_character { 24 } else if with_room_ui { 18 } else if with_ui { 17 } else { MAX_FILES }
         || expected.values().map(Vec::len).sum::<usize>() > MAX_TOTAL_BYTES
     {
         return Err("starter payload exceeds transaction limits".into());

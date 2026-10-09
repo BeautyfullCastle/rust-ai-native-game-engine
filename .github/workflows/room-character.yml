@@ -1,0 +1,84 @@
+name: room-character
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  room-character-linux:
+    # Same temporary unprivileged bwrap profile as sample/navigation/audio; see #154.
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      RUST_BACKTRACE: 1
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install explicit software GPU and isolation prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers bubblewrap
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -r "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+          test "$(id -u)" -ne 0
+          command -v bwrap
+          bwrap --die-with-parent --ro-bind / / -- /bin/true
+      - name: Default-off and explicit unified capability checks
+        run: |
+          cargo check --locked --release -p orr_sample -p orr_editor
+          cargo check --locked --release -p orr_editor --features room-project,animated-models --all-targets
+          cargo test --locked --release -p orr_editor --test deps
+          cargo test --locked --release -p orr_package --test room_character_manifest
+          mkdir -p character-evidence
+          set -o pipefail
+          cargo test --locked --release -p orr_editor -p orr_sample --features orr_editor/room-project,orr_editor/animated-models,orr_editor/project-create,orr_sample/room-character,orr_sample/project-create --test room_character_capabilities -- --ignored --exact editor_rejects_character_even_when_sample_dependency_support_is_unified 2>&1 | tee character-evidence/capability-negative.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/capability-negative.log
+      - name: Pure clocks, authored admission and editor transactions
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_model_bindings --lib animation_time
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib room_character::tests
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib room_view::tests::character -- --skip mixed_character_depth_visibility_repeat_resize_and_failure_are_atomic
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_character_project
+          cargo test --locked --release -p orr_editor --features room-character,project-create --lib room_character_panel::tests
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact character_edit_undo_redo_reopen_and_authoritative_play_states
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact same_path_role_replacement_and_descriptor_retirement_fail_closed 2>&1 | tee character-evidence/role-fence.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/role-fence.log
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact stale_room_character_binding_does_not_mutate_the_verified_cache 2>&1 | tee character-evidence/cache-fence.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/cache-fence.log
+      - name: Mandatory software GPU, actual editor and owned export
+        env:
+          ORR_REQUIRE_GPU: '1'
+          ORR_REQUIRE_PROJECT_ISOLATION: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p character-evidence
+          export ORR_ROOM_CAPTURE_DIR="$PWD/character-evidence/editor"
+          export ORR_ROOM_EXPORT_CAPTURE_DIR="$PWD/character-evidence/export"
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib -- --ignored --exact room_view::tests::character::mixed_character_depth_visibility_repeat_resize_and_failure_are_atomic --nocapture 2>&1 | tee character-evidence/mixed-gpu.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/mixed-gpu.log
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --ignored --exact character_actual_editor_gpu_three_states --nocapture 2>&1 | tee character-evidence/editor-gpu.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/editor-gpu.log
+          cargo build --locked --release -p orr_sample --features room-character,project-create,project-export --bin room_escape --bin orr_export_room
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib --no-run --message-format=json > character-evidence/probe.jsonl
+          export ORR_ROOM_CHARACTER_APP_PROBE=$(python3 -c 'import json; a=[r["executable"] for l in open("character-evidence/probe.jsonl") if (r:=json.loads(l)).get("reason")=="compiler-artifact" and r.get("executable") and r["target"]["name"]=="orr_sample"]; assert len(a)==1; print(a[0])')
+          export ORR_ROOM_RUNTIME="$PWD/target/release/room_escape"
+          export ORR_ROOM_EXPORTER="$PWD/target/release/orr_export_room"
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_character_export -- --ignored --exact room_character_real_export_source_hidden_gpu_workflow --nocapture 2>&1 | tee character-evidence/export.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/export.log
+      - name: Checkpoint presentation remains a read-only consumer
+        run: cargo test --locked --release -p orr_sample --features room-character,room-checkpoint,project-create --lib checkpoint_restore_selects_carrying_without_an_animation_checkpoint_field
+      - name: Strict affected lint
+        run: |
+          cargo clippy --locked --release -p orr_model_bindings -p orr_package --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features room-character,project-create --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-character,room-checkpoint,project-create,project-export --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: room-character-evidence
+          path: character-evidence

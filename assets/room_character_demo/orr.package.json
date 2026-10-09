@@ -1,0 +1,1 @@
+{"schema":1,"name":"sample-room-character","version":"1.0.0","engine":"^0.0.1","capabilities":["animation"],"dependencies":{},"files":["courier.orrmodel.json","LICENSE.txt","generate.py"]}

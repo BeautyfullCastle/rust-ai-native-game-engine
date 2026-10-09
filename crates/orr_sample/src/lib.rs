@@ -124,3 +124,6 @@ pub mod navigation_app;
 pub mod collect_audio;
 #[cfg(feature = "collect-audio")]
 pub mod collect_audio_output;
+
+#[cfg(feature = "room-character")]
+pub mod room_character;
