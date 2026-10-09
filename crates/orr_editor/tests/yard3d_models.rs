@@ -735,7 +735,7 @@ fn capture(name: &str, size: (u32, u32), rgba: &[u8]) {
     std::fs::create_dir_all(directory).unwrap();
     let mut output = std::fs::File::create(directory.join(format!("{name}.ppm"))).unwrap();
     write!(output, "P6\n{} {}\n255\n", size.0, size.1).unwrap();
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0.iter() {
         output.write_all(&pixel[..3]).unwrap();
     }
 }
@@ -750,7 +750,7 @@ fn viewport_pixels(h: &Harness<'_, EditorApp>, name: &str) -> Vec<u8> {
     assert_eq!(pixels.len(), (size.0 * size.1 * 4) as usize);
     assert!(
         pixels
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .any(|pixel| pixel[0] > 40 || pixel[1] > 40 || pixel[2] > 40),
         "main viewport contains scene pixels"
     );
