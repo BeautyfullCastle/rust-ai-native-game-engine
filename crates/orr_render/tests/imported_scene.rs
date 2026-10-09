@@ -85,6 +85,60 @@ fn panel(rect: [f32; 4], transform: Matrix, texel: [u8; 3], factor: [f32; 3]) ->
     let model = StaticModel::new(source).unwrap();
     StaticModel::from_bytes(&model.to_bytes().unwrap()).unwrap()
 }
+fn two_material_asymmetric_model() -> StaticModel {
+    let mut source = imported_model().source().clone();
+    let asset_id = source.asset_id.clone();
+    let quad = |id: &str, material: u32, left: f32, right: f32, uv_left: f32, uv_right: f32| {
+        orr_model::Primitive {
+            id: format!("{asset_id}#node=0/mesh=0/primitive={id}"),
+            vertices: [
+                ([left, -0.5, 0.0], [uv_left, 0.5]),
+                ([right, -0.5, 0.0], [uv_right, 0.5]),
+                ([right, 0.5, 0.0], [uv_right, 0.5]),
+                ([left, 0.5, 0.0], [uv_left, 0.5]),
+            ]
+            .into_iter()
+            .map(|(position, uv)| Vertex {
+                position,
+                normal: [0.0, 0.0, 1.0],
+                uv,
+            })
+            .collect(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material,
+            transform: IDENTITY,
+        }
+    };
+    source.primitives = vec![
+        quad("0", 0, -0.4, 0.0, 0.1, 0.9),
+        quad("1", 1, 0.0, 0.4, 0.55, 0.55),
+    ];
+    source.materials.truncate(1);
+    source.materials[0].base_color = [0.8, 0.7, 0.6, 0.4];
+    source.materials[0].image = 0;
+    source.materials[0].linear_filter = false;
+    source.materials[0].wrap_s = orr_model::Wrap::Clamp;
+    source.materials[0].wrap_t = orr_model::Wrap::Clamp;
+    source.materials.push(orr_model::Material {
+        base_color: [0.7, 0.5, 0.9, 0.8],
+        image: 1,
+        linear_filter: false,
+        wrap_s: orr_model::Wrap::Clamp,
+        wrap_t: orr_model::Wrap::Clamp,
+    });
+    source.images.truncate(1);
+    source.images[0] = orr_model::Image {
+        width: 2,
+        height: 1,
+        rgba8: vec![240, 40, 20, 255, 20, 220, 50, 255],
+    };
+    source.images.push(orr_model::Image {
+        width: 1,
+        height: 1,
+        rgba8: vec![40, 120, 220, 255],
+    });
+    StaticModel::from_bytes(&StaticModel::new(source).unwrap().to_bytes().unwrap()).unwrap()
+}
 fn translated(x: f32, y: f32, z: f32) -> Matrix {
     let mut m = IDENTITY;
     m[3] = [x, y, z, 1.0];
@@ -153,6 +207,28 @@ fn near(actual: [u8; 4], expected: [u8; 4], label: &str) {
         actual.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 3),
         "{label}: actual {actual:?}, expected {expected:?}"
     );
+}
+fn pixel_at(g: &Wgpu, texture: &Texture, cam: &Camera3D, x: f32) -> [u8; 4] {
+    let pixels = g.read_texture(texture);
+    pixel_from_bytes(&pixels, cam, x)
+}
+fn pixel_offset(cam: &Camera3D, x: f32) -> usize {
+    let [screen_x, screen_y] = cam
+        .world_to_screen([x, 0.0, 0.0], EXTENT)
+        .unwrap();
+    (screen_y.floor() as usize * EXTENT.0 as usize + screen_x.floor() as usize) * 4
+}
+fn pixel_from_bytes(pixels: &[u8], cam: &Camera3D, x: f32) -> [u8; 4] {
+    let offset = pixel_offset(cam, x);
+    pixels[offset..offset + 4].try_into().unwrap()
+}
+fn expected_material_pixel(texel: [u8; 3], factor: [f32; 3]) -> [u8; 4] {
+    [
+        encode(decode(texel[0]) * factor[0]),
+        encode(decode(texel[1]) * factor[1]),
+        encode(decode(texel[2]) * factor[2]),
+        255,
+    ]
 }
 fn decode(v: u8) -> f32 {
     let v = v as f32 / 255.0;
@@ -395,6 +471,131 @@ fn static_batches_share_depth_in_both_orders_and_ignore_private_clear_colors() {
             assert_eq!(scene.depth_size(), Some(EXTENT));
             assert_eq!(scene.depth_generation(), 1);
         }
+    }
+}
+
+#[test]
+fn static_material_override_is_instance_local_slot_scoped_and_resettable() {
+    use orr_render::StaticInstance;
+    let Some(g) = gpu() else { return };
+    let cam = camera();
+    let light = lighting(1.0);
+    let off = PointLightSettings::default();
+    let shared = std::sync::Arc::new(two_material_asymmetric_model());
+    let left_factor = [0.9, 0.2, 0.3];
+    let right_factor = [0.2, 0.8, 0.1];
+    let base = [
+        StaticInstance {
+            translation: [-0.5, 0.0, 0.0],
+            ..Default::default()
+        },
+        StaticInstance {
+            translation: [0.5, 0.0, 0.0],
+            ..Default::default()
+        },
+    ];
+    let overridden = [
+        StaticInstance {
+            material_override: Some(orr_model::MaterialOverride {
+                material_slot: 0,
+                base_color_factor: left_factor,
+            }),
+            ..base[0]
+        },
+        StaticInstance {
+            material_override: Some(orr_model::MaterialOverride {
+                material_slot: 0,
+                base_color_factor: right_factor,
+            }),
+            ..base[1]
+        },
+    ];
+    for format in FORMATS {
+        let t = target(&g, format, EXTENT);
+        let view = g.create_texture_view(&t, None);
+        let mut scene = scene(&g, format);
+        let mut renderer = ModelRenderer::new(g.clone(), format, (*shared).clone()).unwrap();
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &cam,
+            &light,
+            &off,
+            &mut [ImportedBatch::StaticInstances {
+                renderer: &mut renderer,
+                instances: &base,
+            }],
+        )
+        .unwrap();
+        let baseline = g.read_texture(&t);
+        let slot_zero_texels = [[240, 40, 20], [20, 220, 50]];
+        let imported_factor = [0.8, 0.7, 0.6];
+        for (x, texel) in [(-0.8, slot_zero_texels[0]), (-0.6, slot_zero_texels[1]), (0.2, slot_zero_texels[0]), (0.4, slot_zero_texels[1])] {
+            near(
+                pixel_at(&g, &t, &cam, x),
+                expected_material_pixel(texel, imported_factor),
+                &format!("unmodified asymmetric UV at x={x}"),
+            );
+        }
+        let slot_one_imported = expected_material_pixel([40, 120, 220], [0.7, 0.5, 0.9]);
+        for x in [-0.3, 0.7] {
+            near(
+                pixel_at(&g, &t, &cam, x),
+                slot_one_imported,
+                &format!("other material slot before override at x={x}"),
+            );
+        }
+
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &cam,
+            &light,
+            &off,
+            &mut [ImportedBatch::StaticInstances {
+                renderer: &mut renderer,
+                instances: &overridden,
+            }],
+        )
+        .unwrap();
+        let changed = g.read_texture(&t);
+        for (x, texel, factor) in [
+            (-0.8, slot_zero_texels[0], left_factor),
+            (-0.6, slot_zero_texels[1], left_factor),
+            (0.2, slot_zero_texels[0], right_factor),
+            (0.4, slot_zero_texels[1], right_factor),
+        ] {
+            near(
+                pixel_at(&g, &t, &cam, x),
+                expected_material_pixel(texel, factor),
+                &format!("instance-local material override at x={x}"),
+            );
+        }
+        for x in [-0.3, 0.7] {
+            assert_eq!(
+                pixel_at(&g, &t, &cam, x),
+                pixel_from_bytes(&baseline, &cam, x),
+                "material slot one must keep its imported color and texture"
+            );
+        }
+        assert_ne!(baseline, changed, "slot zero must use each placement's factor");
+        draw(
+            &mut scene,
+            &view,
+            EXTENT,
+            &cam,
+            &light,
+            &off,
+            &mut [ImportedBatch::StaticInstances {
+                renderer: &mut renderer,
+                instances: &base,
+            }],
+        )
+        .unwrap();
+        assert_eq!(g.read_texture(&t), baseline, "clearing overrides restores import");
+        assert_eq!(scene.depth_generation(), 1, "static instances share retained depth");
     }
 }
 
@@ -711,6 +912,39 @@ fn invalid_later_static_batch_target_camera_and_light_leave_image_and_depth_unch
     assert_eq!(g.read_texture(&t), before);
     assert_eq!(scene.depth_size(), Some(EXTENT));
     assert_eq!(scene.depth_generation(), generation);
+    for invalid_material in [
+        orr_model::MaterialOverride { material_slot: u32::MAX, base_color_factor: [0.2, 0.3, 0.4] },
+        orr_model::MaterialOverride { material_slot: 0, base_color_factor: [f32::NAN, 0.3, 0.4] },
+        orr_model::MaterialOverride { material_slot: 0, base_color_factor: [0.2, f32::INFINITY, 0.4] },
+        orr_model::MaterialOverride { material_slot: 0, base_color_factor: [0.2, 0.3, -0.1] },
+    ] {
+    let invalid_override = [orr_render::StaticInstance {
+        material_override: Some(invalid_material),
+        ..Default::default()
+    }];
+    let previous_model_bytes = good.model().to_bytes().unwrap();
+    assert!(matches!(
+        draw(
+            &mut scene,
+            &view,
+            (SIZE + 1, SIZE),
+            &cam,
+            &light,
+            &off,
+            &mut [ImportedBatch::StaticInstances {
+                renderer: &mut good,
+                instances: &invalid_override,
+            }],
+        ),
+        Err(ImportedSceneError::StaticInstance(
+            orr_render::StaticInstanceError::InvalidMaterialOverride
+        ))
+    ));
+    assert_eq!(g.read_texture(&t), before);
+    assert_eq!(scene.depth_size(), Some(EXTENT));
+    assert_eq!(scene.depth_generation(), generation);
+    assert_eq!(good.model().to_bytes().unwrap(), previous_model_bytes);
+    }
     let base = PointLight {
         position: [0.0, 0.0, 1.0],
         color: [1.0; 3],
@@ -1636,23 +1870,32 @@ fn procedural_and_static_instances_mutually_occlude_in_both_orders() {
     let off = PointLightSettings::default();
     let rect = [-0.4, -0.9, 0.4, 0.9];
     let source = panel(rect, translated(0.2, 0.0, 0.0), [255, 0, 0], [1.0; 3]);
+    let occlusion_factor = [0.7, 0.4, 0.8];
     let instances = [
         StaticInstance {
             translation: [-0.8, 0.0, 0.5],
+            material_override: Some(orr_model::MaterialOverride {
+                material_slot: 0,
+                base_color_factor: occlusion_factor,
+            }),
             ..Default::default()
         },
         StaticInstance {
             translation: [0.4, 0.0, -0.5],
+            material_override: Some(orr_model::MaterialOverride {
+                material_slot: 0,
+                base_color_factor: occlusion_factor,
+            }),
             ..Default::default()
         },
     ];
     let oracle = [
         surface(
-            &panel(rect, translated(-0.6, 0.0, 0.5), [255, 0, 0], [1.0; 3]),
+            &panel(rect, translated(-0.6, 0.0, 0.5), [255, 0, 0], occlusion_factor),
             [0.0, 0.0, 1.0],
         ),
         surface(
-            &panel(rect, translated(0.6, 0.0, -0.5), [255, 0, 0], [1.0; 3]),
+            &panel(rect, translated(0.6, 0.0, -0.5), [255, 0, 0], occlusion_factor),
             [0.0, 0.0, 1.0],
         ),
         surface(
@@ -1751,6 +1994,7 @@ fn external_static_trs_composes_mirrored_sheared_nodes_and_preserves_standalone(
         translation: [-0.2, 0.3, 0.4],
         rotation: [0.0, (angle * 0.5).sin(), 0.0, (angle * 0.5).cos()],
         scale: [1.2, 0.7, 0.9],
+        material_override: None,
     };
     // Independent, explicitly expanded S/R/T * imported node reference.
     let composed = [

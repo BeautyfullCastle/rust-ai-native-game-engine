@@ -238,12 +238,19 @@ impl Work {
                         .guid(actor(admitted.frame(), kind))
                         .unwrap()
                         .to_string(),
-                    binding.clone(),
+                    {
+                        let mut authored = binding.clone();
+                        authored.material_override = Some(orr_model::MaterialOverride {
+                            material_slot: 0,
+                            base_color_factor: if kind == PLAYER { [0.15, 0.9, 0.25] } else { [0.95, 0.12, 0.7] },
+                        });
+                        authored
+                    },
                 )
             })
             .collect();
         let document = Document {
-            version: 2,
+            version: 3,
             scene: "room.scene.yaml".into(),
             project: ".".into(),
             bindings,
@@ -522,6 +529,28 @@ fn room_real_export_source_hidden_gpu_workflow() {
     let sidecar = w.project.join("room.models.json");
     let original = fs::read(&sidecar).unwrap();
     let mut doc: Document = serde_json::from_slice(&original).unwrap();
+    assert_eq!(doc.version, 3);
+    assert_eq!(doc.bindings.len(), 2);
+    let authored: Vec<_> = doc.bindings.values().collect();
+    assert_eq!(authored[0].asset, authored[1].asset);
+    assert_eq!(authored[0].source_hash, authored[1].source_hash);
+    assert_ne!(authored[0].material_override, authored[1].material_override);
+    // Reset the authored factors through the exact production consumer. Only
+    // sidecar presentation changes; scene/checksum and installed assets do not.
+    let mut reset = doc.clone();
+    for binding in reset.bindings.values_mut() { binding.material_override = None; }
+    fs::write(&sidecar, serde_json::to_vec_pretty(&reset).unwrap()).unwrap();
+    let material_captures = w.temp.path().join("captures/material");
+    fs::create_dir(&material_captures).unwrap();
+    let reset_capture = material_captures.join("reset-imported.png");
+    let reset_output = good(w.runtime_command(None, 0, "", &reset_capture).output().unwrap());
+    assert!(reset_output.contains(&format!("room initial checksum: 0x{initial:016x}")));
+    assert!(initial_image.chunks(4).zip(pixels(&reset_capture).chunks(4)).filter(|(a,b)| a != b).count() > 20,
+        "authored RGB factors did not change production pixels");
+    fs::write(&sidecar, &original).unwrap();
+    let restored_capture = material_captures.join("restored-factors.png");
+    good(w.runtime_command(None, 0, "", &restored_capture).output().unwrap());
+    assert_eq!(pixels(&restored_capture), initial_image, "restart must restore saved material appearance");
     for binding in doc.bindings.values_mut() {
         binding.transform.translation = [1000.0, 1000.0, 1000.0];
     }
@@ -555,6 +584,15 @@ fn room_real_export_source_hidden_gpu_workflow() {
         "room model bindings",
     );
     assert!(!failed_capture.exists() && !rejected_export.exists());
+    for (version, slot, diagnostic) in [(2, 0, "version-3"), (3, 255, "used static material slot")] {
+        let mut invalid: Document = serde_json::from_slice(&original).unwrap();
+        invalid.version = version;
+        invalid.bindings.values_mut().next().unwrap().material_override.as_mut().unwrap().material_slot = slot;
+        fs::write(&sidecar, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        bad(w.runtime_command(None, 0, "", &failed_capture).output().unwrap(), diagnostic);
+        bad(w.export_command(&rejected_export).output().unwrap(), diagnostic);
+        assert!(!failed_capture.exists() && !rejected_export.exists(), "invalid material admission created output");
+    }
     fs::write(&sidecar, &original).unwrap();
     // Remove the real installed object store, not a fictitious fixture path.
     let objects = w.project.join(".orr/packages/objects");

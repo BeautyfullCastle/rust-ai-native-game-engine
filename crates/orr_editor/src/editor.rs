@@ -193,6 +193,8 @@ pub struct Editor {
     down: Option<Down>,
     selection: Option<Target>,
     guid_selection: GuidSelection,
+    #[cfg(feature = "models")]
+    material_authoring_generation: Arc<()>,
     batch_supported: bool,
     scene_edit_allowed: bool,
     batch_uncertain: bool,
@@ -320,6 +322,8 @@ impl Editor {
             down: None,
             selection: None,
             guid_selection: GuidSelection::default(),
+            #[cfg(feature = "models")]
+            material_authoring_generation: Arc::new(()),
             batch_supported,
             scene_edit_allowed,
             batch_uncertain: false,
@@ -716,6 +720,13 @@ impl Editor {
     /// remain inspect-only and are never admitted to a batch.
     pub fn selected_guids(&self) -> &[Guid] { self.guid_selection.guids() }
 
+    /// Identity fence for resident presentation drafts. A retained token cannot
+    /// revive across selection/document ABA or a replacement Editor session.
+    #[cfg(feature = "models")]
+    pub(crate) fn material_authoring_generation(&self) -> Arc<()> {
+        self.material_authoring_generation.clone()
+    }
+
     /// Membership used by hierarchy and viewport highlighting.
     pub fn is_selected(&self, target: &Target) -> bool {
         match target {
@@ -830,6 +841,8 @@ impl Editor {
 
     fn set_primary_selection(&mut self, target: Option<Target>) {
         if self.selection != target {
+            #[cfg(feature = "models")]
+            { self.material_authoring_generation = Arc::new(()); }
             self.cancel_edit();
             self.selection = target;
             self.inspect = None;
@@ -1014,6 +1027,8 @@ impl Editor {
                 }
             }
             "watch.history" => {
+                #[cfg(feature = "models")]
+                { self.material_authoring_generation = Arc::new(()); }
                 let b = |k: &str| params.get(k).and_then(J::as_bool).unwrap_or(false);
                 self.history.can_undo = b("can_undo");
                 self.history.can_redo = b("can_redo");
@@ -1193,6 +1208,12 @@ impl Editor {
     }
 
     fn mark_edited(&mut self) {
+        #[cfg(feature = "models")]
+        { self.material_authoring_generation = Arc::new(()); }
+        self.refresh_document_caches();
+    }
+
+    fn refresh_document_caches(&mut self) {
         self.mark_changed();
         self.dirty.history = true;
         self.dirty.state = true;
@@ -1502,7 +1523,9 @@ impl Editor {
     pub fn sync(&mut self) {
         // Notifications lag a little behind the host (it checks the history a few times a second):
         // ask for everything once, so the caches are what the host has now.
-        self.mark_edited();
+        // Synchronizing reads is not a semantic edit and must not retire an
+        // otherwise current presentation draft.
+        self.refresh_document_caches();
         for _ in 0..12 {
             self.last_inspect = None;
             self.last_clients = None;
@@ -1975,6 +1998,11 @@ impl Editor {
     #[cfg(feature="collect-audio")]
     pub fn collect_audio_source_token(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> { self.collect_audio_source.clone() }
     fn clear_room_camera(&mut self) {
+        // Successful source replacement/path changes retire drafts even when
+        // selection and history values are unchanged. Failed events never enter
+        // this existing source-retirement hook.
+        #[cfg(feature = "models")]
+        { self.material_authoring_generation = Arc::new(()); }
         #[cfg(feature="room-character")]
         { self.room_character = None; self.room_character_scene = None; }
         #[cfg(feature="collect-audio")]

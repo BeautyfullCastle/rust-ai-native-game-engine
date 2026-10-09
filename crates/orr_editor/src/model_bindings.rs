@@ -31,9 +31,8 @@ pub struct Bindings {
 }
 impl Bindings {
     /// Restore already validated project bytes; no filesystem reread.
-    pub fn from_document(path: PathBuf, mut document: Document) -> Result<Self,String> {
+    pub fn from_document(path: PathBuf, document: Document) -> Result<Self,String> {
         document.validate()?;
-        document.version=2;
         Ok(Self { path, saved:document.clone(),document,undo:Vec::new(),redo:Vec::new(),generation:Arc::new(()) })
     }
     pub fn create(path: PathBuf, scene: String, project: String) -> Result<Self, String> {
@@ -83,11 +82,8 @@ impl Bindings {
         if bytes.len() as u64 > MAX_BYTES {
             return Err("model binding file exceeds byte limit".into());
         }
-        let mut document: Document = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let document: Document = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         document.validate()?;
-        // Legacy v1 sidecars contain only explicitly static bindings. Keep the
-        // in-memory document at the current version; the next save writes v2.
-        document.version = 2;
         Ok(Self {
             path,
             saved: document.clone(),
@@ -100,6 +96,12 @@ impl Bindings {
 
     pub fn document(&self) -> &Document {
         &self.document
+    }
+
+    /// Opaque revision identity for authoring drafts. Undo/Redo also replace it,
+    /// so a draft cannot survive an ABA change to an otherwise equal document.
+    pub fn generation_token(&self) -> Arc<()> {
+        Arc::clone(&self.generation)
     }
 
     #[cfg(feature="room-character")]
@@ -151,6 +153,9 @@ impl Bindings {
         for guid in guids {
             next.bindings.insert(guid.to_string(), binding.clone());
         }
+        if next != self.document {
+            next.version = next.version.max(if binding.material_override.is_some() { 3 } else { 2 });
+        }
         next.validate()?;
         Ok(PreparedAssignment {
             generation: Arc::clone(&self.generation),
@@ -177,6 +182,34 @@ impl Bindings {
         loaded: &LoadedAsset,
     ) -> Result<(), String> {
         let prepared = self.prepare_assignment(guids, binding, loaded)?;
+        self.commit_assignment(prepared)
+    }
+
+    /// Prepare a single existing binding's material edit without retargeting its
+    /// source identity or replacing other presentation fields.
+    pub fn prepare_material_override(
+        &self,
+        guid: &Guid,
+        material_override: Option<MaterialOverride>,
+        loaded: &LoadedAsset,
+    ) -> Result<PreparedAssignment, String> {
+        let mut binding = self.document.bindings.get(&guid.to_string())
+            .ok_or("selected GUID has no model binding")?.clone();
+        binding.validate(loaded)?;
+        if binding.kind != ModelKind::Static {
+            return Err("material authoring requires a static model binding".into());
+        }
+        binding.material_override = material_override;
+        self.prepare_assignment(std::slice::from_ref(guid), &binding, loaded)
+    }
+
+    pub fn set_material_override(
+        &mut self,
+        guid: &Guid,
+        material_override: Option<MaterialOverride>,
+        loaded: &LoadedAsset,
+    ) -> Result<(), String> {
+        let prepared = self.prepare_material_override(guid, material_override, loaded)?;
         self.commit_assignment(prepared)
     }
 

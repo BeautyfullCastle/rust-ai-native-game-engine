@@ -330,6 +330,7 @@ fn participating_input_key(
             hash.floats(&placement.instance.translation);
             hash.floats(&placement.instance.rotation);
             hash.floats(&placement.instance.scale);
+            hash_material_override(&mut hash, placement.instance.material_override);
             // Loaded models are immutable. An Arc replacement invalidates this
             // runtime cache even if the binding still names the same source.
             // Pointer identity is deliberately absent from persisted SHA256.
@@ -531,6 +532,7 @@ fn capture(
             identity.floats(&binding.transform.translation);
             identity.floats(&binding.transform.rotation);
             identity.floats(&binding.transform.scale);
+            hash_material_override(&mut identity, placement.instance.material_override);
             let source = placement.model.source();
             let mut dependencies: Vec<_> = source.dependencies.iter().collect();
             dependencies.sort_by(|a, b| a.uri.cmp(&b.uri));
@@ -840,12 +842,14 @@ fn append_model(
             let index = scene.materials.len();
             // The existing opaque model pipeline ignores texture and factor
             // alpha. It has no supported alpha-mask/blend or normal-map modes.
+            let base_color = placement
+                .instance
+                .material_override
+                .map_or(input.base_color, |override_| {
+                    override_.effective_base_color(primitive.material, input.base_color)
+                });
             scene.materials.push(BakeMaterial {
-                base_color: [
-                    input.base_color[0],
-                    input.base_color[1],
-                    input.base_color[2],
-                ],
+                base_color: [base_color[0], base_color[1], base_color[2]],
                 texture: Some(BakeTexture {
                     width: image.width,
                     height: image.height,
@@ -918,6 +922,19 @@ fn wrap(value: orr_model::Wrap) -> BakeWrap {
         orr_model::Wrap::Clamp => BakeWrap::Clamp,
         orr_model::Wrap::Repeat => BakeWrap::Repeat,
         orr_model::Wrap::Mirror => BakeWrap::Mirror,
+    }
+}
+
+/// Preserve legacy fingerprints for unmodified bindings while making any
+/// authored slot/factor part of both runtime freshness and portable identity.
+fn hash_material_override(
+    hash: &mut CanonicalHash,
+    material_override: Option<orr_model::MaterialOverride>,
+) {
+    if let Some(material_override) = material_override {
+        hash.u32(0x4d4f_5652); // "MOVR", an explicit optional-field tag.
+        hash.u32(material_override.material_slot);
+        hash.floats(&material_override.base_color_factor);
     }
 }
 
@@ -1654,6 +1671,39 @@ mod tests {
     }
 
     #[test]
+    fn absent_override_preserves_legacy_key_bytes_and_authored_values_change_it() {
+        let legacy = || {
+            let mut hash = CanonicalHash::new();
+            hash.string("runtime-key");
+            hash.u32(7);
+            hash.finish()
+        };
+        let mut absent = CanonicalHash::new();
+        absent.string("runtime-key");
+        absent.u32(7);
+        hash_material_override(&mut absent, None);
+        assert_eq!(absent.finish(), legacy());
+
+        let keyed = |material_slot, base_color_factor| {
+            let mut hash = CanonicalHash::new();
+            hash.string("runtime-key");
+            hash.u32(7);
+            hash_material_override(
+                &mut hash,
+                Some(orr_model::MaterialOverride {
+                    material_slot,
+                    base_color_factor,
+                }),
+            );
+            hash.finish()
+        };
+        let first = keyed(0, [0.2, 0.4, 0.6]);
+        assert_ne!(first, legacy());
+        assert_ne!(first, keyed(1, [0.2, 0.4, 0.6]));
+        assert_ne!(first, keyed(0, [0.2, 0.4, 0.7]));
+    }
+
+    #[test]
     fn coherent_static_guid_participants_ignore_dynamic_and_kinematic_motion() {
         let fixture = include_str!("../../../scenes/yard3d_authoring.scene.yaml");
         let (original, cost) = fixture_hash(fixture);
@@ -1862,6 +1912,59 @@ mod tests {
             target.materials[0].texture.as_ref().unwrap().rgba8_srgb,
             [128, 128, 128, 32]
         );
+        let grid = IrradianceGrid::default();
+        let settings = BakeSettings::default();
+        let imported_fingerprint = hash(&target, &grid, &settings);
+        let mut overridden = ModelPlacement {
+            entity: placement.entity,
+            model: placement.model.clone(),
+            instance: orr_render::StaticInstance {
+                material_override: Some(orr_model::MaterialOverride {
+                    material_slot: 0,
+                    base_color_factor: [0.1, 0.7, 0.3],
+                }),
+                ..placement.instance
+            },
+        };
+        let mut overridden_scene = scene();
+        overridden_scene.triangles.clear();
+        overridden_scene.materials.clear();
+        append_model(
+            &mut overridden_scene,
+            &overridden,
+            &mut 0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(overridden_scene.materials.len(), 1);
+        assert_eq!(overridden_scene.materials[0].base_color, [0.1, 0.7, 0.3]);
+        let overridden_texture = overridden_scene.materials[0].texture.as_ref().unwrap();
+        let imported_texture = target.materials[0].texture.as_ref().unwrap();
+        assert_eq!(
+            (&overridden_texture.rgba8_srgb, overridden_texture.width, overridden_texture.height,
+                overridden_texture.wrap_s, overridden_texture.wrap_t, overridden_texture.filter),
+            (&imported_texture.rgba8_srgb, imported_texture.width, imported_texture.height,
+                imported_texture.wrap_s, imported_texture.wrap_t, imported_texture.filter)
+        );
+        assert_ne!(
+            hash(&overridden_scene, &grid, &settings),
+            imported_fingerprint,
+            "portable identity must include effective override RGB"
+        );
+        append_model(&mut target, &overridden, &mut 0, &AtomicBool::new(false)).unwrap();
+        assert_eq!(target.materials.len(), 2, "instances own distinct bake materials");
+        assert_eq!(target.materials[1].base_color, [0.1, 0.7, 0.3]);
+        overridden.instance.material_override = None;
+        let mut reset = scene();
+        reset.triangles.clear();
+        reset.materials.clear();
+        append_model(&mut reset, &overridden, &mut 0, &AtomicBool::new(false)).unwrap();
+        assert_eq!(reset.materials[0].base_color, [0.6, 0.4, 0.2]);
+        assert_eq!(
+            hash(&reset, &grid, &settings),
+            imported_fingerprint,
+            "reset must restore the imported portable identity"
+        );
         let mut mirrored = placement.model.source().clone();
         mirrored.primitives[0].transform[0][0] = -1.0;
         let mirrored = ModelPlacement {
@@ -2034,6 +2137,7 @@ mod tests {
                 source_hash: "1".repeat(64),
                 transform: crate::model_bindings::LocalTransform::default(),
                 animation: None,
+                material_override: None,
             },
             dependencies: vec![("texture.png".into(), "2".repeat(64))],
         });
@@ -2069,6 +2173,7 @@ mod tests {
             source_hash: digest.clone(),
             transform: crate::model_bindings::LocalTransform::default(),
             animation: None,
+            material_override: None,
         };
         let make = |name: &str| {
             let root = temp.path().join(name);

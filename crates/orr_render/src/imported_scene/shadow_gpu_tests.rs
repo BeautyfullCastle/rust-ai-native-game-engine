@@ -1309,6 +1309,12 @@ fn shared_shadow_gpu_joint_pose_moves_shadow_on_another_renderer_receiver() {
     let mut receiver = ModelRenderer::new(g.clone(), FORMAT, static_panel(3.5, [0.7; 3])).unwrap();
     let receiver_instances = [StaticInstance {
         translation: [0.0, 1.5, -1.0],
+        material_override: Some(orr_model::MaterialOverride {
+            material_slot: 0,
+            // Preserve the independent gray-receiver mask classifier below,
+            // while replacing the imported 0.7 factor with a distinct value.
+            base_color_factor: [0.8; 3],
+        }),
         ..Default::default()
     }];
     let camera = Camera3D::orthographic([-0.7, 1.5, 7.0], [-0.7, 1.5, 0.0], 2.4);

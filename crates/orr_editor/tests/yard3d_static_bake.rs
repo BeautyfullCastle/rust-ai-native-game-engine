@@ -1110,3 +1110,57 @@ fn terrain_attachment_suspends_baked_receipts_without_mutating_probes_and_detach
     assert_eq!(app.irradiance.grid_for_editor(&app.editor), Some(&document.grid));
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
+
+#[test]
+fn material_override_invalidates_pending_and_completed_bakes_and_reset_restores_identity() {
+    use orr_editor::irradiance_bake::BakeSceneSnapshot;
+    let _serial = GPU_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = plain_app(temp.path());
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/imported_scene_demo");
+    Project::open_for_install(temp.path(), Runtime::content_only().engine_version).unwrap().install(&[assets.canonicalize().unwrap()]).unwrap();
+    app.models.open_for_editor(&app.editor, true).unwrap();
+    assign(&mut app, "ground", ModelKind::Static);
+    let guid = app.editor.selected_guid().unwrap();
+    let loaded = orr_editor::model_bindings::load_asset(temp.path(), "sample-imported-scene", "foreground.glb").unwrap();
+    let original_model = app.models.placements(&app.editor)[0].model.clone();
+    let source = original_model.to_bytes().unwrap();
+    let host = host_frame(&mut app.editor);
+    let grid = app.irradiance.bindings.as_ref().unwrap().document().grid.clone();
+    let fingerprint = |app: &EditorApp| {
+        let snapshot = BakeSceneSnapshot::capture(&app.editor, &app.models, &grid, &app.irradiance.bake_settings).unwrap();
+        (snapshot.fingerprint, BakeSceneSnapshot::participating_input_key(&app.editor, &app.models, &grid, &app.irradiance.bake_settings).unwrap())
+    };
+    let baseline = fingerprint(&app);
+    app.irradiance.start_bake(&app.editor, &app.models).unwrap();
+    drain(&mut app);
+    await_verified_grid(&mut app);
+    let baked = app.irradiance.bindings.as_ref().unwrap().document().clone();
+    assert_eq!(baked.grid.provenance, IrradianceProvenance::Baked);
+    app.irradiance.save().unwrap();
+    let saved = std::fs::read(&app.irradiance.bindings.as_ref().unwrap().path).unwrap();
+    let over = Some(orr_model::MaterialOverride {material_slot:0,base_color_factor:[0.12,0.73,0.31]});
+    app.models.bindings.as_mut().unwrap().set_material_override(&guid,over,&loaded).unwrap();
+    let changed = fingerprint(&app);
+    assert_ne!(baseline.0,changed.0,"portable bake identity includes material factor");
+    assert_ne!(baseline.1,changed.1,"runtime bake key includes material factor");
+    app.irradiance.refresh_baked_validity(&app.editor,&app.models);
+    assert!(app.irradiance.grid_for_editor(&app.editor).is_none(),"completed bake must stop applying immediately after material edit");
+    assert!(app.irradiance.baked_stale_reason().is_some());
+    assert_eq!(app.irradiance.bindings.as_ref().unwrap().document(),&baked);
+    assert_eq!(std::fs::read(&app.irradiance.bindings.as_ref().unwrap().path).unwrap(),saved);
+    app.models.bindings.as_mut().unwrap().undo();
+    assert_eq!(fingerprint(&app),baseline);
+    await_verified_grid(&mut app);
+    app.irradiance.start_bake(&app.editor,&app.models).unwrap();
+    app.models.bindings.as_mut().unwrap().set_material_override(&guid,over,&loaded).unwrap();
+    drain(&mut app);
+    assert!(app.irradiance.bake_status().unwrap().contains("discarded"),"{:?}",app.irradiance.bake_status());
+    assert_eq!(app.irradiance.bindings.as_ref().unwrap().document(),&baked);
+    app.models.bindings.as_mut().unwrap().set_material_override(&guid,None,&loaded).unwrap();
+    assert_eq!(fingerprint(&app),baseline);
+    await_verified_grid(&mut app);
+    assert!(std::sync::Arc::ptr_eq(&original_model,&app.models.placements(&app.editor)[0].model));
+    assert_eq!(original_model.to_bytes().unwrap(),source);
+    assert_eq!(host_frame(&mut app.editor),host);
+}

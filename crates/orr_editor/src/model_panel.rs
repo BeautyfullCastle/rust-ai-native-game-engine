@@ -13,7 +13,24 @@ use crate::{
     viewport3d::AnimatedPlacement,
 };
 use egui::Ui;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+
+#[derive(Clone)]
+struct MaterialOverrideDraft {
+    guid: orr_reflect::Guid,
+    entity: orr_ecs::Entity,
+    scene: Option<String>,
+    scene_checksum: u64,
+    authoring_generation: Arc<()>,
+    sidecar: PathBuf,
+    generation: Arc<()>,
+    package: String,
+    asset: String,
+    package_digest: String,
+    source_hash: String,
+    slot: u32,
+    rgb: [f32; 3],
+}
 
 pub struct ModelPanel {
     pub bindings: Option<Bindings>,
@@ -35,6 +52,8 @@ pub struct ModelPanel {
     reserved_scene_models: usize,
     room_identity: Option<(PathBuf, String)>,
     room_character_enabled: bool,
+    material_draft: Option<MaterialOverrideDraft>,
+    material_draft_requires_reload: bool,
 }
 impl Default for ModelPanel {
     fn default() -> Self {
@@ -58,6 +77,8 @@ impl Default for ModelPanel {
             reserved_scene_models: 0,
             room_identity: None,
             room_character_enabled: false,
+            material_draft: None,
+            material_draft_requires_reload: false,
         }
     }
 }
@@ -102,6 +123,8 @@ impl ModelPanel {
             .to_string();
         self.bindings = Some(bindings);
         self.loaded = loaded;
+        self.material_draft = None;
+        self.material_draft_requires_reload = false;
         self.error = None;
         Ok(())
     }
@@ -286,6 +309,8 @@ impl ModelPanel {
         )?;
         self.bindings = Some(candidate);
         self.loaded = loaded;
+        self.material_draft = None;
+        self.material_draft_requires_reload = false;
         self.candidate = None;
         self.error = None;
         Ok(())
@@ -366,6 +391,23 @@ impl ModelPanel {
         }
         Ok(out)
     }
+    /// Keep verified immutable assets (and their GPU caches) when a document
+    /// history transition leaves a binding's complete identity unchanged.
+    fn reuse_loaded_assets(
+        mut fresh: BTreeMap<String, LoadedAsset>,
+        previous: &BTreeMap<String, LoadedAsset>,
+    ) -> BTreeMap<String, LoadedAsset> {
+        let mut reusable: BTreeMap<(bool, String, String, String, String), LoadedAsset> = BTreeMap::new();
+        for asset in previous.values() {
+            reusable.entry((asset.kind() == ModelKind::Animated, asset.package().to_owned(), asset.asset().to_owned(), asset.package_digest().to_owned(), asset.source_hash().to_owned()))
+                .or_insert_with(|| asset.clone());
+        }
+        for asset in fresh.values_mut() {
+            let key = (asset.kind() == ModelKind::Animated, asset.package().to_owned(), asset.asset().to_owned(), asset.package_digest().to_owned(), asset.source_hash().to_owned());
+            if let Some(old) = reusable.get(&key) { *asset = old.clone(); }
+        }
+        fresh
+    }
     pub fn reload(&mut self, editor: &Editor) -> Result<(), String> {
         if !self.editable(editor) {
             return Err(
@@ -380,7 +422,7 @@ impl ModelPanel {
             &loaded,
             self.reserved_scene_models,
         )?;
-        self.loaded = loaded;
+        self.loaded = Self::reuse_loaded_assets(loaded, &self.loaded);
         Ok(())
     }
     /// Loads exactly the currently selected kind/package/path into a transient
@@ -519,6 +561,9 @@ impl ModelPanel {
         }
         let mut candidate = bindings.document().clone();
         candidate.bindings.insert(guid.to_string(), binding.clone());
+        // Legacy v1 is preserved on read, then advanced with the assignment.
+        // Validate the same prospective version that the history commit uses.
+        candidate.version = candidate.version.max(2);
         let mut candidate_loaded = self.loaded.clone();
         candidate_loaded.insert(guid.to_string(), loaded.clone());
         candidate_loaded.retain(|guid, _| candidate.bindings.contains_key(guid));
@@ -530,6 +575,8 @@ impl ModelPanel {
         )?;
         bindings.assign_validated(std::slice::from_ref(&guid), &binding, &loaded)?;
         self.loaded = candidate_loaded;
+        self.material_draft = None;
+        self.material_draft_requires_reload = false;
         Ok(())
     }
     /// Validate the complete proposed state before touching document or history.
@@ -595,7 +642,8 @@ impl ModelPanel {
         let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
         let previous = bindings.document().clone();
         bindings.undo();
-        match Self::load_all(bindings, self.room_identity.as_ref(), self.room_character_enabled).and_then(|loaded| {
+        match Self::load_all(bindings, self.room_identity.as_ref(), self.room_character_enabled).and_then(|fresh| {
+            let loaded = Self::reuse_loaded_assets(fresh, &self.loaded);
             Self::validate_candidate(
                 editor,
                 bindings.document(),
@@ -625,7 +673,8 @@ impl ModelPanel {
         let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
         let previous = bindings.document().clone();
         bindings.redo();
-        match Self::load_all(bindings, self.room_identity.as_ref(), self.room_character_enabled).and_then(|loaded| {
+        match Self::load_all(bindings, self.room_identity.as_ref(), self.room_character_enabled).and_then(|fresh| {
+            let loaded = Self::reuse_loaded_assets(fresh, &self.loaded);
             Self::validate_candidate(
                 editor,
                 bindings.document(),
@@ -662,7 +711,180 @@ impl ModelPanel {
             translation: (pose.pos + offset).to_array(),
             rotation: (pose.rot * q).normalize().to_array(),
             scale: local.scale,
+            material_override: None,
         }
+    }
+    fn binding_instance(
+        pose: orr_view::Transform3,
+        binding: &Binding,
+    ) -> orr_render::StaticInstance {
+        let mut instance = Self::instance(pose, binding.transform);
+        instance.material_override = binding.material_override;
+        instance
+    }
+
+    fn material_slots(model: &orr_model::StaticModel) -> Vec<u32> {
+        let mut slots: Vec<u32> = model.source().primitives.iter().map(|p| p.material).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }
+
+    fn begin_material_draft(&mut self, editor: &Editor, guid: orr_reflect::Guid, entity: orr_ecs::Entity) -> Result<(), String> {
+        let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
+        let binding = bindings.document().bindings.get(&guid.to_string()).ok_or("selected GUID has no model binding")?;
+        if binding.kind != ModelKind::Static { return Err("material authoring requires a static model binding".into()); }
+        let loaded = self.loaded.get(&guid.to_string()).ok_or("Wait for verified model assets before editing material")?;
+        binding.validate(loaded)?;
+        let model = loaded.static_model().ok_or("selected asset is not static")?;
+        let slots = Self::material_slots(model);
+        let slot = binding.material_override.map(|v| v.material_slot).filter(|s| slots.contains(s)).or_else(|| slots.first().copied()).ok_or("static model has no used material slots")?;
+        let base = model.source().materials.get(slot as usize).ok_or("used material slot is unavailable")?.base_color;
+        let rgb = binding.material_override.filter(|v| v.material_slot == slot).map_or([base[0], base[1], base[2]], |v| v.base_color_factor);
+        self.material_draft = Some(MaterialOverrideDraft {
+            guid, entity, scene: editor.sim().scene_path.clone(), scene_checksum: editor.checksum(), sidecar: bindings.path.clone(),
+            authoring_generation: editor.material_authoring_generation(),
+            generation: bindings.generation_token(), package: binding.package.clone(), asset: binding.asset.clone(),
+            package_digest: binding.package_digest.clone(), source_hash: binding.source_hash.clone(), slot, rgb,
+        });
+        self.material_draft_requires_reload = false;
+        Ok(())
+    }
+
+    fn material_draft_is_current(&self, editor: &Editor, draft: &MaterialOverrideDraft) -> bool {
+        let Some(bindings) = &self.bindings else { return false };
+        let selected = editor.selected_guids();
+        if !self.editable(editor) || selected.len() != 1 || selected[0] != draft.guid || editor.sim().scene_path != draft.scene
+            || editor.checksum() != draft.scene_checksum
+            || !Arc::ptr_eq(&editor.material_authoring_generation(), &draft.authoring_generation)
+            || !Arc::ptr_eq(&bindings.generation_token(), &draft.generation) || bindings.path != draft.sidecar { return false; }
+        let Some(row) = editor.rows().iter().find(|row| row.guid.as_ref() == Some(&draft.guid)) else { return false };
+        if row.entity != draft.entity { return false; }
+        let Some(binding) = bindings.document().bindings.get(&draft.guid.to_string()) else { return false };
+        let Some(loaded) = self.loaded.get(&draft.guid.to_string()) else { return false };
+        binding.kind == ModelKind::Static && binding.package == draft.package && binding.asset == draft.asset
+            && binding.package_digest == draft.package_digest && binding.source_hash == draft.source_hash
+            && loaded.package_digest() == draft.package_digest && loaded.source_hash() == draft.source_hash
+            && binding.validate(loaded).is_ok()
+    }
+
+    fn commit_material_override(&mut self, editor: &Editor, override_value: Option<orr_model::MaterialOverride>) -> Result<(), String> {
+        if !self.editable(editor) { return Err("Material override editing requires local Edit mode".into()); }
+        let draft = self.material_draft.as_ref().ok_or("Reload the selected material draft")?;
+        if !self.material_draft_is_current(editor, draft) {
+            self.material_draft = None;
+            return Err("Material draft is stale; reload the selected binding before applying".into());
+        }
+        let guid = draft.guid.clone();
+        let (package_digest, source_hash) = (draft.package_digest.clone(), draft.source_hash.clone());
+        let current_bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
+        let fresh_loaded = match Self::load_all(current_bindings, self.room_identity.as_ref(), self.room_character_enabled) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.material_draft_requires_reload = true;
+                return Err(format!("Verified model source changed or is unavailable; reload the material draft: {error}"));
+            }
+        };
+        let Some(fresh_asset) = fresh_loaded.get(&guid.to_string()) else {
+            self.material_draft_requires_reload = true;
+            return Err("Verified model asset is missing; reload the material draft".into());
+        };
+        if fresh_asset.package_digest() != package_digest || fresh_asset.source_hash() != source_hash {
+            self.material_draft_requires_reload = true;
+            return Err("Installed model source changed; reload the material draft before applying".into());
+        }
+        let mut candidate = current_bindings.document().clone();
+        let binding = candidate.bindings.get_mut(&guid.to_string()).ok_or("selected GUID has no model binding")?;
+        binding.material_override = override_value;
+        candidate.version = candidate.version.max(if override_value.is_some() { 3 } else { 2 });
+        Self::validate_candidate(editor, &candidate, &fresh_loaded, self.reserved_scene_models)?;
+        let loaded = self.loaded.get(&guid.to_string()).ok_or("Verified model cache is missing")?.clone();
+        let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
+        bindings.set_material_override(&guid, override_value, &loaded)?;
+        // A successful mutation advances the sidecar fence. Reopen a clean draft.
+        self.material_draft = None;
+        Ok(())
+    }
+
+    fn show_material_override(&mut self, ui: &mut Ui, editor: &Editor) {
+        let Some(guid) = editor.selected_guid().filter(|_| editor.selected_guids().len() == 1) else {
+            return;
+        };
+        let Some(row) = editor.rows().iter().find(|row| row.guid.as_ref() == Some(&guid)) else { return };
+        let Some(binding) = self.bindings.as_ref().and_then(|b| b.document().bindings.get(&guid.to_string())).cloned() else { return };
+        if binding.kind != ModelKind::Static { self.material_draft = None; return; }
+        let Some(loaded) = self.loaded.get(&guid.to_string()).cloned() else {
+            ui.weak("Wait for verified static model assets before editing material");
+            return;
+        };
+        let Some(model) = loaded.static_model() else { return };
+        let model = model.clone();
+        let slots = Self::material_slots(&model);
+        if slots.is_empty() { return; }
+        // Keep same-GUID drafts across a transient missing row so a recreated
+        // entity cannot inherit the edit; the entity-generation fence below
+        // requires an explicit reload when the row returns.
+        let target_changed = self.material_draft.as_ref().is_none_or(|draft| draft.guid != guid);
+        if target_changed {
+            let _ = self.begin_material_draft(editor, guid.clone(), row.entity);
+        }
+        let Some(mut draft) = self.material_draft.take() else { return };
+        if !slots.contains(&draft.slot) { draft.slot = slots[0]; }
+        ui.separator();
+        ui.label("Static material override · linear RGB");
+        egui::ComboBox::from_label("Used material slot")
+            .selected_text(format!("Material {}", draft.slot))
+            .show_ui(ui, |ui| {
+                for slot in &slots {
+                    if ui.selectable_value(&mut draft.slot, *slot, format!("Material {slot}")).changed() {
+                        let base = model.source().materials[*slot as usize].base_color;
+                        draft.rgb = binding.material_override.filter(|v| v.material_slot == *slot)
+                            .map_or([base[0], base[1], base[2]], |v| v.base_color_factor);
+                    }
+                }
+            });
+        let imported = model.source().materials[draft.slot as usize].base_color;
+        ui.weak(format!("Imported linear RGB: {:.3}, {:.3}, {:.3}", imported[0], imported[1], imported[2]));
+        ui.horizontal(|ui| {
+            ui.label("Override linear RGB");
+            for (name, channel) in ["R", "G", "B"].into_iter().zip(&mut draft.rgb) {
+                let label = ui.label(name);
+                ui.add(egui::DragValue::new(channel).speed(0.005).range(0.0..=1.0)).labelled_by(label.id);
+            }
+        });
+        let current = !self.material_draft_requires_reload && self.material_draft_is_current(editor, &draft);
+        if !current { ui.colored_label(egui::Color32::YELLOW, "Draft is stale. Reload it before applying"); }
+        let mut action_attempted = false;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(current, egui::Button::new("Apply material override")).clicked() {
+                let value = orr_model::MaterialOverride { material_slot: draft.slot, base_color_factor: draft.rgb };
+                self.material_draft = Some(draft.clone());
+                self.error = self.commit_material_override(editor, Some(value)).err();
+                action_attempted = true;
+            }
+            if ui.add_enabled(current && binding.material_override.is_some(), egui::Button::new("Reset material override")).clicked() {
+                self.material_draft = Some(draft.clone());
+                self.error = self.commit_material_override(editor, None).err();
+                action_attempted = true;
+            }
+        });
+        if action_attempted && self.material_draft.is_none() { return; }
+        let mut reloaded = false;
+        if !current && ui.button("Reload material draft").clicked() {
+            match self.reload(editor) {
+                Ok(()) => {
+                    self.material_draft = None;
+                    self.material_draft_requires_reload = false;
+                    if let Err(error) = self.begin_material_draft(editor, guid.clone(), row.entity) {
+                        self.error = Some(error);
+                    }
+                    reloaded = true;
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+        if reloaded { return; }
+        self.material_draft = Some(draft);
     }
     #[cfg(feature = "animated-models")]
     fn animated_instance(
@@ -785,6 +1007,7 @@ impl ModelPanel {
                         translation: local.translation,
                         rotation: local.rotation,
                         scale: local.scale,
+                        material_override: binding.material_override,
                     }
                     .validate_for(model)
                     .map_err(|e| e.to_string())?;
@@ -796,7 +1019,7 @@ impl ModelPanel {
                                         pos: orr_view::Vec3::new(x, y, z),
                                         rot: orr_view::Quat::IDENTITY,
                                     };
-                                    Self::instance(pose, local).validate_for(model).map_err(
+                                    Self::binding_instance(pose, binding).validate_for(model).map_err(
                                         |e| format!("room reachable model placement: {e}"),
                                     )?;
                                 }
@@ -804,7 +1027,7 @@ impl ModelPanel {
                         }
                     }
                     if let Some(pose) = row_pose {
-                        Self::instance(pose, local)
+                        Self::binding_instance(pose, binding)
                             .validate_for(model)
                             .map_err(|e| e.to_string())?;
                     }
@@ -884,10 +1107,11 @@ impl ModelPanel {
                     .find(|(e, _)| *e == row.entity)?;
                 let loaded = self.loaded.get(guid)?;
                 binding.validate(loaded).ok()?;
+                let instance = Self::binding_instance(*pose, binding);
                 Some(ModelPlacement {
                     entity: row.entity,
                     model: loaded.static_model()?.clone(),
-                    instance: Self::instance(*pose, binding.transform),
+                    instance,
                 })
             })
             .collect()
@@ -1082,6 +1306,8 @@ impl ModelPanel {
         self.loaded.clear();
         self.candidate = None;
         self.confirm_discard = false;
+        self.material_draft = None;
+        self.material_draft_requires_reload = false;
         self.error = None;
     }
 
@@ -1114,6 +1340,7 @@ impl ModelPanel {
                     if !self.scene_matches(editor) { ui.colored_label(egui::Color32::YELLOW, "Bindings belong to a different scene; save/discard before opening this scene's bindings"); }
                     let editable = self.editable(editor);
                     ui.add_enabled_ui(editable, |ui| {
+                        self.show_material_override(ui, editor);
                         ui.horizontal(|ui| {
                             ui.label("Model kind");
                             ui.selectable_value(&mut self.kind, ModelKind::Static, "Static");

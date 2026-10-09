@@ -159,7 +159,7 @@ fn installed_cooked_static_model_loads_without_a_clip_or_animation_capability() 
 }
 
 #[test]
-fn legacy_v1_static_bindings_open_and_save_as_v2() {
+fn legacy_v1_static_bindings_open_and_save_without_version_mutation() {
     let temp = tempfile::tempdir().unwrap();
     install(&fixture_dir(), temp.path());
     let loaded = loaded(temp.path());
@@ -174,7 +174,7 @@ fn legacy_v1_static_bindings_open_and_save_as_v2() {
     std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
 
     let mut reopened = Bindings::open(path.clone()).unwrap();
-    assert_eq!(reopened.document().version, 2);
+    assert_eq!(reopened.document().version, 1);
     assert_eq!(
         reopened.document().bindings["e_00000001"].kind,
         ModelKind::Static
@@ -182,7 +182,7 @@ fn legacy_v1_static_bindings_open_and_save_as_v2() {
     assert!(!reopened.dirty());
     reopened.save().unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["version"], 2);
+    assert_eq!(saved["version"], 1);
     assert_eq!(saved["bindings"]["e_00000001"]["kind"], "static");
 }
 
@@ -782,7 +782,7 @@ fn parser_rejects_unknown_or_incomplete_kinds_bad_schema_handles_duplicates_and_
         }
     }
     let mutations: [fn(&mut serde_json::Value); 10] = [
-        |v| v["version"] = 3.into(),
+        |v| v["version"] = 4.into(),
         |v| v["extra"] = true.into(),
         |v| v["scene"] = "/remote/scene.yaml".into(),
         |v| v["project"] = "https://remote/project".into(),
@@ -900,4 +900,143 @@ fn sidecar_open_rejects_symlinks_and_special_files_without_blocking() {
     let broken = temp.path().join("broken.json");
     symlink(temp.path().join("absent.json"), &broken).unwrap();
     assert!(Bindings::create(broken, "scene.yaml".into(), ".".into()).is_err());
+}
+
+#[test]
+fn material_edit_upgrades_transactionally_and_reset_reassign_history_restore_versions() {
+    use orr_model::MaterialOverride;
+    let temp = tempfile::tempdir().unwrap();
+    install(&fixture_dir(), temp.path());
+    let loaded = loaded(temp.path());
+    let bytes = loaded.static_model().unwrap().to_bytes().unwrap();
+    let id = guid(1);
+    for version in [1, 2] {
+        let path = temp.path().join(format!("v{version}.models.json"));
+        let original = Document { version, scene: "scene.yaml".into(), project: ".".into(), bindings: [(id.to_string(), binding(&loaded))].into_iter().collect() };
+        let mut bindings = Bindings::from_document(path.clone(), original.clone()).unwrap();
+        bindings.save().unwrap();
+        assert_eq!(Bindings::open(path.clone()).unwrap().document(), &original);
+        let over = MaterialOverride { material_slot: 0, base_color_factor: [0.1, 0.8, 0.4] };
+        let pending = bindings.prepare_material_override(&id, Some(over), &loaded).unwrap();
+        assert_eq!(bindings.document(), &original);
+        assert!(!bindings.dirty());
+        bindings.commit_assignment(pending).unwrap();
+        assert_eq!(bindings.document().version, 3);
+        assert_eq!(bindings.document().bindings[&id.to_string()].material_override, Some(over));
+        bindings.undo();
+        assert_eq!(bindings.document(), &original);
+        assert!(!bindings.dirty());
+        bindings.redo();
+        bindings.save().unwrap();
+        let reopened = Bindings::open(path.clone()).unwrap();
+        assert_eq!(reopened.document(), bindings.document());
+        assert_eq!(Bindings::from_document(path, reopened.document().clone()).unwrap().document().version, 3);
+        bindings.set_material_override(&id, None, &loaded).unwrap();
+        assert_eq!(bindings.document().version, 3);
+        assert!(bindings.document().bindings[&id.to_string()].material_override.is_none());
+        assert!(!serde_json::to_string(bindings.document()).unwrap().contains("material_override"));
+        bindings.undo();
+        assert_eq!(bindings.document().bindings[&id.to_string()].material_override, Some(over));
+        // Reassigning the same source is deliberate and restores imported factors.
+        bindings.assign_validated(std::slice::from_ref(&id), &binding(&loaded), &loaded).unwrap();
+        assert!(bindings.document().bindings[&id.to_string()].material_override.is_none());
+    }
+    assert_eq!(loaded.static_model().unwrap().to_bytes().unwrap(), bytes);
+}
+
+#[test]
+fn invalid_material_transactions_and_stale_revisions_preserve_document_and_history() {
+    use orr_model::MaterialOverride;
+    let temp = tempfile::tempdir().unwrap();
+    install(&fixture_dir(), temp.path());
+    let loaded = loaded(temp.path());
+    let id = guid(1);
+    let mut bindings = bindings(temp.path());
+    bindings.assign_validated(std::slice::from_ref(&id), &binding(&loaded), &loaded).unwrap();
+    bindings.save().unwrap();
+    let before = bindings.document().clone();
+    let revision = bindings.generation_token();
+    for over in [
+        MaterialOverride { material_slot: 1, base_color_factor: [0.5; 3] },
+        MaterialOverride { material_slot: u32::MAX, base_color_factor: [0.5; 3] },
+        MaterialOverride { material_slot: 0, base_color_factor: [f32::NAN, 0.5, 0.5] },
+        MaterialOverride { material_slot: 0, base_color_factor: [0.5, f32::INFINITY, 0.5] },
+        MaterialOverride { material_slot: 0, base_color_factor: [0.5, 0.5, -0.1] },
+        MaterialOverride { material_slot: 0, base_color_factor: [1.1, 0.5, 0.5] },
+    ] {
+        assert!(bindings.set_material_override(&id, Some(over), &loaded).is_err());
+        assert_eq!(bindings.document(), &before);
+        assert!(!bindings.dirty());
+        assert!(Arc::ptr_eq(&revision, &bindings.generation_token()));
+    }
+    let over = Some(MaterialOverride { material_slot: 0, base_color_factor: [0.2, 0.9, 0.1] });
+    let pending = bindings.prepare_material_override(&id, over, &loaded).unwrap();
+    bindings.set_material_override(&id, over, &loaded).unwrap();
+    bindings.undo();
+    assert_eq!(bindings.document(), &before);
+    assert!(bindings.commit_assignment(pending).is_err(), "ABA draft must not survive Undo");
+    bindings.redo();
+    assert_eq!(bindings.document().bindings[&id.to_string()].material_override, over);
+    for field in ["package_digest", "source_hash"] {
+        let mut stale = bindings.document().clone();
+        let binding = stale.bindings.get_mut(&id.to_string()).unwrap();
+        if field == "package_digest" { binding.package_digest = "0".repeat(64); } else { binding.source_hash = "0".repeat(64); }
+        let mut stale = Bindings::from_document(temp.path().join(format!("{field}.json")), stale).unwrap();
+        let before = stale.document().clone();
+        assert!(stale.set_material_override(&id, None, &loaded).unwrap_err().contains("stale"));
+        assert_eq!(stale.document(), &before);
+    }
+}
+
+#[test]
+fn material_schema_rejects_legacy_null_duplicates_and_animation_even_when_unified() {
+    let temp = tempfile::tempdir().unwrap();
+    install(&fixture_dir(), temp.path());
+    let loaded = loaded(temp.path());
+    let original = serde_json::to_value(Document { version: 3, scene: "scene.yaml".into(), project: ".".into(), bindings: [(guid(1).to_string(), binding(&loaded))].into_iter().collect() }).unwrap();
+    let payload = serde_json::json!({"material_slot":0,"base_color_factor":[0.2,0.7,0.8]});
+    for version in [1, 2] {
+        let mut value = original.clone();
+        value["version"] = version.into();
+        value["bindings"]["e_00000001"]["material_override"] = payload.clone();
+        assert!(serde_json::from_value::<Document>(value).unwrap().validate().unwrap_err().contains("version-3"));
+    }
+    for value in [serde_json::Value::Null, serde_json::json!([]), serde_json::json!({}), serde_json::json!([payload.clone()]), serde_json::json!([0, [0.2, 0.7, 0.8]])] {
+        let mut document = original.clone();
+        document["bindings"]["e_00000001"]["material_override"] = value;
+        assert!(serde_json::from_value::<Document>(document).is_err());
+    }
+    let mut animated = original.clone();
+    animated["bindings"]["e_00000001"]["kind"] = "animated".into();
+    animated["bindings"]["e_00000001"]["animation"] = serde_json::json!({"clip_index":0,"playback":"loop"});
+    animated["bindings"]["e_00000001"]["material_override"] = payload.clone();
+    assert!(serde_json::from_value::<Document>(animated).unwrap().validate().unwrap_err().contains("animated model binding cannot declare"));
+    let text = serde_json::to_string(&original).unwrap();
+    let duplicate = text.replacen("\"kind\":", &format!("\"material_override\":{payload},\"material_override\":{payload},\"kind\":"), 1);
+    assert!(serde_json::from_str::<Document>(&duplicate).is_err());
+}
+
+#[cfg(feature = "animated-models")]
+#[test]
+fn mixed_v3_material_and_animation_edits_preserve_each_other() {
+    let temp = tempfile::tempdir().unwrap();
+    install(&fixture_dir(), temp.path());
+    install(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/animation_demo").canonicalize().unwrap(), temp.path());
+    let static_asset = loaded(temp.path());
+    let animated_asset = model_bindings::load_asset_for_kind(temp.path(), "sample-animation", "animated.glb", ModelKind::Animated).unwrap();
+    let mut animated = Binding::from_animated_asset("sample-animation".into(), "animated.glb".into(), &animated_asset, AnimationDescriptor { clip_index:0, playback:PlaybackMode::Once }, LocalTransform::default()).unwrap();
+    let mut bindings = bindings(temp.path());
+    bindings.assign_validated(&[guid(1)], &binding(&static_asset), &static_asset).unwrap();
+    bindings.assign_validated(&[guid(2)], &animated, &animated_asset).unwrap();
+    let over = Some(orr_model::MaterialOverride { material_slot: 0, base_color_factor: [0.8,0.3,0.1] });
+    bindings.set_material_override(&guid(1), over, &static_asset).unwrap();
+    assert_eq!(bindings.document().bindings[&guid(2).to_string()], animated);
+    animated.animation.as_mut().unwrap().playback = PlaybackMode::Loop;
+    bindings.assign_validated(&[guid(2)], &animated, &animated_asset).unwrap();
+    bindings.save().unwrap();
+    let reopened = Bindings::open(bindings.path.clone()).unwrap();
+    assert_eq!(reopened.document().version, 3);
+    assert_eq!(reopened.document().bindings[&guid(1).to_string()].material_override, over);
+    assert_eq!(reopened.document().bindings[&guid(2).to_string()], animated);
+    assert!(bindings.set_material_override(&guid(2), None, &animated_asset).unwrap_err().contains("static"));
 }
