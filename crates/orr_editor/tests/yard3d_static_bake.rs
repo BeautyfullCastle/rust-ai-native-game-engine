@@ -269,8 +269,8 @@ fn matching_pixels(h: &mut Harness<'_, EditorApp>, name: &str, target: (u32, u32
 
 fn assert_pixels_equal(actual: &[u8], expected: &[u8], stage: &str) {
     let changed_pixels = actual
-        .chunks_exact(4)
-        .zip(expected.chunks_exact(4))
+        .as_chunks::<4>().0.iter()
+        .zip(expected.as_chunks::<4>().0.iter())
         .filter(|(a, b)| a != b)
         .count();
     let hex = |bytes: &[u8]| {
@@ -403,8 +403,8 @@ fn actual_bake_button_commits_once_lights_viewport_and_reopens_verified_receipt(
         "baking must not change the compared viewport dimensions"
     );
     let changed = on
-        .chunks_exact(4)
-        .zip(off.chunks_exact(4))
+        .as_chunks::<4>().0.iter()
+        .zip(off.as_chunks::<4>().0.iter())
         .filter(|(a, b)| a != b)
         .count();
     assert!(

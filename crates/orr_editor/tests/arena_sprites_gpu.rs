@@ -62,7 +62,7 @@ fn frame(h: &mut Harness<'_, EditorApp>, name: &str) -> Frame {
     };
     assert!(frame
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .any(|pixel| pixel[0] > 40 || pixel[1] > 40 || pixel[2] > 40));
     if let Some(directory) = std::env::var_os("ORR_SPRITE_CAPTURE_DIR") {
         std::fs::create_dir_all(&directory).unwrap();
@@ -83,8 +83,8 @@ fn frame(h: &mut Harness<'_, EditorApp>, name: &str) -> Frame {
 fn viewport_difference(a: &Frame, b: &Frame, rect: egui::Rect) -> usize {
     assert_eq!((a.width, a.height), (b.width, b.height));
     a.rgba
-        .chunks_exact(4)
-        .zip(b.rgba.chunks_exact(4))
+        .as_chunks::<4>().0.iter()
+        .zip(b.rgba.as_chunks::<4>().0.iter())
         .enumerate()
         .filter(|(index, (left, right))| {
             let x = (*index as u32 % a.width) as f32;
@@ -98,7 +98,7 @@ fn viewport_difference(a: &Frame, b: &Frame, rect: egui::Rect) -> usize {
 fn atlas_color_count(frame: &Frame, rect: egui::Rect) -> usize {
     frame
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .enumerate()
         .filter(|(index, pixel)| {
             let point = egui::pos2(

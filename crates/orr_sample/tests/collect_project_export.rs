@@ -51,8 +51,45 @@ fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
     visit(root, root, &mut out);
     out
 }
+#[cfg(feature = "collect-progress")]
+const PROGRESS_FIXTURE_ROOT: &str = "/tmp";
+
+#[cfg(feature = "collect-progress")]
+struct ProgressFixture {
+    root: tempfile::TempDir,
+}
+#[cfg(feature = "collect-progress")]
+impl ProgressFixture {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        Self {
+            root: tempfile::Builder::new()
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap(),
+        }
+    }
+    fn bind(&self, command: &mut Command) {
+        // A host root-owned /tmp can have an unmapped owner in bwrap's user
+        // namespace. Replace that existing mountpoint with this private parent
+        // before restoring Work at its original path. Never alias Work's root:
+        // that would expose the source and tools hidden by the other mounts.
+        command
+            .arg("--bind")
+            .arg(self.root.path())
+            .arg(PROGRESS_FIXTURE_ROOT);
+    }
+    fn path(&self, name: &str) -> PathBuf {
+        Path::new(PROGRESS_FIXTURE_ROOT).join(name)
+    }
+    fn host_path(&self, name: &str) -> PathBuf {
+        self.root.path().join(name)
+    }
+}
 struct Work {
     root: tempfile::TempDir,
+    #[cfg(feature = "collect-progress")]
+    progress: ProgressFixture,
     project: PathBuf,
     runtime: PathBuf,
     exporter: PathBuf,
@@ -97,6 +134,8 @@ impl Work {
         assert!(!base.starts_with(&workspace));
         Self {
             root,
+            #[cfg(feature = "collect-progress")]
+            progress: ProgressFixture::new(),
             project,
             runtime: copied[0].clone(),
             exporter: copied[1].clone(),
@@ -114,12 +153,14 @@ impl Work {
             "--dev-bind",
             "/dev/null",
             "/dev/null",
-            "--bind",
-        ])
-        .arg(&base)
-        .arg(&base)
-        .arg("--tmpfs")
-        .arg(&self.workspace);
+        ]);
+        #[cfg(feature = "collect-progress")]
+        self.progress.bind(&mut c);
+        c.arg("--bind")
+            .arg(&base)
+            .arg(&base)
+            .arg("--tmpfs")
+            .arg(&self.workspace);
         if let Some(bundle) = bundle {
             c.arg("--tmpfs")
                 .arg(&self.project)
@@ -325,10 +366,10 @@ fn collect_progress_source_hidden_relaunch_and_no_headless_writes() {
     )
     .unwrap();
     let before = snapshot(&w.project);
-    let data = w.root.path().join("isolated progress data");
+    let data = w.progress.host_path("isolated progress data");
     let run = |c: &mut Command| {
-        c.env("XDG_DATA_HOME", &data)
-            .env("HOME", w.root.path().join("isolated home"));
+        c.env("XDG_DATA_HOME", w.progress.path("isolated progress data"))
+            .env("HOME", w.progress.path("isolated home"));
         good(c.output().unwrap())
     };
     for ticks in [0, 20, 600] {
@@ -389,6 +430,111 @@ fn collect_progress_source_hidden_relaunch_and_no_headless_writes() {
     assert_eq!(snapshot(&w.project), before);
 }
 
+/// The two directory names are reserved identities in this fixture. Checking
+/// their names as well as absolute paths also observes relative path arguments,
+/// decoded `-yy` dirfds/AT_FDCWD and chdir into either root. Do not infer profile
+/// access from generic names such as `.local/share`, `orrery` or `highscore.json`.
+/// This is a guard for this fixture, not a general strace path resolver.
+#[cfg(feature = "collect-progress")]
+fn check_collect_progress_trace(trace: &str, data: &Path, home: &Path) -> Result<(), &'static str> {
+    if !trace.contains("execve(") {
+        return Err("syscall observation did not execute");
+    }
+    for root in [data, home] {
+        if trace.contains(root.to_str().unwrap())
+            || trace.contains(root.file_name().unwrap().to_str().unwrap())
+        {
+            return Err("noninteractive route touched progress root");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "collect-progress")]
+#[test]
+fn collect_progress_syscall_trace_guard_rejects_profile_access() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = ProgressFixture::new();
+    assert_eq!(
+        fs::metadata(fixture.root.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let data = fixture.path("isolated progress data");
+    let home = fixture.path("isolated home");
+    let mut setup = Command::new("bwrap");
+    fixture.bind(&mut setup);
+    assert_eq!(
+        setup.get_args().collect::<Vec<_>>(),
+        [
+            std::ffi::OsStr::new("--bind"),
+            fixture.root.path().as_os_str(),
+            std::ffi::OsStr::new(PROGRESS_FIXTURE_ROOT),
+        ]
+    );
+    assert_eq!(fs::read_dir(fixture.root.path()).unwrap().count(), 0);
+    for name in ["isolated progress data", "isolated home"] {
+        assert!(!fixture.host_path(name).exists());
+        assert_eq!(
+            fixture.path(name).parent(),
+            Some(Path::new(PROGRESS_FIXTURE_ROOT))
+        );
+    }
+    let exec = "11 execve(\"/proof/tools/collect_dodge\", [\"collect_dodge\", \"--headless\", \"--ticks\", \"20\"], 0x0 /* 20 vars */) = 0\n";
+    // Namespace setup touches the neutral parent only, so tracing bwrap cannot
+    // create a false profile-access failure or hide real child-path accesses.
+    let setup_trace = format!(
+        "{exec}11 mount({:?}, {:?}, NULL, MS_BIND, NULL) = 0\n",
+        fixture.root.path(),
+        PROGRESS_FIXTURE_ROOT
+    );
+    assert_eq!(
+        check_collect_progress_trace(&setup_trace, &data, &home),
+        Ok(())
+    );
+    for calls in [
+        "",
+        "11 openat(AT_FDCWD, \"/etc/ld.so.cache\", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>\n",
+        "11 openat(4</proof/edited project>, \"level.scene.yaml\", O_RDONLY) = 5</proof/edited project/level.scene.yaml>\n",
+        "11 openat(AT_FDCWD</proof/empty>, \"unrelated/highscore.json\", O_RDONLY) = -1 ENOENT (No such file or directory)\n",
+        "11 openat(3</proof/unrelated>, \".local/share/orrery/highscore.json\", O_RDONLY) = -1 ENOENT (No such file or directory)\n",
+        "11 chdir(\"/proof/empty\") = 0\n11 openat(AT_FDCWD, \"unrelated\", O_RDONLY) = -1 ENOENT (No such file or directory)\n",
+    ] {
+        let trace = format!("{exec}{calls}");
+        assert_eq!(check_collect_progress_trace(&trace, &data, &home), Ok(()), "{trace}");
+    }
+    for root in ["isolated progress data", "isolated home"] {
+        for calls in [
+            format!("11 openat(AT_FDCWD, \"/proof/{root}/.local/share\", O_RDONLY|O_DIRECTORY) = -1 ENOENT (No such file or directory)\n"),
+            // Original HOME counterexample: failed access creates no XDG directory.
+            format!("11 openat(3</proof>, \"{root}/.local/share\", O_RDONLY|O_DIRECTORY) = -1 ENOENT (No such file or directory)\n"),
+            format!("11 openat(3</proof/{root}>, \".local/share\", O_RDONLY|O_DIRECTORY) = -1 ENOENT (No such file or directory)\n"),
+            format!("11 openat(AT_FDCWD</proof/{root}>, \".local/share\", O_RDONLY|O_DIRECTORY) = -1 ENOENT (No such file or directory)\n"),
+            format!("11 openat(AT_FDCWD</proof/empty>, \"../{root}/.local/share\", O_RDONLY|O_DIRECTORY) = -1 ENOENT (No such file or directory)\n"),
+            format!("11 chdir(\"/proof/{root}\") = 0\n11 openat(AT_FDCWD, \".local/share\", O_RDONLY|O_DIRECTORY) = -1 ENOENT (No such file or directory)\n"),
+        ] {
+            let trace = format!("{exec}{calls}");
+            assert_eq!(
+                check_collect_progress_trace(&trace, &data, &home),
+                Err("noninteractive route touched progress root"),
+                "{trace}"
+            );
+        }
+    }
+    for trace in [
+        "",
+        "11 openat(AT_FDCWD, \"/etc/ld.so.cache\", O_RDONLY) = 3</etc/ld.so.cache>\n",
+    ] {
+        assert_eq!(
+            check_collect_progress_trace(trace, &data, &home),
+            Err("syscall observation did not execute")
+        );
+    }
+}
+
 /// Additional OS syscall observation. Kept separate so environments denying
 /// ptrace report this check blocked without disguising independent acceptance.
 #[cfg(feature = "collect-progress")]
@@ -402,11 +548,11 @@ fn collect_progress_noninteractive_syscall_isolation() {
     manifest["schema"] = 3.into();
     manifest["progress"] = serde_json::json!({"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"collect-dodge-highscore-v1"});
     fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    let data = w.root.path().join("isolated progress data");
+    let data = w.progress.path("isolated progress data");
+    let home = w.progress.path("isolated home");
     let trace_number = std::cell::Cell::new(0u32);
     let run_no_profile = |c: &mut Command| {
-        c.env("XDG_DATA_HOME", &data)
-            .env("HOME", w.root.path().join("isolated home"));
+        c.env("XDG_DATA_HOME", &data).env("HOME", &home);
         let n = trace_number.get();
         trace_number.set(n + 1);
         let trace_path = w.root.path().join(format!("profile-file-syscalls-{n}.log"));
@@ -428,14 +574,9 @@ fn collect_progress_noninteractive_syscall_isolation() {
         }
         let output = good(traced.output().unwrap());
         let trace = fs::read_to_string(trace_path).unwrap();
-        assert!(
-            trace.contains("execve("),
-            "syscall observation did not execute"
-        );
-        assert!(
-            !trace.contains(data.to_str().unwrap()) && !trace.contains("isolated progress data"),
-            "noninteractive route touched progress root: {trace}"
-        );
+        if let Err(reason) = check_collect_progress_trace(&trace, &data, &home) {
+            panic!("{reason}: {trace}");
+        }
         output
     };
 
@@ -453,7 +594,8 @@ fn collect_progress_noninteractive_syscall_isolation() {
         .args(["--runtime-sha256", &hash, "--trusted-runtime", "--output"])
         .arg(w.root.path().join("traced export"));
     run_no_profile(&mut c);
-    assert!(!data.exists());
+    assert!(!w.progress.host_path("isolated progress data").exists());
+    assert!(!w.progress.host_path("isolated home").exists());
 }
 
 #[cfg(feature = "collect-sprites")]

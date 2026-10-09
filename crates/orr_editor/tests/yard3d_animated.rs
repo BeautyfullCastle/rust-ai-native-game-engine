@@ -221,7 +221,7 @@ fn pixels(h: &Harness<'_, EditorApp>, name: &str) -> Vec<u8> {
         std::fs::create_dir_all(&dir).unwrap();
         let mut f = std::fs::File::create(Path::new(&dir).join(format!("{name}.ppm"))).unwrap();
         write!(f, "P6\n{} {}\n255\n", size.0, size.1).unwrap();
-        for p in bytes.chunks_exact(4) {
+        for p in bytes.as_chunks::<4>().0.iter() {
             f.write_all(&p[..3]).unwrap();
         }
     }
@@ -270,7 +270,7 @@ fn production_main_viewport_animated_ticks_pause_seek_stop_save_reopen_and_mixed
     let rest = pixels(&h, "animated-rest");
     assert_ne!(procedural, rest);
     let composed = h.render().unwrap();
-    assert!(composed.as_raw().chunks_exact(4).any(|p| p[0] > 80));
+    assert!(composed.as_raw().as_chunks::<4>().0.iter().any(|p| p[0] > 80));
     {
         let a = h.state_mut();
         a.models.bindings.as_mut().unwrap().save().unwrap();

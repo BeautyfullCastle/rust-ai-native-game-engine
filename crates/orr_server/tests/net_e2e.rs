@@ -443,6 +443,47 @@ fn two_clients_over_native_wt() {
     two_clients_over_verified_transport(TransportKind::Wt);
 }
 
+#[derive(Clone, Debug, Default)]
+struct NativeLinkTrace {
+    connected_at: Option<Duration>,
+    disconnected_at: Option<Duration>,
+    disconnect_reason: Option<String>,
+}
+
+/// Preserve the adapter's redacted transport outcome before RelayClient drops
+/// its link. Forward every event unchanged; observe only connection lifecycle.
+struct TracedNativeLink {
+    inner: orr_relay_net::NetLink,
+    started: Instant,
+    trace: Arc<Mutex<NativeLinkTrace>>,
+}
+
+impl orr_proto::Link for TracedNativeLink {
+    fn send(&mut self, channel: orr_proto::Channel, data: &[u8]) {
+        self.inner.send(channel, data);
+    }
+
+    fn poll(&mut self) -> Option<orr_proto::LinkEvent> {
+        let event = self.inner.poll();
+        match &event {
+            Some(orr_proto::LinkEvent::Connected) => {
+                self.trace.lock().unwrap().connected_at = Some(self.started.elapsed());
+            }
+            Some(orr_proto::LinkEvent::Disconnected) => {
+                let mut trace = self.trace.lock().unwrap();
+                trace.disconnected_at = Some(self.started.elapsed());
+                trace.disconnect_reason = self.inner.disconnect_reason().map(|reason| format!("{reason:?}"));
+            }
+            _ => {}
+        }
+        event
+    }
+
+    fn close(&mut self) {
+        self.inner.close();
+    }
+}
+
 fn two_clients_over_verified_transport(kind: TransportKind) {
     // Public, test-only identity valid 2020–2120; never use outside loopback tests.
     const CERT: &str = r#"-----BEGIN CERTIFICATE-----
@@ -482,30 +523,43 @@ KhgEUZm40iitRLwtR5mKSfFekKGhRANCAAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let server_thread = thread::spawn(move || {
-        run_wall_clock(&mut server, &flag, Duration::from_millis(1), |_, _| {});
-        (server.room_stats(ROOM).unwrap(), server.bad_messages())
+        let mut notes = Vec::new();
+        run_wall_clock(&mut server, &flag, Duration::from_millis(1), |server, now_us| {
+            notes.extend(server.drain_notes().into_iter().map(|note| (now_us, note)));
+        });
+        (server.room_stats(ROOM).unwrap(), server.bad_messages(), notes)
     });
     let handles: Vec<_> = (0..2).map(|i| {
         let cert = cert.clone();
         thread::spawn(move || {
             let options = ConnectOptions::new(format!("{}://{addr}/relay?case=native", if kind == TransportKind::Wt { "https" } else { "wss" }), kind, Trust::PemFile(cert));
-            let link = connect(&options).unwrap();
+            let started = Instant::now();
+            let trace = Arc::new(Mutex::new(NativeLinkTrace::default()));
+            let link = TracedNativeLink { inner: connect(&options).unwrap(), started, trace: trace.clone() };
             let mut client: RelayClient<Arena, _> = RelayClient::new(
                 RelayClientConfig::new(ROOM, 1), link,
                 |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new(),
             );
-            drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &DriveOptions {
+            let report = drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &DriveOptions {
                 play_for: Some(Duration::from_secs(3)), connect_timeout: Duration::from_secs(10),
-                tag: format!("wss{i}"), ..DriveOptions::default()
-            })
+                tag: format!("{kind:?}{i}"), ..DriveOptions::default()
+            });
+            let trace = trace.lock().unwrap().clone();
+            (report, trace)
         })
     }).collect();
     let reports: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
     stop.store(true, Ordering::Relaxed);
-    let (room, bad_messages) = server_thread.join().unwrap();
+    let (room, bad_messages, notes) = server_thread.join().unwrap();
     let reports: Vec<_> = reports.into_iter().map(Result::unwrap).collect();
+    // Print every result before asserting: assert_eq's left/right are the
+    // actual/expected states, not the two clients' results.
+    for (i, (report, trace)) in reports.iter().enumerate() {
+        eprintln!("native {kind:?} client {i}: state {:?}, transport {trace:?}; {}", report.state, report.summary());
+    }
+    eprintln!("native {kind:?} server: finalized {}, desyncs {}, bad messages {bad_messages}, notes {notes:?}", room.finalized, room.desyncs);
+    let reports: Vec<_> = reports.into_iter().map(|(report, _)| report).collect();
     for r in &reports {
-        eprintln!("native {kind:?}: {}", r.summary());
         assert_eq!(r.state, ClientState::Playing);
         assert_eq!(r.desyncs, 0);
         assert_eq!(r.decode_errors, 0);

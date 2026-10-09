@@ -80,6 +80,36 @@ fn real_editor_spawns_distinct_guids_and_picks_nearest_3d_body_without_vec2_nudg
     assert_eq!(field(&mut editor, &near, "pos"), Value::Vec3(pos(0, 2, 2)));
 
     editor.camera3d = orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.0, 0.0, 10.0);
+    // A blocking field read can ingest a delayed watch.history after sync.
+    // Resubscribing publishes the real host's current history notification
+    // before its reply, forcing that ordering without a scheduler delay.
+    let snapshot_checksum = editor.checksum();
+    editor
+        .host_call("watch.subscribe", json!({"topics": ["history"]}))
+        .expect("publish a current history notification");
+    assert!(!editor.yard_rows_coherent());
+    assert_eq!(editor.checksum(), snapshot_checksum);
+    assert_eq!(editor.rows().len(), 5);
+    assert_eq!(editor.yard_frame().items.len(), 5);
+    assert_eq!(
+        editor.yard_frame().pick(
+            &editor.camera3d.camera(),
+            [400.0, 300.0],
+            (800, 600),
+            editor.rows(),
+        ),
+        Some(near.clone()),
+        "the ray and geometry still identify the nearest collider"
+    );
+    assert_eq!(
+        editor.pick3d([400.0, 300.0], (800, 600)),
+        None,
+        "the history notification must fence the old GUID generation"
+    );
+    // Complete authoritative refreshes after every blocking read above.
+    // No ERP call may invalidate the refreshed GUID map before either pick.
+    editor.sync();
+    assert!(editor.yard_rows_coherent());
     assert_eq!(
         editor.pick3d([400.0, 300.0], (800, 600)),
         Some(near.clone())

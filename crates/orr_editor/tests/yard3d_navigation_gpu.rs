@@ -62,8 +62,8 @@ fn pixels(h: &mut Harness<'_, EditorApp>, name: &str, adapter: &str) -> Vec<u8> 
     bytes
 }
 fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>().0.iter()
+        .zip(b.as_chunks::<4>().0.iter())
         .filter(|(x, y)| {
             x[..3]
                 .iter()
@@ -73,19 +73,19 @@ fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
         .count()
 }
 fn cyan_pixels(bytes: &[u8]) -> usize {
-    bytes.chunks_exact(4).filter(|p| strong_cyan(p)).count()
+    bytes.as_chunks::<4>().0.iter().filter(|p| strong_cyan(*p)).count()
 }
 fn strong_cyan(p: &[u8]) -> bool {
     p[0] < 90 && p[1] >= 160 && p[2] >= 175 && p[2] >= p[0].saturating_add(85)
 }
 fn magenta_pixels(bytes: &[u8]) -> usize {
-    bytes.chunks_exact(4).filter(|p| magenta(p)).count()
+    bytes.as_chunks::<4>().0.iter().filter(|p| magenta(*p)).count()
 }
 fn magenta(p: &[u8]) -> bool {
     p[0] >= 150 && p[2] >= 120 && p[1] < 110
 }
 fn red_pixels(bytes: &[u8]) -> usize {
-    bytes.chunks_exact(4).filter(|p| strong_red(p)).count()
+    bytes.as_chunks::<4>().0.iter().filter(|p| strong_red(*p)).count()
 }
 fn strong_red(p: &[u8]) -> bool {
     p[0] >= 145 && p[1] < 100 && p[2] < 115

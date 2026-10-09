@@ -54,7 +54,7 @@ pub(crate) fn is_h3(conn: &quinn::Connection) -> bool {
 /// HTTP/3 handshake, the CONNECT request, and the reliable stream's hello.
 /// `None` for anything that is not a well-formed Orrery WebTransport client.
 pub(crate) async fn accept(shared: &Shared, conn: quinn::Connection) -> Option<Accepted> {
-    let mut h3 = h3::server::builder()
+    let h3 = h3::server::builder()
         .enable_webtransport(true)
         .enable_extended_connect(true)
         .enable_datagram(true)
@@ -63,13 +63,7 @@ pub(crate) async fn accept(shared: &Shared, conn: quinn::Connection) -> Option<A
         .build(h3_quinn::Connection::new(conn))
         .await
         .ok()?;
-    let (req, stream) = h3.accept().await.ok()??.resolve_request().await.ok()?;
-    let is_wt =
-        req.method() == http::Method::CONNECT && req.extensions().get::<Protocol>() == Some(&Protocol::WEB_TRANSPORT);
-    if !is_wt {
-        return None;
-    }
-    let session = WebTransportSession::accept(req, stream, h3).await.ok()?;
+    let session = accept_session(h3).await?;
     let max = shared.cfg.max_message_size;
     match session.accept_bi().await.ok()?? {
         AcceptedBi::BidiStream(_, bi) => {
@@ -82,6 +76,29 @@ pub(crate) async fn accept(shared: &Shared, conn: quinn::Connection) -> Option<A
         AcceptedBi::Request(..) => None,
     }
 }
+
+async fn accept_session<C>(mut h3: h3::server::Connection<C, Bytes>) -> Option<WebTransportSession<C, Bytes>>
+where
+    C: h3::quic::Connection<Bytes> + h3_datagram::quic_traits::DatagramConnectionExt<Bytes>,
+{
+    // CONNECT and the peer control stream arrive independently. Consume the
+    // initial SETTINGS before WebTransport checks their negotiated capabilities.
+    // The caller's existing setup deadline bounds this wait.
+    if !matches!(std::future::poll_fn(|cx| h3.inner.poll_control(cx)).await.ok()?, h3::proto::frame::Frame::Settings(_)) {
+        return None;
+    }
+    let (req, stream) = h3.accept().await.ok()??.resolve_request().await.ok()?;
+    let is_wt =
+        req.method() == http::Method::CONNECT && req.extensions().get::<Protocol>() == Some(&Protocol::WEB_TRANSPORT);
+    if !is_wt {
+        return None;
+    }
+    WebTransportSession::accept(req, stream, h3).await.ok()
+}
+
+#[cfg(test)]
+#[path = "wt/settings_tests.rs"]
+mod settings_tests;
 
 pub(crate) async fn server_conn(shared: Arc<Shared>, conn: quinn::Connection, acc: Accepted) {
     let id = shared.alloc_id();
