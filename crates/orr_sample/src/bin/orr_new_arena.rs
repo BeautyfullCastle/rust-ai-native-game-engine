@@ -1,6 +1,6 @@
 //! Create one offline, versioned Arena starter with an explicit authoring seed.
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
-const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.";
+const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game. A reused UUID\nshares high-score identity; the seed does not create or change game identity.";
 fn main() {
     if let Err((code, error)) = run() {
         eprintln!("error: {error}");
@@ -27,7 +27,27 @@ fn run() -> Result<(), (i32, String)> {
                 .into_string()
                 .map_err(|_| (2, "seed must be ASCII".into()))?,
         };
-        let report = orr_sample::project_create::create(&options).map_err(|e| (1, e))?;
+        let report = if options.template == orr_sample::project_create::COLLECT_TEMPLATE {
+            let game_id = args
+                .get("--game-id")
+                .and_then(|v| v.to_str())
+                .ok_or((2, "CollectDodge requires --game-id canonical UUIDv4".into()))?;
+            #[cfg(feature = "collect-dodge")]
+            {
+                orr_sample::project_create::create_collect(&options, game_id)
+            }
+            #[cfg(not(feature = "collect-dodge"))]
+            {
+                let _ = game_id;
+                Err("CollectDodge template requires collect-dodge feature".into())
+            }
+        } else {
+            if args.contains_key("--game-id") {
+                return Err((2, "--game-id is only valid for CollectDodge".into()));
+            }
+            orr_sample::project_create::create(&options)
+        }
+        .map_err(|e| (1, e))?;
         println!("created project: {}", report.output.display());
         println!("template: {}", report.template);
         println!("authoring seed: {}", report.seed);
@@ -51,7 +71,7 @@ fn parse(args: Vec<OsString>) -> Result<BTreeMap<String, OsString>, String> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let option = arg.to_str().ok_or("option names must be UTF-8")?;
-        if !matches!(option, "--output" | "--template" | "--seed") {
+        if !matches!(option, "--output" | "--template" | "--seed" | "--game-id") {
             return Err(format!("unknown option {option}; use --help for usage"));
         }
         if options.contains_key(option) {

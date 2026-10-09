@@ -533,3 +533,149 @@ fn generated_closure_preserves_licenses_and_excludes_user_data() {
     let sprites = Document::from_bytes(&all["arena.sprites.json"]).unwrap();
     assert_eq!(sprites.project, ".");
 }
+
+#[cfg(feature = "collect-dodge")]
+mod collect {
+    use super::*;
+    use crate::collect_project::{PreparedProject, ProgressSupport, SpriteSupport};
+    const ID: &str = "12345678-1234-4234-8234-123456789abc";
+    fn opts(root: &Path, name: &str) -> CreateOptions {
+        CreateOptions {
+            template: COLLECT_TEMPLATE.into(),
+            ..options(root, name, "same-seed")
+        }
+    }
+    fn open(path: &Path) -> PreparedProject {
+        PreparedProject::open_with_presentation(
+            path,
+            ProgressSupport::MetadataOnly,
+            SpriteSupport::Supported,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn collect_creation_identity_is_explicit_reproducible_and_copy_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = create_collect(&opts(temp.path(), "a"), ID).unwrap();
+        let b = create_collect(&opts(temp.path(), "b"), ID).unwrap();
+        assert_eq!(files(&a.output), files(&b.output));
+        assert_eq!(a.entity_guids.len(), 4);
+        assert_eq!(
+            a.initial_checksum,
+            open(&a.output).scene().frame().checksum()
+        );
+        let before = files(&a.output);
+        assert!(PreparedProject::open(&a.output).is_err());
+        assert!(
+            PreparedProject::open_with_progress(&a.output, ProgressSupport::MetadataOnly).is_err()
+        );
+        let p = open(&a.output);
+        assert_eq!(p.progress().unwrap().game_id, ID);
+        assert_eq!(p.sprites().unwrap().document.bindings.len(), 4);
+        for (i, guid) in a.entity_guids.iter().enumerate() {
+            let entity = p.scene().index().entity(guid).unwrap();
+            let actor = p
+                .scene()
+                .frame()
+                .get::<orr_games::collect_dodge_game::CollectActor>(entity)
+                .unwrap();
+            assert_eq!(actor.kind, [0, 1, 1, 2][i]);
+            assert_eq!(actor.ordinal, [0, 0, 1, 0][i]);
+            let sprites = p.sprites().unwrap();
+            let binding = &sprites.document.bindings[guid.as_str()];
+            let asset = &sprites.assets[&(binding.package.clone(), binding.document.clone())];
+            let region = asset
+                .document
+                .region(binding.region(&asset.document, 0).unwrap())
+                .unwrap();
+            let opaque = (region.y..region.y + region.height)
+                .flat_map(|y| {
+                    (region.x..region.x + region.width)
+                        .map(move |x| (y * asset.document.atlas().width + x) as usize * 4)
+                })
+                .filter(|&offset| asset.rgba[offset + 3] == 255)
+                .count();
+            assert!(
+                opaque > 10,
+                "declared actor sprite must have visible opaque texels"
+            );
+        }
+
+        assert_eq!(
+            p.sprites().unwrap().document.camera_follow.as_deref(),
+            Some(a.entity_guids[0].as_str())
+        );
+        assert_eq!(files(&a.output), before);
+        let c = create_collect(
+            &opts(temp.path(), "c"),
+            "12345678-1234-4234-8234-123456789abd",
+        )
+        .unwrap();
+        assert_eq!(a.entity_guids, c.entity_guids);
+        assert_eq!(a.initial_checksum, c.initial_checksum);
+        assert_ne!(open(&c.output).progress(), p.progress());
+        assert_eq!(
+            fs::read(a.output.join("level.scene.yaml")).unwrap(),
+            fs::read(c.output.join("level.scene.yaml")).unwrap()
+        );
+        let mut changed = opts(temp.path(), "different-seed");
+        changed.seed = "new-authoring-namespace".into();
+        let d = create_collect(&changed, ID).unwrap();
+        assert_ne!(a.entity_guids, d.entity_guids);
+        assert_eq!(a.initial_checksum, d.initial_checksum);
+        assert_eq!(open(&d.output).progress().unwrap().game_id, ID);
+        assert_no_stages(temp.path());
+    }
+    #[test]
+    fn collect_invalid_uuid_or_template_never_creates_output() {
+        let temp = tempfile::tempdir().unwrap();
+        for id in [
+            "",
+            "12345678-1234-1234-8234-123456789abc",
+            "12345678-1234-4234-7234-123456789abc",
+            "12345678-1234-4234-8234-123456789ABC",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            assert!(create_collect(&opts(temp.path(), "bad"), id).is_err());
+            assert!(!temp.path().join("bad").exists());
+        }
+        assert!(create(&opts(temp.path(), "bad")).is_err());
+        assert!(create_collect(&options(temp.path(), "bad", "seed"), ID).is_err());
+        assert_no_stages(temp.path());
+    }
+    #[test]
+    fn collect_existing_output_and_special_parents_are_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = opts(temp.path(), "existing");
+        create_collect(&options, ID).unwrap();
+        let before = files(&options.output);
+        assert!(create_collect(&options, ID).is_err());
+        assert_eq!(files(&options.output), before);
+        symlink(&options.output, temp.path().join("alias")).unwrap();
+        assert!(create_collect(&opts(&temp.path().join("alias"), "new"), ID).is_err());
+        assert_no_stages(temp.path());
+    }
+    #[test]
+    fn collect_corrupted_package_aborts_owned_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let progress = orr_package::ProjectProgress {
+            schema: 1,
+            game_id: ID.into(),
+            profile: orr_package::ProgressProfile::CollectDodgeHighscoreV1,
+        };
+        let result = create_transaction(
+            &opts(temp.path(), "output"),
+            Some(&progress),
+            |stage, root| {
+                if stage == "before-install" {
+                    fs::write(root.join("source/lantern_keeper.png"), b"corrupt").unwrap();
+                }
+                Ok(())
+            },
+            publish_no_replace,
+        );
+        assert!(result.is_err());
+        assert!(!temp.path().join("output").exists());
+        assert_no_stages(temp.path());
+    }
+}

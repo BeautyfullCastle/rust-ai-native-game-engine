@@ -186,3 +186,115 @@ fn invalid_seed_template_and_relative_destination_are_rejected_without_files() {
         );
     }
 }
+
+#[cfg(feature = "collect-dodge")]
+#[test]
+fn collect_cli_requires_identity_and_matches_library() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let output = root.join("collect project");
+    let base = [
+        "--template",
+        "collect-dodge-2d-v1",
+        "--seed",
+        "cli-parity-seed",
+    ];
+    let missing = command(&root)
+        .arg("--output")
+        .arg(&output)
+        .args(base)
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(!output.exists());
+    for id in ["not-uuid", "12345678-1234-1234-8234-123456789abc"] {
+        assert!(!command(&root)
+            .arg("--output")
+            .arg(&output)
+            .args(base)
+            .args(["--game-id", id])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(!output.exists());
+    }
+    let id = "12345678-1234-4234-8234-123456789abc";
+    success(
+        command(&root)
+            .arg("--output")
+            .arg(&output)
+            .args(base)
+            .args(["--game-id", id])
+            .output()
+            .unwrap(),
+    );
+    let report = orr_sample::project_create::create_collect(
+        &CreateOptions {
+            output: root.join("api"),
+            template: "collect-dodge-2d-v1".into(),
+            seed: "cli-parity-seed".into(),
+        },
+        id,
+    )
+    .unwrap();
+    assert_eq!(files(&output), files(&report.output));
+    let before = files(&output);
+    assert!(!command(&root)
+        .arg("--output")
+        .arg(&output)
+        .args(base)
+        .args(["--game-id", id])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(files(&output), before);
+}
+
+#[test]
+fn arena_rejects_collect_identity_option() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let output = root.join("arena");
+    assert!(!command(&root)
+        .arg("--output")
+        .arg(&output)
+        .args([
+            "--template",
+            "arena-2d-v1",
+            "--seed",
+            "seed",
+            "--game-id",
+            "12345678-1234-4234-8234-123456789abc"
+        ])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(!output.exists());
+}
+
+#[cfg(not(feature = "collect-dodge"))]
+#[test]
+fn generator_without_collect_feature_rejects_collect_template() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let output = root.join("unsupported");
+    let result = command(&root)
+        .arg("--output")
+        .arg(&output)
+        .args([
+            "--template",
+            "collect-dodge-2d-v1",
+            "--seed",
+            "seed",
+            "--game-id",
+            "12345678-1234-4234-8234-123456789abc",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("requires collect-dodge feature"));
+    assert!(!output.exists());
+}

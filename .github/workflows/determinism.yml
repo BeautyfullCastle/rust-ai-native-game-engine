@@ -557,9 +557,9 @@ jobs:
           cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-library.log"
           grep -F 'test result: ok. 63 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-library.log"
           cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --list > "$RUNNER_TEMP/new-arena-cli-list.txt"
-          test "$(grep -cE '^[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-cli-list.txt")" -eq 3
+          test "$(grep -cE '^[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-cli-list.txt")" -eq 5
           cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-cli.log"
-          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-cli.log"
+          grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-cli.log"
           if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/new-arena-library.log" "$RUNNER_TEMP/new-arena-cli.log"; then exit 1; fi
       - name: Build and pin actual Arena generator runtime and exporter
         if: runner.os == 'Linux'
@@ -1150,6 +1150,449 @@ jobs:
           cargo clippy --locked -p orr_sample -p orr_editor -p orr_remote -p orr_edit -p orr_package -p orr_games --no-default-features --features orr_sample/collect-dodge,orr_sample/collect-sprites,orr_sample/collect-progress,orr_sample/project-create,orr_sample/project-export,orr_sample/player-settings,orr_sample/input-actions,orr_sample/game-ui,orr_editor/collect-dodge,orr_editor/project-ui,orr_editor/animated-models,orr_editor/terrain-physics,orr_editor/navigation,orr_editor/irradiance-probes,orr_remote/collect-dodge,orr_remote/terrain-physics,orr_remote/navigation,orr_games/collect-dodge,orr_games/terrain-physics,orr_games/navigation --all-targets -- -D warnings 2>&1 | tee "$ROOT/clippy.log"
         env:
           ORR_COLLECT_SPRITE_EVIDENCE: /tmp/orr-collect-sprite-${{ github.run_id }}-${{ github.run_attempt }}
+      # PR142: additive positive gates; historical results do not certify this head.
+      - name: Required explicit-identity Collect generator CLI and library counts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=${ORR_NEW_COLLECT_EVIDENCE:?mandatory external evidence root}
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" -ne 0
+          python3 - "$ROOT" <<'PYPATHS'
+          import pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          hidden = pathlib.Path.cwd().resolve().parent
+          assert root.is_absolute() and root == root.resolve(), 'evidence root must be canonical'
+          tmp = pathlib.Path('/tmp').resolve()
+          assert root.is_relative_to(tmp) and root != tmp, 'inherited bwrap write binds require canonical /tmp evidence'
+          assert not root.is_relative_to(hidden), 'evidence and copied tools must survive whole-source hiding'
+          PYPATHS
+          mkdir "$ROOT"
+          mkdir "$ROOT/temporary" "$ROOT/xdg-runtime"
+          chmod 700 "$ROOT/xdg-runtime"
+          export TMPDIR="$ROOT/temporary" XDG_RUNTIME_DIR="$ROOT/xdg-runtime"
+          git rev-parse HEAD 'HEAD^{tree}' > "$ROOT/candidate.txt"
+          cat > "$ROOT/expected-inventories.json" <<'JSONINVENTORY'
+          {
+            "creator": [
+              "project_create::tests::reproducible_creation_uses_real_install_and_admission",
+              "project_create::tests::different_seed_changes_only_authored_namespace_and_provenance",
+              "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
+              "project_create::tests::package_install_failure_is_not_published_or_replaced_with_fixture_lock",
+              "project_create::tests::whole_lock_verification_precedes_runtime_validation",
+              "project_create::tests::stage_file_closure_and_bytes_are_rechecked_before_publish",
+              "project_create::tests::existing_destinations_are_preserved_including_empty_and_special",
+              "project_create::tests::concurrent_destination_wins_atomic_publication_without_overwrite",
+              "project_create::tests::unsupported_publication_fails_closed_and_cleans_owned_stage",
+              "project_create::tests::invalid_template_seed_and_paths_do_not_create_anything",
+              "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
+              "project_create::tests::typed_remap_covers_nested_references_comments_bindings_and_follow",
+              "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+              "project_create::tests::collect::collect_creation_identity_is_explicit_reproducible_and_copy_stable",
+              "project_create::tests::collect::collect_invalid_uuid_or_template_never_creates_output",
+              "project_create::tests::collect::collect_existing_output_and_special_parents_are_preserved",
+              "project_create::tests::collect::collect_corrupted_package_aborts_owned_transaction"
+            ],
+            "collect-cli": [
+              "actual_cli_and_public_api_generate_identical_loadable_projects",
+              "arena_rejects_collect_identity_option",
+              "collect_cli_requires_identity_and_matches_library",
+              "invalid_seed_template_and_relative_destination_are_rejected_without_files",
+              "missing_duplicate_unknown_and_malformed_cli_arguments_do_not_publish"
+            ],
+            "arena-cli": [
+              "actual_cli_and_public_api_generate_identical_loadable_projects",
+              "arena_rejects_collect_identity_option",
+              "generator_without_collect_feature_rejects_collect_template",
+              "invalid_seed_template_and_relative_destination_are_rejected_without_files",
+              "missing_duplicate_unknown_and_malformed_cli_arguments_do_not_publish"
+            ],
+            "combined-library": [
+              "arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device",
+              "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
+              "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
+              "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
+              "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
+              "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
+              "collect_app::tests::strict_cli",
+              "collect_app::tests::subtick_tap_survives_zero_tick_updates",
+              "collect_progress::tests::isolated_process_relaunch_uses_only_external_progress",
+              "collect_progress::tests::isolated_window_progress_child",
+              "collect_progress::tests::metadata_admission_is_explicit_and_never_rewrites_identity",
+              "collect_progress::tests::semantic_identity_ignores_relocation_names_guids_and_formatting",
+              "collect_progress::tests::semantic_identity_separates_level_changes_and_explicit_forks",
+              "collect_progress_host::tests::awards_completed_loss_only_and_retains_max_after_restart",
+              "collect_progress_host::tests::initial_terminal_is_not_a_completion",
+              "collect_progress_host::tests::observer_does_not_change_simulation_checksums",
+              "collect_progress_host::tests::observes_every_catchup_tick_despite_mailbox_overflow",
+              "collect_progress_host::tests::replay_and_replay_branch_are_ineligible",
+              "collect_progress_host::tests::seek_branch_and_debug_cannot_create_awards",
+              "collect_progress_host::tests::win_and_zero_score_hazard_loss_are_completed",
+              "collect_project::sprite_capability_tests::unrelated_sprite_unification_does_not_enable_collect_consumer",
+              "collect_project::sprite_identity_tests::cosmetic_sprite_edits_preserve_explicit_progress_and_semantic_digest",
+              "collect_view::camera_tests::camera_covers_full_valid_authored_bounds_and_patrol_axes",
+              "collect_view::tests::exact_square_hidden_coin_and_read_only_mapping",
+              "game_progress::tests::backup_recovery_preserves_good_backup",
+              "game_progress::tests::bad_future_mismatched_and_oversize_copies_are_preserved",
+              "game_progress::tests::changed_public_names_and_ancestor_symlinks_block_publication",
+              "game_progress::tests::concurrent_process_child",
+              "game_progress::tests::concurrent_processes_merge_without_lost_highscore",
+              "game_progress::tests::duplicate_identity_fields_never_recover_over_ambiguous_bytes",
+              "game_progress::tests::every_unsupported_discriminator_preserves_even_with_matching_backup",
+              "game_progress::tests::insecure_ancestor_and_invalid_key_are_rejected",
+              "game_progress::tests::links_special_files_and_unwritable_files_are_refused",
+              "game_progress::tests::postpublication_failure_keeps_published_best_and_disallows_blind_retry",
+              "game_progress::tests::prepublication_failures_leave_bytes_and_loaded_best_unchanged",
+              "game_progress::tests::pure_discovery_and_missing_load_do_not_write",
+              "game_progress::tests::scores_are_bounded_and_stale_writers_merge_maximum",
+              "game_progress::tests::stable_nonblocking_lock_and_reread_before_merge",
+              "game_progress::tests::strict_envelope_rejects_unknown_duplicate_and_non_integer_values",
+              "net_client::wss_options_tests::cli_parses_wss_ca_and_name_without_changing_quic_default",
+              "net_client::wss_options_tests::wss_defaults_to_webpki_and_url_name",
+              "net_client::wss_options_tests::wt_cli_defaults_to_webpki_and_url_host",
+              "project_create::tests::collect::collect_corrupted_package_aborts_owned_transaction",
+              "project_create::tests::collect::collect_creation_identity_is_explicit_reproducible_and_copy_stable",
+              "project_create::tests::collect::collect_existing_output_and_special_parents_are_preserved",
+              "project_create::tests::collect::collect_invalid_uuid_or_template_never_creates_output",
+              "project_create::tests::concurrent_destination_wins_atomic_publication_without_overwrite",
+              "project_create::tests::different_seed_changes_only_authored_namespace_and_provenance",
+              "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
+              "project_create::tests::existing_destinations_are_preserved_including_empty_and_special",
+              "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+              "project_create::tests::invalid_template_seed_and_paths_do_not_create_anything",
+              "project_create::tests::package_install_failure_is_not_published_or_replaced_with_fixture_lock",
+              "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
+              "project_create::tests::reproducible_creation_uses_real_install_and_admission",
+              "project_create::tests::stage_file_closure_and_bytes_are_rechecked_before_publish",
+              "project_create::tests::typed_remap_covers_nested_references_comments_bindings_and_follow",
+              "project_create::tests::unsupported_publication_fails_closed_and_cleans_owned_stage",
+              "project_create::tests::whole_lock_verification_precedes_runtime_validation",
+              "project_export::admission::tests::absent_lock_is_preserved_and_appearance_is_detected",
+              "project_export::admission::tests::checked_paths_reject_traversal_and_collisions",
+              "project_export::admission::tests::exact_nine_file_closure_excludes_unrelated_content",
+              "project_export::admission::tests::fifo_and_socket_are_rejected_before_opening",
+              "project_export::admission::tests::hardlink_inputs_are_accepted_but_alias_mutation_is_rejected",
+              "project_export::admission::tests::inactive_tampered_object_does_not_enter_closure",
+              "project_export::admission::tests::manifest_exact_byte_edits_are_detected",
+              "project_export::admission::tests::mutation_during_snapshot_read_is_detected",
+              "project_export::admission::tests::oversized_scene_and_manifest_are_rejected_before_parsing",
+              "project_export::admission::tests::recheck_hashes_bytes_even_when_identity_matches",
+              "project_export::admission::tests::sparse_bounds_are_rejected_without_reading_payloads",
+              "project_export::admission::tests::symlinks_in_files_or_ancestors_are_rejected",
+              "project_export::tests::bounded_child_helper",
+              "project_export::tests::collect_profile_is_explicit_and_preserves_closed_transaction",
+              "project_export::tests::collect_profile_rejects_arena_before_smoke",
+              "project_export::tests::completed_smoke_cleans_redirected_descendants_before_reaping",
+              "project_export::tests::concurrent_destination_creator_is_never_overwritten",
+              "project_export::tests::create_new_write_failure_cleans_only_owned_stage",
+              "project_export::tests::malformed_or_wrong_architecture_elf_rejects_before_execution",
+              "project_export::tests::output_overlap_and_ancestor_symlink_rejected",
+              "project_export::tests::publication_fails_closed_without_rename_fallback",
+              "project_export::tests::smoke_requires_exact_initial_state_output",
+              "project_export::tests::source_mutation_through_hardlink_alias_aborts_publication",
+              "project_export::tests::staged_binary_is_rehashed_before_any_execution",
+              "project_export::tests::staged_mutation_or_extra_file_is_not_published",
+              "project_export::tests::transaction_failpoints_preserve_source_and_previous_export",
+              "project_export::tests::trusted_helper_timeout_output_and_exit_are_bounded",
+              "project_playback::tests::changed_recording_checksum_resets_a_small_forward_span",
+              "project_playback::tests::metadata_only_pause_does_not_reset_a_clip",
+              "project_playback::tests::missing_and_recycled_entities_never_inherit_a_cursor",
+              "project_playback::tests::paused_snapshot_freezes_and_steps_advance_independent_cursors",
+              "project_playback::tests::plain_clip_ignores_motion_transitions_and_ticks_do_not_round_per_frame",
+              "project_playback::tests::retained_history_contains_only_current_bindings",
+              "project_playback::tests::seek_rewind_jump_checksum_change_and_sequence_restart_reset",
+              "sprite_scene::tests::actual_arena_moves_animates_and_follows_without_changing_checksums",
+              "sprite_scene::tests::animated_atlas_is_rejected_before_renderer_creation",
+              "sprite_scene::tests::fractional_time_accumulates_and_entity_reuse_resets_cursor",
+              "sprite_scene::tests::installed_package_is_required_and_removal_is_visible",
+              "sprite_scene::tests::installed_png_hash_is_checked",
+              "sprite_scene::tests::malformed_smaller_apng_frame_is_rejected",
+              "sprite_scene::tests::png_malformed_mismatch_and_crc_valid_dimension_boundary",
+              "sprite_scene::tests::restart_resets_sprite_camera_and_animation_history",
+              "yard3d_stream::tests::authoritative_frame_preserves_entities_floor_and_poses",
+              "yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags",
+              "yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command",
+              "yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh",
+              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
+            ],
+            "minimal-progress-library": [
+              "arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device",
+              "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
+              "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
+              "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
+              "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
+              "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
+              "collect_app::tests::strict_cli",
+              "collect_app::tests::subtick_tap_survives_zero_tick_updates",
+              "collect_progress::tests::isolated_process_relaunch_uses_only_external_progress",
+              "collect_progress::tests::isolated_window_progress_child",
+              "collect_progress::tests::metadata_admission_is_explicit_and_never_rewrites_identity",
+              "collect_progress::tests::semantic_identity_ignores_relocation_names_guids_and_formatting",
+              "collect_progress::tests::semantic_identity_separates_level_changes_and_explicit_forks",
+              "collect_progress_host::tests::awards_completed_loss_only_and_retains_max_after_restart",
+              "collect_progress_host::tests::initial_terminal_is_not_a_completion",
+              "collect_progress_host::tests::observer_does_not_change_simulation_checksums",
+              "collect_progress_host::tests::observes_every_catchup_tick_despite_mailbox_overflow",
+              "collect_progress_host::tests::replay_and_replay_branch_are_ineligible",
+              "collect_progress_host::tests::seek_branch_and_debug_cannot_create_awards",
+              "collect_progress_host::tests::win_and_zero_score_hazard_loss_are_completed",
+              "collect_project::sprite_capability_tests::unrelated_sprite_unification_does_not_enable_collect_consumer",
+              "collect_project::sprite_identity_tests::cosmetic_sprite_edits_preserve_explicit_progress_and_semantic_digest",
+              "collect_view::camera_tests::camera_covers_full_valid_authored_bounds_and_patrol_axes",
+              "collect_view::tests::exact_square_hidden_coin_and_read_only_mapping",
+              "game_progress::tests::backup_recovery_preserves_good_backup",
+              "game_progress::tests::bad_future_mismatched_and_oversize_copies_are_preserved",
+              "game_progress::tests::changed_public_names_and_ancestor_symlinks_block_publication",
+              "game_progress::tests::concurrent_process_child",
+              "game_progress::tests::concurrent_processes_merge_without_lost_highscore",
+              "game_progress::tests::duplicate_identity_fields_never_recover_over_ambiguous_bytes",
+              "game_progress::tests::every_unsupported_discriminator_preserves_even_with_matching_backup",
+              "game_progress::tests::insecure_ancestor_and_invalid_key_are_rejected",
+              "game_progress::tests::links_special_files_and_unwritable_files_are_refused",
+              "game_progress::tests::postpublication_failure_keeps_published_best_and_disallows_blind_retry",
+              "game_progress::tests::prepublication_failures_leave_bytes_and_loaded_best_unchanged",
+              "game_progress::tests::pure_discovery_and_missing_load_do_not_write",
+              "game_progress::tests::scores_are_bounded_and_stale_writers_merge_maximum",
+              "game_progress::tests::stable_nonblocking_lock_and_reread_before_merge",
+              "game_progress::tests::strict_envelope_rejects_unknown_duplicate_and_non_integer_values",
+              "net_client::wss_options_tests::cli_parses_wss_ca_and_name_without_changing_quic_default",
+              "net_client::wss_options_tests::wss_defaults_to_webpki_and_url_name",
+              "net_client::wss_options_tests::wt_cli_defaults_to_webpki_and_url_host",
+              "project_playback::tests::changed_recording_checksum_resets_a_small_forward_span",
+              "project_playback::tests::metadata_only_pause_does_not_reset_a_clip",
+              "project_playback::tests::missing_and_recycled_entities_never_inherit_a_cursor",
+              "project_playback::tests::paused_snapshot_freezes_and_steps_advance_independent_cursors",
+              "project_playback::tests::plain_clip_ignores_motion_transitions_and_ticks_do_not_round_per_frame",
+              "project_playback::tests::retained_history_contains_only_current_bindings",
+              "project_playback::tests::seek_rewind_jump_checksum_change_and_sequence_restart_reset",
+              "sprite_scene::tests::actual_arena_moves_animates_and_follows_without_changing_checksums",
+              "sprite_scene::tests::animated_atlas_is_rejected_before_renderer_creation",
+              "sprite_scene::tests::fractional_time_accumulates_and_entity_reuse_resets_cursor",
+              "sprite_scene::tests::installed_package_is_required_and_removal_is_visible",
+              "sprite_scene::tests::installed_png_hash_is_checked",
+              "sprite_scene::tests::malformed_smaller_apng_frame_is_rejected",
+              "sprite_scene::tests::png_malformed_mismatch_and_crc_valid_dimension_boundary",
+              "sprite_scene::tests::restart_resets_sprite_camera_and_animation_history",
+              "yard3d_stream::tests::authoritative_frame_preserves_entities_floor_and_poses",
+              "yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags",
+              "yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command",
+              "yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh",
+              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
+            ],
+            "ignored-library-hooks": [
+              "collect_progress::tests::isolated_window_progress_child",
+              "game_progress::tests::concurrent_process_child"
+            ],
+            "generated-workflows": [
+              "generated_collect_cpu_workflow",
+              "generated_collect_gpu_workflow",
+              "generated_collect_progress_workflow"
+            ]
+          }
+          JSONINVENTORY
+          check_result() {
+            local label=$1 passed=$2 ignored=$3
+            shift 3
+            "$@" -- --list > "$ROOT/$label-list.txt"
+            "$@" -- --ignored --list > "$ROOT/$label-ignored.txt"
+            python3 - "$ROOT" "$label" "$passed" "$ignored" <<'PYLIST'
+          import json, pathlib, re, sys
+          root = pathlib.Path(sys.argv[1]); label = sys.argv[2]
+          expected = json.loads((root / 'expected-inventories.json').read_text())
+          def names(path):
+              return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', path.read_text(), re.M))
+          actual = names(root / f'{label}-list.txt')
+          ignored = names(root / f'{label}-ignored.txt')
+          assert actual == sorted(expected[label]), (label, actual)
+          assert len(actual) == int(sys.argv[3]) + int(sys.argv[4])
+          assert ignored == (expected['ignored-library-hooks'] if int(sys.argv[4]) else []), ignored
+          PYLIST
+            "$@" -- --nocapture 2>&1 | tee "$ROOT/$label.log"
+            python3 - "$passed" "$ignored" "$ROOT/$label.log" "$label" <<'PYRESULT'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[3]).read_text()
+          rows = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;', text, re.M)
+          parent = (sys.argv[1], '0', sys.argv[2])
+          if sys.argv[4] == 'combined-library':
+              # The real progress concurrency test spawns exactly two inherited-stdout children.
+              assert rows == [('1', '0', '0'), ('1', '0', '0'), parent], rows
+          else:
+              assert rows == [parent], rows
+          assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
+          PYRESULT
+          }
+          check_result creator 17 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
+          check_result collect-cli 5 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --test new_arena_cli
+          check_result arena-cli 5 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli
+          check_result combined-library 105 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
+        env:
+          ORR_NEW_COLLECT_EVIDENCE: /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Build and pin exact Collect creator runtime exporter and progress harness
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=${ORR_NEW_COLLECT_EVIDENCE:?mandatory external evidence root}
+          export TMPDIR="$ROOT/temporary" XDG_RUNTIME_DIR="$ROOT/xdg-runtime"
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" -ne 0
+          command -v bwrap
+          bwrap --ro-bind / / -- /bin/true
+          rustc -vV | grep -Fx 'host: x86_64-unknown-linux-gnu'
+          python3 - <<'PYPATHS'
+          import os, pathlib, tempfile
+          hidden = pathlib.Path.cwd().resolve().parent
+          target = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', 'target')).resolve()
+          evidence = pathlib.Path(os.environ['ORR_NEW_COLLECT_EVIDENCE']).resolve()
+          temporary = pathlib.Path(tempfile.gettempdir()).resolve()
+          assert target.is_relative_to(hidden), 'source-hidden root must cover original build outputs'
+          assert not evidence.is_relative_to(hidden) and not temporary.is_relative_to(hidden)
+          assert evidence.is_relative_to(pathlib.Path('/tmp').resolve()) and temporary.is_relative_to(evidence)
+          PYPATHS
+          mkdir "$ROOT/tools"
+          # Copy each artifact immediately after its matching Cargo build, before another feature profile can overwrite a normal binary path.
+          for lane in creator runtime exporter progress-harness; do
+            case "$lane" in
+              creator) name=orr_new_arena; features=project-create,collect-dodge ;;
+              runtime) name=collect_dodge; features=collect-sprites,collect-progress ;;
+              exporter) name=orr_export_collect; features=project-export,collect-sprites,collect-progress ;;
+              progress-harness) name=orr_sample; features=collect-sprites,collect-progress ;;
+            esac
+            if [[ "$lane" == progress-harness ]]; then
+              cargo test --locked --release -p orr_sample --no-default-features --features "$features" --lib --no-run --message-format=json > "$ROOT/$lane-build.jsonl" 2> "$ROOT/$lane-build.stderr"
+            else
+              cargo build --locked --release -p orr_sample --no-default-features --features "$features" --bin "$name" --message-format=json > "$ROOT/$lane-build.jsonl" 2> "$ROOT/$lane-build.stderr"
+            fi
+            python3 - "$lane" "$name" "$features" <<'PYPIN'
+          import hashlib, json, os, pathlib, shutil, sys
+          lane, name, requested = sys.argv[1:]
+          root = pathlib.Path(os.environ['ORR_NEW_COLLECT_EVIDENCE']).resolve()
+          manifest = (pathlib.Path.cwd() / 'crates/orr_sample/Cargo.toml').resolve()
+          is_test = lane == 'progress-harness'; kind = 'lib' if is_test else 'bin'
+          records = [json.loads(line) for line in (root / f'{lane}-build.jsonl').read_text().splitlines() if line.strip()]
+          found = [row for row in records if row.get('reason') == 'compiler-artifact'
+                   and pathlib.Path(row['manifest_path']).resolve() == manifest
+                   and row['target']['name'] == name and row['target']['kind'] == [kind]
+                   and row['profile']['test'] is is_test and row.get('executable')]
+          assert len(found) == 1, (lane, found)
+          item = found[0]
+          expected = set(requested.split(',')) | {'collect-dodge', 'project', 'sprites'}
+          assert set(item['features']) == expected, (lane, item['features'], sorted(expected))
+          source = pathlib.Path(item['executable']).resolve(strict=True)
+          assert source.is_relative_to(pathlib.Path.cwd().resolve().parent)
+          assert os.access(source, os.X_OK), source
+          copy = root / 'tools' / ('progress-test-harness' if is_test else name)
+          assert not copy.exists()
+          shutil.copy2(source, copy)
+          digest = hashlib.sha256(source.read_bytes()).hexdigest()
+          assert digest == hashlib.sha256(copy.read_bytes()).hexdigest() and os.access(copy, os.X_OK)
+          (root / f'{lane}-artifact.json').write_text(json.dumps({'lane':lane,'source':str(source),'copy':str(copy),'sha256':digest,'manifest':str(manifest),'package_id':item['package_id'],'target':item['target'],'features':item['features'],'requested_features':requested,'profile':item['profile']},indent=2)+'\n')
+          PYPIN
+          done
+          python3 - <<'PYMANIFEST'
+          import json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['ORR_NEW_COLLECT_EVIDENCE']).resolve()
+          entries = [json.loads((root / f'{lane}-artifact.json').read_text()) for lane in ['creator','runtime','exporter','progress-harness']]
+          (root / 'tools.sha256').write_text(''.join(f"{item['sha256']}  {item['copy']}\n" for item in entries))
+          (root / 'artifacts.json').write_text(json.dumps({'head':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'tree':subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip(),'artifacts':entries},indent=2)+'\n')
+          PYMANIFEST
+          sha256sum --check "$ROOT/tools.sha256"
+          "$ROOT/tools/progress-test-harness" --list > "$ROOT/pinned-library-list.txt"
+          "$ROOT/tools/progress-test-harness" --ignored --list > "$ROOT/pinned-library-ignored.txt"
+          python3 - "$ROOT" <<'PYHOOKS'
+          import json, pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+          expected = json.loads((root / 'expected-inventories.json').read_text())
+          def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
+          assert names('pinned-library-list.txt') == expected['minimal-progress-library']
+          assert len(names('pinned-library-list.txt')) == 63
+          assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
+          PYHOOKS
+        env:
+          ORR_NEW_COLLECT_EVIDENCE: /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Mandatory generated Collect CPU GPU export and progress workflows
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=${ORR_NEW_COLLECT_EVIDENCE:?mandatory external evidence root}
+          export TMPDIR="$ROOT/temporary" XDG_RUNTIME_DIR="$ROOT/xdg-runtime"
+          export ORR_NEW_ARENA_BIN="$ROOT/tools/orr_new_arena"
+          export ORR_COLLECT_RUNTIME="$ROOT/tools/collect_dodge"
+          export ORR_COLLECT_EXPORTER="$ROOT/tools/orr_export_collect"
+          export ORR_PROGRESS_TEST_BIN="$ROOT/tools/progress-test-harness"
+          export ORR_EXPORT_HIDE_ROOT="$(dirname "$(pwd -P)")"
+          export ORR_REQUIRE_GPU=1 ORR_REQUIRE_PROJECT_ISOLATION=1
+          sha256sum --check "$ROOT/tools.sha256"
+          cargo test --locked --release -p orr_editor --no-default-features --features sprites,collect-dodge --test new_collect_workflow -- --ignored --list > "$ROOT/generated-ignored.txt"
+          python3 - "$ROOT" <<'PYINVENTORY'
+          import json, pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+          expected = json.loads((root / 'expected-inventories.json').read_text())['generated-workflows']
+          actual = sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/'generated-ignored.txt').read_text(), re.M))
+          assert actual == sorted(expected), actual
+          PYINVENTORY
+          for lane in cpu gpu progress; do
+            name=generated_collect_${lane}_workflow
+            export ORR_COLLECT_CAPTURES="$ROOT/captures/$lane"
+            mkdir -p "$ORR_COLLECT_CAPTURES"
+            cargo test --locked --release -p orr_editor --no-default-features --features sprites,collect-dodge --test new_collect_workflow "$name" -- --ignored --exact --list > "$ROOT/$lane-list.txt"
+            test "$(grep -cE '^[[:alnum:]_:]+: test$' "$ROOT/$lane-list.txt")" -eq 1
+            grep -Fx "$name: test" "$ROOT/$lane-list.txt"
+            cargo test --locked --release -p orr_editor --no-default-features --features sprites,collect-dodge --test new_collect_workflow "$name" -- --ignored --exact --test-threads=1 --nocapture 2>&1 | tee "$ROOT/$lane.log"
+            python3 - "$ROOT/$lane.log" <<'PYRESULT'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[1]).read_text()
+          rows = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;', text, re.M)
+          assert rows == [('1','0','0')], rows
+          assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested|without source hiding|source_hiding=false|software GPU unavailable', text, re.I)
+          PYRESULT
+          done
+          python3 - <<'PYEVIDENCE'
+          import hashlib, os, pathlib, re, struct
+          root = pathlib.Path(os.environ['ORR_NEW_COLLECT_EVIDENCE']) / 'captures'
+          expected = [f'generated-collect-editor-{phase}.png' for phase in ['edited','won','restarted']]
+          expected += [f'generated-collect-{kind}-{phase}.png' for kind in ['runtime','export'] for phase in ['initial','idle','won']]
+          assert sorted(path.name for path in (root/'gpu').glob('*.png')) == sorted(expected)
+          for name in expected:
+              data = (root/'gpu'/name).read_bytes()
+              assert len(data) > 32 and data[:8] == b'\x89PNG\r\n\x1a\n', name
+              width, height = struct.unpack('>II', data[16:24])
+              assert width > 0 and height > 0, name
+              print(f'{name}: {width}x{height}, sha256={hashlib.sha256(data).hexdigest()}')
+          for phase in ['initial','idle','won']:
+              assert (root/'gpu'/f'generated-collect-runtime-{phase}.png').read_bytes() == (root/'gpu'/f'generated-collect-export-{phase}.png').read_bytes(), phase
+          for lane in ['cpu','gpu','progress']:
+              for phase in ['initial','partial','won','hazard','timeout','held-restart']:
+                  text = (root/lane/f'generated-collect-{phase}.txt').read_text()
+                  assert not re.search('SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested',text,re.I), "artifact log contains skip/fallback"
+                  assert re.search(r'collect tick: [0-9]+ checksum: 0x[0-9a-f]{16}',text), (lane,phase)
+          for mode in ['win','relaunch']:
+              text = (root/'progress'/f'generated-collect-progress-{mode}.txt').read_text()
+              rows = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;',text,re.M)
+              assert text.count("test result:") == 1, "unexpected artifact progress summary"
+              assert not re.search('SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested',text,re.I), "artifact progress log contains skip/fallback"
+              assert rows == [('1','0','0')], (mode,rows)
+          PYEVIDENCE
+          sha256sum --check "$ROOT/tools.sha256"
+        env:
+          ORR_NEW_COLLECT_EVIDENCE: /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Strict six-crate generated Collect and Arena-only Clippy
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=${ORR_NEW_COLLECT_EVIDENCE:?mandatory external evidence root}
+          export TMPDIR="$ROOT/temporary" XDG_RUNTIME_DIR="$ROOT/xdg-runtime"
+          cargo clippy --locked -p orr_sample -p orr_editor -p orr_remote -p orr_edit -p orr_package -p orr_games --no-default-features --features orr_sample/collect-dodge,orr_sample/collect-sprites,orr_sample/collect-progress,orr_sample/project-create,orr_sample/project-export,orr_sample/player-settings,orr_sample/input-actions,orr_sample/game-ui,orr_editor/collect-dodge,orr_editor/project-ui,orr_editor/animated-models,orr_editor/terrain-physics,orr_editor/navigation,orr_editor/irradiance-probes,orr_remote/collect-dodge,orr_remote/terrain-physics,orr_remote/navigation,orr_games/collect-dodge,orr_games/terrain-physics,orr_games/navigation --all-targets -- -D warnings 2>&1 | tee "$ROOT/clippy.log"
+          cargo clippy --locked -p orr_sample --no-default-features --features project-create --all-targets -- -D warnings 2>&1 | tee "$ROOT/arena-only-clippy.log"
+        env:
+          ORR_NEW_COLLECT_EVIDENCE: /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload generated Arena acceptance evidence
         if: ${{ always() && runner.os == 'Linux' }}
         uses: actions/upload-artifact@v4
@@ -1175,6 +1618,7 @@ jobs:
             ${{ runner.temp }}/collect-progress-tools.sha256
             ${{ runner.temp }}/collect-progress-captures
             /tmp/orr-collect-sprite-${{ github.run_id }}-${{ github.run_attempt }}
+            /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
       # The physics sample's headless benchmark: no window, no GPU. Runs the
