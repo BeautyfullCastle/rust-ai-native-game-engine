@@ -9,11 +9,14 @@ job results and library files. They do not run the Rust targets or emulate the
 GitHub Actions scheduler or native Windows/macOS shells and toolchains.
 """
 
+import hashlib
 import itertools
+import json
 import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -27,8 +30,9 @@ RESULTS = {
     "ANDROID_ARM64_RESULT": "${{ needs['android-arm64'].result }}",
     "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
     "SAMPLE_BUILD_RESULT": "${{ needs['sample-build'].result }}",
+    "LINKED_PREFABS_RESULT": "${{ needs['sample-linked-prefabs'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -118,9 +122,121 @@ class DeterminismWorkflowTests(unittest.TestCase):
             {"os": "macos-latest", "name": "macos-latest-arm64"},
             {"os": "ubuntu-24.04-arm", "name": "ubuntu-24.04-arm64"},
         ])
-        self.assertEqual(self.jobs["sample-build"]["strategy"]["matrix"]["os"], ["ubuntu-latest", "windows-latest"])
+        self.assertEqual(self.jobs["sample-build"]["strategy"]["matrix"]["os"], ["ubuntu-22.04", "windows-latest"])
         self.assertFalse(self.jobs["sample-build"]["strategy"]["fail-fast"])
         self.assert_required_command(self.jobs["sample-build"], SAMPLE_TEST)
+
+    def test_linked_prefab_lane_is_independent_and_mandatory(self):
+        job = self.jobs["sample-linked-prefabs"]
+        self.assert_required(job)
+        self.assertEqual(job["runs-on"], "ubuntu-22.04")
+        self.assertEqual(job["name"], "sample linked prefabs (ubuntu-22.04)")
+        for key in ("needs", "strategy", "env", "defaults", "permissions"):
+            self.assertNotIn(key, job)
+        steps = job["steps"]
+        self.assertEqual(steps[:3], [
+            {"uses": "actions/checkout@v4"},
+            {"uses": "dtolnay/rust-toolchain@stable"},
+            {"uses": "Swatinem/rust-cache@v2"},
+        ])
+        self.assertEqual(len(steps), 9)
+        self.assertEqual(steps[3], {
+            "name": "Install linked-prefab software Vulkan dependency",
+            "run": "sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers",
+        })
+        # Pin the byte-identical migrated command bodies, including the full
+        # seven-crate feature union and pipefail/tee evidence behavior.
+        expected_hashes = {
+            'Linked Collect prefab contracts and feature boundaries':
+                'fa8bd6e5eb9379924354cba2ed6e6eb94713429b4bfb37cfbf183a7f5711db84',
+            'Install linked-prefab namespace acceptance dependency':
+                'e6b3c77e96769b4ff63aee80df79359f9426eb90ab9da2b66598dfba2b9ad51b',
+            'Linked Collect actual editor GPU and source-hidden export':
+                '647f4d2de1252c38c05d3c1ac91e4cc06eb40d899b1526aa5094bc190c745afa',
+            'Strict seven-crate linked prefab and inherited feature Clippy':
+                '25b126a1f4925c1cf966d655a6118d5b7fea91fa92397fd2e8f415164b09f7d3',
+        }
+        self.assertEqual([step["name"] for step in steps[4:8]], list(expected_hashes))
+        for step in steps[4:8]:
+            self.assert_required(step)
+            self.assertEqual(hashlib.sha256(step["run"].encode()).hexdigest(), expected_hashes[step["name"]])
+            allowed = {"name", "run"}
+            if step is not steps[5]:
+                allowed.add("shell")
+                self.assertEqual(step["shell"], "bash")
+            if step is steps[6]:
+                allowed.add("env")
+                self.assertEqual(step["env"], {"WGPU_BACKEND": "vulkan", "ORR_REQUIRE_GPU": "1"})
+            self.assertEqual(set(step), allowed)
+            parsed = subprocess.run(["bash", "-n"], input=step["run"], capture_output=True, text=True, check=False)
+            self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        self.assertEqual(steps[8], {
+            "name": "Upload linked prefab acceptance evidence",
+            "if": "${{ always() }}",
+            "uses": "actions/upload-artifact@v4",
+            "with": {
+                "name": "linked-prefab-evidence-ubuntu-22.04",
+                "path": "target/linked-prefab-evidence/*.log\ntarget/linked-prefab-evidence/*.sha256\n"
+                        "target/linked-prefab-evidence/captures/*.png\ntarget/linked-prefab-evidence/captures/*.txt\n",
+                "if-no-files-found": "error",
+                "retention-days": 7,
+            },
+        })
+        sample = self.jobs["sample-build"]
+        self.assertEqual(sample["name"], "sample build (${{ matrix.os }})")
+        self.assert_no_migrated_linked_prefab_steps(sample)
+
+    def assert_no_migrated_linked_prefab_steps(self, sample):
+        # Reimport acceptance retains its linked-prefabs Cargo feature dependency.
+        migrated_names = {step["name"] for step in self.jobs["sample-linked-prefabs"]["steps"][4:]}
+        self.assertFalse(any(step.get("name") in migrated_names
+                             or "tools/check-linked-prefabs.sh" in step.get("run", "")
+                             for step in sample["steps"]))
+
+    def test_linked_prefab_migration_allows_required_downstream_feature(self):
+        step = {
+            "name": "Required downstream image reimport acceptance",
+            "run": "cargo test --locked -p orr_sample --features image-reimport,linked-prefabs --lib",
+        }
+        self.assert_required(step)
+        self.assert_no_migrated_linked_prefab_steps({"steps": [step]})
+
+    def test_linked_prefab_migration_rejects_renamed_helper_invocation(self):
+        for lane in ("contracts", "gpu"):
+            with self.subTest(lane=lane), self.assertRaises(AssertionError):
+                self.assert_no_migrated_linked_prefab_steps({"steps": [{
+                    "name": "Renamed downstream acceptance",
+                    "run": f"tools/check-linked-prefabs.sh {lane}",
+                }]})
+
+    def test_linked_prefab_inventory_audit_rejects_false_success(self):
+        # Execute only the unchanged script's embedded Python auditor with
+        # synthetic evidence. No Cargo, GPU, binaries, or namespaces are run.
+        script = (WORKFLOW.parents[2] / "tools/check-linked-prefabs.sh").read_text(encoding="utf-8")
+        inventory = json.loads(script.split("<<'JSONINVENTORY'\n", 1)[1].split("\nJSONINVENTORY", 1)[0])
+        auditor = script.split("<<'PYAUDIT'\n", 1)[1].split("\nPYAUDIT", 1)[0]
+        self.assertIn("bwrap --ro-bind / / -- /bin/true", script)
+        self.assertIn("run_test editor-gpu-source-hidden-export 1 0", script)
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "inventory.json"
+            log = Path(directory) / "test.log"
+            data.write_text(json.dumps(inventory), encoding="utf-8")
+            for lane, expected in inventory.items():
+                listing = "".join(f"{name}: test\n" for name in expected["names"])
+                results = "".join(f"test result: ok. {passed} passed; {failed} failed; {ignored} ignored;\n"
+                                  for passed, failed, ignored in expected["summaries"])
+                for mode, contents, passes in (
+                    ("list", listing, True), ("list", listing + "unexpected_test: test\n", False),
+                    ("list", "", False), ("results", results, True), ("results", "", False),
+                    ("results", results + "skipping unavailable GPU\n", False),
+                    ("results", results.replace(" passed;", "0 passed;", 1), False),
+                    ("results", results.replace("test result: ok.", "test result: FAILED.", 1), False),
+                ):
+                    with self.subTest(lane=lane, mode=mode, passes=passes, contents=contents):
+                        log.write_text(contents, encoding="utf-8")
+                        result = subprocess.run([sys.executable, "-c", auditor, str(data), lane, mode, str(log)],
+                                                capture_output=True, text=True, check=False)
+                        self.assertEqual(result.returncode == 0, passes, result.stdout + result.stderr)
 
     def test_simulation_type_guard_and_fixtures_are_required(self):
         native = self.jobs["native"]
@@ -306,7 +422,7 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_only_all_success_passes(self):
-        # 7776 combinations across all five jobs include all four GitHub result
+        # 46656 combinations across all six jobs include all four GitHub result
         # states, empty results, and an unknown state: allow success, rather
         # than denylisting.
         states = ("success", "failure", "cancelled", "skipped", "", "unknown")
@@ -330,6 +446,18 @@ class DeterminismWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("::error::SAMPLE_BUILD_RESULT must be success", result.stdout)
                 self.assertNotIn("passed", result.stdout)
+
+    def test_each_required_job_non_success_fails_closed(self):
+        for name in RESULTS:
+            for status in ("failure", "skipped", "cancelled", "", "unknown", None):
+                results = {key: "success" for key in RESULTS if key != name}
+                if status is not None:
+                    results[name] = status
+                with self.subTest(job=name, status=status):
+                    result = self.run_gate(results)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"::error::{name} must be success", result.stdout)
+                    self.assertNotIn("passed", result.stdout)
 
     def test_unset_results_fail_closed(self):
         for missing in RESULTS:

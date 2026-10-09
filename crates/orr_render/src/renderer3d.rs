@@ -1069,6 +1069,23 @@ mod tests {
     }
 
     #[test]
+    fn globals_layout_includes_point_light_uniforms() {
+        // Match shader3d.wgsl: retain the 256-byte prefix, then two vec4s.
+        // gpu3d upload budgets count two complete uniforms on every draw.
+        assert_eq!(std::mem::offset_of!(Globals, viewport), 240);
+        assert_eq!(std::mem::offset_of!(Globals, point_position_range), 256);
+        assert_eq!(std::mem::offset_of!(Globals, point_color_intensity), 272);
+        #[cfg(not(feature = "irradiance-probes"))]
+        assert_eq!(std::mem::size_of::<Globals>(), 288);
+        #[cfg(feature = "irradiance-probes")]
+        {
+            assert_eq!(std::mem::offset_of!(Globals, irradiance), 288);
+            assert_eq!(std::mem::size_of::<crate::IrradianceUniform>(), 4 * 16 + 64 * 9 * 16);
+            assert_eq!(std::mem::size_of::<Globals>(), 288 + 4 * 16 + 64 * 9 * 16);
+        }
+    }
+
+    #[test]
     fn light_matrix_maps_the_center_to_the_middle_of_the_box() {
         let l = Lighting {
             shadow_center: [3.0, 0.5, -2.0],

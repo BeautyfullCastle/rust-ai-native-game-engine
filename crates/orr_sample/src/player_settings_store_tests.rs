@@ -426,6 +426,9 @@ fn lock_contention_is_nonblocking_and_stable_inode_survives_failure() {
     ));
     assert_eq!(files(&store), original);
     assert_eq!(fs::metadata(store.paths().lock()).unwrap().ino(), inode);
+    // End this intentional contender even if an unrelated test's pre-exec
+    // child inherited its descriptor. A close-only release can outlive it.
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock).unwrap();
     drop(lock);
     assert_eq!(
         store.commit(&PlayerSettingsV1::default()),
@@ -793,4 +796,290 @@ fn replacing_stable_lock_during_staging_aborts_publication() {
     });
     assert!(matches!(result, CommitOutcome::NotPublished(_)));
     assert_eq!(files(&store), original);
+}
+
+// Test-only source addition for player_settings_store_tests.rs.
+// A failed pre_exec callback keeps ownership/reaping inside Command::spawn.
+struct SettingsPreExecGate {
+    socket: std::os::unix::net::UnixStream,
+    done: std::sync::mpsc::Receiver<Result<i32, String>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SettingsPreExecGate {
+    fn start() -> Result<Self, String> {
+        use std::io::Read;
+        use std::os::unix::{net::UnixStream, process::CommandExt};
+        use std::time::Duration;
+
+        let (parent, child) = UnixStream::pair().map_err(|error| error.to_string())?;
+        for socket in [&parent, &child] {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .map_err(|error| error.to_string())?;
+            socket
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .map_err(|error| error.to_string())?;
+        }
+        let mut command = Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
+        command.env_clear().arg("--help");
+        // SAFETY: The child callback performs only read/write syscalls on an
+        // already-created socket and stack-only byte/error operations. It does
+        // not allocate, lock, format, panic, access the environment, or unwind.
+        // Socket timeouts were installed before fork. It always returns an OS
+        // error, so spawn owns and reaps the child without executing a program.
+        unsafe {
+            command.pre_exec(move || {
+                match rustix::io::write(&child, b"R") {
+                    Ok(1) => (),
+                    Ok(_) => {
+                        return Err(std::io::Error::from_raw_os_error(
+                            rustix::io::Errno::IO.raw_os_error(),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(std::io::Error::from_raw_os_error(error.raw_os_error()));
+                    }
+                }
+                let mut release = [0_u8];
+                match rustix::io::read(&child, &mut release[..]) {
+                    Ok(1) if release == *b"G" => Err(std::io::Error::from_raw_os_error(
+                        rustix::io::Errno::CANCELED.raw_os_error(),
+                    )),
+                    Ok(_) => Err(std::io::Error::from_raw_os_error(
+                        rustix::io::Errno::IO.raw_os_error(),
+                    )),
+                    Err(error) => Err(std::io::Error::from_raw_os_error(error.raw_os_error())),
+                }
+            });
+        }
+        let (complete, done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = match command.spawn() {
+                Err(error) => error
+                    .raw_os_error()
+                    .ok_or_else(|| format!("spawn returned a non-OS error: {error}")),
+                Ok(mut unexpected) => {
+                    // Defensive ownership cleanup if the fixture is changed to
+                    // allow exec: terminate/reap only the Child returned here.
+                    let kill = unexpected.kill();
+                    let wait = unexpected.wait();
+                    Err(format!(
+                        "pre_exec unexpectedly allowed exec: {kill:?}; {wait:?}"
+                    ))
+                }
+            };
+            drop(command);
+            let _ = complete.send(result);
+        });
+        let mut gate = Self {
+            socket: parent,
+            done,
+            worker: Some(worker),
+        };
+        let mut ready = [0_u8];
+        gate.socket
+            .read_exact(&mut ready)
+            .map_err(|error| format!("child readiness: {error}"))?;
+        if ready != *b"R" {
+            return Err("child sent an invalid readiness byte".into());
+        }
+        Ok(gate)
+    }
+
+    fn await_spawn(&mut self) -> Result<i32, String> {
+        if self.worker.is_none() {
+            return Err("spawn was already joined".into());
+        }
+        let outcome = self.done.recv_timeout(std::time::Duration::from_secs(15));
+        // A timeout fails the fixture; never convert it into a lock retry or an
+        // unbounded join. Drop shuts down the socket and makes one cleanup wait.
+        if matches!(outcome, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+            return Err("pre_exec worker exceeded its completion deadline".into());
+        }
+        self.worker
+            .take()
+            .unwrap()
+            .join()
+            .map_err(|_| "pre_exec worker panicked".to_owned())?;
+        outcome.map_err(|error| error.to_string())?
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        let release = self.socket.write_all(b"G");
+        // shutdown, unlike close alone, also wakes the peer when a copy of
+        // the parent's endpoint is present in the forked descriptor table.
+        let _ = self.socket.shutdown(std::net::Shutdown::Write);
+        let outcome = self.await_spawn();
+        release.map_err(|error| format!("child release: {error}"))?;
+        let errno = outcome?;
+        if errno != rustix::io::Errno::CANCELED.raw_os_error() {
+            return Err(format!(
+                "child exited before controlled release: errno {errno}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SettingsPreExecGate {
+    fn drop(&mut self) {
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
+        if self.worker.is_some() {
+            let _ = self.await_spawn();
+        }
+    }
+}
+
+#[test]
+fn commit_releases_lock_before_unrelated_pre_exec_child_exits() {
+    let (_root, store) = sandbox();
+    let mut child = None;
+    let mut during_commit = None;
+    let mut during_bytes_unchanged = false;
+    let first = linux::commit(store.paths(), &PlayerSettingsV1::default(), |point| {
+        if point == "before-publication" {
+            child = Some(SettingsPreExecGate::start()?);
+            let before = files(&store);
+            during_commit = Some(store.commit(&mouse()));
+            during_bytes_unchanged = files(&store) == before;
+        }
+        Ok(())
+    });
+    // The second attempt is deliberately made BEFORE releasing the child. A
+    // known cancellation result below proves its socket did not time out first.
+    let second = store.commit(&mouse());
+    let cleanup = child
+        .ok_or_else(|| "before-publication did not reach the child barrier".to_owned())
+        .and_then(SettingsPreExecGate::finish);
+
+    // Reap the controlled child before any assertion can unwind the test.
+    assert_eq!(cleanup, Ok(()));
+    assert_eq!(first, CommitOutcome::Published);
+    assert!(matches!(
+        during_commit,
+        Some(CommitOutcome::NotPublished(ref reason))
+            if reason.contains("settings are locked or locking is unavailable")
+                && reason.contains("os error 11")
+    ));
+    assert!(during_bytes_unchanged);
+    assert_eq!(second, CommitOutcome::Published);
+    assert_eq!(store.load().settings, mouse());
+    let backup: PlayerSettingsV1 =
+        serde_json::from_slice(&fs::read(store.paths().backup()).unwrap()).unwrap();
+    assert_eq!(backup, PlayerSettingsV1::default());
+}
+
+#[test]
+fn failed_commits_release_lock_before_unrelated_pre_exec_child_exits() {
+    for point in [
+        "primary-write",
+        "before-publication",
+        "after-publication",
+        "directory-sync",
+    ] {
+        let (_root, store) = sandbox();
+        put(
+            &store,
+            &bytes(&PlayerSettingsV1::default()),
+            Some(&bytes(&PlayerSettingsV1::default())),
+        );
+        let before = files(&store);
+        let injected = format!("injected {point}");
+        let mut child = None;
+        let mut during_commit = None;
+        let first = linux::commit(store.paths(), &mouse(), |at| {
+            if at == point {
+                child = Some(SettingsPreExecGate::start()?);
+                during_commit = Some(store.commit(&PlayerSettingsV1::default()));
+                return Err(injected.clone());
+            }
+            Ok(())
+        });
+        let after_failure = files(&store);
+        let loaded_after_failure = store.load();
+        // This is an independent request to select defaults after inspecting
+        // the saved state, not an automatic retry of the uncertain mouse save.
+        let second = store.commit(&PlayerSettingsV1::default());
+        let cleanup = child
+            .ok_or_else(|| format!("{point} did not reach the child barrier"))
+            .and_then(SettingsPreExecGate::finish);
+
+        // The child's controlled cancellation must be observed before any
+        // assertion, so an early timeout cannot masquerade as lock release.
+        assert_eq!(cleanup, Ok(()), "{point}");
+        assert!(
+            matches!(
+                during_commit,
+                Some(CommitOutcome::NotPublished(ref reason))
+                    if reason.contains("settings are locked or locking is unavailable")
+                        && reason.contains("os error 11")
+            ),
+            "{point}"
+        );
+        if matches!(point, "primary-write" | "before-publication") {
+            assert_eq!(first, CommitOutcome::NotPublished(injected), "{point}");
+            assert_eq!(after_failure, before, "{point}");
+            assert_eq!(
+                loaded_after_failure.settings,
+                PlayerSettingsV1::default(),
+                "{point}"
+            );
+        } else {
+            assert!(
+                matches!(first, CommitOutcome::PublishedDurabilityUncertain(ref reason)
+                    if reason.contains(&injected)),
+                "{point}: {first:?}"
+            );
+            assert_eq!(loaded_after_failure.settings, mouse(), "{point}");
+        }
+        assert_eq!(second, CommitOutcome::Published, "{point}");
+        assert_eq!(
+            store.load().settings,
+            PlayerSettingsV1::default(),
+            "{point}"
+        );
+    }
+}
+
+#[test]
+fn unwound_commit_releases_lock_before_unrelated_pre_exec_child_exits() {
+    let (_root, store) = sandbox();
+    put(
+        &store,
+        &bytes(&PlayerSettingsV1::default()),
+        Some(&bytes(&PlayerSettingsV1::default())),
+    );
+    let before = files(&store);
+    let mut child = None;
+    let mut during_commit = None;
+    let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        linux::commit(store.paths(), &mouse(), |point| {
+            if point == "before-publication" {
+                child = Some(SettingsPreExecGate::start()?);
+                during_commit = Some(store.commit(&mouse()));
+                // This panic is on the parent test thread. The pre_exec child
+                // executes only the approved socket/error callback.
+                panic!("injected settings commit unwind");
+            }
+            Ok(())
+        })
+    }));
+    let after_unwind = files(&store);
+    let second = store.commit(&mouse());
+    let cleanup = child
+        .ok_or_else(|| "unwind did not reach the child barrier".to_owned())
+        .and_then(SettingsPreExecGate::finish);
+
+    assert_eq!(cleanup, Ok(()));
+    assert!(first.is_err(), "the parent commit must unwind");
+    assert_eq!(after_unwind, before);
+    assert!(matches!(
+        during_commit,
+        Some(CommitOutcome::NotPublished(ref reason))
+            if reason.contains("settings are locked or locking is unavailable")
+                && reason.contains("os error 11")
+    ));
+    assert_eq!(second, CommitOutcome::Published);
+    assert_eq!(store.load().settings, mouse());
 }
