@@ -437,6 +437,9 @@ fn wait(h: &mut Harness<'_, EditorApp>, label: &str, ready: impl Fn(&EditorApp) 
     }
 }
 fn settle(h: &mut Harness<'_, EditorApp>) {
+    // Layout frames can ingest late host notifications and invalidate the
+    // sprite/GUID join. Check the final painted frame after layout advances.
+    h.run_steps(3);
     wait(h, "coherent scene and presentation", |app| {
         app.editor.yard_rows_coherent()
             && app
@@ -444,7 +447,6 @@ fn settle(h: &mut Harness<'_, EditorApp>) {
                 .snapshot()
                 .is_some_and(|s| s.timeline().is_some() == app.editor.is_playing_mode())
     });
-    h.run_steps(3);
 }
 fn open_editor(root: &Path, gpu: bool) -> Harness<'static, EditorApp> {
     let p = open(root);
@@ -606,6 +608,131 @@ fn editor_workflow(root: &Path, gpu: bool, captures: &Path) -> u64 {
     );
     edited
 }
+/// A real history notification on the last layout frame must not make
+/// settlement return a frame where the production sprite fence hides actors.
+fn assert_late_history_settle(root: &Path) {
+    use std::{cell::Cell, rc::Rc};
+
+    let prepared = open(root);
+    let mut editor = Editor::start(&HostSpec::PreparedCollect {
+        scene: prepared.path().into(),
+        text: prepared.scene().text().into(),
+        listen: None,
+        debug_hooks: false,
+    })
+    .unwrap();
+    editor.sync();
+    let inject_frame = Rc::new(Cell::new(None::<u64>));
+    let injected = Rc::new(Cell::new(false));
+    let inject_in_ui = inject_frame.clone();
+    let injected_in_ui = injected.clone();
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut h = Harness::builder()
+        .with_size([1400.0, 1000.0])
+        .build_ui_state(
+            move |ui, app: &mut EditorApp| {
+                let fence_this_frame = inject_in_ui.get() == Some(ui.ctx().cumulative_frame_nr());
+                if fence_this_frame {
+                    let checksum = app.editor.checksum();
+                    let rows = app.editor.rows().len();
+                    let bodies = app.editor.bodies().len();
+                    // Like a delayed Save history note, resubscribe sends the
+                    // real host's current notification before its RPC reply.
+                    // Repeat for every egui pass of this one frame so a layout
+                    // discard cannot make the fixture depend on scheduling.
+                    app.editor
+                        .host_call(
+                            "watch.subscribe",
+                            serde_json::json!({"topics": ["history"]}),
+                        )
+                        .expect("publish a current history notification");
+                    assert!(!app.editor.yard_rows_coherent());
+                    assert_eq!(app.editor.checksum(), checksum);
+                    assert_eq!(app.editor.rows().len(), rows);
+                    assert_eq!(app.editor.bodies().len(), bodies);
+                    injected_in_ui.set(true);
+                }
+                eframe::App::ui(app, ui, &mut frame);
+                if fence_this_frame {
+                    // The normal pump posts a replacement row request only
+                    // after ingesting replies. This pass must remain hidden.
+                    assert!(!app.editor.yard_rows_coherent());
+                    for guid in app
+                        .sprites
+                        .bindings
+                        .as_ref()
+                        .unwrap()
+                        .document()
+                        .bindings
+                        .keys()
+                    {
+                        assert_eq!(app.sprites.sampled_region(&app.editor, guid), None);
+                    }
+                }
+            },
+            EditorApp::new(editor, None),
+        );
+    let ctx = h.ctx.clone();
+    orr_editor::project::install_collect_presentation(h.state_mut(), prepared, &ctx);
+    settle(&mut h);
+    let checksum = h.state().editor.checksum();
+    let regions: BTreeMap<_, _> = h
+        .state()
+        .sprites
+        .bindings
+        .as_ref()
+        .unwrap()
+        .document()
+        .bindings
+        .keys()
+        .map(|guid| {
+            (
+                guid.clone(),
+                h.state()
+                    .sprites
+                    .sampled_region(&h.state().editor, guid)
+                    .unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(regions.len(), 4);
+    // No queued events: this is the fourth forthcoming Harness frame. The
+    // old helper tests frame one, then returns frame four without rechecking.
+    inject_frame.set(Some(h.ctx.cumulative_frame_nr() + 3));
+    settle(&mut h);
+    assert!(
+        injected.get(),
+        "the real history boundary must be exercised"
+    );
+    assert!(
+        h.state().editor.yard_rows_coherent(),
+        "settle must return its checked frame"
+    );
+    assert_eq!(h.state().editor.checksum(), checksum);
+    for (guid, region) in &regions {
+        assert_eq!(
+            h.state().sprites.sampled_region(&h.state().editor, guid),
+            Some(*region)
+        );
+    }
+    let textures = h.ctx.tex_manager();
+    let textures = textures.read();
+    let painted = h
+        .output()
+        .shapes
+        .iter()
+        .filter(|shape| {
+            matches!(&shape.shape, egui::Shape::Mesh(mesh)
+            if textures.meta(mesh.texture_id).is_some_and(|meta| meta.name.starts_with("sprite:")))
+        })
+        .count();
+    assert_eq!(
+        painted,
+        regions.len(),
+        "the final checked output paints every sprite"
+    );
+}
+
 type Image = (u32, u32, Vec<u8>);
 fn read_png(path: &Path) -> Image {
     let mut reader = png::Decoder::new(fs::File::open(path).unwrap())
@@ -907,6 +1034,9 @@ fn retain(work: &Workflow) {
 fn workflow(gpu: bool) {
     let work = Workflow::new();
     let (project, _) = assert_reproducible(&work);
+    if !gpu {
+        assert_late_history_settle(&project);
+    }
     let checksum = editor_workflow(&project, gpu, &work.root.path().join("captures"));
     export_and_relocate(&work, &project, checksum, gpu);
     retain(&work);
