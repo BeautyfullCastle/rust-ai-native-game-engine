@@ -188,7 +188,7 @@ fn package_install_failure_is_not_published_or_replaced_with_fixture_lock() {
         &options,
         |name, stage| {
             if name == "before-install" {
-                fs::remove_file(stage.join("source/lantern_keeper.png")).unwrap();
+                fs::remove_file(stage.join("source/sample-sprites/lantern_keeper.png")).unwrap();
             }
             Ok(())
         },
@@ -668,7 +668,11 @@ mod collect {
             Some(&progress),
             |stage, root| {
                 if stage == "before-install" {
-                    fs::write(root.join("source/lantern_keeper.png"), b"corrupt").unwrap();
+                    fs::write(
+                        root.join("source/sample-sprites/lantern_keeper.png"),
+                        b"corrupt",
+                    )
+                    .unwrap();
                 }
                 Ok(())
             },
@@ -678,4 +682,174 @@ mod collect {
         assert!(!temp.path().join("output").exists());
         assert_no_stages(temp.path());
     }
+}
+
+#[cfg(feature = "collect-ui")]
+mod collect_ui_template_tests {
+    use super::*;
+    use crate::collect_project::{PreparedProject, ProgressSupport, SpriteSupport};
+    const ID: &str = "12345678-1234-4234-8234-123456789abc";
+    fn opts(root: &Path, name: &str) -> CreateOptions {
+        CreateOptions {
+            template: COLLECT_UI_TEMPLATE.into(),
+            ..options(root, name, "ui-seed")
+        }
+    }
+    #[test]
+    fn ui_profile_installs_exact_font_license_and_document_closure() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = create_collect(&opts(temp.path(), "a"), ID).unwrap();
+        let b = create_collect(&opts(temp.path(), "b"), ID).unwrap();
+        assert_eq!(files(&a.output), files(&b.output));
+        let before = files(&a.output);
+        let project = orr_package::Project::open(&a.output, compiled_runtime()).unwrap();
+        let lock = project.verify().unwrap();
+        assert_eq!(lock.packages.len(), 2);
+        assert_eq!(lock.direct.len(), 2);
+        for (name, bytes) in ui_template::SOURCE.iter().skip(1) {
+            assert_eq!(
+                project.read_asset(ui_template::PACKAGE, name).unwrap(),
+                *bytes
+            );
+        }
+        let admitted = PreparedProject::open_with_ui(
+            &a.output,
+            ProgressSupport::MetadataOnly,
+            SpriteSupport::Supported,
+            true,
+        )
+        .unwrap();
+        assert_eq!(admitted.progress().unwrap().game_id, ID);
+        assert_eq!(
+            admitted.ui().unwrap().document,
+            crate::authored_ui::Document::default_collect()
+        );
+        assert_eq!(admitted.scene().frame().checksum(), a.initial_checksum);
+        assert!(PreparedProject::open_with_presentation(
+            &a.output,
+            ProgressSupport::MetadataOnly,
+            SpriteSupport::Supported
+        )
+        .is_err());
+        assert_eq!(files(&a.output), before);
+        let old = CreateOptions {
+            template: COLLECT_TEMPLATE.into(),
+            ..opts(temp.path(), "old")
+        };
+        create_collect(&old, ID).unwrap();
+        let old_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(old.output.join("orr.project.json")).unwrap())
+                .unwrap();
+        assert!(old_manifest["entry"].get("ui").is_none());
+        assert!(!old.output.join("level.ui.json").exists());
+        assert_ne!(
+            a.entity_guids,
+            Scene::parse(
+                &fs::read_to_string(old.output.join("level.scene.yaml")).unwrap(),
+                &crate::collect_project::types()
+            )
+            .unwrap()
+            .entities
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        );
+        let c = create_collect(
+            &opts(temp.path(), "other-id"),
+            "12345678-1234-4234-8234-123456789abd",
+        )
+        .unwrap();
+        assert_eq!(a.entity_guids, c.entity_guids);
+        assert_eq!(a.initial_checksum, c.initial_checksum);
+        assert_eq!(
+            fs::read(a.output.join("level.ui.json")).unwrap(),
+            fs::read(c.output.join("level.ui.json")).unwrap()
+        );
+
+        assert_eq!(
+            orr_package::Project::open(&old.output, compiled_runtime())
+                .unwrap()
+                .verify()
+                .unwrap()
+                .packages
+                .len(),
+            1
+        );
+        assert_no_stages(temp.path());
+    }
+    #[test]
+    fn only_exact_bundled_font_gets_profile_size_exception() {
+        let font = ui_template::SOURCE[1].1;
+        assert!(ui_template::is_bundled_font(font));
+        assert_eq!(
+            file_limit(Path::new("OrreryKoreanUI.otf"), font, true),
+            ui_template::FONT_BYTES
+        );
+        assert_eq!(
+            file_limit(Path::new("other.otf"), font, true),
+            MAX_FILE_BYTES
+        );
+        assert_eq!(
+            file_limit(Path::new("OrreryKoreanUI.otf"), font, false),
+            MAX_FILE_BYTES
+        );
+        let mut corrupt = font.to_vec();
+        corrupt[42] ^= 1;
+        assert_eq!(
+            file_limit(Path::new("OrreryKoreanUI.otf"), &corrupt, true),
+            MAX_FILE_BYTES
+        );
+        let temp = tempfile::tempdir().unwrap();
+        assert!(
+            write_profile_file(&temp.path().join("OrreryKoreanUI.otf"), &corrupt, true).is_err()
+        );
+        assert!(!temp.path().join("OrreryKoreanUI.otf").exists());
+    }
+    #[test]
+    fn ui_stage_corruption_and_invalid_identity_leave_no_output() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(create_collect(&opts(temp.path(), "bad-id"), "bad").is_err());
+        for (index, target) in [
+            "source/korean-game-ui/OrreryKoreanUI.otf",
+            "source/korean-game-ui/OFL.txt",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let progress = orr_package::ProjectProgress {
+                schema: 1,
+                game_id: ID.into(),
+                profile: orr_package::ProgressProfile::CollectDodgeHighscoreV1,
+            };
+            let opt = opts(temp.path(), &format!("bad-{index}"));
+            let result = create_transaction(
+                &opt,
+                Some(&progress),
+                |stage, root| {
+                    if stage == "before-install" {
+                        fs::write(root.join(target), b"corrupt").unwrap();
+                    }
+                    Ok(())
+                },
+                publish_no_replace,
+            );
+            assert!(result.is_err());
+            assert!(!opt.output.exists());
+        }
+        assert_no_stages(temp.path());
+    }
+}
+
+#[cfg(all(feature = "collect-dodge", not(feature = "collect-ui")))]
+#[test]
+fn ui_template_requires_explicit_compiled_ui_before_creating_stage() {
+    let temp = tempfile::tempdir().unwrap();
+    let opt = CreateOptions {
+        template: COLLECT_UI_TEMPLATE.into(),
+        ..options(temp.path(), "unsupported-ui", "seed")
+    };
+    let error = create_collect(&opt, "12345678-1234-4234-8234-123456789abc").unwrap_err();
+    assert!(error.contains("requires collect-ui feature"));
+    assert!(!opt.output.exists());
+    assert_no_stages(temp.path());
 }

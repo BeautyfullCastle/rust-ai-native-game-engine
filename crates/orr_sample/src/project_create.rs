@@ -1,4 +1,4 @@
-//! Offline creation of one bounded, versioned Arena starter on Linux.
+//! Offline creation of closed, versioned Arena and opt-in Collect starters on Linux.
 //!
 //! Package installation and runtime admission remain the existing authorities.
 //! Publication never replaces a destination. Ordinary errors clean only the owned
@@ -8,6 +8,8 @@ mod collect_template;
 mod template;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "collect-ui")]
+mod ui_template;
 
 use crate::{
     project_publish::publish_no_replace,
@@ -24,6 +26,7 @@ use std::{
 
 pub const TEMPLATE: &str = template::ID;
 pub const COLLECT_TEMPLATE: &str = "collect-dodge-2d-v1";
+pub const COLLECT_UI_TEMPLATE: &str = "collect-dodge-ui-2d-v1";
 pub const MAX_SEED_BYTES: usize = 128;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
@@ -63,8 +66,8 @@ pub fn create_collect(options: &CreateOptions, game_id: &str) -> Result<CreateRe
         profile: orr_package::ProgressProfile::CollectDodgeHighscoreV1,
     };
     progress.validate()?;
-    if options.template != COLLECT_TEMPLATE {
-        return Err("expected collect-dodge-2d-v1 template".into());
+    if options.template != COLLECT_TEMPLATE && options.template != COLLECT_UI_TEMPLATE {
+        return Err("expected collect-dodge-2d-v1 or collect-dodge-ui-2d-v1 template".into());
     }
     create_transaction(options, Some(&progress), |_, _| Ok(()), publish_no_replace)
 }
@@ -83,14 +86,14 @@ fn create_transaction(
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
-    if options.template
-        != if progress.is_some() {
-            COLLECT_TEMPLATE
-        } else {
-            TEMPLATE
-        }
+    let with_ui = options.template == COLLECT_UI_TEMPLATE;
+    if (progress.is_some() && options.template != COLLECT_TEMPLATE && !with_ui)
+        || (progress.is_none() && options.template != TEMPLATE)
     {
         return Err(format!("unsupported template; expected {TEMPLATE}"));
+    }
+    if with_ui && !cfg!(feature = "collect-ui") {
+        return Err("Collect UI template requires collect-ui feature".into());
     }
     if options.seed.is_empty()
         || options.seed.len() > MAX_SEED_BYTES
@@ -120,17 +123,27 @@ fn create_transaction(
     {
         #[cfg(feature = "collect-dodge")]
         {
-            let (scene, sprites) = collect_template::documents(&options.seed)?;
-            let manifest = json_line(&serde_json::json!({"schema":3,"engine":"^0.0.1",
+            let (scene, sprites) =
+                collect_template::documents_for(&options.seed, &options.template)?;
+            let manifest = serde_json::json!({"schema":3,"engine":"^0.0.1",
                 "entry":{"game":"collect-dodge-v1","scene":"level.scene.yaml","sprites":"level.sprites.json"},
-                "progress":progress}))?;
+                "progress":progress});
+            #[cfg(feature = "collect-ui")]
+            let manifest = if with_ui {
+                let mut manifest = manifest;
+                manifest["entry"]["ui"] = ui_template::descriptor();
+                manifest
+            } else {
+                manifest
+            };
+            let manifest = json_line(&manifest)?;
             (
                 scene,
                 sprites,
                 manifest,
                 "level.scene.yaml",
                 "level.sprites.json",
-                collect_template::readme(&options.seed, &progress.game_id),
+                collect_template::readme_for(&options.seed, &progress.game_id, &options.template),
             )
         }
         #[cfg(not(feature = "collect-dodge"))]
@@ -156,67 +169,91 @@ fn create_transaction(
         (sprite_file.into(), json_line(&sprites)?),
         ("README.md".into(), readme.into_bytes()),
     ]);
+    #[cfg(feature = "collect-ui")]
+    if with_ui {
+        expected.insert(
+            "level.ui.json".into(),
+            json_line(&crate::authored_ui::Document::default_collect())?,
+        );
+    }
     for (relative, bytes) in &expected {
         write_new(&project_root.join(relative), bytes)?;
         checkpoint("project-file-written", transaction.path())?;
     }
-    for (relative, bytes) in template::SOURCE {
-        write_new(&source_root.join(relative), bytes)?;
-        checkpoint("source-file-written", transaction.path())?;
+    let sources = vec![(template::PACKAGE, template::SOURCE)];
+    #[cfg(feature = "collect-ui")]
+    let sources = if with_ui {
+        let mut sources = sources;
+        sources.push((ui_template::PACKAGE, ui_template::SOURCE));
+        sources
+    } else {
+        sources
+    };
+    let mut roots = Vec::new();
+    for (name, source) in &sources {
+        let root = source_root.join(name);
+        fs::create_dir(&root).map_err(error)?;
+        for (relative, bytes) in *source {
+            write_profile_file(&root.join(relative), bytes, with_ui)?;
+            checkpoint("source-file-written", transaction.path())?;
+        }
+        roots.push(root);
     }
     checkpoint("before-install", transaction.path())?;
     let project = orr_package::Project::open(&project_root, compiled_runtime()).map_err(error)?;
     let lock = project
-        .install(std::slice::from_ref(&source_root))
+        .install(&roots)
         .map_err(|e| format!("starter package installation: {e}"))?;
     checkpoint("installed", transaction.path())?;
     let verified = project
         .verify()
         .map_err(|e| format!("starter package verification: {e}"))?;
-    if verified != lock {
-        return Err("starter active lock changed after installation".into());
-    }
-    let package = lock
-        .packages
-        .get(template::PACKAGE)
-        .ok_or("starter package missing after installation")?;
-    let bundled_manifest: orr_package::Manifest =
-        serde_json::from_slice(template::SOURCE[0].1).map_err(error)?;
-    let declared: BTreeSet<_> = template::SOURCE
-        .iter()
-        .skip(1)
-        .map(|(name, _)| (*name).to_owned())
-        .collect();
-    if lock.packages.len() != 1
-        || lock.direct.len() != 1
-        || lock.direct.get(template::PACKAGE) != Some(&bundled_manifest.version)
-        || package.manifest != bundled_manifest
-        || package.manifest.files != declared
+    if verified != lock
+        || lock.packages.len() != sources.len()
+        || lock.direct.len() != sources.len()
     {
-        return Err("installed starter package differs from the closed bundle".into());
+        return Err("starter active lock differs from the closed bundle".into());
     }
-    // Capture expected serialized output from the package manager's authoritative
-    // result. The generator neither computes package identities nor writes locks.
     expected.insert("orr.packages.lock.json".into(), json_line(&lock)?);
-    let object = format!(".orr/packages/objects/{}", package.digest);
-    expected.insert(
-        format!("{object}/orr.package.json"),
-        serde_json::to_vec_pretty(&package.manifest).map_err(error)?,
-    );
-    for (relative, bytes) in template::SOURCE.iter().skip(1) {
-        expected.insert(format!("{object}/{relative}"), bytes.to_vec());
+    for (name, source) in sources {
+        let package = lock
+            .packages
+            .get(name)
+            .ok_or("starter package missing after installation")?;
+        let bundled_manifest: orr_package::Manifest =
+            serde_json::from_slice(source[0].1).map_err(error)?;
+        let declared: BTreeSet<_> = source
+            .iter()
+            .skip(1)
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        if lock.direct.get(name) != Some(&bundled_manifest.version)
+            || package.manifest != bundled_manifest
+            || package.manifest.files != declared
+        {
+            return Err("installed starter package differs from the closed bundle".into());
+        }
+        let object = format!(".orr/packages/objects/{}", package.digest);
+        expected.insert(
+            format!("{object}/orr.package.json"),
+            serde_json::to_vec_pretty(&package.manifest).map_err(error)?,
+        );
+        for (relative, bytes) in source.iter().skip(1) {
+            expected.insert(format!("{object}/{relative}"), bytes.to_vec());
+        }
     }
     fs::remove_dir_all(&source_root).map_err(error)?;
     checkpoint("before-validation", transaction.path())?;
-    verify_stage(&project_root, &expected)?;
+    verify_profile_stage(&project_root, &expected, with_ui)?;
     let initial_checksum = if progress.is_some() {
         #[cfg(feature = "collect-dodge")]
         {
             use crate::collect_project::{PreparedProject, ProgressSupport, SpriteSupport};
-            PreparedProject::open_with_presentation(
+            PreparedProject::open_with_ui(
                 &project_root,
                 ProgressSupport::MetadataOnly,
                 SpriteSupport::Supported,
+                with_ui,
             )?
             .scene()
             .frame()
@@ -232,7 +269,7 @@ fn create_transaction(
             .checksum()
     };
     checkpoint("before-publish", transaction.path())?;
-    verify_stage(&project_root, &expected)?;
+    verify_profile_stage(&project_root, &expected, with_ui)?;
     // Recheck ordinary parent changes. RENAME_NOREPLACE itself closes concurrent
     // destination creation, including an empty directory or dangling symlink.
     if destination(&options.output)? != output {
@@ -260,7 +297,23 @@ fn json_line(value: &impl serde::Serialize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if bytes.len() > MAX_FILE_BYTES {
+    write_profile_file(path, bytes, false)
+}
+fn file_limit(path: &Path, bytes: &[u8], with_ui: bool) -> usize {
+    #[cfg(feature = "collect-ui")]
+    if with_ui
+        && path
+            .file_name()
+            .is_some_and(|name| name == "OrreryKoreanUI.otf")
+        && ui_template::is_bundled_font(bytes)
+    {
+        return ui_template::FONT_BYTES;
+    }
+    let _ = (path, bytes, with_ui);
+    MAX_FILE_BYTES
+}
+fn write_profile_file(path: &Path, bytes: &[u8], with_ui: bool) -> Result<(), String> {
+    if bytes.len() > file_limit(path, bytes, with_ui) {
         return Err("starter file exceeds byte limit".into());
     }
     let mut file = OpenOptions::new()
@@ -314,12 +367,16 @@ fn destination(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn verify_stage(root: &Path, expected: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+fn verify_profile_stage(
+    root: &Path,
+    expected: &BTreeMap<String, Vec<u8>>,
+    with_ui: bool,
+) -> Result<(), String> {
     let root_metadata = fs::symlink_metadata(root).map_err(error)?;
     if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
         return Err("starter stage root must be a nonsymlink directory".into());
     }
-    if expected.len() > MAX_FILES
+    if expected.len() > if with_ui { 17 } else { MAX_FILES }
         || expected.values().map(Vec::len).sum::<usize>() > MAX_TOTAL_BYTES
     {
         return Err("starter payload exceeds transaction limits".into());
@@ -350,7 +407,9 @@ fn verify_stage(root: &Path, expected: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 let name = relative.to_str().ok_or("stage path must be UTF-8")?;
                 let bytes = expected.get(name).ok_or("unexpected starter stage file")?;
                 let metadata = fs::symlink_metadata(&path).map_err(error)?;
-                if metadata.len() != bytes.len() as u64 || bytes.len() > MAX_FILE_BYTES {
+                if metadata.len() != bytes.len() as u64
+                    || bytes.len() > file_limit(&path, bytes, with_ui)
+                {
                     return Err("starter stage file size changed".into());
                 }
                 let mut actual = Vec::new();
@@ -359,7 +418,7 @@ fn verify_stage(root: &Path, expected: &BTreeMap<String, Vec<u8>>) -> Result<(),
                     .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
                     .open(&path)
                     .map_err(error)?
-                    .take(MAX_FILE_BYTES as u64 + 1)
+                    .take(file_limit(&path, bytes, with_ui) as u64 + 1)
                     .read_to_end(&mut actual)
                     .map_err(error)?;
                 if actual != *bytes || !seen_files.insert(name.to_owned()) {
