@@ -731,6 +731,7 @@ impl ModelPanel {
     }
 
     fn begin_material_draft(&mut self, editor: &Editor, guid: orr_reflect::Guid, entity: orr_ecs::Entity) -> Result<(), String> {
+        if !editor.material_history_ready() { return Err("Wait for scene history before editing material".into()); }
         let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
         let binding = bindings.document().bindings.get(&guid.to_string()).ok_or("selected GUID has no model binding")?;
         if binding.kind != ModelKind::Static { return Err("material authoring requires a static model binding".into()); }
@@ -754,7 +755,7 @@ impl ModelPanel {
     fn material_draft_is_current(&self, editor: &Editor, draft: &MaterialOverrideDraft) -> bool {
         let Some(bindings) = &self.bindings else { return false };
         let selected = editor.selected_guids();
-        if !self.editable(editor) || selected.len() != 1 || selected[0] != draft.guid || editor.sim().scene_path != draft.scene
+        if !editor.material_history_ready() || !self.editable(editor) || selected.len() != 1 || selected[0] != draft.guid || editor.sim().scene_path != draft.scene
             || editor.checksum() != draft.scene_checksum
             || !Arc::ptr_eq(&editor.material_authoring_generation(), &draft.authoring_generation)
             || !Arc::ptr_eq(&bindings.generation_token(), &draft.generation) || bindings.path != draft.sidecar { return false; }
@@ -825,7 +826,9 @@ impl ModelPanel {
         // entity cannot inherit the edit; the entity-generation fence below
         // requires an explicit reload when the row returns.
         let target_changed = self.material_draft.as_ref().is_none_or(|draft| draft.guid != guid);
+        let history_ready = editor.material_history_ready();
         if target_changed {
+            if !history_ready { ui.weak("Waiting for scene history"); return; }
             let _ = self.begin_material_draft(editor, guid.clone(), row.entity);
         }
         let Some(mut draft) = self.material_draft.take() else { return };
@@ -853,7 +856,8 @@ impl ModelPanel {
             }
         });
         let current = !self.material_draft_requires_reload && self.material_draft_is_current(editor, &draft);
-        if !current { ui.colored_label(egui::Color32::YELLOW, "Draft is stale. Reload it before applying"); }
+        if !history_ready { ui.weak("Waiting for scene history"); }
+        else if !current { ui.colored_label(egui::Color32::YELLOW, "Draft is stale. Reload it before applying"); }
         let mut action_attempted = false;
         ui.horizontal(|ui| {
             if ui.add_enabled(current, egui::Button::new("Apply material override")).clicked() {
@@ -870,7 +874,7 @@ impl ModelPanel {
         });
         if action_attempted && self.material_draft.is_none() { return; }
         let mut reloaded = false;
-        if !current && ui.button("Reload material draft").clicked() {
+        if !current && ui.add_enabled(history_ready, egui::Button::new("Reload material draft")).clicked() {
             match self.reload(editor) {
                 Ok(()) => {
                     self.material_draft = None;

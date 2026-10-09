@@ -64,6 +64,13 @@ const CLIENTS_EVERY: Duration = Duration::from_millis(500);
 /// Most messages the log keeps.
 const LOG_LIMIT: usize = 200;
 
+#[cfg(feature = "models")]
+#[derive(PartialEq, Eq)]
+struct MaterialHistoryIdentity {
+    entries: Vec<(u64, bool)>,
+    in_tx: bool,
+}
+
 /// The type registry of `PhysGame` (physics types, `PaddleTag`, `Scene`): the
 /// shipped descriptors the inspector draws its widgets from.
 pub fn make_types() -> TypeRegistry {
@@ -195,6 +202,8 @@ pub struct Editor {
     guid_selection: GuidSelection,
     #[cfg(feature = "models")]
     material_authoring_generation: Arc<()>,
+    #[cfg(feature = "models")]
+    material_history_identity: Option<MaterialHistoryIdentity>,
     batch_supported: bool,
     scene_edit_allowed: bool,
     batch_uncertain: bool,
@@ -324,6 +333,8 @@ impl Editor {
             guid_selection: GuidSelection::default(),
             #[cfg(feature = "models")]
             material_authoring_generation: Arc::new(()),
+            #[cfg(feature = "models")]
+            material_history_identity: None,
             batch_supported,
             scene_edit_allowed,
             batch_uncertain: false,
@@ -405,8 +416,27 @@ impl Editor {
 
     fn read_history(&mut self) -> Result<(), String> {
         let r = self.timed_erp_call("history.list", J::Null).map_err(|e| format!("history.list: {e}"))?;
-        self.history = History::from_json(&r);
+        self.set_history(History::from_json(&r));
         Ok(())
+    }
+
+    fn set_history(&mut self, history: History) {
+        #[cfg(feature = "models")]
+        {
+            // History pushes can lag this authoritative reply. Fence semantic
+            // history changes once, including middle-entry undo/redo that a
+            // push's len/last summary cannot distinguish. Saving only changes
+            // dirty, so it must not retire a current material draft.
+            let identity = MaterialHistoryIdentity {
+                entries: history.entries.iter().map(|entry| (entry.id, entry.undone)).collect(),
+                in_tx: history.in_tx,
+            };
+            if self.material_history_identity.as_ref().is_some_and(|previous| previous != &identity) {
+                self.material_authoring_generation = Arc::new(());
+            }
+            self.material_history_identity = Some(identity);
+        }
+        self.history = history;
     }
 
     fn read_rows(&mut self) -> Result<(), String> {
@@ -727,6 +757,11 @@ impl Editor {
         self.material_authoring_generation.clone()
     }
 
+    #[cfg(feature = "models")]
+    pub(crate) fn material_history_ready(&self) -> bool {
+        self.material_history_identity.is_some() && !self.dirty.history && !self.inflight.history
+    }
+
     /// Membership used by hierarchy and viewport highlighting.
     pub fn is_selected(&self, target: &Target) -> bool {
         match target {
@@ -1027,8 +1062,8 @@ impl Editor {
                 }
             }
             "watch.history" => {
-                #[cfg(feature = "models")]
-                { self.material_authoring_generation = Arc::new(()); }
+                // This is an invalidation hint, not a new semantic revision.
+                // Material authoring waits for the full history reply below.
                 let b = |k: &str| params.get(k).and_then(J::as_bool).unwrap_or(false);
                 self.history.can_undo = b("can_undo");
                 self.history.can_redo = b("can_redo");
@@ -1104,8 +1139,18 @@ impl Editor {
             }
             Pend::History => {
                 self.inflight.history = false;
+                #[cfg(feature = "models")]
+                if let Err(error) = &r {
+                    // An unsuccessful refresh cannot admit a draft using
+                    // the last verified identity. Retire it across this
+                    // unknown interval, without adding a retry loop.
+                    if self.material_history_identity.take().is_some() {
+                        self.material_authoring_generation = Arc::new(());
+                    }
+                    self.error(format!("Cannot refresh scene history for material editing: {}", error.message));
+                }
                 if let Ok(v) = r {
-                    self.history = History::from_json(&v);
+                    self.set_history(History::from_json(&v));
                 }
             }
             Pend::State(generation) => {
@@ -2254,7 +2299,7 @@ impl Editor {
         match self.call(method, J::Null) {
             Ok(r) => {
                 if let Some(h) = r.get("history") {
-                    self.history = History::from_json(h);
+                    self.set_history(History::from_json(h));
                     self.sim.dirty = self.history.dirty;
                 }
                 self.mark_edited();
@@ -2717,6 +2762,8 @@ pub fn fp_of_f64(v: f64) -> Option<FP> {
 mod recovery_tests;
 #[cfg(test)]
 mod diagnostics_tests;
+#[cfg(all(test, feature = "models"))]
+mod material_history_tests;
 
 mod gestures;
 #[cfg(test)]

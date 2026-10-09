@@ -36,12 +36,16 @@ jobs:
           cargo test --locked --release -p orr_model_bindings --lib
           cargo test --locked --release -p orr_model_bindings --test material_override_shape
           cargo test --locked --release -p orr_editor --features models --test model_bindings
+          cargo test --locked --release -p orr_editor --features models --lib editor::material_history_tests 2>&1 | tee material-evidence/history-models.log
+          grep -F "test result: ok. 5 passed; 0 failed; 0 ignored;" material-evidence/history-models.log
           cargo test --locked --release -p orr_editor --features models --test material_overrides -- --skip production_main_viewport_changes_after_material_override_edit
       - name: Mixed Room and animation authoring compatibility
         run: |
           set -euo pipefail
           cargo test --locked --release -p orr_model_bindings --features animated-models --test material_override_shape
           cargo test --locked --release -p orr_editor --features room-character,project-create --test model_bindings
+          cargo test --locked --release -p orr_editor --features room-character,project-create --lib editor::material_history_tests 2>&1 | tee material-evidence/history-mixed.log
+          grep -F "test result: ok. 5 passed; 0 failed; 0 ignored;" material-evidence/history-mixed.log
           cargo test --locked --release -p orr_editor --features room-character,project-create --test material_overrides -- --skip production_main_viewport_changes_after_material_override_edit
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --skip character_actual_editor_gpu_three_states
           cargo test --locked --release -p orr_sample --features room-project,project-create --test material_overrides
