@@ -155,6 +155,48 @@ jobs:
         # or replay-verification build.
         run: cargo build -p orr_sim --features hotpatch
 
+  sample-linked-prefabs:
+    name: sample linked prefabs (ubuntu-22.04)
+    # Independent required Linux lane; keep commands and evidence identical to
+    # the former sample-build block. Never reuse binaries from another job.
+    # Pin matches sample-build's bubblewrap-compatible x64 runner; migrate
+    # before 2027-04-17: https://github.com/actions/runner-images/issues/14254
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install linked-prefab software Vulkan dependency
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Linked Collect prefab contracts and feature boundaries
+        shell: bash
+        run: tools/check-linked-prefabs.sh contracts
+      - name: Install linked-prefab namespace acceptance dependency
+        run: sudo apt-get install -y -q bubblewrap
+      - name: Linked Collect actual editor GPU and source-hidden export
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+        run: tools/check-linked-prefabs.sh gpu
+      - name: Strict seven-crate linked prefab and inherited feature Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -p orr_sample -p orr_editor -p orr_remote -p orr_edit -p orr_reflect -p orr_package -p orr_games --no-default-features --features orr_editor/linked-prefabs,orr_sample/linked-prefabs,orr_remote/linked-prefabs,orr_edit/linked-prefabs,orr_reflect/linked-prefabs,orr_sample/collect-ui,orr_editor/collect-ui,orr_sample/collect-dodge,orr_sample/collect-sprites,orr_sample/collect-progress,orr_sample/project-create,orr_sample/project-export,orr_sample/player-settings,orr_sample/input-actions,orr_sample/game-ui,orr_editor/collect-dodge,orr_editor/project-ui,orr_editor/animated-models,orr_editor/terrain-physics,orr_editor/navigation,orr_editor/irradiance-probes,orr_remote/collect-dodge,orr_remote/terrain-physics,orr_remote/navigation,orr_games/collect-dodge,orr_games/terrain-physics,orr_games/navigation --all-targets -- -D warnings 2>&1 | tee "${ORR_LINKED_EVIDENCE:-target/linked-prefab-evidence}/combined-feature-clippy.log"
+      - name: Upload linked prefab acceptance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linked-prefab-evidence-ubuntu-22.04
+          path: |
+            target/linked-prefab-evidence/*.log
+            target/linked-prefab-evidence/*.sha256
+            target/linked-prefab-evidence/captures/*.png
+            target/linked-prefab-evidence/captures/*.txt
+          if-no-files-found: error
+          retention-days: 7
+
   sample-build:
     # View-layer demos, audio, and editor. Build and test on Linux and Windows,
     # plus required Linux software-GPU/window tests; separate from the sim jobs.
@@ -209,38 +251,6 @@ jobs:
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
-      - name: Linked Collect prefab contracts and feature boundaries
-        if: runner.os == 'Linux'
-        shell: bash
-        run: tools/check-linked-prefabs.sh contracts
-      - name: Install linked-prefab namespace acceptance dependency
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y -q bubblewrap
-      - name: Linked Collect actual editor GPU and source-hidden export
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        shell: bash
-        env:
-          WGPU_BACKEND: vulkan
-          ORR_REQUIRE_GPU: "1"
-        run: tools/check-linked-prefabs.sh gpu
-      - name: Strict seven-crate linked prefab and inherited feature Clippy
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo clippy --locked -p orr_sample -p orr_editor -p orr_remote -p orr_edit -p orr_reflect -p orr_package -p orr_games --no-default-features --features orr_editor/linked-prefabs,orr_sample/linked-prefabs,orr_remote/linked-prefabs,orr_edit/linked-prefabs,orr_reflect/linked-prefabs,orr_sample/collect-ui,orr_editor/collect-ui,orr_sample/collect-dodge,orr_sample/collect-sprites,orr_sample/collect-progress,orr_sample/project-create,orr_sample/project-export,orr_sample/player-settings,orr_sample/input-actions,orr_sample/game-ui,orr_editor/collect-dodge,orr_editor/project-ui,orr_editor/animated-models,orr_editor/terrain-physics,orr_editor/navigation,orr_editor/irradiance-probes,orr_remote/collect-dodge,orr_remote/terrain-physics,orr_remote/navigation,orr_games/collect-dodge,orr_games/terrain-physics,orr_games/navigation --all-targets -- -D warnings 2>&1 | tee "${ORR_LINKED_EVIDENCE:-target/linked-prefab-evidence}/combined-feature-clippy.log"
-      - name: Upload linked prefab acceptance evidence
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linked-prefab-evidence-${{ matrix.os }}
-          path: |
-            target/linked-prefab-evidence/*.log
-            target/linked-prefab-evidence/*.sha256
-            target/linked-prefab-evidence/captures/*.png
-            target/linked-prefab-evidence/captures/*.txt
-          if-no-files-found: error
-          retention-days: 7
       - if: runner.os == 'Linux'
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:
@@ -2878,8 +2888,8 @@ jobs:
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
-    # target and the sample graphics/audio/editor matrix must pass the gate.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build]
+    # target, sample graphics/audio/editor matrix, and linked-prefab lane must pass.
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -2892,9 +2902,10 @@ jobs:
           ANDROID_ARM64_RESULT: ${{ needs['android-arm64'].result }}
           BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
+          LINKED_PREFABS_RESULT: ${{ needs['sample-linked-prefabs'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then
@@ -2911,6 +2922,7 @@ jobs:
           echo "Chromium passed native/wasm checkpoint comparisons and required GPU views."
           echo "Both sample-build matrix legs passed their graphics/audio/editor checks,"
           echo "including required Linux software-GPU and Arena native-window smoke tests."
+          echo "The independent linked-prefab contracts, GPU/export, and strict lint lane passed."
           echo "The targets assert the same constants in orr_fp, orr_session,"
           echo "orr_physics, orr_physics3d, orr_games, orr_wasm_bench, and orr_asset_fixture tests."
           echo "No checksum artifacts are exchanged: each target independently"
