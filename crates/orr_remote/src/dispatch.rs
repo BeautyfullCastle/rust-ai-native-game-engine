@@ -227,6 +227,8 @@ pub(crate) fn call<G: Game>(
         "registry.schema" => registry_schema(t, &p),
         "registry.input" => input.map(|i| i.descriptor.clone()).ok_or_else(input_unavailable),
         "registry.types" => Ok(registry_types(t)),
+        #[cfg(feature = "linked-prefabs")]
+        "prefab.list" | "prefab.capture" | "prefab.instantiate" | "prefab.position" | "prefab.revert" | "prefab.update" => linked_prefab_call(t, &p, method, origin),
         "world.query" => world_query(t, &p),
         "world.get" => world_get(t, &p),
         "world.singleton.get" => singleton_get(t, &p),
@@ -476,7 +478,7 @@ fn history_json(doc: &EditorDoc) -> J {
 fn registry_schema<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
     let v = view(t);
     let text = match p.opt_str("type")? {
-        None => v.json_schema(),
+        None => if cfg!(feature = "linked-prefabs") { v.json_schema() } else { v.types().legacy_json_schema() },
         Some(name) => v
             .type_schema(name)
             .ok_or_else(|| RpcError::new(NOT_FOUND, "unknown_type", format!("unknown type '{name}' (see registry.types)")))?,
@@ -946,11 +948,13 @@ fn scene_save<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>, fx
     if t.doc.in_tx() {
         return Err(RpcError::state("tx_open", "a transaction is open; commit or roll it back before saving"));
     }
-    let text = t.doc.save_yaml();
+    let text = t.doc.to_yaml();
     let tmp = path.with_extension("scene.yaml.tmp");
     std::fs::write(&tmp, &text)
         .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| RpcError::new(INTERNAL_ERROR, "io", format!("cannot write {}: {e}", path.display())))?;
+    // Do not mark the document clean before the replacement has succeeded.
+    t.doc.save_yaml();
     if named.is_some() {
         fx.scene_path.clone_from(&named);
     }
@@ -1200,4 +1204,58 @@ pub(crate) fn require_writable_play<G: Game>(t: &mut ErpTarget<'_, G>) -> Result
         return Err(RpcError::state("read_only", "replay viewer is read-only; branch before sending inputs or commands"));
     }
     Ok(())
+}
+
+#[cfg(feature = "linked-prefabs")]
+fn linked_prefab_list(doc: &EditorDoc) -> J {
+    let instances: Vec<J> = doc.scene().prefab_links.iter().map(|(key,link)| json!({
+        "instance": key.to_string(), "source": link.source, "digest": link.digest,
+        "guids": link.guids.iter().map(|(a,b)|(a.to_string(),json!(b.to_string()))).collect::<Map<String,J>>(),
+        "ordinals": link.ordinals.iter().map(|(a,b)|(a.to_string(),json!(b))).collect::<Map<String,J>>(),
+        "position_overrides": link.position_overrides.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    })).collect();
+    json!({"revision":doc.revision(),"instances":instances})
+}
+
+#[cfg(feature = "linked-prefabs")]
+fn linked_prefab_call<G: Game>(t: &mut ErpTarget<'_,G>, p: &P<'_>, method: &str, origin: Origin) -> Result<J,RpcError> {
+    require_edit_mode(t,method)?;
+    let allowed: &[&str] = match method {
+        "prefab.list" => &[],
+        "prefab.capture" => &["selected"],
+        "prefab.instantiate" => &["source","text","expected_revision"],
+        "prefab.position" => &["instance","source_guid","value","expected_revision"],
+        "prefab.revert" => &["instance","source_guid","expected_revision"],
+        "prefab.update" => &["instance","source","digest","text","expected_revision"],
+        _ => unreachable!(),
+    };
+    if p.0.keys().any(|key| !allowed.contains(&key.as_str())) { return Err(RpcError::params("unknown linked prefab parameter")); }
+    if method == "prefab.list" { return Ok(linked_prefab_list(t.doc)); }
+    if method == "prefab.capture" {
+        let selected = p.req_raw("selected")?.as_array().ok_or_else(||RpcError::params("selected must be GUID array"))?;
+        if selected.is_empty() || selected.len()>8 { return Err(RpcError::params("selected requires 1..=8 GUIDs")); }
+        let guids = selected.iter().map(|v| Guid::parse(v.as_str().ok_or_else(||RpcError::params("selected GUID must be string"))?).map_err(RpcError::params)).collect::<Result<Vec<_>,_>>()?;
+        return Ok(json!({"text":t.doc.capture_linked_collect_source(&guids)?,"revision":t.doc.revision()}));
+    }
+    if t.doc.in_tx() { return Err(RpcError::state("tx_open","linked operations require a closed transaction")); }
+    if p.req_u64("expected_revision")? != t.doc.revision() { return Err(RpcError::state("stale_revision","document changed; refresh linked instances")); }
+    if method == "prefab.instantiate" {
+        t.doc.instantiate_linked_collect(p.str("source")?,p.str("text")?,origin)?;
+    } else {
+        let instance = Guid::parse(p.str("instance")?).map_err(RpcError::params)?;
+        match method {
+            "prefab.update" => t.doc.update_linked_collect(&instance,p.str("source")?,p.str("digest")?,p.str("text")?,origin)?,
+            _ => {
+                let source = Guid::parse(p.str("source_guid")?).map_err(RpcError::params)?;
+                if method == "prefab.revert" { t.doc.revert_linked_collect_position(&instance,&source,origin)?; }
+                else {
+                    let ty = component_type(&view(t),"CollectDodgeV1::Actor")?;
+                    let value = decode_value(t,ty,"position",p.req_raw("value")?)?;
+                    let Value::Vec2(position) = value else { return Err(RpcError::params("position must be Vec2")); };
+                    t.doc.override_linked_collect_position(&instance,&source,position,origin)?;
+                }
+            }
+        }
+    }
+    Ok(linked_prefab_list(t.doc))
 }

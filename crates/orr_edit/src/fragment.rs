@@ -227,6 +227,17 @@ impl EditorDoc {
         placement: Option<&FragmentTranslation2D>,
         origin: Origin,
     ) -> Result<FragmentInstance, EditError> {
+        let (instance, ops) = self.plan_fragment(fragment, placement)?;
+        self.apply_atomic_batch("instantiate scene fragment", ops, origin)?;
+        Ok(instance)
+    }
+
+    /// Shared insertion plan; admission and publication remain the caller's job.
+    pub(crate) fn plan_fragment(
+        &self,
+        fragment: &SceneFragment,
+        placement: Option<&FragmentTranslation2D>,
+    ) -> Result<(FragmentInstance, Vec<Op>), EditError> {
         let path = placement
             .map(|p| {
                 check_string(&p.component)?;
@@ -301,8 +312,7 @@ impl EditorDoc {
         if placement.is_some() && matches == 0 {
             return Err(invalid("fragment translation matched no component"));
         }
-        self.apply_atomic_batch("instantiate scene fragment", ops, origin)?;
-        Ok(FragmentInstance { guids })
+        Ok((FragmentInstance { guids }, ops))
     }
 }
 

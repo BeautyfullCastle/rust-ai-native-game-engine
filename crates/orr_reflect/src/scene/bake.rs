@@ -94,6 +94,9 @@ impl SceneIndex {
 /// Why baking or unbaking failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BakeError {
+    /// Linked prefab metadata does not agree with the flattened scene.
+    #[cfg(feature = "linked-prefabs")]
+    InvalidPrefabLinks(String),
     /// The scene or registry names a type the `Frame` does not have.
     NotInFrame(String),
     /// The scene names a type the registry does not know.
@@ -119,6 +122,8 @@ pub enum BakeError {
 impl std::fmt::Display for BakeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "linked-prefabs")]
+            BakeError::InvalidPrefabLinks(why) => write!(f, "invalid prefab links: {why}"),
             BakeError::NotInFrame(n) => write!(f, "type '{n}' is not registered in the frame"),
             BakeError::UnknownType(n) => write!(f, "unknown type '{n}'"),
             BakeError::Value { at, error } => write!(f, "{at}: {error}"),
@@ -131,6 +136,8 @@ impl std::fmt::Display for BakeError {
 impl std::error::Error for BakeError {}
 
 pub(super) fn bake(scene: &Scene, reg: &TypeRegistry, frame: &mut Frame) -> Result<SceneIndex, BakeError> {
+    #[cfg(feature = "linked-prefabs")]
+    scene.validate_prefab_links(reg).map_err(BakeError::InvalidPrefabLinks)?;
     // Check every type first, so a failure leaves the frame untouched.
     for (name, _) in &scene.singletons {
         let t = reg.get(name).filter(|t| t.kind() == TypeKind::Singleton).ok_or_else(|| BakeError::UnknownType(name.clone()))?;

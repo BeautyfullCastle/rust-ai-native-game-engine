@@ -48,6 +48,8 @@ mod diff;
 mod doc;
 mod error;
 mod fragment;
+#[cfg(feature = "linked-prefabs")]
+mod linked_prefab;
 mod op;
 mod play;
 mod proposal;

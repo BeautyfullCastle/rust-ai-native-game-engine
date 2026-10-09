@@ -111,11 +111,15 @@ fn plain(scene: &Scene) -> Scene {
     Scene {
         singletons: scene.singletons.clone(),
         entities: scene.entities.clone(),
+        #[cfg(feature = "linked-prefabs")]
+        prefab_links: scene.prefab_links.clone(),
         ..Scene::default()
     }
 }
 
 fn same_content(a: &Scene, b: &Scene) -> bool {
+    #[cfg(feature = "linked-prefabs")]
+    if a.prefab_links != b.prefab_links { return false; }
     a.singletons == b.singletons && a.entities == b.entities
 }
 

@@ -3378,6 +3378,7 @@ dependencies = [
  "orr_reflect_derive",
  "saphyr-parser",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -153,6 +153,9 @@ impl PreparedScene {
         }
         let types = types();
         let scene = Scene::parse(text, &types).map_err(|e| format!("CollectDodgeV1 scene: {e}"))?;
+        if scene.has_prefab_links() && !cfg!(feature = "linked-prefabs") {
+            return Err("this runtime was built without linked-prefabs project support".into());
+        }
         let mut frame = Frame::new(Simulation::<CollectDodgeV1>::build_registry());
         frame.set_singleton(FrameRng::new(SEED));
         let index = scene

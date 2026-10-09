@@ -208,6 +208,61 @@ pub(super) fn scene_schema(reg: &TypeRegistry) -> Json {
     ])
 }
 
+/// Optional closed metadata shape. Cross-document facts remain loader checks.
+#[cfg(feature = "linked-prefabs")]
+pub(super) fn linked_scene_schema(reg: &TypeRegistry) -> Json {
+    let mut root = scene_schema(reg);
+    let guid = || Json::obj(vec![("type", Json::str("string")), ("pattern", Json::str(GUID_PATTERN))]);
+    let guid_map = |values: Json| Json::obj(vec![
+        ("type", Json::str("object")),
+        ("minProperties", Json::num(1)),
+        ("maxProperties", Json::num(8)),
+        ("propertyNames", guid()),
+        ("additionalProperties", values),
+    ]);
+    let link = Json::obj(vec![
+        ("type", Json::str("object")),
+        ("properties", Json::obj(vec![
+            ("profile", Json::obj(vec![("const", Json::str("collect-actors-v1"))])),
+            ("source", Json::obj(vec![
+                ("type", Json::str("string")),
+                ("minLength", Json::num(1)),
+                ("maxLength", Json::num(240)),
+                ("pattern", Json::str("^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$")),
+            ])),
+            ("digest", Json::obj(vec![("type", Json::str("string")), ("pattern", Json::str("^[0-9a-f]{64}$"))])),
+            ("baseline", Json::obj(vec![("type", Json::str("string")), ("maxLength", Json::num(32768))])),
+            ("guids", guid_map(guid())),
+            ("ordinals", guid_map(Json::obj(vec![
+                ("type", Json::str("integer")),
+                ("minimum", Json::num(0)),
+                ("maximum", Json::num(u32::MAX)),
+            ]))),
+            ("position_overrides", Json::obj(vec![
+                ("type", Json::str("array")),
+                ("items", guid()),
+                ("maxItems", Json::num(8)),
+                ("uniqueItems", Json::Bool(true)),
+            ])),
+        ])),
+        ("required", Json::Arr(["profile", "source", "digest", "baseline", "guids", "ordinals", "position_overrides"].iter().map(|s| Json::str(s)).collect())),
+        ("additionalProperties", Json::Bool(false)),
+    ]);
+    if let Json::Obj(fields) = &mut root {
+        if let Some((_, Json::Obj(props))) = fields.iter_mut().find(|(key, _)| key == "properties") {
+            if let Some((_, version)) = props.iter_mut().find(|(key, _)| key == "schema") {
+                *version = Json::obj(vec![("enum", Json::Arr(vec![Json::str(SCENE_SCHEMA), Json::str("orr.scene/2")]))]);
+            }
+            props.push(("prefabs".into(), guid_map(link)));
+        }
+    }
+    root.with("title", Json::str("Orrery scene (orr.scene/1 or orr.scene/2)"))
+        .with("description", Json::str("Strict YAML scene file. No anchors, aliases or tags. Schema 2 is the optional collect-actors-v1 linked-prefab format. The loader additionally enforces the 64 KiB scene and aggregate 32 KiB baseline byte limits, quoted canonical comment-free entity-only scene/1 baselines, SHA-256 agreement, exact Actor profile, complete injective and disjoint GUID mappings, ordinal and override key relationships, root ownership, and flattened-value agreement. Source labels are inert: no filesystem access occurs; normalization and reserved device-name restrictions are checked by the loader. These semantic checks are not expressible by this JSON Schema."))
+        .with("if", Json::obj(vec![("properties", Json::obj(vec![("schema", Json::obj(vec![("const", Json::str(SCENE_SCHEMA))]))]))]))
+        .with("then", Json::obj(vec![("properties", Json::obj(vec![("prefabs", Json::Bool(false))]))]))
+        .with("else", Json::obj(vec![("required", Json::Arr(vec![Json::str("prefabs")]))]))
+}
+
 pub(super) fn type_schema(reg: &TypeRegistry, name: &str) -> Option<Json> {
     let t = reg.get(name)?;
     let body = with_doc(desc_schema(t.desc()), t.doc());
