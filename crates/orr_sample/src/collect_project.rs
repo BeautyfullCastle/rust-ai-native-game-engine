@@ -212,12 +212,21 @@ pub fn compiled_sprite_support() -> SpriteSupport {
         SpriteSupport::Unsupported
     }
 }
+#[cfg(feature = "collect-ui")]
+#[derive(Clone)]
+pub struct PreparedCollectUi {
+    pub path: PathBuf,
+    pub document: crate::authored_ui::Document,
+    pub font: Vec<u8>,
+}
 pub struct PreparedProject {
     root: PathBuf,
     path: PathBuf,
     scene: PreparedScene,
     progress: Option<orr_package::ProjectProgress>,
     sprites: Option<crate::project::PreparedSprites>,
+    #[cfg(feature = "collect-ui")]
+    ui: Option<PreparedCollectUi>,
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
@@ -234,6 +243,14 @@ impl PreparedProject {
         support: ProgressSupport,
         sprites: SpriteSupport,
     ) -> Result<Self, String> {
+        Self::open_with_ui(root, support, sprites, false)
+    }
+    pub fn open_with_ui(
+        root: impl AsRef<Path>,
+        support: ProgressSupport,
+        sprites: SpriteSupport,
+        ui_supported: bool,
+    ) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), sprite_runtime(sprites))
             .map_err(|e| e.to_string())?;
         let lock = project.verify().map_err(|e| e.to_string())?;
@@ -249,7 +266,8 @@ impl PreparedProject {
         {
             return Err("project entry must be schema 2/3 and collect-dodge-v1".into());
         }
-        if entry.ui.is_some() || (entry.sprites.is_some() && sprites == SpriteSupport::Unsupported)
+        if (entry.ui.is_some() && (!ui_supported || !cfg!(feature = "collect-ui")))
+            || (entry.sprites.is_some() && sprites == SpriteSupport::Unsupported)
         {
             return Err(
                 "CollectDodgeV1 authored route does not yet support sprite or UI declarations"
@@ -261,6 +279,38 @@ impl PreparedProject {
         }
         let progress = manifest.progress.clone();
         let root = project.root().to_path_buf();
+        #[cfg(feature = "collect-ui")]
+        let ui = entry
+            .ui
+            .as_ref()
+            .map(|descriptor| {
+                let relative = descriptor
+                    .document
+                    .as_ref()
+                    .ok_or("Collect UI requires a document")?;
+                let path = crate::project::entry_file(&root, relative)?;
+                let document = crate::authored_ui::Document::parse(&crate::project::read_regular(
+                    &path,
+                    64 * 1024,
+                )?)?;
+                let package = lock
+                    .packages
+                    .get(&descriptor.font.package)
+                    .ok_or("UI font package absent from active lock")?;
+                if !package.manifest.files.contains(&descriptor.font.asset) {
+                    return Err("UI font absent from package manifest".into());
+                }
+                let font = project
+                    .read_asset(&descriptor.font.package, &descriptor.font.asset)
+                    .map_err(|e| e.to_string())?;
+                crate::collect_ui::CollectUi::new(document.clone(), font.clone())?;
+                Ok::<_, String>(PreparedCollectUi {
+                    path,
+                    document,
+                    font,
+                })
+            })
+            .transpose()?;
         let path = crate::project::entry_file(&root, &entry.scene)?;
         let bytes = crate::project::read_regular(&path, MAX_BYTES)?;
         let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
@@ -297,7 +347,17 @@ impl PreparedProject {
             scene,
             progress,
             sprites,
+            #[cfg(feature = "collect-ui")]
+            ui,
         })
+    }
+    #[cfg(feature = "collect-ui")]
+    pub fn ui(&self) -> Option<&PreparedCollectUi> {
+        self.ui.as_ref()
+    }
+    #[cfg(feature = "collect-ui")]
+    pub fn take_ui(&mut self) -> Option<PreparedCollectUi> {
+        self.ui.take()
     }
     pub fn sprites(&self) -> Option<&crate::project::PreparedSprites> {
         self.sprites.as_ref()
@@ -376,5 +436,88 @@ mod sprite_capability_tests {
         assert!(sprite_runtime(SpriteSupport::Supported)
             .capabilities
             .contains("sprite"));
+    }
+}
+
+#[cfg(all(test, feature = "collect-ui"))]
+mod authored_ui_tests {
+    use super::*;
+    use std::fs;
+    fn fixture() -> tempfile::TempDir {
+        let root = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let temp = tempfile::tempdir_in(root).unwrap();
+        fs::write(
+            temp.path().join("scene.yaml"),
+            include_bytes!("../../../scenes/collect_dodge_v1.scene.yaml"),
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("ui.json"),
+            crate::authored_ui::Document::default_collect()
+                .to_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+        fs::write(temp.path().join("orr.project.json"),serde_json::to_vec(&serde_json::json!({"schema":2,"engine":"*","entry":{"game":"collect-dodge-v1","scene":"scene.yaml","ui":{"profile":"collect-authored-v1","document":"ui.json","font":{"package":"korean-game-ui","asset":"OrreryKoreanUI.otf"}}}})).unwrap()).unwrap();
+        let project =
+            orr_package::Project::open(temp.path(), orr_package::Runtime::content_only()).unwrap();
+        project
+            .install(&[std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/game_ui_font").canonicalize().unwrap()])
+            .unwrap();
+        temp
+    }
+    #[test]
+    fn explicit_consumer_required_and_owned_ui_survives_source_removal() {
+        let temp = fixture();
+        assert!(PreparedProject::open_with_presentation(
+            temp.path(),
+            ProgressSupport::Unsupported,
+            SpriteSupport::Unsupported
+        )
+        .is_err());
+        let project = PreparedProject::open_with_ui(
+            temp.path(),
+            ProgressSupport::Unsupported,
+            SpriteSupport::Unsupported,
+            true,
+        )
+        .unwrap();
+        let prepared = project.ui().unwrap();
+        assert_eq!(
+            prepared.document,
+            crate::authored_ui::Document::default_collect()
+        );
+        fs::remove_file(temp.path().join("ui.json")).unwrap();
+        assert!(crate::collect_ui::CollectUi::new(
+            prepared.document.clone(),
+            prepared.font.clone()
+        )
+        .is_ok());
+    }
+    #[cfg(all(feature="collect-progress",target_os="linux"))]
+    #[test]
+    fn authored_ui_edits_do_not_change_gameplay_progress_identity() {
+        let temp=fixture();
+        let open=|| PreparedProject::open_with_ui(temp.path(),ProgressSupport::Unsupported,SpriteSupport::Unsupported,true).unwrap();
+        let before=open();
+        let mut document=before.ui().unwrap().document.clone();
+        document.nodes[0].offset[0]+=1;
+        std::fs::write(temp.path().join("ui.json"),document.to_bytes().unwrap()).unwrap();
+        let after=open();
+        assert_eq!(before.scene().frame().checksum(),after.scene().frame().checksum());
+        assert_eq!(crate::collect_progress::challenge_digest(&before),crate::collect_progress::challenge_digest(&after));
+    }
+    #[test]
+    fn document_validation_and_font_corpus_fail_before_candidate() {
+        let temp = fixture();
+        fs::write(temp.path().join("ui.json"), b"{\"schema\":9,\"nodes\":[]}").unwrap();
+        assert!(PreparedProject::open_with_ui(
+            temp.path(),
+            ProgressSupport::Unsupported,
+            SpriteSupport::Unsupported,
+            true
+        )
+        .is_err());
     }
 }

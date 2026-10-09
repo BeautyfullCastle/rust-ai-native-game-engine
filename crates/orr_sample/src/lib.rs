@@ -79,6 +79,10 @@ pub use orr_games::collect_dodge_game as collect_game;
 pub mod collect_view;
 #[cfg(feature = "collect-dodge")]
 pub mod collect_app;
+#[cfg(feature = "collect-ui")]
+pub mod authored_ui;
+#[cfg(feature = "collect-ui")]
+pub mod collect_ui;
 
 #[cfg(all(feature = "collect-progress", target_os = "linux"))]
 pub mod game_progress;

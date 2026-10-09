@@ -88,7 +88,7 @@ impl GameUi {
         Self::validate_font_with_corpus(font, SETTINGS_TEXT_CORPUS)?;
         Ok(())
     }
-    fn validate_font_with_corpus(font: &[u8], corpus: &str) -> Result<(), String> {
+    pub(crate) fn validate_font_with_corpus(font: &[u8], corpus: &str) -> Result<(), String> {
         if font.is_empty() || font.len() > 16 * 1024 * 1024 {
             return Err("game UI font must be 1 byte to 16 MiB".into());
         }

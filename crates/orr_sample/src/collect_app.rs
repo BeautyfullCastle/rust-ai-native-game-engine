@@ -119,6 +119,20 @@ fn parse_hold(value: &str) -> Result<CollectInput, String> {
 fn axis(negative: bool, positive: bool) -> FP {
     FP::from_int(i32::from(positive) - i32::from(negative))
 }
+#[cfg(feature = "collect-ui")]
+fn pointer_in_ui(
+    position: winit::dpi::PhysicalPosition<f64>,
+    pixels_per_point: f32,
+) -> Option<egui::Pos2> {
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return None;
+    }
+    let point = egui::pos2(
+        (position.x / f64::from(pixels_per_point)) as f32,
+        (position.y / f64::from(pixels_per_point)) as f32,
+    );
+    point.is_finite().then_some(point)
+}
 type LocalBridge = InProc<CollectDodgeV1, PlayHost<CollectDodgeV1>>;
 fn bridge(project: &PreparedProject) -> Result<LocalBridge, String> {
     Ok(InProc::new(
@@ -133,10 +147,11 @@ pub fn run(options: Options) -> Result<(), String> {
     } else {
         crate::collect_project::ProgressSupport::Unsupported
     };
-    let project = PreparedProject::open_with_presentation(
+    let project = PreparedProject::open_with_ui(
         &options.project,
         support,
         crate::collect_project::compiled_sprite_support(),
+        cfg!(feature = "collect-ui"),
     )?;
     if options.headless {
         headless(
@@ -163,12 +178,39 @@ struct Keys {
     observed_tick: u64,
 }
 impl Keys {
+    #[cfg(feature = "collect-ui")]
+    fn ui_action(&mut self, action: crate::authored_ui::Action) {
+        // Navigation neutralizes movement without dropping an authorized edge.
+        self.blocked.append(&mut self.pressed);
+        if matches!(
+            action,
+            crate::authored_ui::Action::Play | crate::authored_ui::Action::Restart
+        ) {
+            self.pending_restarts = self
+                .pending_restarts
+                .saturating_add(1)
+                .min(MAX_PENDING_RESTARTS);
+        }
+    }
     fn focus(&mut self, focused: bool) {
         if !focused {
             self.blocked.append(&mut self.pressed);
             self.pending_restarts = 0;
         }
         self.focused = focused;
+    }
+    fn captured_event(
+        &mut self,
+        code: KeyCode,
+        down: bool,
+        repeat: bool,
+        synthetic: bool,
+        capture: bool,
+    ) {
+        if capture && down {
+            self.blocked.insert(code);
+        }
+        self.event(code, down, repeat, synthetic);
     }
     fn event(&mut self, code: KeyCode, down: bool, repeat: bool, synthetic: bool) {
         if !down {
@@ -244,6 +286,18 @@ struct App {
     keys: Keys,
     last: Instant,
     error: Option<String>,
+    #[cfg(feature = "collect-ui")]
+    ui: Option<crate::collect_ui::CollectUi>,
+    #[cfg(feature = "collect-ui")]
+    window_ui: Option<WindowUi>,
+    #[cfg(feature = "collect-ui")]
+    ui_pointer: Option<winit::dpi::PhysicalPosition<f64>>,
+}
+#[cfg(feature = "collect-ui")]
+struct WindowUi {
+    state: egui_winit::State,
+    gpu: crate::game_ui_gpu::GpuOverlay,
+    pending: crate::game_ui_gpu::PendingOverlay,
 }
 impl App {
     #[cfg(all(feature = "collect-progress", target_os = "linux"))]
@@ -259,6 +313,56 @@ impl App {
         let now = Instant::now();
         let dt = now - self.last;
         self.last = now;
+        #[cfg(feature = "collect-ui")]
+        if let (Some(ui), Some(window_ui), Some((window, _))) =
+            (&mut self.ui, &mut self.window_ui, &self.gfx)
+        {
+            let input = window_ui.state.take_egui_input(window);
+            let capture = ui.blocks_controls()
+                || ui.pending_pointer_over_ui(&input)
+                || ui.context.egui_wants_keyboard_input();
+            if capture {
+                self.keys.blocked.append(&mut self.keys.pressed);
+            }
+            let snapshot = self.bridge.snapshot();
+            let run = snapshot
+                .as_ref()
+                .map(|s| {
+                    let run = s.predicted().singleton::<game::CollectRun>();
+                    (run.score, run.phase)
+                })
+                .unwrap_or((0, game::PLAYING));
+            #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+            let best = self
+                .progress
+                .best()
+                .map_or_else(|| "-".into(), |v| v.to_string());
+            #[cfg(not(all(feature = "collect-progress", target_os = "linux")))]
+            let best = "-".into();
+            let (mut output, action) = ui.show(
+                input,
+                crate::collect_ui::Hud {
+                    score: run.0,
+                    phase: run.1,
+                    best,
+                },
+            );
+            window_ui
+                .state
+                .handle_platform_output(window, std::mem::take(&mut output.platform_output));
+            if let Err(error) = window_ui.pending.push(output) {
+                self.fail(event_loop, error);
+                return;
+            }
+            if let Some(action) = action {
+                if action == crate::authored_ui::Action::Quit {
+                    event_loop.exit();
+                    return;
+                }
+                self.keys.ui_action(action);
+                ui.apply(action);
+            }
+        }
         if let Err(e) = self.bridge.set_input(PlayerSlot(0), self.keys.input()) {
             self.fail(event_loop, e.to_string());
             return;
@@ -268,6 +372,19 @@ impl App {
         self.persist_completed();
         let update = self.bridge.poll_view(); // Drain events, including after terminal states.
         if let Some(snapshot) = &update.snapshot {
+            #[cfg(feature = "collect-ui")]
+            if snapshot.tick() > self.keys.observed_tick
+                && snapshot
+                    .predicted()
+                    .singleton::<game::CollectRun>()
+                    .restart_held
+                    != 0
+                && !self.keys.observed_restart_held
+            {
+                if let Some(ui) = &mut self.ui {
+                    ui.acknowledge_restart();
+                }
+            }
             self.keys.observe(
                 snapshot.tick(),
                 snapshot
@@ -287,11 +404,32 @@ impl App {
             #[cfg(all(feature = "collect-progress", target_os = "linux"))]
             let title = format!("{title} | {}", self.progress.status());
             window.set_title(&title);
-            if let Err(error) = renderer.render(
+            #[cfg(feature = "collect-ui")]
+            let result = if let (Some(ui), Some(window_ui)) = (&self.ui, &mut self.window_ui) {
+                renderer.render_with_overlay(
+                    self.presentation.shapes(),
+                    self.presentation.sprites(),
+                    &self.presentation.camera,
+                    |gpu, view, size| {
+                        window_ui
+                            .pending
+                            .paint(&mut window_ui.gpu, gpu, view, size, &ui.context)
+                    },
+                )
+            } else {
+                renderer.render(
+                    self.presentation.shapes(),
+                    self.presentation.sprites(),
+                    &self.presentation.camera,
+                )
+            };
+            #[cfg(not(feature = "collect-ui"))]
+            let result = renderer.render(
                 self.presentation.shapes(),
                 self.presentation.sprites(),
                 &self.presentation.camera,
-            ) {
+            );
+            if let Err(error) = result {
                 self.error = Some(error);
                 event_loop.exit();
             }
@@ -317,6 +455,22 @@ impl ApplicationHandler for App {
             Ok(renderer) => {
                 println!("collect adapter: {}", renderer.adapter_name());
                 self.keys.focus(window.has_focus());
+                #[cfg(feature = "collect-ui")]
+                if let Some(ui) = &mut self.ui {
+                    ui.invalidate_pointer_layout();
+                    self.window_ui = Some(WindowUi {
+                        state: egui_winit::State::new(
+                            ui.context.clone(),
+                            egui::ViewportId::ROOT,
+                            window.as_ref(),
+                            Some(window.scale_factor() as f32),
+                            window.theme(),
+                            None,
+                        ),
+                        gpu: crate::game_ui_gpu::GpuOverlay::new(renderer.rhi(), renderer.format()),
+                        pending: Default::default(),
+                    });
+                }
                 self.gfx = Some((window, renderer));
                 self.last = Instant::now();
             }
@@ -324,9 +478,41 @@ impl ApplicationHandler for App {
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        #[cfg(feature = "collect-ui")]
+        if let (Some(window_ui), Some((window, _))) = (&mut self.window_ui, &self.gfx) {
+            let response = window_ui.state.on_window_event(window, &event);
+            if response.consumed {
+                self.keys.blocked.append(&mut self.keys.pressed);
+            }
+        }
+        #[cfg(feature = "collect-ui")]
+        if matches!(
+            event,
+            WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(false)
+        ) {
+            if let Some(ui) = &mut self.ui {
+                ui.invalidate_pointer_layout();
+            }
+        }
+        #[cfg(feature = "collect-ui")]
+        match &event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.ui_pointer = Some(*position);
+            }
+            WindowEvent::CursorLeft { .. } => self.ui_pointer = None,
+            _ => {}
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Focused(focused) => {
+                #[cfg(feature = "collect-ui")]
+                if !focused {
+                    if let Some(ui) = &mut self.ui {
+                        ui.acknowledge_restart();
+                    }
+                }
                 self.keys.focus(focused);
                 if let Err(e) = self.bridge.set_input(PlayerSlot(0), self.keys.input()) {
                     self.fail(event_loop, e.to_string());
@@ -347,7 +533,29 @@ impl ApplicationHandler for App {
                     if code == KeyCode::Escape && down && !is_synthetic && self.keys.focused {
                         event_loop.exit();
                     }
-                    self.keys.event(code, down, event.repeat, is_synthetic);
+                    #[cfg(feature = "collect-ui")]
+                    let capture = self.ui.as_ref().is_some_and(|ui| {
+                        let mut pending = egui::RawInput::default();
+                        let scale = self
+                            .gfx
+                            .as_ref()
+                            .map_or(ui.context.pixels_per_point(), |(window, _)| {
+                                egui_winit::pixels_per_point(&ui.context, window)
+                            });
+                        let point = self
+                            .ui_pointer
+                            .and_then(|position| pointer_in_ui(position, scale));
+                        pending.events.push(
+                            point.map_or(egui::Event::PointerGone, egui::Event::PointerMoved),
+                        );
+                        ui.blocks_controls()
+                            || ui.context.egui_wants_keyboard_input()
+                            || ui.pending_pointer_over_ui(&pending)
+                    });
+                    #[cfg(not(feature = "collect-ui"))]
+                    let capture = false;
+                    self.keys
+                        .captured_event(code, down, event.repeat, is_synthetic, capture);
                 }
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
@@ -382,6 +590,15 @@ fn window_app(project: &PreparedProject) -> Result<App, String> {
         keys: Keys::default(),
         last: Instant::now(),
         error: None,
+        #[cfg(feature = "collect-ui")]
+        ui: project
+            .ui()
+            .map(|p| crate::collect_ui::CollectUi::new(p.document.clone(), p.font.clone()))
+            .transpose()?,
+        #[cfg(feature = "collect-ui")]
+        window_ui: None,
+        #[cfg(feature = "collect-ui")]
+        ui_pointer: None,
     })
 }
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
@@ -452,6 +669,43 @@ pub fn headless(
             presentation.sprites(),
             &presentation.camera,
         )?;
+        #[cfg(feature = "collect-ui")]
+        if let Some(prepared) = project.ui() {
+            let mut ui = crate::collect_ui::CollectUi::new(
+                prepared.document.clone(),
+                prepared.font.clone(),
+            )?;
+            ui.apply(crate::authored_ui::Action::Play);
+            let run = frame.singleton::<game::CollectRun>();
+            let mut overlay =
+                crate::game_ui_gpu::GpuOverlay::new(&gpu, TextureFormat::Rgba8UnormSrgb);
+            // Settle egui layout/font atlas through the identical runtime document path.
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(size.0 as f32, size.1 as f32),
+                    )),
+                    ..Default::default()
+                };
+                let (output, _) = ui.show(
+                    input,
+                    crate::collect_ui::Hud {
+                        score: run.score,
+                        phase: run.phase,
+                        best: "-".into(),
+                    },
+                );
+                compositor.draw_with_overlay(
+                    target.render_view(),
+                    size,
+                    presentation.shapes(),
+                    presentation.sprites(),
+                    &presentation.camera,
+                    |gpu, view, size| overlay.paint(gpu, view, size, &ui.context, output),
+                )?;
+            }
+        }
         let rgba = target.read_rgba8();
         let file = std::fs::File::create_new(path)
             .map_err(|e| format!("capture {}: {e}", path.display()))?;
@@ -487,15 +741,75 @@ pub(crate) fn exercise_window_progress(project: &PreparedProject, mode: &str) {
         .unwrap();
     app.bridge.step(20);
     assert_eq!(app.bridge.host().completed_best(), Some(2));
-    app.bridge
-        .set_input(
-            PlayerSlot(0),
-            CollectInput {
-                buttons: game::RESTART,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let restart = CollectInput {
+        buttons: game::RESTART,
+        ..Default::default()
+    };
+    #[cfg(feature = "collect-ui")]
+    let restart = if let Some(ui) = &mut app.ui {
+        use crate::authored_ui::{Action, Kind, Screen};
+        ui.apply(Action::Play);
+        let hud = crate::collect_ui::Hud {
+            score: 2,
+            phase: game::WON,
+            best: "0".into(),
+        };
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let (mut output, _) = ui.show(input(), hud.clone());
+        output.textures_delta.clear();
+        let node = ui
+            .document()
+            .nodes
+            .iter()
+            .find(|n| {
+                n.screen == Screen::Terminal
+                    && matches!(
+                        n.kind,
+                        Kind::Button {
+                            action: Action::Restart,
+                            ..
+                        }
+                    )
+            })
+            .expect("authored terminal Restart");
+        assert!(
+            node.parent.is_none(),
+            "test fixture uses a root restart control"
+        );
+        let pos = egui::pos2(
+            900.0 * f32::from(node.anchor[0]) / 1000.0
+                + f32::from(node.offset[0])
+                + f32::from(node.size[0]) / 2.0,
+            900.0 * f32::from(node.anchor[1]) / 1000.0
+                + f32::from(node.offset[1])
+                + f32::from(node.size[1]) / 2.0,
+        );
+        let mut click = input();
+        for pressed in [true, false] {
+            click.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+        }
+        let (mut output, action) = ui.show(click, hud);
+        output.textures_delta.clear();
+        assert_eq!(action, Some(Action::Restart));
+        app.keys.focus(true);
+        app.keys.ui_action(action.unwrap());
+        ui.apply(action.unwrap());
+        app.keys.input()
+    } else {
+        restart
+    };
+    app.bridge.set_input(PlayerSlot(0), restart).unwrap();
     app.bridge.step(1);
     assert_eq!(
         app.bridge
@@ -517,6 +831,52 @@ mod tests {
     use super::*;
     fn parse(s: &str) -> Result<Options, String> {
         Options::parse(s.split_whitespace().map(str::to_owned))
+    }
+    #[cfg(feature = "collect-ui")]
+    #[test]
+    fn ui_navigation_preserves_restart_until_authoritative_tick() {
+        use crate::authored_ui::Action;
+        let mut keys = Keys::default();
+        keys.focus(true);
+        keys.event(KeyCode::KeyD, true, false, false);
+        keys.ui_action(Action::Restart);
+        keys.ui_action(Action::Menu);
+        keys.ui_action(Action::Continue);
+        for _ in 0..8 {
+            keys.observe(0, false);
+            assert_eq!(keys.input().buttons, game::RESTART);
+            assert_eq!(keys.input().x, FP::ZERO);
+        }
+        keys.observe(1, true);
+        assert_eq!(keys.pending_restarts, 0);
+        assert_eq!(keys.input().buttons, 0);
+        keys.ui_action(Action::Restart);
+        keys.focus(false);
+        assert_eq!(keys.pending_restarts, 0);
+    }
+    #[test]
+    fn captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives() {
+        let mut keys = Keys::default();
+        keys.focus(true);
+        keys.captured_event(KeyCode::Space, true, false, false, true);
+        assert_eq!(keys.pending_restarts, 0);
+        assert_eq!(keys.input().buttons, 0);
+        keys.captured_event(KeyCode::Space, false, false, false, true);
+        keys.captured_event(KeyCode::Space, true, false, false, false);
+        assert_eq!(keys.pending_restarts, 1);
+        keys.captured_event(KeyCode::Space, false, false, false, true);
+        assert_eq!(keys.input().buttons, game::RESTART);
+    }
+    #[cfg(feature = "collect-ui")]
+    #[test]
+    fn pointer_capture_recomputes_physical_point_for_dpi_and_zoom() {
+        let point = winit::dpi::PhysicalPosition::new(240.0, 120.0);
+        assert_eq!(pointer_in_ui(point, 1.0), Some(egui::pos2(240.0, 120.0)));
+        assert_eq!(
+            pointer_in_ui(point, 2.0 * 1.5),
+            Some(egui::pos2(80.0, 40.0))
+        );
+        assert!(pointer_in_ui(point, 0.0).is_none());
     }
     #[test]
     fn strict_cli() {

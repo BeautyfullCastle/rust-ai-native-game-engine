@@ -12,6 +12,7 @@ workspace = true
 
 [features]
 # Explicit consuming-route opt-in; unrelated unified sprite dependencies do not enable it.
+collect-ui = ["collect-dodge", "game-ui"]
 collect-sprites = ["collect-dodge"]
 collect-progress = ["collect-dodge", "dep:sha2", "dep:tempfile", "dep:rustix"]
 collect-dodge = ["project", "orr_games/collect-dodge"]
@@ -67,6 +68,7 @@ winit = "0.30"
 rustix = { version = "1.1.5", features = ["fs", "process"], optional = true }
 
 [dev-dependencies]
+tempfile = "3"
 # Compile-check browser and native sample identities together.
 orr_web = { path = "../orr_web" }
 orr_server = { path = "../orr_server", features = ["harness"] }

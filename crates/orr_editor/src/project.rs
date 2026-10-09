@@ -93,6 +93,14 @@ impl PreparedProject {
 /// Install an already-admitted Collect presentation without rereading project files.
 #[cfg(feature="collect-dodge")]
 pub fn install_collect_presentation(app: &mut EditorApp, mut project: orr_sample::collect_project::PreparedProject, ctx: &egui::Context) {
+    #[cfg(feature="collect-ui")]
+    if let Some(ui) = project.take_ui() {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert("collect-authoring".into(), egui::FontData::from_owned(ui.font.clone()).into());
+        for family in [egui::FontFamily::Proportional,egui::FontFamily::Monospace] { fonts.families.entry(family).or_default().insert(0,"collect-authoring".into()); }
+        ctx.set_fonts(fonts);
+        app.collect_ui = Some(crate::collect_ui_panel::Panel::new(ui));
+    }
     if let Some(sprites) = project.take_sprites() {
         app.sprites.install_prepared(ctx, Bindings::from_document(sprites.path, sprites.document), sprites.assets);
     }
