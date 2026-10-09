@@ -8,6 +8,7 @@
 #[cfg(feature = "animated-models")]
 use orr_model::animation::AnimatedModel;
 use orr_model::{Error as ModelError, StaticModel};
+pub use orr_model::MaterialOverride;
 use orr_package::{LockedPackage, Project, Runtime};
 use orr_reflect::Guid;
 use serde::{Deserialize, Serialize};
@@ -109,6 +110,17 @@ pub struct Binding {
     /// the immutable loaded asset before assignment and again during resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<AnimationDescriptor>,
+    /// v3 only: replace one used static material slot's linear RGB factor.
+    /// Absence restores imported factors. Explicit null is an invalid payload.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_material_override")]
+    pub material_override: Option<MaterialOverride>,
+}
+
+fn deserialize_material_override<'de, D>(deserializer: D) -> Result<Option<MaterialOverride>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    MaterialOverride::deserialize(deserializer).map(Some)
 }
 impl Binding {
     pub fn from_asset(
@@ -133,6 +145,7 @@ impl Binding {
             source_hash: loaded.source_hash.clone(),
             transform,
             animation: None,
+            material_override: None,
         };
         binding.validate_fields()?;
         Ok(binding)
@@ -181,6 +194,7 @@ impl Binding {
                 source_hash: loaded.source_hash.clone(),
                 transform,
                 animation: Some(animation),
+                material_override: None,
             };
             binding.validate_fields()?;
             Ok(binding)
@@ -193,6 +207,12 @@ impl Binding {
         validate_digest(&self.package_digest, "package digest")?;
         validate_digest(&self.source_hash, "source hash")?;
         self.transform.validate()?;
+        if let Some(material_override) = self.material_override {
+            if self.kind != ModelKind::Static {
+                return Err("animated model binding cannot declare a static material override".into());
+            }
+            material_override.validate().map_err(|error| error.to_string())?;
+        }
         match (self.kind, self.animation) {
             (ModelKind::Static, None) => Ok(()),
             (ModelKind::Static, Some(_)) => {
@@ -232,6 +252,10 @@ impl Binding {
             return Err(
                 "stale model binding: source asset changed; explicitly reassign the model".into(),
             );
+        }
+        if let Some(material_override) = self.material_override {
+            let model = loaded.static_model().ok_or("material override requires a static model")?;
+            material_override.validate_for(model).map_err(|error| error.to_string())?;
         }
         if let Some(animation) = self.animation {
             #[cfg(feature = "animated-models")]
@@ -307,7 +331,7 @@ where
 }
 impl Document {
     pub fn validate(&self) -> Result<(), String> {
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1..=3) {
             return Err("unsupported model binding document version".into());
         }
         if !relative_hint(&self.scene) || !relative_hint(&self.project) {
@@ -323,6 +347,9 @@ impl Document {
             }
             if self.version == 1 && binding.kind != ModelKind::Static {
                 return Err("version-1 model bindings support static models only".into());
+            }
+            if self.version < 3 && binding.material_override.is_some() {
+                return Err("material overrides require a version-3 model binding document".into());
             }
             binding
                 .validate_fields()

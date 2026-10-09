@@ -1530,6 +1530,26 @@ mod tests {
                 StaticInstanceError::InvalidPlacement
             ))
         ));
+        let invalid_override = [StaticInstance {
+            material_override: Some(orr_model::MaterialOverride {
+                material_slot: u32::MAX,
+                base_color_factor: [0.2, 0.3, 0.4],
+            }),
+            ..Default::default()
+        }];
+        assert!(matches!(
+            scene.preflight(
+                (64, 64),
+                &camera,
+                &lighting,
+                &point,
+                &list,
+                &[(model.model(), &invalid_override)]
+            ),
+            Err(ImportedSceneError::StaticInstance(
+                StaticInstanceError::InvalidMaterialOverride
+            ))
+        ));
         list.spheres[0].pos[0] = f32::NAN;
         assert!(matches!(
             scene.preflight(
@@ -1633,6 +1653,33 @@ mod tests {
         ));
         assert_eq!(rhi.take(), Effects::default());
         assert_eq!(procedural.last_frame_stats(), stats);
+    }
+
+    #[test]
+    fn mock_late_material_override_rejection_has_zero_draw_effects() {
+        let rhi = Mock::default();
+        let mut first = model(&rhi, FORMAT);
+        let mut last = model(&rhi, FORMAT);
+        let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+        draw(&mut scene, (32, 32), &mut [
+            ImportedBatch::Static(&mut first),
+            ImportedBatch::Static(&mut last),
+        ]).unwrap();
+        rhi.take();
+        let more = [StaticInstance::default(); 3];
+        for override_value in [
+            orr_model::MaterialOverride { material_slot: 0, base_color_factor: [f32::NAN, 0.5, 0.5] },
+            orr_model::MaterialOverride { material_slot: u32::MAX, base_color_factor: [0.5; 3] },
+        ] {
+            let invalid = [StaticInstance { material_override: Some(override_value), ..Default::default() }];
+            assert!(matches!(draw(&mut scene, (64, 64), &mut [
+                ImportedBatch::StaticInstances { renderer: &mut first, instances: &more },
+                ImportedBatch::StaticInstances { renderer: &mut last, instances: &invalid },
+            ]), Err(ImportedSceneError::StaticInstance(StaticInstanceError::InvalidMaterialOverride))));
+            assert_eq!(rhi.take(), Effects::default(), "no upload, write, resize, allocation, clear or submit on a late invalid override");
+            assert_eq!(scene.depth_size(), Some((32, 32)));
+            assert_eq!(scene.depth_generation(), 1);
+        }
     }
 
     #[test]

@@ -596,6 +596,7 @@ fn signed_sh9_uses_transformed_world_normals_and_clamps_only_after_reconstructio
             translation: [-0.85, 0.0, 0.0],
             rotation: quaternion(angles),
             scale,
+            material_override: None,
         }];
         let mut list = RenderList3D::new();
         list.cuboid(

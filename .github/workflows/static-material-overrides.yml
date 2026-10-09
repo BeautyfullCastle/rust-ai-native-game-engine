@@ -1,0 +1,102 @@
+name: static-material-overrides
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  static-material-overrides-linux:
+    # Existing unprivileged bwrap-compatible profile; migration is tracked by #154.
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      RUST_BACKTRACE: 1
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mandatory GPU and isolation prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers bubblewrap
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -r "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+          test "$(id -u)" -ne 0
+          bwrap --die-with-parent --ro-bind / / -- /bin/true
+          mkdir -p material-evidence
+      - name: Default boundary and GPU-free schema
+        run: |
+          set -euo pipefail
+          cargo check --locked --release -p orr_editor -p orr_sample
+          cargo test --locked --release -p orr_editor --test deps
+          cargo test --locked --release -p orr_model --test material_override
+          cargo test --locked --release -p orr_model_bindings --lib
+          cargo test --locked --release -p orr_model_bindings --test material_override_shape
+          cargo test --locked --release -p orr_editor --features models --test model_bindings
+          cargo test --locked --release -p orr_editor --features models --lib editor::material_history_tests 2>&1 | tee material-evidence/history-models.log
+          grep -F "test result: ok. 5 passed; 0 failed; 0 ignored;" material-evidence/history-models.log
+          cargo test --locked --release -p orr_editor --features models --test material_overrides -- --skip production_main_viewport_changes_after_material_override_edit
+      - name: Mixed Room and animation authoring compatibility
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_model_bindings --features animated-models --test material_override_shape
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test model_bindings
+          cargo test --locked --release -p orr_editor --features room-character,project-create --lib editor::material_history_tests 2>&1 | tee material-evidence/history-mixed.log
+          grep -F "test result: ok. 5 passed; 0 failed; 0 ignored;" material-evidence/history-mixed.log
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test material_overrides -- --skip production_main_viewport_changes_after_material_override_edit
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --skip character_actual_editor_gpu_three_states
+          cargo test --locked --release -p orr_sample --features room-project,project-create --test material_overrides
+          cargo test --locked --release -p orr_sample --features room-character,project-create --test material_overrides --test room_character_project
+      - name: Effective bake color and pending/completed invalidation
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_editor --features irradiance-probes,animated-models --lib irradiance_bake::tests 2>&1 | tee material-evidence/bake-library.log
+          grep -F "test result: ok. 13 passed; 0 failed; 0 ignored;" material-evidence/bake-library.log
+          cargo test --locked --release -p orr_editor --features irradiance-probes,animated-models --test yard3d_static_bake -- --exact material_override_invalidates_pending_and_completed_bakes_and_reset_restores_identity 2>&1 | tee material-evidence/bake.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" material-evidence/bake.log
+      - name: Mandatory renderer and real editor GPU
+        env:
+          ORR_REQUIRE_GPU: '1'
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_render --features imported-scene,animation --test imported_scene 2>&1 | tee material-evidence/renderer-gpu.log
+          grep -F "test static_material_override_is_instance_local_slot_scoped_and_resettable ... ok" material-evidence/renderer-gpu.log
+          cargo test --locked --release -p orr_render --features imported-scene,animation,irradiance-probes --lib 2>&1 | tee material-evidence/renderer-lib-gpu.log
+          grep -F "test imported_scene::tests::mock_preflight_before_cache_or_resize_matches_frame_validation_without_gpu_effects ... ok" material-evidence/renderer-lib-gpu.log
+          grep -F "shared_shadow_gpu_joint_pose_moves_shadow_on_another_renderer_receiver ... ok" material-evidence/renderer-lib-gpu.log
+          grep -F "; 0 failed; 0 ignored;" material-evidence/renderer-lib-gpu.log
+          export ORR_MATERIAL_CAPTURE_DIR="$PWD/material-evidence/editor"
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test material_overrides -- --ignored --exact production_main_viewport_changes_after_material_override_edit --nocapture 2>&1 | tee material-evidence/editor-gpu.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" material-evidence/editor-gpu.log
+          cargo test --locked --release -p orr_editor --features models --test yard3d_models 2>&1 | tee material-evidence/yard-regressions.log
+          grep -F "test production_editor_main_gpu_viewport_renders_bound_models_edits_play_seek_and_stop ... ok" material-evidence/yard-regressions.log
+          cargo test --locked --release -p orr_sample --features room-project,project-create --test room_project -- --include-ignored 2>&1 | tee material-evidence/room-regressions.log
+          grep -F "; 0 failed; 0 ignored;" material-evidence/room-regressions.log
+      - name: Mandatory source-hidden read-only v3 export
+        env:
+          ORR_REQUIRE_GPU: '1'
+          ORR_REQUIRE_PROJECT_ISOLATION: '1'
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p orr_sample --features room-character,project-create,project-export --bin room_escape --bin orr_export_room
+          export ORR_ROOM_RUNTIME="$PWD/target/release/room_escape"
+          export ORR_ROOM_EXPORTER="$PWD/target/release/orr_export_room"
+          export ORR_ROOM_EXPORT_CAPTURE_DIR="$PWD/material-evidence/export"
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_export -- --ignored --exact room_real_export_source_hidden_gpu_workflow --nocapture 2>&1 | tee material-evidence/export.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" material-evidence/export.log
+      - name: Strict affected configurations
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --release -p orr_model -p orr_model_bindings --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features models --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features room-character,project-create,irradiance-probes --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-character,project-create,project-export --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_render --features imported-scene,animation,irradiance-probes --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: static-material-overrides-evidence
+          path: material-evidence

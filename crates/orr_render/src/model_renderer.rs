@@ -23,6 +23,8 @@ pub struct StaticInstance {
     pub translation: [f32; 3],
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
+    /// Per-placement replacement for one imported material's RGB base factor.
+    pub material_override: Option<orr_model::MaterialOverride>,
 }
 impl Default for StaticInstance {
     fn default() -> Self {
@@ -30,6 +32,7 @@ impl Default for StaticInstance {
             translation: [0.0; 3],
             rotation: crate::IDENTITY_ROT,
             scale: [1.0; 3],
+            material_override: None,
         }
     }
 }
@@ -40,12 +43,14 @@ pub const MAX_STATIC_INSTANCE_DRAWS: usize = 4096;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StaticInstanceError {
     InvalidPlacement,
+    InvalidMaterialOverride,
     InstanceLimit,
 }
 impl std::fmt::Display for StaticInstanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::InvalidPlacement => "static placement requires bounded finite TRS, unit rotation, positive scale, and invertible composed node transforms",
+            Self::InvalidMaterialOverride => "static material override is invalid for this model",
             Self::InstanceLimit => "static instance/draw limit exceeded",
         })
     }
@@ -677,6 +682,11 @@ fn prepare_static_instances(
 ) -> Result<PreparedStatic, StaticInstanceError> {
     let mut objects = Vec::with_capacity(static_instance_draw_count(model, instances.len())?);
     for instance in instances {
+        if let Some(override_) = instance.material_override {
+            override_
+                .validate_for(model)
+                .map_err(|_| StaticInstanceError::InvalidMaterialOverride)?;
+        }
         let placement = instance.matrix()?;
         for (p, &(min, max)) in model.source().primitives.iter().zip(bounds) {
             let world = placement.mul(&crate::math3::Mat4(p.transform));
@@ -713,7 +723,11 @@ fn prepare_static_instances(
             objects.push(Object {
                 world: world.0,
                 normal,
-                color: material.base_color,
+                color: instance
+                    .material_override
+                    .map_or(material.base_color, |override_| {
+                        override_.effective_base_color(p.material, material.base_color)
+                    }),
                 sampling: [
                     wrap(material.wrap_s),
                     wrap(material.wrap_t),
@@ -828,6 +842,7 @@ mod instance_tests {
             translation: [3.0, 4.0, 5.0],
             rotation: [0.0, 0.0, half.sin(), half.cos()],
             scale: [2.0, 3.0, 4.0],
+            material_override: None,
         };
         let point = instance.matrix().unwrap().transform_point4([1.0, 2.0, 3.0]);
         for (actual, expected) in point.into_iter().zip([-3.0, 6.0, 17.0, 1.0]) {

@@ -440,6 +440,7 @@ fn admission_rejects_player_transform_that_exceeds_bounds_only_after_movement() 
         translation: binding.transform.translation,
         rotation: binding.transform.rotation,
         scale: binding.transform.scale,
+        material_override: binding.material_override,
     }
     .validate_for(loaded.static_model().unwrap())
     .unwrap();

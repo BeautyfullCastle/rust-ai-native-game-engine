@@ -69,7 +69,11 @@ pub struct ModelPlacement {
 
 /// Body-to-world × binding-local TRS, identical to the editor model placement
 /// convention. Collider extents never scale or displace the imported model.
-fn instance(body: Transform3, local: LocalTransform) -> StaticInstance {
+fn instance(
+    body: Transform3,
+    local: LocalTransform,
+    material_override: Option<orr_model::MaterialOverride>,
+) -> StaticInstance {
     let offset = body.rot.rotate(orr_view::Vec3::new(
         local.translation[0],
         local.translation[1],
@@ -85,6 +89,7 @@ fn instance(body: Transform3, local: LocalTransform) -> StaticInstance {
         translation: (body.pos + offset).to_array(),
         rotation: (body.rot * rotation).normalize().to_array(),
         scale: local.scale,
+        material_override,
     }
 }
 
@@ -173,6 +178,7 @@ fn validate_models(models: &PreparedModels) -> Result<(), String> {
             translation: binding.transform.translation,
             rotation: binding.transform.rotation,
             scale: binding.transform.scale,
+            material_override: binding.material_override,
         };
         let primitives = match binding.kind {
             ModelKind::Static => {
@@ -304,7 +310,7 @@ pub fn admit_presentation(
                 let mut pose = orr_view::fp_to_transform3(body.pos, body.rot);
                 pose.pos.x = x;
                 pose.pos.z = z;
-                let placed = instance(pose, binding.transform);
+                let placed = instance(pose, binding.transform, binding.material_override);
                 if let Some(model) = loaded.static_model() {
                     placed
                         .validate_for(model)
@@ -370,6 +376,7 @@ pub fn placements(
         let instance = instance(
             orr_view::fp_to_transform3(body.pos, body.rot),
             binding.transform,
+            binding.material_override,
         );
         instance.validate_for(model).map_err(|e| e.to_string())?;
         if actor.kind == KEY && collected {
@@ -413,6 +420,7 @@ pub fn character_placement(
     let transform = animated_transform(instance(
         orr_view::fp_to_transform3(body.pos, body.rot),
         binding.transform,
+        binding.material_override,
     ));
     let placement = CharacterPlacement {
         entity,
@@ -488,6 +496,7 @@ impl RoomRenderer {
                     translation: binding.transform.translation,
                     rotation: binding.transform.rotation,
                     scale: binding.transform.scale,
+                    material_override: binding.material_override,
                 })
                 .collect();
             if let Some(model) = loaded.static_model() {
@@ -885,6 +894,7 @@ mod tests {
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: [2.0, 3.0, 4.0],
             },
+            None,
         );
         assert_eq!(result.translation, [2.0, 6.0, 2.0]);
         assert_eq!(result.rotation, [0.0, 1.0, 0.0, 0.0]);

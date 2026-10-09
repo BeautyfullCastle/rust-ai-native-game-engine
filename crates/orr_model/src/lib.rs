@@ -5,6 +5,9 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 
+pub mod material_override;
+pub use material_override::MaterialOverride;
+
 #[cfg(feature = "import")]
 pub mod import;
 
