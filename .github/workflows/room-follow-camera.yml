@@ -1,0 +1,86 @@
+name: room-follow-camera
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  room-follow-camera-linux:
+    # Existing unprivileged bwrap-compatible profile; migration is tracked by #154.
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      RUST_BACKTRACE: 1
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Mandatory software GPU and export isolation prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers bubblewrap
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -r "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+          test "$(id -u)" -ne 0
+          bwrap --die-with-parent --ro-bind / / -- /bin/true
+          mkdir -p follow-evidence
+      - name: Default boundaries and fixed-camera backwards compatibility
+        run: |
+          set -euo pipefail
+          cargo check --locked --release -p orr_editor -p orr_sample
+          cargo test --locked --release -p orr_editor --test deps
+          cargo test --locked --release -p orr_sample --features room-project,project-create --lib room_camera::tests 2>&1 | tee follow-evidence/camera-contract.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' follow-evidence/camera-contract.log
+          cargo test --locked --release -p orr_sample --features room-project,project-create --test room_follow_camera 2>&1 | tee follow-evidence/static-admission.log
+          grep -F 'test generated_project_follow_camera_admission_is_strict ... ok' follow-evidence/static-admission.log
+          cargo test --locked --release -p orr_editor --features room-project,project-create --lib room_camera_panel::tests 2>&1 | tee follow-evidence/panel.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' follow-evidence/panel.log
+          cargo test --locked --release -p orr_editor --features room-project,project-create --test room_follow_camera -- --skip generated_room_follow_camera_actual_viewport_gpu_static_and_character 2>&1 | tee follow-evidence/static-editor.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' follow-evidence/static-editor.log
+      - name: Character, material and checkpoint compatibility
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --features room-character,room-checkpoint,project-create,project-export --test room_follow_camera 2>&1 | tee follow-evidence/mixed-admission.log
+          cargo test --locked --release -p orr_sample --features room-character,room-checkpoint,project-create,project-export --lib room_app::room_ui_app_tests::native_follow_camera_tracks_actual_restart_and_checkpoint_restore -- --exact 2>&1 | tee follow-evidence/native-checkpoint.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' follow-evidence/native-checkpoint.log
+          grep -F 'test generated_project_follow_camera_admission_is_strict ... ok' follow-evidence/mixed-admission.log
+          cargo test --locked --release -p orr_editor --features room-character,room-checkpoint,project-create --test room_follow_camera -- --skip generated_room_follow_camera_actual_viewport_gpu_static_and_character 2>&1 | tee follow-evidence/mixed-editor.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' follow-evidence/mixed-editor.log
+          cargo test --locked --release -p orr_editor --features room-character,room-checkpoint,project-create --test room_project_workflow --test room_character_workflow --test material_overrides
+          cargo test --locked --release -p orr_sample --features room-character,room-checkpoint,project-create,project-export --test room_project --test room_character_project --test material_overrides
+      - name: Mandatory real editor GPU follow proof
+        env:
+          ORR_REQUIRE_GPU: '1'
+        run: |
+          set -euo pipefail
+          export ORR_ROOM_FOLLOW_CAPTURE_DIR="$PWD/follow-evidence/editor"
+          cargo test --locked --release -p orr_editor --features room-character,room-checkpoint,project-create --test room_follow_camera -- --ignored --exact generated_room_follow_camera_actual_viewport_gpu_static_and_character --nocapture 2>&1 | tee follow-evidence/editor-gpu.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' follow-evidence/editor-gpu.log
+      - name: Mandatory source-hidden read-only follow export
+        env:
+          ORR_REQUIRE_GPU: '1'
+          ORR_REQUIRE_PROJECT_ISOLATION: '1'
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p orr_sample --features room-character,room-checkpoint,project-create,project-export --bin room_escape --bin orr_export_room
+          export ORR_ROOM_RUNTIME="$PWD/target/release/room_escape"
+          export ORR_ROOM_EXPORTER="$PWD/target/release/orr_export_room"
+          export ORR_ROOM_FOLLOW_CAPTURE_DIR="$PWD/follow-evidence/export"
+          cargo test --locked --release -p orr_sample --features room-character,room-checkpoint,project-create,project-export --test room_export -- --ignored --exact room_follow_camera_source_hidden_readonly_export --nocapture 2>&1 | tee follow-evidence/export.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' follow-evidence/export.log
+      - name: Strict affected configurations
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --release -p orr_editor -p orr_sample --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-project,project-create --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features room-project,project-create --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-character,room-checkpoint,project-create,project-export --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features room-character,room-checkpoint,project-create --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: room-follow-camera-evidence
+          path: follow-evidence

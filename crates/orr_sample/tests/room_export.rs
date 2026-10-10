@@ -639,3 +639,618 @@ fn room_real_export_source_hidden_gpu_workflow() {
         fs::copy(bundle.join("orr.export.json"), dest.join("orr.export.json")).unwrap();
     }
 }
+
+#[test]
+#[ignore = "requires exact production Room tools, real GPU and source-hidden read-only Linux namespace"]
+fn room_follow_camera_source_hidden_readonly_export() {
+    let w = Work::new();
+    let camera_path = w.project.join("room.camera.json");
+    let manifest_path = w.project.join("orr.project.json");
+    let scene_text = fs::read_to_string(w.project.join("room.scene.yaml")).unwrap();
+    let scene = PreparedScene::parse(&scene_text).unwrap();
+    let player = actor(scene.frame(), PLAYER);
+    let player_guid = scene.index().guid(player).unwrap().to_string();
+    let initial = scene.frame().checksum();
+
+    // Work::new owns a v3 static sidecar with per-player/key RGB factors. Keep
+    // those exact authored factors while adding only a presentation camera.
+    let model_path = w.project.join("room.models.json");
+    let model_bytes = fs::read(&model_path).unwrap();
+    let models: Document = serde_json::from_slice(&model_bytes).unwrap();
+    assert_eq!(models.version, 3);
+    assert_eq!(models.bindings.len(), 2);
+    let factors: Vec<_> = models
+        .bindings
+        .values()
+        .map(|binding| binding.material_override)
+        .collect();
+    assert!(factors.iter().all(Option::is_some));
+    assert_ne!(factors[0], factors[1]);
+
+    let fixed = orr_sample::room_camera::Document::readable_default();
+    let fixed_bytes = fixed.to_bytes().unwrap();
+    fs::write(&camera_path, &fixed_bytes).unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["entry"]["camera"] = "room.camera.json".into();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let admitted = PreparedProject::open(&w.project).unwrap();
+    assert_eq!(admitted.scene().frame().checksum(), initial);
+    assert_eq!(admitted.camera().unwrap().document, fixed);
+    let fixed_capture = w.temp.path().join("captures/fixed-camera.png");
+    let fixed_output = good(
+        w.runtime_command(None, 0, "", &fixed_capture)
+            .output()
+            .unwrap(),
+    );
+    assert!(fixed_output.contains(&format!("room initial checksum: 0x{initial:016x}")));
+    let fixed_pixels = pixels(&fixed_capture);
+
+    let mut followed = fixed.clone();
+    followed.schema = 2;
+    followed.follow = Some(orr_sample::room_camera::Follow {
+        player: player_guid.clone(),
+        offset: [1.25, -0.5, 0.75],
+    });
+    let follow_bytes = followed.to_bytes().unwrap();
+    fs::write(&camera_path, &follow_bytes).unwrap();
+    let admitted = PreparedProject::open(&w.project).unwrap();
+    assert_eq!(admitted.scene().frame().checksum(), initial);
+    assert_eq!(admitted.camera().unwrap().bytes, follow_bytes);
+    assert_eq!(fs::read(&model_path).unwrap(), model_bytes);
+    let followed_capture = w.temp.path().join("captures/follow-camera.png");
+    let followed_output = good(
+        w.runtime_command(None, 0, "", &followed_capture)
+            .output()
+            .unwrap(),
+    );
+    assert!(followed_output.contains(&format!("room initial checksum: 0x{initial:016x}")));
+    assert_ne!(
+        pixels(&followed_capture),
+        fixed_pixels,
+        "camera-only follow must change actual GPU pixels without changing the simulation checksum"
+    );
+
+    // A syntactically valid but unknown GUID, and a GUID reassigned to KEY,
+    // must both fail before either runtime capture or exporter creates output.
+    let key = actor(scene.frame(), KEY);
+    let key_guid = scene.index().guid(key).unwrap().to_string();
+    for (invalid_guid, diagnostic) in [
+        (
+            "e_ffffffffffffffffffffffffffffffff".to_string(),
+            "not in the scene index",
+        ),
+        (key_guid, "sole PLAYER"),
+    ] {
+        let mut invalid = followed.clone();
+        invalid.follow.as_mut().unwrap().player = invalid_guid;
+        fs::write(&camera_path, invalid.to_bytes().unwrap()).unwrap();
+        let capture = w.temp.path().join("captures/rejected-follow.png");
+        bad(
+            w.runtime_command(None, 0, "", &capture).output().unwrap(),
+            diagnostic,
+        );
+        let output = w.temp.path().join("rejected follow export");
+        bad(w.export_command(&output).output().unwrap(), diagnostic);
+        assert!(!capture.exists() && !output.exists());
+    }
+    fs::write(&camera_path, &follow_bytes).unwrap();
+
+    // Malformed/structurally incomplete sidecars fail admission before the
+    // runtime writes a capture or the exporter creates a destination.
+    let malformed_cameras: [&[u8]; 3] = [
+        b"{malformed camera",
+        br#"{"schema":2}"#,
+        br#"{"schema":2,"follow":{"player":"not-a-guid","offset":[0,0,0]}}"#,
+    ];
+    for malformed in malformed_cameras {
+        fs::write(&camera_path, malformed).unwrap();
+        let capture = w.temp.path().join("captures/rejected-malformed-camera.png");
+        bad(
+            w.runtime_command(None, 0, "", &capture).output().unwrap(),
+            "room camera",
+        );
+        let output = w.temp.path().join("rejected malformed camera export");
+        bad(w.export_command(&output).output().unwrap(), "room camera");
+        assert!(!capture.exists() && !output.exists());
+    }
+    fs::write(&camera_path, &follow_bytes).unwrap();
+
+    let project_before = tree(&w.project);
+    let staged = w.temp.path().join("follow-camera export");
+    good(w.export_command(&staged).output().unwrap());
+    let changed_camera = {
+        let mut next = followed.clone();
+        next.follow.as_mut().unwrap().offset = [2.25, -0.5, 0.75];
+        next
+    };
+    fs::write(&camera_path, changed_camera.to_bytes().unwrap()).unwrap();
+    let changed_export = w.temp.path().join("camera identity export");
+    good(w.export_command(&changed_export).output().unwrap());
+    let old_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(staged.join("orr.export.json")).unwrap()).unwrap();
+    let new_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(changed_export.join("orr.export.json")).unwrap()).unwrap();
+    assert_ne!(
+        old_manifest["content_digest"],
+        new_manifest["content_digest"]
+    );
+    assert_eq!(
+        fs::read(changed_export.join("project/room.camera.json")).unwrap(),
+        changed_camera.to_bytes().unwrap()
+    );
+    fs::remove_dir_all(changed_export).unwrap();
+    fs::write(&camera_path, &follow_bytes).unwrap();
+
+    let bundle = w.temp.path().join("relocated follow camera room");
+    fs::rename(staged, &bundle).unwrap();
+    let bundle_before = tree(&bundle);
+    assert_eq!(hash(&bundle.join("bin/room_escape")), hash(&w.runtime));
+    assert_eq!(
+        fs::read(bundle.join("project/room.camera.json")).unwrap(),
+        follow_bytes
+    );
+    assert_eq!(
+        fs::read(bundle.join("project/room.models.json")).unwrap(),
+        model_bytes,
+        "static material overrides must survive exact export"
+    );
+    for (path, bytes) in tree(&bundle.join("project")) {
+        assert_eq!(
+            project_before.get(&path),
+            Some(&bytes),
+            "export changed {path}"
+        );
+    }
+
+    // The shipping binary and relocated, read-only export must produce byte-
+    // identical checksums, PNGs, and captured source states at initial/move/key.
+    let mut initial_image = Vec::new();
+    for (name, ticks, held) in [
+        ("initial", 0, ""),
+        ("movement", 18, "right"),
+        ("key", 18, "right,interact"),
+    ] {
+        let source = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("{name}-source.png"));
+        let exported = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("{name}-export.png"));
+        let a = good(
+            w.runtime_command(None, ticks, held, &source)
+                .output()
+                .unwrap(),
+        );
+        let b = good(
+            w.runtime_command(Some(&bundle), ticks, held, &exported)
+                .output()
+                .unwrap(),
+        );
+        assert!(a.contains(&format!("room initial checksum: 0x{initial:016x}")));
+        assert!(a.contains("room capture adapter:"));
+        assert_eq!(a, b, "production source/export state parity: {name}");
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            fs::read(&exported).unwrap(),
+            "PNG parity: {name}"
+        );
+        let image = pixels(&source);
+        if ticks == 0 {
+            initial_image = image;
+        } else {
+            assert_ne!(
+                image, initial_image,
+                "input should visibly change follow-camera output"
+            );
+        }
+        if name == "key" {
+            assert!(a.contains("room key: 1"), "key pickup must occur: {a}");
+        }
+    }
+    assert_eq!(
+        tree(&w.project),
+        project_before,
+        "source project bytes must be restored exactly"
+    );
+    assert_eq!(fs::read(&model_path).unwrap(), model_bytes);
+    assert_eq!(fs::read(&camera_path).unwrap(), follow_bytes);
+    let forbidden_capture = bundle.join("forbidden.png");
+    bad(
+        w.runtime_command(Some(&bundle), 0, "", &forbidden_capture)
+            .output()
+            .unwrap(),
+        "Read-only file system",
+    );
+    let readonly_export = w.temp.path().join("readonly/export");
+    bad(
+        w.export_command(&readonly_export).output().unwrap(),
+        "Read-only file system",
+    );
+    assert!(!forbidden_capture.exists() && !readonly_export.exists());
+    assert_eq!(
+        tree(&bundle),
+        bundle_before,
+        "read-only export bundle must remain unchanged"
+    );
+    if let Some(destination) = std::env::var_os("ORR_ROOM_FOLLOW_CAPTURE_DIR") {
+        let destination = PathBuf::from(destination);
+        fs::create_dir_all(&destination).unwrap();
+        copy_tree(
+            &w.temp.path().join("captures"),
+            &destination.join("static/captures"),
+        );
+        copy_tree(&w.project, &destination.join("static/authored-project"));
+        fs::create_dir_all(destination.join("static/export/project")).unwrap();
+        fs::copy(
+            bundle.join("orr.export.json"),
+            destination.join("static/export/orr.export.json"),
+        )
+        .unwrap();
+        fs::copy(
+            bundle.join("project/room.camera.json"),
+            destination.join("static/export/project/room.camera.json"),
+        )
+        .unwrap();
+        fs::copy(
+            bundle.join("project/room.models.json"),
+            destination.join("static/export/project/room.models.json"),
+        )
+        .unwrap();
+    }
+    #[cfg(feature = "room-character")]
+    {
+        // Keep production-binary copies and export staging bounded to one profile.
+        drop(w);
+        follow_camera_character_export_case();
+    }
+}
+
+#[cfg(feature = "room-character")]
+fn follow_camera_character_export_case() {
+    let w = Work::new();
+    let character_package = w.source.join("character");
+    copy_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/room_character_demo"),
+        &character_package,
+    );
+    Project::open_for_install(&w.project, Runtime::content_only().engine_version)
+        .unwrap()
+        .install(std::slice::from_ref(&character_package))
+        .unwrap();
+    let lock: orr_package::Lock =
+        serde_json::from_slice(&fs::read(w.project.join("orr.packages.lock.json")).unwrap())
+            .unwrap();
+    let character_digest = &lock
+        .packages
+        .get("sample-room-character")
+        .expect("character package is active")
+        .digest;
+    let character_object = w
+        .project
+        .join(".orr/packages/objects")
+        .join(character_digest);
+    let source_manifest: orr_package::Manifest =
+        serde_json::from_slice(&fs::read(character_package.join("orr.package.json")).unwrap())
+            .unwrap();
+    let installed_manifest: orr_package::Manifest =
+        serde_json::from_slice(&fs::read(character_object.join("orr.package.json")).unwrap())
+            .unwrap();
+    assert_eq!(installed_manifest, source_manifest);
+    for file in ["courier.orrmodel.json", "LICENSE.txt", "generate.py"] {
+        assert_eq!(
+            fs::read(character_object.join(file)).unwrap(),
+            fs::read(character_package.join(file)).unwrap(),
+            "installed character package bytes changed: {file}"
+        );
+    }
+
+    let scene =
+        PreparedScene::parse(&fs::read_to_string(w.project.join("room.scene.yaml")).unwrap())
+            .unwrap();
+    let initial = scene.frame().checksum();
+    let player_guid = scene
+        .index()
+        .guid(actor(scene.frame(), PLAYER))
+        .unwrap()
+        .to_string();
+    let key_guid = scene
+        .index()
+        .guid(actor(scene.frame(), KEY))
+        .unwrap()
+        .to_string();
+    let model_path = w.project.join("room.models.json");
+    let mut models: Document = serde_json::from_slice(&fs::read(&model_path).unwrap()).unwrap();
+    assert_eq!(models.version, 3);
+    let key_static = models.bindings.get(&key_guid).unwrap().clone();
+    let player_static = models.bindings.remove(&player_guid).unwrap();
+    assert_eq!(key_static.kind, model_bindings::ModelKind::Static);
+    let key_factor = key_static.material_override.unwrap();
+    assert_eq!(player_static.kind, model_bindings::ModelKind::Static);
+    assert!(player_static.material_override.is_some());
+
+    let loaded = model_bindings::load_asset_for_kind(
+        &w.project,
+        "sample-room-character",
+        "courier.orrmodel.json",
+        model_bindings::ModelKind::Animated,
+    )
+    .unwrap();
+    let animated_player = Binding::from_animated_asset(
+        "sample-room-character".into(),
+        "courier.orrmodel.json".into(),
+        &loaded,
+        model_bindings::AnimationDescriptor {
+            clip_index: 0,
+            playback: model_bindings::PlaybackMode::Loop,
+        },
+        LocalTransform::default(),
+    )
+    .unwrap();
+    assert_eq!(animated_player.kind, model_bindings::ModelKind::Animated);
+    assert_eq!(animated_player.material_override, None);
+    assert_eq!(animated_player.animation.unwrap().clip_index, 0);
+    models.bindings.insert(player_guid.clone(), animated_player);
+    assert_eq!(models.bindings.len(), 2);
+    assert_eq!(
+        models.bindings.get(&key_guid).unwrap().material_override,
+        Some(key_factor),
+        "the static KEY keeps its authored material factor"
+    );
+    fs::write(&model_path, serde_json::to_vec_pretty(&models).unwrap()).unwrap();
+    let model_bytes = fs::read(&model_path).unwrap();
+
+    let character = orr_sample::room_character::Document {
+        schema: 1,
+        player: player_guid.clone(),
+        searching: 0,
+        carrying: 1,
+        escaped: 2,
+    };
+    let character_path = w.project.join("room.character.json");
+    let character_bytes = character.to_bytes().unwrap();
+    fs::write(&character_path, &character_bytes).unwrap();
+
+    let manifest_path = w.project.join("orr.project.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["entry"]["character"] = "room.character.json".into();
+    let camera_path = w.project.join("room.camera.json");
+    let fixed = orr_sample::room_camera::Document::readable_default();
+    fs::write(&camera_path, fixed.to_bytes().unwrap()).unwrap();
+    manifest["entry"]["camera"] = "room.camera.json".into();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let open = || {
+        PreparedProject::open_with_capabilities(
+            &w.project,
+            false,
+            orr_sample::room_project::CheckpointSupport::Disabled,
+            true,
+        )
+        .unwrap()
+    };
+    let admitted = open();
+    assert_eq!(admitted.scene().frame().checksum(), initial);
+    assert_eq!(admitted.camera().unwrap().document, fixed);
+    assert_eq!(admitted.character().unwrap().document, character);
+    assert_eq!(admitted.character().unwrap().bytes, character_bytes);
+    assert_eq!(admitted.models().document, models);
+    assert_eq!(
+        admitted
+            .models()
+            .document
+            .bindings
+            .get(&key_guid)
+            .unwrap()
+            .material_override,
+        Some(key_factor)
+    );
+
+    let fixed_capture = w.temp.path().join("captures/character-fixed-camera.png");
+    let fixed_output = good(
+        w.runtime_command(None, 0, "", &fixed_capture)
+            .output()
+            .unwrap(),
+    );
+    assert!(fixed_output.contains(&format!("room initial checksum: 0x{initial:016x}")));
+    let fixed_pixels = pixels(&fixed_capture);
+
+    let mut followed = fixed;
+    followed.schema = 2;
+    followed.follow = Some(orr_sample::room_camera::Follow {
+        player: player_guid,
+        offset: [1.25, -0.5, 0.75],
+    });
+    let follow_bytes = followed.to_bytes().unwrap();
+    fs::write(&camera_path, &follow_bytes).unwrap();
+    let admitted = open();
+    assert_eq!(admitted.scene().frame().checksum(), initial);
+    assert_eq!(admitted.camera().unwrap().bytes, follow_bytes);
+    assert_eq!(admitted.character().unwrap().bytes, character_bytes);
+    assert_eq!(admitted.models().document, models);
+    assert_eq!(fs::read(&model_path).unwrap(), model_bytes);
+    assert_eq!(fs::read(&character_path).unwrap(), character_bytes);
+
+    let followed_capture = w.temp.path().join("captures/character-follow-camera.png");
+    let followed_output = good(
+        w.runtime_command(None, 0, "", &followed_capture)
+            .output()
+            .unwrap(),
+    );
+    assert!(followed_output.contains(&format!("room initial checksum: 0x{initial:016x}")));
+    assert_ne!(
+        pixels(&followed_capture),
+        fixed_pixels,
+        "animated PLAYER follow changes actual GPU view without changing the simulation"
+    );
+
+    let project_before = tree(&w.project);
+    let staged = w.temp.path().join("character follow-camera export");
+    good(w.export_command(&staged).output().unwrap());
+    let bundle = w.temp.path().join("relocated character follow-camera room");
+    fs::rename(&staged, &bundle).unwrap();
+    let bundle_before = tree(&bundle);
+    assert_eq!(hash(&bundle.join("bin/room_escape")), hash(&w.runtime));
+    assert_eq!(
+        fs::read(bundle.join("project/room.camera.json")).unwrap(),
+        follow_bytes
+    );
+    assert_eq!(
+        fs::read(bundle.join("project/room.models.json")).unwrap(),
+        model_bytes
+    );
+    assert_eq!(
+        fs::read(bundle.join("project/room.character.json")).unwrap(),
+        character_bytes
+    );
+    assert_eq!(
+        serde_json::from_slice::<Document>(
+            &fs::read(bundle.join("project/room.models.json")).unwrap()
+        )
+        .unwrap()
+        .bindings
+        .get(&key_guid)
+        .unwrap()
+        .material_override,
+        Some(key_factor),
+        "the exported static KEY retains its exact material factor"
+    );
+    let exported_project = tree(&bundle.join("project"));
+    for (path, bytes) in &exported_project {
+        assert_eq!(
+            project_before.get(path),
+            Some(bytes),
+            "export changed {path}"
+        );
+    }
+    assert!(exported_project
+        .keys()
+        .any(|path| path.ends_with("courier.orrmodel.json")));
+    assert!(exported_project.keys().any(|path| {
+        path == &format!(".orr/packages/objects/{character_digest}/courier.orrmodel.json")
+    }));
+
+    let mut initial_image = Vec::new();
+    for (name, ticks, held) in [
+        ("initial", 0, ""),
+        ("movement", 18, "right"),
+        ("key", 18, "right,interact"),
+    ] {
+        let source = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("character-{name}-source.png"));
+        let exported = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("character-{name}-export.png"));
+        let source_output = good(
+            w.runtime_command(None, ticks, held, &source)
+                .output()
+                .unwrap(),
+        );
+        let exported_output = good(
+            w.runtime_command(Some(&bundle), ticks, held, &exported)
+                .output()
+                .unwrap(),
+        );
+        assert!(source_output.contains(&format!("room initial checksum: 0x{initial:016x}")));
+        assert!(source_output.contains("room capture adapter:"));
+        assert_eq!(
+            source_output, exported_output,
+            "character source/export parity: {name}"
+        );
+        assert_eq!(fs::read(&source).unwrap(), fs::read(&exported).unwrap());
+        let image = pixels(&source);
+        assert!(
+            image
+                .chunks(4)
+                .filter(|pixel| *pixel != &image[..4])
+                .count()
+                > 100
+        );
+        if ticks == 0 {
+            initial_image = image;
+        } else {
+            assert_ne!(
+                image, initial_image,
+                "character presentation changed: {name}"
+            );
+        }
+        if name == "key" {
+            assert!(
+                source_output.contains("room key: 1"),
+                "key interaction failed: {source_output}"
+            );
+        }
+    }
+    assert_eq!(
+        tree(&w.project),
+        project_before,
+        "character source bytes changed"
+    );
+    assert_eq!(fs::read(&model_path).unwrap(), model_bytes);
+    assert_eq!(fs::read(&character_path).unwrap(), character_bytes);
+    assert_eq!(fs::read(&camera_path).unwrap(), follow_bytes);
+
+    let forbidden_capture = bundle.join("character-forbidden.png");
+    bad(
+        w.runtime_command(Some(&bundle), 0, "", &forbidden_capture)
+            .output()
+            .unwrap(),
+        "Read-only file system",
+    );
+    let readonly_export = w.temp.path().join("readonly/character-export");
+    bad(
+        w.export_command(&readonly_export).output().unwrap(),
+        "Read-only file system",
+    );
+    assert!(!forbidden_capture.exists() && !readonly_export.exists());
+    assert_eq!(
+        tree(&bundle),
+        bundle_before,
+        "character export bundle changed"
+    );
+
+    if let Some(destination) = std::env::var_os("ORR_ROOM_FOLLOW_CAPTURE_DIR") {
+        let destination = PathBuf::from(destination).join("character");
+        fs::create_dir_all(&destination).unwrap();
+        copy_tree(
+            &w.temp.path().join("captures"),
+            &destination.join("captures"),
+        );
+        copy_tree(&w.project, &destination.join("authored-project"));
+        fs::create_dir_all(destination.join("export/project")).unwrap();
+        fs::copy(
+            bundle.join("orr.export.json"),
+            destination.join("export/orr.export.json"),
+        )
+        .unwrap();
+        for sidecar in [
+            "room.camera.json",
+            "room.models.json",
+            "room.character.json",
+        ] {
+            fs::copy(
+                bundle.join("project").join(sidecar),
+                destination.join("export/project").join(sidecar),
+            )
+            .unwrap();
+        }
+    }
+}

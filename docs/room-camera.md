@@ -1,4 +1,4 @@
-# Authored Room presentation camera (first bounded slice)
+# Authored Room presentation camera
 
 A schema-2 `room-escape-v1` entry can name a root-level `camera` JSON sidecar.
 This optional profile is owned by the Room presentation consumer, not the
@@ -14,7 +14,7 @@ There is no silent retrofit of older project files.
 
 ## Schema
 
-The strict JSON document requires `schema: 1`, `target: [x,y,z]`, `yaw`, `pitch`,
+The fixed strict JSON document requires `schema: 1`, `target: [x,y,z]`, `yaw`, `pitch`,
 `distance`, and `projection`. Angles use radians except perspective vertical FOV
 which uses degrees. Unknown, duplicate, null, or missing fields are errors.
 
@@ -27,6 +27,10 @@ which uses degrees. Unknown, duplicate, null, or missing fields are errors.
   half-height is `half_height * session_distance / authored_distance / min(aspect,1)`
 - Dimensions are positive and at most 16384 each; exact aspect is retained
 - Maximum document size is 4096 bytes
+
+Optional schema-2 PLAYER follow and its precise navigation/lifecycle contract are
+documented in [Room follow camera](room-follow-camera.md). Schema-1 fixed defaults
+and bytes are unchanged.
 
 The same resolved camera is used for authored native runtime, capture, editor
 rendering, picking, and overlays. Matrices and rays must remain finite. Manual
@@ -71,5 +75,5 @@ Focused acceptance covers strict schema and bounds, aspect extremes, projection-
 aware gestures, actual editor Apply/Undo/Save/reopen widgets, scene lifecycle,
 Frame identity preservation, explicit software-GPU render/pick, and exact
 production-tool source-hidden read-only export. OS-window interaction, physical
-GPU, Windows local, camera follow, cutscenes, a generic rig system, and richer HUD
+GPU, Windows local, cutscenes, a generic rig system, and richer HUD
 are separate work. This slice does not complete roadmap #94 or #104.

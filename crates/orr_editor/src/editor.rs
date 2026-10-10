@@ -218,6 +218,8 @@ pub struct Editor {
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
     room_camera_scene: Option<std::path::PathBuf>,
+    #[cfg(feature="room-project")]
+    room_camera_source: Arc<()>,
     #[cfg(feature="room-ui")]
     room_ui_source: std::sync::Arc<std::sync::atomic::AtomicU64>,
     #[cfg(feature="collect-audio")]
@@ -343,6 +345,7 @@ impl Editor {
             #[cfg(feature="room-character")] room_character_scene: None,
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
+            #[cfg(feature="room-project")] room_camera_source: Arc::new(()),
             #[cfg(feature="collect-audio")] collect_audio: None,
             #[cfg(feature="collect-audio")] collect_audio_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature="room-ui")] room_ui_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1994,12 +1997,74 @@ impl Editor {
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
         document.validate()?;
-        for size in [(1,16384),(16384,1),(800,600)] { document.camera(&document.orbit(),size)?; }
         if !self.game().is_room() || !self.spec().is_local() { return Err("camera requires a local Room project".into()); }
+        if document.follow.is_some() && !self.yard_rows_coherent() {
+            // Initial watch.history can retire the rows read during startup.
+            // Use one bounded authoritative barrier for direct startup/restart
+            // admission, then revalidate; never bypass the live source fences.
+            // Panel actions preflight coherence and do not enter this branch.
+            self.sync();
+        }
+        self.validate_room_camera_document(&document)?;
         self.camera3d = document.orbit();
         self.room_camera = Some(document);
         self.room_camera_scene = self.path();
         Ok(())
+    }
+    /// Camera authoring shares the current coherent GUID map with rendered geometry.
+    #[cfg(feature="room-project")]
+    fn room_camera_index(&self) -> Result<orr_reflect::SceneIndex, String> {
+        if !self.game().is_room() || !self.spec().is_local() || !self.yard_rows_coherent() {
+            return Err("Room follow camera requires a coherent local Room snapshot".into());
+        }
+        let mut index = orr_reflect::SceneIndex::default();
+        let mut guids = std::collections::BTreeSet::new();
+        let mut entities = std::collections::BTreeSet::new();
+        for row in &self.rows {
+            if let Some(guid) = &row.guid {
+                if !guids.insert(guid.clone()) || !entities.insert(row.entity) {
+                    return Err("Room follow camera GUID map is ambiguous".into());
+                }
+                index.insert(guid.clone(), row.entity);
+            }
+        }
+        Ok(index)
+    }
+    #[cfg(feature="room-project")]
+    pub fn validate_room_camera_document(&self, document: &orr_sample::room_camera::Document) -> Result<(),String> {
+        document.validate()?;
+        if !self.game().is_room() || !self.spec().is_local() { return Err("camera requires a local Room project".into()); }
+        if document.follow.is_some() {
+            let index = self.room_camera_index()?;
+            let frame = self.snapshot().ok_or("Room camera snapshot is unavailable")?.predicted();
+            for size in [(1,16384),(16384,1),(800,600)] {
+                document.camera_for_frame(&document.orbit(), frame, &index, size)?;
+            }
+        } else {
+            for size in [(1,16384),(16384,1),(800,600)] { document.camera(&document.orbit(),size)?; }
+        }
+        Ok(())
+    }
+    #[cfg(feature="room-project")]
+    pub fn room_camera_player_guid(&self) -> Result<String, String> {
+        let index = self.room_camera_index()?;
+        let frame = self.snapshot().ok_or("Room camera snapshot is unavailable")?.predicted();
+        let mut players = frame.iter::<orr_sample::room_game::RoomActor>()
+            .filter(|(_, actor)| actor.kind == orr_sample::room_game::PLAYER);
+        let (entity, _) = players.next().ok_or("Room camera requires a PLAYER")?;
+        if players.next().is_some() { return Err("Room camera requires exactly one PLAYER".into()); }
+        let guid = index.guid(entity).ok_or("Room PLAYER has no coherent GUID")?.to_string();
+        let mut document = orr_sample::room_camera::Document::readable_default();
+        document.schema = 2;
+        document.follow = Some(orr_sample::room_camera::Follow { player: guid.clone(), offset: [0.0;3] });
+        document.validate_frame(frame, &index)?;
+        Ok(guid)
+    }
+    #[cfg(feature="room-project")]
+    pub fn room_camera_source_token(&self) -> Arc<()> { self.room_camera_source.clone() }
+    #[cfg(feature="room-project")]
+    pub fn room_camera_document(&self) -> Option<&orr_sample::room_camera::Document> {
+        self.has_room_camera().then_some(self.room_camera.as_ref()).flatten()
     }
     pub fn has_room_camera(&self) -> bool {
         #[cfg(feature="room-project")]
@@ -2010,7 +2075,15 @@ impl Editor {
     }
     pub fn presentation_camera3d(&self, size:(u32,u32)) -> Result<orr_render::Camera3D,String> {
         #[cfg(feature="room-project")]
-        if self.has_room_camera() { return self.room_camera.as_ref().unwrap().camera(&self.camera3d,size); }
+        if self.has_room_camera() {
+            let document = self.room_camera.as_ref().unwrap();
+            if document.follow.is_some() {
+                let index = self.room_camera_index()?;
+                let frame = self.snapshot().ok_or("Room camera snapshot is unavailable")?.predicted();
+                return document.camera_for_frame(&self.camera3d, frame, &index, size);
+            }
+            return document.camera(&self.camera3d,size);
+        }
         let _ = size;
         Ok(self.camera3d.camera())
     }
@@ -2043,6 +2116,8 @@ impl Editor {
     #[cfg(feature="collect-audio")]
     pub fn collect_audio_source_token(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> { self.collect_audio_source.clone() }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature="room-project")]
+        { self.room_camera_source = Arc::new(()); }
         // Successful source replacement/path changes retire drafts even when
         // selection and history values are unchanged. Failed events never enter
         // this existing source-retirement hook.
@@ -2647,7 +2722,6 @@ impl Editor {
                 return false;
             }
         };
-        fresh.log = std::mem::take(&mut self.log);
         if fresh.game() == self.game() {
             fresh.camera = self.camera;
             fresh.initial_camera_fit = false;
@@ -2656,8 +2730,14 @@ impl Editor {
         if fresh.game().is_room() && fresh.path()==self.path() { if let Some(character)=self.room_character() { let _ = fresh.install_room_character(character.clone()); } }
         #[cfg(feature="room-project")]
         if self.has_room_camera() && fresh.game().is_room() && fresh.path()==self.path() {
-            let _ = fresh.install_room_camera(self.room_camera.as_ref().unwrap().clone());
+            if let Err(error) = fresh.install_room_camera(self.room_camera.as_ref().unwrap().clone()) {
+                // Never downgrade a rejected authored follow target to the fixed
+                // fallback. A failed restart preserves this editor and its camera.
+                self.error(format!("restart camera rejected: {error}; reopen the complete project"));
+                return false;
+            }
         }
+        fresh.log = std::mem::take(&mut self.log);
         fresh.feed.filter = self.feed.filter;
         fresh.agent.expand_methods = std::mem::take(&mut self.agent.expand_methods);
         *self = fresh;

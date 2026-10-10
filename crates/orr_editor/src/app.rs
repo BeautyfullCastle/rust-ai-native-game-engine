@@ -664,9 +664,7 @@ impl EditorApp {
         {
             if !self.editor.has_room_camera() { self.room_camera = None; }
             if let Some(panel) = &mut self.room_camera {
-                let editable = self.editor.mode()==Mode::Edit && self.editor.can_mutate()
-                    && self.editor.previewing().is_none() && self.editor.yard_rows_coherent();
-                if panel.show(ui, editable) { let _ = self.editor.install_room_camera(panel.document().clone()); }
+                panel.show_for_editor(ui, &mut self.editor);
             }
         }
         #[cfg(all(feature="room-checkpoint",target_os="linux"))]
@@ -948,7 +946,16 @@ impl EditorApp {
         }
         #[cfg(feature="terrain")]
         if frame_drawn || !self.editor.has_room_camera() { self.terrain.paint_selection(&self.editor, ui.painter(), &camera, rect); }
-        ui.painter().text(rect.left_top()+egui::vec2(10.0,10.0),egui::Align2::LEFT_TOP,"Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan",egui::FontId::proportional(12.0),Color32::WHITE);
+        #[cfg(feature="room-project")]
+        let following = self.editor.room_camera_document().is_some_and(|document| document.follow.is_some());
+        #[cfg(not(feature="room-project"))]
+        let following = false;
+        let controls = if following {
+            "Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan disabled while following"
+        } else {
+            "Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan"
+        };
+        ui.painter().text(rect.left_top()+egui::vec2(10.0,10.0),egui::Align2::LEFT_TOP,controls,egui::FontId::proportional(12.0),Color32::WHITE);
         if self.editor.previewing().is_some(){ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"3D proposal preview unavailable; displaying live host snapshot",egui::FontId::proportional(14.0),Color32::YELLOW);}
     }
 

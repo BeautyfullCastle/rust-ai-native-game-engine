@@ -16,11 +16,13 @@ const PACKAGE: &str = "sample-imported-scene";
 const ASSET: &str = "foreground.glb";
 
 fn prepare(root: &Path) -> PathBuf {
+    // Resolve the test-owned temporary directory alias (for example macOS /var).
+    let root = root.canonicalize().unwrap();
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/imported_scene_demo")
         .canonicalize()
         .unwrap();
-    Project::open_for_install(root, Runtime::content_only().engine_version)
+    Project::open_for_install(&root, Runtime::content_only().engine_version)
         .unwrap()
         .install(&[source])
         .unwrap();
@@ -736,7 +738,7 @@ fn reinstall_revision(root: &Path, source: &Path, revision: u32) {
 fn package_replacement_stales_material_draft_without_autoswitching_binding() {
     let temp = tempfile::tempdir().unwrap();
     let scene = prepare(temp.path());
-    let source = mutable_package_source(temp.path());
+    let source = mutable_package_source(scene.parent().unwrap());
     let mut h = harness(&scene);
     settle(&mut h);
     click(&mut h, "box_right");

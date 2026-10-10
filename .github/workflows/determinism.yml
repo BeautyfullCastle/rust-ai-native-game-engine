@@ -558,12 +558,15 @@ jobs:
           bwrap --ro-bind / / -- /bin/true
           mkdir -p "$ORR_PLAYER_SETTINGS_CAPTURE_DIR"
           cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --list > "$RUNNER_TEMP/player-settings-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 108
-          test "$(grep -cE '^player_settings::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 28
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 111
+          test "$(grep -cE '^player_settings::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 31
+          grep -Fx 'player_settings::tests::commit_releases_lock_before_unrelated_pre_exec_child_exits: test' "$RUNNER_TEMP/player-settings-library-list.txt"
+          grep -Fx 'player_settings::tests::failed_commits_release_lock_before_unrelated_pre_exec_child_exits: test' "$RUNNER_TEMP/player-settings-library-list.txt"
+          grep -Fx 'player_settings::tests::unwound_commit_releases_lock_before_unrelated_pre_exec_child_exits: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           grep -Fx 'app::player_settings_tests::persisted_widgets_mouse_fire_restart_match_inproc_threaded_and_effective_inputs: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           grep -Fx 'app::player_settings_tests::saved_mouse_binding_never_leaks_queued_apply_click_or_stale_dpi_layout: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/player-settings-library.log"
-          grep -F 'test result: ok. 108 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/player-settings-library.log"
+          grep -F 'test result: ok. 111 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/player-settings-library.log"
           if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested|without source hiding|source_hiding=false|software GPU unavailable' "$RUNNER_TEMP/player-settings-library.log"; then exit 1; fi
           for specification in player_settings_cli:6 player_settings_lifecycle:3 player_settings_ui:1; do
             target=${specification%:*}
@@ -857,7 +860,7 @@ jobs:
           PYDISABLED
 
           check_library library 89 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib
-          check_library joint-library 147 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export,player-settings --lib
+          check_library joint-library 150 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export,player-settings --lib
           name=game_progress::tests::stable_nonblocking_lock_and_reread_before_merge
           cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib "$name" -- --exact --list > "$RUNNER_TEMP/collect-progress-barrier-list.txt"
           test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-barrier-list.txt")" -eq 1
