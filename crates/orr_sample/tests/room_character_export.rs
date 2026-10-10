@@ -283,6 +283,7 @@ impl Work {
             searching: 0,
             carrying: 1,
             escaped: 2,
+            speeds: None,
         };
         fs::write(
             project.join("room.character.json"),
@@ -611,7 +612,10 @@ fn room_character_real_export_source_hidden_gpu_workflow() {
         .env("HOME", w.temp.path().join("absent-home"));
     let proof = good(child.output().unwrap());
     println!("{proof}");
-    assert!(!w.temp.path().join("absent-home").exists(),"App must not create or require HOME");
+    assert!(
+        !w.temp.path().join("absent-home").exists(),
+        "App must not create or require HOME"
+    );
     assert!(proof.contains("1 passed; 0 failed; 0 ignored"), "{proof}");
     // An actual production-runtime negative control: move only the imported
     // model presentation outside the view; procedural room geometry is unchanged.
@@ -694,6 +698,127 @@ fn room_character_real_export_source_hidden_gpu_workflow() {
         fs::create_dir_all(&dest).unwrap();
         copy_tree(&w.temp.path().join("captures"), &dest.join("captures"));
         copy_tree(&w.project, &dest.join("authored-project"));
+        fs::copy(bundle.join("orr.export.json"), dest.join("orr.export.json")).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires exact production tools, GPU and source-hidden read-only Linux namespace"]
+fn room_character_rates_export_source_hidden_gpu_parity() {
+    use orr_sample::room_character::{Document as Character, PlaybackRate, PlaybackRates};
+    let w = Work::new();
+    let path = w.project.join("room.character.json");
+    let legacy_bytes = fs::read(&path).unwrap();
+    let mut character = Character::parse(&legacy_bytes).unwrap();
+    character.schema = 2;
+    character.speeds = Some(PlaybackRates {
+        searching: PlaybackRate::Quarter,
+        carrying: PlaybackRate::Double,
+        escaped: PlaybackRate::Quadruple,
+    });
+    let authored_bytes = character.to_bytes().unwrap();
+    fs::write(&path, &authored_bytes).unwrap();
+    let project_before = tree(&w.project);
+    let staged = w.temp.path().join("rated export");
+    good(w.export_command(&staged).output().unwrap());
+    let bundle = w.temp.path().join("relocated rated export");
+    fs::rename(staged, &bundle).unwrap();
+    assert_eq!(
+        fs::read(bundle.join("project/room.character.json")).unwrap(),
+        authored_bytes
+    );
+    let before = tree(&bundle);
+    let mut zero_pixels = None;
+    for (name, ticks, held) in [
+        ("rated-searching", 30, ""),
+        ("rated-carrying", 18, "right,interact"),
+        ("rated-zero", 0, ""),
+        ("rated-restart", 0, ""),
+    ] {
+        let source = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("{name}-source.png"));
+        let exported = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("{name}-export.png"));
+        let legacy = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("{name}-legacy.png"));
+        let a = good(
+            w.runtime_command(None, ticks, held, &source)
+                .output()
+                .unwrap(),
+        );
+        let b = good(
+            w.runtime_command(Some(&bundle), ticks, held, &exported)
+                .output()
+                .unwrap(),
+        );
+        assert!(a.contains("room capture adapter:"), "actual GPU required");
+        assert_eq!(a, b, "source/export state and checksum parity: {name}");
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            fs::read(&exported).unwrap(),
+            "exact source-hidden PNG parity: {name}"
+        );
+        if name == "rated-carrying" {
+            assert!(a.contains("room key: 1"), "{a}");
+        }
+        // Only authored presentation speed changes for this negative control.
+        // Identical runtime state/checksum with different pixels rules out a
+        // loaded-but-unused sidecar or a movement-only rendering difference.
+        fs::write(&path, &legacy_bytes).unwrap();
+        let c = good(
+            w.runtime_command(None, ticks, held, &legacy)
+                .output()
+                .unwrap(),
+        );
+        fs::write(&path, &authored_bytes).unwrap();
+        assert_eq!(a, c, "rates cannot change simulation state: {name}");
+        if ticks != 0 {
+            assert_ne!(
+                pixels(&source),
+                pixels(&legacy),
+                "actual runtime must consume the {name} rate"
+            );
+        } else {
+            assert_eq!(pixels(&source), pixels(&legacy));
+            if let Some(zero) = &zero_pixels {
+                assert_eq!(&pixels(&source), zero);
+            }
+            zero_pixels = Some(pixels(&source));
+        }
+        println!("Authored rate runtime parity {name}: {b}");
+    }
+    // Reuse the real App interaction/restart probe against the schema-2 export.
+    // Its three state transitions are production inputs, never invented flags.
+    let mut child = w.isolated(&w.app_probe, Some(&bundle));
+    child
+        .args([
+            "--ignored",
+            "--exact",
+            "room_app::character_acceptance_tests::exported_character_app_child",
+            "--nocapture",
+        ])
+        .env("ORR_CHARACTER_EXPORTED_PROJECT", bundle.join("project"))
+        .env("ORR_CHARACTER_APP_CAPTURES", w.temp.path().join("captures"))
+        .env("HOME", w.temp.path().join("absent-home"));
+    let proof = good(child.output().unwrap());
+    assert!(proof.contains("1 passed; 0 failed; 0 ignored"), "{proof}");
+    assert!(!w.temp.path().join("absent-home").exists());
+    assert_eq!(tree(&bundle), before);
+    assert_eq!(tree(&w.project), project_before);
+    if let Some(dest) = std::env::var_os("ORR_ROOM_EXPORT_CAPTURE_DIR") {
+        let dest = PathBuf::from(dest).join("playback-rates");
+        fs::create_dir_all(&dest).unwrap();
+        copy_tree(&w.temp.path().join("captures"), &dest.join("captures"));
+        fs::write(dest.join("room.character.json"), &authored_bytes).unwrap();
         fs::copy(bundle.join("orr.export.json"), dest.join("orr.export.json")).unwrap();
     }
 }

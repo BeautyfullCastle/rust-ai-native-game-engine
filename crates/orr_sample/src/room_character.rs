@@ -1,7 +1,8 @@
 //! Read-only, authored RoomEscape character state and absolute-tick poses.
 //!
 //! The model sidecar owns verified asset identity and local TRS. This small
-//! schema-1 map only selects three distinct clips for its one PLAYER binding.
+//! map selects three distinct clips for its one PLAYER binding. Schema 1 keeps
+//! fixed 1x; schema 2 explicitly authors a closed playback rate for every state.
 //! State is derived from the same immutable frame as body placement. There is
 //! no transition clock, ECS animation state, or replay/checkpoint write-back.
 
@@ -9,7 +10,7 @@ use orr_bridge::FrameView;
 use orr_games::room_escape_game::{RoomActor, RoomRun, PLAYER};
 use orr_model::animation::{AnimatedModel, ChannelValues, Matrix4, Pose, Trs, MAX_CLIPS};
 use orr_model_bindings::{
-    animation_time::sample_clip_time,
+    animation_time::sample_clip_time_at_rate,
     model_bindings::{self, AnimationDescriptor, LoadedAsset, ModelKind, PlaybackMode},
 };
 use orr_reflect::{Guid, SceneIndex};
@@ -17,6 +18,52 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, mem::size_of};
 
 pub const MAX_BYTES: usize = 4096;
+pub use orr_model_bindings::animation_time::PlaybackRate;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PlaybackRates {
+    pub searching: PlaybackRate,
+    pub carrying: PlaybackRate,
+    pub escaped: PlaybackRate,
+}
+
+impl<'de> Deserialize<'de> for PlaybackRates {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            searching: PlaybackRate,
+            carrying: PlaybackRate,
+            escaped: PlaybackRate,
+        }
+        struct Object;
+        impl<'de> serde::de::Visitor<'de> for Object {
+            type Value = PlaybackRates;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a room character speeds JSON object")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<PlaybackRates, M::Error> {
+                let wire = Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(PlaybackRates {
+                    searching: wire.searching,
+                    carrying: wire.carrying,
+                    escaped: wire.escaped,
+                })
+            }
+        }
+        deserializer.deserialize_map(Object)
+    }
+}
+
+// Distinguish an absent schema-1 field from an explicitly null invalid value.
+fn present_speeds<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<PlaybackRates>, D::Error> {
+    PlaybackRates::deserialize(deserializer).map(Some)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Document {
@@ -25,6 +72,8 @@ pub struct Document {
     pub searching: u32,
     pub carrying: u32,
     pub escaped: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speeds: Option<PlaybackRates>,
 }
 
 // A derived struct also accepts positional arrays. Route exclusively through
@@ -39,6 +88,8 @@ impl<'de> Deserialize<'de> for Document {
             searching: u32,
             carrying: u32,
             escaped: u32,
+            #[serde(default, deserialize_with = "present_speeds")]
+            speeds: Option<PlaybackRates>,
         }
         struct Object;
         impl<'de> serde::de::Visitor<'de> for Object {
@@ -48,12 +99,25 @@ impl<'de> Deserialize<'de> for Document {
             }
             fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Document, M::Error> {
                 let wire = Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                match (wire.schema, wire.speeds) {
+                    (1, None) | (2, Some(_)) => {}
+                    (1, Some(_)) => {
+                        return Err(serde::de::Error::custom("schema 1 does not accept speeds"));
+                    }
+                    (2, None) => return Err(serde::de::Error::missing_field("speeds")),
+                    _ => {
+                        return Err(serde::de::Error::custom(
+                            "unsupported room character schema",
+                        ));
+                    }
+                }
                 Ok(Document {
                     schema: wire.schema,
                     player: wire.player,
                     searching: wire.searching,
                     carrying: wire.carrying,
                     escaped: wire.escaped,
+                    speeds: wire.speeds,
                 })
             }
         }
@@ -103,8 +167,11 @@ impl Document {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != 1 {
-            return Err("unsupported room character schema".into());
+        match (self.schema, self.speeds) {
+            (1, None) | (2, Some(_)) => {}
+            (1, Some(_)) => return Err("schema 1 does not accept speeds".into()),
+            (2, None) => return Err("schema 2 requires speeds for every state".into()),
+            _ => return Err("unsupported room character schema".into()),
         }
         let player =
             Guid::parse(&self.player).map_err(|e| format!("room character player GUID: {e}"))?;
@@ -129,6 +196,15 @@ impl Document {
             State::Searching => self.searching,
             State::Carrying => self.carrying,
             State::Escaped => self.escaped,
+        }
+    }
+
+    pub fn speed(&self, state: State) -> PlaybackRate {
+        let speeds = self.speeds.unwrap_or_default();
+        match state {
+            State::Searching => speeds.searching,
+            State::Carrying => speeds.carrying,
+            State::Escaped => speeds.escaped,
         }
     }
 
@@ -207,7 +283,13 @@ impl Document {
         let model = loaded
             .animated_model()
             .ok_or("room character PLAYER model is not animated")?;
-        if model.source().skins.is_empty() || !model.source().primitives.iter().any(|primitive| primitive.skin.is_some()) {
+        if model.source().skins.is_empty()
+            || !model
+                .source()
+                .primitives
+                .iter()
+                .any(|primitive| primitive.skin.is_some())
+        {
             return Err("room character PLAYER model must contain skinned geometry".into());
         }
         self.validate_clips(model)?;
@@ -225,7 +307,8 @@ impl Document {
     }
 }
 
-/// Absolute frame tick at fixed 1x; state changes never reset or offset phase.
+/// Absolute frame tick at the state's authored rate (legacy 1x); state changes
+/// never reset or offset phase.
 /// `rest` explicitly distinguishes Edit/Stop from Play at tick zero. No call
 /// mutates the frame, descriptor, asset, or any prior presentation state.
 pub fn sample_pose(
@@ -242,9 +325,16 @@ pub fn sample_pose(
     let pose = if rest {
         model.rest_pose()
     } else {
-        let clip = document.clip(state(frame));
+        let state = state(frame);
+        let clip = document.clip(state);
         let duration = model.source().clips[clip as usize].duration();
-        let time = sample_clip_time(frame.tick(), tick_rate, duration, PlaybackMode::Loop)?;
+        let time = sample_clip_time_at_rate(
+            frame.tick(),
+            tick_rate,
+            duration,
+            PlaybackMode::Loop,
+            document.speed(state),
+        )?;
         model.sample_clip(clip, time)
     }
     .map_err(|e| format!("room character pose: {e}"))?;
@@ -359,6 +449,7 @@ mod tests {
             searching: 0,
             carrying: 1,
             escaped: 2,
+            speeds: None,
         }
     }
     fn frame(tick: u64, key: u32, won: u32) -> Frame {
@@ -510,6 +601,150 @@ mod tests {
             }
             .validate()
             .is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_speeds_require_schema_two_and_strict_complete_objects() {
+        let legacy = document();
+        assert!(!String::from_utf8(legacy.to_bytes().unwrap())
+            .unwrap()
+            .contains("speeds"));
+        for state in [State::Searching, State::Carrying, State::Escaped] {
+            assert_eq!(legacy.speed(state), PlaybackRate::Normal);
+        }
+        for rate in PlaybackRate::ALL {
+            let doc = Document {
+                schema: 2,
+                speeds: Some(PlaybackRates {
+                    searching: rate,
+                    carrying: rate,
+                    escaped: rate,
+                }),
+                ..legacy.clone()
+            };
+            assert_eq!(Document::parse(&doc.to_bytes().unwrap()).unwrap(), doc);
+            for state in [State::Searching, State::Carrying, State::Escaped] {
+                assert_eq!(doc.speed(state), rate);
+            }
+        }
+        let valid = r#"{"schema":2,"player":"e_00000001","searching":0,"carrying":1,"escaped":2,"speeds":{"searching":"1/4x","carrying":"2x","escaped":"4x"}}"#;
+        let doc = Document::parse(valid.as_bytes()).unwrap();
+        assert_eq!(doc.speed(State::Searching), PlaybackRate::Quarter);
+        assert_eq!(doc.speed(State::Carrying), PlaybackRate::Double);
+        assert_eq!(doc.speed(State::Escaped), PlaybackRate::Quadruple);
+        for malformed in [
+            valid.replace("\"schema\":2", "\"schema\":1"),
+            valid.replace("\"schema\":2", "\"schema\":3"),
+            valid.replace("\"schema\":2", "\"schema\":2,\"schema\":2"),
+            valid.replace("\"speeds\":", "\"speeds\":null,\"speeds\":"),
+            valid.replace("\"speeds\":", "\"extra\":0,\"speeds\":"),
+            valid.replace("\"searching\":\"1/4x\"", "\"searching\":\"1/4x\",\"searching\":\"1/4x\""),
+            valid.replace("\"carrying\":\"2x\"", "\"carrying\":\"2x\",\"carrying\":\"2x\""),
+            valid.replace("\"escaped\":\"4x\"", "\"escaped\":\"4x\",\"escaped\":\"4x\""),
+            valid.replace("\"escaped\":\"4x\"", "\"escaped\":\"4x\",\"extra\":\"1x\""),
+            valid.replace("\"carrying\":1", "\"carrying\":0"),
+            valid.replace("\"escaped\":2", "\"escaped\":32"),
+            "[2,\"e_00000001\",0,1,2,{\"searching\":\"1x\",\"carrying\":\"1x\",\"escaped\":\"1x\"}]".into(),
+        ] {
+            assert!(Document::parse(malformed.as_bytes()).is_err(), "{malformed}");
+        }
+        let base: serde_json::Value = serde_json::from_str(valid).unwrap();
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!(["1x", "1x", "1x"]),
+            serde_json::json!("1x"),
+            serde_json::json!({}),
+        ] {
+            let mut value = base.clone();
+            value["speeds"] = invalid;
+            assert!(Document::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+        for field in ["searching", "carrying", "escaped"] {
+            let mut value = base.clone();
+            value["speeds"].as_object_mut().unwrap().remove(field);
+            assert!(Document::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+            for invalid in [
+                serde_json::Value::Null,
+                serde_json::json!(1),
+                serde_json::json!(0.25),
+                serde_json::json!("3x"),
+                serde_json::json!("1/8x"),
+                serde_json::json!("8x"),
+                serde_json::json!("0x"),
+                serde_json::json!("-1x"),
+                serde_json::json!({"1x":null}),
+            ] {
+                let mut value = base.clone();
+                value["speeds"][field] = invalid;
+                assert!(Document::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+            }
+        }
+        let mut no_speeds = base;
+        no_speeds.as_object_mut().unwrap().remove("speeds");
+        assert!(Document::parse(&serde_json::to_vec(&no_speeds).unwrap()).is_err());
+        assert!(Document {
+            schema: 2,
+            ..legacy.clone()
+        }
+        .to_bytes()
+        .is_err());
+        assert!(Document {
+            speeds: Some(PlaybackRates::default()),
+            ..legacy
+        }
+        .to_bytes()
+        .is_err());
+    }
+
+    #[test]
+    fn rates_change_real_pose_without_history_or_frame_mutation() {
+        let model = model();
+        let doc = Document {
+            schema: 2,
+            speeds: Some(PlaybackRates {
+                searching: PlaybackRate::Quarter,
+                carrying: PlaybackRate::Double,
+                escaped: PlaybackRate::Quadruple,
+            }),
+            ..document()
+        };
+        for (key, won, expected) in [(0, 0, 1.625), (1, 0, 11.0), (1, 1, 24.0)] {
+            let frame = frame(150, key, won);
+            let before = frame.to_bytes();
+            let pose = sample_pose(&doc, &model, FrameView::of(&frame), 60, false).unwrap();
+            assert_eq!(pose.local()[0].translation[0], expected);
+            assert_ne!(
+                pose,
+                sample_pose(&document(), &model, FrameView::of(&frame), 60, false).unwrap()
+            );
+            assert_eq!(
+                pose,
+                sample_pose(&doc, &model, FrameView::of(&frame), 60, false).unwrap()
+            );
+            assert_eq!(frame.to_bytes(), before);
+        }
+        for (tick, expected) in [
+            (150, 1.625),
+            (30, 1.125),
+            (0, 1.0),
+            (u64::MAX, 2.0625),
+            (30, 1.125),
+            (0, 1.0),
+        ] {
+            let frame = frame(tick, 0, 0);
+            assert_eq!(
+                sample_pose(&doc, &model, FrameView::of(&frame), 60, false)
+                    .unwrap()
+                    .local()[0]
+                    .translation[0],
+                expected
+            );
+            assert_eq!(
+                sample_pose(&doc, &model, FrameView::of(&frame), 60, true).unwrap(),
+                model.rest_pose().unwrap()
+            );
         }
     }
 

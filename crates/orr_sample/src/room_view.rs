@@ -1069,6 +1069,7 @@ mod tests {
                         searching: 0,
                         carrying: 1,
                         escaped: 2,
+                        speeds: None,
                     }),
                 };
                 admit_presentation(FrameView::of(&frame), &index, &models).unwrap();

@@ -276,7 +276,7 @@ fn workflow(gpu: bool) {
         h.get_by_label(format!("{label} {clip}").as_str()).click();
         h.run_steps(2);
     }
-    h.get_by_label("Apply character clips").click();
+    h.get_by_label("Apply character settings").click();
     settle(&mut h);
     assert_eq!(h.state().editor.room_character().unwrap().searching, 1);
     assert_eq!(h.state().editor.room_character().unwrap().carrying, 2);
@@ -419,6 +419,173 @@ fn character_edit_undo_redo_reopen_and_authoritative_play_states() {
 fn character_actual_editor_gpu_three_states() {
     assert_eq!(std::env::var("ORR_REQUIRE_GPU").as_deref(), Ok("1"));
     workflow(true);
+}
+
+fn playback_rates_workflow(gpu: bool) {
+    use orr_sample::room_character::{PlaybackRate, PlaybackRates};
+    let fixture = Fixture::new();
+    let mut h = fixture.app(gpu);
+    settle(&mut h);
+    let initial = frame_bytes(&mut h.state_mut().editor);
+    let legacy = h.state().editor.room_character().unwrap().clone();
+    assert_eq!(legacy.schema, 1);
+    assert_eq!(legacy.speeds, None);
+    let disk = fs::read(fixture.root.join("room.character.json")).unwrap();
+    let models = h
+        .state()
+        .models
+        .bindings
+        .as_ref()
+        .unwrap()
+        .document()
+        .clone();
+    let rest = poses(&h);
+    h.state_mut().editor.step(30);
+    wait(&mut h, "legacy paused sample", |app| {
+        app.editor.yard_rows_coherent() && app.editor.timeline().is_some_and(|t| t.tick == 30)
+    });
+    let legacy_pose = poses(&h);
+    let at_thirty = frame_bytes(&mut h.state_mut().editor);
+    let legacy_pixels = gpu.then(|| capture(&h, "character-speed-legacy"));
+    h.get_by_label(orr_editor::app::LBL_STOP).click();
+    wait(&mut h, "legacy stop", |app| {
+        app.editor.mode() == Mode::Edit && app.editor.yard_rows_coherent()
+    });
+    assert_eq!(poses(&h), rest);
+
+    h.get_by_label("Room character").click();
+    settle(&mut h);
+    // Exercise every real speed option; changes remain a candidate until Apply.
+    for rate in PlaybackRate::ALL.into_iter().chain([PlaybackRate::Quarter]) {
+        h.get_by_label("Searching speed").click();
+        h.run_steps(2);
+        h.get_by_label(format!("Searching speed {}", rate.label()).as_str())
+            .click();
+        h.run_steps(2);
+    }
+    for (label, rate) in [
+        ("Carrying key speed", PlaybackRate::Double),
+        ("Escaped speed", PlaybackRate::Quadruple),
+    ] {
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        h.get_by_label(format!("{label} {}", rate.label()).as_str())
+            .click();
+        h.run_steps(2);
+    }
+    assert_eq!(h.state().editor.room_character(), Some(&legacy));
+    assert_eq!(
+        fs::read(fixture.root.join("room.character.json")).unwrap(),
+        disk
+    );
+    h.get_by_label("Apply character settings").click();
+    settle(&mut h);
+    let authored = h.state().editor.room_character().unwrap().clone();
+    assert_eq!(authored.schema, 2);
+    assert_eq!(
+        authored.speeds,
+        Some(PlaybackRates {
+            searching: PlaybackRate::Quarter,
+            carrying: PlaybackRate::Double,
+            escaped: PlaybackRate::Quadruple
+        })
+    );
+    assert_eq!(
+        (authored.searching, authored.carrying, authored.escaped),
+        (legacy.searching, legacy.carrying, legacy.escaped)
+    );
+    assert_eq!(
+        h.state().models.bindings.as_ref().unwrap().document(),
+        &models
+    );
+    h.get_by_label("Undo character edit").click();
+    settle(&mut h);
+    assert_eq!(h.state().editor.room_character(), Some(&legacy));
+    h.get_by_label("Redo character edit").click();
+    settle(&mut h);
+    assert_eq!(h.state().editor.room_character(), Some(&authored));
+    h.get_by_label("Save character and model bindings").click();
+    settle(&mut h);
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), initial);
+    assert_eq!(
+        orr_sample::room_character::Document::parse(
+            &fs::read(fixture.root.join("room.character.json")).unwrap()
+        )
+        .unwrap(),
+        authored
+    );
+    drop(h);
+
+    let mut h = fixture.app(gpu);
+    settle(&mut h);
+    assert_eq!(h.state().editor.room_character(), Some(&authored));
+    assert_eq!(poses(&h), rest);
+    h.state_mut().editor.step(30);
+    wait(&mut h, "rated paused sample", |app| {
+        app.editor.yard_rows_coherent() && app.editor.timeline().is_some_and(|t| t.tick == 30)
+    });
+    let rated_pose = poses(&h);
+    assert_ne!(rated_pose, legacy_pose);
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), at_thirty);
+    let placements = h
+        .state()
+        .models
+        .animated_placements(&h.state().editor)
+        .unwrap();
+    assert_eq!(
+        rated_pose,
+        placements[0]
+            .model
+            .sample_clip(authored.searching, 0.125)
+            .unwrap()
+            .global()
+    );
+    let rated_pixels = gpu.then(|| capture(&h, "character-speed-quarter"));
+    if gpu {
+        assert_ne!(
+            rated_pixels, legacy_pixels,
+            "the actual viewport must visibly consume authored speed"
+        );
+    }
+    for tick in [12, 30, 12, 0, 30] {
+        h.state_mut().editor.seek(tick);
+        wait(&mut h, "rated seek", |app| {
+            app.editor.yard_rows_coherent() && app.editor.timeline().is_some_and(|t| t.tick == tick)
+        });
+        let sample = poses(&h);
+        settle(&mut h);
+        assert_eq!(poses(&h), sample);
+        if tick == 30 {
+            assert_eq!(sample, rated_pose);
+        }
+    }
+    h.get_by_label(orr_editor::app::LBL_STOP).click();
+    wait(&mut h, "rated stop", |app| {
+        app.editor.mode() == Mode::Edit && app.editor.yard_rows_coherent()
+    });
+    assert_eq!(poses(&h), rest);
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), initial);
+    h.state_mut().editor.step(30);
+    wait(&mut h, "rated restart", |app| {
+        app.editor.yard_rows_coherent() && app.editor.timeline().is_some_and(|t| t.tick == 30)
+    });
+    assert_eq!(poses(&h), rated_pose);
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), at_thirty);
+    if gpu {
+        assert_eq!(Some(capture(&h, "character-speed-restart")), rated_pixels);
+    }
+}
+
+#[test]
+fn character_playback_rates_widgets_save_reopen_seek_stop_restart() {
+    playback_rates_workflow(false);
+}
+
+#[test]
+#[ignore = "explicit production editor GPU acceptance; requires ORR_REQUIRE_GPU=1"]
+fn character_playback_rates_actual_editor_gpu() {
+    assert_eq!(std::env::var("ORR_REQUIRE_GPU").as_deref(), Ok("1"));
+    playback_rates_workflow(true);
 }
 
 #[test]
