@@ -884,8 +884,10 @@ fn crossfade_workflow(gpu: bool) {
     if gpu {
         let snapped = capture(&h, "character-crossfade-same-tick-seek");
         let changed = snapped
-            .chunks_exact(4)
-            .zip(blend_pixels.as_ref().unwrap().chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(blend_pixels.as_ref().unwrap().as_chunks::<4>().0)
             .filter(|(a, b)| a != b)
             .count();
         assert!(
