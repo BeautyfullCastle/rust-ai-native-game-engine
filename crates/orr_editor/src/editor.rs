@@ -213,6 +213,8 @@ pub struct Editor {
     #[cfg(feature="room-character")]
     room_character: Option<orr_sample::room_character::Document>,
     #[cfg(feature="room-character")]
+    room_character_revision: Arc<()>,
+    #[cfg(feature="room-character")]
     room_character_scene: Option<std::path::PathBuf>,
     #[cfg(feature="room-project")]
     room_camera: Option<orr_sample::room_camera::Document>,
@@ -342,6 +344,7 @@ impl Editor {
             batch_uncertain: false,
             camera: Camera::new([0.0, 0.0], 20.0),
             #[cfg(feature="room-character")] room_character: None,
+            #[cfg(feature="room-character")] room_character_revision: Arc::new(()),
             #[cfg(feature="room-character")] room_character_scene: None,
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
@@ -987,7 +990,15 @@ impl Editor {
         let r = self.timed_erp_call(method, params);
         self.ingest();
         match r {
-            Ok(v) => Ok(v),
+            Ok(v) => {
+                // Same-tick seeks can retain the host epoch, but still discard
+                // Room presentation history. This token never enters the host.
+                #[cfg(feature = "room-character")]
+                if self.game().is_room() && matches!(method, "sim.start" | "sim.stop" | "sim.seek" | "sim.branch" | "scene.load") {
+                    self.room_character_revision = Arc::new(());
+                }
+                Ok(v)
+            },
             Err(ClientError::Rpc(e)) => Err(e.message),
             Err(other) => {
                 self.connection_lost(&other.to_string());
@@ -1994,6 +2005,11 @@ impl Editor {
     pub fn room_character(&self) -> Option<&orr_sample::room_character::Document> {
         if self.game().is_room() && self.spec().is_local() && self.room_character_scene == self.path() { self.room_character.as_ref() } else { None }
     }
+    #[cfg(feature = "room-character")]
+    pub(crate) fn room_character_revision(&self) -> &Arc<()> {
+        &self.room_character_revision
+    }
+
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
         document.validate()?;

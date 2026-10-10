@@ -750,3 +750,306 @@ fn stale_room_character_binding_does_not_mutate_the_verified_cache() {
         .unwrap();
     assert!(std::sync::Arc::ptr_eq(&model, &restored[0].model));
 }
+
+fn crossfade_step(h: &mut Harness<'_, EditorApp>, interact: bool, ticks: u32) {
+    h.state_mut().editor.host_call("sim.input_value", serde_json::json!({
+        "player": 0,
+        "value": {"move_x": 0, "move_z": 0, "buttons": if interact { vec!["interact"] } else { vec![] } }
+    })).unwrap();
+    let target = h.state().editor.snapshot().unwrap().tick() + u64::from(ticks);
+    h.state_mut().editor.step(ticks);
+    wait(h, "paused authoritative crossfade step", |app| {
+        app.editor.yard_rows_coherent()
+            && app
+                .editor
+                .timeline()
+                .is_some_and(|t| t.tick == target && !t.playing)
+    });
+}
+
+fn crossfade_workflow(gpu: bool) {
+    use orr_sample::room_character::{Document, PlaybackRates};
+    let fixture = Fixture::new();
+    let mut h = fixture.app(gpu);
+    settle(&mut h);
+    move_actor(
+        &mut h,
+        &fixture.guids[&KEY],
+        FPVec3::new(FP::HALF, FP::ONE, -FP::HALF),
+    );
+    assert!(h.state_mut().editor.save());
+    settle(&mut h);
+    let initial = frame_bytes(&mut h.state_mut().editor);
+    let legacy = h.state().editor.room_character().unwrap().clone();
+    let authored = Document {
+        schema: 3,
+        speeds: Some(PlaybackRates::default()),
+        crossfade_ticks: Some(12),
+        ..legacy.clone()
+    };
+    h.get_by_label("Room character").click();
+    settle(&mut h);
+    let _ = h.get_by_role_and_label(egui::accesskit::Role::Slider, "Crossfade ticks");
+    // The real panel transaction, history and paired save are shared with the
+    // numeric widget; no descriptor is injected directly into rendering.
+    {
+        let app = h.state_mut();
+        app.room_character
+            .as_mut()
+            .unwrap()
+            .apply_document(authored.clone(), &mut app.editor, &mut app.models)
+            .unwrap();
+    }
+    settle(&mut h);
+    h.get_by_label("Undo character edit").click();
+    settle(&mut h);
+    assert_eq!(h.state().editor.room_character(), Some(&legacy));
+    h.get_by_label("Redo character edit").click();
+    settle(&mut h);
+    assert_eq!(h.state().editor.room_character(), Some(&authored));
+    h.get_by_label("Save character and model bindings").click();
+    settle(&mut h);
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), initial);
+    assert_eq!(
+        Document::parse(&fs::read(fixture.root.join("room.character.json")).unwrap()).unwrap(),
+        authored
+    );
+    drop(h);
+
+    let mut h = fixture.app(gpu);
+    settle(&mut h);
+    assert_eq!(h.state().editor.room_character(), Some(&authored));
+    let rest = poses(&h);
+    assert!(h.state_mut().editor.start_play());
+    wait(&mut h, "paused crossfade tick zero", |app| {
+        app.editor.yard_rows_coherent()
+            && app
+                .editor
+                .timeline()
+                .is_some_and(|t| t.tick == 0 && !t.playing)
+    });
+    let outgoing = h
+        .state()
+        .models
+        .animated_placements(&h.state().editor)
+        .unwrap()[0]
+        .pose
+        .clone();
+    crossfade_step(&mut h, true, 1);
+    assert_eq!(run(h.state()).key_collected, 1);
+    assert_eq!(poses(&h), outgoing.global());
+    for _ in 0..6 {
+        crossfade_step(&mut h, false, 1);
+    }
+    let blended = h
+        .state()
+        .models
+        .animated_placements(&h.state().editor)
+        .unwrap()
+        .remove(0);
+    let snapshot = h.state().editor.snapshot().unwrap();
+    let target = orr_sample::room_character::sample_pose(
+        &authored,
+        &blended.model,
+        snapshot.predicted(),
+        snapshot.tick_rate(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        blended.pose,
+        blended.model.blend_poses(&outgoing, &target, 0.5).unwrap()
+    );
+    assert_ne!(blended.pose, target);
+    let frame = frame_bytes(&mut h.state_mut().editor);
+    let blend_pixels = gpu.then(|| capture(&h, "character-crossfade-midpoint"));
+    settle(&mut h);
+    assert_eq!(poses(&h), blended.pose.global());
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), frame);
+    if gpu {
+        assert_eq!(
+            Some(capture(&h, "character-crossfade-repeat")),
+            blend_pixels
+        );
+    }
+
+    // Same-tick seek does not change the host epoch. The Room-only local token
+    // must still discard transition history and display the exact target pose.
+    let epoch = h.state().editor.timeline().unwrap().epoch;
+    h.state_mut().editor.seek(7);
+    settle(&mut h);
+    assert_eq!(h.state().editor.timeline().unwrap().epoch, epoch);
+    assert_eq!(poses(&h), target.global());
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), frame);
+    if gpu {
+        let snapped = capture(&h, "character-crossfade-same-tick-seek");
+        let changed = snapped
+            .chunks_exact(4)
+            .zip(blend_pixels.as_ref().unwrap().chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            changed > 20,
+            "actual editor crossfade must affect pixels at the same simulation frame: {changed}"
+        );
+        println!("Crossfade editor midpoint/snap changes {changed} viewport pixels");
+    }
+    h.state_mut().editor.stop();
+    wait(&mut h, "crossfade stop", |app| {
+        app.editor.mode() == Mode::Edit && app.editor.yard_rows_coherent()
+    });
+    assert_eq!(poses(&h), rest);
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), initial);
+    assert!(h.state_mut().editor.start_play());
+    wait(&mut h, "crossfade restart", |app| {
+        app.editor.yard_rows_coherent() && app.editor.timeline().is_some_and(|t| t.tick == 0)
+    });
+    assert_eq!(poses(&h), outgoing.global());
+    crossfade_step(&mut h, true, 1);
+    assert_eq!(poses(&h), outgoing.global());
+    // Three authoritative ticks, only the final snapshot observed: snap rather
+    // than invent transition history for the missing snapshots.
+    crossfade_step(&mut h, false, 3);
+    let placement = h
+        .state()
+        .models
+        .animated_placements(&h.state().editor)
+        .unwrap()
+        .remove(0);
+    let snapshot = h.state().editor.snapshot().unwrap();
+    assert_eq!(
+        placement.pose,
+        orr_sample::room_character::sample_pose(
+            &authored,
+            &placement.model,
+            snapshot.predicted(),
+            snapshot.tick_rate(),
+            false
+        )
+        .unwrap()
+    );
+    h.state_mut().editor.seek(0);
+    settle(&mut h);
+    assert_eq!(poses(&h), outgoing.global());
+}
+
+#[test]
+fn character_crossfade_authoring_and_explicit_lifecycle_resets() {
+    crossfade_workflow(false);
+}
+
+#[test]
+fn character_crossfade_committed_replacement_and_close_release_retired_assets() {
+    use orr_sample::room_character::{Document, PlaybackRates};
+    use std::sync::Arc;
+    let fixture = Fixture::new();
+    let mut h = fixture.app(false);
+    settle(&mut h);
+    let authored = Document {
+        schema: 3,
+        speeds: Some(PlaybackRates::default()),
+        crossfade_ticks: Some(12),
+        ..h.state().editor.room_character().unwrap().clone()
+    };
+    {
+        let app = h.state_mut();
+        app.room_character
+            .as_mut()
+            .unwrap()
+            .apply_document(authored.clone(), &mut app.editor, &mut app.models)
+            .unwrap();
+    }
+    assert!(h.state_mut().editor.start_play());
+    wait(&mut h, "paused retirement tick zero", |app| {
+        app.editor.yard_rows_coherent() && app.editor.timeline().is_some_and(|t| t.tick == 0)
+    });
+    crossfade_step(&mut h, true, 1);
+    assert_eq!(run(h.state()).key_collected, 1);
+    for _ in 0..6 {
+        crossfade_step(&mut h, false, 1);
+    }
+    let visible = h
+        .state()
+        .models
+        .animated_placements(&h.state().editor)
+        .unwrap()
+        .remove(0);
+    let old = Arc::downgrade(&visible.model);
+    let expected_visible = visible.pose.clone();
+    let snapshot = h.state().editor.snapshot().unwrap();
+    let target = orr_sample::room_character::sample_pose(
+        &authored,
+        &visible.model,
+        snapshot.predicted(),
+        snapshot.tick_rate(),
+        false,
+    )
+    .unwrap();
+    assert_ne!(expected_visible, target);
+    drop(visible);
+    let replacement = || {
+        PreparedProject::open_with_capabilities(
+            &fixture.root,
+            false,
+            orr_sample::room_project::CheckpointSupport::Disabled,
+            true,
+        )
+        .unwrap()
+        .into_parts()
+        .3
+    };
+    let mut invalid = replacement();
+    invalid.document.project = "../unadmitted".into();
+    assert!(h.state_mut().models.install_room(invalid).is_err());
+    assert!(old.upgrade().is_some());
+    assert_eq!(
+        h.state()
+            .models
+            .animated_placements(&h.state().editor)
+            .unwrap()[0]
+            .pose,
+        expected_visible
+    );
+    // Retired assets must disappear at commit, before another draw can reset
+    // the source lazily. A failed transaction above must retain its blend.
+    h.state_mut().models.install_room(replacement()).unwrap();
+    assert!(
+        old.upgrade().is_none(),
+        "committed replacement retained its old model"
+    );
+    let replacement = h
+        .state()
+        .models
+        .animated_placements(&h.state().editor)
+        .unwrap()
+        .remove(0);
+    assert_eq!(replacement.pose.local(), target.local());
+    let closing = Arc::downgrade(&replacement.model);
+    drop(replacement);
+    h.state_mut().editor.stop();
+    wait(&mut h, "stop before model close", |app| {
+        app.editor.mode() == Mode::Edit && app.editor.yard_rows_coherent()
+    });
+    h.get_by_label("Static model binding").click();
+    settle(&mut h);
+    h.get_by_label("Discard model bindings").click();
+    settle(&mut h);
+    assert!(h.state().models.bindings.is_none());
+    assert!(
+        closing.upgrade().is_none(),
+        "closed bindings retained their observed model"
+    );
+    assert!(h
+        .state()
+        .models
+        .animated_placements(&h.state().editor)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+#[ignore = "explicit production editor crossfade GPU acceptance; requires ORR_REQUIRE_GPU=1"]
+fn character_crossfade_actual_editor_gpu() {
+    assert_eq!(std::env::var("ORR_REQUIRE_GPU").as_deref(), Ok("1"));
+    crossfade_workflow(true);
+}

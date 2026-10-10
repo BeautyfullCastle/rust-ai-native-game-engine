@@ -148,8 +148,14 @@ pub fn headless(
     }
     let mut sim = project.scene().simulation()?;
     println!("room initial checksum: 0x{:016x}", sim.frame().checksum());
+    #[cfg(feature = "room-character")]
+    let mut character_playback = crate::room_character::PlaybackCursor::default();
+    #[cfg(feature = "room-character")]
+    room_view::observe_character(&mut character_playback, FrameView::of(sim.frame()), project.scene().index(), project.models(), room_view::PresentationTime::default())?;
     for _ in 0..ticks {
         step(&mut sim, held);
+        #[cfg(feature = "room-character")]
+        room_view::observe_character(&mut character_playback, FrameView::of(sim.frame()), project.scene().index(), project.models(), room_view::PresentationTime::default())?;
     }
     let run = sim.frame().singleton::<RoomRun>();
     println!(
@@ -170,7 +176,11 @@ pub fn headless(
         let gpu = Wgpu::headless(WgpuOptions::default())?;
         let size = (1024, 768);
         let mut renderer = RoomRenderer::new(&gpu, size, project.models())?;
-        renderer.render(
+        #[cfg(feature = "room-character")]
+        let render = RoomRenderer::render_with_playback;
+        #[cfg(not(feature = "room-character"))]
+        let render = RoomRenderer::render;
+        render(&mut renderer,
             FrameView::of(sim.frame()),
             project.scene().index(),
             project.models(),
@@ -178,6 +188,8 @@ pub fn headless(
                 Some(camera) => camera.document.camera_for_frame(&camera.document.orbit(), FrameView::of(sim.frame()), project.scene().index(), size)?,
                 None => room_view::camera(size),
             },
+            #[cfg(feature = "room-character")]
+            &character_playback,
         )?;
         #[cfg(feature = "room-ui")]
         if let Some(prepared) = project.ui() {
@@ -335,6 +347,8 @@ struct App {
     ui_pointer: Option<winit::dpi::PhysicalPosition<f64>>,
     project: PreparedProject,
     sim: Simulation<RoomEscapeV1>,
+    #[cfg(feature = "room-character")]
+    character_playback: crate::room_character::PlaybackCursor,
     graphics: Option<Graphics>,
     keys: Keys,
     focused: bool,
@@ -350,15 +364,24 @@ impl App {
         self.error = Some(error);
         event_loop.exit();
     }
-    fn step_authoritative(&mut self, input: RoomInput) {
+    fn step_authoritative(&mut self, input: RoomInput) -> Result<(), String> {
         step(&mut self.sim, input);
+        #[cfg(feature = "room-character")]
+        self.observe_character()?;
         #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
         if let Some(checkpoint) = &mut self.checkpoint {
             checkpoint.observe(*self.sim.frame().singleton::<RoomRun>());
         }
+        Ok(())
+    }
+    #[cfg(feature = "room-character")]
+    fn observe_character(&mut self) -> Result<(), String> {
+        room_view::observe_character(&mut self.character_playback, FrameView::of(self.sim.frame()), self.project.scene().index(), self.project.models(), room_view::PresentationTime::default())
     }
     fn restart(&mut self) -> Result<(), String> {
         self.sim = self.project.scene().simulation()?;
+        #[cfg(feature = "room-character")]
+        { self.character_playback.reset(); self.observe_character()?; }
         if let Some(camera) = self.project.camera() {
             self.orbit = camera.document.orbit();
             self.drag = None;
@@ -474,7 +497,7 @@ impl App {
                 #[cfg(not(feature = "room-ui"))]
                 let blocked = false;
                 let input = self.keys.sample();
-                self.step_authoritative(if blocked { RoomInput::default() } else { input });
+                self.step_authoritative(if blocked { RoomInput::default() } else { input })?;
                 self.accumulated -= interval;
             }
         } else {
@@ -492,7 +515,11 @@ impl App {
         // The backend reconfigures lost/outdated surfaces and returns Skip.
         if let Acquire::Frame(surface_frame) = g.rhi.acquire_frame(&mut g.surface) {
             let view = g.rhi.frame_view(&surface_frame);
-            g.renderer.render_to(
+            #[cfg(feature = "room-character")]
+            let render = RoomRenderer::render_to_with_playback;
+            #[cfg(not(feature = "room-character"))]
+            let render = RoomRenderer::render_to;
+            render(&mut g.renderer,
                 FrameView::of(self.sim.frame()),
                 self.project.scene().index(),
                 self.project.models(),
@@ -506,6 +533,8 @@ impl App {
                     format: g.format,
                     sample_count: 1,
                 },
+                #[cfg(feature = "room-character")]
+                &self.character_playback,
             )?;
             #[cfg(feature = "room-ui")]
             if let (Some(ui), Some(window_ui)) = (&self.ui, &mut self.window_ui) {
@@ -620,6 +649,8 @@ impl App {
                 }
                 self.restart()?;
                 self.sim = crate::room_checkpoint::restore(&self.project, true)?;
+                #[cfg(feature = "room-character")]
+                { self.character_playback.reset(); self.observe_character()?; }
             }
             CheckpointAction::Restart => self.restart()?,
             CheckpointAction::Continue => {}
@@ -886,6 +917,10 @@ impl ApplicationHandler for App {
 impl App {
     fn new(project: PreparedProject) -> Result<Self, String> {
         let sim = project.scene().simulation()?;
+        #[cfg(feature = "room-character")]
+        let mut character_playback = crate::room_character::PlaybackCursor::default();
+        #[cfg(feature = "room-character")]
+        room_view::observe_character(&mut character_playback, FrameView::of(sim.frame()), project.scene().index(), project.models(), room_view::PresentationTime::default())?;
         let orbit = project.camera().map_or_else(
             || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
             |camera| camera.document.orbit(),
@@ -914,6 +949,8 @@ impl App {
             ui_pointer: None,
             project,
             sim,
+            #[cfg(feature = "room-character")]
+            character_playback,
             graphics: None,
             keys: Keys::default(),
             focused: false,
@@ -1114,7 +1151,7 @@ mod room_ui_app_tests {
         let initial_camera = camera(&app);
         click(&mut app, "play");
         for _ in 0..12 {
-            app.step_authoritative(RoomInput { move_x: 1, ..RoomInput::default() });
+            app.step_authoritative(RoomInput { move_x: 1, ..RoomInput::default() }).unwrap();
         }
         assert_ne!(camera(&app).target, initial_camera.target);
         let moved = app.sim.frame().to_bytes();

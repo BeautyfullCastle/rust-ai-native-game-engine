@@ -50,11 +50,12 @@ fn player_position(app: &App) -> orr_fp::FPVec3 {
     frame.get::<Body>(entity).unwrap().pos
 }
 fn press(app: &mut App) {
-    app.step_authoritative(RoomInput::default());
+    app.step_authoritative(RoomInput::default()).unwrap();
     app.step_authoritative(RoomInput {
         buttons: INTERACT,
         ..Default::default()
-    });
+    })
+    .unwrap();
 }
 fn acquire(app: &mut App) {
     assert_eq!(run_state(app).key_collected, 0);
@@ -72,7 +73,8 @@ fn walk_to_exit_and_win(app: &mut App) {
         app.step_authoritative(RoomInput {
             move_x: 1,
             ..Default::default()
-        });
+        })
+        .unwrap();
     }
     press(app);
     assert_eq!(
@@ -199,7 +201,8 @@ fn checkpoint_failed_durable_reset_preserves_live_frame() {
     app.step_authoritative(RoomInput {
         move_x: 1,
         ..Default::default()
-    });
+    })
+    .unwrap();
     let checksum = app.sim.frame().checksum();
     app.checkpoint = Some(CheckpointSession::from_store(Err(
         "injected unavailable store".into(),
@@ -863,7 +866,8 @@ fn checkpoint_process_blocked_reset_child() {
     app.step_authoritative(RoomInput {
         move_x: -1,
         ..Default::default()
-    });
+    })
+    .unwrap();
     let checksum = app.sim.frame().checksum();
     app.apply_checkpoint_action(CheckpointAction::NewGame)
         .unwrap();

@@ -67,6 +67,7 @@ pub(super) fn documents(
         carrying: 1,
         escaped: 2,
         speeds: None,
+        crossfade_ticks: None,
     };
     character.validate()?;
     Ok((models, character))
