@@ -115,6 +115,11 @@ pub fn export_collect(options: &ExportOptions) -> Result<ExportReport, String> {
     export_profile_with(options, Profile::Collect, |_| Ok(()), |command| run_bounded(command, SMOKE_TIMEOUT, MAX_SMOKE_OUTPUT))
 }
 
+#[cfg(feature = "room-project")]
+pub fn export_room(options: &ExportOptions) -> Result<ExportReport,String> {
+    export_profile_with(options,Profile::Room, |_|Ok(()), |command|run_bounded(command,SMOKE_TIMEOUT,MAX_SMOKE_OUTPUT))
+}
+
 fn export_with(
     options: &ExportOptions,
     checkpoint: impl FnMut(&str) -> Result<(), String>,
@@ -153,7 +158,7 @@ fn export_profile_with(
             );
         }
     }
-    let project = match profile { Profile::Arena => ProjectSnapshot::open(&options.project)?, #[cfg(feature = "collect-dodge")] Profile::Collect => ProjectSnapshot::open_profile(&options.project, profile)? };
+    let project = match profile { #[cfg(feature="room-project")] Profile::Room => ProjectSnapshot::open_profile(&options.project,profile)?, Profile::Arena => ProjectSnapshot::open(&options.project)?, #[cfg(feature = "collect-dodge")] Profile::Collect => ProjectSnapshot::open_profile(&options.project, profile)? };
     let runtime_path = check_path(&options.runtime, false)?;
     if fs::metadata(&runtime_path)
         .map_err(error)?

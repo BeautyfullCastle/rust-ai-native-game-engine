@@ -93,7 +93,7 @@ fn the_editor_sources_do_not_name_the_simulation_crates() {
 fn terrain_authoring_stays_optional_and_simulation_integration_is_explicit() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    assert!(manifest.contains("terrain = [\"models\", \"dep:orr_terrain\", \"dep:orr_terrain_view\"]"));
+    assert!(manifest.contains("terrain = [\"orr_model_bindings/terrain\", \"models\", \"dep:orr_terrain\", \"dep:orr_terrain_view\"]"));
     assert!(manifest.contains("default = []"));
     let view = std::fs::read_to_string(root.join("../orr_terrain_view/Cargo.toml")).unwrap();
     assert!(view.contains("default = []"));

@@ -36,6 +36,8 @@ fn main() {
     });
     #[cfg(feature = "collect-dodge")]
     let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_ui(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }, cfg!(feature="collect-ui")).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
+    #[cfg(feature="room-project")]
+    let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open(root).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
@@ -65,6 +67,10 @@ fn main() {
             #[cfg(feature = "collect-dodge")]
             let spec = collect_project.as_ref().map_or(spec.clone(), |project| HostSpec::PreparedCollect {
                 scene: project.path().to_path_buf(), text:project.scene().text().to_owned(), listen:None,debug_hooks:false,
+            });
+            #[cfg(feature="room-project")]
+            let spec=room_project.as_ref().map_or(spec.clone(),|project|HostSpec::PreparedRoom {
+                scene:project.path().to_path_buf(),text:project.scene().text().to_owned(),listen:None,debug_hooks:false,
             });
             match listen {
                 Some(cfg) => spec.with_listener(cfg),
@@ -115,6 +121,11 @@ fn main() {
             #[cfg(all(feature="sprites",feature="collect-dodge"))]
             if let Some(project) = collect_project {
                 orr_editor::project::install_collect_presentation(&mut app, project, &cc.egui_ctx);
+            }
+            #[cfg(feature="room-project")]
+            if let Some(project)=room_project {
+                let (_,_,_,models)=project.into_parts();
+                app.models.install_room(models).unwrap_or_else(|error|fail(&format!("room presentation: {error}")));
             }
             if let Some(job) = shot {
                 app = app.with_screenshot(job);

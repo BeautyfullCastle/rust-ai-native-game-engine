@@ -3164,6 +3164,7 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_model",
+ "orr_model_bindings",
  "orr_navigation",
  "orr_package",
  "orr_reflect",
@@ -3259,6 +3260,18 @@ version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
  "png 0.18.1",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "orr_model_bindings"
+version = "0.0.1"
+dependencies = [
+ "orr_model",
+ "orr_package",
+ "orr_reflect",
  "serde",
  "serde_json",
  "sha2",
@@ -3476,6 +3489,8 @@ dependencies = [
  "orr_fp",
  "orr_games",
  "orr_input",
+ "orr_model",
+ "orr_model_bindings",
  "orr_package",
  "orr_physics",
  "orr_physics3d",

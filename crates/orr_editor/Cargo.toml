@@ -13,6 +13,7 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+room-project = ["models", "orr_remote/room-project", "orr_sample/room-project"]
 image-reimport = ["sprites", "orr_sample/image-reimport"]
 linked-prefabs = ["collect-dodge", "dep:tempfile", "orr_remote/linked-prefabs", "orr_sample/linked-prefabs", "orr_reflect/linked-prefabs"]
 collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]
@@ -22,13 +23,14 @@ project-ui = ["sprites", "orr_sample/game-ui"]
 navigation = ["terrain", "orr_remote/navigation", "dep:orr_navigation"]
 terrain-physics = ["terrain", "orr_remote/terrain-physics"]
 default = []
-terrain = ["models", "dep:orr_terrain", "dep:orr_terrain_view"]
-irradiance-probes = ["models", "orr_render/irradiance-probes"]
+terrain = ["orr_model_bindings/terrain", "models", "dep:orr_terrain", "dep:orr_terrain_view"]
+irradiance-probes = ["orr_model_bindings/irradiance-probes", "models", "orr_render/irradiance-probes"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile", "orr_sample/project"]
-models = ["dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
-animated-models = ["models", "orr_model/animation", "orr_render/animation"]
+models = ["dep:orr_model_bindings", "dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
+animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/animation", "orr_render/animation"]
 
 [dependencies]
+orr_model_bindings = { path = "../orr_model_bindings", optional = true }
 orr_navigation = { path = "../orr_navigation", optional = true }
 orr_terrain = { path = "../orr_terrain", optional = true }
 orr_terrain_view = { path = "../orr_terrain_view", optional = true }
