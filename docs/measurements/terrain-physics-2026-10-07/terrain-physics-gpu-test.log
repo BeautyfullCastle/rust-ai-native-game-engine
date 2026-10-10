@@ -1,0 +1,14 @@
+   Compiling orr_editor v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_editor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 17s
+     Running tests/terrain_physics_gpu.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/terrain_physics_gpu-2653591a75913710)
+
+running 1 test
+Failed to create /home/agent/.cache/mesa_shader_cache for shader cache (Read-only file system)---disabling.
+Failed to create /home/agent/.cache/mesa_shader_cache_db for shader cache (Read-only file system)---disabling.
+terrain physics GPU llvmpipe (LLVM 19.1.7, 256 bits) software=true
+Failed to create /home/agent/.cache/mesa_shader_cache for shader cache (Read-only file system)---disabling.
+Failed to create /home/agent/.cache/mesa_shader_cache_db for shader cache (Read-only file system)---disabling.
+test admitted_frame_terrain_and_spheres_render_in_main_viewport_during_play ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+

@@ -2,13 +2,14 @@
 //!
 //! The editor is a view: the simulation runs in a host, by default a thread
 //! of this process (connected in-process), with `--connect` in another
-//! process. Flags: see `--help` (`--scene`, `--select`, `--play-ticks`,
+//! process. Flags: see `--help` (`--game`, `--scene`, `--select`, `--play-ticks`,
 //! `--script`, `--screenshot <png> --frames <n>`, `--erp <addr>` with
 //! `--erp-token` or `--erp-dev`, `--connect <ws://host:port> [--token t]`).
 use std::path::PathBuf;
 
 use orr_editor::cli::{Args, USAGE};
-use orr_editor::editor::{default_scene_path, Editor};
+use orr_editor::editor::Editor;
+use orr_editor::game::EditorGame;
 use orr_editor::{script, EditorApp, HostSpec, ScreenshotJob};
 use orr_remote::{Auth, ServerConfig, TokenEntry};
 
@@ -25,10 +26,21 @@ fn main() {
             std::process::exit(if m == USAGE { 0 } else { 2 });
         }
     };
+    // All project files, active package bytes and presentation references are
+    // admitted before constructing any host or window. Keep this owned candidate
+    // until the actual egui context is available for texture restoration.
+    #[cfg(feature = "sprites")]
+    let project = args.project.as_ref().map(|root| {
+        orr_editor::project::PreparedProject::open(root)
+            .unwrap_or_else(|error| fail(&format!("--project: {error}")))
+    });
+    #[cfg(feature = "collect-dodge")]
+    let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_ui(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }, cfg!(feature="collect-ui")).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
+    #[cfg(feature="room-project")]
+    let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open(root).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
-            let scene: PathBuf = args.scene.clone().unwrap_or_else(default_scene_path);
             // With --erp the same host thread also listens for agents: they share the window's document.
             let listen = args.erp.map(|bind| {
                 let auth = if args.erp_dev {
@@ -43,7 +55,27 @@ fn main() {
                 cfg.bind = bind;
                 cfg
             });
-            HostSpec::Local { scene, listen, debug_hooks: false }
+            let standalone = || {
+                let game = args.game.unwrap_or(EditorGame::PhysGame);
+                let scene: PathBuf = args.scene.clone().unwrap_or_else(|| game.default_scene_path());
+                HostSpec::local_game(scene, game)
+            };
+            #[cfg(feature = "sprites")]
+            let spec = project.as_ref().map_or_else(standalone, |project| project.host_spec());
+            #[cfg(not(feature = "sprites"))]
+            let spec = standalone();
+            #[cfg(feature = "collect-dodge")]
+            let spec = collect_project.as_ref().map_or(spec.clone(), |project| HostSpec::PreparedCollect {
+                scene: project.path().to_path_buf(), text:project.scene().text().to_owned(), listen:None,debug_hooks:false,
+            });
+            #[cfg(feature="room-project")]
+            let spec=room_project.as_ref().map_or(spec.clone(),|project|HostSpec::PreparedRoom {
+                scene:project.path().to_path_buf(),text:project.scene().text().to_owned(),listen:None,debug_hooks:false,
+            });
+            match listen {
+                Some(cfg) => spec.with_listener(cfg),
+                None => spec,
+            }
         }
     };
     let mut editor = Editor::start(&spec).unwrap_or_else(|e| fail(&e));
@@ -71,12 +103,30 @@ fn main() {
         viewport: egui::ViewportBuilder::default().with_inner_size([args.size.0, args.size.1]).with_title(editor.title()),
         ..Default::default()
     };
-    let shot = args.screenshot.clone().map(|p| ScreenshotJob::new(p, args.frames));
+    let shot = args.screenshot.clone().map(|p| {
+        let job = ScreenshotJob::new(p, args.frames);
+        if args.screenshot_settle { job.with_settle() } else { job }
+    });
     let result = eframe::run_native(
         "Orrery Editor",
         options,
         Box::new(move |cc| {
+            #[cfg(feature = "sprites")]
+            let mut app = match project {
+                Some(project) => project.into_app(editor, cc.wgpu_render_state.clone(), &cc.egui_ctx),
+                None => EditorApp::new(editor, cc.wgpu_render_state.clone()),
+            };
+            #[cfg(not(feature = "sprites"))]
             let mut app = EditorApp::new(editor, cc.wgpu_render_state.clone());
+            #[cfg(all(feature="sprites",feature="collect-dodge"))]
+            if let Some(project) = collect_project {
+                orr_editor::project::install_collect_presentation(&mut app, project, &cc.egui_ctx);
+            }
+            #[cfg(feature="room-project")]
+            if let Some(project)=room_project {
+                let (_,_,_,models)=project.into_parts();
+                app.models.install_room(models).unwrap_or_else(|error|fail(&format!("room presentation: {error}")));
+            }
             if let Some(job) = shot {
                 app = app.with_screenshot(job);
             }

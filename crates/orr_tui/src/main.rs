@@ -19,10 +19,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use orr_tui::headless::{self, HeadlessOpts};
-use orr_tui::source::{Session, SocketSource, Source};
+use orr_tui::source::{Session, SocketOptions, SocketSource, Source};
 use orr_tui::ui::{self, UiOpts};
 
-const USAGE: &str = "usage: orr_tui (--connect URL [--token T] | --ffi [--lib PATH] [--scene PATH]) [--player N] [--fps N]\n\
+const USAGE: &str = "usage: orr_tui (--connect URL [--token T] [--ca-file PEM] | --ffi [--lib PATH] [--scene PATH]) [--player N] [--fps N]\n\
                      \x20               [--headless [--frames N] [--dump FILE] [--size WxH]]\n\
                      \x20      orr_tui --server HOST:PORT [--lib PATH] [--fingerprint HEX | --insecure] [--ws] [--room N] [--slot N]\n\
                      \x20               [--sim-latency MS] [--sim-jitter MS] [--sim-loss PCT] [--sim-seed N] [--connect-timeout S]\n\
@@ -40,6 +40,7 @@ const USAGE: &str = "usage: orr_tui (--connect URL [--token T] | --ffi [--lib PA
 struct Args {
     connect: Option<String>,
     token: Option<String>,
+    ca_file: Option<PathBuf>,
     ffi: bool,
     lib: Option<PathBuf>,
     scene: Option<PathBuf>,
@@ -72,6 +73,7 @@ fn parse_args() -> Result<Args, String> {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
         match flag.as_str() {
             "--connect" => a.connect = Some(value("--connect")?),
+            "--ca-file" => a.ca_file = Some(PathBuf::from(value("--ca-file")?)),
             "--token" => a.token = Some(value("--token")?),
             "--ffi" => a.ffi = true,
             "--lib" => a.lib = Some(PathBuf::from(value("--lib")?)),
@@ -106,6 +108,12 @@ fn parse_args() -> Result<Args, String> {
     if usize::from(a.connect.is_some()) + usize::from(a.ffi) + usize::from(a.server.is_some()) != 1 {
         return Err("give exactly one of --connect URL, --ffi or --server HOST:PORT".into());
     }
+    if a.ca_file.is_some() && !a.connect.as_deref().is_some_and(|url| url.starts_with("wss://")) {
+        return Err("--ca-file requires --connect wss://...".into());
+    }
+    if a.connect.is_some() && a.insecure {
+        return Err("--insecure is not supported for ERP connections".into());
+    }
     Ok(a)
 }
 
@@ -115,7 +123,7 @@ fn open(a: &Args) -> Result<(Box<dyn Source>, bool), String> {
         // A headless run wants a paused session to step; the interactive view wants one that runs.
         let session = Session::Ensure { run: !a.headless };
         let max_fps = if a.headless { 1000 } else { 60 };
-        return Ok((Box::new(SocketSource::connect(url, a.token.as_deref(), max_fps, session)?), false));
+        return Ok((Box::new(SocketSource::connect_with_options(url, a.token.as_deref(), max_fps, session, &SocketOptions { ca_file: a.ca_file.clone(), ..SocketOptions::default() })?), false));
     }
     #[cfg(feature = "ffi")]
     {

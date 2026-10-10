@@ -24,7 +24,11 @@ pub fn demo_editor() -> Editor {
 
 /// An editor whose host thread has the `debug.panic` hook.
 pub fn crashable_editor() -> Editor {
-    let spec = HostSpec::Local { scene: default_scene_path(), listen: None, debug_hooks: true };
+    let spec = HostSpec::Local {
+        scene: default_scene_path(),
+        listen: None,
+        debug_hooks: true,
+    };
     let mut ed = Editor::start(&spec).expect("start");
     ed.sync();
     ed
@@ -52,13 +56,16 @@ pub fn vec2(x: i32, y: i32) -> Value {
 
 /// `[x, y]` of a `Vec2` value, in world units (view layer).
 pub fn xy(v: &Value) -> [f32; 2] {
-    let Value::Vec2(p) = v else { panic!("a vec2, got {v:?}") };
+    let Value::Vec2(p) = v else {
+        panic!("a vec2, got {v:?}")
+    };
     [orr_view::fp_to_f32(p.x), orr_view::fp_to_f32(p.y)]
 }
 
 /// One field of an entity, read from the host.
 pub fn field(ed: &mut Editor, t: &Target, component: &str, path: &str) -> Value {
-    ed.field_of(t, component, path).unwrap_or_else(|e| panic!("{component}.{path}: {e}"))
+    ed.field_of(t, component, path)
+        .unwrap_or_else(|e| panic!("{component}.{path}: {e}"))
 }
 
 /// `fixed` as the JSON ERP takes.
@@ -70,7 +77,9 @@ pub fn fixed_json(n: i32) -> serde_json::Value {
 pub fn checksums(ed: &mut Editor, from: u64, to: u64) -> Vec<u64> {
     (from..=to)
         .map(|t| {
-            let r = ed.host_call("sim.checksum", json!({"tick": t})).unwrap_or_else(|e| panic!("checksum of tick {t}: {e}"));
+            let r = ed
+                .host_call("sim.checksum", json!({"tick": t}))
+                .unwrap_or_else(|e| panic!("checksum of tick {t}: {e}"));
             orr_remote::wire::parse_checksum(&r["checksum"]).expect("checksum")
         })
         .collect()
@@ -95,11 +104,18 @@ pub fn gpu() -> Option<(MutexGuard<'static, ()>, orr_rhi::Wgpu)> {
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     match orr_rhi::Wgpu::headless(orr_rhi::WgpuOptions::default()) {
         Ok(g) => {
-            eprintln!("gpu test adapter: {} (software: {})", orr_rhi::Rhi::adapter_name(&g), g.is_software());
+            eprintln!(
+                "gpu test adapter: {} (software: {})",
+                orr_rhi::Rhi::adapter_name(&g),
+                g.is_software()
+            );
             Some((guard, g))
         }
         Err(e) => {
-            assert!(std::env::var_os("ORR_REQUIRE_GPU").is_none(), "ORR_REQUIRE_GPU is set but no adapter: {e}");
+            assert!(
+                std::env::var_os("ORR_REQUIRE_GPU").is_none(),
+                "ORR_REQUIRE_GPU is set but no adapter: {e}"
+            );
             eprintln!("SKIP: no GPU adapter ({e})");
             None
         }
@@ -114,7 +130,10 @@ pub fn temp_path(name: &str) -> std::path::PathBuf {
 
 /// The yaml text of the host's scene (what `scene.save` without `write` returns).
 pub fn scene_text(ed: &mut Editor) -> String {
-    ed.host_call("scene.save", json!({})).expect("scene.save")["text"].as_str().expect("text").to_string()
+    ed.host_call("scene.save", json!({})).expect("scene.save")["text"]
+        .as_str()
+        .expect("text")
+        .to_string()
 }
 
 /// The checksum of the host's scene document.
@@ -122,3 +141,5 @@ pub fn doc_checksum(ed: &mut Editor) -> u64 {
     let r = ed.host_call("sim.state", json!({})).expect("sim.state");
     orr_remote::wire::parse_checksum(&r["doc_checksum"]).expect("doc_checksum")
 }
+
+pub mod arena;

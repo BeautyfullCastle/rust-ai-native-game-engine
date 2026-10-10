@@ -1,0 +1,10 @@
+{
+  "name": "orrery-browser-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test test_*.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.57.0"
+  }
+}

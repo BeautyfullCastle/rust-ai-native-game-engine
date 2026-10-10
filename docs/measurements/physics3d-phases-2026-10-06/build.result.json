@@ -1,0 +1,39 @@
+{
+  "stage": "build",
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "-p",
+    "orr_physics3d",
+    "--example",
+    "phase_costs",
+    "--locked",
+    "--offline",
+    "-j1"
+  ],
+  "cwd": "/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs",
+  "limit_seconds": 300,
+  "free_floor_bytes": 1073741824,
+  "utc_start": "2026-10-06T00:30:44.867079+00:00",
+  "free_start_bytes": 1331478528,
+  "minimum_free_bytes": 1324335104,
+  "aborted": false,
+  "abort_reason": null,
+  "pid": 50,
+  "initial_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "exit_code": 0,
+  "elapsed_seconds": 17.53390678299911,
+  "utc_end": "2026-10-06T00:31:02.401010+00:00",
+  "free_end_bytes": 1327509504
+}

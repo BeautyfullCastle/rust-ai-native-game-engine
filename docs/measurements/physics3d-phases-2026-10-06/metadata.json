@@ -1,0 +1,92 @@
+{
+  "utc": "2026-10-06T00:30:44.362224+00:00",
+  "source_sha": "7282ca7c09e7c6895fb5a49a4ceafb0e81f056c1",
+  "source_tree": "97cf3baed8db542aa371dd0ced476f3d33f5747f",
+  "baseline_code_sha": "a9e5ccbcc86ecf282179aa0b908ab5efd6d097c0",
+  "base_docs_sha": "d9fb5e0bd758ebed05990be904b106a17bbd07e7",
+  "environment": {
+    "RUSTUP_HOME": "/workspace/scratch/edd3c9d10b8b/rust-setup/rustup",
+    "CARGO_HOME": "/workspace/scratch/edd3c9d10b8b/rust-setup/cargo",
+    "CARGO_TARGET_DIR": "/workspace/scratch/edd3c9d10b8b/su-tui-wss-target",
+    "RUSTUP_TOOLCHAIN": "1.97.1",
+    "PATH": "/workspace/scratch/edd3c9d10b8b/rust-setup/cargo/bin:/opt/codex/runtimes/codex-primary-runtime/dependencies/bin/override:/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin:/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin:/opt/codex/runtimes/codex-primary-runtime/dependencies/bin:/opt/codex/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agent/.local/bin:/opt/codex/runtimes/codex-primary-runtime/dependencies/bin/fallback"
+  },
+  "other_build_variables": {},
+  "profile": "Existing release: default opt-level 3, thin LTO, codegen-units 1, debug 1; no overrides",
+  "cpu_claim": "Logical CPU 0 affinity only, not physical-core isolation; visible process namespace cannot exclude host work; cgroup quota/throttle files unavailable",
+  "rustc": {
+    "command": [
+      "rustc",
+      "-Vv"
+    ],
+    "exit_code": 0,
+    "output": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n"
+  },
+  "cargo": {
+    "command": [
+      "cargo",
+      "-Vv"
+    ],
+    "exit_code": 0,
+    "output": "cargo 1.97.1 (c980f4866 2026-06-30)\nrelease: 1.97.1\ncommit-hash: c980f4866141969fab6254a680546a277789d6f0\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nlibgit2: 1.9.2 (sys:0.20.4 vendored)\nlibcurl: 8.20.0-DEV (sys:0.4.88+curl-8.20.0 vendored ssl:OpenSSL/3.6.2)\nssl: OpenSSL 3.6.2 7 Apr 2026\nos: Debian 13.0.0 [64-bit]\n"
+  },
+  "kernel": {
+    "command": [
+      "uname",
+      "-a"
+    ],
+    "exit_code": 0,
+    "output": "Linux 6a3807ae74c1 6.18.44 #1 SMP Sat Sep 26 20:02:31 UTC 2026 x86_64 GNU/Linux\n"
+  },
+  "taskset": {
+    "command": [
+      "taskset",
+      "--version"
+    ],
+    "exit_code": 0,
+    "output": "taskset from util-linux 2.41.5\n"
+  },
+  "targets": {
+    "command": [
+      "rustup",
+      "target",
+      "list",
+      "--installed"
+    ],
+    "exit_code": 0,
+    "output": "x86_64-unknown-linux-gnu\n"
+  },
+  "source_sha256": {
+    "Cargo.toml": "1ee557955c0560e0bc814c4ee6902ef6cf876f1df0e057ae8afd4472629ca122",
+    "Cargo.lock": "1aa7b12f7da8c7e00b4fa42b3228d0f3efea19f3d3b44a0c2dcc8bd36f250314",
+    "crates/orr_physics3d/Cargo.toml": "5fbb426580df34910087a6f155e020f0ea68a48ced22fdc297a97cdc3e816ea5",
+    "crates/orr_physics3d/examples/phase_costs.rs": "33f9eae76c75c94cb517c08d7d2f54edb596fe0180bdd872700597ab7460afe4",
+    "crates/orr_physics3d/benches/physics3d.rs": "d39726c659880b4a851b676c05b00ac2deb082ce7fd00f552014f0eefbd3806a",
+    "crates/orr_physics3d/tests/common/mod.rs": "109742d32bbfa18f7652b024cec461dbc0203bbb58a6ee012d676d44f963bccf",
+    "crates/orr_physics3d/tests/common/scenes.rs": "590ea3e8087eae394e3c6bedcad4ea12c0094196259a2491ffc1cbf22d5dc3a6",
+    "crates/orr_physics3d/src/collide.rs": "8ea666164aaf4c6c8fecacdfa969df58ab4ec2bf19049f7544b067b7538c9ed6",
+    "crates/orr_physics3d/src/fastmath.rs": "ea5e4517644f26274c2021bcf07304338ca97eb15f172d620fbdecc7f4ffbc1e",
+    "crates/orr_physics3d/src/geom.rs": "239f38f68d868193655de508d89d47d91081654f6e336a5c2b841b7410216f36",
+    "crates/orr_physics3d/src/lib.rs": "fe7020133a8c85b40e9b75dfba2434bf2ed03c98eaf992152191cc38324d6235",
+    "crates/orr_physics3d/src/manifold_tests.rs": "d26deff60c2cf11c348a36376dc2c633f05a47c6d35495274ef3b3f578d8b062",
+    "crates/orr_physics3d/src/query.rs": "ef3f07205c6fc5db27f8f0fdef4a66b1b0a3c8b59f574e083fcfdbf5c83276ff",
+    "crates/orr_physics3d/src/reflection.rs": "6f21ce622a049fc72e0830e24bcbf9abf37d8a5169653c42bcfd15d30863db94",
+    "crates/orr_physics3d/src/sleep.rs": "d1a95239a96837d31f08b66a4c3bcdf4931afa30a97a722e5531603d4dab855b",
+    "crates/orr_physics3d/src/solver.rs": "798a1c32348578456979d2667adb85a8506557b79b2a993ae198dd43cd79652f",
+    "crates/orr_physics3d/src/step.rs": "f46d57cd54e9773468be73caf9638fded8b7096be14ec109cdeead8d518c7cd0",
+    "crates/orr_physics3d/src/system.rs": "2454ed443d0fe6760b8a6746e2cb2a87a47966aa221cb613df77888efeb385c1",
+    "crates/orr_physics3d/src/types.rs": "efb48a9bad05d7f952f04e83fe78b3a39204f49a6324e93a3cc14e1d3917125b"
+  },
+  "source_delta_from_base": {
+    "command": [
+      "git",
+      "diff",
+      "--stat",
+      "d9fb5e0bd758ebed05990be904b106a17bbd07e7..HEAD"
+    ],
+    "exit_code": 0,
+    "output": " crates/orr_physics3d/examples/phase_costs.rs | 300 +++++++++++++++++++++++++++\n 1 file changed, 300 insertions(+)\n"
+  },
+  "source_patch_sha256": "718f88eba5d09cf30419e987547f39bbb72cebae934f217612da8de89d1d384a",
+  "runner_sha256": "93a22c7f3b1edde848c8bb89107332bcc67cf14bd8f31500290602b1c2c37ed8"
+}

@@ -25,11 +25,11 @@ use crate::arena_view::arena_fire_commands;
 use crate::physics_game::{NoCommand, PhysConfig, PhysGame, PhysInput};
 use crate::physics_host::{physics_bridge_config, SimMetrics};
 
-/// Build id of the arena sample; the server room's build hash is
+/// Frame-format-bound build id of the arena sample; the room's build hash is
 /// `build_hash_of(ARENA_BUILD_ID, 0)` (`orr_server --game arena`).
-pub const ARENA_BUILD_ID: u64 = 0x0A2E_4A00_0001;
-/// Build id of the physics sample (`orr_server --game physics`).
-pub const PHYSICS_BUILD_ID: u64 = 0x0A2E_4A00_0002;
+pub const ARENA_BUILD_ID: u64 = orr_sim::frame_build_id(0x0A2E_4A00_0001);
+/// Frame-format-bound build id of the physics sample (`orr_server --game physics`).
+pub const PHYSICS_BUILD_ID: u64 = orr_sim::frame_build_id(0x0A2E_4A00_0002);
 
 /// Client mode options of the sample programs.
 #[derive(Clone, Debug)]
@@ -39,7 +39,14 @@ pub struct NetArgs {
     pub kind: TransportKind,
     pub fingerprint: Option<[u8; 32]>,
     pub insecure_dev: bool,
+    /// Explicit PEM CA trust (otherwise WSS/WT use the public root set).
+    pub ca_cert: Option<PathBuf>,
+    /// Certificate name override; WSS normally checks its URL host; WT rejects overrides.
+    pub server_name: Option<String>,
     pub room: u64,
+    /// Override the sample's frame-format-bound game identity (`--build-id`).
+    /// `Some(0)` intentionally preserves the engine's untracked development mode.
+    pub build_id: Option<u64>,
     pub slot: Option<u8>,
     /// Label in log lines.
     pub name: String,
@@ -61,7 +68,10 @@ impl Default for NetArgs {
             kind: TransportKind::Quic,
             fingerprint: None,
             insecure_dev: false,
+            ca_cert: None,
+            server_name: None,
             room: 1,
+            build_id: None,
             slot: None,
             name: "client".to_string(),
             sim: SimConditions { latency_ms: 0, jitter_ms: 0, loss: 0.0, seed: 0 },
@@ -76,11 +86,14 @@ impl Default for NetArgs {
 
 /// Text of the network options, for the `--help` header of the programs.
 pub const NET_HELP: &str = "\
-  --connect HOST:PORT          play on a relay server instead of the local loopback
-  --transport quic|ws          (default quic)
+  --connect HOST:PORT|URL      play (wss:// for WSS, https:// for WT) on a relay server instead of the local loopback
+  --transport quic|ws|wss|wt   (default quic)
   --trust-fingerprint HEX      QUIC: pin the server certificate (the server prints it)
   --insecure-dev               QUIC: accept any certificate (development only)
+  --ca-cert PATH               trust certificates in this PEM CA file (WSS/WT/QUIC)
+  --server-name NAME           override certificate DNS/IP name (WSS defaults to URL host; WT rejects overrides)
   --room N                     room id (default 1)
+  --build-id N                 override the game's frame-format-bound build id (exact decimal u64)
   --slot N                     ask for this slot (default: any free slot)
   --name TEXT                  label in log lines
   --sim-latency MS             add MS of one-way delay in each direction (test the network)
@@ -106,7 +119,10 @@ impl NetArgs {
             "--transport" => self.kind = next(arg)?.parse()?,
             "--trust-fingerprint" => self.fingerprint = Some(parse_fingerprint(&next(arg)?)?),
             "--insecure-dev" => self.insecure_dev = true,
+            "--ca-cert" => self.ca_cert = Some(PathBuf::from(next(arg)?)),
+            "--server-name" => self.server_name = Some(next(arg)?),
             "--room" => self.room = num(arg, next(arg)?)?,
+            "--build-id" => self.build_id = Some(num(arg, next(arg)?)?),
             "--slot" => self.slot = Some(num(arg, next(arg)?)?),
             "--name" => self.name = next(arg)?,
             "--sim-latency" => self.sim.latency_ms = num(arg, next(arg)?)?,
@@ -123,15 +139,26 @@ impl NetArgs {
 
     fn connect_options(&self) -> Result<ConnectOptions, String> {
         let addr = self.connect.clone().ok_or("--connect is not set")?;
-        let trust = match (self.fingerprint, self.insecure_dev, self.kind) {
-            (Some(fp), _, _) => Trust::Fingerprint(fp),
-            (None, true, _) => Trust::InsecureDev,
-            (None, false, TransportKind::Ws) => Trust::InsecureDev, // unused by WebSocket
-            (None, false, TransportKind::Quic) => {
-                return Err("QUIC needs --trust-fingerprint HEX (printed by the server) or --insecure-dev".into())
+        if self.ca_cert.is_some() && (self.fingerprint.is_some() || self.insecure_dev) {
+            return Err("--ca-cert cannot be combined with --trust-fingerprint or --insecure-dev".into());
+        }
+        let trust = if let Some(path) = &self.ca_cert {
+            Trust::PemFile(path.clone())
+        } else {
+            match (self.fingerprint, self.insecure_dev, self.kind) {
+                (Some(fp), _, _) => Trust::Fingerprint(fp),
+                (None, true, _) => Trust::InsecureDev,
+                (None, false, TransportKind::Ws) => Trust::InsecureDev, // unused by WebSocket
+                (None, false, TransportKind::Wss | TransportKind::Wt) => Trust::WebPki,
+                (None, false, TransportKind::Quic) => {
+                    return Err("QUIC needs --trust-fingerprint HEX (printed by the server), --ca-cert PATH or --insecure-dev".into())
+                }
             }
         };
         let mut o = ConnectOptions::new(addr, self.kind, trust);
+        if let Some(name) = &self.server_name {
+            o.server_name = name.clone();
+        }
         let mut sim = self.sim;
         if sim.is_active() {
             sim.seed = self.sim_seed.unwrap_or_else(fresh_seed);
@@ -169,7 +196,7 @@ impl NetArgs {
 pub fn arena_client(args: &NetArgs) -> Result<RelayClient<Arena, NetLink>, String> {
     let link = args.link()?;
     Ok(RelayClient::new(
-        args.client_config(ARENA_BUILD_ID),
+        args.client_config(args.build_id.unwrap_or(ARENA_BUILD_ID)),
         link,
         |w| ArenaConfig { player_count: w.player_count },
         DirSink::new(&args.desync_dir),
@@ -187,7 +214,7 @@ pub type SceneSink = Arc<Mutex<Option<PhysConfig>>>;
 fn physics_client_with(args: &NetArgs, sink: Option<SceneSink>) -> Result<RelayClient<PhysGame, NetLink>, String> {
     let link = args.link()?;
     Ok(RelayClient::new(
-        args.client_config(PHYSICS_BUILD_ID),
+        args.client_config(args.build_id.unwrap_or(PHYSICS_BUILD_ID)),
         link,
         move |w| {
             let scene = PhysConfig::from_blob(&w.config, w.player_count)
@@ -352,5 +379,59 @@ pub fn log_lifecycle(note: &Lifecycle) {
         Lifecycle::DebugRejected(e) => println!("debug command refused: {e}"),
         Lifecycle::SeekRejected { target } => println!("seek to tick {target} refused (outside the recording)"),
         _ => {}
+    }
+}
+
+/// Recovery summaries are diagnostics, not a replay of lifecycle transitions.
+pub fn log_view_resync(reset: &orr_bridge::ViewResync) {
+    eprintln!(
+        "view resynced at tick {}: {} presentation notifications discarded",
+        reset.head_tick, reset.discarded_events
+    );
+    for note in &reset.lifecycle {
+        eprintln!(
+            "  coalesced {} lifecycle notifications; latest: {:?}",
+            note.count, note.last
+        );
+    }
+}
+
+#[cfg(test)]
+mod wss_options_tests {
+    use super::*;
+
+    #[test]
+    fn wt_cli_defaults_to_webpki_and_url_host() {
+        let mut args = NetArgs::default();
+        for (key, value) in [("--transport", "wt"), ("--connect", "https://relay.example/game?room=1")] {
+            assert!(args.parse_option(key, &mut |_| Ok(value.into())).unwrap());
+        }
+        let options = args.connect_options().unwrap();
+        assert_eq!(options.kind, TransportKind::Wt);
+        assert!(matches!(options.trust, Trust::WebPki));
+        assert!(options.server_name.is_empty());
+    }
+
+    #[test]
+    fn wss_defaults_to_webpki_and_url_name() {
+        let args = NetArgs { connect: Some("wss://relay.example/game?room=1".into()), kind: TransportKind::Wss, ..NetArgs::default() };
+        let options = args.connect_options().unwrap();
+        assert!(matches!(options.trust, Trust::WebPki));
+        assert!(options.server_name.is_empty());
+        assert_eq!(options.addr, "wss://relay.example/game?room=1");
+    }
+
+    #[test]
+    fn cli_parses_wss_ca_and_name_without_changing_quic_default() {
+        let mut args = NetArgs::default();
+        for (key, value) in [("--transport", "wss"), ("--connect", "localhost:443"), ("--ca-cert", "ca.pem"), ("--server-name", "relay.example")] {
+            assert!(args.parse_option(key, &mut |_| Ok(value.into())).unwrap());
+        }
+        let options = args.connect_options().unwrap();
+        assert!(matches!(options.trust, Trust::PemFile(ref path) if path == &PathBuf::from("ca.pem")));
+        assert_eq!(options.server_name, "relay.example");
+        args.insecure_dev = true;
+        assert!(args.connect_options().is_err());
+        assert_eq!(ConnectOptions::new("localhost:443", TransportKind::Quic, Trust::WebPki).server_name, "localhost");
     }
 }

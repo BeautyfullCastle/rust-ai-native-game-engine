@@ -3,7 +3,14 @@
 
 mod common;
 
-use std::time::Instant;
+use std::{
+    cell::RefCell,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 
 use common::*;
 use orr_edit::{
@@ -13,7 +20,7 @@ use orr_edit::{
 use orr_reflect::Value;
 use orr_sample::physics_game::{PhysGame, PhysInput, PhysMetrics};
 use orr_session::ControlOp;
-use orr_sim::PlayerSlot;
+use orr_sim::{Game, Metrics, PlayerSlot, SimContext, Simulation, System};
 
 const BODY: &str = "orr_physics::Body";
 
@@ -51,6 +58,35 @@ fn verify(doc: &EditorDoc, id: ProposalId, inputs: &VerifyInputs<'_, PhysGame>) 
     doc.verify_proposal::<PhysGame>(id, inputs, &PhysMetrics, &opts()).unwrap()
 }
 
+struct CancelOnSample {
+    cancel: Arc<AtomicBool>,
+    tick: u64,
+}
+
+impl Metrics for CancelOnSample {
+    fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+        if frame.tick() == self.tick {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+        Vec::new()
+    }
+}
+
+struct CancelAfterBothSample {
+    cancel: Arc<AtomicBool>,
+    tick: u64,
+    samples: AtomicUsize,
+}
+
+impl Metrics for CancelAfterBothSample {
+    fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+        if frame.tick() == self.tick && self.samples.fetch_add(1, Ordering::Relaxed) + 1 == 2 {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+        Vec::new()
+    }
+}
+
 #[test]
 fn an_identical_candidate_does_not_diverge() {
     let mut doc = demo_doc();
@@ -75,6 +111,46 @@ fn an_identical_candidate_does_not_diverge() {
     assert!(r.recording.is_none());
     // PhysMetrics reports what the demo scene has.
     assert_eq!(r.metric("dynamic_bodies").unwrap().base.start, MetricValue::Int(40));
+}
+
+#[test]
+fn sampling_coverage_uses_actual_boundaries_relative_to_the_start() {
+    let doc = demo_doc();
+    let mut frame = orr_ecs::Frame::from_bytes(doc.frame_registry().clone(), &doc.frame().to_bytes()).unwrap();
+    frame.set_tick(17);
+    let mut final_checksum = None;
+    for (interval, expected) in [
+        (0, vec![17, 22]),
+        (1, vec![17, 18, 19, 20, 21, 22]),
+        (2, vec![17, 19, 21, 22]),
+        (60, vec![17, 22]),
+    ] {
+        let options = VerifyOptions { sample_every: interval, ..VerifyOptions::default() };
+        let r = orr_edit::verify_frames::<PhysGame>(&frame, &frame, &scripted(5), &PhysMetrics, &options).unwrap();
+        assert_eq!((r.start_tick, r.end_tick, r.ticks), (17, 22, 5));
+        assert_eq!(r.sample_every, interval);
+        assert_eq!(r.samples.iter().map(|s| s.tick).collect::<Vec<_>>(), expected);
+        assert_eq!(r.every_tick_boundary_observed(), interval == 1);
+        assert_eq!(r.lines().iter().any(|line| line.contains("between samples not checked")), interval != 1);
+        let check = r.check(&[Check::parse("dynamic_bodies.max == 40").unwrap()]);
+        assert!(check.passed);
+        assert_eq!(check.results[0].reason.contains("between samples not checked"), interval != 1);
+        assert!(r.identical());
+        assert_eq!(*final_checksum.get_or_insert(r.base_final_checksum), r.base_final_checksum);
+    }
+    // One tick has only the two endpoints, regardless of requested interval.
+    for interval in [0, 1, 60] {
+        let options = VerifyOptions { sample_every: interval, ..VerifyOptions::default() };
+        let r = orr_edit::verify_frames::<PhysGame>(&frame, &frame, &scripted(1), &PhysMetrics, &options).unwrap();
+        assert_eq!(r.samples.len(), 2);
+        assert!(r.every_tick_boundary_observed());
+        assert!(!r.lines().iter().any(|line| line.contains("between samples not checked")));
+        // Preserve the existing zero-tick contract: no report is produced.
+        assert!(matches!(
+            orr_edit::verify_frames::<PhysGame>(&frame, &frame, &scripted(0), &PhysMetrics, &options),
+            Err(EditError::Verify(message)) if message == "no ticks to run"
+        ));
+    }
 }
 
 #[test]
@@ -123,6 +199,310 @@ fn verify_is_deterministic_and_the_same_on_one_thread_or_two() {
         .unwrap();
     assert_eq!(short.ticks, 60);
     assert_eq!(short.samples.last(), a.samples.iter().find(|s| s.tick == 60));
+}
+
+#[test]
+fn cancellable_verify_stops_before_start_and_between_ticks() {
+    let doc = demo_doc();
+    let already_cancelled = AtomicBool::new(true);
+    let never_run = VerifyInputs::scripted(4, 2, |_, _| panic!("pre-cancelled input must not run"));
+    let result = orr_edit::verify_frames_cancellable::<PhysGame>(
+        doc.frame(),
+        doc.frame(),
+        &never_run,
+        &PhysMetrics,
+        &opts(),
+        &already_cancelled,
+    );
+    assert!(matches!(result, Err(EditError::VerifyCancelled)));
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let input_calls = Arc::new(AtomicUsize::new(0));
+    let calls = input_calls.clone();
+    let inputs = VerifyInputs::scripted(4, 2, move |tick, slot| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        script(tick, slot)
+    });
+    let metrics = CancelOnSample { cancel: cancel.clone(), tick: 1 };
+    let sequential = VerifyOptions { parallel: false, sample_every: 1, ..opts() };
+    let result = orr_edit::verify_frames_cancellable::<PhysGame>(doc.frame(), doc.frame(), &inputs, &metrics, &sequential, &cancel);
+    assert!(matches!(result, Err(EditError::VerifyCancelled)));
+    assert_eq!(input_calls.load(Ordering::Relaxed), 2, "only tick 1 inputs were requested");
+}
+
+#[test]
+fn scripted_input_cancellation_skips_later_players_and_simulation() {
+    let doc = demo_doc();
+    let checksum = doc.frame().checksum();
+    for cancel_slot in 0..3 {
+        let cancel = AtomicBool::new(false);
+        let calls = AtomicUsize::new(0);
+        let inputs = VerifyInputs::scripted(4, 3, |tick, slot| {
+            assert_eq!(tick, 1);
+            assert_eq!(usize::from(slot.0), calls.fetch_add(1, Ordering::Relaxed));
+            if slot.0 == cancel_slot {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            script(tick, slot)
+        });
+        struct InitialSampleOnly(AtomicUsize);
+        impl Metrics for InitialSampleOnly {
+            fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+                assert_eq!(
+                    frame.tick(),
+                    0,
+                    "cancelled inputs must not reach simulation"
+                );
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+        }
+        let metrics = InitialSampleOnly(AtomicUsize::new(0));
+        let sequential = VerifyOptions {
+            parallel: false,
+            sample_every: 1,
+            ..opts()
+        };
+        let result = orr_edit::verify_frames_cancellable::<PhysGame>(
+            doc.frame(),
+            doc.frame(),
+            &inputs,
+            &metrics,
+            &sequential,
+            &cancel,
+        );
+        assert!(matches!(result, Err(EditError::VerifyCancelled)));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            usize::from(cancel_slot) + 1,
+            "no later player callback is invoked"
+        );
+        assert_eq!(
+            metrics.0.load(Ordering::Relaxed),
+            1,
+            "the candidate side never starts"
+        );
+        assert_eq!(doc.frame().checksum(), checksum);
+    }
+}
+
+#[test]
+fn uncancelled_scripted_players_preserve_complete_reports() {
+    let doc = demo_doc();
+    for players in [0, 1, 3] {
+        for parallel in [false, true] {
+            let options = VerifyOptions {
+                parallel,
+                sample_every: 1,
+                ..opts()
+            };
+            let expected = orr_edit::verify_frames::<PhysGame>(
+                doc.frame(),
+                doc.frame(),
+                &VerifyInputs::scripted(16, players, script),
+                &PhysMetrics,
+                &options,
+            )
+            .unwrap();
+            let calls = AtomicUsize::new(0);
+            let inputs = VerifyInputs::scripted(16, players, |tick, slot| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                script(tick, slot)
+            });
+            let actual = orr_edit::verify_frames_cancellable::<PhysGame>(
+                doc.frame(),
+                doc.frame(),
+                &inputs,
+                &PhysMetrics,
+                &options,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual.ticks, 16);
+            assert_eq!(calls.load(Ordering::Relaxed), 2 * 16 * usize::from(players));
+        }
+    }
+}
+
+// The test system requests cancellation during an ordinary successful tick.
+// Thread-local instrumentation keeps concurrent tests independent without
+// coordinating worker threads; these fixtures deliberately run sequentially.
+#[derive(Default)]
+struct TickCancellationProbe {
+    cancel: Arc<AtomicBool>,
+    cancel_tick: Option<u64>,
+    ticks: Vec<u64>,
+    inputs: Vec<(u64, PlayerSlot)>,
+    samples: Vec<u64>,
+}
+
+thread_local! {
+    static TICK_CANCELLATION: RefCell<TickCancellationProbe> = RefCell::default();
+}
+
+struct TickCancellationGame;
+
+impl Game for TickCancellationGame {
+    type Input = u8;
+    type Command = <PhysGame as Game>::Command;
+    type Event = u8;
+    type Config = ();
+
+    fn register(_: &mut orr_ecs::ComponentRegistryBuilder) {}
+    fn setup(_: &mut orr_ecs::Frame, _: &()) {}
+    fn systems() -> Vec<Box<dyn System<Self>>> {
+        vec![Box::new(cancel_during_tick as fn(&mut SimContext<Self>))]
+    }
+}
+
+fn cancel_during_tick(ctx: &mut SimContext<TickCancellationGame>) {
+    TICK_CANCELLATION.with_borrow_mut(|probe| {
+        probe.ticks.push(ctx.tick);
+        if probe.cancel_tick == Some(ctx.tick) {
+            probe.cancel.store(true, Ordering::Relaxed);
+        }
+    });
+}
+
+fn tick_probe_input(tick: u64, slot: PlayerSlot) -> u8 {
+    TICK_CANCELLATION.with_borrow_mut(|probe| probe.inputs.push((tick, slot)));
+    0
+}
+
+struct TickProbeMetrics;
+
+impl Metrics for TickProbeMetrics {
+    fn sample(&self, frame: &orr_ecs::Frame) -> Vec<(String, MetricValue)> {
+        TICK_CANCELLATION.with_borrow_mut(|probe| probe.samples.push(frame.tick()));
+        vec![("tick".into(), MetricValue::Int(frame.tick() as i64))]
+    }
+}
+
+#[test]
+fn cancellation_during_successful_tick_skips_sampling_and_candidate() {
+    let sim = Simulation::<TickCancellationGame>::new((), 60, 1);
+    let frame = sim.frame();
+    let bytes = frame.to_bytes();
+    let checksum = frame.checksum();
+    let options = VerifyOptions {
+        parallel: false,
+        sample_every: 1,
+        ..opts()
+    };
+    for cancel_tick in 1..=3 {
+        let cancel = Arc::new(AtomicBool::new(false));
+        TICK_CANCELLATION.set(TickCancellationProbe {
+            cancel: cancel.clone(),
+            cancel_tick: Some(cancel_tick),
+            ..Default::default()
+        });
+        let inputs = VerifyInputs::scripted(3, 2, tick_probe_input);
+        let result = orr_edit::verify_frames_cancellable::<TickCancellationGame>(
+            frame,
+            frame,
+            &inputs,
+            &TickProbeMetrics,
+            &options,
+            &cancel,
+        );
+        let probe = TICK_CANCELLATION.take();
+        assert!(matches!(result, Err(EditError::VerifyCancelled)));
+        assert_eq!(probe.ticks, (1..=cancel_tick).collect::<Vec<_>>());
+        assert_eq!(
+            probe.inputs,
+            (1..=cancel_tick)
+                .flat_map(|t| [(t, PlayerSlot(0)), (t, PlayerSlot(1))])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe.samples,
+            (0..cancel_tick).collect::<Vec<_>>(),
+            "no post-cancel sample or candidate start"
+        );
+        assert_eq!(frame.to_bytes(), bytes);
+        assert_eq!(frame.checksum(), checksum);
+    }
+}
+
+#[test]
+fn uncancelled_successful_ticks_preserve_complete_reports() {
+    let sim = Simulation::<TickCancellationGame>::new((), 60, 1);
+    let frame = sim.frame();
+    let bytes = frame.to_bytes();
+    let checksum = frame.checksum();
+    let options = VerifyOptions {
+        parallel: false,
+        sample_every: 1,
+        ..opts()
+    };
+    let inputs = VerifyInputs::scripted(3, 2, tick_probe_input);
+    TICK_CANCELLATION.set(TickCancellationProbe::default());
+    let expected = orr_edit::verify_frames::<TickCancellationGame>(
+        frame,
+        frame,
+        &inputs,
+        &TickProbeMetrics,
+        &options,
+    )
+    .unwrap();
+    let expected_probe = TICK_CANCELLATION.take();
+    let actual = orr_edit::verify_frames_cancellable::<TickCancellationGame>(
+        frame,
+        frame,
+        &inputs,
+        &TickProbeMetrics,
+        &options,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let actual_probe = TICK_CANCELLATION.take();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.ticks, 3);
+    assert_eq!(actual_probe.ticks, vec![1, 2, 3, 1, 2, 3]);
+    assert_eq!(actual_probe.ticks, expected_probe.ticks);
+    assert_eq!(
+        actual_probe.inputs,
+        (1..=3)
+            .cycle()
+            .take(6)
+            .flat_map(|t| [(t, PlayerSlot(0)), (t, PlayerSlot(1))])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(actual_probe.inputs, expected_probe.inputs);
+    assert_eq!(actual_probe.samples, vec![0, 1, 2, 3, 0, 1, 2, 3]);
+    assert_eq!(actual_probe.samples, expected_probe.samples);
+    assert_eq!(frame.to_bytes(), bytes);
+    assert_eq!(frame.checksum(), checksum);
+}
+
+#[test]
+fn cancellable_verify_does_not_return_a_report_when_cancelled_after_final_tick() {
+    let doc = demo_doc();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let input_calls = Arc::new(AtomicUsize::new(0));
+    let calls = input_calls.clone();
+    let inputs = VerifyInputs::scripted(4, 2, move |tick, slot| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        script(tick, slot)
+    });
+    let metrics = CancelOnSample { cancel: cancel.clone(), tick: 4 };
+    let sequential = VerifyOptions { parallel: false, sample_every: 4, ..opts() };
+    let result = orr_edit::verify_frames_cancellable::<PhysGame>(doc.frame(), doc.frame(), &inputs, &metrics, &sequential, &cancel);
+    assert!(matches!(result, Err(EditError::VerifyCancelled)));
+    assert_eq!(input_calls.load(Ordering::Relaxed), 8, "all four ticks ran before the final sample cancelled");
+}
+
+#[test]
+fn parallel_cancellation_is_shared_by_and_joins_both_sides() {
+    let doc = demo_doc();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let inputs = scripted(16);
+    let metrics = CancelAfterBothSample { cancel: cancel.clone(), tick: 1, samples: AtomicUsize::new(0) };
+    let parallel = VerifyOptions { parallel: true, sample_every: 1, ..opts() };
+    let result = orr_edit::verify_frames_cancellable::<PhysGame>(doc.frame(), doc.frame(), &inputs, &metrics, &parallel, &cancel);
+    assert!(matches!(result, Err(EditError::VerifyCancelled)));
+    assert_eq!(metrics.samples.load(Ordering::Relaxed), 2, "both sides reached the same sampled tick");
 }
 
 /// Records a play of `ticks` ticks of `script` from the doc's frame.
@@ -324,4 +704,127 @@ fn verify_600_ticks_of_the_demo_scene_is_fast() {
     if !cfg!(debug_assertions) {
         assert!(par_time.as_millis() < 1000, "{par_time:?}");
     }
+}
+
+#[test]
+fn verified_accept_refuses_document_changes_then_accepts_a_new_verification() {
+    let mut doc = demo_doc();
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let expected = doc.proposal_state(id).unwrap();
+    let report = verify(&doc, id, &scripted(1));
+    let other = guid_named(&doc, "body_06");
+    doc.apply(set(&other, BODY, "pos", vec2(2, 14)), Origin::User).unwrap();
+    assert!(doc.proposal_check(id).is_ok(), "the ops still apply: ordinary conflict detection is insufficient");
+    let unchanged = state(&doc);
+    let history = doc.history();
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    assert_eq!(state(&doc), unchanged);
+    assert_eq!(doc.history(), history);
+    assert!(doc.proposal_info(id).is_ok(), "a stale verification leaves the proposal open");
+
+    let fresh = doc.proposal_state(id).unwrap();
+    let report2 = verify(&doc, id, &scripted(1));
+    assert_ne!(report.candidate_start_checksum, report2.candidate_start_checksum);
+    let accepted = doc.accept_if_unchanged(id, fresh).unwrap();
+    assert_eq!(doc.checksum(), report2.candidate_start_checksum);
+    assert!(accepted.history_id.is_some());
+    doc.undo().unwrap();
+    assert_eq!(state(&doc), unchanged, "the guarded acceptance is one undo entry");
+}
+
+#[test]
+fn verified_accept_refuses_proposal_mutation_and_cross_proposal_state() {
+    let mut doc = demo_doc();
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let expected = doc.proposal_state(id).unwrap();
+    let report = verify(&doc, id, &scripted(1));
+    let body = guid_named(&doc, "body_05");
+    doc.proposal_apply(id, set(&body, BODY, "pos", vec2(0, -30))).unwrap();
+    let unchanged = state(&doc);
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    assert_eq!(state(&doc), unchanged);
+    assert_ne!(report.candidate_start_checksum, doc.proposal_preview(id).unwrap().checksum());
+    assert!(doc.history().is_empty());
+
+    let other = propose_move(&mut doc, "body_05", vec2(0, 12));
+    assert_eq!(doc.proposal_state(other).unwrap().proposal_revision, expected.proposal_revision);
+    assert_eq!(doc.accept_if_unchanged(other, expected), Err(EditError::StaleVerification { proposal: other.0 }));
+    assert!(doc.proposal_info(other).is_ok());
+}
+
+#[test]
+fn verified_accept_invalidates_after_undo_redo_and_rollback_even_when_values_return() {
+    let mut doc = demo_doc();
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let other = guid_named(&doc, "body_06");
+    let expected = doc.proposal_state(id).unwrap();
+    let initial = state(&doc);
+    doc.apply(set(&other, BODY, "pos", vec2(2, 14)), Origin::User).unwrap();
+    doc.undo().unwrap();
+    assert_eq!(state(&doc), initial);
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+
+    let expected = doc.proposal_state(id).unwrap();
+    doc.redo().unwrap();
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    let expected = doc.proposal_state(id).unwrap();
+    let before = state(&doc);
+    doc.begin_tx("temporary", Origin::User).unwrap();
+    doc.apply(set(&other, BODY, "pos", vec2(3, 15)), Origin::User).unwrap();
+    doc.rollback_tx().unwrap();
+    assert_eq!(state(&doc), before);
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+}
+
+#[test]
+fn verified_accept_preserves_noops_but_conservatively_invalidates_failed_batch_rollback() {
+    let mut doc = demo_doc();
+    let body = guid_named(&doc, "body_05");
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let expected = doc.proposal_state(id).unwrap();
+    assert!(!doc.proposal_apply(id, set(&body, BODY, "pos", vec2(0, 12))).unwrap().changed);
+    assert_eq!(doc.proposal_state(id).unwrap(), expected);
+    doc.save_yaml();
+    assert_eq!(doc.proposal_state(id).unwrap(), expected, "saving does not change verification inputs");
+    // An invalid first op rolls an empty transaction back. This deliberately
+    // invalidates the staged revision even though no values changed.
+    let preview = doc.proposal_preview(id).unwrap().checksum();
+    assert!(doc.proposal_apply_all(id, vec![set(&body, BODY, "no_such_field", fixed(1))]).is_err());
+    assert_eq!(doc.proposal_preview(id).unwrap().checksum(), preview);
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    let fresh = doc.proposal_state(id).unwrap();
+    verify(&doc, id, &scripted(1));
+    doc.accept_if_unchanged(id, fresh).unwrap();
+}
+
+#[test]
+fn manual_accept_keeps_its_explicit_rebase_semantics() {
+    let mut doc = demo_doc();
+    let body = guid_named(&doc, "body_05");
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let expected = doc.proposal_state(id).unwrap();
+    verify(&doc, id, &scripted(1));
+    doc.apply(set(&body, BODY, "pos", vec2(3, 15)), Origin::User).unwrap();
+    assert_eq!(doc.accept_if_unchanged(id, expected), Err(EditError::StaleVerification { proposal: id.0 }));
+    doc.accept(id).unwrap();
+    assert_eq!(doc.view().field(&orr_edit::Target::Guid(body), BODY, "pos").unwrap(), vec2(0, 12));
+}
+
+#[test]
+fn verification_states_cannot_be_reused_on_another_document_with_matching_counters() {
+    let mut doc = demo_doc();
+    let mut other = demo_doc();
+    let id = propose_move(&mut doc, "body_05", vec2(0, 12));
+    let other_id = propose_move(&mut other, "body_05", vec2(0, -30));
+    let expected = doc.proposal_state(id).unwrap();
+    let other_state = other.proposal_state(other_id).unwrap();
+    assert_eq!(expected.id, other_state.id);
+    assert_eq!(expected.document_revision, other_state.document_revision);
+    assert_eq!(expected.proposal_revision, other_state.proposal_revision);
+    assert_ne!(expected.document_id, other_state.document_id);
+    let before = state(&other);
+    assert_eq!(other.accept_if_unchanged(other_id, expected), Err(EditError::StaleVerification { proposal: other_id.0 }));
+    assert_eq!(state(&other), before);
+    assert!(other.history().is_empty());
+    assert!(other.proposal_info(other_id).is_ok());
 }

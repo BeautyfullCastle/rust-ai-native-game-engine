@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::codec::{put_pods, put_u32, FrameDecodeError, Reader};
+use crate::codec::{hash_len, put_pods, put_u32, FrameDecodeError, Reader};
 
 /// A handle to a simulation entity.
 ///
@@ -117,8 +117,10 @@ impl EntityAllocator {
 
     pub fn hash_into(&self, h: &mut xxhash_rust::xxh3::Xxh3) {
         h.update(&self.alive_count.to_le_bytes());
+        hash_len(h, self.versions.len());
         h.update(bytemuck::cast_slice(&self.versions));
         h.update(&self.alive);
+        hash_len(h, self.free.len());
         h.update(bytemuck::cast_slice(&self.free));
     }
 

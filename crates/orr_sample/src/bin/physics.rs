@@ -70,7 +70,12 @@ fn real_main() -> Result<(), String> {
     let mut ticks: Option<u64> = None;
     let mut opts = Options {
         label: String::new(),
+        #[cfg(feature = "input-actions")]
+        input_map: None,
+        #[cfg(feature = "game-ui")]
+        game_ui_project: None,
         vsync: true,
+        audio: orr_sample::arena_audio::AudioMode::Off,
         seconds: None,
         remote_mode: InterpMode::Prediction,
         view: ViewConfig::default(),

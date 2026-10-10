@@ -1,0 +1,25 @@
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+   Compiling orr_terrain_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain_physics3d)
+   Compiling orr_games v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_games)
+   Compiling orr_sample v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sample)
+   Compiling orr_remote v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_remote)
+   Compiling orr_editor v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_editor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3m 32s
+     Running tests/deps.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/deps-239e724bbe999abc)
+
+running 3 tests
+test the_editor_does_not_depend_on_the_simulation_crates ... ok
+test terrain_authoring_stays_optional_and_simulation_integration_is_explicit ... ok
+test the_editor_sources_do_not_name_the_simulation_crates ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/terrain_physics.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/terrain_physics-5b85575d8c590730)
+
+running 3 tests
+test terrain_game_spawns_only_spheres_and_cannot_open_without_admission ... ok
+test same_revision_source_change_refreshes_panel_label_and_reuses_mesh ... ok
+test actual_play_controls_use_pinned_frame_and_disable_terrain_play_edits ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

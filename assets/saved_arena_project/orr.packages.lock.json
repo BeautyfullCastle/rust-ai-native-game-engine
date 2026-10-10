@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "direct": {
+    "sample-sprites": "1.0.0"
+  },
+  "packages": {
+    "sample-sprites": {
+      "manifest": {
+        "schema": 1,
+        "name": "sample-sprites",
+        "version": "1.0.0",
+        "engine": "^0.0.1",
+        "capabilities": [
+          "sprite"
+        ],
+        "dependencies": {},
+        "files": [
+          "LICENSE.txt",
+          "lantern_keeper.png",
+          "lantern_keeper.rgba",
+          "sprites.json"
+        ]
+      },
+      "digest": "952838c26cb40890a4c9b1bb9a3c25c5e2430bca3b33b4064b9d79efd7432f86",
+      "files": {
+        "LICENSE.txt": "318e191782bebb2e0fa21170cd2cbd7161b6f9a843d4ced7d3e135da5c589b98",
+        "lantern_keeper.png": "e7366af75c9a9bb44114c3914e8dc6cee447cdb18c762f805c1f564a12409693",
+        "lantern_keeper.rgba": "6928c2058440a8f508b4069f9e83349e11643dbec8573aa164e03e5b2a0ad682",
+        "sprites.json": "c109f459ce085162773026e41b73ab483fd1d3ee646cb5e59e0e2d3ba368adf4"
+      }
+    }
+  }
+}

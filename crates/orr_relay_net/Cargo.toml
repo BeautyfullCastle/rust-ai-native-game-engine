@@ -14,3 +14,6 @@ orr_net = { path = "../orr_net", features = ["conditioner"] }
 orr_proto = { path = "../orr_proto" }
 orr_session = { path = "../orr_session" }
 orr_sim = { path = "../orr_sim" }
+
+[dev-dependencies]
+orr_testgame = { path = "../orr_testgame" }

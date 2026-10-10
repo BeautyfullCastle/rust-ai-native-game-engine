@@ -1,14 +1,16 @@
 //! Executes ERP methods against the host's model.
 //!
-//! Everything here is synchronous and runs on the host thread (a
-//! [`crate::LocalHost`] thread or the headless loop), inside [`crate::ErpServer::poll`].
+//! Direct calls here are synchronous. [`crate::ErpServer`] intercepts verification
+//! to capture immutable inputs and execute it on a bounded worker; other methods
+//! run on the host thread (a [`crate::LocalHost`] or the headless loop).
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use orr_ecs::Entity;
 use orr_edit::{EditorDoc, EntityInfo, Op, Origin, PlayController, StoppedPlay, Target, View};
 use orr_reflect::{Guid, TypeInfo, TypeKind, Value};
-use orr_session::{ControlOp, Speed};
+use orr_session::{ControlOp, PlayMode, Speed};
 use orr_sim::{EventKey, Game, PlayerSlot, SimCommand};
 use serde_json::{json, Map, Value as J};
 
@@ -43,8 +45,9 @@ pub struct HostLimits {
     pub max_step_per_call: u32,
     /// The scene file `scene.save` with `write: true` writes; `None` = never writes a file.
     pub scene_path: Option<PathBuf>,
-    /// Most ticks one `proposal.verify` / `verify.self` call may run (the
-    /// host thread is busy meanwhile). Default 6000.
+    /// Most simulation ticks one `proposal.verify` / `verify.self` call may run.
+    /// Default 6000. The server runs one verification worker at a time; this
+    /// execution cap does not bound replay decoding memory or wall-clock time.
     pub max_verify_ticks: u32,
     /// Build id of the host's simulation (shown in `rpc.discover`, given to
     /// the verification runs). Default 0 = not tracked.
@@ -55,6 +58,10 @@ pub struct HostLimits {
     /// embedding editor, whose person owns the machine; false (default) for
     /// a headless host, where only the configured scene file is written.
     pub allow_scene_paths: bool,
+    /// Refuse an explicit scene path rather than ignoring it. Asset-backed
+    /// hosts use this to keep their resolver root and save destination aligned.
+    /// Default false preserves the legacy fixed-path host behavior.
+    pub reject_scene_path_overrides: bool,
     /// Enables the `debug.panic` test hook (default false).
     pub debug_hooks: bool,
     /// The game's view stream producer (the `viewstream` topic of
@@ -77,6 +84,7 @@ impl Default for HostLimits {
             build_id: 0,
             game: GameHooks::default(),
             allow_scene_paths: false,
+            reject_scene_path_overrides: false,
             debug_hooks: false,
             view_stream: None,
             client_session: None,
@@ -130,7 +138,7 @@ pub fn call_local<G: Game>(
     params: &J,
 ) -> Result<J, RpcError> {
     let mut fx = Effects::default();
-    call(target, limits, &CallCtx { client, caps, last_play: None, tx_check: None }, &mut fx, method, params)
+    call(target, limits, None, &CallCtx { client, caps, last_play: None, tx_check: None }, &mut fx, method, params)
 }
 
 /// Only the connection that opened a transaction may end it.
@@ -146,7 +154,7 @@ fn own_tx<G: Game>(t: &ErpTarget<'_, G>, ctx: &CallCtx<'_>) -> Result<(), RpcErr
 fn is_world_mutation(method: &str) -> bool {
     matches!(
         method,
-        "world.patch" | "world.insert" | "world.remove" | "world.spawn" | "world.despawn" | "world.singleton.patch"
+        "world.patch" | "world.patch_batch" | "world.insert" | "world.remove" | "world.spawn" | "world.despawn" | "world.singleton.patch"
     )
 }
 
@@ -181,6 +189,7 @@ pub(crate) fn authorize(method: &str, caps: Caps, playing: bool, params: &J) -> 
 pub(crate) fn call<G: Game>(
     t: &mut ErpTarget<'_, G>,
     lim: &HostLimits,
+    input: Option<&crate::input::StructuredInput<G>>,
     ctx: &CallCtx<'_>,
     fx: &mut Effects,
     method: &str,
@@ -196,7 +205,13 @@ pub(crate) fn call<G: Game>(
     let p = P(obj);
     let origin = crate::caps::origin_of_client(ctx.client);
     match method {
-        "rpc.discover" => Ok(proposals::discover_with_engine(t, lim, ctx)),
+        "rpc.discover" => {
+            let mut result = proposals::discover_with_engine(t, lim, ctx);
+            if let Some(input) = input {
+                result["engine"]["input"] = input.descriptor.clone();
+            }
+            Ok(result)
+        },
         "proposal.begin" => proposals::begin(t, &p, origin),
         "proposal.apply" => proposals::apply(t, &p),
         "proposal.list" => Ok(proposals::list(t)),
@@ -204,17 +219,21 @@ pub(crate) fn call<G: Game>(
         "proposal.preview" => proposals::preview(t, &p),
         "proposal.verify" => proposals::verify(t, lim, ctx, fx, &p, true),
         "verify.self" => proposals::verify(t, lim, ctx, fx, &p, false),
-        "proposal.accept" => {
-            require_edit_mode(t, "proposal.accept")?;
-            proposals::accept(t, &p)
+        "proposal.accept" | "proposal.accept_verified" => {
+            require_edit_mode(t, method)?;
+            proposals::accept(t, &p, method == "proposal.accept_verified")
         }
         "proposal.reject" => proposals::reject(t, &p),
         "registry.schema" => registry_schema(t, &p),
+        "registry.input" => input.map(|i| i.descriptor.clone()).ok_or_else(input_unavailable),
         "registry.types" => Ok(registry_types(t)),
+        #[cfg(feature = "linked-prefabs")]
+        "prefab.list" | "prefab.capture" | "prefab.instantiate" | "prefab.position" | "prefab.revert" | "prefab.update" => linked_prefab_call(t, &p, method, origin),
         "world.query" => world_query(t, &p),
         "world.get" => world_get(t, &p),
         "world.singleton.get" => singleton_get(t, &p),
         "world.patch" => world_patch(t, &p, origin),
+        "world.patch_batch" => world_patch_batch(t, lim, ctx, &p, origin),
         "world.insert" => world_insert(t, &p, origin),
         "world.remove" => world_remove(t, &p, origin),
         "world.spawn" => world_spawn(t, &p, origin),
@@ -272,7 +291,7 @@ pub(crate) fn call<G: Game>(
         }
         "sim.state" => Ok(state_json(t, lim)),
         "sim.checksum" => sim_checksum(t, &p),
-        "sim.start" => sim_start(t, lim, &p),
+        "sim.start" => sim_start(t, lim, input, &p),
         "sim.stop" => sim_stop(t, &p, fx),
         "sim.play" => control(t, lim, ControlOp::Play),
         "sim.pause" => control(t, lim, ControlOp::Pause),
@@ -287,6 +306,9 @@ pub(crate) fn call<G: Game>(
         "sim.debug" => {
             let cmd = debug_from_json(obj).map_err(RpcError::params)?;
             let pc = play_mut(t)?;
+            if !pc.allow_play_edits() {
+                return Err(RpcError::state("play_edit_refused", "this admitted scene does not allow play-mode debug mutations; stop play first"));
+            }
             match pc.session_mut().debug(cmd) {
                 Ok(()) => Ok(json!({"ok": true})),
                 Err(e) => Err(RpcError::new(DEBUG_REFUSED, "debug_refused", e.to_string()).with("error", json!(debug_error_name(e)))),
@@ -294,6 +316,7 @@ pub(crate) fn call<G: Game>(
         }
         "session.status" => Err(RpcError::state("not_a_client", "this host is not a relay client (session.status is for hosts started with --join); see sim.state")),
         "sim.input" => sim_input(t, &p),
+        "sim.input_value" => sim_input_value(t, input, &p),
         "sim.command" => sim_command(t, &p),
         // `watch.*` is handled by the server, which owns the subscriptions.
         other => Err(RpcError::new(METHOD_NOT_FOUND, "method_not_found", format!("method '{other}' cannot be called here"))),
@@ -455,7 +478,7 @@ fn history_json(doc: &EditorDoc) -> J {
 fn registry_schema<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
     let v = view(t);
     let text = match p.opt_str("type")? {
-        None => v.json_schema(),
+        None => if cfg!(feature = "linked-prefabs") { v.json_schema() } else { v.types().legacy_json_schema() },
         Some(name) => v
             .type_schema(name)
             .ok_or_else(|| RpcError::new(NOT_FOUND, "unknown_type", format!("unknown type '{name}' (see registry.types)")))?,
@@ -615,6 +638,161 @@ fn world_patch<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> 
     Ok(edited(t, changed))
 }
 
+const MAX_PATCH_BATCH_ITEMS: usize = 128;
+const MAX_PATCH_BATCH_PARAMS_BYTES: usize = 64 * 1024;
+
+/// A writer which measures compact JSON serialization without retaining it.
+struct ParamSizeWriter {
+    bytes: usize,
+    too_large: bool,
+}
+
+impl Write for ParamSizeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let Some(total) = self.bytes.checked_add(buf.len()) else {
+            self.too_large = true;
+            return Err(io::Error::other("serialized params exceed the limit"));
+        };
+        if total > MAX_PATCH_BATCH_PARAMS_BYTES {
+            self.too_large = true;
+            return Err(io::Error::other("serialized params exceed the limit"));
+        }
+        self.bytes = total;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn check_patch_batch_params_size(params: &Map<String, J>) -> Result<(), RpcError> {
+    let mut writer = ParamSizeWriter { bytes: 0, too_large: false };
+    if let Err(error) = serde_json::to_writer(&mut writer, params) {
+        if writer.too_large {
+            return Err(RpcError::new(
+                LIMIT_EXCEEDED,
+                "limit_exceeded",
+                format!("world.patch_batch params exceed {MAX_PATCH_BATCH_PARAMS_BYTES} serialized bytes"),
+            ));
+        }
+        return Err(RpcError::params(format!("cannot serialize world.patch_batch params: {error}")));
+    }
+    Ok(())
+}
+
+fn position_component_for_game(game: &str) -> Option<&'static str> {
+    match game {
+        "PhysGame" => Some("orr_physics::Body"),
+        "Arena" => Some("Position"),
+        _ => None,
+    }
+}
+
+fn world_patch_batch<G: Game>(
+    t: &mut ErpTarget<'_, G>,
+    lim: &HostLimits,
+    ctx: &CallCtx<'_>,
+    p: &P<'_>,
+    origin: Origin,
+) -> Result<J, RpcError> {
+    check_patch_batch_params_size(p.0)?;
+    require_edit_mode(t, "world.patch_batch")?;
+    own_tx(t, ctx)?;
+    if t.doc.in_tx() {
+        return Err(RpcError::state("tx_open", "world.patch_batch cannot run while a transaction is open"));
+    }
+
+    let label = p.str("label")?;
+    if label.trim().is_empty() {
+        return Err(RpcError::params("'label' must not be empty"));
+    }
+    let checksum = p.str("expected_checksum")?;
+    let expected = checksum
+        .strip_prefix("0x")
+        .filter(|digits| digits.len() == 16)
+        .and_then(|digits| u64::from_str_radix(digits, 16).ok())
+        .ok_or_else(|| RpcError::params("'expected_checksum' must be 0x followed by 16 hexadecimal digits"))?;
+    let actual = t.doc.checksum();
+    if actual != expected {
+        return Err(RpcError::state(
+            "stale_checksum",
+            format!("document checksum changed (expected {}, current {})", checksum_text(expected), checksum_text(actual)),
+        ));
+    }
+
+    let component = p.str("component")?;
+    let expected_component = position_component_for_game(&lim.game.name)
+        .ok_or_else(|| RpcError::state("position_unavailable", "this game has no supported 2D position descriptor for world.patch_batch"))?;
+    if component != expected_component {
+        return Err(RpcError::params(format!(
+            "component must be the {expected_component} position component for {}",
+            lim.game.name
+        )));
+    }
+    let path = p.str("path")?;
+    if path != "pos" {
+        return Err(RpcError::params("world.patch_batch only accepts the adapter position field 'pos'"));
+    }
+    let ti = component_type(&view(t), component)?;
+    let field = desc_at_path(ti.desc(), path)
+        .map_err(|error| invalid_value(format!("{}.{path}: {error}", ti.name())))?;
+    if !matches!(field.kind, orr_reflect::Kind::Vec2 { .. }) {
+        return Err(invalid_value(format!("{}.{path} is not a 2D fixed-point position", ti.name())));
+    }
+
+    let raw_patches = p
+        .req_raw("patches")?
+        .as_array()
+        .ok_or_else(|| RpcError::params("'patches' must be an array"))?;
+    if raw_patches.is_empty() {
+        return Err(RpcError::params("'patches' must contain at least one position"));
+    }
+    if raw_patches.len() > MAX_PATCH_BATCH_ITEMS {
+        return Err(RpcError::new(
+            LIMIT_EXCEEDED,
+            "limit_exceeded",
+            format!("world.patch_batch accepts at most {MAX_PATCH_BATCH_ITEMS} positions"),
+        ));
+    }
+
+    let scene_view = t.doc.view();
+    let mut guids = Vec::with_capacity(raw_patches.len());
+    let mut ops = Vec::with_capacity(raw_patches.len());
+    for (index, raw) in raw_patches.iter().enumerate() {
+        let item = raw
+            .as_object()
+            .ok_or_else(|| RpcError::params(format!("patches[{index}] must be an object")))?;
+        if item.len() != 2 || !item.contains_key("guid") || !item.contains_key("value") {
+            return Err(RpcError::params(format!("patches[{index}] must contain only 'guid' and 'value'")));
+        }
+        let guid_text = item["guid"]
+            .as_str()
+            .ok_or_else(|| RpcError::params(format!("patches[{index}].guid must be a GUID string")))?;
+        let guid = Guid::parse(guid_text)
+            .map_err(|_| RpcError::params(format!("patches[{index}].guid is not a valid document GUID")))?;
+        if guid.to_string() != guid_text {
+            return Err(RpcError::params(format!("patches[{index}].guid must use canonical GUID spelling")));
+        }
+        if guids.contains(&guid) {
+            return Err(RpcError::params(format!("patches[{index}] duplicates GUID '{guid}'")));
+        }
+        let value = decode_value(t, ti, path, &item["value"])?;
+        if !matches!(value, Value::Vec2(_)) {
+            return Err(invalid_value(format!("patches[{index}].value must be a 2D position")));
+        }
+        // Reading through the document view validates that this GUID resolves
+        // now and owns the adapter's position component before any edit begins.
+        scene_view.component(&Target::Guid(guid.clone()), component)?;
+        guids.push(guid.clone());
+        ops.push(Op::SetField { guid, component: component.to_string(), path: path.to_string(), value });
+    }
+
+    let applied = t.doc.apply_atomic_batch(label, ops, origin)?;
+    let changed = applied.iter().any(|entry| entry.changed);
+    Ok(json!({"changed": changed, "count": applied.len(), "checksum": checksum_text(t.doc.checksum())}))
+}
+
 /// `patch` laid over `base`: struct fields of `patch` replace the ones of
 /// `base` (recursively); any other value replaces `base` whole.
 pub(crate) fn overlay(base: &Value, patch: &Value) -> Value {
@@ -738,6 +916,7 @@ fn singleton_patch<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin)
 /// The `path` parameter of `scene.save` / `scene.load`, if the host allows one.
 fn scene_path_param(lim: &HostLimits, p: &P<'_>) -> Result<Option<PathBuf>, RpcError> {
     match p.opt_str("path")? {
+        Some(_) if lim.reject_scene_path_overrides => Err(RpcError::state("scene_path_fixed", "this asset-backed host is bound to its original scene path; start another host to change it")),
         Some(path) if lim.allow_scene_paths => Ok(Some(PathBuf::from(path))),
         // A host that does not let clients pick files ignores the parameter (the configured file is used).
         _ => Ok(None),
@@ -769,11 +948,13 @@ fn scene_save<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>, fx
     if t.doc.in_tx() {
         return Err(RpcError::state("tx_open", "a transaction is open; commit or roll it back before saving"));
     }
-    let text = t.doc.save_yaml();
+    let text = t.doc.to_yaml();
     let tmp = path.with_extension("scene.yaml.tmp");
     std::fs::write(&tmp, &text)
         .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| RpcError::new(INTERNAL_ERROR, "io", format!("cannot write {}: {e}", path.display())))?;
+    // Do not mark the document clean before the replacement has succeeded.
+    t.doc.save_yaml();
     if named.is_some() {
         fx.scene_path.clone_from(&named);
     }
@@ -874,7 +1055,9 @@ fn sim_checksum<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError>
     }
 }
 
-fn sim_start<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) -> Result<J, RpcError> {
+fn sim_start<G: Game>(
+    t: &mut ErpTarget<'_, G>, lim: &HostLimits, input: Option<&crate::input::StructuredInput<G>>, p: &P<'_>,
+) -> Result<J, RpcError> {
     if t.play.is_some() {
         return Err(RpcError::state("sim_running", "a play session is already running (sim.stop first)"));
     }
@@ -883,11 +1066,24 @@ fn sim_start<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) -> 
     if !(1..=16).contains(&players) {
         return Err(RpcError::params("'player_count' must be 1..=16"));
     }
+    if let Some(input) = input {
+        if players > u64::from(input.max_players) {
+            return Err(RpcError::params(format!("this input adapter supports at most {} players", input.max_players)));
+        }
+    }
     if !(1..=1000).contains(&rate) {
         return Err(RpcError::params("'tick_rate' must be 1..=1000"));
     }
-    let cfg = t.doc.play_config(players as u8, rate as u32);
+    let mut cfg = t.doc.play_config(players as u8, rate as u32);
+    if input.is_some() {
+        cfg.game_id = lim.game.name.clone();
+        cfg.build_id = lim.build_id;
+    }
     let mut pc = PlayController::<G>::start_play(t.doc, cfg)?;
+    if let Some(input) = input {
+        let commands = input.commands.clone();
+        pc.session_mut().set_commands_from_input(move |slot, held| commands(slot, held));
+    }
     if p.opt_bool("run")?.unwrap_or(false) {
         pc.control(ControlOp::Play);
     }
@@ -950,7 +1146,7 @@ fn sim_seek<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>) -> R
     Ok(state_json(t, lim))
 }
 
-fn slot_of<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>, required: bool) -> Result<PlayerSlot, RpcError> {
+pub(crate) fn slot_of<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>, required: bool) -> Result<PlayerSlot, RpcError> {
     let n = if required { p.req_u64("player")? } else { p.opt_u64("player")?.unwrap_or(0) };
     let players = t.play.as_ref().map_or(0, |pc| pc.session().player_count());
     if n >= u64::from(players) {
@@ -959,21 +1155,107 @@ fn slot_of<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>, required: bool) -> Result<P
     Ok(PlayerSlot(n as u8))
 }
 
+fn input_unavailable() -> RpcError {
+    RpcError::state("input_unavailable", "this host has no structured input adapter (raw sim.input is unchanged)")
+}
+
+fn sim_input_value<G: Game>(
+    t: &mut ErpTarget<'_, G>, input: Option<&crate::input::StructuredInput<G>>, p: &P<'_>,
+) -> Result<J, RpcError> {
+    reject_unhandled_grant(p)?;
+    let adapter = input.ok_or_else(input_unavailable)?;
+    require_writable_play(t)?;
+    let slot = slot_of(t, p, true)?;
+    let value = p.raw("value").ok_or_else(|| RpcError::params("missing parameter 'value' (the complete reflected input object)"))?;
+    let value = adapter.decode(value)?;
+    play_mut(t)?.session_mut().set_input(slot, value);
+    Ok(json!({"ok": true}))
+}
+
+fn reject_unhandled_grant(p: &P<'_>) -> Result<(), RpcError> {
+    if ["grant", "generation", "sequence"].iter().any(|key| p.raw(key).is_some()) {
+        return Err(RpcError::state("input_stale", "managed input requires an active server connection and grant"));
+    }
+    Ok(())
+}
+
 fn sim_input<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
-    play_mut(t)?;
+    reject_unhandled_grant(p)?;
+    require_writable_play(t)?;
     let slot = slot_of(t, p, true)?;
     let bytes = hex_decode(p.str("input")?).ok_or_else(|| RpcError::params("'input' is not valid hex"))?;
     let input = bytemuck::try_pod_read_unaligned::<G::Input>(&bytes)
         .map_err(|_| RpcError::params(format!("'input' must be {} bytes", core::mem::size_of::<G::Input>())))?;
-    play_mut(t)?.session_mut().set_input(slot, input);
+    play_mut(t)?.session_mut().set_input_without_commands(slot, input);
     Ok(json!({"ok": true}))
 }
 
 fn sim_command<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError> {
-    play_mut(t)?;
+    require_writable_play(t)?;
     let slot = slot_of(t, p, false)?;
     let bytes = hex_decode(p.str("command")?).ok_or_else(|| RpcError::params("'command' is not valid hex"))?;
     let cmd = <G::Command as SimCommand>::decode(&bytes).ok_or_else(|| RpcError::params("'command' does not decode as this game's Command"))?;
-    play_mut(t)?.session_mut().push_command(slot, cmd);
+    play_mut(t)?.session_mut().push_command(slot, cmd).map_err(|e| RpcError::state("read_only", e.to_string()))?;
     Ok(json!({"ok": true}))
+}
+
+pub(crate) fn require_writable_play<G: Game>(t: &mut ErpTarget<'_, G>) -> Result<(), RpcError> {
+    if play_mut(t)?.session().mode() == PlayMode::Viewer {
+        return Err(RpcError::state("read_only", "replay viewer is read-only; branch before sending inputs or commands"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "linked-prefabs")]
+fn linked_prefab_list(doc: &EditorDoc) -> J {
+    let instances: Vec<J> = doc.scene().prefab_links.iter().map(|(key,link)| json!({
+        "instance": key.to_string(), "source": link.source, "digest": link.digest,
+        "guids": link.guids.iter().map(|(a,b)|(a.to_string(),json!(b.to_string()))).collect::<Map<String,J>>(),
+        "ordinals": link.ordinals.iter().map(|(a,b)|(a.to_string(),json!(b))).collect::<Map<String,J>>(),
+        "position_overrides": link.position_overrides.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    })).collect();
+    json!({"revision":doc.revision(),"instances":instances})
+}
+
+#[cfg(feature = "linked-prefabs")]
+fn linked_prefab_call<G: Game>(t: &mut ErpTarget<'_,G>, p: &P<'_>, method: &str, origin: Origin) -> Result<J,RpcError> {
+    require_edit_mode(t,method)?;
+    let allowed: &[&str] = match method {
+        "prefab.list" => &[],
+        "prefab.capture" => &["selected"],
+        "prefab.instantiate" => &["source","text","expected_revision"],
+        "prefab.position" => &["instance","source_guid","value","expected_revision"],
+        "prefab.revert" => &["instance","source_guid","expected_revision"],
+        "prefab.update" => &["instance","source","digest","text","expected_revision"],
+        _ => unreachable!(),
+    };
+    if p.0.keys().any(|key| !allowed.contains(&key.as_str())) { return Err(RpcError::params("unknown linked prefab parameter")); }
+    if method == "prefab.list" { return Ok(linked_prefab_list(t.doc)); }
+    if method == "prefab.capture" {
+        let selected = p.req_raw("selected")?.as_array().ok_or_else(||RpcError::params("selected must be GUID array"))?;
+        if selected.is_empty() || selected.len()>8 { return Err(RpcError::params("selected requires 1..=8 GUIDs")); }
+        let guids = selected.iter().map(|v| Guid::parse(v.as_str().ok_or_else(||RpcError::params("selected GUID must be string"))?).map_err(RpcError::params)).collect::<Result<Vec<_>,_>>()?;
+        return Ok(json!({"text":t.doc.capture_linked_collect_source(&guids)?,"revision":t.doc.revision()}));
+    }
+    if t.doc.in_tx() { return Err(RpcError::state("tx_open","linked operations require a closed transaction")); }
+    if p.req_u64("expected_revision")? != t.doc.revision() { return Err(RpcError::state("stale_revision","document changed; refresh linked instances")); }
+    if method == "prefab.instantiate" {
+        t.doc.instantiate_linked_collect(p.str("source")?,p.str("text")?,origin)?;
+    } else {
+        let instance = Guid::parse(p.str("instance")?).map_err(RpcError::params)?;
+        match method {
+            "prefab.update" => t.doc.update_linked_collect(&instance,p.str("source")?,p.str("digest")?,p.str("text")?,origin)?,
+            _ => {
+                let source = Guid::parse(p.str("source_guid")?).map_err(RpcError::params)?;
+                if method == "prefab.revert" { t.doc.revert_linked_collect_position(&instance,&source,origin)?; }
+                else {
+                    let ty = component_type(&view(t),"CollectDodgeV1::Actor")?;
+                    let value = decode_value(t,ty,"position",p.req_raw("value")?)?;
+                    let Value::Vec2(position) = value else { return Err(RpcError::params("position must be Vec2")); };
+                    t.doc.override_linked_collect_position(&instance,&source,position,origin)?;
+                }
+            }
+        }
+    }
+    Ok(linked_prefab_list(t.doc))
 }

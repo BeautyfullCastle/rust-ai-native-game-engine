@@ -1,0 +1,18 @@
+2026-10-06T02:19:56Z
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: x86_64-unknown-linux-gnu
+release: 1.97.1
+LLVM version: 22.1.6
+cargo 1.97.1 (c980f4866 2026-06-30)
+Linux [redacted-hostname] 6.18.44 #1 SMP Sat Sep 26 20:02:31 UTC 2026 x86_64 GNU/Linux
+CARGO_BUILD_JOBS=2
+CARGO_HOME=$WORKSPACE/rust-setup/cargo
+CARGO_TARGET_DIR=$TARGET_DIR
+RUSTUP_HOME=$WORKSPACE/rust-setup/rustup
+f0162b9222e42d1b74247ab6aeebd9ff65b86ac3
+8136c32e455c8825991426b34f40c245f48a9506
+Filesystem       1B-blocks        Used  Available Use% Mounted on
+overlay        33770192896 30775148544 1260281856  97% $WORKSPACE

@@ -10,7 +10,47 @@ default-run = "arena"
 [lints]
 workspace = true
 
+[features]
+room-project = ["project", "orr_games/room-escape", "dep:orr_model", "dep:orr_model_bindings", "orr_render/imported-scene"]
+# Explicit Linux authoring transaction; does not execute the exporter or runtime.
+image-reimport = ["project-export", "collect-sprites", "dep:semver"]
+linked-prefabs = ["collect-dodge", "orr_reflect/linked-prefabs"]
+# Explicit consuming-route opt-in; unrelated unified sprite dependencies do not enable it.
+collect-ui = ["collect-dodge", "game-ui"]
+collect-sprites = ["collect-dodge"]
+collect-progress = ["collect-dodge", "dep:sha2", "dep:tempfile", "dep:rustix"]
+collect-dodge = ["project", "orr_games/collect-dodge"]
+default = []
+# Optional Linux player preferences; no simulation or default dependencies.
+player-settings = ["project", "game-ui", "dep:tempfile", "dep:rustix"]
+# Offline bounded Arena starter creation; no default/runtime dependency changes.
+project-create = ["project", "dep:sha2", "dep:tempfile", "dep:rustix"]
+project-export = ["project", "dep:sha2", "dep:tempfile", "dep:rustix"]
+project = ["sprites", "orr_reflect/scene", "dep:serde", "dep:serde_json", "dep:png17"]
+# Optional native UI needs Rust 1.95 (egui); default remains workspace MSRV.
+game-ui = ["input-actions", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:orr_package", "dep:ttf-parser"]
+input-actions = ["dep:orr_input"]
+audio = ["dep:orr_audio"]
+audio-native = ["audio", "orr_audio/native"]
+sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
+
 [dependencies]
+orr_model = { path = "../orr_model", optional = true }
+orr_model_bindings = { path = "../orr_model_bindings", optional = true }
+semver = { version = "1", optional = true }
+sha2 = { version = "0.11", optional = true }
+tempfile = { version = "3", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+png17 = { package = "png", version = "0.17", optional = true }
+ttf-parser = { version = "=0.25.1", optional = true }
+egui = { version = "=0.36.2", optional = true }
+egui-wgpu = { version = "=0.36.2", optional = true }
+egui-winit = { version = "=0.36.2", default-features = false, optional = true }
+orr_input = { path = "../orr_input", optional = true }
+orr_sprite = { path = "../orr_sprite", optional = true }
+orr_package = { path = "../orr_package", optional = true }
+orr_audio = { path = "../orr_audio", optional = true }
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
 orr_viewstream = { path = "../orr_viewstream" }
@@ -31,7 +71,13 @@ png = "0.18"
 # Window (view layer only): winit 0.30 (raw-window-handle 0.6, same as wgpu 30).
 winit = "0.30"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.5", features = ["fs", "process"], optional = true }
+
 [dev-dependencies]
+tempfile = "3"
+# Compile-check browser and native sample identities together.
+orr_web = { path = "../orr_web" }
 orr_server = { path = "../orr_server", features = ["harness"] }
 orr_proto = { path = "../orr_proto" }
 orr_edit = { path = "../orr_edit" }
@@ -40,3 +86,60 @@ lz4_flex = { version = "0.14", default-features = false, features = ["std", "saf
 [[bench]]
 name = "seek"
 harness = false
+
+[[bin]]
+name = "orr_new_arena"
+path = "src/bin/orr_new_arena.rs"
+required-features = ["project-create"]
+test = false
+
+[[bin]]
+name = "orr_export_arena"
+path = "src/bin/orr_export_arena.rs"
+required-features = ["project-export"]
+test = false
+
+[[bin]]
+name = "arena"
+path = "src/bin/arena.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
+
+[[bin]]
+name = "physics"
+path = "src/bin/physics.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
+
+[[bin]]
+name = "physics3d"
+path = "src/bin/physics3d.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
+
+[[bin]]
+name = "collect_dodge"
+path = "src/bin/collect_dodge.rs"
+required-features = ["collect-dodge"]
+test = false
+
+[[bin]]
+name = "orr_export_collect"
+path = "src/bin/orr_export_collect.rs"
+required-features = ["collect-dodge", "project-export"]
+test = false
+
+[[bin]]
+name = "room_escape"
+path = "src/bin/room_escape.rs"
+required-features = ["room-project"]
+test = false
+
+[[bin]]
+name = "orr_export_room"
+path = "src/bin/orr_export_room.rs"
+required-features = ["room-project", "project-export"]
+test = false

@@ -379,7 +379,7 @@ fn summary_ui(ui: &mut Ui, editor: &Editor, s: &Summary) {
         ui.label(RichText::new(format!("- singleton {n}")).color(RED));
     }
     for f in &s.fields_changed {
-        let who = f.entity.as_ref().map_or_else(|| "singleton".to_string(), &name_of);
+        let who = f.entity.as_ref().map_or_else(|| "singleton".to_string(), name_of);
         let dot = if f.path.is_empty() { String::new() } else { format!(".{}", f.path) };
         ui.label(RichText::new(format!("~ {who}  {}{dot}:  {} -> {}", f.component, format_json(&f.old), format_json(&f.new))).color(AMBER));
     }

@@ -28,9 +28,11 @@ mod event;
 mod frame_view;
 mod host;
 mod inproc;
+mod ingress;
 mod relay_host;
 mod snapshot;
 mod threaded;
+mod view_events;
 
 pub use bridge::{Bridge, BridgeConfig, BridgeError, SimControl, StepObserver, StepTiming};
 pub use event::{BridgeEvent, BridgeStats, Lifecycle};
@@ -40,6 +42,7 @@ pub use inproc::InProc;
 pub use relay_host::{ConnectError, RelayHost, RelayHostOptions, RelayMetrics, RelayStatus, StatusFn};
 pub use snapshot::{Snapshot, SnapshotParts};
 pub use threaded::{Pacing, Threaded, ThreadedConfig};
+pub use view_events::{view_event_channel, LifecycleRecovery, ViewEventReceiver, ViewEventSender, ViewResync, ViewUpdate, DEFAULT_VIEW_EVENT_CAPACITY};
 
 pub use orr_session::{
     ControlOp, EventStatus, PlayConfig, PlayMode, PlaySession, RollbackInfo, Speed, Timeline, TIMELINE_CHECKSUM_WINDOW,

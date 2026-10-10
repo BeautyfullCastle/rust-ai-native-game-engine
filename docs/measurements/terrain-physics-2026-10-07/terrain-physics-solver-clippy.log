@@ -1,0 +1,31 @@
+    Checking zerocopy v0.8.59
+    Checking thiserror v2.0.21
+    Checking serde v1.0.229
+    Checking ciborium-io v0.2.2
+    Checking memchr v2.8.3
+    Checking anstyle v1.0.14
+    Checking clap_lex v1.1.1
+    Checking regex-syntax v0.8.11
+    Checking regex-automata v0.4.18
+    Checking clap_builder v4.6.7
+    Checking half v2.7.1
+    Checking ciborium-ll v0.2.2
+    Checking serde_json v1.0.151
+    Checking itertools v0.10.5
+    Checking saphyr-parser v0.1.0
+    Checking same-file v1.0.6
+    Checking cast v0.3.0
+    Checking walkdir v2.5.0
+    Checking orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect)
+    Checking criterion-plot v0.5.0
+    Checking num-traits v0.2.19
+    Checking is-terminal v0.4.17
+    Checking tinytemplate v1.2.1
+    Checking clap v4.6.7
+    Checking ciborium v0.2.2
+    Checking regex v1.13.1
+    Checking anes v0.1.6
+    Checking oorandom v11.1.5
+    Checking orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+    Checking criterion v0.5.1
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.77s

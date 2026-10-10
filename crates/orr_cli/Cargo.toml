@@ -20,6 +20,8 @@ orr_mcp = { path = "../orr_mcp" }
 orr_remote = { path = "../orr_remote", default-features = false }
 # Same features as orr_remote: fixed-point numbers keep their exact decimal text.
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+# Stage local replay exports beside the destination, then commit without truncation.
+tempfile = "3"
 
 [dev-dependencies]
 orr_edit = { path = "../orr_edit" }

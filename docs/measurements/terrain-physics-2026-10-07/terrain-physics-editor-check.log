@@ -1,0 +1,35 @@
+    Checking orr_model v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_model)
+    Checking orr_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_net)
+    Checking orr_rhi v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_rhi)
+    Checking orr_relay_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_relay_net)
+    Checking orr_render v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_render)
+    Checking orr_viewstream v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_viewstream)
+    Checking orr_package v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_package)
+    Checking orr_sample v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sample)
+    Checking orr_terrain_view v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain_view)
+    Checking orr_remote v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_remote)
+    Checking orr_editor v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_editor)
+error[E0308]: mismatched types
+    --> crates/orr_editor/src/editor.rs:1502:60
+     |
+1502 |         if self.game().is_terrain() && self.path() != Some(path) {
+     |                                                       ---- ^^^^ expected `PathBuf`, found `&Path`
+     |                                                       |
+     |                                                       arguments to this enum variant are incorrect
+     |
+help: the type constructed contains `&std::path::Path` due to the type of the argument passed
+    --> crates/orr_editor/src/editor.rs:1502:55
+     |
+1502 |         if self.game().is_terrain() && self.path() != Some(path) {
+     |                                                       ^^^^^----^
+     |                                                            |
+     |                                                            this argument influences the type of `Some`
+note: tuple variant defined here
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/option.rs:605:4
+help: try using a conversion method
+     |
+1502 |         if self.game().is_terrain() && self.path() != Some(path.to_path_buf()) {
+     |                                                                ++++++++++++++
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `orr_editor` (lib) due to 1 previous error

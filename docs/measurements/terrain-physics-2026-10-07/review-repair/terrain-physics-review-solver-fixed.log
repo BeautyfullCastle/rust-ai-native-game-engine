@@ -1,0 +1,117 @@
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 32.56s
+     Running unittests src/lib.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/orr_physics3d-1f20e88822ae75ee)
+
+running 20 tests
+test checked_solver::tests::checked_and_original_solver_match_each_safe_stage ... ok
+test checked_solver::tests::refreshed_speculative_contact_allows_approach ... ok
+test checked_solver::tests::overflow_is_an_error_before_narrow_multiplication ... ok
+test fastmath::tests::div_matches_operator ... ok
+test manifold_tests::box_box_face_edge_and_offsets ... ok
+test manifold_tests::box_box_ids_are_stable_for_a_tiny_rotation ... ok
+test manifold_tests::capsule_capsule_crossing_and_parallel ... ok
+test manifold_tests::capsule_box_lying_standing_and_edge ... ok
+test manifold_tests::sphere_box_regions ... ok
+test manifold_tests::sphere_capsule ... ok
+test manifold_tests::fast_rotation_integration_matches_the_library_function ... ok
+test manifold_tests::sphere_sphere ... ok
+test reflection::tests::body_descriptor_round_trips_layout_and_hides_runtime_words ... ok
+test reflection::tests::physics_state_init_allocates_a_fresh_cache_and_preserves_authored_config ... ok
+test reflection::tests::quaternion_descriptor_requires_unit_length_and_preserves_valid_rotations ... ok
+test reflection::tests::shape_descriptors_round_trip_canonical_shapes_and_reject_bad_geometry ... ok
+test reflection::tests::scene_parse_rejects_non_unit_quaternion_without_mutating_target ... ok
+test reflection::tests::scene_parse_rejects_capsule_overall_extent_without_mutating_target ... ok
+test manifold_tests::closest_point_of_segment_and_box_matches_brute_force ... ok
+test fastmath::tests::sqrt_matches_reference ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/golden.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/golden-0511162dd2b5525c)
+
+running 10 tests
+test golden_box_stack_checksum ... ok
+test golden_sleep_and_wake_rollback ... ok
+test golden_ramp_capsules_checksum ... ok
+test golden_spawn_despawn_rollback ... ok
+test golden_sphere_rain_checksum ... ok
+test golden_pyramid_checksum ... ok
+test golden_serialize_roundtrip ... ok
+test golden_two_runs_agree_and_scratch_history_is_irrelevant ... ok
+test golden_rollback_replay ... ok
+test golden_mixed_pile_checksum ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/physics3d.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/physics3d-5d7faa43be8b19e1)
+
+running 26 tests
+test capsule_lying_across_a_box_stays_on_top ... ok
+test box_dropped_on_its_edge_falls_flat ... ok
+test capsule_standing_upright_stays_upright ... ok
+test collision_filters_let_masked_bodies_pass ... ok
+test box_overhanging_past_its_center_of_mass_tips_off ... ok
+test impulse_off_center_produces_spin_and_motion ... ok
+test kinematic_spin_rotates_by_omega_times_time ... ok
+test free_spin_keeps_its_rate_and_kinetic_energy ... ok
+test no_tunneling_through_a_wall_at_moderate_speed ... ok
+test friction_holds_a_box_on_a_slope_when_mu_exceeds_tan_angle ... ok
+test raycast_hits_a_rotated_box_face ... ok
+test kinematic_platform_carries_a_box ... ok
+test raycast_hits_every_shape_with_the_right_distance_and_normal ... ok
+test offset_box_on_box_stays_when_over_the_support ... ok
+test removing_the_support_wakes_a_sleeping_box ... ok
+test mass_properties_match_numeric_integration ... ok
+test sphere_cast_is_exact_for_sphere_box_and_capsule_targets ... ok
+test restitution_bounces_back_to_the_expected_height ... ok
+test sphere_box_capsule_come_to_rest_and_sleep ... ok
+test tilted_capsule_topples_and_lies_down ... ok
+test sphere_lands_on_a_static_capsule_and_slides_off ... ok
+test a_resting_stack_sleeps_and_wakes_on_impulse_and_on_contact ... ok
+test sphere_rolls_off_a_box_edge_and_reaches_the_ground ... ok
+test energy_does_not_grow_in_a_bouncing_pile ... ok
+test every_shape_pair_survives_a_drop_onto_each_other ... ok
+test pyramid_and_big_pile_stay_inside_the_arena ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/session3d.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/session3d-240fc133156ca94f)
+
+running 1 test
+test two_peers_with_rollbacks_agree_and_match_a_plain_simulation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/static_contacts.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/static_contacts-7e0b12377eabd8a4)
+
+running 28 tests
+test endpoint_reacquired_support_may_sleep_after_a_temporary_gap ... ok
+test duplicate_features_and_unallocated_objects_are_rejected_atomically ... ok
+test cached_support_absent_at_first_refresh_resets_existing_sleep_timer ... ok
+test errors_in_late_substeps_and_final_validation_are_atomic ... ok
+test losing_support_in_the_final_substep_clears_cache_and_prevents_sleep ... ok
+test expanded_query_margin_does_not_make_a_hovering_floor ... ok
+test convex_grounded_dynamic_stack_still_sleeps_with_a_static_provider ... ok
+test provider_sees_every_substep_and_final_integrated_pose ... ok
+test optional_path_clamps_before_each_integration ... ok
+test same_pair_independent_features_reuse_their_own_persistent_impulses ... ok
+test cache_order_and_rollback_hold_with_interleaved_convex_pairs ... ok
+test static_filters_and_materials_use_existing_solver ... ok
+test sleeping_contact_cache_survives_idle_and_impulse_wakes ... ok
+test static_contacts_sleep_and_despawned_support_wakes_the_body ... ok
+test support_lost_after_first_of_one_substep_resets_existing_sleep_timer ... ok
+test speculative_proximity_does_not_ground_a_slowly_falling_sphere ... ok
+test support_lost_after_first_of_two_substeps_resets_existing_sleep_timer ... ok
+test support_lost_after_first_of_eight_substeps_resets_existing_sleep_timer ... ok
+test tiny_gravity_free_flight_cannot_sleep_without_support_across_ticks ... ok
+test touching_free_flight_cluster_cannot_ground_itself ... ok
+test unsafe_cached_impulse_returns_an_atomic_numeric_error ... ok
+test wall_and_ceiling_impulses_do_not_ground_a_body_against_downward_gravity ... ok
+test zero_duration_substeps_are_explicit_atomic_errors ... ok
+test zero_gravity_free_space_may_sleep_with_a_static_provider ... ok
+test falling_onto_a_terrain_grounded_sphere_stack_eventually_sleeps ... ok
+test no_static_objects_preserve_convex_frame_bytes ... ok
+test terrain_grounded_dynamic_stack_still_sleeps ... ok
+test independent_normals_and_shuffled_features_solve_identically ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

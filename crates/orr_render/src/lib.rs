@@ -32,6 +32,7 @@ pub mod math3;
 pub mod mesh;
 pub mod renderer;
 pub mod renderer3d;
+mod stats;
 pub mod targets;
 pub mod text;
 
@@ -39,10 +40,59 @@ pub use camera::Camera;
 pub use camera3d::{Camera3D, OrbitCamera, Projection};
 pub use list3d::{Instance3D, Lighting, LineInstance3D, Material, RenderList3D, IDENTITY_ROT};
 pub use mesh::{MeshKind, MeshSet, Vertex3, DEFAULT_SEGMENTS};
-pub use renderer3d::{light_view_proj, Renderer3D, Settings3D, DEFAULT_CLEAR_3D};
+pub use renderer3d::{light_view_proj, Renderer3D, Settings3D, SphereLod3D, SphereLodError3D, SphereLodStats3D, DEFAULT_CLEAR_3D};
 pub use extract::{extract_items, instance_of};
 pub use list::{LineInstance, RenderList, ShapeInstance};
 pub use renderer::{Renderer, DEFAULT_CLEAR};
+pub use stats::{FrameStats, PassStats};
 pub use targets::{OffscreenTarget, WindowRenderer, WindowRenderer3D};
 
 pub use orr_rhi;
+
+#[cfg(feature = "sprites")]
+pub mod sprite_list;
+#[cfg(feature = "sprites")]
+pub mod sprite_renderer;
+#[cfg(feature = "sprites")]
+pub use sprite_list::{SpriteDrawList, SpriteInstance};
+#[cfg(feature = "sprites")]
+pub use sprite_renderer::{SpriteRenderError, SpriteRenderer};
+
+#[cfg(feature = "models")]
+pub mod model_renderer;
+#[cfg(feature = "models")]
+pub use model_renderer::{ModelRenderer, ModelRenderError, StaticInstance, StaticInstanceError};
+
+#[cfg(feature = "animation")]
+pub mod skinned;
+#[cfg(feature = "animation")]
+pub use skinned::{SkinnedBounds, SkinnedInstance, SkinnedModelRenderer, SkinnedRenderError};
+
+#[cfg(feature = "imported-scene")]
+pub mod point_light;
+#[cfg(feature = "imported-scene")]
+pub mod imported_scene;
+#[cfg(feature = "imported-scene")]
+pub use point_light::{PointLight, PointLightError, PointLightSettings};
+#[cfg(feature = "imported-scene")]
+pub use imported_scene::{ImportedBatch, ImportedSceneError, ImportedSceneRenderer, ImportedSceneTarget};
+
+#[cfg(feature = "imported-scene")]
+pub use renderer3d::ProceduralSceneError;
+
+#[cfg(feature = "imported-scene")]
+mod shared_shadow;
+#[cfg(feature = "imported-scene")]
+pub use shared_shadow::{MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE};
+
+#[cfg(feature = "imported-scene")]
+pub mod post_process;
+#[cfg(feature = "imported-scene")]
+pub use post_process::{PostProcessSettings, PostProcessor, MAX_POST_PROCESS_BYTES, MAX_HDR_RADIANCE};
+
+#[cfg(feature = "irradiance-probes")]
+pub mod irradiance;
+#[cfg(feature = "irradiance-probes")]
+pub mod irradiance_bake;
+#[cfg(feature = "irradiance-probes")]
+pub use irradiance::{IrradianceGrid, IrradianceProvenance, IrradianceSample, IrradianceUniform};

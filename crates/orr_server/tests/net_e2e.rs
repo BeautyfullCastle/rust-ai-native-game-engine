@@ -13,14 +13,14 @@ mod common;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{arena_room, arena_script};
 use orr_proto::RejectReason;
 use orr_relay_net::{
-    connect, drive, listen, ClientReport, ConnectOptions, DriveOptions, ListenOptions, SimConditions, TransportKind, Trust,
+    connect, drive, listen, report, ClientReport, ConnectOptions, DriveOptions, ListenOptions, SimConditions, TransportKind, Trust,
 };
 use orr_server::serve::run_wall_clock;
 use orr_server::{RelayServer, RoomStats, ServerNote};
@@ -46,6 +46,10 @@ struct Live {
 
 impl Live {
     fn start(kind: TransportKind, players: u8) -> Live {
+        Self::start_observed(kind, players, |_| {})
+    }
+
+    fn start_observed(kind: TransportKind, players: u8, mut observe: impl FnMut(&ServerNote) + Send + 'static) -> Live {
         let ep = listen(&ListenOptions::new("127.0.0.1:0".parse().unwrap(), kind)).expect("listen");
         let (addr, fingerprint) = (ep.local_addr(), ep.cert_sha256());
         let mut server = RelayServer::new(ep, 7);
@@ -54,7 +58,12 @@ impl Live {
         let stop_flag = stop.clone();
         let join = thread::spawn(move || {
             let mut notes = Vec::new();
-            run_wall_clock(&mut server, &stop_flag, Duration::from_millis(1), |s, _| notes.extend(s.drain_notes()));
+            run_wall_clock(&mut server, &stop_flag, Duration::from_millis(1), |s, _| {
+                for note in s.drain_notes() {
+                    observe(&note);
+                    notes.push(note);
+                }
+            });
             let room = server.room_stats(ROOM).expect("room");
             ServerResult { room, notes, bad_messages: server.bad_messages() }
         });
@@ -113,6 +122,124 @@ fn run_client(live: &Live, setup: ClientSetup, stop: Option<Arc<AtomicBool>>, ta
         ..DriveOptions::default()
     };
     drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &opts)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProgressGoal {
+    verified_ticks: u64,
+    shared_checkpoints: usize,
+}
+
+/// Rejoin-only counterpart to `drive`: keep its update/leave behavior, but
+/// finish on observed progress instead of a wall-clock play window. A late
+/// join's snapshot/catch-up ticks do not count toward its Playing baseline.
+fn run_progress_client(
+    live: &Live,
+    setup: ClientSetup,
+    stop: Option<Arc<AtomicBool>>,
+    tag: &str,
+    goal: Option<ProgressGoal>,
+    mut observe: impl FnMut(&ClientReport) -> usize,
+) -> ClientReport {
+    let link = connect(&live.options(setup.sim)).expect("connect");
+    let mut cfg = RelayClientConfig::new(ROOM, setup.build_id);
+    cfg.want_slot = setup.want_slot.map(PlayerSlot);
+    cfg.token = setup.token;
+    let mut client: RelayClient<Arena, _> =
+        RelayClient::new(cfg, link, |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new());
+    let start = Instant::now();
+    let mut playing: Option<(Instant, u64)> = None;
+    // Failure guards only: two 20 s client runs plus the 10 s PlayerLeft
+    // barrier and cleanup fit within the stayer's 60 s overall watchdog.
+    let watchdog = Duration::from_secs(if goal.is_some() { 20 } else { 60 });
+    let rep = loop {
+        let slot = client.welcome().map_or(0, |w| w.slot);
+        client.update(start.elapsed().as_micros() as u64, &mut |tick| arena_script(usize::from(slot), tick));
+        let r = report(&client, playing.map_or(0.0, |(p, _)| p.elapsed().as_secs_f64()));
+        if playing.is_none() && r.state == ClientState::Playing {
+            playing = Some((Instant::now(), r.verified_tick));
+        }
+        let shared = observe(&r);
+        let baseline = playing.map(|(_, tick)| tick);
+        let target = baseline.zip(goal).map(|(tick, goal)| tick + goal.verified_ticks);
+        if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+            break r;
+        }
+        assert!(
+            !matches!(r.state, ClientState::Rejected(_) | ClientState::Disconnected | ClientState::Failed(_)),
+            "{tag} stopped before progress: state {:?}, baseline {baseline:?}, target {target:?}, goal {goal:?}, shared {shared}; {}",
+            r.state,
+            r.summary()
+        );
+        assert!(
+            start.elapsed() < watchdog,
+            "{tag} progress watchdog after {:?}: state {:?}, baseline {baseline:?}, target {target:?}, goal {goal:?}, shared {shared}, checkpoints {}; {}",
+            start.elapsed(),
+            r.state,
+            r.checksums.len(),
+            r.summary()
+        );
+        if r.state == ClientState::Playing
+            && target.is_some_and(|tick| r.verified_tick >= tick)
+            && goal.is_some_and(|goal| shared >= goal.shared_checkpoints)
+        {
+            eprintln!("{tag}: baseline {baseline:?}, target {target:?}, shared {shared}; {}", r.summary());
+            break r;
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    if setup.leave_at_end && matches!(client.state(), ClientState::Playing | ClientState::Syncing | ClientState::CatchingUp) {
+        client.leave();
+        let slot = client.welcome().map_or(0, |w| w.slot);
+        // Same reliable Leave flush as `orr_relay_net::drive`.
+        for _ in 0..20 {
+            client.update(start.elapsed().as_micros() as u64, &mut |tick| arena_script(usize::from(slot), tick));
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    rep
+}
+
+/// Own only this scenario's threads. In particular, address-only `Live`
+/// copies elsewhere must never stop or join their owner's server.
+struct RejoinRun {
+    live: Live,
+    stop: Arc<AtomicBool>,
+    stayer: Option<JoinHandle<ClientReport>>,
+}
+
+impl RejoinRun {
+    fn finish(mut self) -> (ClientReport, ServerResult) {
+        self.stop.store(true, Ordering::Relaxed);
+        let stayer = self.stayer.take().expect("stayer handle").join().expect("stayer thread");
+        self.live.stop.store(true, Ordering::Relaxed);
+        let server = self.live.join.take().expect("server handle").join().expect("server thread");
+        (stayer, server)
+    }
+}
+
+impl Drop for RejoinRun {
+    fn drop(&mut self) {
+        // Signal both before joining either, even while unwinding from a
+        // connect, progress, disconnect-barrier or assertion failure.
+        self.stop.store(true, Ordering::Relaxed);
+        self.live.stop.store(true, Ordering::Relaxed);
+        if let Some(stayer) = self.stayer.take() {
+            match stayer.join() {
+                Ok(r) => eprintln!("rejoin cleanup stayer: state {:?}; {}", r.state, r.summary()),
+                Err(_) => eprintln!("rejoin cleanup: stayer thread panicked"),
+            }
+        }
+        if let Some(server) = self.live.join.take() {
+            match server.join() {
+                Ok(s) => eprintln!(
+                    "rejoin cleanup server: finalized {}, desyncs {}, bad messages {}, notes {:?}",
+                    s.room.finalized, s.room.desyncs, s.bad_messages, s.notes
+                ),
+                Err(_) => eprintln!("rejoin cleanup: server thread panicked"),
+            }
+        }
+    }
 }
 
 /// Checks that every report's verified checksums agree with the others on
@@ -229,38 +356,70 @@ fn build_hash_mismatch_is_rejected() {
 /// its token: same slot, state from the other client's snapshot, no desync.
 #[test]
 fn disconnect_and_rejoin_over_quic() {
-    let live = Live::start(TransportKind::Quic, 2);
-    let stop = Arc::new(AtomicBool::new(false));
-
-    let stay = {
+    let (left_tx, left_rx) = mpsc::channel();
+    let live = Live::start_observed(TransportKind::Quic, 2, move |note| {
+        if matches!(note, ServerNote::PlayerLeft { room: ROOM, slot: 1, .. }) {
+            let _ = left_tx.send(());
+        }
+    });
+    let mut run = RejoinRun { live, stop: Arc::new(AtomicBool::new(false)), stayer: None };
+    let stayer_progress = Arc::new(Mutex::new(None));
+    run.stayer = Some({
+        let live = &run.live;
         let l = Live { kind: live.kind, addr: live.addr, fingerprint: live.fingerprint, stop: live.stop.clone(), join: None };
         let mut setup = ClientSetup::new(0.0);
         setup.play_for = None;
         setup.want_slot = Some(0);
-        let stop = stop.clone();
-        thread::spawn(move || run_client(&l, setup, Some(stop), "stayer"))
-    };
-    let mut first = ClientSetup::new(2.5);
+        let stop = run.stop.clone();
+        let progress = stayer_progress.clone();
+        thread::spawn(move || {
+            run_progress_client(&l, setup, Some(stop), "stayer", None, |r| {
+                *progress.lock().expect("stayer progress") = Some(r.clone());
+                0
+            })
+        })
+    });
+    let mut first = ClientSetup::new(0.0);
     first.want_slot = Some(1);
     first.leave_at_end = false; // just drop the connection
-    let before = run_client(&live, first, None, "leaver");
+    // Equivalent simulation depth to the old 2.5 s at 60 Hz, irrespective
+    // of how much wall time the clients need under load.
+    let before = run_progress_client(
+        &run.live, first, None, "leaver", Some(ProgressGoal { verified_ticks: 150, shared_checkpoints: 0 }), |_| 0,
+    );
     assert_eq!(before.state, ClientState::Playing);
     let token = before.token.expect("token");
     eprintln!("leaver before: {}", before.summary());
-    thread::sleep(Duration::from_millis(500));
+    // Reusing the token while the old connection is still registered takes
+    // over its slot without announcing PlayerLeft. Observe the disconnect
+    // first so this test exercises a real departure and subsequent rejoin.
+    left_rx.recv_timeout(Duration::from_secs(10)).expect("slot 1 did not leave before rejoining");
 
-    let mut second = ClientSetup::new(4.0);
+    let mut second = ClientSetup::new(0.0);
     second.want_slot = Some(1);
     second.token = token;
-    let after = run_client(&live, second, None, "rejoiner");
+    let after = run_progress_client(
+        &run.live,
+        second,
+        None,
+        "rejoiner",
+        Some(ProgressGoal { verified_ticks: 240, shared_checkpoints: 3 }),
+        |r| {
+            let progress = stayer_progress.lock().expect("stayer progress");
+            progress.as_ref().map_or(0, |stayer| {
+                r.checksums.iter().filter(|(tick, _)| stayer.checksums.binary_search_by_key(tick, |&(t, _)| t).is_ok()).count()
+            })
+        },
+    );
     eprintln!("rejoiner after: {}", after.summary());
     assert_eq!(after.state, ClientState::Playing);
     assert_eq!(after.slot, Some(1));
-    stop.store(true, Ordering::Relaxed);
-    let stayer = stay.join().unwrap();
+    assert_eq!(after.token, Some(token));
+    let (stayer, server) = run.finish();
     eprintln!("stayer: {}", stayer.summary());
-    let server = live.finish();
 
+    assert_eq!(before.desyncs, 0);
+    assert_eq!(stayer.state, ClientState::Playing);
     assert_eq!(stayer.desyncs, 0);
     assert_eq!(after.desyncs, 0);
     assert!(after.verified_tick > before.verified_tick, "the rejoiner did not advance past its earlier tick");
@@ -271,4 +430,142 @@ fn disconnect_and_rejoin_over_quic() {
     // Left once when the connection dropped, once more when the rejoiner said goodbye.
     assert!(left >= 1 && joined == 2, "left {left}, joined {joined}: {:?}", server.notes);
     assert_eq!(server.room.desyncs, 0);
+}
+
+/// Native WSS uses the existing QUIC identity/listener and explicit PEM trust.
+#[test]
+fn two_clients_over_native_wss() {
+    two_clients_over_verified_transport(TransportKind::Wss);
+}
+
+#[test]
+fn two_clients_over_native_wt() {
+    two_clients_over_verified_transport(TransportKind::Wt);
+}
+
+#[derive(Clone, Debug, Default)]
+struct NativeLinkTrace {
+    connected_at: Option<Duration>,
+    disconnected_at: Option<Duration>,
+    disconnect_reason: Option<String>,
+}
+
+/// Preserve the adapter's redacted transport outcome before RelayClient drops
+/// its link. Forward every event unchanged; observe only connection lifecycle.
+struct TracedNativeLink {
+    inner: orr_relay_net::NetLink,
+    started: Instant,
+    trace: Arc<Mutex<NativeLinkTrace>>,
+}
+
+impl orr_proto::Link for TracedNativeLink {
+    fn send(&mut self, channel: orr_proto::Channel, data: &[u8]) {
+        self.inner.send(channel, data);
+    }
+
+    fn poll(&mut self) -> Option<orr_proto::LinkEvent> {
+        let event = self.inner.poll();
+        match &event {
+            Some(orr_proto::LinkEvent::Connected) => {
+                self.trace.lock().unwrap().connected_at = Some(self.started.elapsed());
+            }
+            Some(orr_proto::LinkEvent::Disconnected) => {
+                let mut trace = self.trace.lock().unwrap();
+                trace.disconnected_at = Some(self.started.elapsed());
+                trace.disconnect_reason = self.inner.disconnect_reason().map(|reason| format!("{reason:?}"));
+            }
+            _ => {}
+        }
+        event
+    }
+
+    fn close(&mut self) {
+        self.inner.close();
+    }
+}
+
+fn two_clients_over_verified_transport(kind: TransportKind) {
+    // Public, test-only identity valid 2020–2120; never use outside loopback tests.
+    const CERT: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBQzCB66ADAgECAgEBMAoGCCqGSM49BAMCMBsxGTAXBgNVBAMMEG9ycmVyeSB0
+ZXN0IG9ubHkwIBcNMjAwMTAxMDAwMDAwWhgPMjEyMDAxMDEwMDAwMDBaMBsxGTAX
+BgNVBAMMEG9ycmVyeSB0ZXN0IG9ubHkwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC
+AAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK2Oj+mV2Fg36RPsCdzUMl7OBVP4Nj1YTH
+1btKGBXtcl47dzYPRGk+si7Wox4wHDAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8A
+AAEwCgYIKoZIzj0EAwIDRwAwRAIgZVKoQHqVJ9pmRWDJNfEc8byj33JPvuiCGpsp
+9xf1IKQCIFSsACU0rQzuf53MhHx5gmRiyGaKdcfPJbU9o56eck0G
+-----END CERTIFICATE-----
+"#;
+    const KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg6BgCBClYjDYJYaP9
+KhgEUZm40iitRLwtR5mKSfFekKGhRANCAAR0w8xN2auy8AkXCwSD64Ekjp/gXHPK
+2Oj+mV2Fg36RPsCdzUMl7OBVP4Nj1YTH1btKGBXtcl47dzYPRGk+si7W
+-----END PRIVATE KEY-----
+"#;
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!("orr-native-{kind:?}-{}", std::process::id())));
+    std::fs::create_dir(&fixture.0).unwrap();
+    let cert = fixture.0.join("cert.pem");
+    let key = fixture.0.join("key.pem");
+    std::fs::write(&cert, CERT).unwrap();
+    std::fs::write(&key, KEY).unwrap();
+    let mut options = ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Quic);
+    options.tls = orr_relay_net::Tls::Pem { cert_chain: cert.clone(), private_key: key };
+    if kind == TransportKind::Wss { options.wss_bind = Some("127.0.0.1:0".parse().unwrap()); }
+    options.webtransport = kind == TransportKind::Wt;
+    let ep = listen(&options).unwrap();
+    let addr = if kind == TransportKind::Wt { ep.local_addr() } else { ep.wss_addr().unwrap() };
+    let mut server = RelayServer::new(ep, 7);
+    server.create_room(ROOM, arena_room(2));
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let server_thread = thread::spawn(move || {
+        let mut notes = Vec::new();
+        run_wall_clock(&mut server, &flag, Duration::from_millis(1), |server, now_us| {
+            notes.extend(server.drain_notes().into_iter().map(|note| (now_us, note)));
+        });
+        (server.room_stats(ROOM).unwrap(), server.bad_messages(), notes)
+    });
+    let handles: Vec<_> = (0..2).map(|i| {
+        let cert = cert.clone();
+        thread::spawn(move || {
+            let options = ConnectOptions::new(format!("{}://{addr}/relay?case=native", if kind == TransportKind::Wt { "https" } else { "wss" }), kind, Trust::PemFile(cert));
+            let started = Instant::now();
+            let trace = Arc::new(Mutex::new(NativeLinkTrace::default()));
+            let link = TracedNativeLink { inner: connect(&options).unwrap(), started, trace: trace.clone() };
+            let mut client: RelayClient<Arena, _> = RelayClient::new(
+                RelayClientConfig::new(ROOM, 1), link,
+                |w| ArenaConfig { player_count: w.player_count }, DumpCollector::new(),
+            );
+            let report = drive(&mut client, &mut |slot, tick| arena_script(usize::from(slot), tick), &DriveOptions {
+                play_for: Some(Duration::from_secs(3)), connect_timeout: Duration::from_secs(10),
+                tag: format!("{kind:?}{i}"), ..DriveOptions::default()
+            });
+            let trace = trace.lock().unwrap().clone();
+            (report, trace)
+        })
+    }).collect();
+    let reports: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+    stop.store(true, Ordering::Relaxed);
+    let (room, bad_messages, notes) = server_thread.join().unwrap();
+    let reports: Vec<_> = reports.into_iter().map(Result::unwrap).collect();
+    // Print every result before asserting: assert_eq's left/right are the
+    // actual/expected states, not the two clients' results.
+    for (i, (report, trace)) in reports.iter().enumerate() {
+        eprintln!("native {kind:?} client {i}: state {:?}, transport {trace:?}; {}", report.state, report.summary());
+    }
+    eprintln!("native {kind:?} server: finalized {}, desyncs {}, bad messages {bad_messages}, notes {notes:?}", room.finalized, room.desyncs);
+    let reports: Vec<_> = reports.into_iter().map(|(report, _)| report).collect();
+    for r in &reports {
+        assert_eq!(r.state, ClientState::Playing);
+        assert_eq!(r.desyncs, 0);
+        assert_eq!(r.decode_errors, 0);
+        assert!(r.verified_tick > 90, "verified {}", r.verified_tick);
+    }
+    assert!(assert_checksums_agree(&reports) >= 4);
+    assert_eq!(room.desyncs, 0);
+    assert_eq!(bad_messages, 0);
 }

@@ -1,0 +1,43 @@
+orr_games v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_games)
+├── bytemuck v1.25.2
+│   └── bytemuck_derive v1.12.1 (proc-macro)
+│       ├── proc-macro2 v1.0.107
+│       │   └── unicode-ident v1.0.26
+│       ├── quote v1.0.47
+│       │   └── proc-macro2 v1.0.107 (*)
+│       └── syn v3.0.6
+│           ├── proc-macro2 v1.0.107 (*)
+│           ├── quote v1.0.47 (*)
+│           └── unicode-ident v1.0.26
+├── orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs)
+│   ├── bytemuck v1.25.2 (*)
+│   └── xxhash-rust v0.8.19
+├── orr_fp v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_fp)
+│   └── bytemuck v1.25.2 (*)
+├── orr_physics v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics)
+│   ├── bytemuck v1.25.2 (*)
+│   ├── orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs) (*)
+│   ├── orr_fp v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_fp) (*)
+│   ├── orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect)
+│   │   ├── bytemuck v1.25.2 (*)
+│   │   ├── orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs) (*)
+│   │   ├── orr_fp v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_fp) (*)
+│   │   └── orr_reflect_derive v0.0.1 (proc-macro) (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect_derive)
+│   │       ├── proc-macro2 v1.0.107 (*)
+│   │       ├── quote v1.0.47 (*)
+│   │       └── syn v2.0.119
+│   │           ├── proc-macro2 v1.0.107 (*)
+│   │           ├── quote v1.0.47 (*)
+│   │           └── unicode-ident v1.0.26
+│   └── orr_sim v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sim)
+│       ├── bytemuck v1.25.2 (*)
+│       ├── orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs) (*)
+│       └── orr_fp v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_fp) (*)
+├── orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+│   ├── bytemuck v1.25.2 (*)
+│   ├── orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs) (*)
+│   ├── orr_fp v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_fp) (*)
+│   ├── orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect) (*)
+│   └── orr_sim v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sim) (*)
+├── orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect) (*)
+└── orr_sim v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sim) (*)

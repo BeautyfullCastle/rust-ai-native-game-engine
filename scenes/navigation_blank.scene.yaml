@@ -1,0 +1,4 @@
+# Empty authoring canvas; patch NavigationScenePin to admit a route.
+schema: orr.scene/1
+singletons: {}
+entities: {}

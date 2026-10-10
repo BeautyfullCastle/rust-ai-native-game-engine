@@ -9,7 +9,14 @@ use crate::camera3d::Camera3D;
 use crate::list::RenderList;
 use crate::list3d::RenderList3D;
 use crate::renderer::Renderer;
-use crate::renderer3d::{Renderer3D, Settings3D};
+use crate::renderer3d::{Renderer3D, Settings3D, SphereLod3D, SphereLodError3D};
+
+struct OffscreenViews<B: Rhi> {
+    texture: B::Texture,
+    render_view: B::TextureView,
+    sample_view: B::TextureView,
+    sample_texture: Option<B::Texture>,
+}
 
 /// An offscreen color texture. For the editor viewport: draw into it with
 /// [`OffscreenTarget::render`], then show [`OffscreenTarget::sample_view`]
@@ -20,6 +27,9 @@ pub struct OffscreenTarget<B: Rhi> {
     texture: B::Texture,
     render_view: B::TextureView,
     sample_view: B::TextureView,
+    // On downlevel backends an sRGB texture cannot also have a UNORM view.
+    // Keep rendering/blending in sRGB and copy stored bytes for gamma-space UI.
+    sample_texture: Option<B::Texture>,
     size: (u32, u32),
     format: TextureFormat,
     generation: u64,
@@ -29,13 +39,15 @@ impl<B: Rhi> OffscreenTarget<B> {
     /// `format` is what the renderer writes. With an sRGB format the
     /// shader output is encoded on write, exactly like a window surface.
     pub fn new(rhi: &B, width: u32, height: u32, format: TextureFormat) -> Self {
-        let (texture, render_view, sample_view) = Self::create(rhi, width, height, format);
-        Self { rhi: rhi.clone(), texture, render_view, sample_view, size: (width.max(1), height.max(1)), format, generation: 0 }
+        let size = (width.max(1), height.max(1));
+        let OffscreenViews { texture, render_view, sample_view, sample_texture } = Self::create(rhi, size.0, size.1, format);
+        Self { rhi: rhi.clone(), texture, render_view, sample_view, sample_texture, size, format, generation: 0 }
     }
 
-    fn create(rhi: &B, width: u32, height: u32, format: TextureFormat) -> (B::Texture, B::TextureView, B::TextureView) {
+    fn create(rhi: &B, width: u32, height: u32, format: TextureFormat) -> OffscreenViews<B> {
         let raw = format.with_srgb(false);
-        let view_formats: Vec<TextureFormat> = if raw != format { vec![raw] } else { Vec::new() };
+        let needs_copy = raw != format && !rhi.texture_view_formats_supported();
+        let view_formats: Vec<TextureFormat> = if raw != format && !needs_copy { vec![raw] } else { Vec::new() };
         let texture = rhi.create_texture(&TextureDesc {
             label: "offscreen target",
             width,
@@ -46,8 +58,17 @@ impl<B: Rhi> OffscreenTarget<B> {
             view_formats: &view_formats,
         });
         let render_view = rhi.create_texture_view(&texture, None);
-        let sample_view = rhi.create_texture_view(&texture, Some(raw));
-        (texture, render_view, sample_view)
+        let sample_texture = needs_copy.then(|| rhi.create_texture(&TextureDesc {
+            label: "offscreen encoded sample",
+            width,
+            height,
+            format: raw,
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+            sample_count: 1,
+            view_formats: &[],
+        }));
+        let sample_view = rhi.create_texture_view(sample_texture.as_ref().unwrap_or(&texture), Some(raw));
+        OffscreenViews { texture, render_view, sample_view, sample_texture }
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -63,15 +84,39 @@ impl<B: Rhi> OffscreenTarget<B> {
     }
 
     /// The view the renderer writes to (the target's own format).
+    /// After low-level writes, call [`Self::update_sample_view`] before a cached
+    /// sample view is used, or use [`Self::render_into`] to do both together.
     pub fn render_view(&self) -> &B::TextureView {
         &self.render_view
     }
 
-    /// A view of the same texels in the non-sRGB format: what a UI toolkit
-    /// that blends in gamma space (egui) should sample, so the picture looks
-    /// the same as in a window.
+    /// The stored texels sampled without sRGB decoding, for gamma-space UI
+    /// (egui). This is either an alternate view or a GPU-copy-backed UNORM view.
+    /// The handle stays valid until resize; all `render*` methods keep it fresh.
+    /// Also refreshes after low-level writes. If this view was cached earlier,
+    /// use `update_sample_view` after low-level writes instead.
     pub fn sample_view(&self) -> &B::TextureView {
+        self.update_sample_view();
         &self.sample_view
+    }
+
+    /// Refreshes the cached sample view after low-level rendering has submitted.
+    /// A no-op with native alternate views or a non-sRGB target. Otherwise this
+    /// enqueues one full-size, byte-preserving GPU copy and submission; it does
+    /// not wait, read pixels to the CPU, or alter renderer frame statistics.
+    pub fn update_sample_view(&self) {
+        if let Some(sample) = &self.sample_texture {
+            self.rhi.copy_texture(&self.texture, sample);
+        }
+    }
+
+    /// Submits custom rendering, then refreshes the UI sample view. The callback
+    /// must submit its work on this RHI before returning (including error paths).
+    /// Multiple passes can be composed with only one final sample copy.
+    pub fn render_into<T>(&self, draw: impl FnOnce(&B, &B::TextureView, (u32, u32)) -> T) -> T {
+        let result = draw(&self.rhi, &self.render_view, self.size);
+        self.update_sample_view();
+        result
     }
 
     /// Bumps each time the texture is recreated by `resize`.
@@ -85,10 +130,11 @@ impl<B: Rhi> OffscreenTarget<B> {
         if size == self.size {
             return false;
         }
-        let (texture, render_view, sample_view) = Self::create(&self.rhi, size.0, size.1, self.format);
+        let OffscreenViews { texture, render_view, sample_view, sample_texture } = Self::create(&self.rhi, size.0, size.1, self.format);
         self.texture = texture;
         self.render_view = render_view;
         self.sample_view = sample_view;
+        self.sample_texture = sample_texture;
         self.size = size;
         self.generation += 1;
         true
@@ -96,12 +142,12 @@ impl<B: Rhi> OffscreenTarget<B> {
 
     /// Draws `list` into the texture.
     pub fn render(&self, renderer: &mut Renderer<B>, list: &RenderList, camera: &Camera) {
-        renderer.draw(&self.render_view, self.size, list, camera);
+        self.render_into(|_, view, size| renderer.draw(view, size, list, camera));
     }
 
     /// Draws a 3D `list` into the texture (multisampled, resolved into it).
     pub fn render3d(&self, renderer: &mut Renderer3D<B>, list: &RenderList3D, camera: &Camera3D) {
-        renderer.draw(&self.render_view, self.size, list, camera);
+        self.render_into(|_, view, size| renderer.draw(view, size, list, camera));
     }
 
     /// Draws a 3D `list`, then a 2D `overlay` (screen space text and gizmos, see
@@ -118,11 +164,14 @@ impl<B: Rhi> OffscreenTarget<B> {
         let clear = overlay_renderer.clear.take();
         overlay_renderer.draw(&self.render_view, self.size, overlay, &crate::text::pixel_camera(self.size));
         overlay_renderer.clear = clear;
+        self.update_sample_view();
     }
 
     /// Waits for the GPU and reads the pixels back as tightly packed RGBA8
     /// (stored bytes, so sRGB targets return encoded values), top row first.
+    /// Panics for non-8-bit formats; use `Rhi::read_texture` for RGBA16F bytes.
     pub fn read_rgba8(&self) -> Vec<u8> {
+        assert!(matches!(self.format, TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb | TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb), "read_rgba8 requires an 8-bit color target");
         let mut bytes = self.rhi.read_texture(&self.texture);
         if self.format.is_bgra() {
             for px in bytes.chunks_exact_mut(4) {
@@ -165,9 +214,21 @@ impl<B: Rhi> WindowRenderer<B> {
     /// Draws and presents. Returns `false` if the frame was skipped (window
     /// hidden, surface being reconfigured).
     pub fn render(&mut self, list: &RenderList, camera: &Camera) -> bool {
+        self.render_with_overlay(list, camera, |_, _, _| {})
+    }
+
+    /// Draws the scene, then an overlay on the same acquired view before present.
+    /// The callback must submit through the supplied RHI.
+    pub fn render_with_overlay(
+        &mut self,
+        list: &RenderList,
+        camera: &Camera,
+        overlay: impl FnOnce(&B, &B::TextureView, (u32, u32)),
+    ) -> bool {
         let rhi = self.renderer.rhi().clone();
         let Acquire::Frame(frame) = rhi.acquire_frame(&mut self.surface) else { return false };
         self.renderer.draw(rhi.frame_view(&frame), self.size, list, camera);
+        overlay(&rhi, rhi.frame_view(&frame), self.size);
         rhi.present(frame);
         true
     }
@@ -202,6 +263,22 @@ impl<B: Rhi> WindowRenderer3D<B> {
             surface,
             size: (size.0.max(1), size.1.max(1)),
         }
+    }
+
+    /// Creates a 3D window renderer with opt-in main-pass sphere LOD.
+    /// The existing `from_parts` constructor continues to use fixed mesh detail.
+    pub fn from_parts_with_sphere_lod(
+        rhi: B,
+        surface: B::Surface,
+        size: (u32, u32),
+        settings: Settings3D,
+        policy: SphereLod3D,
+    ) -> Result<Self, SphereLodError3D> {
+        let format = rhi.surface_format(&surface);
+        let renderer = Renderer3D::with_sphere_lod(rhi.clone(), format, settings, policy)?;
+        let mut overlay = Renderer::new(rhi, format);
+        overlay.clear = None;
+        Ok(Self { renderer, overlay, surface, size: (size.0.max(1), size.1.max(1)) })
     }
 
     pub fn adapter_name(&self) -> String {

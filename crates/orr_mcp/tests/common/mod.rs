@@ -32,6 +32,29 @@ pub struct TestHost {
 }
 
 impl TestHost {
+    /// Arena authoring host with two stationary players in bullet range.
+    pub fn start_arena() -> TestHost {
+        use orr_testgame::{Arena, ArenaMetrics};
+        const SCENE: &str = "schema: orr.scene/1\nsingletons:\n  Score: { kills: [0,0,0,0,0,0,0,0] }\nentities:\n  e_00000001:\n    name: hero\n    Position: { pos: [-300,0] }\n    PlayerTag: { slot: 0 }\n  e_00000002:\n    name: target\n    Position: { pos: [300,0] }\n    PlayerTag: { slot: 1 }\n";
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let (tx, rx) = channel();
+        let thread = std::thread::spawn(move || {
+            let mut types = TypeRegistry::new();
+            orr_testgame::register_reflect(&mut types);
+            let doc = EditorDoc::from_yaml(SCENE, types, Simulation::<Arena>::build_registry(), 42).unwrap();
+            let mut cfg = ServerConfig::new(Auth::Tokens(vec![TokenEntry { client: "claude".into(), token: "claude-tok".into(), caps: Caps::ALL }]));
+            cfg.bind.set_port(0);
+            cfg.limits.build_id = default_build_id("Arena");
+            cfg.limits.game = GameHooks::new("Arena").with_metrics(ArenaMetrics);
+            let mut server = ErpServer::start(cfg).unwrap();
+            server.set_structured_input::<Arena>("ArenaInput", 8, |slot, input| orr_sample::arena_view::arena_fire_commands(u32::from(slot.0), input));
+            tx.send(server.url()).unwrap();
+            Host::<Arena>::new(doc, server).run(&stopped, Duration::from_micros(500));
+        });
+        TestHost { url: rx.recv_timeout(Duration::from_secs(20)).unwrap(), stop, thread: Some(thread) }
+    }
+
     /// Tokens: `claude-tok` (all), `limited-tok` (read + scene_edit: cannot accept).
     pub fn start() -> TestHost {
         let stop = Arc::new(AtomicBool::new(false));

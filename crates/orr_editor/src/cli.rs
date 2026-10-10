@@ -2,11 +2,14 @@
 
 use std::path::PathBuf;
 
+use crate::game::EditorGame;
+
 /// Usage text.
 pub const USAGE: &str = "\
-orr_editor [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
-           [--screenshot <out.png> [--frames <n>]] [--size <WxH>]
+orr_editor [--game physics|arena|yard3d|terrain-yard3d|navigation-yard3d] [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
+           [--screenshot <out.png> [--frames <n>] [--screenshot-settle]] [--size <WxH>]
            [--erp <addr>] [--erp-token <name:token:caps>]... [--erp-dev]
+orr_editor --project <directory> [--select <name>] [--play-ticks <n>] [--erp <addr>] [screenshot flags]
 orr_editor --connect <ws://host:port> [--token <t>] [same flags, but --scene/--erp]
 
 The editor is a view. The simulation and the scene document live in a
@@ -14,7 +17,11 @@ host: by default a thread of this process, started on the scene and
 connected in-process; with --connect, an `orr_remote_host` (or another
 editor's ERP) that is already running.
 
-  --scene <file>        scene to open (default scenes/physics_demo.scene.yaml)
+  --scene <file>        scene to open (default scene depends on --game)
+  --project <dir>       open a saved Arena project, including its optional sprites
+                        (requires the sprites feature); cannot be combined with
+                        --scene, --game, --connect or --script
+  --game <name>         local game: physics (default), arena, yard3d or terrain-yard3d (terrain-physics feature) or navigation-yard3d (navigation feature); cannot be used with --connect
   --connect <url>       attach to a running host instead of starting one: the
                         editor then shows and edits THAT host's scene and play
                         session (with --token when it needs one; a dev-mode
@@ -26,6 +33,8 @@ editor's ERP) that is already running.
   --screenshot <png>    render --frames frames, save the window's own
                         framebuffer to the PNG and exit
   --frames <n>          frames before the screenshot (default 30)
+  --screenshot-settle   additionally wait for a current paused frame, refreshed
+                        panels and expired agent pulses (10 second deadline)
   --size <WxH>          window size in points (default 1600x900)
   --erp <addr>          serve ERP (JSON-RPC over WebSocket) on this address,
                         e.g. 127.0.0.1:7777, so AI agents can edit and play
@@ -34,11 +43,20 @@ editor's ERP) that is already running.
                         scene_edit, sim_control (comma separated) or all
   --erp-dev             no tokens, every client has every capability
                         (loopback addresses only)
+  --room-project DIR   validated RoomEscapeV1 project (room-project feature)
+  --collect-project DIR validated CollectDodgeV1 project (collect-dodge feature)
 ";
 
 /// Parsed flags.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Args {
+    /// `--project`: an explicitly saved project, with no default-path fallback.
+    pub project: Option<PathBuf>,
+    /// Dedicated versioned CollectDodge project route.
+    pub collect_project: Option<PathBuf>,
+    pub room_project: Option<PathBuf>,
+    /// Optional local game selection. `None` preserves the PhysGame default.
+    pub game: Option<EditorGame>,
     /// `--scene`.
     pub scene: Option<PathBuf>,
     /// `--select`.
@@ -51,6 +69,8 @@ pub struct Args {
     pub screenshot: Option<PathBuf>,
     /// `--frames`.
     pub frames: u64,
+    /// `--screenshot-settle` (requires `--screenshot`).
+    pub screenshot_settle: bool,
     /// `--size`.
     pub size: (f32, f32),
     /// `--erp`.
@@ -67,7 +87,7 @@ pub struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Self { scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
+        Self { collect_project: None, room_project: None, project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -80,10 +100,26 @@ impl Args {
         while let Some(a) = it.next() {
             let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value\n\n{USAGE}"));
             match a.as_str() {
+                "--room-project" => {
+                    if out.room_project.is_some() { return Err("--room-project may only be supplied once".into()); }
+                    out.room_project=Some(PathBuf::from(value("--room-project")?));
+                }
+                "--collect-project" => {
+                    if out.collect_project.is_some() { return Err("--collect-project may only be supplied once".into()); }
+                    out.collect_project = Some(PathBuf::from(value("--collect-project")?));
+                }
+                "--project" => {
+                    if out.project.is_some() {
+                        return Err("--project may only be supplied once".into());
+                    }
+                    out.project = Some(PathBuf::from(value("--project")?));
+                }
+                "--game" => out.game = Some(EditorGame::from_local_name(&value("--game")?)?),
                 "--scene" => out.scene = Some(PathBuf::from(value("--scene")?)),
                 "--select" => out.select = Some(value("--select")?),
                 "--script" => out.script = Some(PathBuf::from(value("--script")?)),
                 "--screenshot" => out.screenshot = Some(PathBuf::from(value("--screenshot")?)),
+                "--screenshot-settle" => out.screenshot_settle = true,
                 "--play-ticks" => out.play_ticks = Some(value("--play-ticks")?.parse().map_err(|_| "--play-ticks needs a whole number".to_string())?),
                 "--frames" => out.frames = value("--frames")?.parse().map_err(|_| "--frames needs a whole number".to_string())?,
                 "--size" => {
@@ -100,11 +136,36 @@ impl Args {
                 other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
             }
         }
+        if let Some(root) = &out.room_project {
+            if !cfg!(feature="room-project") { return Err("--room-project requires room-project feature".into()); }
+            if root.as_os_str().is_empty() { return Err("--room-project requires a nonempty directory".into()); }
+            if out.project.is_some() || out.collect_project.is_some() || out.scene.is_some() || out.game.is_some() || out.connect.is_some() || out.script.is_some() {
+                return Err("--room-project cannot be combined with another project, scene, game, connect or script".into());
+            }
+        }
+        if out.collect_project.is_some() {
+            if !cfg!(feature = "collect-dodge") { return Err("--collect-project requires collect-dodge feature".into()); }
+            if out.project.is_some() || out.scene.is_some() || out.game.is_some() || out.connect.is_some() || out.script.is_some() { return Err("--collect-project cannot be combined with --project, --scene, --game, --connect or --script".into()); }
+        }
+        if out.project.is_some() {
+            if out.scene.is_some() || out.game.is_some() || out.connect.is_some() || out.script.is_some() {
+                return Err("--project cannot be combined with --scene, --game, --connect or --script".into());
+            }
+            if !cfg!(feature = "sprites") {
+                return Err("--project requires an editor built with the sprites feature".into());
+            }
+        }
         if out.connect.is_some() && (out.scene.is_some() || out.erp.is_some()) {
             return Err("--connect attaches to a host that has its own scene: it cannot be combined with --scene or --erp".to_string());
         }
+        if out.connect.is_some() && out.game.is_some() {
+            return Err("--game selects a local game and cannot be combined with --connect".to_string());
+        }
         if out.token.is_some() && out.connect.is_none() {
             return Err("--token is for --connect (use --erp-token to set tokens for --erp)".to_string());
+        }
+        if out.screenshot_settle && out.screenshot.is_none() {
+            return Err("--screenshot-settle requires --screenshot".to_string());
         }
         Ok(out)
     }
@@ -135,6 +196,7 @@ mod tests {
         assert!(parse("--size 10").is_err());
         assert!(parse("--connect ws://h:1 --scene a.yaml").is_err());
         assert!(parse("--token x").is_err());
+        assert!(parse("--screenshot-settle").is_err());
     }
 
     #[test]
@@ -142,4 +204,82 @@ mod tests {
         let a = parse("--connect ws://127.0.0.1:7790 --token s3 --screenshot /tmp/a.png").unwrap();
         assert_eq!((a.connect.as_deref(), a.token.as_deref()), (Some("ws://127.0.0.1:7790"), Some("s3")));
     }
+
+    #[test]
+    fn collect_project_has_one_authority_in_every_option_order() {
+        for other in ["--project a", "--scene a", "--game arena", "--connect ws://localhost:9", "--script a"] {
+            for text in [format!("--collect-project a {other}"), format!("{other} --collect-project a")] {
+                assert!(parse(&text).is_err(), "accepted {text}");
+            }
+        }
+        assert!(parse("--collect-project a --collect-project b").is_err());
+        assert!(parse("--collect-project").is_err());
+        #[cfg(feature = "collect-dodge")]
+        assert_eq!(parse("--collect-project a").unwrap().collect_project, Some(PathBuf::from("a")));
+        #[cfg(not(feature = "collect-dodge"))]
+        assert!(parse("--collect-project a").unwrap_err().contains("collect-dodge feature"));
+    }
+
+    #[test]
+    fn saved_project_flags_have_one_explicit_authority() {
+        for flags in [
+            "--project", "--project a --project b",
+            "--project a --scene a.yaml", "--scene a.yaml --project a",
+            "--project a --game arena", "--game arena --project a",
+            "--project a --connect ws://127.0.0.1:7790",
+            "--project a --script commands.txt", "--script commands.txt --project a",
+        ] {
+            assert!(parse(flags).is_err(), "must reject {flags}");
+        }
+        #[cfg(feature = "sprites")]
+        {
+            let args = parse("--project game --select hero --play-ticks 12 --screenshot out.png --erp 127.0.0.1:0 --erp-dev").unwrap();
+            assert_eq!(args.project, Some(PathBuf::from("game")));
+            assert_eq!(args.play_ticks, Some(12));
+            assert_eq!(args.game, None);
+            assert_eq!(args.scene, None);
+        }
+        #[cfg(not(feature = "sprites"))]
+        assert!(parse("--project game").unwrap_err().contains("sprites feature"));
+    }
+
+    #[test]
+    fn local_game_defaults_to_physics_and_accepts_arena() {
+        assert_eq!(parse("").unwrap().game, None);
+        assert_eq!(parse("--game physics").unwrap().game, Some(EditorGame::PhysGame));
+        assert_eq!(parse("--game arena").unwrap().game, Some(EditorGame::Arena));
+    }
+
+    #[test]
+    fn local_game_rejects_unknown_and_remote_selection() {
+        assert!(parse("--game nope").is_err());
+        assert!(parse("--game arena --connect ws://127.0.0.1:7790").is_err());
+    }
+
+    #[test]
+    fn screenshot_settle_is_opt_in() {
+        assert!(!parse("--screenshot out.png --frames 30").unwrap().screenshot_settle);
+        assert!(parse("--screenshot out.png --frames 30 --screenshot-settle").unwrap().screenshot_settle);
+    }
+    #[test]
+    fn room_project_route_requires_its_explicit_feature() {
+        #[cfg(feature="room-project")]
+        {
+            let args=parse("--room-project authored-room").unwrap();
+            assert_eq!(args.room_project,Some(PathBuf::from("authored-room")));
+            assert!(args.project.is_none() && args.collect_project.is_none() && args.game.is_none());
+            assert!(Args::parse(["--room-project".into(),String::new()]).is_err());
+        }
+        #[cfg(not(feature="room-project"))]
+        assert!(parse("--room-project authored-room").unwrap_err().contains("room-project feature"));
+    }
+    #[test]
+    fn room_project_rejects_conflicting_authorities_in_either_order() {
+        for other in ["--project another","--collect-project another","--scene scene.yaml","--game arena","--connect ws://127.0.0.1:7790","--script commands.txt"] {
+            assert!(parse(&format!("--room-project room {other}")).is_err(),"{other}");
+            assert!(parse(&format!("{other} --room-project room")).is_err(),"{other}");
+        }
+        assert!(parse("--room-project one --room-project two").is_err());
+    }
+
 }

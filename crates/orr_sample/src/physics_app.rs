@@ -167,7 +167,11 @@ impl<B: Bridge<PhysGame> + SimControl<PhysGame>> App<B> {
             let _ = self.bridge.set_input(self.bridge.local_slot(), self.keys.to_input());
         }
         self.bridge.update(dt);
-        let snapshot = self.bridge.snapshot();
+        let update = self.bridge.poll_view();
+        let snapshot = update.snapshot.clone();
+        if let Some(reset) = &update.resync {
+            crate::net_client::log_view_resync(reset);
+        }
         // A seek or an edit is a jump: show the new state, do not smooth to it.
         let epoch = snapshot.as_ref().and_then(|s| s.timeline().map(|t| t.epoch));
         if epoch != self.epoch {
@@ -176,10 +180,10 @@ impl<B: Bridge<PhysGame> + SimControl<PhysGame>> App<B> {
         }
 
         let t = Instant::now();
-        self.view.update(dt.as_secs_f32().min(0.1), snapshot.as_ref());
+        self.view.update_from_bridge(dt.as_secs_f32().min(0.1), &update);
         self.stages.view_update.push(ms(t.elapsed()));
         // Game events are not used by this scene, but the queue must not grow.
-        for event in self.bridge.drain_events() {
+        for event in update.events {
             if let BridgeEvent::Lifecycle(note) = event {
                 log_lifecycle(&note);
             }

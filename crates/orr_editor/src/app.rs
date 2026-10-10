@@ -4,12 +4,15 @@
 //! All state changes go through [`Editor`]; this file only draws and
 //! translates input into `Editor` calls.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::thread::JoinHandle;
+use std::time::Instant;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Pos2, Rect, RichText, Sense, Ui};
-use orr_bridge::PlayMode;
-use orr_fp::FPVec2;
+use orr_fp::{FPVec2, FP};
 use orr_reflect::Value;
+use orr_remote::{CaptureError, CaptureRequest, CapturedImage, ViewState};
 
 use crate::editor::{fp_of_f64, Editor, Message, Mode, Owner};
 use crate::inspector::{show_component, InspEvent};
@@ -30,7 +33,6 @@ pub const LBL_RESTART: &str = "Restart simulation host";
 /// The button that reconnects to a remote host.
 pub const LBL_RECONNECT: &str = "Reconnect";
 
-const BODY: &str = "orr_physics::Body";
 
 /// Which tab the bottom panel shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -91,9 +93,22 @@ pub struct UiState {
     pub viewport_rect: Option<Rect>,
     /// Size of the viewport in pixels last frame.
     pub viewport_px: (u32, u32),
+    /// View-only opt-in. Exposure and tone mapping continue to come from Lighting.
+    #[cfg(feature = "models")]
+    pub yard_post_process: orr_render::PostProcessSettings,
+    /// Last rejected display-policy/frame request; the previous texture stays visible.
+    #[cfg(feature = "models")]
+    pub yard_post_process_error: Option<String>,
     /// Entities an agent just edited, pulsing in the viewport (see [`Pulse`]).
     pub pulses: Vec<Pulse>,
     body_drag: Option<BodyDrag>,
+    yard_transform_target: Option<Target>,
+    yard_xyz: [String;3],
+    yard_quat: [String;4],
+    input_player: u8,
+    take_control: bool,
+    #[cfg(feature = "animated-models")]
+    animated_window: bool,
 }
 
 /// A request to save the app's own framebuffer as a PNG and quit (see [`crate::cli`]).
@@ -103,12 +118,84 @@ pub struct ScreenshotJob {
     /// Frames to render before asking for the screenshot.
     pub frames: u64,
     requested_at: Option<u64>,
+    settle: bool,
+    started_at: Option<f64>,
+}
+
+const MAX_CAPTURE_PIXELS: u64 = 1_048_576;
+const MAX_CAPTURE_RGBA_BYTES: usize = 4 << 20;
+
+#[derive(Clone, Copy)]
+struct FramebufferInfo {
+    viewport: egui::ViewportId,
+    logical_width: f32,
+    logical_height: f32,
+    pixels_per_point: f32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Copy)]
+struct CapturePass {
+    state: ViewState,
+    frame_seq: u64,
+    ui_frame: u64,
+    framebuffer: FramebufferInfo,
+}
+
+struct RemoteCapture {
+    request: CaptureRequest,
+    pass: Option<CapturePass>,
+    screenshot_requested: bool,
+    image_received: bool,
+    orphaned: bool,
+}
+
+struct EncoderWorker {
+    serial: u64,
+    pass: CapturePass,
+    handle: JoinHandle<Result<Vec<u8>, CaptureError>>,
+}
+
+struct BoundedPngWriter<'a>(&'a mut Vec<u8>);
+
+impl Write for BoundedPngWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.0.len().saturating_add(bytes.len()) > MAX_CAPTURE_RGBA_BYTES {
+            return Err(io::Error::other("PNG exceeds screenshot byte limit"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl ScreenshotJob {
     /// Screenshot after `frames` frames.
     pub fn new(path: PathBuf, frames: u64) -> Self {
-        Self { path, frames, requested_at: None }
+        Self { path, frames, requested_at: None, settle: false, started_at: None }
+    }
+
+    /// Also wait for refreshed panels, a current paused frame and expired
+    /// agent pulses. Readiness is checked without blocking the UI; failure
+    /// to settle within ten seconds of UI time fails the screenshot job.
+    pub fn with_settle(mut self) -> Self {
+        self.settle = true;
+        self
+    }
+
+    fn ready(&mut self, frames: u64, now: f64, waiting_for: Option<&str>) -> Result<bool, String> {
+        let started = *self.started_at.get_or_insert(now);
+        if !self.settle {
+            return Ok(frames >= self.frames);
+        }
+        if now - started >= 10.0 {
+            return Err(format!("settle deadline exceeded waiting for {}", waiting_for.unwrap_or("minimum frame count")));
+        }
+        Ok(frames >= self.frames && waiting_for.is_none())
     }
 }
 
@@ -120,16 +207,47 @@ pub struct EditorApp {
     pub ui: UiState,
     render_state: Option<egui_wgpu::RenderState>,
     gpu: Option<GpuViewport>,
+    gpu3d: Option<crate::viewport3d::GpuViewport3d>,
+    viewport_hdr_disabled: bool,
+    #[cfg(feature="irradiance-probes")]
+    pub irradiance: crate::irradiance_panel::IrradiancePanel,
+    #[cfg(feature="models")]
+    pub models: crate::model_panel::ModelPanel,
+    #[cfg(feature="terrain")]
+    pub terrain: crate::terrain_panel::TerrainPanel,
+    #[cfg(feature="navigation")]
+    pub navigation: crate::navigation_panel::NavigationPanel,
     shot: Option<ScreenshotJob>,
+    remote_capture: Option<RemoteCapture>,
+    encoder: Option<EncoderWorker>,
+    ui_settled_reported: bool,
     frames: u64,
     last_title: String,
+    #[cfg(feature = "sprites")]
+    pub sprites: crate::sprite_panel::SpritePanel,
+    #[cfg(feature = "project-ui")]
+    pub project_ui: Option<crate::project_ui::Preview>,
+    #[cfg(feature="collect-ui")]
+    pub collect_ui: Option<crate::collect_ui_panel::Panel>,
+    #[cfg(feature = "linked-prefabs")]
+    pub linked_prefabs: crate::linked_prefab_panel::Panel,
+    #[cfg(feature = "animated-models")]
+    pub animated_models: crate::animated_panel::AnimatedPanel,
 }
 
 impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, ui: UiState::default(), render_state, gpu: None, shot: None, frames: 0, last_title: String::new() }
+        Self { editor, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+    }
+
+    /// Deliberately restrict HDR for compatibility. This one-way builder must
+    /// be applied before the first frame; the GPU device/adapter is unchanged.
+    pub fn without_hdr_support(mut self) -> Self {
+        assert!(self.gpu3d.is_none(), "restrict HDR before the first viewport frame");
+        self.viewport_hdr_disabled = true;
+        self
     }
 
     /// Asks for a screenshot of the window after some frames, then quits.
@@ -149,6 +267,8 @@ impl EditorApp {
     }
 
     /// The viewport's GPU texture target, once it has drawn (readback in tests).
+    pub fn viewport3d_gpu(&self) -> Option<&crate::viewport3d::GpuViewport3d> { self.gpu3d.as_ref() }
+
     pub fn viewport_gpu(&self) -> Option<&GpuViewport> {
         self.gpu.as_ref()
     }
@@ -156,11 +276,28 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let started = Instant::now();
         let ctx = ui.ctx().clone();
         self.frames += 1;
 
+        // Disarm before ingesting a late claim/update; focus returning is not intent.
+        let keyboard_viewport = if self.editor.game().is_room() { "room_keyboard_viewport" } else { "arena_keyboard_viewport" };
+        let input_focus = ctx.memory(|m| m.focused()) == Some(egui::Id::new(keyboard_viewport));
+        let outside_click = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !self.ui.viewport_rect.is_some_and(|r| r.contains(p))));
+        if !input_focus || outside_click || self.ui.dialog.is_some() || ctx.input(|i| !i.focused || i.key_pressed(Key::Escape)) {
+            self.editor.release_control();
+        }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
         self.editor.pump();
+        #[cfg(feature="navigation")]
+        {
+            self.terrain.sync_for_editor(&self.editor);
+            self.navigation.sync_from_editor(&self.editor);
+            self.navigation.observe_terrain(&self.editor, &self.terrain);
+            let blocker = self.navigation.play_blocker(&self.editor, &self.terrain);
+            self.editor.set_navigation_blocker(blocker);
+        }
+        self.poll_remote_capture_request();
         self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {
             self.ui.bottom_tab = BottomTab::Agent;
@@ -169,6 +306,19 @@ impl eframe::App for EditorApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(40));
         if self.editor.is_playing_mode() && self.editor.timeline().is_some_and(|t| t.playing) {
             ctx.request_repaint();
+        }
+        if ctx.input(|i| i.key_pressed(Key::Escape) || !i.focused) {
+            // Escape cancels an active drag without changing its inspection
+            // target. With no gesture, Escape clears the GUID selection.
+            let cancelling_gesture = self.editor.in_gesture();
+            self.editor.cancel_edit();
+            if !cancelling_gesture && ctx.input(|i| i.key_pressed(Key::Escape)) { self.editor.select(None); }
+            // Focus loss may hide the physical release. Forget egui's drag
+            // ownership so later moves cannot revive it; a fresh press starts
+            // a fresh gesture even when the old pointer-up never arrived.
+            ctx.stop_dragging();
+            self.editor.end_edit();
+            self.ui.body_drag = None;
         }
         self.shortcuts(&ctx);
 
@@ -184,7 +334,26 @@ impl eframe::App for EditorApp {
         egui::Panel::right("inspector").resizable(true).default_size(340.0).show(ui, |ui| self.inspector(ui));
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
 
+        // A scrub widget can disappear after selection/navigation changes.
+        // Release still closes its gesture even if that widget saw no End.
+        if !ctx.input(|i| i.pointer.button_down(PointerButton::Primary)) {
+            self.editor.end_edit();
+            self.ui.body_drag = None;
+        }
         self.dialogs(&ctx);
+        #[cfg(feature = "animated-models")]
+        egui::Window::new("Animation authoring · local sidecar")
+            .open(&mut self.ui.animated_window)
+            .default_pos([280.0, 70.0])
+            .default_width(540.0)
+            .resizable(true)
+            .show(&ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.animated_models.show(ui, &self.editor, self.render_state.as_ref());
+                });
+            });
+        #[cfg(feature = "animated-models")]
+        if !self.ui.animated_window { self.animated_models.suspend_preview(); }
         if !self.ui.pulses.is_empty() {
             // The pulses animate until they expire.
             ctx.request_repaint();
@@ -195,7 +364,10 @@ impl eframe::App for EditorApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+        self.process_remote_capture(&ctx);
+        self.report_ui_settled(&ctx);
         self.screenshot(&ctx);
+        self.editor.record_ui_frame(started.elapsed());
     }
 }
 
@@ -212,7 +384,7 @@ impl EditorApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
         let redo_a = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
@@ -246,8 +418,11 @@ impl EditorApp {
     // ---- top bar ----
 
     fn top_bar(&mut self, ui: &mut Ui) {
+        let mutable = self.editor.can_mutate() && self.editor.previewing().is_none();
+        let live = self.editor.down().is_none();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                if !(mutable) { ui.disable(); }
                 if ui.button("Open scene\u{2026}").clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::Open, text });
@@ -264,7 +439,7 @@ impl EditorApp {
                 }
             });
             ui.menu_button("Edit", |ui| {
-                let editing = self.editor.mode() == Mode::Edit;
+                let editing = mutable && self.editor.mode() == Mode::Edit;
                 if ui.add_enabled(editing && self.editor.history().can_undo, egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
                     self.editor.undo();
                     ui.close();
@@ -276,16 +451,16 @@ impl EditorApp {
             });
             ui.separator();
             let playing = self.editor.timeline().is_some_and(|t| t.playing);
-            if ui.add_enabled(!playing, egui::Button::new(LBL_PLAY)).clicked() {
+            if ui.add_enabled(live && !playing, egui::Button::new(LBL_PLAY)).clicked() {
                 self.editor.play();
             }
-            if ui.add_enabled(playing, egui::Button::new(LBL_PAUSE)).clicked() {
+            if ui.add_enabled(live && playing, egui::Button::new(LBL_PAUSE)).clicked() {
                 self.editor.pause();
             }
-            if ui.add_enabled(!playing, egui::Button::new(LBL_STEP)).clicked() {
+            if ui.add_enabled(live && !playing, egui::Button::new(LBL_STEP)).clicked() {
                 self.editor.step(1);
             }
-            if ui.add_enabled(self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
+            if ui.add_enabled(live && self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
                 self.editor.stop();
             }
             ui.separator();
@@ -293,10 +468,57 @@ impl EditorApp {
                 Mode::Edit => ui.label(RichText::new("EDIT").strong()),
                 Mode::Play => ui.label(RichText::new("PLAY").strong().color(Color32::from_rgb(255, 150, 60))),
             };
+            ui.weak(self.editor.game().name());
+            if self.editor.game().is_3d() {
+                #[cfg(feature = "models")]
+                ui.menu_button("Viewport effects", |ui| {
+                    ui.checkbox(&mut self.ui.yard_post_process.enabled, "HDR post-processing");
+                    ui.add_enabled_ui(self.ui.yard_post_process.enabled, |ui| {
+                        ui.checkbox(&mut self.ui.yard_post_process.bloom, "Bloom");
+                        ui.add(egui::Slider::new(&mut self.ui.yard_post_process.threshold, 0.0..=8.0).text("Bloom threshold"));
+                        ui.add(egui::Slider::new(&mut self.ui.yard_post_process.strength, 0.0..=8.0).text("Bloom strength"));
+                        ui.add(egui::Slider::new(&mut self.ui.yard_post_process.radius, 1..=8).text("Bloom radius"));
+                        ui.add(egui::Slider::new(&mut self.ui.yard_post_process.iterations, 1..=4).text("Bloom iterations"));
+                    });
+                    ui.weak("View only · scene Lighting controls exposure and tone mapping");
+                    if let Some(error) = &self.ui.yard_post_process_error {
+                        ui.colored_label(Color32::RED, format!("Last rejected request: {error}"));
+                    }
+                });
+                #[cfg(not(feature = "models"))]
+                ui.add_enabled(false, egui::Button::new("Viewport effects"))
+                    .on_disabled_hover_text("HDR/bloom requires an editor built with the models or animated-models feature");
+            }
+            if self.editor.is_viewer() { ui.label("REPLAY VIEWER · read-only"); }
             if self.editor.is_dirty() {
                 ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
             }
         });
+        if self.editor.game().has_keyboard() {
+            ui.horizontal_wrapped(|ui| {
+                use crate::editor::input::Phase;
+                let phase = self.editor.input_phase();
+                #[cfg(feature = "collect-dodge")]
+                if self.editor.game().is_collect() {
+                    if let Some(snapshot) = self.editor.snapshot() { let run = snapshot.predicted().singleton::<orr_sample::collect_game::CollectRun>(); ui.label(format!("{} · Score {}/{}", orr_sample::collect_view::status(run), run.score, run.goal)); }
+                }
+                ui.label("Keyboard player slot");
+                ui.add_enabled(phase == Phase::Off, egui::DragValue::new(&mut self.ui.input_player).range(0..=self.editor.sim().player_count.saturating_sub(1)));
+                if self.editor.game() == crate::game::EditorGame::Arena && self.editor.mode() == Mode::Edit && ui.add_enabled(
+                        self.editor.can_mutate() && self.editor.previewing().is_none() && phase == Phase::Off,
+                        egui::Button::new("+ Player"),
+                ).on_hover_text("Create a player in this unused slot at the viewport center.").clicked() {
+                    let at = self.editor.camera.center;
+                    self.editor.spawn_arena_player(self.ui.input_player, at);
+                }
+                if ui.add_enabled(phase == Phase::Off && self.editor.can_take_control(), egui::Button::new("Take control")).on_hover_text("Replaces this slot's current held input. Does not cancel commands or take over the simulation.").clicked() {
+                    self.ui.take_control = true;
+                }
+                if ui.add_enabled(phase != Phase::Off, egui::Button::new("Release control")).clicked() { self.editor.release_control(); }
+                if self.editor.input_cleanup_pending() && ui.button("Reconnect control").clicked() { self.editor.restart(); }
+                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if self.editor.game().is_room() { "Active · WASD/arrows · E interact · Escape releases" } else if self.editor.game().is_collect() { "Active · WASD/arrows · press Space to restart · Escape releases" } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
+            });
+        }
     }
 
     /// The banner of a host that is gone: why, and the way back.
@@ -324,7 +546,7 @@ impl EditorApp {
                 None => ui.weak("ready"),
             };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let gpu = self.gpu.as_ref().map_or_else(|| "no GPU".to_string(), |g| g.gpu().adapter_name());
+                let gpu = self.gpu3d.as_ref().map(|g|g.gpu().adapter_name()).or_else(||self.gpu.as_ref().map(|g|g.gpu().adapter_name())).unwrap_or_else(||"no GPU".to_string());
                 ui.weak(gpu);
                 ui.weak(format!("checksum {:#018x}", self.editor.checksum()));
                 if let Some((url, clients)) = self.editor.erp_status() {
@@ -343,11 +565,15 @@ impl EditorApp {
     fn hierarchy(&mut self, ui: &mut Ui) {
         ui.heading("Hierarchy");
         ui.horizontal(|ui| {
-            if ui.button("+ Body").on_hover_text("Spawn a dynamic circle at the view center").clicked() {
+            if !(self.editor.can_mutate() && self.editor.previewing().is_none()) { ui.disable(); }
+            if self.editor.game() == crate::game::EditorGame::PhysGame && ui.button("+ Body").on_hover_text("Spawn a dynamic circle at the view center").clicked() {
                 let c = self.editor.camera.center;
                 self.editor.spawn_body(c);
             }
-            if ui.add_enabled(self.editor.selection().is_some(), egui::Button::new("Delete")).clicked() {
+            if self.editor.game().is_3d() && !self.editor.game().is_navigation() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
+                self.editor.spawn_yard_body(orr_fp::FPVec3::new(FP::ZERO,FP::from_int(5),FP::ZERO));
+            }
+            if ui.add_enabled(self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).clicked() {
                 self.editor.delete_selected();
             }
         });
@@ -370,14 +596,15 @@ impl EditorApp {
         let mut clicked: Option<Target> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
             for (label, target, tip) in &rows[range] {
-                let selected = self.editor.selection() == Some(target);
+                let selected = self.editor.is_selected(target);
                 if ui.selectable_label(selected, label).on_hover_text(tip).clicked() {
                     clicked = Some(target.clone());
                 }
             }
         });
         if let Some(t) = clicked {
-            self.editor.select(Some(t));
+            if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) { self.editor.toggle_selection(t); }
+            else { self.editor.select(Some(t)); }
         }
     }
 
@@ -385,6 +612,60 @@ impl EditorApp {
 
     fn inspector(&mut self, ui: &mut Ui) {
         ui.heading("Inspector");
+        #[cfg(feature = "linked-prefabs")]
+        self.linked_prefabs.show(ui, &mut self.editor);
+        if self.editor.game().is_3d() { self.yard_transform(ui); }
+        #[cfg(feature="terrain")]
+        {
+            self.terrain.sync_for_editor(&self.editor);
+            let terrain_slots = usize::from(self.terrain.attached_for_editor(&self.editor));
+            #[cfg(feature="navigation")]
+            let terrain_slots = terrain_slots + usize::from(self.editor.game().is_navigation() && self.editor.admitted_navigation().admitted);
+            self.models.reserve_scene_models(terrain_slots);
+        }
+        #[cfg(feature="models")]
+        self.models.show(ui,&self.editor);
+        #[cfg(feature="terrain")]
+        {
+            let error = if self.models.scene_matches(&self.editor) { self.models.terrain_admission_error() } else { None };
+            self.terrain.document.set_render_admission_error(error);
+            self.terrain.show(ui, &self.editor);
+        }
+        #[cfg(feature="navigation")]
+        self.navigation.show(ui, &mut self.editor, &self.terrain);
+        #[cfg(all(feature="terrain", feature="irradiance-probes"))]
+        self.irradiance.set_terrain_attached(self.terrain.attached_for_editor(&self.editor));
+        #[cfg(feature="irradiance-probes")]
+        self.irradiance.show_with_models(ui,&self.editor,&self.models);
+        #[cfg(feature = "sprites")]
+        self.sprites.show(ui, &self.editor);
+        #[cfg(feature = "project-ui")]
+        if let Some(preview) = &self.project_ui { preview.show(ui); }
+        #[cfg(feature="collect-ui")]
+        if let Some(panel) = &mut self.collect_ui { panel.show(ui, !self.editor.is_playing_mode()); }
+        #[cfg(feature = "animated-models")]
+        if ui.add_enabled(self.editor.game() == crate::game::EditorGame::Arena && self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
+        let count = self.editor.selected_guids().len();
+        if count>0&&self.editor.game().is_3d() {ui.label("Single 3D selection · Esc to clear");}
+        if count > 0 && !self.editor.game().is_3d() {
+            ui.label(format!("{count} selected · Ctrl-click to toggle · Esc to clear"));
+            let enabled = self.editor.can_nudge_selection();
+            ui.horizontal_wrapped(|ui| {
+                for (label, x, y) in [("Move left", -1, 0), ("Move right", 1, 0), ("Move up", 0, 1), ("Move down", 0, -1)] {
+                    if ui.add_enabled(enabled, egui::Button::new(label)).on_hover_text("Move every selected document GUID by one world unit in a single undo entry").clicked() {
+                        self.editor.nudge_selected(FPVec2::new(FP::from_int(x), FP::from_int(y)));
+                    }
+                }
+            });
+            if self.editor.batch_outcome_uncertain() {
+                ui.colored_label(Color32::YELLOW, "Move result unconfirmed. Reconnect to read document and history.");
+            }
+        }
+        if self.editor.previewing().is_some() {
+            ui.weak("Live document inspector · read-only during proposal preview");
+        } else if self.editor.is_viewer() {
+            ui.weak("Replay Viewer · read-only");
+        }
         let mut events: Vec<(Owner, InspEvent)> = Vec::new();
         let mut add: Option<String> = None;
         let mut remove: Option<String> = None;
@@ -392,6 +673,7 @@ impl EditorApp {
         let inspect = self.editor.inspect().cloned();
         let editor = &self.editor;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if !(editor.can_mutate() && editor.previewing().is_none()) { ui.disable(); }
             let types = editor.types();
             match (&selection, &inspect) {
                 (Some(_), Some(ins)) => {
@@ -432,7 +714,7 @@ impl EditorApp {
                     }
                 }
                 (None, _) => {
-                    ui.weak("Select an entity in the hierarchy or click a body in the viewport.");
+                    ui.weak("Select an entity in the hierarchy or click an entity in the viewport.");
                 }
             }
             ui.separator();
@@ -440,7 +722,7 @@ impl EditorApp {
             for (name, value) in editor.singletons() {
                 let Some(ty) = types.get(name) else { continue };
                 let base = egui::Id::new(("singleton", name));
-                egui::CollapsingHeader::new(name).id_salt(base).default_open(false).show(ui, |ui| {
+                egui::CollapsingHeader::new(name).id_salt(base).default_open(editor.game() == crate::game::EditorGame::Arena && name == "Score").show(ui, |ui| {
                     let mut evs = Vec::new();
                     show_component(ui, base, ty.desc(), value, &mut evs);
                     events.extend(evs.into_iter().map(|e| (Owner::Singleton(name.clone()), e)));
@@ -465,24 +747,237 @@ impl EditorApp {
         }
     }
 
+    fn yard_transform(&mut self, ui:&mut Ui) {
+        let target=self.editor.selection().cloned();
+        let reset=self.ui.yard_transform_target!=target;
+        if reset || ui.button("Read 3D transform").clicked() {
+            if let Some(body)=self.editor.inspect().and_then(|inspect|inspect.components.iter().find(|(name,_)|name=="orr_physics3d::Body").map(|(_,value)|value)) {
+                if let Some(Value::Vec3(pos))=body.field("pos") { self.ui.yard_xyz=[orr_reflect::decimal::fp_to_decimal(pos.x),orr_reflect::decimal::fp_to_decimal(pos.y),orr_reflect::decimal::fp_to_decimal(pos.z)]; }
+                if let Some(rot)=body.field("rot") { for (i,key) in ["x","y","z","w"].into_iter().enumerate(){ if let Some(Value::Fixed(v))=rot.field(key){self.ui.yard_quat[i]=orr_reflect::decimal::fp_to_decimal(*v);} } }
+                self.ui.yard_transform_target=target;
+            }
+        }
+        ui.collapsing("Exact 3D transform",|ui|{
+            ui.add_enabled_ui(self.editor.mode()==Mode::Edit && self.editor.can_mutate() && self.editor.selected_guids().len()==1,|ui|{
+                for (i,axis) in ["X","Y","Z"].into_iter().enumerate(){ui.horizontal(|ui|{let label=ui.label(format!("Position {axis}"));ui.add(egui::TextEdit::singleline(&mut self.ui.yard_xyz[i]).id(egui::Id::new(("yard_xyz",i))).hint_text(format!("Position {axis}"))).labelled_by(label.id);});}
+                ui.label("Unit quaternion (x, y, z, w)");
+                for (i,axis) in ["x","y","z","w"].into_iter().enumerate(){ui.horizontal(|ui|{let label=ui.label(format!("Rotation {axis}"));ui.add(egui::TextEdit::singleline(&mut self.ui.yard_quat[i]).id(egui::Id::new(("yard_quat",i))).hint_text(format!("Rotation {axis}"))).labelled_by(label.id);});}
+                if ui.button("Apply XYZ + rotation").clicked(){
+                    let pos:Result<Vec<FP>,_>=self.ui.yard_xyz.iter().map(|v|v.parse()).collect();
+                    let rot:Result<Vec<FP>,_>=self.ui.yard_quat.iter().map(|v|v.parse()).collect();
+                    match (pos,rot){(Ok(p),Ok(q))=>{self.editor.set_yard_transform(orr_fp::FPVec3::new(p[0],p[1],p[2]),[q[0],q[1],q[2],q[3]]);},_=>self.editor.error("3D transform requires exact finite decimal values")}
+                }
+            });
+        });
+    }
+
+    fn yard_viewport(&mut self,ui:&mut Ui){
+        #[cfg(feature="terrain")]
+        self.terrain.sync_for_editor(&self.editor);
+        #[cfg(all(feature="terrain", feature="irradiance-probes"))]
+        self.irradiance.set_terrain_attached(self.terrain.attached_for_editor(&self.editor));
+        #[cfg(feature="irradiance-probes")]
+        {
+            self.irradiance.sync_for_editor(&self.editor);
+            self.irradiance.sync_bake_for_editor(&self.editor,&self.models);
+            if self.irradiance.is_baking() || self.irradiance.is_validating_bake() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+            }
+        }
+        #[cfg(feature="room-project")]
+        if self.editor.game().is_room() {
+            let run=self.editor.snapshot().map(|snapshot|*snapshot.predicted().singleton::<orr_sample::room_game::RoomRun>());
+            ui.horizontal(|ui| {
+                if let Some(run)=run {
+                    ui.label(if run.won!=0 { "Escaped!" } else if run.key_collected!=0 { "Key collected · Find exit and press E" } else { "Exit locked · Find key and press E" });
+                }
+                if ui.add_enabled(self.editor.mode()==Mode::Play,egui::Button::new("Restart room")).clicked() {
+                    self.editor.stop();
+                    if self.editor.mode()==Mode::Edit { self.editor.play(); }
+                    self.ui.take_control=false;
+                }
+            });
+        }
+        let (rect,resp)=if self.editor.game().is_room() {
+            let (rect,_)=ui.allocate_exact_size(ui.available_size(),Sense::hover());
+            (rect,ui.interact(rect,egui::Id::new("room_keyboard_viewport"),Sense::click_and_drag()))
+        } else { ui.allocate_exact_size(ui.available_size(),Sense::click_and_drag()) };
+        if self.editor.game().is_room() {
+            if self.ui.take_control {
+                self.ui.take_control=false;
+                if self.ui.dialog.is_none() && ui.input(|i|i.focused) { resp.request_focus(); self.editor.take_control(0,true); }
+            }
+            let focused=resp.has_focus() && self.ui.dialog.is_none() && ui.input(|i|i.focused && !i.key_pressed(Key::Escape));
+            let keys=ui.input(|i|crate::editor::input::Keys {
+                x:i8::from(i.key_down(Key::D)||i.key_down(Key::ArrowRight))-i8::from(i.key_down(Key::A)||i.key_down(Key::ArrowLeft)),
+                y:i8::from(i.key_down(Key::W)||i.key_down(Key::ArrowUp))-i8::from(i.key_down(Key::S)||i.key_down(Key::ArrowDown)),
+                fire:i.key_down(Key::E),
+            });
+            self.editor.arena_keys(focused,keys);
+            if resp.has_focus() {
+                let controlled=focused && self.editor.input_phase()==crate::editor::input::Phase::Active;
+                ui.memory_mut(|memory|memory.set_focus_lock_filter(resp.id,egui::EventFilter { horizontal_arrows:controlled,vertical_arrows:controlled,..Default::default() }));
+            }
+        }
+        let ppp=ui.ctx().pixels_per_point();
+        let px=(((rect.width()*ppp).round() as u32).clamp(1,8192),((rect.height()*ppp).round() as u32).clamp(1,8192));
+        self.ui.viewport_rect=Some(rect);self.ui.viewport_px=px;
+        if resp.dragged_by(PointerButton::Secondary){let d=resp.drag_delta();self.editor.camera3d.orbit([d.x*ppp,d.y*ppp]);}
+        if resp.dragged_by(PointerButton::Middle){let d=resp.drag_delta();self.editor.camera3d.pan([d.x*ppp,d.y*ppp],px);}
+        if resp.hovered(){let scroll=ui.input(|i|i.smooth_scroll_delta.y);if scroll!=0.0 {self.editor.camera3d.zoom(scroll*0.01);}}
+        if resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
+            if let Some(at) = resp.interact_pointer_pos() {
+                let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
+                #[cfg(feature="terrain")]
+                let consumed = self.terrain.pick(&self.editor, &self.editor.camera3d.camera(), pixel, px);
+                #[cfg(not(feature="terrain"))]
+                let consumed = false;
+                if !consumed { let target = self.editor.pick3d(pixel, px); self.editor.select(target); }
+            }
+        }
+        let selected=if self.editor.yard_rows_coherent(){self.editor.selection().and_then(|t|self.editor.row_of(t)).map(|r|r.entity)}else{None};
+        #[cfg(feature="models")]
+        let placements=self.models.placements(&self.editor);
+        #[cfg(feature="animated-models")]
+        let animated_placements = match self.models.animated_placements(&self.editor) {
+            Ok(placements) => placements,
+            Err(error) => {
+                if let Some(texture) = self.gpu3d.as_ref().and_then(|gpu| gpu.last_texture()) {
+                    ui.painter().image(texture,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);
+                }
+                ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
+                return;
+            }
+        };
+        #[cfg(all(feature="models", feature="animated-models"))]
+        let hidden:Vec<_>=placements.iter().map(|p|p.entity).chain(animated_placements.iter().map(|p|p.entity)).collect();
+        #[cfg(all(feature="models", not(feature="animated-models")))]
+        let hidden:Vec<_>=placements.iter().map(|p|p.entity).collect();
+        #[cfg(not(feature="models"))]
+        let hidden=Vec::new();
+        let list=self.editor.yard_frame().list(&hidden,selected);
+        #[cfg(feature="terrain")]
+        let scene_models: Vec<_> = {
+            #[cfg(feature="navigation")]
+            let model = if self.editor.game().is_navigation() {
+                if self.editor.mode() == Mode::Edit {
+                    self.terrain.viewport_model(&self.editor).or_else(|| self.editor.admitted_navigation().model())
+                } else { self.editor.admitted_navigation().model() }
+            } else { self.terrain.viewport_model(&self.editor) };
+            #[cfg(not(feature="navigation"))]
+            let model = self.terrain.viewport_model(&self.editor);
+            #[allow(unused_mut)]
+            let mut models: Vec<_> = model.into_iter().map(|model| crate::viewport3d::SceneModel { model, instance: Default::default() }).collect();
+            #[cfg(feature="navigation")]
+            if self.editor.game().is_navigation() {
+                if let Some(model) = self.editor.admitted_navigation().overlay_model(self.navigation.route_stale(&self.editor, &self.terrain)) {
+                    models.push(crate::viewport3d::SceneModel { model, instance: Default::default() });
+                }
+            }
+            models
+        };
+        if let Some(rs)=&self.render_state {
+            let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
+            #[cfg(all(feature="animated-models", not(feature="irradiance-probes"), not(feature="terrain")))]
+            let rendered = gpu.render_mixed_post_processed(px,&list,&self.editor.camera3d.camera(),&placements,&animated_placements,self.ui.yard_post_process);
+            #[cfg(all(feature="models", not(feature="animated-models"), not(feature="irradiance-probes"), not(feature="terrain")))]
+            let rendered = gpu.render_post_processed(px,&list,&self.editor.camera3d.camera(),&placements,self.ui.yard_post_process);
+            #[cfg(all(feature="irradiance-probes", not(feature="terrain")))]
+            let rendered = gpu.render_irradiance(px,&list,&self.editor.camera3d.camera(),&placements,
+                #[cfg(feature="animated-models")] &animated_placements,
+                self.ui.yard_post_process,self.irradiance.grid_for_editor(&self.editor));
+            #[cfg(feature="terrain")]
+            let rendered = gpu.render_scene(px, &list, &self.editor.camera3d.camera(), &placements, &scene_models,
+                #[cfg(feature="animated-models")] &animated_placements,
+                self.ui.yard_post_process,
+                #[cfg(feature="irradiance-probes")] self.irradiance.grid_for_editor(&self.editor));
+            #[cfg(not(feature="models"))]
+            let rendered = gpu.render(px,&list,&self.editor.camera3d.camera());
+            #[cfg(feature="models")]
+            if let Err(error) = &rendered {
+                // Unsupported/invalid requests cannot strand the editor in a broken
+                // mode. Keep the admitted policy and working native texture.
+                self.ui.yard_post_process = gpu.gpu().post_process_settings();
+                self.ui.yard_post_process_error = Some(error.clone());
+            }
+            match rendered {
+                Ok(tex)=>{ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}
+                Err(error)=>{if let Some(tex)=gpu.last_texture(){ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);}
+            }
+        } else {
+            ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
+            ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
+        }
+        #[cfg(feature="terrain")]
+        self.terrain.paint_selection(&self.editor, ui.painter(), &self.editor.camera3d.camera(), rect);
+        ui.painter().text(rect.left_top()+egui::vec2(10.0,10.0),egui::Align2::LEFT_TOP,"Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan",egui::FontId::proportional(12.0),Color32::WHITE);
+        if self.editor.previewing().is_some(){ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"3D proposal preview unavailable; displaying live host snapshot",egui::FontId::proportional(14.0),Color32::YELLOW);}
+    }
+
     // ---- viewport ----
 
     fn viewport(&mut self, ui: &mut Ui) {
-        let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        if self.editor.game().is_3d() { self.yard_viewport(ui);return; }
+        let (rect, resp) = if self.editor.game().has_keyboard() {
+            let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+            (rect, ui.interact(rect, egui::Id::new("arena_keyboard_viewport"), Sense::click_and_drag()))
+        } else {
+            ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag())
+        };
+        if self.ui.take_control {
+            self.ui.take_control = false;
+            if self.ui.dialog.is_none() && ui.input(|i| i.focused) {
+                resp.request_focus();
+                self.editor.take_control(self.ui.input_player, true);
+            }
+        }
+        let focused = resp.has_focus() && self.ui.dialog.is_none() && ui.input(|i| i.focused && !i.key_pressed(Key::Escape));
+        let keys = ui.input(|i| crate::editor::input::Keys {
+            x: i8::from(i.key_down(Key::D) || i.key_down(Key::ArrowRight)) - i8::from(i.key_down(Key::A) || i.key_down(Key::ArrowLeft)),
+            y: i8::from(i.key_down(Key::W) || i.key_down(Key::ArrowUp)) - i8::from(i.key_down(Key::S) || i.key_down(Key::ArrowDown)),
+            fire: i.key_down(Key::Space),
+        });
+        if self.editor.game().is_collect() && focused {
+            let edges = ui.input(|i| i.events.iter().filter_map(|event| match event {
+                egui::Event::Key { key:Key::Space, pressed, repeat:false, .. } => Some(*pressed), _ => None,
+            }).collect::<Vec<_>>());
+            for pressed in edges {
+                self.editor.collect_space_event(focused, pressed);
+            }
+        }
+        self.editor.arena_keys(focused, keys);
+        if self.editor.game().has_keyboard() && resp.has_focus() {
+            // Arrow movement belongs to managed gameplay, not egui's focus
+            // navigation. Tab/Escape still release focus normally.
+            let controlled = focused && self.editor.input_phase() == crate::editor::input::Phase::Active;
+            ui.memory_mut(|memory| memory.set_focus_lock_filter(resp.id, egui::EventFilter {
+                horizontal_arrows: controlled, vertical_arrows: controlled, ..Default::default()
+            }));
+        }
+        if focused && self.editor.input_phase() == crate::editor::input::Phase::Active {
+            ui.input_mut(|i| i.events.retain(|event| !matches!(event, egui::Event::Key { key: Key::W | Key::A | Key::S | Key::D | Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight | Key::Space, .. })));
+        }
         let ppp = ui.ctx().pixels_per_point();
         let px = (((rect.width() * ppp).round() as u32).clamp(1, 8192), ((rect.height() * ppp).round() as u32).clamp(1, 8192));
         self.ui.viewport_rect = Some(rect);
         self.ui.viewport_px = px;
         let to_px = |p: Pos2| [(p.x - rect.min.x) * ppp, (p.y - rect.min.y) * ppp];
 
+        #[cfg(feature = "sprites")]
+        self.sprites.update(&mut self.editor);
+
         // Camera: pan with middle or right drag, zoom with the wheel.
         if resp.dragged_by(PointerButton::Middle) || resp.dragged_by(PointerButton::Secondary) {
             let d = resp.drag_delta();
+            #[cfg(feature = "sprites")]
+            if d != egui::Vec2::ZERO { self.sprites.playback.suspend_follow(); }
             self.editor.camera.pan_pixels([d.x * ppp, d.y * ppp], px);
         }
         if resp.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if let (true, Some(at)) = (scroll != 0.0, resp.hover_pos()) {
+                #[cfg(feature = "sprites")]
+                self.sprites.playback.suspend_follow();
                 self.editor.camera.zoom_at((scroll * 0.0015).exp(), to_px(at), px);
             }
         }
@@ -491,15 +986,16 @@ impl EditorApp {
         let previewing = self.editor.previewing().map(str::to_string);
         let live = self.editor.down().is_none();
         // Select and move bodies with the primary button.
-        if live && previewing.is_none() && resp.drag_started_by(PointerButton::Primary) {
+        if self.editor.can_mutate() && previewing.is_none() && self.editor.selected_guids().len() <= 1
+            && !ui.input(|i| i.modifiers.ctrl || i.modifiers.command) && resp.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
                 let world = self.editor.camera.screen_to_world(to_px(origin), px);
                 if let Some(target) = self.editor.pick(world) {
                     let pos = self.editor.body_pos(&target);
                     self.editor.select(Some(target));
-                    if let Some(pos) = pos {
+                    if let Some(pos) = pos.filter(|_| self.editor.movement_owner().is_some()) {
                         self.ui.body_drag = Some(BodyDrag { offset: [pos[0] - world[0], pos[1] - world[1]] });
-                        self.editor.begin_edit("move body");
+                        self.editor.begin_edit("move entity");
                     }
                 }
             }
@@ -509,7 +1005,9 @@ impl EditorApp {
                 let w = self.editor.camera.screen_to_world(to_px(at), px);
                 let p = [w[0] + drag.offset[0], w[1] + drag.offset[1]];
                 if let (Some(x), Some(y)) = (fp_of_f64(f64::from(p[0])), fp_of_f64(f64::from(p[1]))) {
-                    self.editor.set_field(&Owner::Component(BODY.to_string()), "pos", Value::Vec2(FPVec2::new(x, y)));
+                    if let Some(owner) = self.editor.movement_owner() {
+                        self.editor.set_field(&owner, self.editor.game().position_field(), Value::Vec2(FPVec2::new(x, y)));
+                    }
                 }
             }
         }
@@ -520,7 +1018,9 @@ impl EditorApp {
             if let Some(at) = resp.interact_pointer_pos() {
                 let world = self.editor.camera.screen_to_world(to_px(at), px);
                 let hit = self.editor.pick(world);
-                self.editor.select(hit);
+                if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                    if let Some(hit) = hit { self.editor.toggle_selection(hit); }
+                } else { self.editor.select(hit); }
             }
         }
 
@@ -539,17 +1039,19 @@ impl EditorApp {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "viewport needs a GPU (wgpu adapter)", egui::FontId::proportional(14.0), Color32::GRAY);
             }
         }
+        #[cfg(feature = "sprites")]
+        self.sprites.paint(ui, &self.editor, rect, px);
         if !live {
             ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 120));
         }
         let label = match self.editor.timeline() {
-            Some(t) => format!("PLAY  tick {}", t.tick),
+            Some(t) => format!("{}  tick {}", if self.editor.is_viewer() { "REPLAY VIEWER" } else { "PLAY" }, t.tick),
             None => "EDIT".to_string(),
         };
         ui.painter().text(rect.min + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, egui::FontId::monospace(13.0), Color32::from_gray(200));
         if let Some(id) = previewing {
             let font = egui::FontId::monospace(15.0);
-            let text = format!("PREVIEW {id}");
+            let text = format!("PREVIEW {id} · read-only");
             let galley = ui.painter().layout_no_wrap(text, font, Color32::BLACK);
             let box_rect = Rect::from_min_size(rect.min + egui::vec2(8.0, 26.0), galley.size() + egui::vec2(14.0, 6.0));
             ui.painter().rect_filled(box_rect, 3.0, Color32::from_rgb(90, 200, 240));
@@ -597,10 +1099,11 @@ impl EditorApp {
             return;
         };
         ui.horizontal(|ui| {
+            if !(self.editor.down().is_none()) { ui.disable(); }
             if ui.button("\u{23EE}").on_hover_text("Rewind to the first tick").clicked() {
                 self.editor.seek(tl.first_tick);
             }
-            if ui.add_enabled(!tl.playing, egui::Button::new("\u{25B6}")).on_hover_text("Play by the clock (from a rewound tick this branches)").clicked() {
+            if ui.add_enabled(!tl.playing, egui::Button::new("\u{25B6}")).on_hover_text(if self.editor.is_viewer() { "Play recorded ticks only" } else { "Play by the clock (from a rewound tick this branches)" }).clicked() {
                 self.editor.play();
             }
             if ui.add_enabled(tl.playing, egui::Button::new("\u{23F8}")).on_hover_text("Pause").clicked() {
@@ -616,7 +1119,7 @@ impl EditorApp {
                 self.editor.set_speed(speed);
             }
             ui.separator();
-            let can_branch = tl.mode == PlayMode::Viewer || tl.tick < tl.last_tick;
+            let can_branch = !self.editor.is_viewer() && tl.tick < tl.last_tick;
             if ui.add_enabled(can_branch, egui::Button::new("Branch")).on_hover_text("Drop the recorded ticks after the current one").clicked() {
                 self.editor.branch();
             }
@@ -687,6 +1190,12 @@ impl EditorApp {
         });
         if accept && !dialog.text.trim().is_empty() {
             let path = PathBuf::from(dialog.text.trim());
+            #[cfg(feature="terrain")]
+            if self.terrain.document.dirty() {
+                self.editor.error("Save or explicitly discard terrain changes before changing the scene path");
+                self.ui.dialog = Some(dialog);
+                return;
+            }
             let ok = match dialog.kind {
                 DialogKind::Open => self.editor.open_path(&path),
                 DialogKind::SaveAs => self.editor.save_as(&path),
@@ -698,22 +1207,269 @@ impl EditorApp {
         }
     }
 
+    fn poll_remote_capture_request(&mut self) {
+        let mut clear_unrequested = false;
+        if let Some(capture) = self.remote_capture.as_mut() {
+            if !self.editor.screenshot_is_active(capture.request.serial) {
+                self.editor.cancel_screenshot_validation(capture.request.serial);
+                if capture.screenshot_requested && !capture.image_received {
+                    // Keep the old ticket/pass until its matching GPU event is
+                    // consumed; this remains true across a backend restart in
+                    // the same App because the physical renderer is unchanged.
+                    capture.orphaned = true;
+                } else if !capture.screenshot_requested {
+                    clear_unrequested = true;
+                }
+            }
+        }
+        if clear_unrequested {
+            self.remote_capture = None;
+        }
+        if self.remote_capture.is_some() {
+            return;
+        }
+        let Some(request) = self.editor.take_screenshot_request() else { return };
+        if self.shot.is_some() {
+            self.editor.screenshot_complete(request.serial, Err(CaptureError::Unavailable));
+            return;
+        }
+        match self.editor.begin_screenshot_validation(&request) {
+            Ok(()) => {
+                self.remote_capture = Some(RemoteCapture { request, pass: None, screenshot_requested: false, image_received: false, orphaned: false });
+            }
+            Err(error) => self.editor.screenshot_complete(request.serial, Err(error)),
+        }
+    }
+
+    fn process_remote_capture(&mut self, ctx: &egui::Context) {
+        self.reap_capture_encoder(ctx);
+        self.receive_capture_event(ctx);
+        self.request_capture_frame(ctx);
+        if self.remote_capture.as_ref().is_some_and(|capture| !capture.orphaned) || self.encoder.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
+    fn request_capture_frame(&mut self, ctx: &egui::Context) {
+        let Some(capture) = self.remote_capture.as_ref() else { return };
+        if capture.orphaned || capture.pass.is_some() || !self.editor.screenshot_is_active(capture.request.serial) {
+            return;
+        }
+        if self.encoder.is_some() {
+            return;
+        }
+        let serial = capture.request.serial;
+        let request = capture.request.clone();
+        let state = match self.editor.screenshot_capture_ready(serial) {
+            Ok(Some(state)) => state,
+            Ok(None) => return,
+            Err(error) => {
+                self.finish_remote_capture(serial, Err(error));
+                return;
+            }
+        };
+        if !self.ui.pulses.is_empty() || self.editor.previewing().is_some() || self.editor.screenshot_gesture_busy() {
+            return;
+        }
+        let Some(frame_seq) = self.editor.capture_snapshot_seq().filter(|seq| *seq > 0) else { return };
+        let Some(framebuffer) = framebuffer_info(ctx) else {
+            self.finish_remote_capture(serial, Err(CaptureError::Unavailable));
+            return;
+        };
+        let pixels = u64::from(framebuffer.width) * u64::from(framebuffer.height);
+        if framebuffer.width > request.options.max_width
+            || framebuffer.height > request.options.max_height
+            || pixels > MAX_CAPTURE_PIXELS
+            || pixels.saturating_mul(4) > MAX_CAPTURE_RGBA_BYTES as u64
+        {
+            self.finish_remote_capture(serial, Err(CaptureError::Failed));
+            return;
+        }
+        let pass = CapturePass { state, frame_seq, ui_frame: self.frames, framebuffer };
+        if self.editor.capture_view_state() != state || !self.editor.capture_snapshot_matches(state) {
+            self.finish_remote_capture(serial, Err(CaptureError::Stale));
+            return;
+        }
+        if let Err(error) = self.editor.screenshot_begin_capture(serial) {
+            self.finish_remote_capture(serial, Err(error));
+            return;
+        }
+        if let Some(capture) = self.remote_capture.as_mut().filter(|capture| capture.request.serial == serial) {
+            capture.pass = Some(pass);
+            capture.screenshot_requested = true;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(serial)));
+    }
+
+    fn receive_capture_event(&mut self, ctx: &egui::Context) {
+        let Some(capture) = self.remote_capture.as_ref() else { return };
+        if !capture.screenshot_requested || capture.image_received {
+            return;
+        }
+        let serial = capture.request.serial;
+        let Some(pass) = capture.pass else { return };
+        let event = ctx.input(|input| {
+            input.events.iter().find_map(|event| {
+                if screenshot_event_matches(event, pass.framebuffer.viewport, serial) {
+                    match event {
+                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+        });
+        let Some(image) = event else { return };
+        if let Some(capture) = self.remote_capture.as_mut().filter(|capture| capture.request.serial == serial) {
+            capture.image_received = true;
+        }
+        if !self.editor.screenshot_is_active(serial) {
+            self.editor.screenshot_end_capture(serial);
+            self.editor.cancel_screenshot_validation(serial);
+            self.remote_capture = None;
+            return;
+        }
+        if !self.capture_pass_still_current(ctx, pass) {
+            self.editor.screenshot_end_capture(serial);
+            self.finish_remote_capture(serial, Err(CaptureError::Stale));
+            return;
+        }
+        let (Ok(width), Ok(height)) = (u32::try_from(image.width()), u32::try_from(image.height())) else {
+            self.editor.screenshot_end_capture(serial);
+            self.finish_remote_capture(serial, Err(CaptureError::Stale));
+            return;
+        };
+        let pixels = u64::from(width) * u64::from(height);
+        if width != pass.framebuffer.width
+            || height != pass.framebuffer.height
+            || pixels > MAX_CAPTURE_PIXELS
+            || pixels.saturating_mul(4) > MAX_CAPTURE_RGBA_BYTES as u64
+            || image.pixels.len() as u64 != pixels
+        {
+            self.editor.screenshot_end_capture(serial);
+            self.finish_remote_capture(serial, Err(CaptureError::Stale));
+            return;
+        }
+        if let Err(error) = self.editor.screenshot_begin_encoder(serial) {
+            self.editor.screenshot_end_capture(serial);
+            self.finish_remote_capture(serial, Err(error));
+            return;
+        }
+        let handle = std::thread::Builder::new()
+            .name("orr-screenshot-png".into())
+            .spawn(move || encode_png_bounded(&image));
+        match handle {
+            Ok(handle) => self.encoder = Some(EncoderWorker { serial, pass, handle }),
+            Err(_) => {
+                self.editor.screenshot_end_encoder(serial);
+                self.finish_remote_capture(serial, Err(CaptureError::Failed));
+            }
+        }
+    }
+
+    fn reap_capture_encoder(&mut self, ctx: &egui::Context) {
+        if !self.encoder.as_ref().is_some_and(|worker| worker.handle.is_finished()) {
+            return;
+        }
+        let worker = self.encoder.take().expect("finished screenshot worker exists");
+        let result = worker.handle.join().unwrap_or(Err(CaptureError::Failed));
+        if !self.editor.screenshot_is_active(worker.serial) {
+            self.editor.screenshot_end_encoder(worker.serial);
+            self.editor.cancel_screenshot_validation(worker.serial);
+            if self.remote_capture.as_ref().is_some_and(|capture| capture.request.serial == worker.serial) {
+                self.remote_capture = None;
+            }
+            return;
+        }
+        if !self.capture_pass_still_current(ctx, worker.pass) {
+            self.editor.screenshot_end_encoder(worker.serial);
+            self.finish_remote_capture(worker.serial, Err(CaptureError::Stale));
+            return;
+        }
+        match result {
+            Ok(png) => {
+                let image = CapturedImage {
+                    png,
+                    width: worker.pass.framebuffer.width,
+                    height: worker.pass.framebuffer.height,
+                    captured: worker.pass.state,
+                    frame_seq: worker.pass.frame_seq,
+                    ui_frame: worker.pass.ui_frame,
+                };
+                self.editor.cancel_screenshot_validation(worker.serial);
+                // Publish while the just-finished worker still owns the shared
+                // capture permit; release only after its real exit is observed.
+                self.editor.screenshot_complete(worker.serial, Ok(image));
+                self.editor.screenshot_end_encoder(worker.serial);
+                self.remote_capture = None;
+            }
+            Err(error) => {
+                self.editor.screenshot_end_encoder(worker.serial);
+                self.finish_remote_capture(worker.serial, Err(error));
+            }
+        }
+    }
+
+    fn capture_pass_still_current(&self, ctx: &egui::Context, pass: CapturePass) -> bool {
+        let Some(current) = framebuffer_info(ctx) else { return false };
+        same_framebuffer(current, pass.framebuffer)
+            && self.editor.capture_view_state() == pass.state
+            && self.editor.capture_snapshot_seq() == Some(pass.frame_seq)
+            && self.editor.capture_snapshot_matches(pass.state)
+            && self.editor.previewing().is_none()
+            && !self.editor.screenshot_gesture_busy()
+            && self.ui.pulses.is_empty()
+            && self.editor.screenshot_waiting_for().is_none()
+    }
+
+    fn finish_remote_capture(&mut self, serial: u64, result: Result<CapturedImage, CaptureError>) {
+        self.editor.cancel_screenshot_validation(serial);
+        self.editor.screenshot_complete(serial, result);
+        if self.remote_capture.as_ref().is_some_and(|capture| capture.request.serial == serial) {
+            self.remote_capture = None;
+        }
+    }
+
+    fn report_ui_settled(&mut self, ctx: &egui::Context) {
+        if self.ui_settled_reported || !self.editor.has_local_screenshot_owner() || self.render_state.is_none() {
+            return;
+        }
+        if !self.ui.pulses.is_empty() || self.editor.previewing().is_some() || self.editor.screenshot_gesture_busy() {
+            return;
+        }
+        if framebuffer_info(ctx).is_none() || self.editor.screenshot_waiting_for().is_some() {
+            return;
+        }
+        let Some((url, _)) = self.editor.erp_status() else { return };
+        eprintln!("Editor UI settled: {url}");
+        self.ui_settled_reported = true;
+    }
+
     /// `--screenshot`: after N frames ask the window for a screenshot of its
     /// own framebuffer, write the PNG and quit.
     fn screenshot(&mut self, ctx: &egui::Context) {
         let frames = self.frames;
+        let waiting_for = if self.ui.pulses.is_empty() { self.editor.screenshot_waiting_for() } else { Some("agent pulses to expire") };
         let Some(job) = &mut self.shot else { return };
         ctx.request_repaint();
         match job.requested_at {
-            None if frames >= job.frames => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-                job.requested_at = Some(frames);
+            None => match job.ready(frames, ctx.input(|i| i.time), waiting_for) {
+                Ok(true) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                    job.requested_at = Some(frames);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("screenshot failed: {e}");
+                    std::process::exit(2);
+                }
             }
-            None => {}
             Some(at) => {
                 let image = ctx.input(|i| {
                     i.events.iter().find_map(|e| match e {
-                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                        egui::Event::Screenshot { viewport_id, user_data, image }
+                            if *viewport_id == egui::ViewportId::ROOT && user_data.data.is_none() => Some(image.clone()),
                         _ => None,
                     })
                 });
@@ -736,6 +1492,81 @@ impl EditorApp {
     }
 }
 
+fn framebuffer_info(ctx: &egui::Context) -> Option<FramebufferInfo> {
+    let (viewport, inner_rect) = ctx.input(|input| (input.raw.viewport_id, input.raw.viewport().inner_rect));
+    framebuffer_info_from(viewport, inner_rect?, ctx.pixels_per_point())
+}
+
+fn framebuffer_info_from(viewport: egui::ViewportId, rect: Rect, ppp: f32) -> Option<FramebufferInfo> {
+    if viewport != egui::ViewportId::ROOT { return None; }
+    let physical_width = rect.width() * ppp;
+    let physical_height = rect.height() * ppp;
+    if !rect.width().is_finite()
+        || !rect.height().is_finite()
+        || !ppp.is_finite()
+        || !physical_width.is_finite()
+        || !physical_height.is_finite()
+        || rect.width() <= 0.0
+        || rect.height() <= 0.0
+        || ppp <= 0.0
+        || physical_width < 1.0
+        || physical_height < 1.0
+        || physical_width >= u32::MAX as f32
+        || physical_height >= u32::MAX as f32
+    {
+        return None;
+    }
+    Some(FramebufferInfo {
+        viewport,
+        logical_width: rect.width(),
+        logical_height: rect.height(),
+        pixels_per_point: ppp,
+        width: physical_width.round() as u32,
+        height: physical_height.round() as u32,
+    })
+}
+
+fn same_framebuffer(a: FramebufferInfo, b: FramebufferInfo) -> bool {
+    a.viewport == b.viewport
+        && a.width == b.width
+        && a.height == b.height
+        && a.logical_width.to_bits() == b.logical_width.to_bits()
+        && a.logical_height.to_bits() == b.logical_height.to_bits()
+        && a.pixels_per_point.to_bits() == b.pixels_per_point.to_bits()
+}
+
+fn screenshot_event_matches(event: &egui::Event, viewport: egui::ViewportId, serial: u64) -> bool {
+    matches!(event,
+        egui::Event::Screenshot { viewport_id, user_data, .. }
+            if *viewport_id == viewport
+                && user_data.data.as_ref().and_then(|data| data.downcast_ref::<u64>()).copied() == Some(serial)
+    )
+}
+
+fn encode_png_bounded(image: &egui::ColorImage) -> Result<Vec<u8>, CaptureError> {
+    let width = u32::try_from(image.width()).map_err(|_| CaptureError::Failed)?;
+    let height = u32::try_from(image.height()).map_err(|_| CaptureError::Failed)?;
+    let pixels = u64::from(width) * u64::from(height);
+    let rgba_len = usize::try_from(pixels.checked_mul(4).ok_or(CaptureError::Failed)?)
+        .map_err(|_| CaptureError::Failed)?;
+    if width == 0 || height == 0 || pixels > MAX_CAPTURE_PIXELS || rgba_len > MAX_CAPTURE_RGBA_BYTES || image.pixels.len() as u64 != pixels {
+        return Err(CaptureError::Failed);
+    }
+    let mut rgba = Vec::with_capacity(rgba_len);
+    for pixel in &image.pixels {
+        rgba.extend_from_slice(&pixel.to_array());
+    }
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(BoundedPngWriter(&mut png), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder.write_header().map_err(|_| CaptureError::Failed)?;
+    writer.write_image_data(&rgba).map_err(|_| CaptureError::Failed)?;
+    writer.finish().map_err(|_| CaptureError::Failed)?;
+    Ok(png)
+}
+
 /// Writes a `ColorImage` as an RGBA PNG.
 pub fn write_png(path: &std::path::Path, image: &egui::ColorImage) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -746,4 +1577,107 @@ pub fn write_png(path: &std::path::Path, image: &egui::ColorImage) -> Result<(),
     let mut writer = enc.write_header().map_err(|e| e.to_string())?;
     let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
     writer.write_image_data(&bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_capture_keeps_frame_count_behavior() {
+        let mut job = ScreenshotJob::new("unused.png".into(), 30);
+        assert!(!job.ready(29, 0.0, Some("agent pulses")).unwrap());
+        assert!(job.ready(30, 0.0, Some("agent pulses")).unwrap());
+    }
+
+    #[test]
+    fn settle_is_condition_based_and_has_a_deadline() {
+        let mut job = ScreenshotJob::new("unused.png".into(), 30).with_settle();
+        assert!(!job.ready(30, 3.0, Some("agent pulses")).unwrap());
+        assert!(!job.ready(3000, 4.0, Some("model refresh")).unwrap());
+        assert!(job.ready(3001, 4.1, None).unwrap());
+        assert!(job.ready(3002, 13.0, Some("model refresh")).unwrap_err().contains("deadline exceeded waiting for model refresh"));
+    }
+
+    #[test]
+    fn settled_capture_waits_for_actual_pulse_expiry_on_egui_clock() {
+        let mut editor = Editor::open(&crate::editor::default_scene_path()).unwrap();
+        editor.select_named("body_05");
+        editor.sync();
+        assert_eq!(editor.screenshot_waiting_for(), None);
+        let target = editor.selection().unwrap().clone();
+        let mut app = EditorApp::new(editor, None).with_screenshot(ScreenshotJob::new("unused.png".into(), 30).with_settle());
+        app.frames = 30;
+        app.ui.pulses.push(Pulse { target: target.clone(), started: 0.0 });
+        let ctx = egui::Context::default();
+        let draw = |app: &mut EditorApp, now| {
+            let mut output = ctx.run_ui(egui::RawInput { time: Some(now), ..Default::default() }, |ui| {
+                let ctx = ui.ctx();
+                app.start_pulses(ctx.input(|i| i.time));
+                app.screenshot(ctx);
+            });
+            output.textures_delta.clear(); // This clock/command test deliberately has no GPU.
+            output.viewport_output.values().any(|v| v.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Screenshot(_))))
+        };
+        assert!(!draw(&mut app, 0.0));
+        assert!(!draw(&mut app, viewport::PULSE_SECONDS - 0.01));
+        assert_eq!(app.ui.pulses.len(), 1, "waiting must not remove agent activity");
+        // A later edit extends readiness according to its real pulse, not a fixed delay.
+        app.ui.pulses.push(Pulse { target, started: 1.0 });
+        assert!(!draw(&mut app, viewport::PULSE_SECONDS));
+        assert_eq!(app.ui.pulses.len(), 1);
+        assert!(draw(&mut app, 1.0 + viewport::PULSE_SECONDS));
+        assert!(app.ui.pulses.is_empty());
+        assert_eq!(app.shot.as_ref().unwrap().requested_at, Some(30));
+    }
+
+    #[test]
+    fn remote_screenshot_event_requires_its_ticket_and_root_viewport() {
+        let image = std::sync::Arc::new(egui::ColorImage::filled([1, 1], Color32::BLACK));
+        let matching = egui::Event::Screenshot {
+            viewport_id: egui::ViewportId::ROOT,
+            user_data: egui::UserData::new(42_u64),
+            image: image.clone(),
+        };
+        let duplicate = egui::Event::Screenshot {
+            viewport_id: egui::ViewportId::ROOT,
+            user_data: egui::UserData::new(41_u64),
+            image: image.clone(),
+        };
+        let foreign_viewport = egui::Event::Screenshot {
+            viewport_id: egui::ViewportId::from_hash_of("secondary"),
+            user_data: egui::UserData::new(42_u64),
+            image,
+        };
+        assert!(screenshot_event_matches(&matching, egui::ViewportId::ROOT, 42));
+        assert!(!screenshot_event_matches(&duplicate, egui::ViewportId::ROOT, 42));
+        assert!(!screenshot_event_matches(&foreign_viewport, egui::ViewportId::ROOT, 42));
+    }
+
+    #[test]
+    fn physical_framebuffer_identity_invalidates_resize_and_dpi_changes() {
+        let root = egui::ViewportId::ROOT;
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let original = framebuffer_info_from(root, rect, 1.0).unwrap();
+        assert!(same_framebuffer(original, framebuffer_info_from(root, rect, 1.0).unwrap()));
+        assert!(!same_framebuffer(original, framebuffer_info_from(root, Rect::from_min_size(Pos2::ZERO, egui::vec2(801.0, 600.0)), 1.0).unwrap()));
+        assert!(!same_framebuffer(original, framebuffer_info_from(root, rect, 1.25).unwrap()));
+        assert!(framebuffer_info_from(egui::ViewportId::from_hash_of("secondary"), rect, 1.0).is_none());
+    }
+
+    #[test]
+    fn bounded_png_encoder_and_writer_enforce_allocation_limits() {
+        let image = egui::ColorImage::filled([2, 2], Color32::from_rgb(10, 20, 30));
+        let png = encode_png_bounded(&image).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png.len() <= MAX_CAPTURE_RGBA_BYTES);
+
+        let mut output = vec![0; MAX_CAPTURE_RGBA_BYTES];
+        let mut writer = BoundedPngWriter(&mut output);
+        assert!(writer.write_all(b"x").is_err());
+        assert_eq!(writer.0.len(), MAX_CAPTURE_RGBA_BYTES);
+
+        let oversized = egui::ColorImage::filled([1025, 1024], Color32::BLACK);
+        assert_eq!(encode_png_bounded(&oversized), Err(CaptureError::Failed));
+    }
 }

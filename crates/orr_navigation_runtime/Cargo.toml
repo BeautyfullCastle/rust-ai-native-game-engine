@@ -1,0 +1,20 @@
+[package]
+name = "orr_navigation_runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Optional bounded Frame-owned terrain point-navigation state"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+orr_ecs = { path = "../orr_ecs" }
+orr_fp = { path = "../orr_fp" }
+orr_terrain = { path = "../orr_terrain" }
+orr_navigation = { path = "../orr_navigation" }
+bytemuck = { version = "1", features = ["derive"] }

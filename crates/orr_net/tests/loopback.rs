@@ -254,11 +254,17 @@ both!(connect_to_nothing_fails);
 
 fn max_connections_enforced(b: Backend) {
     let cfg = NetConfig { max_connections: 2, connect_timeout: Duration::from_secs(1), ..NetConfig::default() };
-    let s = server(b, cfg.clone());
+    let mut s = server(b, cfg.clone());
     let mut c1 = client(&s, cfg.clone());
     let mut c2 = client(&s, cfg.clone());
     expect_connected(&mut c1);
     expect_connected(&mut c2);
+    // A QUIC client can finish its handshake before the server registers it.
+    // Fill both server-side slots before asking it to reject a third client.
+    let sc1 = expect_connected(&mut s.ep);
+    let sc2 = expect_connected(&mut s.ep);
+    assert_ne!(sc1, sc2);
+    assert_eq!(s.ep.connections().len(), 2);
     let mut c3 = client(&s, cfg);
     let (_, reason) = expect_disconnect(&mut c3, Duration::from_secs(5));
     assert!(matches!(reason, DisconnectReason::ConnectFailed(_)), "{reason:?}");

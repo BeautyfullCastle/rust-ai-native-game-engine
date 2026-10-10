@@ -15,6 +15,7 @@ pub mod input;
 #[cfg(test)]
 mod input_tests;
 pub mod render;
+pub mod render3d;
 #[cfg(test)]
 mod render_tests;
 pub mod schema;

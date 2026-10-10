@@ -1,0 +1,10 @@
+   Compiling orr_terrain_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.57s
+     Running tests/golden.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/golden-d39f94685ede5cf1)
+
+running 1 test
+terrain solid/hole checksums at 60,120,240: [8d551ecfcd815005, 9c8701f6d712c0e7, a7fc4ddbfbedeefe]
+test golden_frame_owned_solid_and_hole_spheres ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

@@ -16,6 +16,9 @@ use crate::server_ep::NetEndpoint;
 pub enum TransportKind {
     Quic,
     Ws,
+    Wss,
+    /// Native WebTransport client; server uses Quic + webtransport.
+    Wt,
 }
 
 impl FromStr for TransportKind {
@@ -24,12 +27,14 @@ impl FromStr for TransportKind {
         match s.to_ascii_lowercase().as_str() {
             "quic" => Ok(TransportKind::Quic),
             "ws" | "websocket" => Ok(TransportKind::Ws),
-            other => Err(format!("unknown transport '{other}' (use quic or ws)")),
+            "wt" | "webtransport" => Ok(TransportKind::Wt),
+            "wss" => Ok(TransportKind::Wss),
+            other => Err(format!("unknown transport '{other}' (use quic, ws, wss or wt)")),
         }
     }
 }
 
-/// How a QUIC client trusts the server certificate. WebSocket ignores it.
+/// Certificate trust. Plain WS ignores it; WSS/WT support PemFile and WebPki.
 #[derive(Clone, Debug)]
 pub enum Trust {
     /// Pin the SHA-256 of the server certificate (what the dev server prints).
@@ -93,11 +98,11 @@ fn condition(ep: Endpoint, sim: Option<SimConditions>) -> Box<dyn Transport + Se
 /// Options of [`connect`].
 #[derive(Clone, Debug)]
 pub struct ConnectOptions {
-    /// `host:port`.
+    /// `host:port`, `wss://` URL for WSS, or `https://` URL for WT.
     pub addr: String,
     pub kind: TransportKind,
     pub trust: Trust,
-    /// TLS name checked against the certificate (`Trust::PemFile`, `WebPki`).
+    /// TLS name override. WSS/WT default to URL host; WT rejects overrides. QUIC keeps localhost.
     pub server_name: String,
     pub sim: Option<SimConditions>,
     pub net: NetConfig,
@@ -105,7 +110,11 @@ pub struct ConnectOptions {
 
 impl ConnectOptions {
     pub fn new(addr: impl Into<String>, kind: TransportKind, trust: Trust) -> Self {
-        Self { addr: addr.into(), kind, trust, server_name: "localhost".into(), sim: None, net: NetConfig::default() }
+        Self {
+            addr: addr.into(), kind, trust,
+            server_name: if matches!(kind, TransportKind::Wss | TransportKind::Wt) { String::new() } else { "localhost".into() },
+            sim: None, net: NetConfig::default(),
+        }
     }
 }
 
@@ -128,8 +137,29 @@ pub fn connect(opts: &ConnectOptions) -> Result<NetLink, String> {
             Endpoint::connect_quic(resolve(&opts.addr)?, &opts.server_name, trust, opts.net.clone())
         }
         TransportKind::Ws => Endpoint::connect_ws(&format!("ws://{}/", opts.addr), opts.net.clone()),
+        TransportKind::Wt => {
+            if !opts.server_name.is_empty() {
+                return Err("WT verifies the URL host; server_name override is unsupported".into());
+            }
+            let trust = match &opts.trust {
+                Trust::WebPki => QuicTrust::WebPki,
+                Trust::PemFile(path) => QuicTrust::PemFile(path.clone()),
+                _ => return Err("WT requires WebPki or PEM CA trust; fingerprint/insecure trust is QUIC-only".into()),
+            };
+            let url = if opts.addr.starts_with("https://") { opts.addr.clone() } else { format!("https://{}/", opts.addr) };
+            Endpoint::connect_wt(&url, trust, opts.net.clone())
+        }
+        TransportKind::Wss => {
+            let trust = match &opts.trust {
+                Trust::WebPki => QuicTrust::WebPki,
+                Trust::PemFile(path) => QuicTrust::PemFile(path.clone()),
+                _ => return Err("WSS requires WebPki or PEM CA trust; fingerprint/insecure trust is QUIC-only".into()),
+            };
+            let url = if opts.addr.starts_with("wss://") { opts.addr.clone() } else { format!("wss://{}/", opts.addr) };
+            Endpoint::connect_wss(&url, (!opts.server_name.is_empty()).then_some(opts.server_name.as_str()), trust, opts.net.clone())
+        }
     }
-    .map_err(|e| format!("connect to {}: {e}", opts.addr))?;
+    .map_err(|e| if matches!(opts.kind, TransportKind::Wss | TransportKind::Wt) { format!("secure transport connect: {e}") } else { format!("connect to {}: {e}", opts.addr) })?;
     let conn = ep.client_conn().ok_or("client endpoint has no connection")?;
     Ok(NetLink::new_boxed(condition(ep, opts.sim), conn))
 }
@@ -204,6 +234,8 @@ pub fn listen(opts: &ListenOptions) -> Result<NetEndpoint, String> {
             Endpoint::listen_quic_with(opts.bind, tls, opts.net.clone(), opts.webtransport)
         }
         TransportKind::Ws => Endpoint::listen_ws(opts.bind, opts.net.clone()),
+        TransportKind::Wt => return Err("WT listen requires TransportKind::Quic with webtransport enabled".into()),
+        TransportKind::Wss => return Err("WSS listen requires TransportKind::Quic with ListenOptions::wss_bind and TLS identity".into()),
     }
     .map_err(|e| format!("listen on {}: {e}", opts.bind))?;
     if let Some(bind) = opts.ws_bind {
@@ -246,6 +278,37 @@ pub fn format_fingerprint(fp: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wss_is_client_only_and_rejects_lax_trust_without_url_disclosure() {
+        assert_eq!("wss".parse::<TransportKind>().unwrap(), TransportKind::Wss);
+        let sentinel = "sensitive-sentinel";
+        for trust in [Trust::InsecureDev, Trust::Fingerprint([0; 32]), Trust::PemFile(PathBuf::from(sentinel))] {
+            let opts = ConnectOptions::new(format!("wss://localhost/{sentinel}?secret={sentinel}"), TransportKind::Wss, trust);
+            let error = match connect(&opts) { Ok(_) => panic!("expected rejection"), Err(e) => e };
+            assert!(!error.contains(sentinel), "{error}");
+        }
+        let error = match listen(&ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Wss)) {
+            Ok(_) => panic!("standalone WSS listener unexpectedly accepted"), Err(e) => e,
+        };
+        assert!(error.contains("wss_bind"));
+        assert!(error.contains("Quic"));
+    }
+
+    #[test]
+    fn wt_is_verified_client_only_without_url_disclosure() {
+        assert_eq!("wt".parse::<TransportKind>().unwrap(), TransportKind::Wt);
+        for trust in [Trust::InsecureDev, Trust::Fingerprint([0; 32]), Trust::PemFile(PathBuf::from("private-sentinel"))] {
+            let opts = ConnectOptions::new("https://localhost/private-sentinel?secret=private-sentinel", TransportKind::Wt, trust);
+            assert!(opts.server_name.is_empty());
+            let error = match connect(&opts) { Ok(_) => panic!("expected rejection"), Err(e) => e };
+            assert!(!error.contains("private-sentinel"));
+        }
+        let mut opts = ConnectOptions::new("https://localhost", TransportKind::Wt, Trust::WebPki);
+        opts.server_name = "override.invalid".into();
+        assert!(connect(&opts).is_err());
+        assert!(listen(&ListenOptions::new("127.0.0.1:0".parse().unwrap(), TransportKind::Wt)).is_err());
+    }
 
     #[test]
     fn fingerprint_roundtrip() {

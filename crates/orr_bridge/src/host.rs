@@ -48,6 +48,32 @@ pub trait SimHost<G: Game> {
         Vec::new()
     }
 
+    /// Number of gameplay commands staged locally for a future simulation
+    /// tick. This includes commands in a host/session's unsent queue, but
+    /// excludes commands already submitted as tick input or sent over the
+    /// network (including prediction/history). Hosts with a local staging
+    /// queue must report its exact size; custom hosts with no such queue may
+    /// keep the default of zero.
+    fn pending_command_count(&self) -> usize {
+        0
+    }
+
+    /// Whether new gameplay input and commands may be admitted now. This is
+    /// independent of pause: a paused but writable host may still queue
+    /// commands. Default: writable.
+    fn accepts_commands(&self) -> bool {
+        true
+    }
+
+    /// Whether every accepted [`ControlOp::Branch`] synchronously enables
+    /// gameplay-command admission. Hosts returning `true` guarantee that
+    /// every Branch is supported and synchronously enables admission (or the
+    /// host was already accepting); ordered ingress may therefore admit
+    /// inputs/commands queued behind Branch. The conservative default is false.
+    fn branch_enables_commands(&self) -> bool {
+        false
+    }
+
     /// Changes whenever a stored frame of an unchanged tick may differ
     /// (a seek or an edit). Cached frames of older epochs are dropped.
     /// Default: the rollback count.
@@ -268,16 +294,19 @@ impl<G: Game> SimHost<G> for PlayHost<G> {
         self.session.player_count()
     }
     fn advance(&mut self, input: G::Input, commands: Vec<G::Command>) -> AdvanceResult<G> {
-        self.session.set_input(self.local_slot, input);
-        for command in commands {
-            self.session.push_command(self.local_slot, command);
-        }
-        if let Some(bot) = self.bot.as_mut() {
-            let tick = self.session.head_tick() + 1;
-            for slot in 0..self.session.player_count() {
-                if PlayerSlot(slot) != self.local_slot {
-                    let input = bot(PlayerSlot(slot), tick);
-                    self.session.set_input(PlayerSlot(slot), input);
+        if self.session.mode() == orr_session::PlayMode::Record {
+            self.session.set_input(self.local_slot, input);
+            for command in commands {
+                // Mode cannot change while this host call runs on the sim thread.
+                let _ = self.session.push_command(self.local_slot, command);
+            }
+            if let Some(bot) = self.bot.as_mut() {
+                let tick = self.session.head_tick() + 1;
+                for slot in 0..self.session.player_count() {
+                    if PlayerSlot(slot) != self.local_slot {
+                        let input = bot(PlayerSlot(slot), tick);
+                        self.session.set_input(PlayerSlot(slot), input);
+                    }
                 }
             }
         }
@@ -327,6 +356,17 @@ impl<G: Game> SimHost<G> for PlayHost<G> {
     }
     fn timeline(&self) -> Option<Timeline> {
         Some(self.session.timeline())
+    }
+    fn pending_command_count(&self) -> usize {
+        self.session.pending_command_count()
+    }
+    fn accepts_commands(&self) -> bool {
+        self.session.mode() == orr_session::PlayMode::Record
+    }
+    fn branch_enables_commands(&self) -> bool {
+        // PlaySession::control(Branch) synchronously and unconditionally
+        // converts a Viewer into Record mode.
+        true
     }
     fn control(&mut self, op: ControlOp) -> HostOutcome<G> {
         let events = self.session.control(op);
