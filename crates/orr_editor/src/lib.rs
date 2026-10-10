@@ -119,3 +119,6 @@ pub mod collect_ui_panel;
 
 #[cfg(feature = "linked-prefabs")]
 pub mod linked_prefab_panel;
+
+#[cfg(feature="room-project")]
+pub mod room_camera_panel;

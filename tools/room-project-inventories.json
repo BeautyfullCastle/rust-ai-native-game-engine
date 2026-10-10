@@ -1,0 +1,320 @@
+{
+  "room-simulation": {
+    "names": [
+      "room_escape_game::tests::admission_rejects_hostile_hidden_fields_missing_roles_and_anonymous_entities",
+      "room_escape_game::tests::canonical_setup_and_initial_only_admission",
+      "room_escape_game::tests::hostile_samples_are_wholly_neutral",
+      "room_escape_game::tests::key_then_exit_requires_separate_edges_and_won_freezes",
+      "room_escape_game::tests::movement_bounds_each_segment_before_casting",
+      "room_escape_game::tests::only_connected_slot_zero_controls_player",
+      "room_escape_game::tests::rejects_noncanonical_and_unbounded_authoring_before_math",
+      "room_escape_game::tests::snapshot_replay_and_initial_frame_restart_match_exact_bytes",
+      "room_escape_game::tests::wall_blocks_key_interaction_and_exit_stays_locked",
+      "room_escape_game::tests::walls_stop_motion_and_diagonal_is_normalized"
+    ],
+    "ignored_names": [],
+    "expected_summary_rows": [
+      [
+        10,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": false
+  },
+  "runtime-input": {
+    "names": [
+      "room_app::tests::focus_synthetic_and_restart_withhold_keys",
+      "room_app::tests::reset_inserts_neutral_tick_before_new_press",
+      "room_app::tests::strict_options"
+    ],
+    "ignored_names": [],
+    "expected_summary_rows": [
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": false
+  },
+  "room-view-contracts": {
+    "names": [
+      "room_view::tests::current_pose_and_collected_key_are_read_only",
+      "room_view::tests::local_translation_rotates_with_body_and_scale_stays_local"
+    ],
+    "ignored_names": [],
+    "expected_summary_rows": [
+      [
+        2,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": false
+  },
+  "project-admission": {
+    "names": [
+      "admission_rejects_player_transform_that_exceeds_bounds_only_after_movement",
+      "admission_rejects_reused_model_aggregate_draw_budget_before_export_smoke",
+      "authored_camera_is_owned_presentation_without_simulation_changes",
+      "authored_camera_routes_paths_and_documents_fail_closed",
+      "authored_scene_rejects_initial_overlap_and_noncanonical_roles",
+      "camera_admission_rejects_nonregular_and_symlink_documents",
+      "owned_real_model_offscreen_readback_is_nonblank_and_read_only",
+      "owned_scene_and_models_survive_removal_of_every_source",
+      "prepared_initial_frame_session_and_simulation_have_exact_parity",
+      "project_manifest_rejects_unsupported_routes_and_escaping_model_paths",
+      "sidecar_rejects_redirected_roots_unknown_guids_missing_packages_and_stale_identity"
+    ],
+    "ignored_names": [
+      "owned_real_model_offscreen_readback_is_nonblank_and_read_only"
+    ],
+    "expected_summary_rows": [
+      [
+        10,
+        0,
+        1
+      ]
+    ],
+    "run_ignored": false
+  },
+  "editor-workflow": {
+    "names": [
+      "authored_camera_viewport_projection_picking_and_invalid_preservation",
+      "authored_xyz_models_save_reopen_real_keyboard_win_restart_and_stop",
+      "external_erp_load_retires_authored_camera_without_reactivation",
+      "legacy_game_routing_remains_explicit_with_room_feature",
+      "production_room_viewport_native_texture_has_imported_uv_model_contribution",
+      "room_camera_projection_restart_and_open_lifecycle_are_coherent"
+    ],
+    "ignored_names": [
+      "authored_camera_viewport_projection_picking_and_invalid_preservation",
+      "production_room_viewport_native_texture_has_imported_uv_model_contribution"
+    ],
+    "expected_summary_rows": [
+      [
+        4,
+        0,
+        2
+      ]
+    ],
+    "run_ignored": false
+  },
+  "camera-schema": {
+    "names": [
+      "room_camera::tests::all_numeric_fields_have_closed_finite_bounds",
+      "room_camera::tests::capture_and_native_use_identical_centered_cameras",
+      "room_camera::tests::every_field_is_required_and_projection_shapes_are_closed",
+      "room_camera::tests::finite_extreme_gestures_saturate_and_wrap",
+      "room_camera::tests::invalid_inputs_and_invalid_sessions_are_noops",
+      "room_camera::tests::orthographic_portrait_fit_and_session_zoom_are_exact",
+      "room_camera::tests::pan_tracks_pixels_for_both_projections_after_resize_and_zoom",
+      "room_camera::tests::projection_decimal_roundtrip_and_strict_variant_fields",
+      "room_camera::tests::strict_json_round_trip_and_size_bound"
+    ],
+    "ignored_names": [],
+    "expected_summary_rows": [
+      [
+        9,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": false
+  },
+  "camera-editor-panel": {
+    "names": [
+      "room_camera_panel::tests::external_exact_byte_edits_and_nonregular_targets_refuse_save",
+      "room_camera_panel::tests::failed_directory_sync_reports_uncertainty_and_advances_baseline_for_retry",
+      "room_camera_panel::tests::failed_pre_persist_preserves_file_baseline_history_and_dirty_state",
+      "room_camera_panel::tests::invalid_candidate_is_atomic_and_history_is_bounded",
+      "room_camera_panel::tests::invalid_widget_apply_preserves_document_and_reset_is_explicit",
+      "room_camera_panel::tests::play_widgets_cannot_apply_or_save_staged_values",
+      "room_camera_panel::tests::save_preserves_undo_and_tracks_saved_baseline",
+      "room_camera_panel::tests::symlink_files_and_replaced_or_symlink_directory_refuse_save",
+      "room_camera_panel::tests::widgets_stage_apply_undo_save_reopen"
+    ],
+    "ignored_names": [],
+    "expected_summary_rows": [
+      [
+        9,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": false
+  },
+  "generated-room-camera": {
+    "names": [
+      "generated_camera_only_edit_preserves_game_identity",
+      "room::generated_room_cli_api_determinism_complete_package_and_no_overwrite",
+      "room::generated_room_real_export_source_hidden_gpu_workflow",
+      "room::room_cli_rejects_progress_game_identity_without_publishing"
+    ],
+    "ignored_names": [
+      "room::generated_room_real_export_source_hidden_gpu_workflow"
+    ],
+    "expected_summary_rows": [
+      [
+        3,
+        0,
+        1
+      ]
+    ],
+    "run_ignored": false
+  },
+  "editor-model-admission": {
+    "names": [
+      "aggregate_assignment_rejection_preserves_cache_document_dirty_and_history",
+      "last_binding_removal_and_forged_hints_preserve_last_good_state",
+      "unknown_guid_open_rejection_preserves_document_cache_and_redo"
+    ],
+    "ignored_names": [],
+    "expected_summary_rows": [
+      [
+        3,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": false
+  },
+  "camera-schema-unified": {
+    "names": [
+      "room_camera::tests::all_numeric_fields_have_closed_finite_bounds",
+      "room_camera::tests::capture_and_native_use_identical_centered_cameras",
+      "room_camera::tests::every_field_is_required_and_projection_shapes_are_closed",
+      "room_camera::tests::finite_extreme_gestures_saturate_and_wrap",
+      "room_camera::tests::invalid_inputs_and_invalid_sessions_are_noops",
+      "room_camera::tests::orthographic_portrait_fit_and_session_zoom_are_exact",
+      "room_camera::tests::pan_tracks_pixels_for_both_projections_after_resize_and_zoom",
+      "room_camera::tests::projection_decimal_roundtrip_and_strict_variant_fields",
+      "room_camera::tests::strict_json_round_trip_and_size_bound"
+    ],
+    "ignored_names": [],
+    "expected_summary_rows": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        9,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": false,
+    "harness_rows": [
+      {
+        "package": "orr_editor",
+        "names": [],
+        "summary": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "package": "orr_sample",
+        "names": [
+          "room_camera::tests::all_numeric_fields_have_closed_finite_bounds",
+          "room_camera::tests::capture_and_native_use_identical_centered_cameras",
+          "room_camera::tests::every_field_is_required_and_projection_shapes_are_closed",
+          "room_camera::tests::finite_extreme_gestures_saturate_and_wrap",
+          "room_camera::tests::invalid_inputs_and_invalid_sessions_are_noops",
+          "room_camera::tests::orthographic_portrait_fit_and_session_zoom_are_exact",
+          "room_camera::tests::pan_tracks_pixels_for_both_projections_after_resize_and_zoom",
+          "room_camera::tests::projection_decimal_roundtrip_and_strict_variant_fields",
+          "room_camera::tests::strict_json_round_trip_and_size_bound"
+        ],
+        "summary": [
+          9,
+          0,
+          0
+        ]
+      }
+    ]
+  },
+  "sample-gpu-readback": {
+    "names": [
+      "owned_real_model_offscreen_readback_is_nonblank_and_read_only"
+    ],
+    "ignored_names": [
+      "owned_real_model_offscreen_readback_is_nonblank_and_read_only"
+    ],
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": true
+  },
+  "editor-gpu-viewport": {
+    "names": [
+      "production_room_viewport_native_texture_has_imported_uv_model_contribution"
+    ],
+    "ignored_names": [
+      "production_room_viewport_native_texture_has_imported_uv_model_contribution"
+    ],
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": true
+  },
+  "production-source-hidden-export": {
+    "names": [
+      "room_real_export_source_hidden_gpu_workflow"
+    ],
+    "ignored_names": [
+      "room_real_export_source_hidden_gpu_workflow"
+    ],
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": true
+  },
+  "camera-editor-gpu": {
+    "names": [
+      "authored_camera_viewport_projection_picking_and_invalid_preservation"
+    ],
+    "ignored_names": [
+      "authored_camera_viewport_projection_picking_and_invalid_preservation"
+    ],
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": true
+  },
+  "camera-generated-source-hidden-export": {
+    "names": [
+      "room::generated_room_real_export_source_hidden_gpu_workflow"
+    ],
+    "ignored_names": [
+      "room::generated_room_real_export_source_hidden_gpu_workflow"
+    ],
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ],
+    "run_ignored": true
+  }
+}
