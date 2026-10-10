@@ -2132,7 +2132,7 @@ impl Editor {
         }
         // Reuse the source-retirement hook for camera-free authored Room UI too.
         #[cfg(feature="room-ui")]
-        { let _ = self.room_ui_source.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |value| Some(value.saturating_add(1))); }
+        { let _ = self.room_ui_source.try_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |value| Some(value.saturating_add(1))); }
         #[cfg(feature="room-project")]
         if self.room_camera.take().is_some() {
             self.room_camera_scene = None;
