@@ -259,8 +259,10 @@ fn capture(h: &Harness<'_, EditorApp>, label: &str) -> Vec<u8> {
 
 fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
     assert_eq!(a.len(), b.len());
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0.iter())
         .filter(|(a, b)| a != b)
         .count()
 }
