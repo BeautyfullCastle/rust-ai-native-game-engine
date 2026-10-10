@@ -32,8 +32,35 @@ continues to consume a fully baked initial frame, never a source file.
   authoring; this slice does not claim art/presentation prefab inheritance.
 - Nested linked sources, player copying, additions/removals of source entities
   or components, generic field overrides, 3D imported props and reimport are
-  outside this slice. Instance detach/removal is not a separate command yet;
-  undoing its creation restores the previous document atomically.
+  outside this slice. Detach removes one source link while keeping its actors;
+  actor/group deletion and relinking are not separate commands in this profile.
+
+## Detach one instance
+
+`Detach instance` in the editor and optional ERP `prefab.detach` convert exactly
+one linked Collect group into independent scene actors. The RPC takes only an
+`instance` root GUID and exact `expected_revision`; it requires `scene_edit`,
+edit mode and a closed transaction. Unknown or already detached instances fail.
+Refresh after another edit before retrying a stale request.
+
+Detach validates the current links, then removes only the selected metadata
+entry in one atomic document operation. It never reads, creates, replaces or
+removes the source file and remains usable when that file is missing. All actor
+GUIDs, ordinals, names, components and current positions (including explicit
+overrides) remain exactly as they were. The baked Frame bytes and checksum do
+not change; other instances retain their complete source provenance. The change
+is dirty and advances revision, with one zero-entity-op history entry. Undo/Redo
+restore/remove the exact link, baseline, digest and override markers together.
+A rejected validation or admission leaves the scene, frame, history and redo
+untouched.
+
+Detached actors can be edited normally. Updating another linked instance does
+not affect them. The source asset remains available for other instances. With
+other links remaining the scene stays `orr.scene/2`; detaching the last link
+naturally saves as `orr.scene/1`, with the same flattened actors. Feature-disabled
+hosts neither advertise nor accept `prefab.detach` and continue to accept the
+legacy scene format. This is deliberately limited to the existing Collect
+profile, without nested, variant, generic 3D or destructive actor-removal rules.
 
 ## Persistence and validation
 
@@ -68,10 +95,19 @@ Required focused coverage includes two independent instances, ordinal allocation
 actual editor widgets, explicit override/revert, source changes and rejected
 structural conflicts, metadata-only undo/redo, failed-operation full-state
 preservation, same-file save/reopen, deleted-source runtime, feature-disabled
-rejection and unchanged scene-1 output. Focused results, independent review,
+rejection and unchanged scene-1 output. Detach additionally requires exact
+entity/frame/checksum preservation for an overridden group beside another
+instance, independent Inspector edits, one-link source updates, unknown/repeated/
+malformed/stale/capability/Play/transaction rejection with nonempty redo, final
+admission failure, last-link legacy persistence and deleted-source Undo/reopen.
+The contracts gate passes the last-detach API’s exact saved scene and checksum
+to a separately compiled feature-disabled host/runtime consumer.
+The mandatory GPU workflow compares every cropped viewport RGBA pixel before
+and after both one-of-two and last-link detach, then exports/runs the saved
+partially detached scene with its source already absent. Focused results, independent review,
 source publication, exact-head required CI and development integration are
 separate checkpoints; this document alone claims none of them passed.
 
-Design references: [Godot scene instances](https://docs.godotengine.org/en/stable/getting_started/step_by_step/instancing.html)
+Design references: [Godot scene instances](https://docs.godotengine.org/en/stable/getting_started/step_by_step/instancing.html), [Unity 6 unpack](https://docs.unity3d.com/6000.0/Documentation/Manual/UnpackingPrefabInstances.html)
 and [Unity 6 instance overrides](https://docs.unity3d.com/6000.0/Documentation/Manual/PrefabInstanceOverrides.html).
 Their broader functionality is not claimed here.
