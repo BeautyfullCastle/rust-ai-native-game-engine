@@ -1,0 +1,39 @@
+name: room-interact-taps
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  room-interact-taps-linux:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install editor link prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: Managed input and genuine headless editor keyboard acceptance
+        run: |
+          set -euo pipefail
+          mkdir -p interact-evidence
+          cargo test --locked --release -p orr_editor --features room-project,collect-dodge --lib editor::input 2>&1 | tee interact-evidence/input.log
+          grep -F 'test editor::input::room_input_tests::room_two_short_taps_wait_for_distinct_observed_press_and_release_ticks ... ok' interact-evidence/input.log
+          grep -F 'test editor::input::room_input_tests::room_tap_before_claim_ack_survives_until_observed_and_late_claim_cancels ... ok' interact-evidence/input.log
+          cargo test --locked --release -p orr_editor --features room-project --test room_project_workflow -- --skip production_room_viewport_native_texture_has_imported_uv_model_contribution --skip authored_camera_viewport_projection_picking_and_invalid_preservation 2>&1 | tee interact-evidence/editor.log
+          grep -F 'test room_same_frame_interact_taps_collect_and_win_with_exact_replay ... ok' interact-evidence/editor.log
+          grep -F 'test room_interact_taps_are_suppressed_by_focus_loss_escape_and_dialog_capture ... ok' interact-evidence/editor.log
+      - name: Default boundary and strict lint
+        run: |
+          set -euo pipefail
+          cargo check --locked --release -p orr_editor
+          cargo test --locked --release -p orr_editor --test deps
+          cargo clippy --locked --release -p orr_editor --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features room-project,collect-dodge --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: room-interact-taps-evidence
+          path: interact-evidence
