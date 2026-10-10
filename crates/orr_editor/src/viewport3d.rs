@@ -158,6 +158,8 @@ type AnimatedGroup = (
 );
 /// Production offscreen renderer, also used verbatim by mandatory GPU tests.
 pub struct Viewport3dGpu {
+    #[cfg(feature = "models")]
+    point_light: orr_render::PointLightSettings,
     target: OffscreenTarget<Wgpu>,
     renderer: Renderer3D<Wgpu>,
     /// Advances only when an accepted frame changes every scene pipeline format.
@@ -172,6 +174,8 @@ pub struct Viewport3dGpu {
 impl Viewport3dGpu {
     pub fn new(rhi: &Wgpu, size: (u32, u32)) -> Self {
         Self {
+            #[cfg(feature = "models")]
+            point_light: orr_render::PointLightSettings::default(),
             target: OffscreenTarget::new(rhi, size.0, size.1, TARGET_FORMAT),
             renderer: Renderer3D::with_settings(rhi.clone(), TARGET_FORMAT, Settings3D::LOW),
             pipeline_generation: 0,
@@ -183,6 +187,12 @@ impl Viewport3dGpu {
             #[cfg(feature = "animated-models")]
             animated_models: Vec::new(),
         }
+    }
+    #[cfg(feature = "models")]
+    pub fn set_point_light_settings(&mut self, settings: orr_render::PointLightSettings) -> Result<(), String> {
+        settings.validate().map_err(|e| e.to_string())?;
+        self.point_light = settings;
+        Ok(())
     }
     pub fn target(&self) -> &OffscreenTarget<Wgpu> {
         &self.target
@@ -496,7 +506,7 @@ impl Viewport3dGpu {
                 size,
                 camera,
                 &list.lighting,
-                &orr_render::PointLightSettings::default(),
+                &self.point_light,
                 list,
                 &prepared,
                 &prepared_skinned,
@@ -509,7 +519,7 @@ impl Viewport3dGpu {
                 size,
                 camera,
                 &list.lighting,
-                &orr_render::PointLightSettings::default(),
+                &self.point_light,
                 list,
                 &prepared,
             )
@@ -636,7 +646,7 @@ impl Viewport3dGpu {
                 },
                 camera,
                 &list.lighting,
-                &orr_render::PointLightSettings::default(),
+                &self.point_light,
                 &mut batches,
             )
             .map_err(|e| e.to_string())
@@ -689,6 +699,10 @@ impl GpuViewport3d {
         self.has_frame.then_some(self.id)
     }
 
+    #[cfg(feature = "models")]
+    pub fn set_point_light_settings(&mut self, settings: orr_render::PointLightSettings) -> Result<(), String> {
+        self.gpu.set_point_light_settings(settings)
+    }
     pub fn gpu(&self) -> &Viewport3dGpu {
         &self.gpu
     }

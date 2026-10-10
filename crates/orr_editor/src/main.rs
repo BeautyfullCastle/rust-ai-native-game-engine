@@ -37,7 +37,7 @@ fn main() {
     #[cfg(feature = "collect-dodge")]
     let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_audio(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }, cfg!(feature="collect-ui"), cfg!(feature="collect-audio")).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
     #[cfg(feature="room-project")]
-    let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open_with_capabilities(root, cfg!(feature="room-ui"), if cfg!(all(feature="room-checkpoint",target_os="linux")) { orr_sample::room_project::CheckpointSupport::MetadataOnly } else { orr_sample::room_project::CheckpointSupport::Disabled }, cfg!(feature="room-character")).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
+    let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open_with_presentation(root, cfg!(feature="room-ui"), if cfg!(all(feature="room-checkpoint",target_os="linux")) { orr_sample::room_project::CheckpointSupport::MetadataOnly } else { orr_sample::room_project::CheckpointSupport::Disabled }, cfg!(feature="room-character"), cfg!(feature="room-lighting")).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
     #[cfg(feature = "navigation-project")]
     let navigation_project = args.navigation_project.as_ref().map(|root| orr_sample::navigation_project::PreparedProject::open(root).unwrap_or_else(|error| fail(&format!("--navigation-project: {error}"))));
     let spec = match &args.connect {
@@ -141,6 +141,11 @@ fn main() {
                     let mut panel = orr_editor::collect_ui_panel::Panel::new_room(ui);
                     panel.bind_room(&app.editor).unwrap_or_else(|error|fail(&error));
                     app.collect_ui = Some(panel);
+                }
+                #[cfg(feature="room-lighting")]
+                if let Some(lighting) = project.take_lighting() {
+                    app.editor.install_room_lighting(lighting.document.clone()).unwrap_or_else(|error|fail(&error));
+                    app.room_lighting = Some(orr_editor::room_lighting_panel::Panel::new_for_editor(lighting, &app.editor).unwrap_or_else(|error|fail(&error)));
                 }
                 if let Some(camera)=project.take_camera() {
                     app.editor.install_room_camera(camera.document.clone()).unwrap_or_else(|error|fail(&error));

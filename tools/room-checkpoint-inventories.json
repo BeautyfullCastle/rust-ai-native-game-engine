@@ -50,6 +50,7 @@
       "tests::host_capability_inventory_is_required_for_asset_reads",
       "tests::install_load_remove_reinstall_identity_and_source_isolation",
       "tests::legacy_manifest_and_entry_sequence_decoders_are_preserved",
+      "tests::lighting_preserves_legacy_positions_and_requires_manifest_objects",
       "tests::project_entry_contract_rejects_ambiguous_unsupported_and_unsafe_metadata",
       "tests::project_schemas_preserve_metadata_and_only_describe_entry_content",
       "tests::project_ui_is_strict_optional_metadata_without_activation_authority",
@@ -64,7 +65,7 @@
       "tests::tamper_and_writer_failure_preserve_authority"
     ],
     "ignored_names": [],
-    "passed": 36,
+    "passed": 37,
     "ignored": 0,
     "expected_summary_rows": [
       [
@@ -73,7 +74,7 @@
         0
       ],
       [
-        36,
+        37,
         0,
         0
       ]

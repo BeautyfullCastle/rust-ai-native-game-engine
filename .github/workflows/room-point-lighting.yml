@@ -1,0 +1,102 @@
+name: room-point-lighting
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  room-point-lighting-linux:
+    # Keep the checked unprivileged bwrap profile; runner migration is tracked by #154.
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      RUST_BACKTRACE: 1
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Mandatory software GPU and export isolation prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers bubblewrap
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -r "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+          test "$(id -u)" -ne 0
+          bwrap --die-with-parent --ro-bind / / -- /bin/true
+          mkdir -p lighting-evidence
+      - name: Default boundaries and legacy lighting-disabled admission
+        run: |
+          set -euo pipefail
+          cargo check --locked --release -p orr_editor -p orr_sample
+          cargo test --locked --release -p orr_editor --test deps
+          cargo test --locked --release -p orr_sample --features room-project,project-create --test room_lighting 2>&1 | tee lighting-evidence/default-off.log
+          grep -F 'test legacy_absent_lighting_stays_off_and_unsupported_consumers_refuse_declaration ... ok' lighting-evidence/default-off.log
+          grep -F 'test lighting_manifest_is_room_only_distinct_contained_and_nonnull ... ok' lighting-evidence/default-off.log
+      - name: Bounded document, admission and actual editor transactions
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --features room-lighting,project-create --lib room_lighting::tests 2>&1 | tee lighting-evidence/document.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' lighting-evidence/document.log
+          cargo test --locked --release -p orr_sample --features room-lighting,project-create --test room_lighting 2>&1 | tee lighting-evidence/admission.log
+          grep -F 'test generated_room_lighting_admission_is_strict_and_presentation_only ... ok' lighting-evidence/admission.log
+          cargo test --locked --release -p orr_editor --features room-lighting,project-create --lib room_lighting_panel::tests 2>&1 | tee lighting-evidence/panel.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' lighting-evidence/panel.log
+          cargo test --locked --release -p orr_editor --features room-lighting,project-create --test room_lighting -- --skip generated_room_lighting_actual_viewport_gpu_static_and_character 2>&1 | tee lighting-evidence/editor.log
+          grep -F 'test generated_room_lighting_actual_editor_apply_undo_redo_save_reopen ... ok' lighting-evidence/editor.log
+          grep -F 'test lighting_source_restart_and_scene_replacement_retire_stale_panel ... ok' lighting-evidence/editor.log
+          grep -F 'test lighting_replacement_before_first_panel_frame_cannot_rebind ... ok' lighting-evidence/editor.log
+      - name: Character, camera, material and checkpoint compatibility
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --features room-lighting,room-character,room-checkpoint,project-create,project-export --test room_lighting --test room_project --test room_character_project --test room_follow_camera --test material_overrides 2>&1 | tee lighting-evidence/mixed-admission.log
+          grep -F 'test generated_room_lighting_admission_is_strict_and_presentation_only ... ok' lighting-evidence/mixed-admission.log
+          cargo test --locked --release -p orr_editor --features room-lighting,room-character,room-checkpoint,project-create --test room_lighting --test room_project_workflow --test room_character_workflow --test material_overrides -- --skip generated_room_lighting_actual_viewport_gpu_static_and_character 2>&1 | tee lighting-evidence/mixed-editor.log
+          grep -F 'test character_room_lighting_actual_editor_lifecycle ... ok' lighting-evidence/mixed-editor.log
+      - name: Mandatory renderer and actual editor GPU lighting proof
+        env:
+          ORR_REQUIRE_GPU: '1'
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_render --features imported-scene,animation --test imported_scene point_light 2>&1 | tee lighting-evidence/renderer-gpu.log
+          grep -F 'test point_light_near_far_range_backface_color_and_zero_match_scalar_oracle ... ok' lighting-evidence/renderer-gpu.log
+          grep -F 'test skinned_point_lighting_follows_deformed_world_positions_normals_and_separate_instances ... ok' lighting-evidence/renderer-gpu.log
+          grep -F 'test procedural_point_light_matches_diffuse_oracle_and_off_preserves_standalone_pixels ... ok' lighting-evidence/renderer-gpu.log
+          export ORR_ROOM_LIGHTING_CAPTURE_DIR="$PWD/lighting-evidence/editor"
+          cargo test --locked --release -p orr_editor --features room-lighting,room-character,room-checkpoint,project-create --test room_lighting -- --ignored --exact generated_room_lighting_actual_viewport_gpu_static_and_character --nocapture 2>&1 | tee lighting-evidence/editor-gpu.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' lighting-evidence/editor-gpu.log
+      - name: Mandatory generated static and character source-hidden read-only export
+        env:
+          ORR_REQUIRE_GPU: '1'
+          ORR_REQUIRE_PROJECT_ISOLATION: '1'
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p orr_sample --features room-lighting,room-character,room-checkpoint,project-create,project-export --bin room_escape --bin orr_export_room
+          export ORR_ROOM_RUNTIME="$PWD/target/release/room_escape"
+          export ORR_ROOM_EXPORTER="$PWD/target/release/orr_export_room"
+          export ORR_ROOM_LIGHTING_CAPTURE_DIR="$PWD/lighting-evidence/export"
+          cargo test --locked --release -p orr_sample --features room-lighting,room-character,room-checkpoint,project-create,project-export --test room_lighting_export -- --ignored --exact room_lighting_source_hidden_readonly_export --nocapture 2>&1 | tee lighting-evidence/export.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' lighting-evidence/export.log
+          test -s lighting-evidence/export/static/captures/off-initial-export.png
+          test -s lighting-evidence/export/static/captures/on-initial-export.png
+          test -s lighting-evidence/export/static/captures/moved-initial-export.png
+          test -s lighting-evidence/export/character/captures/off-initial-export.png
+          test -s lighting-evidence/export/character/captures/on-initial-export.png
+          test -s lighting-evidence/export/character/captures/moved-initial-export.png
+      - name: Strict affected configurations
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --release -p orr_editor -p orr_sample --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-project,project-create --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features room-project,project-create --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-lighting,project-create,project-export --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features room-lighting,project-create --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-lighting,room-character,room-checkpoint,project-create,project-export --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features room-lighting,room-character,room-checkpoint,project-create --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: room-point-lighting-evidence
+          path: lighting-evidence
