@@ -26,7 +26,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-pub const HELP: &str = "room_escape --project PATH [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png]]\nWASD/arrows: world X/Z movement; E: interact; R: restart; Escape: quit.\nMouse left drag: orbit; right/middle drag: pan; wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter.";
+pub const HELP: &str = "room_escape --project PATH [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png]]\nWASD/arrows: world X/Z movement; E: interact; R: restart; Escape: quit.\nMouse left drag: orbit; right/middle drag: pan (disabled for authored follow); wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter.";
 
 #[derive(Debug)]
 pub struct Options {
@@ -175,7 +175,7 @@ pub fn headless(
             project.scene().index(),
             project.models(),
             &match project.camera() {
-                Some(camera) => camera.document.camera(&camera.document.orbit(), size)?,
+                Some(camera) => camera.document.camera_for_frame(&camera.document.orbit(), FrameView::of(sim.frame()), project.scene().index(), size)?,
                 None => room_view::camera(size),
             },
         )?;
@@ -485,7 +485,10 @@ impl App {
             .as_mut()
             .expect("graphics checked before stepping");
         let run = self.sim.frame().singleton::<RoomRun>();
-        g.window.set_title(&format!("Room Escape | key: {} | {} | WASD/arrows move, E interact, R restart, Esc quit | mouse orbit/pan/zoom", run.key_collected, if run.won != 0 { "WON" } else if run.key_collected == 0 { "exit locked" } else { "exit unlocked" }));
+        let navigation = if self.project.camera().is_some_and(|camera| camera.document.follow.is_some()) {
+            "PLAYER follow | mouse orbit/zoom; pan disabled"
+        } else { "mouse orbit/pan/zoom" };
+        g.window.set_title(&format!("Room Escape | key: {} | {} | WASD/arrows move, E interact, R restart, Esc quit | {navigation}", run.key_collected, if run.won != 0 { "WON" } else if run.key_collected == 0 { "exit locked" } else { "exit unlocked" }));
         // The backend reconfigures lost/outdated surfaces and returns Skip.
         if let Acquire::Frame(surface_frame) = g.rhi.acquire_frame(&mut g.surface) {
             let view = g.rhi.frame_view(&surface_frame);
@@ -494,7 +497,7 @@ impl App {
                 self.project.scene().index(),
                 self.project.models(),
                 &match self.project.camera() {
-                    Some(camera) => camera.document.camera(&self.orbit, g.size)?,
+                    Some(camera) => camera.document.camera_for_frame(&self.orbit, FrameView::of(self.sim.frame()), self.project.scene().index(), g.size)?,
                     None => self.orbit.camera(),
                 },
                 orr_render::ImportedSceneTarget {
@@ -1077,6 +1080,66 @@ mod room_ui_app_tests {
         render(app, vec![egui::Event::PointerMoved(point), event(true)]);
         render(app, vec![event(false)]);
     }
+    #[cfg(feature = "room-checkpoint")]
+    #[test]
+    fn native_follow_camera_tracks_actual_restart_and_checkpoint_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("follow room");
+        crate::project_create::create(&crate::project_create::CreateOptions {
+            output: root.clone(),
+            template: crate::project_create::ROOM_UI_TEMPLATE.into(),
+            seed: "native-follow-restart".into(),
+        }).unwrap();
+        let fixed = PreparedProject::open_with_ui(&root, true).unwrap();
+        let (player, _) = FrameView::of(fixed.scene().frame())
+            .iter::<orr_games::room_escape_game::RoomActor>()
+            .find(|(_, actor)| actor.kind == orr_games::room_escape_game::PLAYER).unwrap();
+        let mut declared = fixed.camera().unwrap().document.clone();
+        declared.schema = 2;
+        declared.follow = Some(crate::room_camera::Follow {
+            player: fixed.scene().index().guid(player).unwrap().to_string(),
+            offset: [0.25, 1.0, -0.5],
+        });
+        std::fs::write(root.join("room.camera.json"), declared.to_bytes().unwrap()).unwrap();
+        let prepared = PreparedProject::open_with_ui(&root, true).unwrap();
+        assert_eq!(prepared.scene().frame().to_bytes(), fixed.scene().frame().to_bytes());
+        let mut app = App::new(prepared).unwrap();
+        // All restart/checkpoint poses below use the admitted project; no source
+        // re-open or profile store is permitted by this CPU fixture.
+        std::fs::remove_dir_all(&root).unwrap();
+        let camera = |app: &App| declared.camera_for_frame(
+            &app.orbit, FrameView::of(app.sim.frame()), app.project.scene().index(), (800,600)
+        ).unwrap();
+        let initial = app.sim.frame().to_bytes();
+        let initial_camera = camera(&app);
+        click(&mut app, "play");
+        for _ in 0..12 {
+            app.step_authoritative(RoomInput { move_x: 1, ..RoomInput::default() });
+        }
+        assert_ne!(camera(&app).target, initial_camera.target);
+        let moved = app.sim.frame().to_bytes();
+        declared.orbit_delta(&mut app.orbit, [35.0, -12.0]);
+        declared.zoom(&mut app.orbit, 1.0);
+        assert_ne!(camera(&app), initial_camera);
+        assert_eq!(app.sim.frame().to_bytes(), moved);
+        // Execute the production key-only restore policy, not a fabricated Frame
+        // or an ordinary initial-scene simulation mislabeled as a checkpoint.
+        let restored = crate::room_checkpoint::restore(&app.project, true).unwrap();
+        let fixed_restored = crate::room_checkpoint::restore(&fixed, true).unwrap();
+        assert_eq!(restored.frame().to_bytes(), fixed_restored.frame().to_bytes());
+        assert_eq!(restored.frame().singleton::<RoomRun>().key_collected, 1);
+        assert_eq!(restored.frame().singleton::<RoomRun>().won, 0);
+        app.sim = restored;
+        app.orbit = declared.orbit();
+        let checkpoint_bytes = app.sim.frame().to_bytes();
+        assert_eq!(camera(&app), initial_camera);
+        assert_eq!(app.sim.frame().to_bytes(), checkpoint_bytes);
+        app.apply_ui_action(Action::Restart).unwrap();
+        assert_eq!(app.sim.frame().to_bytes(), initial);
+        assert_eq!(camera(&app), initial_camera);
+        assert_eq!(app.keys.sample(), RoomInput::default());
+    }
+
     #[test]
     fn native_app_widget_restart_uses_owned_frame_camera_and_neutral_controls() {
         let temp = tempfile::tempdir().unwrap();

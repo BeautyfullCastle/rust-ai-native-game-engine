@@ -190,6 +190,27 @@ fn ws_url(url: &str, token: Option<&str>) -> String {
     format!("{url}{sep}client={USER_CLIENT}")
 }
 
+/// Reconnect keeps Room's bounded regular-file admission rather than reading an
+/// arbitrarily large file or opening a FIFO through the generic local path.
+#[cfg(feature = "room-project")]
+fn read_room_restart_scene(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let limit = orr_sample::room_project::MAX_SCENE_BYTES;
+    let before = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if before.file_type().is_symlink() || !before.is_file() || before.len() > limit {
+        return Err(format!("{} must be a regular Room scene within {limit} bytes", path.display()));
+    }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(format!("{} must be a regular Room scene within {limit} bytes", path.display()));
+    }
+    let mut text = String::new();
+    file.take(limit + 1).read_to_string(&mut text).map_err(|e| e.to_string())?;
+    if text.len() as u64 > limit { return Err(format!("Room scene exceeds {limit} bytes")); }
+    Ok(text)
+}
+
 impl Backend {
     /// Starts the host thread or attaches to the host, and opens both channels.
     pub fn connect(spec: &HostSpec) -> Result<Backend, String> {
@@ -199,6 +220,11 @@ impl Backend {
                 Self::connect_local(spec, scene, text, EditorGame::PhysGame, listen, *debug_hooks)
             }
             HostSpec::LocalGame { scene, game, listen, debug_hooks } => {
+                #[cfg(feature = "room-project")]
+                if game.is_room() {
+                    let text = read_room_restart_scene(scene)?;
+                    return Self::connect_local(spec, scene, text, *game, listen, *debug_hooks);
+                }
                 let text = std::fs::read_to_string(scene).map_err(|e| format!("cannot read {}: {e}", scene.display()))?;
                 Self::connect_local(spec, scene, text, *game, listen, *debug_hooks)
             }
@@ -220,7 +246,10 @@ impl Backend {
             }
             #[cfg(feature = "room-project")]
             HostSpec::PreparedRoom { scene, text, listen, debug_hooks } => {
-                Self::connect_local(spec,scene,text.clone(),EditorGame::RoomEscape,listen,*debug_hooks)
+                // Preserve admitted bytes for first startup, but re-open the
+                // saved scene on reconnect, as PreparedArena/Collect already do.
+                let restart = HostSpec::LocalGame { scene:scene.clone(),game:EditorGame::RoomEscape,listen:listen.clone(),debug_hooks:*debug_hooks };
+                Self::connect_local(&restart,scene,text.clone(),EditorGame::RoomEscape,listen,*debug_hooks)
             }
             #[cfg(feature = "navigation-project")]
             HostSpec::PreparedNavigation { project_root, scene, text, reload, listen, debug_hooks, .. } => {

@@ -548,7 +548,23 @@ mod linux {
         result
     }
 
-    fn lock(directory: &File) -> Result<File, String> {
+    // Closing one descriptor is insufficient if an unrelated process launch
+    // inherited the same open file description before exec. Keep ownership
+    // private and explicitly release this commit's lock when its scope ends.
+    struct SettingsLock {
+        file: File,
+    }
+
+    impl Drop for SettingsLock {
+        fn drop(&mut self) {
+            // Best effort, like File's close: never panic during unwinding or
+            // change an already determined publication/durability outcome.
+            // The owned File still closes normally if unlocking fails.
+            let _ = fs::flock(&self.file, FlockOperation::Unlock);
+        }
+    }
+
+    fn lock(directory: &File) -> Result<SettingsLock, String> {
         let old = stat_regular(directory, LOCK_NAME)?;
         if old.as_ref().is_some_and(|stat| stat.st_mode & 0o200 == 0) {
             return Err("settings lock is read-only".into());
@@ -581,7 +597,7 @@ mod linux {
             format!("settings are locked or locking is unavailable: {failure}")
         })?;
         // Never remove or replace this inode, including on failure.
-        Ok(file)
+        Ok(SettingsLock { file })
     }
 
     struct Stage<'a> {
@@ -702,7 +718,7 @@ mod linux {
             }
             let named_lock = stat_regular(&directory, LOCK_NAME)?
                 .ok_or("settings lock disappeared before publication")?;
-            if !same_file(&named_lock, &fs::fstat(&_lock).map_err(error)?) {
+            if !same_file(&named_lock, &fs::fstat(&_lock.file).map_err(error)?) {
                 return Err("settings lock changed before publication".into());
             }
             checkpoint("primary-rename")?;

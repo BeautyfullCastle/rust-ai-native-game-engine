@@ -404,7 +404,7 @@ fn wss_pem_file_trust_and_expired_certificate_rejection() {
     std::fs::remove_dir_all(expired_dir).unwrap();
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum MockResponse {
     StallTls,
     SlowHttp,
@@ -413,11 +413,50 @@ enum MockResponse {
     NoProtocol,
 }
 
+// Each delayed phase is below the budget, but together they exceed it. The
+// original 250 ms / 160 ms fixture left only 90 ms for TLS and scheduling.
+// Preserve the cumulative-deadline oracle while giving real loopback TLS room.
+const CONNECT_BUDGET: Duration = Duration::from_secs(1);
+const PHASE_DELAY: Duration = Duration::from_millis(650);
+const STALL_DELAY: Duration = Duration::from_secs(4);
+
+#[derive(Debug, PartialEq)]
+enum MockPhase {
+    TcpAccepted,
+    TlsAccepted,
+    HttpRequestStarted,
+    Failed(&'static str, String),
+}
+
+async fn observe_http_start<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut tokio::io::BufReader<S>,
+    phases: &mpsc::Sender<MockPhase>,
+) -> bool {
+    use tokio::io::AsyncBufReadExt;
+    // Observe decrypted request bytes without consuming them: tungstenite must
+    // still validate the original complete request in the cumulative case.
+    match stream.fill_buf().await {
+        Ok(bytes) if !bytes.is_empty() => {
+            let _ = phases.send(MockPhase::HttpRequestStarted);
+            true
+        }
+        result => {
+            let error = match result {
+                Ok(_) => "EOF before HTTP request".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            let _ = phases.send(MockPhase::Failed("HTTP request", error));
+            false
+        }
+    }
+}
+
 struct MockServer {
     addr: SocketAddr,
     cert: Vec<u8>,
     alpn: mpsc::Receiver<Option<Vec<u8>>>,
     request: mpsc::Receiver<Vec<u8>>,
+    phases: mpsc::Receiver<MockPhase>,
 }
 
 /// A tiny external TLS peer for timeout and malicious-server-response tests.
@@ -437,6 +476,7 @@ fn mock_tls_server(mode: MockResponse) -> MockServer {
     let (addr_tx, addr_rx) = mpsc::channel();
     let (alpn_tx, alpn_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
+    let (phase_tx, phase_rx) = mpsc::channel();
 
     thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -446,26 +486,44 @@ fn mock_tls_server(mode: MockResponse) -> MockServer {
         rt.block_on(async move {
             let listener = tokio::net::TcpListener::bind(loopback()).await.unwrap();
             addr_tx.send(listener.local_addr().unwrap()).unwrap();
-            let Ok((stream, _)) = listener.accept().await else { return };
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(error) => {
+                    let _ = phase_tx.send(MockPhase::Failed("TCP accept", error.to_string()));
+                    return;
+                }
+            };
+            let _ = phase_tx.send(MockPhase::TcpAccepted);
             if matches!(mode, MockResponse::StallTls) {
-                tokio::time::sleep(Duration::from_millis(1500)).await;
+                tokio::time::sleep(STALL_DELAY).await;
                 drop(stream);
                 return;
             }
             if matches!(mode, MockResponse::CumulativeDelay) {
-                tokio::time::sleep(Duration::from_millis(160)).await;
+                tokio::time::sleep(PHASE_DELAY).await;
             }
 
-            let Ok(mut stream) = acceptor.accept(stream).await else { return };
+            let mut stream = match acceptor.accept(stream).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let _ = phase_tx.send(MockPhase::Failed("TLS accept", error.to_string()));
+                    return;
+                }
+            };
+            let _ = phase_tx.send(MockPhase::TlsAccepted);
             let _ = alpn_tx.send(stream.get_ref().1.alpn_protocol().map(|protocol| protocol.to_vec()));
             match mode {
                 MockResponse::StallTls => unreachable!(),
                 MockResponse::SlowHttp => {
-                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    if !observe_http_start(&mut stream, &phase_tx).await { return; }
+                    tokio::time::sleep(STALL_DELAY).await;
                 }
                 MockResponse::CumulativeDelay => {
                     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
-                    tokio::time::sleep(Duration::from_millis(160)).await;
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    if !observe_http_start(&mut stream, &phase_tx).await { return; }
+                    tokio::time::sleep(PHASE_DELAY).await;
                     #[allow(clippy::result_large_err)] // tungstenite callback requires this error type
                     let callback = |_request: &Request, mut response: Response| {
                         response.headers_mut().insert(
@@ -523,6 +581,7 @@ fn mock_tls_server(mode: MockResponse) -> MockServer {
         cert,
         alpn: alpn_rx,
         request: request_rx,
+        phases: phase_rx,
     }
 }
 
@@ -537,19 +596,22 @@ fn assert_http11_alpn(alpn: &mpsc::Receiver<Option<Vec<u8>>>) {
 
 fn timeout_cfg() -> NetConfig {
     NetConfig {
-        connect_timeout: Duration::from_millis(250),
+        connect_timeout: CONNECT_BUDGET,
         ..NetConfig::default()
     }
 }
 
 #[test]
 fn wss_tls_and_http_handshakes_share_the_connect_timeout() {
+    assert!(PHASE_DELAY < CONNECT_BUDGET);
+    assert!(PHASE_DELAY + PHASE_DELAY > CONNECT_BUDGET);
+    assert!(STALL_DELAY > CONNECT_BUDGET);
     for mode in [
         MockResponse::StallTls,
         MockResponse::SlowHttp,
         MockResponse::CumulativeDelay,
     ] {
-        let MockServer { addr, cert, alpn, .. } = mock_tls_server(mode);
+        let MockServer { addr, cert, alpn, phases, .. } = mock_tls_server(mode);
         // Match the IPv4 listener so localhost's IPv6 fallback cannot consume the timeout budget.
         let target = url("127.0.0.1", addr, "/timeout");
         let mut client = Endpoint::connect_wss(
@@ -559,20 +621,39 @@ fn wss_tls_and_http_handshakes_share_the_connect_timeout() {
             timeout_cfg(),
         )
         .unwrap();
-        let error = connect_failed(&mut client);
-        assert!(
-            error.contains("timed out"),
-            "expected timeout, got {error:?}"
-        );
-        if !matches!(mode, MockResponse::StallTls) {
-            assert_http11_alpn(&alpn);
+        let outcome = terminal(&mut client);
+        let expected = if matches!(mode, MockResponse::StallTls) {
+            &[MockPhase::TcpAccepted][..]
+        } else {
+            &[MockPhase::TcpAccepted, MockPhase::TlsAccepted, MockPhase::HttpRequestStarted][..]
+        };
+        for phase in expected {
+            let observed = phases.recv_timeout(Duration::from_secs(3));
+            assert!(
+                observed.as_ref() == Ok(phase),
+                "{mode:?}: expected phase {phase:?}, got {observed:?}; client: {outcome:?}"
+            );
         }
+        if !matches!(mode, MockResponse::StallTls) {
+            let observed = alpn.recv_timeout(Duration::from_secs(3));
+            assert_eq!(
+                observed.as_ref().map(|protocol| protocol.as_deref()),
+                Ok(Some(b"http/1.1".as_slice())),
+                "{mode:?}: TLS ALPN observation failed; client: {outcome:?}"
+            );
+        }
+        assert!(
+            matches!(&outcome, Event::Disconnected {
+                reason: DisconnectReason::ConnectFailed(error), ..
+            } if error.contains("timed out")),
+            "{mode:?}: expected shared-budget timeout, got {outcome:?}"
+        );
     }
 }
 
 #[test]
 fn wss_errors_do_not_leak_server_or_url_secrets() {
-    let MockServer { addr, cert, alpn, request: request_rx } = mock_tls_server(MockResponse::ReflectError);
+    let MockServer { addr, cert, alpn, request: request_rx, .. } = mock_tls_server(MockResponse::ReflectError);
     let path_secret = "wss_path_secret_71a3";
     let query_secret = "wss_query_secret_28bf";
     let url = url(
@@ -602,7 +683,7 @@ fn wss_errors_do_not_leak_server_or_url_secrets() {
 
 #[test]
 fn wss_requires_server_to_select_the_native_subprotocol() {
-    let MockServer { addr, cert, alpn, request: request_rx } = mock_tls_server(MockResponse::NoProtocol);
+    let MockServer { addr, cert, alpn, request: request_rx, .. } = mock_tls_server(MockResponse::NoProtocol);
     let mut client = Endpoint::connect_wss(
         &url("127.0.0.1", addr, "/no-subprotocol"),
         Some("localhost"),

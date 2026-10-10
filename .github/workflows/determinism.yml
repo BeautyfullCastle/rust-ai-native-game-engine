@@ -558,12 +558,15 @@ jobs:
           bwrap --ro-bind / / -- /bin/true
           mkdir -p "$ORR_PLAYER_SETTINGS_CAPTURE_DIR"
           cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --list > "$RUNNER_TEMP/player-settings-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 108
-          test "$(grep -cE '^player_settings::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 28
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 111
+          test "$(grep -cE '^player_settings::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 31
+          grep -Fx 'player_settings::tests::commit_releases_lock_before_unrelated_pre_exec_child_exits: test' "$RUNNER_TEMP/player-settings-library-list.txt"
+          grep -Fx 'player_settings::tests::failed_commits_release_lock_before_unrelated_pre_exec_child_exits: test' "$RUNNER_TEMP/player-settings-library-list.txt"
+          grep -Fx 'player_settings::tests::unwound_commit_releases_lock_before_unrelated_pre_exec_child_exits: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           grep -Fx 'app::player_settings_tests::persisted_widgets_mouse_fire_restart_match_inproc_threaded_and_effective_inputs: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           grep -Fx 'app::player_settings_tests::saved_mouse_binding_never_leaks_queued_apply_click_or_stale_dpi_layout: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/player-settings-library.log"
-          grep -F 'test result: ok. 108 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/player-settings-library.log"
+          grep -F 'test result: ok. 111 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/player-settings-library.log"
           if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested|without source hiding|source_hiding=false|software GPU unavailable' "$RUNNER_TEMP/player-settings-library.log"; then exit 1; fi
           for specification in player_settings_cli:6 player_settings_lifecycle:3 player_settings_ui:1; do
             target=${specification%:*}
@@ -618,10 +621,12 @@ jobs:
           test "$(uname -m)" = x86_64
           test "$(id -u)" -ne 0
           cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --list > "$RUNNER_TEMP/new-arena-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 64
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 66
           test "$(grep -cE '^project_create::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 14
+          grep -Fx 'project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists: test' "$RUNNER_TEMP/new-arena-library-list.txt"
+          grep -Fx 'project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly: test' "$RUNNER_TEMP/new-arena-library-list.txt"
           cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-library.log"
-          grep -F 'test result: ok. 64 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-library.log"
+          grep -F 'test result: ok. 66 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-library.log"
           cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --list > "$RUNNER_TEMP/new-arena-cli-list.txt"
           test "$(grep -cE '^[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-cli-list.txt")" -eq 6
           cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-cli.log"
@@ -721,7 +726,7 @@ jobs:
           selection=()
           check_count sample-library 63 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_count package 34 cargo test --locked --release -p orr_package --lib
+          check_count package 36 cargo test --locked --release -p orr_package --lib
           check_count editor-collect-library 4 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --lib collect
           selection=(--skip collect_actual_editor_gpu_edit_save_play_reopen)
           check_count editor-collect-cpu 2 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --test collect_dodge
@@ -836,7 +841,7 @@ jobs:
           }
 
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_library package 34 0 cargo test --locked --release -p orr_package --lib
+          check_library package 36 0 cargo test --locked --release -p orr_package --lib
           for name in \
             project_identity::tests::canonical_roundtrip \
             project_identity::tests::rejects_duplicate_unknown_missing_null_and_invalid_types \
@@ -857,7 +862,7 @@ jobs:
           PYDISABLED
 
           check_library library 89 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib
-          check_library joint-library 147 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export,player-settings --lib
+          check_library joint-library 150 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export,player-settings --lib
           name=game_progress::tests::stable_nonblocking_lock_and_reread_before_merge
           cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib "$name" -- --exact --list > "$RUNNER_TEMP/collect-progress-barrier-list.txt"
           test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-barrier-list.txt")" -eq 1
@@ -1249,6 +1254,8 @@ jobs:
           cat > "$ROOT/expected-inventories.json" <<'JSONINVENTORY'
           {
             "creator": [
+              "project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists",
+              "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
               "project_create::tests::ui_template_requires_explicit_compiled_ui_before_creating_stage",
               "project_create::tests::reproducible_creation_uses_real_install_and_admission",
               "project_create::tests::different_seed_changes_only_authored_namespace_and_provenance",
@@ -1286,6 +1293,8 @@ jobs:
               "missing_duplicate_unknown_and_malformed_cli_arguments_do_not_publish"
             ],
             "combined-library": [
+              "project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists",
+              "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
               "arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device",
               "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
@@ -1505,10 +1514,10 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
+          check_result creator 21 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
           check_result collect-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --test new_arena_cli
           check_result arena-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli
-          check_result combined-library 108 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
+          check_result combined-library 110 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
         env:
           ORR_NEW_COLLECT_EVIDENCE: /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin exact Collect creator runtime exporter and progress harness
@@ -1709,6 +1718,8 @@ jobs:
               "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
               "arena_input::menu_tests::explicit_pause_never_synthesizes_remapped_system_action",
               "arena_input::menu_tests::replacement_validates_both_adapters_before_mutation_and_retains_capture_focus",
+              "authored_ui::room_profile_tests::room_profile_is_explicit_and_collect_default_stays_closed",
+              "authored_ui::room_profile_tests::room_schema_rejects_cross_bindings_unknown_duplicate_and_bad_geometry",
               "authored_ui::tests::boundaries_are_inclusive",
               "authored_ui::tests::default_round_trip_and_complete_vocabulary",
               "authored_ui::tests::rejects_duplicate_fields_including_null_and_tags",
@@ -1858,11 +1869,13 @@ jobs:
               "project_identity::tests::rejects_unsupported_schema_and_profiles",
               "project_identity::tests::room_checkpoint_identity_roundtrip_and_fork_preserve_profile",
               "tests::ancestor_links_and_reserved_manifest_subtrees_are_rejected",
+              "tests::bounded_project_file_reads_cannot_bypass_install_or_package_capabilities",
               "tests::bounds_reject_before_large_reads_and_graph_walks",
               "tests::candidate_dependencies_are_transitive_and_pruned",
               "tests::canonical_paths_check_root_and_each_existing_component",
               "tests::checked_install_injected_failures_keep_old_lock",
               "tests::checked_install_requires_both_exact_locks_and_keeps_callback_failures_atomic",
+              "tests::collect_audio_metadata_is_optional_closed_and_noncolliding",
               "tests::competing_writer_cannot_modify_authority",
               "tests::dependency_conflict_cycle_and_failure_preserve_lock",
               "tests::digest_ignores_json_layout_and_source_location",
@@ -1928,10 +1941,10 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-library 137 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
+          check_result ui-library 139 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
           check_result editor-panel 6 0 cargo test --locked --release -p orr_editor --no-default-features --features collect-ui --lib collect_ui_panel
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_result package 34 0 cargo test --locked --release -p orr_package --lib
+          check_result package 36 0 cargo test --locked --release -p orr_package --lib
         env:
           ORR_COLLECT_UI_EVIDENCE: /tmp/orr-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin separate no-UI runtime UI tools and exact libtest
@@ -2016,7 +2029,7 @@ jobs:
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
           assert names('pinned-library-list.txt') == expected['ui-library']
-          assert len(names('pinned-library-list.txt')) == 139
+          assert len(names('pinned-library-list.txt')) == 141
           assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
           PYHOOKS
         env:
@@ -2115,6 +2128,10 @@ jobs:
           cat > "$ROOT/expected-inventories.json" <<'JSONINVENTORY'
           {
             "ui-creator-library": [
+              "authored_ui::room_profile_tests::room_profile_is_explicit_and_collect_default_stays_closed",
+              "authored_ui::room_profile_tests::room_schema_rejects_cross_bindings_unknown_duplicate_and_bad_geometry",
+              "project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists",
+              "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
               "app::game_ui_tests::repeated_local_restart_discards_bridge_view_audio_and_input_history",
               "app::project_ui_tests::authored_widgets_restart_inproc_from_admitted_frame_and_replay_identically",
               "app::project_ui_tests::authored_widgets_restart_threaded_without_old_input_or_view_mailboxes",
@@ -2285,6 +2302,8 @@ jobs:
               "missing_duplicate_unknown_and_malformed_cli_arguments_do_not_publish"
             ],
             "non-ui-creator": [
+              "project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists",
+              "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
               "project_create::tests::collect::collect_corrupted_package_aborts_owned_transaction",
               "project_create::tests::collect::collect_creation_identity_is_explicit_reproducible_and_copy_stable",
               "project_create::tests::collect::collect_existing_output_and_special_parents_are_preserved",
@@ -2314,6 +2333,8 @@ jobs:
               "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
               "arena_input::menu_tests::explicit_pause_never_synthesizes_remapped_system_action",
               "arena_input::menu_tests::replacement_validates_both_adapters_before_mutation_and_retains_capture_focus",
+              "authored_ui::room_profile_tests::room_profile_is_explicit_and_collect_default_stays_closed",
+              "authored_ui::room_profile_tests::room_schema_rejects_cross_bindings_unknown_duplicate_and_bad_geometry",
               "authored_ui::tests::boundaries_are_inclusive",
               "authored_ui::tests::default_round_trip_and_complete_vocabulary",
               "authored_ui::tests::rejects_duplicate_fields_including_null_and_tags",
@@ -2461,9 +2482,9 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-creator-library 158 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
+          check_result ui-creator-library 162 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
           check_result ui-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --test new_arena_cli
-          check_result non-ui-creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
+          check_result non-ui-creator 21 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
         env:
           ORR_NEW_COLLECT_UI_EVIDENCE: /tmp/orr-new-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin separate UI creator runtime exporter and matching libtest
@@ -2548,7 +2569,7 @@ jobs:
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
           assert names('pinned-library-list.txt') == expected['minimal-ui-progress-library']
-          assert len(names('pinned-library-list.txt')) == 112
+          assert len(names('pinned-library-list.txt')) == 114
           assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
           PYHOOKS
         env:
@@ -2686,11 +2707,13 @@ jobs:
                 "project_identity::tests::rejects_unsupported_schema_and_profiles",
                 "project_identity::tests::room_checkpoint_identity_roundtrip_and_fork_preserve_profile",
                 "tests::ancestor_links_and_reserved_manifest_subtrees_are_rejected",
+                "tests::bounded_project_file_reads_cannot_bypass_install_or_package_capabilities",
                 "tests::bounds_reject_before_large_reads_and_graph_walks",
                 "tests::candidate_dependencies_are_transitive_and_pruned",
                 "tests::canonical_paths_check_root_and_each_existing_component",
                 "tests::checked_install_injected_failures_keep_old_lock",
                 "tests::checked_install_requires_both_exact_locks_and_keeps_callback_failures_atomic",
+                "tests::collect_audio_metadata_is_optional_closed_and_noncolliding",
                 "tests::competing_writer_cannot_modify_authority",
                 "tests::dependency_conflict_cycle_and_failure_preserve_lock",
                 "tests::digest_ignores_json_layout_and_source_location",
@@ -2714,7 +2737,7 @@ jobs:
                 "tests::tamper_and_writer_failure_preserve_authority"
               ],
               "ignored_names": [],
-              "passed": 34,
+              "passed": 36,
               "ignored": 0,
               "children": 1,
               "features": [],
@@ -2725,7 +2748,7 @@ jobs:
                   0
                 ],
                 [
-                  34,
+                  36,
                   0,
                   0
                 ]
@@ -2741,6 +2764,8 @@ jobs:
                 "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
                 "arena_input::menu_tests::explicit_pause_never_synthesizes_remapped_system_action",
                 "arena_input::menu_tests::replacement_validates_both_adapters_before_mutation_and_retains_capture_focus",
+                "authored_ui::room_profile_tests::room_profile_is_explicit_and_collect_default_stays_closed",
+                "authored_ui::room_profile_tests::room_schema_rejects_cross_bindings_unknown_duplicate_and_bad_geometry",
                 "authored_ui::tests::boundaries_are_inclusive",
                 "authored_ui::tests::default_round_trip_and_complete_vocabulary",
                 "authored_ui::tests::rejects_duplicate_fields_including_null_and_tags",
@@ -2890,7 +2915,7 @@ jobs:
                 "game_progress::tests::concurrent_process_child",
                 "image_reimport::tests::reimport_real_pixels_export_relocates_with_sources_hidden_and_read_only"
               ],
-              "passed": 148,
+              "passed": 150,
               "ignored": 3,
               "children": 2,
               "features": [
@@ -2911,7 +2936,7 @@ jobs:
                   0
                 ],
                 [
-                  148,
+                  150,
                   0,
                   3
                 ]

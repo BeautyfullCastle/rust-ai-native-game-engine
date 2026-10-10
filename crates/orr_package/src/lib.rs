@@ -205,9 +205,6 @@ pub enum ProjectGame {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectEntry {
-    /// Optional Room-only state-selected character clip document.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
-    pub character: Option<String>,
     /// Optional Room-only presentation camera document.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
     pub camera: Option<String>,
@@ -234,6 +231,10 @@ pub struct ProjectEntry {
     /// Optional Collect-only, presentation-only audio document.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
     pub audio: Option<String>,
+    /// Optional Room-only state-selected character clip document.
+    /// Keep additive fields last to preserve the legacy sequence decoder's positions.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub character: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1917,6 +1918,10 @@ mod tests {
         }
         let entry_sequence = r#"["room.camera.json","room-escape-v1","room.yaml"]"#;
         let expected: ProjectEntry = serde_json::from_str(entry_sequence).unwrap();
+        assert_eq!(expected.camera.as_deref(), Some("room.camera.json"));
+        assert_eq!(expected.game, ProjectGame::RoomEscapeV1);
+        assert_eq!(expected.scene, "room.yaml");
+        assert_eq!(expected.character, None);
         // Preserve decoding even when separate runtime validation rejects a
         // legacy launch combination; wire hardening is conditional on schema 4.
         for schema in [1, 2, 3] {
