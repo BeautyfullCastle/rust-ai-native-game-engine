@@ -97,10 +97,11 @@ class RoomProjectGateTests(unittest.TestCase):
         self.assertEqual(INVENTORIES['generated-room-camera']['expected_summary_rows'], [[3, 0, 1]])
         self.assertEqual(INVENTORIES['camera-schema-unified']['harness_rows'], [
             {'package': 'orr_editor', 'names': [], 'summary': [0, 0, 0]},
-            {'package': 'orr_sample', 'names': INVENTORIES['camera-schema']['names'], 'summary': [9, 0, 0]}])
+            {'package': 'orr_sample', 'names': INVENTORIES['camera-schema']['names'], 'summary': [13, 0, 0]}])
 
     def test_room_view_character_scope_is_explicit_and_cannot_hide_default_growth(self):
-        default = ''.join(f'    #[test]\n    fn {name.rsplit("::", 1)[1]}() {{}}\n'
+        default = ''.join('    #[test]\n' + ('    #[ignore = "explicit studio GPU"]\n' if name in INVENTORIES['room-view-contracts']['ignored_names'] else '')
+                          + f'    fn {name.rsplit("::", 1)[1]}() {{}}\n'
                           for name in INVENTORIES['room-view-contracts']['names'])
         character = ''.join('        #[test]\n' + ('        #[ignore = "software GPU"]\n' if index == 2 else '')
                             + f'        fn {name.rsplit("::", 1)[1]}() {{}}\n'
@@ -121,6 +122,7 @@ class RoomProjectGateTests(unittest.TestCase):
             'unrelated unguarded nested module': valid.replace('    ' + guard, '    mod unrelated {\n        #[test]\n        fn unexpected_nested_default() {}\n    }\n    ' + guard),
             'extra nested test': valid.replace('mod character {', 'mod character {\n        #[test]\n        fn unexpected_character() {}'),
             'missing GPU ignore': valid.replace('        #[ignore = "software GPU"]\n', ''),
+            'missing studio GPU ignore': valid.replace('    #[ignore = "explicit studio GPU"]\n', ''),
             'comment guard decoy': '// ' + guard + '\n// mod character {\n' + valid.replace(guard, ''),
             'literal guard decoy': 'const DECOY: &str = r#"' + guard + '\nmod character {"#;\n' + valid.replace(guard, ''),
         }
@@ -149,7 +151,7 @@ class RoomProjectGateTests(unittest.TestCase):
                 for invalid in bad:
                     with self.assertRaises(AssertionError): gate.check_log(expected, 'result', invalid)
 
-    def test_unified_zero_is_bound_to_editor_with_sample_nine_mandatory(self):
+    def test_unified_zero_is_bound_to_editor_with_sample_thirteen_mandatory(self):
         expected = INVENTORIES['camera-schema-unified']
         for mode in ('list', 'ignored', 'result'):
             valid = unified_log(mode)
@@ -160,12 +162,33 @@ class RoomProjectGateTests(unittest.TestCase):
                    'test outside ... ok\n' + valid, valid + '\n Running tests/unknown.rs (/tmp/unknown-abc)\n']
             if mode != 'ignored':
                 bad.extend([valid.replace(expected['names'][0], 'wrong_name', 1),
-                            valid.replace('9 passed;', '0 passed;'),
-                            valid.replace('0 passed;', '9 passed;', 1)] if mode == 'result' else [valid.replace(expected['names'][0], 'wrong_name', 1)])
+                            valid.replace('13 passed;', '0 passed;'),
+                            valid.replace('0 passed;', '13 passed;', 1)] if mode == 'result' else [valid.replace(expected['names'][0], 'wrong_name', 1)])
             if mode == 'result':
                 bad.append(valid.replace('test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n', ''))
             for invalid in bad:
                 with self.assertRaises(AssertionError): gate.check_log(expected, mode, invalid)
+
+    def test_each_camera_identity_is_required_in_list_and_result(self):
+        # Exercise every identity, including the additive follow-camera tests.
+        for lane in ('camera-schema', 'camera-schema-unified', 'camera-editor-panel'):
+            expected = INVENTORIES[lane]
+            for mode in ('list', 'result'):
+                valid = unified_log(mode) if 'harness_rows' in expected else (
+                    log_for(expected) if mode == 'result' else
+                    ''.join(name + ': test\n' for name in expected['names']))
+                gate.check_log(expected, mode, valid)
+                for name in expected['names']:
+                    with self.subTest(lane=lane, mode=mode, missing=name):
+                        missing = '\n'.join(line for line in valid.splitlines() if name not in line) + '\n'
+                        self.assertNotEqual(missing, valid)
+                        with self.assertRaises(AssertionError):
+                            gate.check_log(expected, mode, missing)
+                        if mode == 'result':
+                            ignored = valid.replace('test ' + name + ' ... ok', 'test ' + name + ' ... ignored')
+                            self.assertNotEqual(ignored, valid)
+                            with self.assertRaises(AssertionError):
+                                gate.check_log(expected, mode, ignored)
 
     def test_camera_capture_pixels_dimensions_and_exact_preservation(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,0 +1,170 @@
+# Orrery room-escape-3d-v1 closed starter; seed namespaces authored GUIDs only.
+# Original Orrery imported-scene fixtures: CC0-1.0
+#
+# The static foreground geometry, background geometry, grid textures, and
+# Python authoring script were created specifically for Orrery's imported-scene
+# composition example in October 2026 by the OpenAI coding assistant under the
+# repository user's task authorization. No third-party meshes or textures were
+# downloaded or copied, and no image-generation service was used.
+#
+# To the extent copyright applies, foreground.glb, background.glb and generate.py
+# are dedicated to the public domain under CC0 1.0 Universal:
+# https://creativecommons.org/publicdomain/zero/1.0/
+#
+# Reproduce from the repository root, with Python 3 (standard library only):
+#   python3 assets/imported_scene_demo/generate.py
+#
+# The checked-in GLBs contain indexed triangle geometry, authored face normals,
+# UVs and embedded original 8x8 opaque PNG textures. The background is a wall and
+# floor; the foreground is a low crossbar and left post. The animated strip is
+# from the separate assets/animation_demo package and retains its own license.
+#
+# The authoring script runs only on request. Neither the content-package installer
+# nor lit_imported_scene executes this script. The running example loads all mesh
+# and texture data through Project::read_asset from installed package snapshots.
+schema: orr.scene/1
+singletons:
+  RoomEscapeV1::Run: {}
+  orr_physics3d::PhysicsState:
+    config:
+      gravity: [0, -10, 0]
+      dt: 0.01666
+      baumgarte: 0.2
+      linear_slop: 0.01
+      contact_margin: 0.02
+      restitution_threshold: 1
+      max_correction_speed: 6
+      max_linear_speed: 500
+      max_angular_speed: 60
+      velocity_iterations: 1
+      substeps: 8
+      sleep_ticks: 30
+      sleep_linear_speed: 0.05
+      sleep_angular_speed: 0.05
+entities:
+  e_88c5863e77f28fed0166d7d100000001:
+    RoomEscapeV1::Actor: { kind: 1, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [-1, 0.5, -1]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: kinematic
+    orr_physics3d::Collider:
+      shape: { kind: sphere, radius: 0.4 }
+      restitution: 0
+      friction: 0.5
+      layer: 2
+      mask: 0
+  e_88c5863e77f28fed0166d7d100000002:
+    RoomEscapeV1::Actor: { kind: 2, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [0, 0.5, -1]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: sphere, radius: 0.2 }
+      restitution: 0
+      friction: 0.5
+      layer: 2
+      mask: 0
+  e_88c5863e77f28fed0166d7d100000003:
+    RoomEscapeV1::Actor: { kind: 3, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [2, 0.5, -1]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: sphere, radius: 0.5 }
+      restitution: 0
+      friction: 0.5
+      layer: 2
+      mask: 0
+  e_88c5863e77f28fed0166d7d100000004:
+    RoomEscapeV1::Actor: { kind: 4, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [0, 0.5, 5]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [5, 1, 0.25] }
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 0
+  e_88c5863e77f28fed0166d7d100000005:
+    RoomEscapeV1::Actor: { kind: 4, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [-5, 0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.25, 1, 5] }
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 0
+  e_88c5863e77f28fed0166d7d100000006:
+    RoomEscapeV1::Actor: { kind: 4, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [0, 0.5, -5]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [5, 1, 0.25] }
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 0
+  e_88c5863e77f28fed0166d7d100000007:
+    RoomEscapeV1::Actor: { kind: 4, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [5, 0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.25, 1, 5] }
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 0

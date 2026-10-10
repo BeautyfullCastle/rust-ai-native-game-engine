@@ -106,6 +106,8 @@ pub use orr_games::room_escape_game as room_game;
 
 #[cfg(feature = "room-project")]
 pub mod room_view;
+#[cfg(feature = "room-project")]
+pub mod room_studio;
 
 #[cfg(feature = "room-project")]
 pub mod room_app;

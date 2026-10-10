@@ -1,0 +1,12 @@
+{
+  "schema": 2,
+  "engine": "^0.0.1",
+  "entry": {
+    "game": "room-escape-v1",
+    "scene": "room.scene.yaml",
+    "models": "room.models.json",
+    "camera": "room.camera.json",
+    "character": "room.character.json",
+    "lighting": "room.lighting.json"
+  }
+}

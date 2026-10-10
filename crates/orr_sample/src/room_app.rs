@@ -26,10 +26,11 @@ use winit::{
     window::{Window, WindowId},
 };
 
-pub const HELP: &str = "room_escape --project PATH [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png]]\nWASD/arrows: world X/Z movement; E: interact; R: restart; Escape: quit.\nMouse left drag: orbit; right/middle drag: pan (disabled for authored follow); wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter.";
+pub const HELP: &str = "room_escape --project PATH [--studio] [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png]]\nWASD/arrows: world X/Z movement; E: interact; R: restart; Escape: quit.\nMouse left drag: orbit; right/middle drag: pan (disabled for authored follow); wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter. --studio opts into directional shadows, HDR/ACES, subtle bloom and decorative room materials (requires HDR-capable GPU).";
 
 #[derive(Debug)]
 pub struct Options {
+    pub studio: bool,
     pub project: PathBuf,
     pub headless: bool,
     pub ticks: u32,
@@ -38,6 +39,7 @@ pub struct Options {
 }
 impl Options {
     pub fn parse(args: Vec<String>) -> Result<Self, String> {
+        let mut studio = false;
         let mut project = None;
         let mut headless = false;
         let mut ticks = 0;
@@ -56,6 +58,7 @@ impl Options {
                     ))
                 }
                 "--headless" => headless = true,
+                "--studio" => studio = true,
                 "--ticks" => {
                     ticks = args
                         .next()
@@ -102,6 +105,7 @@ impl Options {
             return Err("--ticks, --hold and --capture require --headless".into());
         }
         Ok(Self {
+            studio,
             project: project.ok_or("--project is required; no fallback room is created")?,
             headless,
             ticks,
@@ -128,14 +132,15 @@ pub fn run(options: Options) -> Result<(), String> {
         cfg!(feature = "room-lighting"),
     )?;
     if options.headless {
-        headless(
+        headless_with_look(
             &project,
             options.ticks,
             options.held,
             options.capture.as_deref(),
+            options.studio,
         )
     } else {
-        run_window(project)
+        run_window_with_look(project, options.studio)
     }
 }
 pub fn headless(
@@ -143,6 +148,16 @@ pub fn headless(
     ticks: u32,
     held: RoomInput,
     capture: Option<&Path>,
+) -> Result<(), String> {
+    headless_with_look(project, ticks, held, capture, false)
+}
+
+pub fn headless_with_look(
+    project: &PreparedProject,
+    ticks: u32,
+    held: RoomInput,
+    capture: Option<&Path>,
+    studio: bool,
 ) -> Result<(), String> {
     if ticks > 6000 {
         return Err("--ticks must be between 0 and 6000".into());
@@ -170,7 +185,7 @@ pub fn headless(
         }
         let gpu = Wgpu::headless(WgpuOptions::default())?;
         let size = (1024, 768);
-        let mut renderer = RoomRenderer::new(&gpu, size, project.models())?;
+        let mut renderer = RoomRenderer::new_with_look(&gpu, size, project.models(), room_view::TARGET_FORMAT, studio)?;
         renderer.set_point_light_settings(project.point_light_settings())?;
         renderer.render(
             FrameView::of(sim.frame()),
@@ -325,6 +340,7 @@ enum CheckpointAction {
     Quit,
 }
 struct App {
+    studio: bool,
     #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
     checkpoint: Option<crate::room_checkpoint::CheckpointSession>,
     #[cfg(feature = "room-ui")]
@@ -672,7 +688,7 @@ impl ApplicationHandler for App {
             )?;
             let format = rhi.surface_format(&surface);
             let mut renderer =
-                RoomRenderer::new_with_format(&rhi, size, self.project.models(), format)?;
+                RoomRenderer::new_with_look(&rhi, size, self.project.models(), format, self.studio)?;
             renderer.set_point_light_settings(self.project.point_light_settings())?;
             Ok::<_, String>(Graphics {
                 window,
@@ -905,6 +921,7 @@ impl App {
             })
             .transpose()?;
         Ok(Self {
+            studio: false,
             #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
             checkpoint: None,
             #[cfg(feature = "room-ui")]
@@ -930,6 +947,10 @@ impl App {
     }
 }
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
+    run_window_with_look(project, false)
+}
+
+fn run_window_with_look(project: PreparedProject, studio: bool) -> Result<(), String> {
     // Metadata admission is intentionally available to non-persisting tooling;
     // it must not grant support to this public standalone consuming route.
     #[cfg(not(all(feature = "room-checkpoint", target_os = "linux")))]
@@ -937,6 +958,7 @@ pub fn run_window(project: PreparedProject) -> Result<(), String> {
         return Err("Room checkpoint runtime requires the Linux room-checkpoint consumer".into());
     }
     let mut app = App::new(project)?;
+    app.studio = studio;
     #[cfg(all(feature = "room-checkpoint", target_os = "linux"))]
     {
         app.checkpoint = crate::room_checkpoint::CheckpointSession::open(&app.project);
@@ -973,6 +995,9 @@ mod tests {
             "left,right,up,interact",
         ]))
         .unwrap();
+        assert!(!options.studio);
+        assert!(Options::parse(args(&["--project", "x", "--studio"])).unwrap().studio);
+        assert!(Options::parse(args(&["--project", "x", "--studio", "--studio"])).is_err());
         assert_eq!(options.ticks, 0);
         assert_eq!(options.held.move_x, 0);
         assert_eq!(options.held.move_z, -1);

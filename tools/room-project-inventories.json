@@ -41,14 +41,17 @@
   "room-view-contracts": {
     "names": [
       "room_view::tests::current_pose_and_collected_key_are_read_only",
-      "room_view::tests::local_translation_rotates_with_body_and_scale_stays_local"
+      "room_view::tests::local_translation_rotates_with_body_and_scale_stays_local",
+      "room_view::tests::studio_gpu_shadows_hdr_bloom_and_legacy_capture"
     ],
-    "ignored_names": [],
+    "ignored_names": [
+      "room_view::tests::studio_gpu_shadows_hdr_bloom_and_legacy_capture"
+    ],
     "expected_summary_rows": [
       [
         2,
         0,
-        0
+        1
       ]
     ],
     "run_ignored": false
@@ -107,16 +110,20 @@
       "room_camera::tests::capture_and_native_use_identical_centered_cameras",
       "room_camera::tests::every_field_is_required_and_projection_shapes_are_closed",
       "room_camera::tests::finite_extreme_gestures_saturate_and_wrap",
+      "room_camera::tests::follow_binding_checks_exact_entity_generation_player_body_and_raw_bounds",
+      "room_camera::tests::follow_camera_tracks_authoritative_frames_without_mutation_or_history",
       "room_camera::tests::invalid_inputs_and_invalid_sessions_are_noops",
       "room_camera::tests::orthographic_portrait_fit_and_session_zoom_are_exact",
       "room_camera::tests::pan_tracks_pixels_for_both_projections_after_resize_and_zoom",
       "room_camera::tests::projection_decimal_roundtrip_and_strict_variant_fields",
+      "room_camera::tests::schema_one_bytes_and_fixed_camera_behavior_are_unchanged",
+      "room_camera::tests::schema_two_follow_roundtrips_and_rejects_non_object_shapes",
       "room_camera::tests::strict_json_round_trip_and_size_bound"
     ],
     "ignored_names": [],
     "expected_summary_rows": [
       [
-        9,
+        13,
         0,
         0
       ]
@@ -125,9 +132,11 @@
   },
   "camera-editor-panel": {
     "names": [
+      "room_camera_panel::tests::checked_apply_and_source_retirement_preserve_panel_history",
       "room_camera_panel::tests::external_exact_byte_edits_and_nonregular_targets_refuse_save",
       "room_camera_panel::tests::failed_directory_sync_reports_uncertainty_and_advances_baseline_for_retry",
       "room_camera_panel::tests::failed_pre_persist_preserves_file_baseline_history_and_dirty_state",
+      "room_camera_panel::tests::follow_widgets_apply_redo_save_and_reopen",
       "room_camera_panel::tests::invalid_candidate_is_atomic_and_history_is_bounded",
       "room_camera_panel::tests::invalid_widget_apply_preserves_document_and_reset_is_explicit",
       "room_camera_panel::tests::play_widgets_cannot_apply_or_save_staged_values",
@@ -138,7 +147,7 @@
     "ignored_names": [],
     "expected_summary_rows": [
       [
-        9,
+        11,
         0,
         0
       ]
@@ -186,10 +195,14 @@
       "room_camera::tests::capture_and_native_use_identical_centered_cameras",
       "room_camera::tests::every_field_is_required_and_projection_shapes_are_closed",
       "room_camera::tests::finite_extreme_gestures_saturate_and_wrap",
+      "room_camera::tests::follow_binding_checks_exact_entity_generation_player_body_and_raw_bounds",
+      "room_camera::tests::follow_camera_tracks_authoritative_frames_without_mutation_or_history",
       "room_camera::tests::invalid_inputs_and_invalid_sessions_are_noops",
       "room_camera::tests::orthographic_portrait_fit_and_session_zoom_are_exact",
       "room_camera::tests::pan_tracks_pixels_for_both_projections_after_resize_and_zoom",
       "room_camera::tests::projection_decimal_roundtrip_and_strict_variant_fields",
+      "room_camera::tests::schema_one_bytes_and_fixed_camera_behavior_are_unchanged",
+      "room_camera::tests::schema_two_follow_roundtrips_and_rejects_non_object_shapes",
       "room_camera::tests::strict_json_round_trip_and_size_bound"
     ],
     "ignored_names": [],
@@ -200,7 +213,7 @@
         0
       ],
       [
-        9,
+        13,
         0,
         0
       ]
@@ -223,14 +236,18 @@
           "room_camera::tests::capture_and_native_use_identical_centered_cameras",
           "room_camera::tests::every_field_is_required_and_projection_shapes_are_closed",
           "room_camera::tests::finite_extreme_gestures_saturate_and_wrap",
+          "room_camera::tests::follow_binding_checks_exact_entity_generation_player_body_and_raw_bounds",
+          "room_camera::tests::follow_camera_tracks_authoritative_frames_without_mutation_or_history",
           "room_camera::tests::invalid_inputs_and_invalid_sessions_are_noops",
           "room_camera::tests::orthographic_portrait_fit_and_session_zoom_are_exact",
           "room_camera::tests::pan_tracks_pixels_for_both_projections_after_resize_and_zoom",
           "room_camera::tests::projection_decimal_roundtrip_and_strict_variant_fields",
+          "room_camera::tests::schema_one_bytes_and_fixed_camera_behavior_are_unchanged",
+          "room_camera::tests::schema_two_follow_roundtrips_and_rejects_non_object_shapes",
           "room_camera::tests::strict_json_round_trip_and_size_bound"
         ],
         "summary": [
-          9,
+          13,
           0,
           0
         ]
