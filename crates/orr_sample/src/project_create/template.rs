@@ -53,6 +53,7 @@ pub(super) fn documents(seed: &str) -> Result<(Scene, Document), String> {
             walk: "walk".into(),
         },
         units_per_pixel: 2.0,
+        orientation: None,
     };
     let mut sprites = Document {
         version: 2,

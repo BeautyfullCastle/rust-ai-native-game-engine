@@ -100,9 +100,6 @@ impl<R: Rhi> ProjectCompositor<R> {
             let mut list = SpriteDrawList::default();
             for (run_index, draw) in sprites[start..end].iter().enumerate() {
                 let mut instance = draw.instance;
-                // Authored project bindings do not define transform flips.
-                instance.flip_x = false;
-                instance.flip_y = false;
                 // `SpriteRenderer` stable-sorts by this field. Reindex each
                 // contiguous run to preserve the caller's already-global order.
                 instance.order = run_index as i32;
