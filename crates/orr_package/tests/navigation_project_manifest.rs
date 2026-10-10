@@ -3,11 +3,14 @@ use orr_package::{Project, ProjectGame, Runtime};
 #[test]
 fn navigation_profile_accepts_only_schema_two_without_foreign_descriptors() {
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("orr.project.json");
+    // Canonicalize only our owned fixture root: macOS temporary paths can use
+    // the /var symlink, while production project admission rejects symlinks.
+    let root = temp.path().canonicalize().unwrap();
+    let path = root.join("orr.project.json");
     let valid = serde_json::json!({"schema":2,"engine":"^0.0.1","entry":{"game":"terrain-point-route-3d-v1","scene":"navigation.scene.yaml"}});
     std::fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
     assert_eq!(
-        Project::open(temp.path(), Runtime::content_only())
+        Project::open(&root, Runtime::content_only())
             .unwrap()
             .manifest()
             .unwrap()
@@ -30,7 +33,7 @@ fn navigation_profile_accepts_only_schema_two_without_foreign_descriptors() {
         bad["entry"][key] = value;
         std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
         assert!(
-            Project::open(temp.path(), Runtime::content_only()).is_err(),
+            Project::open(&root, Runtime::content_only()).is_err(),
             "{key}"
         );
     }
@@ -38,6 +41,6 @@ fn navigation_profile_accepts_only_schema_two_without_foreign_descriptors() {
         let mut bad = valid.clone();
         bad["schema"] = schema.into();
         std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
-        assert!(Project::open(temp.path(), Runtime::content_only()).is_err());
+        assert!(Project::open(&root, Runtime::content_only()).is_err());
     }
 }
