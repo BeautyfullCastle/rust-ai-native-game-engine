@@ -228,8 +228,21 @@ fn validate_models(models: &PreparedModels) -> Result<(), String> {
     if used.len() != models.assets.len() {
         return Err("room asset cache contains unbound assets".into());
     }
+    #[cfg(feature = "room-character")]
+    crate::room_project::validate_decoded_model_budget_with_extra(models.assets.values(), crossfade_extra_bytes(models)?)?;
+    #[cfg(not(feature = "room-character"))]
     crate::room_project::validate_decoded_model_budget(models.assets.values())?;
     Ok(())
+}
+
+#[cfg(feature = "room-character")]
+fn crossfade_extra_bytes(models: &PreparedModels) -> Result<usize, String> {
+    if !models.character.as_ref().is_some_and(|character| character.crossfade_ticks.is_some_and(|ticks| ticks > 0)) {
+        return Ok(0);
+    }
+    models.assets.values().filter_map(|asset| asset.animated_model()).try_fold(0usize, |total, model| {
+        total.checked_add(crate::room_character::crossfade_extra_pose_bytes(model)?).ok_or_else(|| "room crossfade aggregate overflow".to_string())
+    })
 }
 
 fn validate_frame(
@@ -392,13 +405,48 @@ pub fn placements(
 }
 
 /// Current absolute-tick character pose and body × local placement, shared by
-/// native, capture and editor. There is no remembered transition state.
+/// diagnostic/admission callers without known transition history.
 #[cfg(feature = "room-character")]
 pub fn character_placement(
     frame: FrameView<'_>,
     index: &SceneIndex,
     models: &PreparedModels,
     time: PresentationTime,
+) -> Result<Option<CharacterPlacement>, String> {
+    character_placement_with_playback(frame, index, models, time, None)
+}
+
+/// Observe each authoritative tick; unknown snapshot gaps explicitly snap.
+#[cfg(feature = "room-character")]
+pub fn observe_character(
+    playback: &mut crate::room_character::PlaybackCursor,
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    time: PresentationTime,
+) -> Result<(), String> {
+    validate_frame(frame, index, models)?;
+    let Some(character) = &models.character else {
+        playback.reset();
+        return Ok(());
+    };
+    let entity = index.entity(&Guid::parse(&character.player)?).ok_or("room character PLAYER GUID missing")?;
+    let binding = &models.document.bindings[&character.player];
+    let model = models.assets[&(binding.package.clone(), binding.asset.clone())]
+        .animated_model().ok_or("room character PLAYER asset is not animated")?;
+    playback.observe(character, model, frame, crate::room_character::PlaybackContext {
+        entity, tick_rate: time.tick_rate, rest: time.rest, revision: 0,
+    })?;
+    Ok(())
+}
+
+#[cfg(feature = "room-character")]
+fn character_placement_with_playback(
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    time: PresentationTime,
+    playback: Option<&crate::room_character::PlaybackCursor>,
 ) -> Result<Option<CharacterPlacement>, String> {
     validate_frame(frame, index, models)?;
     let Some(character) = &models.character else {
@@ -415,8 +463,13 @@ pub fn character_placement(
     let model = models.assets[&(binding.package.clone(), binding.asset.clone())]
         .animated_model()
         .ok_or("room character PLAYER asset is not animated")?;
-    let pose =
-        crate::room_character::sample_pose(character, model, frame, time.tick_rate, time.rest)?;
+    let pose = if let Some(playback) = playback {
+        playback.pose(character, model, frame, crate::room_character::PlaybackContext {
+            entity, tick_rate: time.tick_rate, rest: time.rest, revision: 0,
+        })?.clone()
+    } else {
+        crate::room_character::sample_pose(character, model, frame, time.tick_rate, time.rest)?
+    };
     let transform = animated_transform(instance(
         orr_view::fp_to_transform3(body.pos, body.rot),
         binding.transform,
@@ -643,7 +696,7 @@ impl RoomRenderer {
             format: self.core.format,
             sample_count: 1,
         };
-        self.core.render(frame, index, models, camera, target, time)
+        self.core.render(frame, index, models, camera, target, time, #[cfg(feature = "room-character")] None)
     }
 
     /// Draw directly into a window-owned texture without readback, copying, or
@@ -676,7 +729,26 @@ impl RoomRenderer {
         target: ImportedSceneTarget<'_, Wgpu>,
         time: PresentationTime,
     ) -> Result<(), String> {
-        self.core.render(frame, index, models, camera, target, time)
+        self.core.render(frame, index, models, camera, target, time, #[cfg(feature = "room-character")] None)
+    }
+    /// Draw the last authoritative observation without advancing during rendering.
+    #[cfg(feature = "room-character")]
+    pub fn render_with_playback(
+        &mut self, frame: FrameView<'_>, index: &SceneIndex, models: &PreparedModels,
+        camera: &Camera3D, playback: &crate::room_character::PlaybackCursor,
+    ) -> Result<(), String> {
+        let target = ImportedSceneTarget { view: self.target.render_view(), size: self.target.size(), format: self.core.format, sample_count: 1 };
+        self.core.render(frame, index, models, camera, target, PresentationTime::default(), Some(playback))
+    }
+
+    #[cfg(feature = "room-character")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to_with_playback(
+        &mut self, frame: FrameView<'_>, index: &SceneIndex, models: &PreparedModels,
+        camera: &Camera3D, target: ImportedSceneTarget<'_, Wgpu>,
+        playback: &crate::room_character::PlaybackCursor,
+    ) -> Result<(), String> {
+        self.core.render(frame, index, models, camera, target, PresentationTime::default(), Some(playback))
     }
 }
 
@@ -690,6 +762,7 @@ impl RoomRenderCore {
         camera: &Camera3D,
         target: ImportedSceneTarget<'_, Wgpu>,
         time: PresentationTime,
+        #[cfg(feature = "room-character")] playback: Option<&crate::room_character::PlaybackCursor>,
     ) -> Result<(), String> {
         // Check caller metadata before changing retained instance lists or GPU state.
         if target.sample_count != 1 {
@@ -707,7 +780,7 @@ impl RoomRenderCore {
         }
         let placed = placements(frame, index, models)?;
         #[cfg(feature = "room-character")]
-        let character = character_placement(frame, index, models, time)?;
+        let character = character_placement_with_playback(frame, index, models, time, playback)?;
         // Check all cache identities, including collected-key assets, before
         // mutation. A reopened equivalent asset is still a new GPU identity.
         let cache_count = self.models.len();
@@ -1070,6 +1143,7 @@ mod tests {
                         carrying: 1,
                         escaped: 2,
                         speeds: None,
+                        crossfade_ticks: None,
                     }),
                 };
                 admit_presentation(FrameView::of(&frame), &index, &models).unwrap();
@@ -1144,6 +1218,52 @@ mod tests {
                 PresentationTime::default()
             )
             .is_err());
+        }
+
+        #[test]
+        fn crossfade_budget_preserves_snap_and_rejects_extra_storage_at_boundary() {
+            use crate::room_project::{validate_decoded_model_budget_with_extra, MAX_DECODED_MODEL_BYTES};
+            let mut f = Fixture::new();
+            let legacy = f.models.character.clone().unwrap();
+            assert_eq!(crossfade_extra_bytes(&f.models).unwrap(), 0);
+            validate_models(&f.models).unwrap();
+            let mut rated = legacy.clone();
+            rated.schema = 2;
+            rated.speeds = Some(crate::room_character::PlaybackRates::default());
+            f.models.character = Some(rated.clone());
+            assert_eq!(crossfade_extra_bytes(&f.models).unwrap(), 0);
+            validate_models(&f.models).unwrap();
+            rated.schema = 3;
+            rated.crossfade_ticks = Some(0);
+            f.models.character = Some(rated.clone());
+            assert_eq!(crossfade_extra_bytes(&f.models).unwrap(), 0);
+            validate_models(&f.models).unwrap();
+            rated.crossfade_ticks = Some(1);
+            f.models.character = Some(rated);
+            let extra = crossfade_extra_bytes(&f.models).unwrap();
+            assert!(extra > 0);
+            validate_models(&f.models).unwrap();
+            // Measure exact remaining admission capacity without allocating a
+            // 64MiB fixture; the same checked aggregate operation charges both
+            // the existing assets and any additional pose reservation.
+            let mut low = 0usize;
+            let mut high = MAX_DECODED_MODEL_BYTES;
+            while low < high {
+                let mid = low + (high - low).div_ceil(2);
+                if validate_decoded_model_budget_with_extra(f.models.assets.values(), mid).is_ok() {
+                    low = mid;
+                } else { high = mid - 1; }
+            }
+            assert!(low > extra);
+            validate_decoded_model_budget_with_extra(f.models.assets.values(), low).unwrap();
+            assert!(validate_decoded_model_budget_with_extra(f.models.assets.values(), low + 1).is_err());
+            assert!(validate_decoded_model_budget_with_extra(f.models.assets.values(), low + extra).is_err());
+            assert!(validate_decoded_model_budget_with_extra(f.models.assets.values(), usize::MAX).is_err());
+            // Failed admission leaves the original asset/cache and snap budget
+            // available; no partial replacement occurs in the checking path.
+            f.models.character = Some(legacy);
+            assert_eq!(crossfade_extra_bytes(&f.models).unwrap(), 0);
+            validate_models(&f.models).unwrap();
         }
 
         #[test]

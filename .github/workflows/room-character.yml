@@ -41,7 +41,12 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --release -p orr_model_bindings --lib animation_time
+          cargo test --locked --release -p orr_model --features animation,import --test animation_runtime pose_blend -- --nocapture 2>&1 | tee character-evidence/crossfade-model.log
+          grep -F "test result: ok. 6 passed; 0 failed; 0 ignored;" character-evidence/crossfade-model.log
           cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib room_character::tests
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib -- --exact room_app::character_acceptance_tests::character_crossfade_app_observes_steps_interruption_completion_and_restart --nocapture 2>&1 | tee character-evidence/crossfade-app-cpu.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/crossfade-app-cpu.log
+          grep -F "test room_app::character_acceptance_tests::character_crossfade_app_observes_steps_interruption_completion_and_restart ... ok" character-evidence/crossfade-app-cpu.log
           cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib room_view::tests::character -- --skip mixed_character_depth_visibility_repeat_resize_and_failure_are_atomic
           cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_character_project
           cargo test --locked --release -p orr_editor --features room-character,project-create --lib room_character_panel::tests
@@ -49,6 +54,12 @@ jobs:
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact character_playback_rates_widgets_save_reopen_seek_stop_restart 2>&1 | tee character-evidence/rates-editor-cpu.log
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/rates-editor-cpu.log
           grep -F "test character_playback_rates_widgets_save_reopen_seek_stop_restart ... ok" character-evidence/rates-editor-cpu.log
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact character_crossfade_authoring_and_explicit_lifecycle_resets 2>&1 | tee character-evidence/crossfade-editor-cpu.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/crossfade-editor-cpu.log
+          grep -F "test character_crossfade_authoring_and_explicit_lifecycle_resets ... ok" character-evidence/crossfade-editor-cpu.log
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact character_crossfade_committed_replacement_and_close_release_retired_assets 2>&1 | tee character-evidence/crossfade-retirement.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/crossfade-retirement.log
+          grep -F "test character_crossfade_committed_replacement_and_close_release_retired_assets ... ok" character-evidence/crossfade-retirement.log
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact same_path_role_replacement_and_descriptor_retirement_fail_closed 2>&1 | tee character-evidence/role-fence.log
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/role-fence.log
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact stale_room_character_binding_does_not_mutate_the_verified_cache 2>&1 | tee character-evidence/cache-fence.log
@@ -69,6 +80,9 @@ jobs:
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --ignored --exact character_playback_rates_actual_editor_gpu --nocapture 2>&1 | tee character-evidence/rates-editor-gpu.log
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/rates-editor-gpu.log
           grep -F "test character_playback_rates_actual_editor_gpu ... ok" character-evidence/rates-editor-gpu.log
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --ignored --exact character_crossfade_actual_editor_gpu --nocapture 2>&1 | tee character-evidence/crossfade-editor-gpu.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/crossfade-editor-gpu.log
+          grep -F "test character_crossfade_actual_editor_gpu ... ok" character-evidence/crossfade-editor-gpu.log
           cargo build --locked --release -p orr_sample --features room-character,project-create,project-export --bin room_escape --bin orr_export_room
           cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib --no-run --message-format=json > character-evidence/probe.jsonl
           export ORR_ROOM_CHARACTER_APP_PROBE=$(python3 -c 'import json; a=[r["executable"] for l in open("character-evidence/probe.jsonl") if (r:=json.loads(l)).get("reason")=="compiler-artifact" and r.get("executable") and r["target"]["name"]=="orr_sample"]; assert len(a)==1; print(a[0])')
@@ -79,10 +93,15 @@ jobs:
           cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_character_export -- --ignored --exact room_character_rates_export_source_hidden_gpu_parity --nocapture 2>&1 | tee character-evidence/rates-export.log
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/rates-export.log
           grep -F "test room_character_rates_export_source_hidden_gpu_parity ... ok" character-evidence/rates-export.log
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_character_export -- --ignored --exact room_character_crossfade_export_source_hidden_gpu_parity --nocapture 2>&1 | tee character-evidence/crossfade-export.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/crossfade-export.log
+          grep -F "test room_character_crossfade_export_source_hidden_gpu_parity ... ok" character-evidence/crossfade-export.log
+          grep -F "exported_character_crossfade_app_child ... ok" character-evidence/crossfade-export.log
       - name: Checkpoint presentation remains a read-only consumer
         run: cargo test --locked --release -p orr_sample --features room-character,room-checkpoint,project-create --lib checkpoint_restore_selects_carrying_without_an_animation_checkpoint_field
       - name: Strict affected lint
         run: |
+          cargo clippy --locked --release -p orr_model --features animation,import --all-targets -- -D warnings
           cargo clippy --locked --release -p orr_model_bindings -p orr_package --all-targets -- -D warnings
           cargo clippy --locked --release -p orr_editor --features room-character,project-create --all-targets -- -D warnings
           cargo clippy --locked --release -p orr_sample --features room-character,room-checkpoint,project-create,project-export --all-targets -- -D warnings

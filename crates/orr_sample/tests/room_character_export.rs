@@ -284,6 +284,7 @@ impl Work {
             carrying: 1,
             escaped: 2,
             speeds: None,
+            crossfade_ticks: None,
         };
         fs::write(
             project.join("room.character.json"),
@@ -816,6 +817,138 @@ fn room_character_rates_export_source_hidden_gpu_parity() {
     assert_eq!(tree(&w.project), project_before);
     if let Some(dest) = std::env::var_os("ORR_ROOM_EXPORT_CAPTURE_DIR") {
         let dest = PathBuf::from(dest).join("playback-rates");
+        fs::create_dir_all(&dest).unwrap();
+        copy_tree(&w.temp.path().join("captures"), &dest.join("captures"));
+        fs::write(dest.join("room.character.json"), &authored_bytes).unwrap();
+        fs::copy(bundle.join("orr.export.json"), dest.join("orr.export.json")).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires exact production tools, GPU and source-hidden read-only Linux namespace"]
+fn room_character_crossfade_export_source_hidden_gpu_parity() {
+    use orr_sample::room_character::{Document as Character, PlaybackRate, PlaybackRates};
+    let w = Work::new();
+    let path = w.project.join("room.character.json");
+    let legacy_bytes = fs::read(&path).unwrap();
+    let mut character = Character::parse(&legacy_bytes).unwrap();
+    character.schema = 3;
+    character.crossfade_ticks = Some(24);
+    character.speeds = Some(PlaybackRates {
+        searching: PlaybackRate::Normal,
+        carrying: PlaybackRate::Normal,
+        escaped: PlaybackRate::Normal,
+    });
+    let authored_bytes = character.to_bytes().unwrap();
+    let mut zero = character.clone();
+    zero.crossfade_ticks = Some(0);
+    let zero_bytes = zero.to_bytes().unwrap();
+    fs::write(&path, &authored_bytes).unwrap();
+    let project_before = tree(&w.project);
+    let staged = w.temp.path().join("crossfade export");
+    good(w.export_command(&staged).output().unwrap());
+    let bundle = w.temp.path().join("relocated crossfade export");
+    fs::rename(staged, &bundle).unwrap();
+    assert_eq!(
+        fs::read(bundle.join("project/room.character.json")).unwrap(),
+        authored_bytes
+    );
+    let before = tree(&bundle);
+    let mut zero_pixels = None;
+    for (name, ticks, held) in [
+        ("crossfade-searching", 30, ""),
+        ("crossfade-carrying", 18, "right,interact"),
+        ("crossfade-zero", 0, ""),
+        ("crossfade-restart", 0, ""),
+    ] {
+        let source = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("{name}-source.png"));
+        let exported = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("{name}-export.png"));
+        let zero_capture = w
+            .temp
+            .path()
+            .join("captures")
+            .join(format!("{name}-zero-duration.png"));
+        let a = good(
+            w.runtime_command(None, ticks, held, &source)
+                .output()
+                .unwrap(),
+        );
+        let b = good(
+            w.runtime_command(Some(&bundle), ticks, held, &exported)
+                .output()
+                .unwrap(),
+        );
+        assert!(a.contains("room capture adapter:"), "actual GPU required");
+        assert_eq!(a, b, "source/export state and checksum parity: {name}");
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            fs::read(&exported).unwrap(),
+            "exact source-hidden PNG parity: {name}"
+        );
+        if name == "crossfade-carrying" {
+            assert!(a.contains("room key: 1"), "{a}");
+        }
+        // Only authored crossfade duration changes for this negative control.
+        // Identical runtime state/checksum with different pixels rules out a
+        // loaded-but-unused sidecar or a movement-only rendering difference.
+        fs::write(&path, &zero_bytes).unwrap();
+        let c = good(
+            w.runtime_command(None, ticks, held, &zero_capture)
+                .output()
+                .unwrap(),
+        );
+        fs::write(&path, &authored_bytes).unwrap();
+        assert_eq!(a, c, "crossfade cannot change simulation state: {name}");
+        if name == "crossfade-carrying" {
+            assert_ne!(
+                pixels(&source),
+                pixels(&zero_capture),
+                "actual runtime must consume the {name} blend"
+            );
+        } else {
+            assert_eq!(pixels(&source), pixels(&zero_capture));
+            if ticks == 0 {
+                if let Some(zero) = &zero_pixels {
+                    assert_eq!(&pixels(&source), zero);
+                }
+                zero_pixels = Some(pixels(&source));
+            }
+        }
+        println!("Authored crossfade runtime parity {name}: {b}");
+    }
+    // The production App observes every authoritative tick before rendering.
+    // Its source-hidden midpoint/snap negative control and restart use real inputs.
+    let mut child = w.isolated(&w.app_probe, Some(&bundle));
+    child
+        .args([
+            "--ignored",
+            "--exact",
+            "room_app::character_acceptance_tests::exported_character_crossfade_app_child",
+            "--nocapture",
+        ])
+        .env("ORR_CHARACTER_EXPORTED_PROJECT", bundle.join("project"))
+        .env("ORR_CHARACTER_APP_CAPTURES", w.temp.path().join("captures"))
+        .env("HOME", w.temp.path().join("absent-home"));
+    let proof = good(child.output().unwrap());
+    assert!(proof.contains("1 passed; 0 failed; 0 ignored"), "{proof}");
+    assert!(
+        proof.contains("exported_character_crossfade_app_child ... ok"),
+        "{proof}"
+    );
+    println!("{proof}");
+    assert!(!w.temp.path().join("absent-home").exists());
+    assert_eq!(tree(&bundle), before);
+    assert_eq!(tree(&w.project), project_before);
+    if let Some(dest) = std::env::var_os("ORR_ROOM_EXPORT_CAPTURE_DIR") {
+        let dest = PathBuf::from(dest).join("crossfade");
         fs::create_dir_all(&dest).unwrap();
         copy_tree(&w.temp.path().join("captures"), &dest.join("captures"));
         fs::write(dest.join("room.character.json"), &authored_bytes).unwrap();
