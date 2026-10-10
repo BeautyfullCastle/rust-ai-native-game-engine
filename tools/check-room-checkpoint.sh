@@ -35,7 +35,7 @@ if [[ $mode == contracts ]]; then
  run syscall-checker-fixtures python3 tools/test_room_checkpoint_syscall.py
  unset ORR_PACKAGE_FIFO_TEST_ROOT
  tests room-goldens 10 0 cargo test --release --locked -p orr_games --features room-escape --lib room_escape_game::tests::
- tests package-closure 34 0 cargo test --release --locked -p orr_package --lib
+ tests package-closure 36 0 cargo test --release --locked -p orr_package --lib
  tests default-off 2 0 cargo test --release --locked -p orr_sample --features room-project --lib room_project::checkpoint_tests::
  tests metadata-only-window-rejected 1 0 cargo test --release --locked -p orr_sample --features room-ui,project-create --lib room_project::checkpoint_tests::metadata_only_admission_preserves_legacy_scene_and_owns_checkpoint
  tests store 17 0 cargo test --release --locked -p orr_sample --features "$features" --lib room_checkpoint_store::tests::
