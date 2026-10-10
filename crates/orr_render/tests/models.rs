@@ -349,3 +349,119 @@ fn large_uvs_preserve_half_texel_wrap_seams_at_max_texture_extent() {
         near(at_world(&g.read_texture(&t), sample, &cam), expected);
     }
 }
+
+#[test]
+fn static_texture_transform_matches_independent_baked_uv_gpu_oracle() {
+    let Some(g) = gpu() else { return };
+    let original = include_str!("../../orr_model/tests/fixtures/model.gltf");
+    let import = |text: &str| {
+        let loaded =
+            orr_model::import::import_with_resolver("model.gltf", text.as_bytes(), |uri| {
+                Ok(match uri {
+                    "model.bin" => {
+                        include_bytes!("../../orr_model/tests/fixtures/model.bin").to_vec()
+                    }
+                    "quadrants.png" => {
+                        include_bytes!("../../orr_model/tests/fixtures/quadrants.png").to_vec()
+                    }
+                    "marker.png" => {
+                        include_bytes!("../../orr_model/tests/fixtures/marker.png").to_vec()
+                    }
+                    _ => panic!("unexpected GPU fixture resource {uri}"),
+                })
+            })
+            .unwrap();
+        StaticModel::from_bytes(&loaded.to_bytes().unwrap()).unwrap()
+    };
+    let baseline = import(original);
+    let cam = camera();
+    let light = lighting();
+    let render = |model: StaticModel| {
+        let t = target(&g, TextureFormat::Rgba8UnormSrgb, (SIZE, SIZE));
+        let view = g.create_texture_view(&t, None);
+        let mut renderer =
+            ModelRenderer::new(g.clone(), TextureFormat::Rgba8UnormSrgb, model).unwrap();
+        renderer.clear = [0.0, 0.0, 0.0, 1.0];
+        renderer.draw(&view, (SIZE, SIZE), &cam, &light).unwrap();
+        g.read_texture(&t)
+    };
+    let baseline_pixels = render(baseline.clone());
+    // The CPU oracle uses explicitly enumerated affine matrices, not the
+    // importer's trig implementation or UVs obtained from transformed output.
+    for (name, descriptor, coefficients) in [
+        ("identity", r#"{}"#, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+        (
+            "offset_scale",
+            r#"{"offset":[0.125,0.25],"scale":[0.5,0.5]}"#,
+            [0.5, 0.0, 0.125, 0.0, 0.5, 0.25],
+        ),
+        (
+            "reflection",
+            r#"{"offset":[1,0],"scale":[-1,1]}"#,
+            [-1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+        ),
+        (
+            "quarter_nonuniform",
+            r#"{"offset":[0.875,0.125],"rotation":1.5707963267948966,"scale":[0.5,0.75]}"#,
+            [0.0, -0.75, 0.875, 0.5, 0.0, 0.125],
+        ),
+    ] {
+        let text = original
+            .replacen('{', "{\"extensionsUsed\":[\"KHR_texture_transform\"],", 1)
+            .replacen(
+                "\"index\": 0",
+                &format!(
+                    "\"index\": 0, \"extensions\": {{\"KHR_texture_transform\": {descriptor}}}"
+                ),
+                1,
+            );
+        let imported = import(&text);
+        assert_eq!(
+            imported.source().primitives[1],
+            baseline.source().primitives[1]
+        );
+        assert_eq!(imported.source().materials, baseline.source().materials);
+        assert_eq!(imported.source().images, baseline.source().images);
+        let mut expected = baseline.source().clone();
+        for vertex in &mut expected.primitives[0].vertices {
+            let [u, v] = vertex.uv;
+            let [a, b, c, d, e, f] = coefficients;
+            vertex.uv = [a * u + b * v + c, d * u + e * v + f];
+        }
+        let actual_pixels = render(imported.clone());
+        let expected_pixels = render(StaticModel::new(expected).unwrap());
+        assert_eq!(
+            actual_pixels, expected_pixels,
+            "{name}: imported pixels differ from independently baked UVs"
+        );
+        if name == "identity" {
+            assert_eq!(actual_pixels, baseline_pixels);
+        } else {
+            assert_ne!(
+                actual_pixels, baseline_pixels,
+                "{name}: control must show a visible mapping change"
+            );
+        }
+        // Unchanged material-slot marker, plus a later-submitted occluded mesh:
+        // transformed textures do not modify geometry or depth composition.
+        near(
+            at_world(&actual_pixels, world(&imported, [1.43, -0.35, 0.0]), &cam),
+            [188, 255, 0, 255],
+        );
+        let mut layered = imported.source().clone();
+        let mut behind = baseline.source().primitives[0].clone();
+        behind.id.push_str("/texture-transform-depth-control");
+        behind.material = 1;
+        behind.transform[3][2] -= 0.5;
+        layered.primitives.push(behind);
+        assert_eq!(render(StaticModel::new(layered).unwrap()), actual_pixels);
+        if let Some(dir) = std::env::var_os("ORR_TEXTURE_TRANSFORM_CAPTURE_DIR") {
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut ppm = format!("P6\n{SIZE} {SIZE}\n255\n").into_bytes();
+            for pixel in actual_pixels.chunks_exact(4) {
+                ppm.extend_from_slice(&pixel[..3]);
+            }
+            std::fs::write(std::path::Path::new(&dir).join(format!("{name}.ppm")), ppm).unwrap();
+        }
+    }
+}

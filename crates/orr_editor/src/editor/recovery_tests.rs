@@ -5,6 +5,96 @@ use super::*;
 use orr_bridge::{Bridge, DebugError, LifecycleRecovery};
 use orr_remote::{RemoteBridge, Auth, Caps, LocalHost, RemoteConfig, ServerConfig, ViewDeliveryMode, USER_CLIENT};
 
+#[cfg(all(feature = "sprites", feature = "collect-dodge"))]
+#[path = "../../../orr_sample/tests/common/collect_sprites.rs"]
+mod collect_sprite_fixture;
+
+#[cfg(all(feature = "sprites", feature = "collect-dodge"))]
+#[test]
+fn late_history_fences_collect_sprite_sampling_until_current_rows_reply() {
+    use orr_sample::collect_project::{PreparedProject, ProgressSupport, SpriteSupport};
+
+    let directory = collect_sprite_fixture::tempdir();
+    collect_sprite_fixture::fixture(directory.path());
+    let prepared = PreparedProject::open_with_presentation(
+        directory.path(),
+        ProgressSupport::MetadataOnly,
+        SpriteSupport::Supported,
+    )
+    .unwrap();
+    let mut editor = Editor::start(&HostSpec::PreparedCollect {
+        scene: prepared.path().into(),
+        text: prepared.scene().text().into(),
+        listen: None,
+        debug_hooks: false,
+    })
+    .unwrap();
+    editor.sync();
+    let rows = editor.call("world.query", json!({"limit": ROWS_LIMIT})).unwrap();
+    let mut app = crate::app::EditorApp::new(editor, None);
+    crate::project::install_collect_presentation(&mut app, prepared, &egui::Context::default());
+
+    // Pin the response/notification order without scheduler sleeps or another
+    // host read. These flags model dispatch; all answers use production handlers.
+    let old_generation = app.editor.change_gen;
+    app.editor.dirty.rows = false;
+    app.editor.inflight.rows = true;
+    app.editor.on_answer(Pend::Rows(old_generation), Ok(rows.clone()));
+    assert!(app.editor.yard_rows_coherent());
+    assert!(app.sprites.scene_matches(&app.editor));
+    let expected = [("e_00000001", 10), ("e_00000002", 20)];
+    for (guid, region) in expected {
+        assert_eq!(app.sprites.sampled_region(&app.editor, guid), Some(region));
+    }
+    let checksum = app.editor.checksum();
+    let camera = app.editor.camera;
+    let body_positions = app
+        .editor
+        .bodies()
+        .iter()
+        .map(|b| (b.entity, b.pos))
+        .collect::<Vec<_>>();
+    let document = app.sprites.bindings.as_ref().unwrap().document().clone();
+
+    app.editor.inflight.rows = true;
+    assert!(!app.editor.yard_rows_coherent());
+    for (guid, _) in expected {
+        assert_eq!(app.sprites.sampled_region(&app.editor, guid), None);
+    }
+    app.editor.on_notification("watch.history", &json!({
+        "can_undo": false, "can_redo": false, "dirty": false, "in_tx": false,
+    }));
+    assert!(app.editor.dirty.rows);
+    assert_ne!(app.editor.change_gen, old_generation);
+    assert!(!app.editor.yard_rows_coherent());
+    assert!(app.sprites.scene_matches(&app.editor));
+    for (guid, _) in expected {
+        assert_eq!(app.sprites.sampled_region(&app.editor, guid), None);
+    }
+    app.editor.on_answer(Pend::Rows(old_generation), Ok(rows.clone()));
+    assert!(app.editor.dirty.rows);
+    assert!(!app.editor.yard_rows_coherent());
+    for (guid, _) in expected {
+        assert_eq!(app.sprites.sampled_region(&app.editor, guid), None);
+    }
+
+    app.editor.dirty.rows = false;
+    app.editor.inflight.rows = true;
+    let current_generation = app.editor.change_gen;
+    app.editor.on_answer(Pend::Rows(current_generation), Ok(rows));
+    assert!(app.editor.yard_rows_coherent());
+    for (guid, region) in expected {
+        assert_eq!(app.sprites.sampled_region(&app.editor, guid), Some(region));
+    }
+    assert_eq!(app.editor.checksum(), checksum);
+    assert_eq!(app.editor.camera, camera);
+    assert_eq!(
+        app.editor.bodies().iter().map(|b| (b.entity, b.pos)).collect::<Vec<_>>(),
+        body_positions
+    );
+    assert_eq!(app.sprites.bindings.as_ref().unwrap().document(), &document);
+}
+
 fn reset(snapshot: Option<&Snapshot>) -> ViewResync {
     ViewResync {
         generation: 7,

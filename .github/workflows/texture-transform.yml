@@ -1,0 +1,79 @@
+name: texture-transform
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  texture-transform-linux:
+    # Keep the existing unprivileged bwrap-compatible profile; migration is #154.
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      RUST_BACKTRACE: 1
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mandatory GPU and isolation prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers bubblewrap
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -r "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+          test "$(id -u)" -ne 0
+          bwrap --die-with-parent --ro-bind / / -- /bin/true
+          mkdir -p texture-transform-evidence
+      - name: Default boundary and complete importer compatibility
+        run: |
+          set -euo pipefail
+          cargo check --locked --release -p orr_model -p orr_editor -p orr_sample
+          cargo test --locked --release -p orr_editor --test deps
+          cargo test --locked --release -p orr_model --features import,animation --test texture_transform 2>&1 | tee texture-transform-evidence/import.log
+          grep -F 'test animated_entrypoint_rejects_transform_before_external_resolution ... ok' texture-transform-evidence/import.log
+          grep -F 'test result: ok. 10 passed; 0 failed; 0 ignored;' texture-transform-evidence/import.log
+          cargo test --locked --release -p orr_model --features import,animation --test import --test animation_import --test animation_runtime
+          cargo test --locked --release -p orr_editor --features models --test texture_transform -- --exact installed_transform_widgets_save_reopen_reject_malformed_and_preserve_host_bytes 2>&1 | tee texture-transform-evidence/editor-cpu.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' texture-transform-evidence/editor-cpu.log
+      - name: Mandatory independent renderer and real editor GPU
+        env:
+          ORR_REQUIRE_GPU: '1'
+        run: |
+          set -euo pipefail
+          export ORR_TEXTURE_TRANSFORM_CAPTURE_DIR="$PWD/texture-transform-evidence/renderer"
+          cargo test --locked --release -p orr_render --features models --test models -- --nocapture 2>&1 | tee texture-transform-evidence/renderer-gpu.log
+          grep -F 'test static_texture_transform_matches_independent_baked_uv_gpu_oracle ... ok' texture-transform-evidence/renderer-gpu.log
+          grep -F '; 0 failed; 0 ignored;' texture-transform-evidence/renderer-gpu.log
+          export ORR_TEXTURE_TRANSFORM_CAPTURE_DIR="$PWD/texture-transform-evidence/editor"
+          cargo test --locked --release -p orr_editor --features models --test texture_transform -- --exact production_main_viewport_matches_baked_uv_oracle_through_play_seek_stop --nocapture 2>&1 | tee texture-transform-evidence/editor-gpu.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' texture-transform-evidence/editor-gpu.log
+      - name: Mandatory production source-hidden read-only export
+        env:
+          ORR_REQUIRE_GPU: '1'
+          ORR_REQUIRE_PROJECT_ISOLATION: '1'
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p orr_sample --features room-project,project-export --bin room_escape --bin orr_export_room
+          export ORR_ROOM_RUNTIME="$PWD/target/release/room_escape"
+          export ORR_ROOM_EXPORTER="$PWD/target/release/orr_export_room"
+          export ORR_TEXTURE_TRANSFORM_EXPORT_CAPTURE_DIR="$PWD/texture-transform-evidence/export"
+          cargo test --locked --release -p orr_sample --features room-project,project-export --test texture_transform_export -- --ignored --exact texture_transform_real_export_source_hidden_gpu_workflow --nocapture 2>&1 | tee texture-transform-evidence/export.log
+          grep -F 'test texture_transform_real_export_source_hidden_gpu_workflow ... ok' texture-transform-evidence/export.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' texture-transform-evidence/export.log
+      - name: Strict affected configurations
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --release -p orr_model --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_model --features import --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_model --features import,animation --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_render --features models --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_editor --features models --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-project,project-export --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: texture-transform-evidence
+          path: texture-transform-evidence

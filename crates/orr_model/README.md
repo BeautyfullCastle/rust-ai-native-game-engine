@@ -27,12 +27,45 @@ The existing procedural primitive renderer is unchanged.
 
 Unknown schema fields reject except inert names, extras and asset generator/
 copyright metadata. In particular skins, joints/weights, animations, morphs,
-sparse accessors, additional vertex attributes, extensions (even optional used
-ones), compressed data, alpha blending/masking, double-sided, PBR textures,
-normal/emissive/occlusion maps and texture transforms reject. This is deliberately
+sparse accessors, additional vertex attributes, unsupported extensions (even
+optional used ones), compressed data, alpha blending/masking, double-sided, PBR
+textures and normal/emissive/occlusion maps reject. This is deliberately
 not a replacement for a complete glTF library or metallic-roughness PBR renderer.
 The initial normal `gltf 1.4.1` registry fetch was blocked by the executor's
 network policy; no third-party code was vendored or downloaded around that block.
+
+## Static texture mapping authoring
+
+Static base-color textures accept the declared `KHR_texture_transform` extension.
+Authors can offset, rotate (radians about the UV origin) and scale imported UV0.
+The importer applies scale, then rotation, then translation exactly once to each
+primitive's own vertices; it preserves geometry, material slots and image bytes.
+Existing model assignment, sidecar Save/reopen and runtime/export paths consume
+these UVs without shader or cooked-format changes. This is imported mapping
+support, not an in-engine UV editor or a complete glTF extension implementation.
+
+`offset`, `rotation`, and `scale` default to `[0,0]`, `0`, and `[1,1]`. The optional
+extension `texCoord` overrides the textureInfo selection, but the effective set
+must be zero. Other vertex attributes and UV sets remain unsupported. The source
+must list the extension in `extensionsUsed`; `extensionsRequired`, when present,
+must be a subset of used declarations. Unknown and duplicate declarations reject.
+Both extension payloads must be objects: null, positional arrays, duplicate or
+unknown fields and nonfinite numbers reject. Negative and zero scales are valid.
+Original and final UVs must each be finite with absolute components at most
+65536; a zero scale cannot conceal malformed input. Absent/default identity
+transforms preserve UV bits (including signed zero). Sampler wrap/filter behavior
+is unchanged, and no UV clamping is introduced.
+
+The optional animated importer still rejects this extension, before external
+resource resolution. Immutable cooked models need no extension parser or new
+runtime dependency: existing vertices hold the transformed UVs. Exact source
+hashes still change when authoring changes, while primitive slot IDs stay stable.
+
+Semantics: [Khronos KHR_texture_transform specification](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_texture_transform).
+Acceptance is split into importer CPU/GLTF/GLB/cook checks, an independent baked-UV
+GPU oracle, actual editor authoring and isolated production export. Source/test
+presence is not an executed acceptance claim; mandatory feature and inherited CI
+remain required before development integration.
 
 ## Import, cook, load, render
 
