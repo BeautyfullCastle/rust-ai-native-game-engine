@@ -77,7 +77,17 @@ class RoomTemplateGateTests(unittest.TestCase):
         room = nested(room_start, len(source), 'room_template_tests')
         self.assertEqual((len(base), len(collect), len(ui), len(room)), (13, 4, 3, 3))
         disabled = [prefix + name for name in re.findall(r'^#\[test\]\nfn (\w+)\(', source[disabled_room:room_start], re.M)]
-        for lane, names, count in [('creator-default', base + disabled, 14), ('creator-room', base + room, 16), ('creator-joint', base + room + collect + ui, 23)]:
+        audio_source = (ROOT / 'crates/orr_sample/src/project_create/audio_tests.rs').read_text()
+        audio_attributes = dict((name, attributes) for attributes, name in re.findall(
+            r'^((?:#\[[^\n]+\]\n)+)fn (\w+)\(', audio_source, re.M))
+        self.assertEqual(audio_attributes, {
+            'original_arena_and_collect_templates_do_not_gain_audio_implicitly': '#[test]\n',
+            'missing_audio_feature_rejects_template_before_any_stage_exists': '#[cfg(not(feature = "collect-audio"))]\n#[test]\n',
+        })
+        self.assertIn('#[cfg(test)]\nmod audio_tests;',
+                      (ROOT / 'crates/orr_sample/src/project_create.rs').read_text())
+        audio = ['project_create::audio_tests::' + name for name in audio_attributes]
+        for lane, names, count in [('creator-default', base + disabled + audio, 16), ('creator-room', base + room + audio, 18), ('creator-joint', base + room + collect + ui + audio, 25)]:
             self.assertEqual(INVENTORIES[lane]['names'], sorted(names))
             self.assertEqual(INVENTORIES[lane]['expected_summary_rows'], [[count, 0, 0]])
         sample = (ROOT / 'crates/orr_sample/tests/new_room_project.rs').read_text()

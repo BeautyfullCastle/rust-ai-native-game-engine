@@ -2868,6 +2868,8 @@ mod gesture_tests;
 mod input_tests;
 #[cfg(test)]
 mod multi_selection_tests;
+#[cfg(test)]
+mod yard_coherence_tests;
 
 #[cfg(test)]
 mod tick_state_refresh_tests {
