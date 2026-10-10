@@ -1,6 +1,8 @@
 {
   "creator-default": {
     "names": [
+      "project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists",
+      "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
       "project_create::tests::concurrent_destination_wins_atomic_publication_without_overwrite",
       "project_create::tests::different_seed_changes_only_authored_namespace_and_provenance",
       "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
@@ -20,7 +22,7 @@
     "run_ignored": false,
     "expected_summary_rows": [
       [
-        14,
+        16,
         0,
         0
       ]
@@ -28,6 +30,8 @@
   },
   "creator-room": {
     "names": [
+      "project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists",
+      "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
       "project_create::tests::concurrent_destination_wins_atomic_publication_without_overwrite",
       "project_create::tests::different_seed_changes_only_authored_namespace_and_provenance",
       "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
@@ -49,7 +53,7 @@
     "run_ignored": false,
     "expected_summary_rows": [
       [
-        16,
+        18,
         0,
         0
       ]
@@ -57,6 +61,8 @@
   },
   "creator-joint": {
     "names": [
+      "project_create::audio_tests::missing_audio_feature_rejects_template_before_any_stage_exists",
+      "project_create::audio_tests::original_arena_and_collect_templates_do_not_gain_audio_implicitly",
       "project_create::tests::collect::collect_corrupted_package_aborts_owned_transaction",
       "project_create::tests::collect::collect_creation_identity_is_explicit_reproducible_and_copy_stable",
       "project_create::tests::collect::collect_existing_output_and_special_parents_are_preserved",
@@ -85,7 +91,7 @@
     "run_ignored": false,
     "expected_summary_rows": [
       [
-        23,
+        25,
         0,
         0
       ]
