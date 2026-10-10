@@ -350,7 +350,7 @@ fn pixels(h: &Harness<'_, EditorApp>, name: &str) -> Vec<u8> {
         fs::create_dir_all(&dir).unwrap();
         let mut output = fs::File::create(Path::new(&dir).join(format!("{name}.ppm"))).unwrap();
         write!(output, "P6\n{} {}\n255\n", size.0, size.1).unwrap();
-        for pixel in rgba.chunks_exact(4) {
+        for pixel in rgba.as_chunks::<4>().0 {
             output.write_all(&pixel[..3]).unwrap();
         }
     }
@@ -358,8 +358,10 @@ fn pixels(h: &Harness<'_, EditorApp>, name: &str) -> Vec<u8> {
 }
 fn changed(a: &[u8], b: &[u8]) -> usize {
     assert_eq!(a.len(), b.len());
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count()
 }
