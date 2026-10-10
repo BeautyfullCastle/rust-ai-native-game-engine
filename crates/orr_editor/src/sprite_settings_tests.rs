@@ -54,6 +54,7 @@ fn setup() -> (
                     walk: "walk".into(),
                 },
                 units_per_pixel: 100.0,
+                orientation: Some(Orientation { quarter_turns: 1, flip_x: true, flip_y: false }),
             }),
         )
         .unwrap();
@@ -71,13 +72,14 @@ fn setup() -> (
         .unwrap();
     (dir, panel, editor, first, second)
 }
-fn draft(panel: &SpritePanel) -> (String, String, Source, f32, bool) {
+fn draft(panel: &SpritePanel) -> (String, String, Source, f32, bool, Option<Option<Orientation>>) {
     (
         panel.package.clone(),
         panel.document.clone(),
         panel.source.clone(),
         panel.scale,
         panel.preview_playing,
+        panel.picked_orientation,
     )
 }
 
@@ -105,6 +107,7 @@ fn sprite_settings_picker_widgets_copy_assign_history_save_reopen() {
             original.bindings[&first.to_string()].source
         );
         assert_eq!(h.state().0.scale, 100.0);
+        assert_eq!(h.state().0.picked_orientation, Some(original.bindings[first.as_str()].orientation));
         assert_eq!(h.state().0.bindings.as_ref().unwrap().document(), &original);
         assert!(!h.state().0.bindings.as_ref().unwrap().dirty());
     }
@@ -131,6 +134,39 @@ fn sprite_settings_picker_widgets_copy_assign_history_save_reopen() {
         &assigned
     );
     assert!(!bindings.dirty());
+    assert_eq!(h.state().1.checksum(), checksum);
+    assert_eq!(h.state().1.history().entries.len(), history_len);
+    // Explicitly picking identity clears a target's authored transform, while
+    // ordinary reassignment and the opt-out button preserve target orientation.
+    h.state_mut().0.bindings.as_mut().unwrap()
+        .set_orientation(&first, None).unwrap();
+    h.state_mut().1.select(Some(Target::Guid(first.clone())));
+    h.run_steps(3);
+    h.get_by_label("Use selected sprite settings").click();
+    h.run_steps(3);
+    assert_eq!(h.state().0.picked_orientation, Some(None));
+    h.state_mut().1.select(Some(Target::Guid(second.clone())));
+    h.run_steps(3);
+    h.get_by_label("Keep target sprite orientations").click();
+    h.run_steps(3);
+    h.get_by_label("Assign sprite to selection").click();
+    h.run_steps(3);
+    assert_eq!(h.state().0.bindings.as_ref().unwrap().document().bindings[second.as_str()].orientation,
+        assigned.bindings[second.as_str()].orientation);
+    h.state_mut().1.select(Some(Target::Guid(first.clone())));
+    h.run_steps(3);
+    h.get_by_label("Use selected sprite settings").click();
+    h.run_steps(3);
+    h.state_mut().1.select(Some(Target::Guid(second.clone())));
+    h.run_steps(3);
+    h.get_by_label("Assign sprite to selection").click();
+    h.run_steps(3);
+    assert_eq!(h.state().0.bindings.as_ref().unwrap().document().bindings[second.as_str()].orientation, None);
+    assert_eq!(h.state().0.bindings.as_ref().unwrap().document().version, 3);
+    h.get_by_label("Undo binding").click();
+    h.run_steps(3);
+    assert_eq!(h.state().0.bindings.as_ref().unwrap().document().bindings[second.as_str()].orientation,
+        assigned.bindings[second.as_str()].orientation);
     assert_eq!(h.state().1.checksum(), checksum);
     assert_eq!(h.state().1.history().entries.len(), history_len);
 }

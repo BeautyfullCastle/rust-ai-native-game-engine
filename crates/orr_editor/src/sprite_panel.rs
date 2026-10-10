@@ -4,7 +4,7 @@ use crate::{
     editor::Editor,
     game::EditorGame,
     model::Mode,
-    sprite_bindings::{self, Asset, Binding, Bindings, Source},
+    sprite_bindings::{self, Asset, Binding, Bindings, Orientation, Source},
     sprite_playback::SpritePlayback,
 };
 use egui::{Color32, Pos2, Rect, TextureHandle, Ui};
@@ -28,6 +28,8 @@ pub struct SpritePanel {
     pub document: String,
     pub source: Source,
     pub scale: f32,
+    // None preserves each target; Some(None) explicitly copies identity.
+    picked_orientation: Option<Option<Orientation>>,
     loaded: BTreeMap<(String, String), Loaded>,
     error: Option<String>,
     #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
@@ -49,6 +51,7 @@ impl Default for SpritePanel {
             document: String::new(),
             source: Source::Region(0),
             scale: 0.05,
+            picked_orientation: None,
             loaded: BTreeMap::new(),
             error: None,
             #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
@@ -131,6 +134,7 @@ impl SpritePanel {
         self.scene.clone_from(&candidate.document().scene);
         self.project.clone_from(&candidate.document().project);
         self.bindings = Some(candidate);
+        self.picked_orientation = None;
         self.playback.reset_document();
         self.preview_playing = false;
         self.error = None;
@@ -142,6 +146,7 @@ impl SpritePanel {
         let candidate = Bindings::create(path, scene, project)?;
         self.path = candidate.path.to_string_lossy().into_owned();
         self.bindings = Some(candidate);
+        self.picked_orientation = None;
         self.playback.reset_document();
         self.loaded.clear();
         self.preview_playing = false;
@@ -289,6 +294,7 @@ impl SpritePanel {
         self.document.clone_from(&binding.document);
         self.source.clone_from(&binding.source);
         self.scale = binding.units_per_pixel;
+        self.picked_orientation = Some(binding.orientation);
         self.preview_playing = false;
         Ok(())
     }
@@ -309,6 +315,7 @@ impl SpritePanel {
             document: self.document.clone(),
             source: self.source.clone(),
             units_per_pixel: self.scale,
+            orientation: self.picked_orientation.flatten(),
         };
         binding.region(&asset.document, 0)?;
         // One atlas is shared by every binding of this document. A package
@@ -337,13 +344,80 @@ impl SpritePanel {
         if references.len() > 8 {
             return Err("sidecar references more than 8 sprite documents".into());
         }
-        self.bindings
-            .as_mut()
-            .unwrap()
-            .assign(editor.selected_guids(), Some(binding))?;
+        let bindings = self.bindings.as_mut().unwrap();
+        if self.picked_orientation.is_some() {
+            bindings.assign(editor.selected_guids(), Some(binding))?;
+        } else {
+            bindings.assign_preserving_orientation(editor.selected_guids(), &binding)?;
+        }
         self.loaded.retain(|key, _| references.contains(key));
         self.cache_asset(ctx, key, asset);
         Ok(())
+    }
+    fn selected_orientation(&self, editor: &Editor) -> Option<Orientation> {
+        if editor.selected_guids().len() != 1 { return None; }
+        self.bindings.as_ref()?.document().bindings
+            .get(editor.selected_guids()[0].as_str())?.orientation
+    }
+    /// Immediate current-selection transaction: no retained target draft can be
+    /// applied after selection, document or history has changed. Revalidate the
+    /// installed source and refuse to edit a stale last-good texture preview.
+    pub fn set_selected_orientation(&mut self, editor: &Editor, orientation: Option<Orientation>) -> Result<(), String> {
+        if !self.editable(editor) || !editor.spec().is_local() || !editor.can_mutate()
+            || editor.sim().in_tx || editor.selected_guids().len() != 1 {
+            return Err("sprite orientation requires one selected binding in the matching settled local Edit scene".into());
+        }
+        if let Some(orientation) = orientation { orientation.validate()?; }
+        let guid = &editor.selected_guids()[0];
+        let row = binding_row(editor.rows(), guid.as_str()).ok_or("selected sprite entity is unavailable")?;
+        if !editor.bodies().iter().any(|body| body.entity == row.entity) {
+            return Err("selected sprite entity is absent from the displayed snapshot".into());
+        }
+        let bindings = self.bindings.as_ref().ok_or("open sprite bindings first")?;
+        let binding = bindings.document().bindings.get(guid.as_str()).ok_or("selected entity has no sprite binding")?;
+        let key = (binding.package.clone(), binding.document.clone());
+        let current = self.loaded.get(&key).ok_or("reload verified sprite assets first")?;
+        let fresh = sprite_bindings::load_asset(
+            &sprite_bindings::resolve_project(bindings.base(), &bindings.document().project)?,
+            &binding.package, &binding.document,
+        )?;
+        binding.region(&fresh.document, 0)?;
+        if fresh.rgba != current.asset.rgba
+            || fresh.document.to_json().map_err(|e| e.to_string())?
+                != current.asset.document.to_json().map_err(|e| e.to_string())? {
+            return Err("installed sprite source changed; Reload assets before editing orientation".into());
+        }
+        self.bindings.as_mut().unwrap().set_orientation(guid, orientation)?;
+        self.picked_orientation = None;
+        Ok(())
+    }
+    fn show_orientation(&mut self, ui: &mut Ui, editor: &Editor) {
+        if editor.selected_guids().len() != 1 { return; }
+        let guid = &editor.selected_guids()[0];
+        let Some(binding) = self.bindings.as_ref().and_then(|b| b.document().bindings.get(guid.as_str())) else { return; };
+        let saved = binding.orientation;
+        let mut draft = saved.unwrap_or_default();
+        ui.collapsing("Selected sprite orientation", |ui| {
+            ui.weak("Mirrors use the original atlas axes, then quarter turns rotate counter-clockwise around the sprite center. Collision stays unchanged.");
+            let enabled = self.editable(editor) && editor.spec().is_local() && editor.can_mutate() && !editor.sim().in_tx;
+            ui.add_enabled_ui(enabled, |ui| {
+                let mut changed = false;
+                egui::ComboBox::from_label("Sprite quarter turns")
+                    .selected_text(format!("{} degrees", u16::from(draft.quarter_turns) * 90))
+                    .show_ui(ui, |ui| {
+                        for turns in 0..=3 {
+                            changed |= ui.selectable_value(&mut draft.quarter_turns, turns, format!("{} degrees", u16::from(turns) * 90)).changed();
+                        }
+                    });
+                changed |= ui.checkbox(&mut draft.flip_x, "Mirror sprite X").changed();
+                changed |= ui.checkbox(&mut draft.flip_y, "Mirror sprite Y").changed();
+                let reset = ui.add_enabled(saved.is_some(), egui::Button::new("Reset sprite orientation")).clicked();
+                if reset || changed {
+                    let result = self.set_selected_orientation(editor, if reset { None } else { Some(draft) });
+                    self.report(result);
+                }
+            });
+        });
     }
     pub fn update(&mut self, editor: &mut Editor) {
         let matches = self.scene_matches(editor);
@@ -432,7 +506,7 @@ impl SpritePanel {
                 });
                 let dirty = self.bindings.as_ref().unwrap().dirty();
                 if ui.button(if dirty { "Discard unsaved bindings and close" } else { "Close bindings" }).clicked() {
-                    self.bindings = None; self.loaded.clear(); self.error = None; self.preview_playing = false; self.playback.reset_document(); return;
+                    self.bindings = None; self.picked_orientation = None; self.loaded.clear(); self.error = None; self.preview_playing = false; self.playback.reset_document(); return;
                 }
                 ui.separator();
                 if ui.add_enabled(self.editable(editor) && editor.selected_guids().len() == 1,
@@ -485,7 +559,7 @@ impl SpritePanel {
                         if ui.add_enabled(editor.mode() == Mode::Edit, egui::Button::new("Play sprite preview")).clicked() { self.preview_playing = true; self.preview_started = ui.input(|i| i.time); }
                         if ui.button("Stop sprite preview").clicked() { self.preview_playing = false; }
                     });
-                    let binding = Binding { package: self.package.clone(), document: self.document.clone(), source: self.source.clone(), units_per_pixel: self.scale };
+                    let binding = Binding { package: self.package.clone(), document: self.document.clone(), source: self.source.clone(), units_per_pixel: self.scale, orientation: self.picked_orientation.unwrap_or_else(|| self.selected_orientation(editor)) };
                     let elapsed = if self.preview_playing { ((ui.input(|i| i.time) - self.preview_started).max(0.0) * 1000.0) as u64 } else { 0 };
                     if self.preview_playing { ui.ctx().request_repaint(); }
                     if let Ok(region) = binding.region(&loaded.asset.document, elapsed) {
@@ -493,14 +567,24 @@ impl SpritePanel {
                         let region = loaded.asset.document.region(region).unwrap();
                         let size = egui::vec2(region.width as f32, region.height as f32);
                         let size = size * (128.0 / size.x.max(size.y));
-                        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                        ui.painter().image(loaded.texture.id(), rect, Rect::from_min_max(Pos2::new(uv[0], uv[1]), Pos2::new(uv[2], uv[3])), Color32::WHITE);
+                        let orientation = binding.orientation.unwrap_or_default();
+                        let extent = if orientation.quarter_turns.is_multiple_of(2) { size } else { egui::vec2(size.y, size.x) };
+                        let (rect, _) = ui.allocate_exact_size(extent, egui::Sense::hover());
+                        paint_oriented_preview(ui, loaded.texture.id(), rect, size, uv, orientation);
                     }
                     let enabled = self.editable(editor) && !editor.selected_guids().is_empty();
                     if ui.add_enabled(enabled, egui::Button::new("Assign sprite to selection")).clicked() {
                         let result = self.assign(ui.ctx(), editor); self.report(result);
                     }
                 }
+                if let Some(orientation) = self.picked_orientation {
+                    let orientation = orientation.unwrap_or_default();
+                    ui.weak(format!("Assignment copies orientation: {} degrees, mirror X {}, mirror Y {}", u16::from(orientation.quarter_turns) * 90, orientation.flip_x, orientation.flip_y));
+                    if ui.button("Keep target sprite orientations").clicked() {
+                        self.picked_orientation = None;
+                    }
+                }
+                self.show_orientation(ui, editor);
                 let enabled = self.editable(editor) && !editor.selected_guids().is_empty();
                 if ui.add_enabled(enabled, egui::Button::new("Remove selected sprite bindings")).clicked() {
                     let result = self.bindings.as_mut().unwrap().assign(editor.selected_guids(), None); self.report(result);
@@ -597,12 +681,13 @@ impl SpritePanel {
                 continue;
             };
             let region = asset.asset.document.region(id).unwrap();
-            let uv = asset.asset.document.uv_rect(id).unwrap();
+            let orientation = binding.orientation.unwrap_or_default();
+            let uv = orientation.uv_rect(asset.asset.document.uv_rect(id).unwrap());
             let half = [
                 region.width as f32 * binding.units_per_pixel * 0.5,
                 region.height as f32 * binding.units_per_pixel * 0.5,
             ];
-            let (sin, cos) = body.angle.sin_cos();
+            let (sin, cos) = (body.angle + orientation.radians()).sin_cos();
             let mut mesh = egui::Mesh::with_texture(asset.texture.id());
             for ([x, y], tex) in [
                 ([-half[0], half[1]], [uv[0], uv[1]]),
@@ -631,6 +716,26 @@ impl SpritePanel {
             painter.add(egui::Shape::mesh(mesh));
         }
     }
+}
+fn paint_oriented_preview(ui: &Ui, texture: egui::TextureId, rect: Rect, size: egui::Vec2, uv: [f32; 4], orientation: Orientation) {
+    let uv = orientation.uv_rect(uv);
+    let half = size * 0.5;
+    let (sin, cos) = orientation.radians().sin_cos();
+    let mut mesh = egui::Mesh::with_texture(texture);
+    for ([x, y], tex) in [
+        ([-half.x, half.y], [uv[0], uv[1]]),
+        ([half.x, half.y], [uv[2], uv[1]]),
+        ([half.x, -half.y], [uv[2], uv[3]]),
+        ([-half.x, -half.y], [uv[0], uv[3]]),
+    ] {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: rect.center() + egui::vec2(x * cos - y * sin, -x * sin - y * cos),
+            uv: Pos2::new(tex[0], tex[1]),
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    ui.painter().add(egui::Shape::mesh(mesh));
 }
 fn binding_row<'a>(
     rows: &'a [crate::model::EntityRow],

@@ -381,6 +381,9 @@ impl ProjectPresentation {
                         region.width as f32 * binding.units_per_pixel,
                         region.height as f32 * binding.units_per_pixel,
                     ],
+                    rotation: binding.orientation.unwrap_or_default().radians(),
+                    flip_x: binding.orientation.unwrap_or_default().flip_x,
+                    flip_y: binding.orientation.unwrap_or_default().flip_y,
                     ..Default::default()
                 },
             });
