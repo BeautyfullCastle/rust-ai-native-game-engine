@@ -71,6 +71,30 @@ fn wait_for(h: &mut Harness<'_, EditorApp>, description: &str, ready: impl Fn(&E
     }
 }
 
+// A coherent row cache alone does not mean material controls are ready: a
+// delayed history invalidation can temporarily disable both Reload and Apply.
+// Observe the actual control, without repeating the action or relaxing fences.
+fn wait_for_enabled(h: &mut Harness<'_, EditorApp>, label: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        settle(h);
+        if h
+            .query_by_label(label)
+            .is_some_and(|node| !node.accesskit_node().is_disabled())
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for enabled {label}; coherent rows: {}; waiting for history: {}; stale draft: {}",
+            h.state().editor.yard_rows_coherent(),
+            h.query_by_label("Waiting for scene history").is_some(),
+            h.query_by_label("Draft is stale. Reload it before applying").is_some(),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn host_frame_bytes(h: &mut Harness<'_, EditorApp>) -> Vec<u8> {
     settle(h);
     let snapshot = h.state().editor.snapshot().unwrap();
@@ -518,6 +542,9 @@ fn same_path_scene_replacement_fences_draft_until_reload() {
     });
     assert!(h.state().models.scene_matches(&h.state().editor));
     assert_ne!(h.state().editor.checksum(), original_checksum);
+    // Require a usable Reload control before attributing disabled Apply to the
+    // stale scene draft rather than a pending history/row refresh.
+    wait_for_enabled(&mut h, "Reload material draft");
     assert!(
         h.get_by_label("Apply material override")
             .accesskit_node()
@@ -525,6 +552,9 @@ fn same_path_scene_replacement_fences_draft_until_reload() {
         "same-path scene replacement must stale the original draft"
     );
     click(&mut h, "Reload material draft");
+    // One click must suffice. A later read-only history push may temporarily
+    // disable the refreshed draft; wait for readiness, never retry Reload.
+    wait_for_enabled(&mut h, "Apply material override");
     assert!(
         !h.get_by_label("Apply material override")
             .accesskit_node()

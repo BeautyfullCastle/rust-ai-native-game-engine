@@ -626,3 +626,118 @@ fn external_erp_load_retires_authored_camera_without_reactivation() {
     h.state_mut().editor.agent_client("camera-lifecycle-acceptance").unwrap().call("scene.load",serde_json::json!({"text":text,"path":a.display().to_string()})).unwrap();
     settle(&mut h);assert!(!h.state().editor.has_room_camera());
 }
+
+
+/// Taps are delivered in one real egui input frame, then replayed through
+/// the unmodified deterministic runtime. No direct interaction API is used.
+#[test]
+fn room_same_frame_interact_taps_collect_and_win_with_exact_replay() {
+    for tap_count in [2, 5] {
+        let fixture = Fixture::new();
+        let mut h = fixture.app(false);
+        settle(&mut h);
+        move_actor(&mut h, &fixture.guids[&KEY], FPVec3::new(FP::HALF, FP::ONE, FP::ZERO));
+        move_actor(&mut h, &fixture.guids[&EXIT], FPVec3::new(-FP::HALF, FP::ONE, FP::ZERO));
+        assert!(h.state_mut().editor.save());
+        settle(&mut h);
+        let authored = PreparedScene::parse(&fs::read_to_string(fixture.root.join("room.scene.yaml")).unwrap()).unwrap();
+        h.get_by_label(orr_editor::app::LBL_PLAY).click();
+        wait(&mut h, "live play", |app| app.editor.can_take_control());
+        h.get_by_label("Take control").click();
+        wait(&mut h, "managed claim", |app| app.editor.input_phase() == Phase::Active);
+        for _ in 0..tap_count {
+            key(&mut h, egui::Key::E, true);
+            key(&mut h, egui::Key::E, false);
+        }
+        wait(&mut h, "two queued taps collect key then exit", |app| run(app).won == 1);
+        assert_eq!(run(h.state()).key_collected, 1);
+        h.state_mut().editor.pause();
+        settle(&mut h);
+        let live = frame_bytes(&mut h.state_mut().editor);
+        let stopped = h.state_mut().editor.stop().unwrap().clone();
+        settle(&mut h);
+        assert_eq!(h.state().editor.checksum(), authored.frame().checksum());
+        let reader = orr_session::ReplayReader::<RoomEscapeV1>::parse(&stopped.replay).unwrap();
+        let mut sim = authored.simulation().unwrap();
+        let mut presses = 0;
+        let mut held = false;
+        for tick in 1..=reader.last_tick() {
+            let (inputs, commands) = reader.tick(tick).unwrap();
+            assert!(commands.is_empty());
+            let down = inputs[0].buttons & INTERACT != 0;
+            presses += u32::from(down && !held);
+            held = down;
+            let mut samples = TickInputs::new(tick, 1);
+            samples.set_input(PlayerSlot(0), inputs[0]);
+            sim.step(&samples);
+            if let Some((_, expected)) = reader.checksums.iter().find(|(at, _)| *at == sim.tick()) {
+                assert_eq!(sim.frame().checksum(), *expected);
+            }
+        }
+        assert_eq!(presses, 2, "two physical taps become exactly two deterministic rising edges");
+        assert_eq!(sim.frame().to_bytes(), live);
+        assert_eq!(sim.frame().checksum(), stopped.checksum);
+        // Stop/restart does not replay any queued or already-consumed interaction.
+        h.get_by_label(orr_editor::app::LBL_PLAY).click();
+        wait(&mut h, "second live play", |app| app.editor.can_take_control());
+        h.get_by_label("Take control").click();
+        wait(&mut h, "second claim", |app| app.editor.input_phase() == Phase::Active);
+        let tick = h.state().editor.timeline().unwrap().tick;
+        wait(&mut h, "neutral restarted frames", |app| app.editor.timeline().unwrap().tick >= tick + 4);
+        assert_eq!(run(h.state()).key_collected, 0);
+        assert_eq!(run(h.state()).won, 0);
+        h.state_mut().editor.stop().unwrap();
+    }
+}
+
+#[test]
+fn room_interact_taps_are_suppressed_by_focus_loss_escape_and_dialog_capture() {
+    for gate in ["focus", "escape", "dialog"] {
+        let fixture = Fixture::new();
+        let mut h = fixture.app(false);
+        settle(&mut h);
+        h.get_by_label(orr_editor::app::LBL_PLAY).click();
+        wait(&mut h, "live play", |app| app.editor.can_take_control());
+        h.get_by_label("Take control").click();
+        wait(&mut h, "managed claim", |app| app.editor.input_phase() == Phase::Active);
+        match gate {
+            "focus" => {
+                h.input_mut().focused = false;
+                h.event(egui::Event::WindowFocused(false));
+            }
+            "escape" => { key(&mut h, egui::Key::Escape, true); }
+            "dialog" => {
+                h.state_mut().ui.dialog = Some(orr_editor::app::Dialog {
+                    kind: orr_editor::app::DialogKind::SaveAs,
+                    text: String::new(),
+                });
+            }
+            _ => unreachable!(),
+        }
+        for _ in 0..3 {
+            key(&mut h, egui::Key::E, true);
+            key(&mut h, egui::Key::E, false);
+        }
+        wait(&mut h, "gate releases and cancels interaction", |app| {
+            app.editor.input_phase() == Phase::Off && !app.editor.input_cleanup_pending()
+        });
+        assert_eq!(run(h.state()).key_collected, 0, "{gate} must suppress E events");
+        h.input_mut().focused = true;
+        h.event(egui::Event::WindowFocused(true));
+        key(&mut h, egui::Key::Escape, false);
+        if gate == "dialog" {
+            h.get_by_label("Cancel").click();
+        }
+        settle(&mut h);
+        assert_eq!(h.state().editor.input_phase(), Phase::Off);
+        h.get_by_label("Take control").click();
+        wait(&mut h, "explicit reclaimed control", |app| app.editor.input_phase() == Phase::Active);
+        let tick = h.state().editor.timeline().unwrap().tick;
+        wait(&mut h, "neutral after capture", |app| app.editor.timeline().unwrap().tick >= tick + 4);
+        assert_eq!(run(h.state()).key_collected, 0, "{gate} events cannot leak into reclaim");
+        key(&mut h, egui::Key::E, true);
+        key(&mut h, egui::Key::E, false);
+        wait(&mut h, "fresh authorized tap", |app| run(app).key_collected == 1);
+        h.state_mut().editor.stop().unwrap();
+    }
+}

@@ -841,6 +841,13 @@ impl EditorApp {
                 y:i8::from(i.key_down(Key::W)||i.key_down(Key::ArrowUp))-i8::from(i.key_down(Key::S)||i.key_down(Key::ArrowDown)),
                 fire:i.key_down(Key::E),
             });
+            if focused {
+                let edges = ui.input(|i| i.events.iter().filter_map(|event| match event {
+                    egui::Event::Key { key: Key::E, pressed, repeat: false, .. } => Some(*pressed),
+                    _ => None,
+                }).collect::<Vec<_>>());
+                for pressed in edges { self.editor.room_interact_event(focused, pressed); }
+            }
             self.editor.arena_keys(focused,keys);
             if resp.has_focus() {
                 let controlled=focused && self.editor.input_phase()==crate::editor::input::Phase::Active;
