@@ -853,3 +853,133 @@ fn ui_template_requires_explicit_compiled_ui_before_creating_stage() {
     assert!(!opt.output.exists());
     assert_no_stages(temp.path());
 }
+
+#[cfg(not(feature = "room-project"))]
+#[test]
+fn room_template_requires_feature_before_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut options = options(temp.path(), "room", "room-seed");
+    options.template = ROOM_TEMPLATE.into();
+    assert!(create(&options)
+        .unwrap_err()
+        .contains("room-project feature"));
+    assert!(!options.output.exists());
+    assert_no_stages(temp.path());
+}
+
+#[cfg(feature = "room-project")]
+mod room_template_tests {
+    use super::*;
+    fn room(root: &Path, name: &str, seed: &str) -> CreateOptions {
+        let mut value = options(root, name, seed);
+        value.template = ROOM_TEMPLATE.into();
+        value
+    }
+    #[test]
+    fn closed_room_installs_exact_allowlist_and_namespaces_only_guids() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = create(&room(temp.path(), "a", "room-seed")).unwrap();
+        let b = create(&room(temp.path(), "b", "room-seed")).unwrap();
+        let c = create(&room(temp.path(), "c", "other-seed")).unwrap();
+        assert_eq!(files(&a.output), files(&b.output));
+        assert_eq!(files(&a.output).len(), 10);
+        assert_eq!(a.entity_guids.len(), 7);
+        assert_eq!(a.initial_checksum, c.initial_checksum);
+        assert!(a
+            .entity_guids
+            .iter()
+            .all(|guid| !c.entity_guids.contains(guid)));
+        let project =
+            orr_package::Project::open(&a.output, crate::room_project::compiled_runtime()).unwrap();
+        for (name, bytes) in room_template::SOURCE.iter().skip(1) {
+            assert_eq!(
+                project.read_asset(room_template::PACKAGE, name).unwrap(),
+                *bytes
+            );
+        }
+        let prepared = crate::room_project::PreparedProject::open(&a.output).unwrap();
+        assert_eq!(prepared.models().document.bindings.len(), 2);
+        assert_eq!(prepared.scene().frame().checksum(), a.initial_checksum);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(a.output.join("orr.project.json")).unwrap()).unwrap();
+        assert!(manifest.get("progress").is_none());
+        assert!(manifest["entry"].get("sprites").is_none());
+        assert_eq!(manifest["entry"]["game"], "room-escape-v1");
+        fs::remove_dir_all(&a.output).unwrap();
+        assert_eq!(prepared.scene().frame().checksum(), a.initial_checksum);
+        assert_eq!(prepared.models().assets.len(), 1);
+    }
+    #[test]
+    fn room_errors_clean_only_owned_stage_and_never_replace_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        for point in [
+            "stage-created",
+            "project-file-written",
+            "source-file-written",
+            "before-install",
+            "installed",
+            "room-models-written",
+            "before-validation",
+            "before-publish",
+        ] {
+            let options = room(temp.path(), "failure", "seed");
+            let result = create_with(
+                &options,
+                |stage, _| {
+                    if stage == point {
+                        Err(format!("injected {point}"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                publish_no_replace,
+            );
+            assert!(result.unwrap_err().contains("injected"));
+            assert!(!options.output.exists());
+            assert_no_stages(temp.path());
+        }
+        let options = room(temp.path(), "raced", "seed");
+        let result = create_with(
+            &options,
+            |point, _| {
+                if point == "before-publish" {
+                    fs::create_dir(&options.output).unwrap();
+                    fs::write(options.output.join("keep"), b"owner").unwrap();
+                }
+                Ok(())
+            },
+            publish_no_replace,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(options.output.join("keep")).unwrap(), b"owner");
+        assert_no_stages(temp.path());
+    }
+    #[test]
+    fn room_extra_or_changed_bytes_fail_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        for extra in [true, false] {
+            let options = room(temp.path(), "tamper", "seed");
+            let result = create_with(
+                &options,
+                |point, stage| {
+                    if point == "before-publish" {
+                        fs::write(
+                            stage.join("project").join(if extra {
+                                "unexpected"
+                            } else {
+                                "room.models.json"
+                            }),
+                            b"tampered",
+                        )
+                        .unwrap();
+                    }
+                    Ok(())
+                },
+                publish_no_replace,
+            );
+            assert!(result.is_err());
+            assert!(!options.output.exists());
+            assert_no_stages(temp.path());
+        }
+    }
+}

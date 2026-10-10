@@ -13,6 +13,8 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+# Optional new-project creator for explicit authoring and acceptance workflows.
+project-create = ["orr_sample/project-create"]
 room-project = ["models", "orr_remote/room-project", "orr_sample/room-project"]
 image-reimport = ["sprites", "orr_sample/image-reimport"]
 linked-prefabs = ["collect-dodge", "dep:tempfile", "orr_remote/linked-prefabs", "orr_sample/linked-prefabs", "orr_reflect/linked-prefabs"]

@@ -631,10 +631,10 @@ jobs:
           test "$(uname -m)" = x86_64
           test "$(id -u)" -ne 0
           cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --list > "$RUNNER_TEMP/new-arena-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 63
-          test "$(grep -cE '^project_create::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 13
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 64
+          test "$(grep -cE '^project_create::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 14
           cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-library.log"
-          grep -F 'test result: ok. 63 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-library.log"
+          grep -F 'test result: ok. 64 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-library.log"
           cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --list > "$RUNNER_TEMP/new-arena-cli-list.txt"
           test "$(grep -cE '^[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-cli-list.txt")" -eq 6
           cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-cli.log"
@@ -1276,6 +1276,7 @@ jobs:
               "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
               "project_create::tests::typed_remap_covers_nested_references_comments_bindings_and_follow",
               "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+              "project_create::tests::room_template_requires_feature_before_staging",
               "project_create::tests::collect::collect_creation_identity_is_explicit_reproducible_and_copy_stable",
               "project_create::tests::collect::collect_invalid_uuid_or_template_never_creates_output",
               "project_create::tests::collect::collect_existing_output_and_special_parents_are_preserved",
@@ -1351,6 +1352,7 @@ jobs:
               "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
               "project_create::tests::existing_destinations_are_preserved_including_empty_and_special",
               "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+              "project_create::tests::room_template_requires_feature_before_staging",
               "project_create::tests::invalid_template_seed_and_paths_do_not_create_anything",
               "project_create::tests::package_install_failure_is_not_published_or_replaced_with_fixture_lock",
               "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
@@ -1516,10 +1518,10 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result creator 18 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
+          check_result creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
           check_result collect-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --test new_arena_cli
           check_result arena-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli
-          check_result combined-library 107 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
+          check_result combined-library 108 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
         env:
           ORR_NEW_COLLECT_EVIDENCE: /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin exact Collect creator runtime exporter and progress harness
@@ -2224,6 +2226,7 @@ jobs:
               "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
               "project_create::tests::existing_destinations_are_preserved_including_empty_and_special",
               "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+              "project_create::tests::room_template_requires_feature_before_staging",
               "project_create::tests::invalid_template_seed_and_paths_do_not_create_anything",
               "project_create::tests::package_install_failure_is_not_published_or_replaced_with_fixture_lock",
               "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
@@ -2298,6 +2301,7 @@ jobs:
               "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
               "project_create::tests::existing_destinations_are_preserved_including_empty_and_special",
               "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+              "project_create::tests::room_template_requires_feature_before_staging",
               "project_create::tests::invalid_template_seed_and_paths_do_not_create_anything",
               "project_create::tests::package_install_failure_is_not_published_or_replaced_with_fixture_lock",
               "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
@@ -2464,9 +2468,9 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-creator-library 157 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
+          check_result ui-creator-library 158 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
           check_result ui-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --test new_arena_cli
-          check_result non-ui-creator 18 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
+          check_result non-ui-creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
         env:
           ORR_NEW_COLLECT_UI_EVIDENCE: /tmp/orr-new-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin separate UI creator runtime exporter and matching libtest
@@ -3201,6 +3205,43 @@ jobs:
             /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.json
             /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.jsonl
             /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.stderr
+          if-no-files-found: error
+          retention-days: 7
+      # PR148: bounded Room creator gates; source-only historical results do not certify this union.
+      - name: Room creator checker semantic fixtures
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        run: python3 tools/test_room_template_gate.py
+      - name: Required Room creator API CLI editor and joint inventories
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 90
+        run: tools/check-room-template.sh contracts
+        env:
+          ORR_ROOM_TEMPLATE_EVIDENCE: /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Required generated Room GPU and source-hidden production export
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_ROOM_TEMPLATE_EVIDENCE: /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}
+        run: tools/check-room-template.sh gpu
+      - name: Upload Room creator acceptance evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-template-evidence-${{ matrix.os }}
+          path: |
+            /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.log
+            /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.sha256
+            /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.txt
+            /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.png
+            /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.json
+            /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.jsonl
+            /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.stderr
           if-no-files-found: error
           retention-days: 7
       - name: Upload generated Arena acceptance evidence
