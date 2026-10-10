@@ -7,7 +7,10 @@ use crate::{
     editor::Editor,
     game::EditorGame,
     model::Mode,
-    terrain_document::{format_fixed, parse_fixed, NewTerrain, TerrainSession, TerrainSource},
+    terrain_document::{
+        brush::{self, BrushOperation, TerrainBrush, MAX_BRUSH_RADIUS},
+        format_fixed, parse_fixed, NewTerrain, TerrainSession, TerrainSource,
+    },
     terrain_pick::{self, TerrainQuery, TerrainSelectionMode},
 };
 use egui::Ui;
@@ -16,6 +19,14 @@ use orr_model::StaticModel;
 use orr_render::Camera3D;
 use orr_terrain::Edit;
 use std::{path::PathBuf, sync::Arc};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SculptMode {
+    #[default]
+    RaiseLower,
+    Flatten,
+    Smooth,
+}
 
 pub struct TerrainPanel {
     pub document: TerrainSession,
@@ -32,10 +43,18 @@ pub struct TerrainPanel {
     pub selected_vertex: [u32; 2],
     pub selected_cell: [u32; 2],
     pub height: String,
+    pub sculpt_mode: SculptMode,
+    pub sculpt_radius: u32,
+    pub sculpt_delta: String,
+    pub sculpt_height: String,
+    pub show_sculpt_footprint: bool,
     pub hole: bool,
     pub query_xz: [String; 2],
     confirm_discard: bool,
     error: Option<String>,
+    stroke_context_lost: bool,
+    sculpt_hover: Option<[u32; 2]>,
+    stroke_cancelled_frame: bool,
 }
 impl Default for TerrainPanel {
     fn default() -> Self {
@@ -54,10 +73,18 @@ impl Default for TerrainPanel {
             selected_vertex: [0; 2],
             selected_cell: [0; 2],
             height: "0".into(),
+            sculpt_mode: SculptMode::RaiseLower,
+            sculpt_radius: 2,
+            sculpt_delta: "0.5".into(),
+            sculpt_height: "0".into(),
+            show_sculpt_footprint: false,
             hole: false,
             query_xz: ["0".into(), "0".into()],
             confirm_discard: false,
             error: None,
+            stroke_context_lost: false,
+            sculpt_hover: None,
+            stroke_cancelled_frame: false,
         }
     }
 }
@@ -70,7 +97,9 @@ impl TerrainPanel {
         result
     }
     fn local_scene(editor: &Editor) -> Result<PathBuf, String> {
-        if (editor.game() != EditorGame::Yard3D && !editor.game().is_navigation()) || !editor.spec().is_local() {
+        if (editor.game() != EditorGame::Yard3D && !editor.game().is_navigation())
+            || !editor.spec().is_local()
+        {
             return Err("Terrain authoring requires a local Yard3D scene".into());
         }
         let expected: &std::path::Path = match editor.spec() {
@@ -78,11 +107,13 @@ impl TerrainPanel {
             #[cfg(feature = "sprites")]
             HostSpec::PreparedArena { scene, .. } => scene.path(),
             #[cfg(feature = "collect-dodge")]
-            HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
+            HostSpec::PreparedCollect { .. } => {
+                return Err("CollectDodge does not support local 3D asset authoring".into())
+            }
             #[cfg(feature = "room-project")]
             HostSpec::PreparedRoom { scene, .. } => scene,
-        #[cfg(feature = "navigation-project")]
-        HostSpec::PreparedNavigation { scene, .. } => scene,
+            #[cfg(feature = "navigation-project")]
+            HostSpec::PreparedNavigation { scene, .. } => scene,
             HostSpec::Remote { .. } => {
                 return Err("Remote paths are not local terrain authority".into())
             }
@@ -127,15 +158,21 @@ impl TerrainPanel {
     /// render compatibility and must disable stale baked lighting.
     pub fn attached_for_editor(&self, editor: &Editor) -> bool {
         #[cfg(feature = "navigation")]
-        if editor.game().is_navigation() && editor.admitted_navigation().admitted { return true; }
+        if editor.game().is_navigation() && editor.admitted_navigation().admitted {
+            return true;
+        }
         #[cfg(feature = "terrain-physics")]
-        if editor.game().is_terrain() { return editor.admitted_terrain().admitted; }
+        if editor.game().is_terrain() {
+            return editor.admitted_terrain().admitted;
+        }
         self.scene_matches(editor) && self.document.terrain().is_some()
     }
     pub fn viewport_model(&self, editor: &Editor) -> Option<Arc<StaticModel>> {
         #[cfg(feature = "terrain-physics")]
         if editor.game().is_terrain() {
-            return (editor.yard_rows_coherent() && editor.previewing().is_none()).then(|| editor.admitted_terrain().model.clone()).flatten();
+            return (editor.yard_rows_coherent() && editor.previewing().is_none())
+                .then(|| editor.admitted_terrain().model.clone())
+                .flatten();
         }
         (self.attached_for_editor(editor)
             && editor.yard_rows_coherent()
@@ -166,6 +203,9 @@ impl TerrainPanel {
     /// Called before viewport drawing even when the panel is collapsed. Dirty
     /// state survives external scene changes, while its render/query is hidden.
     pub fn sync_for_editor(&mut self, editor: &Editor) {
+        if self.stroke_context_lost && self.document.terrain().is_some() {
+            return;
+        }
         let Ok(scene) = Self::require_context(editor) else {
             return;
         };
@@ -248,6 +288,7 @@ impl TerrainPanel {
         let result = (|| {
             Self::require_context(editor)?;
             self.document.close()?;
+            self.stroke_context_lost = false;
             self.confirm_discard = false;
             Ok(())
         })();
@@ -257,6 +298,7 @@ impl TerrainPanel {
         let result = (|| {
             Self::require_context(editor)?;
             self.document.discard();
+            self.stroke_context_lost = false;
             self.confirm_discard = false;
             Ok(())
         })();
@@ -273,6 +315,247 @@ impl TerrainPanel {
             self.document.apply(&[Edit::SetHeight { x, z, height }])
         })();
         self.report(result)
+    }
+    /// One discrete stamp centered on the selected vertex. Existing viewport
+    /// picking selects the center; applying never sends a host scene mutation.
+    pub fn apply_sculpt_stamp(&mut self, editor: &Editor) -> Result<(), String> {
+        let result = (|| {
+            self.require_attached(editor)?;
+            if self.selection_mode != TerrainSelectionMode::Vertex {
+                return Err("Choose Vertex selection to sculpt terrain".into());
+            }
+            let operation = self.sculpt_operation()?;
+            self.document.apply_brush(TerrainBrush {
+                center: self.selected_vertex,
+                radius: self.sculpt_radius,
+                operation,
+            })
+        })();
+        if result.is_ok() {
+            self.refresh_selection();
+        }
+        self.report(result)
+    }
+    // Sample authoritative admitted data, never the editable height text. This
+    // changes only the brush draft and must not create terrain/host history.
+    fn sample_flatten_height(&mut self, editor: &Editor) -> Result<(), String> {
+        let result = (|| {
+            self.require_attached(editor)?;
+            if self.sculpt_mode != SculptMode::Flatten
+                || !matches!(
+                    self.selection_mode,
+                    TerrainSelectionMode::Vertex | TerrainSelectionMode::Sculpt
+                )
+            {
+                return Err(
+                    "Choose Vertex or Sculpt selection and Flatten to sample a height".into(),
+                );
+            }
+            if self.document.read_only() || self.document.stroke_active() {
+                return Err("Sampling requires writable terrain with no held stroke".into());
+            }
+            let terrain = self.document.terrain().ok_or("open a terrain first")?;
+            let [x, z] = self.selected_vertex;
+            if x >= terrain.width() || z >= terrain.depth() {
+                return Err("Sample vertex is outside the terrain grid".into());
+            }
+            let height = terrain.heights()[(z * terrain.width() + x) as usize];
+            self.sculpt_height = format_fixed(height);
+            Ok(())
+        })();
+        self.report(result)
+    }
+
+    fn sculpt_operation(&self) -> Result<BrushOperation, String> {
+        Ok(match self.sculpt_mode {
+            SculptMode::RaiseLower => BrushOperation::RaiseLower {
+                delta: parse_fixed(&self.sculpt_delta)?,
+            },
+            SculptMode::Flatten => BrushOperation::Flatten {
+                height: parse_fixed(&self.sculpt_height)?,
+            },
+            SculptMode::Smooth => BrushOperation::Smooth,
+        })
+    }
+    pub fn cancel_sculpt_stroke(&mut self, reason: &str) -> bool {
+        if self.document.cancel_stroke() {
+            self.refresh_selection();
+            self.error = Some(reason.into());
+            true
+        } else {
+            false
+        }
+    }
+    /// Observe context before any hidden/collapsed viewport can miss cancellation.
+    pub fn observe_sculpt_context(
+        &mut self,
+        editor: &Editor,
+        ctx: &egui::Context,
+        blocked: bool,
+    ) -> bool {
+        // Recomputed only by the current viewport; never retain a stale context hit.
+        self.sculpt_hover = None;
+        self.stroke_cancelled_frame = blocked
+            || ctx.input(|i| {
+                !i.focused
+                    || i.events
+                        .iter()
+                        .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+                    || i.key_pressed(egui::Key::Escape)
+                    || i.pointer.button_down(egui::PointerButton::Secondary)
+                    || i.pointer.button_down(egui::PointerButton::Middle)
+                    || i.pointer.button_released(egui::PointerButton::Secondary)
+                    || i.pointer.button_released(egui::PointerButton::Middle)
+            });
+        if !self.document.stroke_active() {
+            return false;
+        }
+        let scene_changed = !self.scene_matches(editor);
+        if self.stroke_cancelled_frame
+            || editor.game() != EditorGame::Yard3D
+            || self.selection_mode != TerrainSelectionMode::Sculpt
+            || self.require_attached(editor).is_err()
+            || self.document.read_only()
+        {
+            self.stroke_context_lost |= scene_changed;
+            self.stroke_cancelled_frame = true;
+            return self.cancel_sculpt_stroke(
+                "Terrain stroke cancelled; original terrain and history restored",
+            );
+        }
+        false
+    }
+    /// Own primary input only in dedicated Sculpt mode; every supplied sample is
+    /// processed in order against the frozen baseline. Gaps cancel the full stroke.
+    pub fn sculpt_pointer(
+        &mut self,
+        editor: &Editor,
+        response: &egui::Response,
+        camera: &Camera3D,
+        rect: egui::Rect,
+        size: (u32, u32),
+        frame_available: bool,
+    ) -> bool {
+        self.sculpt_hover = None;
+        if editor.game() != EditorGame::Yard3D
+            || self.selection_mode != TerrainSelectionMode::Sculpt
+            || !self.authoring_active(editor)
+            || !self.attached_for_editor(editor)
+        {
+            return false;
+        }
+        if self.stroke_cancelled_frame {
+            return true;
+        }
+        let (events, down, at, hover) = response.ctx.input(|i| {
+            (
+                i.events.clone(),
+                i.pointer.button_down(egui::PointerButton::Primary),
+                i.pointer.interact_pos(),
+                i.pointer.hover_pos(),
+            )
+        });
+        let center_at = |panel: &Self, at: egui::Pos2| {
+            if !frame_available || !rect.contains(at) {
+                return None;
+            }
+            let pixel = [
+                (at.x - rect.min.x) * size.0 as f32 / rect.width(),
+                (at.y - rect.min.y) * size.1 as f32 / rect.height(),
+            ];
+            terrain_pick::pick_sculpt_center(
+                panel.document.sculpt_pick_terrain()?,
+                camera,
+                pixel,
+                size,
+            )
+        };
+        if !self.document.stroke_active() && !down && !self.document.read_only() {
+            self.sculpt_hover = hover
+                .filter(|pos| response.ctx.layer_id_at(*pos) == Some(response.layer_id))
+                .and_then(|pos| center_at(self, pos));
+        }
+        for event in events {
+            let (position, starting, released) = match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } if rect.contains(pos)
+                    && response.ctx.layer_id_at(pos) == Some(response.layer_id) =>
+                {
+                    (pos, true, false)
+                }
+                egui::Event::PointerMoved(pos) if self.document.stroke_active() => {
+                    (pos, false, false)
+                }
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    ..
+                } if self.document.stroke_active() => (pos, false, true),
+                egui::Event::PointerGone
+                | egui::Event::WindowFocused(false)
+                | egui::Event::Key {
+                    key: egui::Key::Escape,
+                    pressed: true,
+                    ..
+                }
+                | egui::Event::PointerButton {
+                    button: egui::PointerButton::Secondary | egui::PointerButton::Middle,
+                    pressed: true,
+                    ..
+                } => {
+                    self.stroke_cancelled_frame = true;
+                    self.sculpt_hover = None;
+                    self.cancel_sculpt_stroke("Terrain input interrupted; stroke cancelled");
+                    break;
+                }
+                _ => continue,
+            };
+            let Some(center) = center_at(self, position) else {
+                self.cancel_sculpt_stroke(
+                    "Terrain stroke left the viewport surface or hit a hole; stroke cancelled",
+                );
+                continue;
+            };
+            let result = (|| {
+                if starting {
+                    let operation = self.sculpt_operation()?;
+                    self.document.begin_stroke(TerrainBrush {
+                        center,
+                        radius: self.sculpt_radius,
+                        operation,
+                    })?;
+                } else {
+                    self.document.update_stroke(center)?;
+                }
+                self.selected_vertex = center;
+                if released {
+                    self.document.finish_stroke()?;
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                self.document.cancel_stroke();
+            }
+            self.refresh_selection();
+            let _ = self.report(result);
+        }
+        if self.document.stroke_active() {
+            if let Some(center) = at.filter(|_| down).and_then(|at| center_at(self, at)) {
+                let result = self.document.update_stroke(center);
+                self.refresh_selection();
+                let _ = self.report(result);
+            } else {
+                self.cancel_sculpt_stroke(
+                    "Terrain pointer left its valid viewport or lost release; stroke cancelled",
+                );
+            }
+        }
+        true
     }
     pub fn apply_hole(&mut self, editor: &Editor) -> Result<(), String> {
         let result = (|| {
@@ -330,6 +613,7 @@ impl TerrainPanel {
         Some(terrain_pick::query(self.document.terrain()?, x, z))
     }
     fn refresh_loaded(&mut self) {
+        self.stroke_context_lost = false;
         self.confirm_discard = false;
         self.selected_vertex = [0; 2];
         self.selected_cell = [0; 2];
@@ -386,7 +670,7 @@ impl TerrainPanel {
                     self.refresh_selection();
                 }
             }
-            TerrainSelectionMode::Entity => {}
+            TerrainSelectionMode::Entity | TerrainSelectionMode::Sculpt => {}
         }
         true
     }
@@ -412,7 +696,39 @@ impl TerrainPanel {
         let painter = painter.with_clip_rect(rect);
         let color = egui::Color32::from_rgb(255, 220, 70);
         match self.selection_mode {
-            TerrainSelectionMode::Vertex => {
+            TerrainSelectionMode::Vertex | TerrainSelectionMode::Sculpt => {
+                if self.show_sculpt_footprint || self.selection_mode == TerrainSelectionMode::Sculpt
+                {
+                    let center = if self.selection_mode == TerrainSelectionMode::Sculpt
+                        && !self.document.stroke_active()
+                    {
+                        self.sculpt_hover
+                    } else {
+                        Some(self.selected_vertex)
+                    };
+                    if let Some(Ok(vertices)) = center.map(|center| {
+                        brush::footprint(
+                            terrain,
+                            center,
+                            self.document
+                                .active_stroke_brush()
+                                .map_or(self.sculpt_radius, |b| b.radius),
+                        )
+                    }) {
+                        for [x, z] in vertices {
+                            if let Some(p) = terrain
+                                .vertex_position(z * terrain.width() + x)
+                                .and_then(screen)
+                            {
+                                painter.circle_filled(
+                                    p,
+                                    2.5,
+                                    egui::Color32::from_rgb(110, 220, 240),
+                                );
+                            }
+                        }
+                    }
+                }
                 let [x, z] = self.selected_vertex;
                 if x < terrain.width() && z < terrain.depth() {
                     if let Some(p) = terrain
@@ -538,7 +854,7 @@ impl TerrainPanel {
             ui.colored_label(egui::Color32::YELLOW, "Terrain belongs to the previous scene and is hidden here. Save writes its original path; close or discard before opening another terrain.");
         }
         let attached = self.authoring_active(editor) && self.attached_for_editor(editor);
-        let writable = attached && !self.document.read_only();
+        let writable = attached && !self.document.read_only() && !self.document.stroke_active();
         ui.add_enabled_ui(attached, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Selection");
@@ -553,9 +869,19 @@ impl TerrainPanel {
                     "Vertex",
                 );
                 ui.selectable_value(&mut self.selection_mode, TerrainSelectionMode::Cell, "Cell");
+                if editor.game() == EditorGame::Yard3D {
+                    ui.selectable_value(
+                        &mut self.selection_mode,
+                        TerrainSelectionMode::Sculpt,
+                        "Sculpt",
+                    );
+                }
             });
             ui.weak("Numeric X/Z indices are authoritative; holes remain selectable");
-            if self.selection_mode == TerrainSelectionMode::Vertex {
+            if matches!(
+                self.selection_mode,
+                TerrainSelectionMode::Vertex | TerrainSelectionMode::Sculpt
+            ) {
                 let changed = index_field(ui, "Terrain vertex X", &mut self.selected_vertex[0])
                     | index_field(ui, "Terrain vertex Z", &mut self.selected_vertex[1]);
                 if changed {
@@ -563,11 +889,84 @@ impl TerrainPanel {
                 }
                 text_field(ui, "Terrain height", &mut self.height);
                 if ui
-                    .add_enabled(writable, egui::Button::new("Apply terrain height"))
+                    .add_enabled(
+                        writable && self.selection_mode == TerrainSelectionMode::Vertex,
+                        egui::Button::new("Apply terrain height"),
+                    )
                     .clicked()
                 {
                     let _ = self.apply_height(editor);
                 }
+                ui.collapsing("Terrain sculpt stamp", |ui| {
+                    ui.weak("Pick a vertex or enter X/Z above, then apply one undoable stamp");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(
+                            &mut self.sculpt_mode,
+                            SculptMode::RaiseLower,
+                            "Raise/lower",
+                        );
+                        ui.selectable_value(&mut self.sculpt_mode, SculptMode::Flatten, "Flatten");
+                        ui.selectable_value(&mut self.sculpt_mode, SculptMode::Smooth, "Smooth");
+                    });
+                    ui.horizontal(|ui| {
+                        let label = ui.label("Sculpt radius in grid steps");
+                        ui.add(
+                            egui::DragValue::new(&mut self.sculpt_radius)
+                                .range(0..=MAX_BRUSH_RADIUS)
+                                .speed(1),
+                        )
+                        .labelled_by(label.id);
+                    });
+                    match self.sculpt_mode {
+                        SculptMode::RaiseLower => {
+                            text_field(ui, "Sculpt height change", &mut self.sculpt_delta);
+                            ui.weak("Use a negative change to lower terrain");
+                        }
+                        SculptMode::Flatten => {
+                            text_field(ui, "Sculpt target height", &mut self.sculpt_height);
+                            if ui
+                                .add_enabled(
+                                    writable,
+                                    egui::Button::new("Sample selected vertex height"),
+                                )
+                                .clicked()
+                            {
+                                let _ = self.sample_flatten_height(editor);
+                            }
+                        }
+                        SculptMode::Smooth => {
+                            ui.weak(
+                                "One 3×3 mean from the original heights; clipped at grid edges",
+                            );
+                        }
+                    }
+                    ui.checkbox(&mut self.show_sculpt_footprint, "Show sculpt footprint");
+                    if let Some(terrain) = self.document.terrain() {
+                        match brush::footprint(terrain, self.selected_vertex, self.sculpt_radius) {
+                            Ok(vertices) => {
+                                ui.label(format!("Stamp affects {} vertices", vertices.len()));
+                            }
+                            Err(error) => {
+                                ui.colored_label(egui::Color32::YELLOW, error);
+                            }
+                        }
+                    }
+                    ui.weak("Holes keep their flags; hidden vertices participate");
+                    if self.selection_mode == TerrainSelectionMode::Sculpt {
+                        ui.weak(
+                            "Drag the viewport to sculpt; release commits one Undo. Escape cancels",
+                        );
+                    }
+                    if ui
+                        .add_enabled(
+                            writable && self.selection_mode == TerrainSelectionMode::Vertex,
+                            egui::Button::new("Apply sculpt stamp"),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.apply_sculpt_stamp(editor);
+                    }
+                });
             }
             if self.selection_mode == TerrainSelectionMode::Cell {
                 let changed = index_field(ui, "Terrain cell X", &mut self.selected_cell[0])
