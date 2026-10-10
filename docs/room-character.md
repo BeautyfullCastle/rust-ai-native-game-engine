@@ -14,10 +14,12 @@ orr_new_arena --output /absolute/new-project --template room-escape-character-3d
 ```
 
 Open it in an editor built with `room-character` using `--room-project PATH`.
-The Room character panel assigns searching, carrying-key and escaped clips.
+The Room character panel assigns searching, carrying-key and escaped clips and
+per-state playback speeds (1/4x, 1/2x, 1x, 2x or 4x).
 Apply validates all three clips and the complete reachable presentation before
 changing either in-memory document. Undo/Redo character edit coordinates the
-model binding's default searching clip with the character map. Use **Save
+model binding's default searching clip with the character map and speed choices.
+Use **Apply character settings**, then **Save
 character and model bindings** for a changed mapping. Other model edits retain
 the existing verified package/asset, local transform and clip admission gates.
 
@@ -57,8 +59,24 @@ Selection reads the same authoritative Frame as body placement:
 2. Otherwise `RoomRun.key_collected != 0`: carrying
 3. Otherwise: searching
 
-Every clip uses the absolute Frame tick / tick rate at fixed 1x. Transitions do
-not reset phase. Pause, repeated draws, missing rendered frames, Seek and export
+Schema 1 keeps exactly its original fields and fixed 1x behavior; it rejects a
+`speeds` field. Schema 2 requires a complete object of explicit speed strings:
+
+```json
+{"schema":2,"player":"e_0123456789abcdef0123456789abcdef","searching":0,"carrying":1,"escaped":2,"speeds":{"searching":"1/4x","carrying":"2x","escaped":"4x"}}
+```
+
+Only `"1/4x"`, `"1/2x"`, `"1x"`, `"2x"` and `"4x"` are accepted. Missing,
+duplicate or extra speed keys, nulls, arrays, numbers and enum-shaped objects
+are invalid. Generated templates stay schema 1. Changing a speed in the editor
+upgrades the candidate to schema 2; Apply/Undo/Redo/Save preserve the whole
+document, including the schema choice. Selecting all 1x in schema 2 is valid.
+
+Every clip uses the absolute Frame tick / tick rate multiplied by its state's
+exact rational speed (fixed 1x in schema 1). The shared sampler reduces the
+dyadic period with bounded integer modular arithmetic before conversion to
+presentation floats, retaining adjacent-tick phase even near `u64::MAX`.
+Transitions do not reset phase. Pause, repeated draws, missing rendered frames, Seek and export
 therefore agree. Edit/Stop requests rest; Play or Seek at tick zero samples clip
 zero time. There is no renderer-history movement inference, animation clock in
 ECS, or modification to checkpoints/replays/golden checksums.

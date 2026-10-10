@@ -1,6 +1,9 @@
 //! Editor-owned character authoring. Clip edits coordinate the searching binding
 //! default; pair saves roll back ordinary second-file failures, not process crashes.
-use orr_sample::{room_character::Document, room_project::PreparedRoomCharacter};
+use orr_sample::{
+    room_character::{Document, PlaybackRate},
+    room_project::PreparedRoomCharacter,
+};
 use std::{
     fs::{File, Metadata},
     io::{Read, Write},
@@ -241,8 +244,15 @@ impl Panel {
             });
         if let Err(error) = second {
             return match rollback.persist(&model_path) {
-                Ok(_) => { let _=pin.directory.sync_all(); Err(format!("Character save failed; model sidecar restored: {error}")) },
-                Err(rollback) => Err(format!("Character save failed ({error}); model rollback failed ({rollback}); reopen and recover the sidecars before continuing")),
+                Ok(_) => {
+                    let _ = pin.directory.sync_all();
+                    Err(format!(
+                        "Character save failed; model sidecar restored: {error}"
+                    ))
+                }
+                Err(rollback) => Err(format!(
+                    "Character save failed ({error}); model rollback failed ({rollback}); reopen and recover the sidecars before continuing"
+                )),
             };
         }
         models.bindings.as_mut().unwrap().mark_current_saved();
@@ -284,7 +294,30 @@ impl Panel {
                             }
                         });
                 }
-                if ui.button("Apply character clips").clicked() {
+                let mut speeds = self.candidate.speeds.unwrap_or_default();
+                let original_speeds = speeds;
+                for (label, value) in [
+                    ("Searching speed", &mut speeds.searching),
+                    ("Carrying key speed", &mut speeds.carrying),
+                    ("Escaped speed", &mut speeds.escaped),
+                ] {
+                    egui::ComboBox::from_label(label)
+                        .selected_text(value.label())
+                        .show_ui(ui, |ui| {
+                            for rate in PlaybackRate::ALL {
+                                ui.selectable_value(
+                                    value,
+                                    rate,
+                                    format!("{label} {}", rate.label()),
+                                );
+                            }
+                        });
+                }
+                if speeds != original_speeds {
+                    self.candidate.schema = 2;
+                    self.candidate.speeds = Some(speeds);
+                }
+                if ui.button("Apply character settings").clicked() {
                     self.error = self
                         .apply_document(self.candidate.clone(), editor, models)
                         .err();
