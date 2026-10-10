@@ -39,8 +39,22 @@ fn delayed_duplicate_history_and_save_notifications_preserve_material_generation
     let edited = history(&[false], true, false);
     editor.on_answer(Pend::History, Ok(edited.clone()));
     let current = editor.material_authoring_generation();
+    editor.dirty.history = false;
+    editor.inflight.history = false;
+    assert!(editor.material_history_ready());
     editor.on_notification("watch.history", &notification(&edited));
+    assert!(
+        !editor.material_history_ready(),
+        "a delayed duplicate temporarily disables material controls pending an authoritative reply"
+    );
+    assert!(Arc::ptr_eq(&current, &editor.material_authoring_generation()));
+    // Model dispatching the refresh: the read must still fence editing even
+    // though its duplicate notification did not retire the material draft.
+    editor.dirty.history = false;
+    editor.inflight.history = true;
+    assert!(!editor.material_history_ready());
     editor.on_answer(Pend::History, Ok(edited.clone()));
+    assert!(editor.material_history_ready());
     assert!(
         Arc::ptr_eq(&current, &editor.material_authoring_generation()),
         "a delayed duplicate must not stale a draft captured after the full reply"
