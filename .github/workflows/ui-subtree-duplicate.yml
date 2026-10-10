@@ -2,7 +2,7 @@ name: Collect HUD subtree duplication
 on:
   pull_request:
   push:
-    branches: [development]
+    branches: [su/engine-correctness-hardening]
 permissions:
   contents: read
 jobs:
