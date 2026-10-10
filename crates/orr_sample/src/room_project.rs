@@ -341,6 +341,11 @@ impl PreparedProject {
         let scene = PreparedScene::parse(
             std::str::from_utf8(&bytes).map_err(|_| "room scene is not UTF-8")?,
         )?;
+        if let Some(camera) = &camera {
+            camera
+                .document
+                .validate_frame(orr_bridge::FrameView::of(scene.frame()), scene.index())?;
+        }
         let model_path = crate::project::entry_file(project.root(), models_relative)?;
         let bytes = crate::project::read_regular(&model_path, 1024 * 1024)?;
         let document: Document =
