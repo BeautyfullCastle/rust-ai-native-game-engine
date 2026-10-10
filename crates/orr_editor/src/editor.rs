@@ -220,6 +220,12 @@ pub struct Editor {
     room_camera_scene: Option<std::path::PathBuf>,
     #[cfg(feature="room-project")]
     room_camera_source: Arc<()>,
+    #[cfg(feature="room-lighting")]
+    room_lighting: Option<orr_sample::room_lighting::Document>,
+    #[cfg(feature="room-lighting")]
+    room_lighting_scene: Option<std::path::PathBuf>,
+    #[cfg(feature="room-lighting")]
+    room_lighting_source: Arc<()>,
     #[cfg(feature="room-ui")]
     room_ui_source: std::sync::Arc<std::sync::atomic::AtomicU64>,
     #[cfg(feature="collect-audio")]
@@ -346,6 +352,9 @@ impl Editor {
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
             #[cfg(feature="room-project")] room_camera_source: Arc::new(()),
+            #[cfg(feature="room-lighting")] room_lighting: None,
+            #[cfg(feature="room-lighting")] room_lighting_scene: None,
+            #[cfg(feature="room-lighting")] room_lighting_source: Arc::new(()),
             #[cfg(feature="collect-audio")] collect_audio: None,
             #[cfg(feature="collect-audio")] collect_audio_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature="room-ui")] room_ui_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1982,6 +1991,38 @@ impl Editor {
     #[cfg(feature = "navigation")]
     pub fn set_navigation_blocker(&mut self, blocker: Option<String>) { self.navigation_blocker = blocker; }
 
+    #[cfg(feature="room-lighting")]
+    pub fn install_room_lighting(&mut self, document: orr_sample::room_lighting::Document) -> Result<(), String> {
+        // Startup may precede the watch barrier; explicit authoring actions never bypass it.
+        if !self.yard_rows_coherent() { self.sync(); }
+        self.validate_room_lighting_document(&document)?;
+        self.room_lighting = Some(document);
+        self.room_lighting_scene = self.path();
+        Ok(())
+    }
+    #[cfg(feature="room-lighting")]
+    pub fn validate_room_lighting_document(&self, document: &orr_sample::room_lighting::Document) -> Result<(), String> {
+        document.validate()?;
+        if !self.game().is_room() || !self.spec().is_local() || self.path().is_none()
+            || !self.yard_rows_coherent() || self.snapshot().is_none() {
+            return Err("lighting requires a coherent local Room snapshot".into());
+        }
+        Ok(())
+    }
+    #[cfg(feature="room-lighting")]
+    pub fn room_lighting_source_token(&self) -> Arc<()> { self.room_lighting_source.clone() }
+    #[cfg(feature="room-lighting")]
+    pub fn room_lighting_document(&self) -> Option<&orr_sample::room_lighting::Document> {
+        if self.game().is_room() && self.spec().is_local() && self.room_lighting_scene == self.path() {
+            self.room_lighting.as_ref()
+        } else { None }
+    }
+    #[cfg(feature="models")]
+    pub fn room_point_light_settings(&self) -> orr_render::PointLightSettings {
+        #[cfg(feature="room-lighting")]
+        if let Some(document) = self.room_lighting_document() { return document.settings(); }
+        orr_render::PointLightSettings::default()
+    }
     #[cfg(feature="room-character")]
     pub fn install_room_character(&mut self, document: orr_sample::room_character::Document) -> Result<(), String> {
         document.validate()?;
@@ -2116,6 +2157,8 @@ impl Editor {
     #[cfg(feature="collect-audio")]
     pub fn collect_audio_source_token(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> { self.collect_audio_source.clone() }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature="room-lighting")]
+        { self.room_lighting_source = Arc::new(()); self.room_lighting = None; self.room_lighting_scene = None; }
         #[cfg(feature="room-project")]
         { self.room_camera_source = Arc::new(()); }
         // Successful source replacement/path changes retire drafts even when
@@ -2735,6 +2778,15 @@ impl Editor {
                 // fallback. A failed restart preserves this editor and its camera.
                 self.error(format!("restart camera rejected: {error}; reopen the complete project"));
                 return false;
+            }
+        }
+        #[cfg(feature="room-lighting")]
+        if fresh.game().is_room() && fresh.path() == self.path() {
+            if let Some(document) = self.room_lighting_document() {
+                if let Err(error) = fresh.install_room_lighting(document.clone()) {
+                    self.error(format!("restart lighting rejected: {error}; reopen the complete project"));
+                    return false;
+                }
             }
         }
         fresh.log = std::mem::take(&mut self.log);

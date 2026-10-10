@@ -116,7 +116,7 @@ fn step(sim: &mut Simulation<RoomEscapeV1>, input: RoomInput) {
     sim.step(&inputs);
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let project = PreparedProject::open_with_capabilities(
+    let project = PreparedProject::open_with_presentation(
         &options.project,
         cfg!(feature = "room-ui"),
         if cfg!(all(feature = "room-checkpoint", target_os = "linux")) {
@@ -125,6 +125,7 @@ pub fn run(options: Options) -> Result<(), String> {
             crate::room_project::CheckpointSupport::Disabled
         },
         cfg!(feature = "room-character"),
+        cfg!(feature = "room-lighting"),
     )?;
     if options.headless {
         headless(
@@ -170,6 +171,7 @@ pub fn headless(
         let gpu = Wgpu::headless(WgpuOptions::default())?;
         let size = (1024, 768);
         let mut renderer = RoomRenderer::new(&gpu, size, project.models())?;
+        renderer.set_point_light_settings(project.point_light_settings())?;
         renderer.render(
             FrameView::of(sim.frame()),
             project.scene().index(),
@@ -669,8 +671,9 @@ impl ApplicationHandler for App {
                 },
             )?;
             let format = rhi.surface_format(&surface);
-            let renderer =
+            let mut renderer =
                 RoomRenderer::new_with_format(&rhi, size, self.project.models(), format)?;
+            renderer.set_point_light_settings(self.project.point_light_settings())?;
             Ok::<_, String>(Graphics {
                 window,
                 rhi,

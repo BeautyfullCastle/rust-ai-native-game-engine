@@ -11,6 +11,7 @@ default-run = "arena"
 workspace = true
 
 [features]
+room-lighting = ["room-project"]
 room-character = ["room-project", "orr_model_bindings/animated-models", "orr_model/animation", "orr_render/animation"]
 collect-audio = ["collect-dodge", "audio", "dep:orr_asset", "dep:sha2"]
 collect-audio-native = ["collect-audio", "orr_audio/native"]
