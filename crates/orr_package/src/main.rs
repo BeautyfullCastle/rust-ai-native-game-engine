@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
-        println!("orr_pkg <install PROJECT --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME | list PROJECT | verify PROJECT | inspect SOURCE>\nOffline content only. Runtime capabilities must be validated by the consuming host.");
+        println!("orr_pkg <install PROJECT --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME | list PROJECT | explain PROJECT NAME | verify PROJECT | inspect SOURCE>\nOffline content only. Runtime capabilities must be validated by the consuming host.");
         return Ok(());
     }
     let engine = Runtime::content_only().engine_version;
@@ -15,6 +15,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let root = args.get(1).ok_or("project directory required")?;
         let project = Project::open_for_install(root, engine)?;
+        if args[0] == "explain" && args.len() == 3 {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&project.explain(&args[2])?)?
+            );
+            eprintln!("Lock metadata only; installed bytes were not verified. Compiled capability validation is deferred to the consuming host.");
+            return Ok(());
+        }
         let lock = match args[0].as_str() {
             "install" if args.len() >= 4 => {
                 let mut sources = Vec::new();
