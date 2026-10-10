@@ -266,7 +266,7 @@ fn interpolation(sampler: &AnimationSampler) -> Result<Interpolation, Error> {
     match sampler.interpolation.as_deref().unwrap_or("LINEAR") {
         "STEP" => Ok(Interpolation::Step),
         "LINEAR" => Ok(Interpolation::Linear),
-        "CUBICSPLINE" => Err(invalid("CUBICSPLINE interpolation unsupported")),
+        "CUBICSPLINE" => Ok(Interpolation::CubicSpline),
         _ => Err(invalid("unsupported animation interpolation")),
     }
 }
@@ -279,12 +279,12 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
         // Validate unused samplers too. Unknown output shapes/normalized integer
         // rotations cannot silently sneak in through an unreferenced sampler.
         for sampler in &clip.samplers {
-            interpolation(sampler)?;
+            let cubic = interpolation(sampler)? == Interpolation::CubicSpline;
             let input = at(&doc.accessors, sampler.input, "animation input")?;
             let output = at(&doc.accessors, sampler.output, "animation output")?;
             data_accessor(doc, input)?;
             data_accessor(doc, output)?;
-            sampler_keys = sampler_keys.saturating_add(input.count);
+            sampler_keys = sampler_keys.saturating_add(output.count);
             if sampler_keys > MAX_ANIMATION_KEYS
                 || input.component_type != 5126
                 || input.normalized
@@ -292,7 +292,8 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
                 || output.component_type != 5126
                 || output.normalized
                 || !matches!(output.kind.as_str(), "VEC3" | "VEC4")
-                || input.count != output.count
+                || (cubic && input.count < 2)
+                || input.count.checked_mul(if cubic { 3 } else { 1 }) != Some(output.count)
             {
                 return Err(invalid(
                     "animation sampler count/type/key budget mismatch; only f32 output supported",
@@ -315,6 +316,8 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
                     return Err(invalid("animation times must be finite, nonnegative, bounded and strictly increasing"));
                 }
                 previous = Some(time);
+            }
+            for i in 0..output.count {
                 for chunk in output.bytes(doc, buffers, i).chunks_exact(4) {
                     if !f32::from_le_bytes(chunk.try_into().expect("f32 component")).is_finite() {
                         return Err(invalid("animation output must be finite"));
@@ -339,13 +342,14 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
                 "weights" => return Err(invalid("morph animation unsupported")),
                 _ => return Err(invalid("unsupported animation target path")),
             };
-            aggregate_keys = aggregate_keys.saturating_add(input.count);
-            aggregate_bytes =
-                aggregate_bytes.saturating_add(input.count.saturating_mul(if kind == "VEC4" {
-                    20
-                } else {
-                    16
-                }));
+            aggregate_keys = aggregate_keys.saturating_add(output.count);
+            aggregate_bytes = aggregate_bytes
+                .saturating_add(input.count.saturating_mul(4))
+                .saturating_add(
+                    output
+                        .count
+                        .saturating_mul(if kind == "VEC4" { 16 } else { 12 }),
+                );
             if aggregate_keys > MAX_ANIMATION_KEYS
                 || aggregate_bytes > MAX_ANIMATION_BYTES
                 || output.kind != kind

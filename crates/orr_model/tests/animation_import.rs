@@ -672,3 +672,74 @@ fn cooked_reload_rejects_invalid_data_and_clip_switch_resets_missing_tracks() {
         ChannelValues::Rotation(_)
     ));
 }
+
+fn cubic_fixture() -> Value {
+    let mut value = source();
+    value["animations"][0]["samplers"][0]["interpolation"] = json!("CUBICSPLINE");
+    let mut data = Vec::new();
+    for rotation in [
+        [0.0f32, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ] {
+        for vector in [[0.0; 4], rotation, [0.0; 4]] {
+            for component in vector {
+                data.extend(component.to_le_bytes());
+            }
+        }
+    }
+    replace_accessor(&mut value, 8, 5126, false, &data);
+    value["accessors"][8]["count"] = json!(9);
+    let view = value["accessors"][8]["bufferView"].as_u64().unwrap() as usize;
+    value["bufferViews"][view]
+        .as_object_mut()
+        .unwrap()
+        .remove("target");
+    value
+}
+
+#[test]
+fn cubic_gltf_import_cooked_roundtrip_and_skin_sampling() {
+    let model = import(&cubic_fixture()).unwrap();
+    assert_eq!(
+        model.source().clips[0].channels[0].interpolation,
+        Interpolation::CubicSpline
+    );
+    let reopened = AnimatedModel::from_bytes(&model.to_bytes().unwrap()).unwrap();
+    for time in [0.0, 0.25, 0.5, 0.75, 1.0, 2.0] {
+        let pose = model.sample_clip(0, time).unwrap();
+        let again = reopened.sample_clip(0, time).unwrap();
+        assert_eq!(pose.local(), again.local());
+        assert_eq!(
+            model.deform(&pose).unwrap(),
+            reopened.deform(&again).unwrap()
+        );
+        assert!(model.bounds(&pose).is_ok());
+    }
+}
+
+#[test]
+fn cubic_import_rejects_wrong_triplet_count_single_key_and_nonfinite_last_tangent() {
+    for count in [3, 8, 10] {
+        let mut value = cubic_fixture();
+        value["accessors"][8]["count"] = json!(count);
+        assert!(import(&value).is_err());
+    }
+    let mut value = cubic_fixture();
+    value["accessors"][7]["count"] = json!(1);
+    value["accessors"][8]["count"] = json!(3);
+    assert!(import(&value).is_err());
+    for unused in [false, true] {
+        let mut value = cubic_fixture();
+        if unused {
+            let sampler = value["animations"][0]["samplers"][0].clone();
+            value["animations"][1]["samplers"]
+                .as_array_mut()
+                .unwrap()
+                .push(sampler);
+            value["animations"].as_array_mut().unwrap().remove(0);
+        }
+        write_accessor(&mut value, 8, 8 * 16 + 12, &f32::INFINITY.to_le_bytes());
+        assert!(import(&value).unwrap_err().to_string().contains("finite"));
+    }
+}

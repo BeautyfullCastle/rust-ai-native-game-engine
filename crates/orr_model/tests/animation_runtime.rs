@@ -666,3 +666,132 @@ fn loop_remainder_rounding_never_exposes_exact_duration() {
     assert_eq!(player.time(), 0.0);
     assert_eq!(player.state(), PlaybackState::Playing);
 }
+
+fn cubic_source() -> AnimatedSource {
+    let mut source = source();
+    let channel = &mut source.clips[0].channels[0];
+    channel.interpolation = Interpolation::CubicSpline;
+    // Two-second segment: midpoint x = 1 + (2 * 4 / 8) = 2.
+    channel.values = ChannelValues::Translation(vec![
+        [0.0; 3],
+        [0.0, 1.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [0.0; 3],
+        [2.0, 1.0, 0.0],
+        [0.0; 3],
+    ]);
+    source
+}
+
+#[test]
+fn cubic_hermite_scales_tangents_and_drives_skin_deformation() {
+    let model = AnimatedModel::new(cubic_source()).unwrap();
+    for (time, x) in [
+        (-1.0, 0.0),
+        (2.0, 0.0),
+        (2.5, 1.4375),
+        (3.0, 2.0),
+        (4.0, 2.0),
+        (99.0, 2.0),
+    ] {
+        let pose = model.sample_clip(0, time).unwrap();
+        close3(pose.local()[2].translation, [x, 1.0, 0.0]);
+        // The first vertex is fully weighted to joint 2; bind cancels its rest.
+        close3(
+            model.deform(&pose).unwrap()[0].vertices[0].position,
+            [x, 0.0, 0.0],
+        );
+        assert!(model.bounds(&pose).is_ok());
+    }
+    let bytes = model.to_bytes().unwrap();
+    let reopened = AnimatedModel::from_bytes(&bytes).unwrap();
+    assert_eq!(model.source(), reopened.source());
+    // Sampling another time/clip/rest cannot contaminate a repeated seek.
+    let want = model.sample_clip(0, 3.0).unwrap();
+    model.sample_clip(0, 4.0).unwrap();
+    model.rest_pose().unwrap();
+    assert_eq!(want, model.sample_clip(0, 3.0).unwrap());
+    assert_eq!(want.local(), reopened.sample_clip(0, 3.0).unwrap().local());
+}
+
+#[test]
+fn cubic_rotation_normalizes_component_hermite_without_sign_flipping() {
+    let mut source = cubic_source();
+    source.clips[0].channels[0].values = ChannelValues::Rotation(vec![
+        [0.0; 4],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0; 4],
+        [0.0, 0.0, 0.0, -1.0],
+        [0.0; 4],
+    ]);
+    let model = AnimatedModel::new(source).unwrap();
+    let pose = model.sample_clip(0, 3.0).unwrap();
+    assert_eq!(pose.local()[2].rotation, [0.0, 0.0, 1.0, 0.0]);
+    assert!(model.deform(&pose).is_ok());
+}
+
+#[test]
+fn cubic_tangents_allow_zero_negative_values_but_invalid_outputs_fail_closed() {
+    let mut source = cubic_source();
+    source.clips[0].channels[0].values = ChannelValues::Scale(vec![
+        [0.0; 3], [1.0; 3], [-8.0; 3], [0.0; 3], [1.0; 3], [0.0; 3],
+    ]);
+    let model = AnimatedModel::new(source).unwrap();
+    assert!(model.sample_clip(0, 3.0).is_err()); // Hermite overshoot cannot mirror geometry.
+    let mut source = cubic_source();
+    source.clips[0].channels[0].values = ChannelValues::Rotation(vec![
+        [0.0; 4],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0, 0.0, 0.0, -1.0],
+        [0.0; 4],
+    ]);
+    assert!(AnimatedModel::new(source)
+        .unwrap()
+        .sample_clip(0, 3.0)
+        .is_err());
+    let mut huge = cubic_source();
+    if let ChannelValues::Translation(values) = &mut huge.clips[0].channels[0].values {
+        values[2][0] = f32::MAX;
+    }
+    assert!(AnimatedModel::new(huge)
+        .unwrap()
+        .sample_clip(0, 3.0)
+        .is_err());
+    for index in [0, 2, 3, 5] {
+        let mut source = cubic_source();
+        if let ChannelValues::Translation(values) = &mut source.clips[0].channels[0].values {
+            values[index][0] = f32::NAN;
+        }
+        assert!(AnimatedModel::new(source).is_err());
+    }
+    for times in [
+        vec![2.0],
+        vec![2.0, 2.0],
+        vec![4.0, 2.0],
+        vec![2.0, f32::INFINITY],
+    ] {
+        let mut source = cubic_source();
+        source.clips[0].channels[0].times = times;
+        assert!(AnimatedModel::new(source).is_err());
+    }
+    let model = AnimatedModel::new(cubic_source()).unwrap();
+    for time in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(model.sample_clip(0, time).is_err());
+    }
+}
+
+#[test]
+fn cubic_tangent_entries_count_toward_aggregate_key_budget() {
+    let mut source = cubic_source();
+    let count = MAX_ANIMATION_KEYS / 3 + 1;
+    let channel = &mut source.clips[0].channels[0];
+    channel.times = (0..count).map(|index| index as f32).collect();
+    channel.values = ChannelValues::Translation(vec![[0.0; 3]; count * 3]);
+    assert!(AnimatedModel::new(source)
+        .unwrap_err()
+        .to_string()
+        .contains("key budget"));
+}
