@@ -1,5 +1,7 @@
 //! Offline, content-only packages. No script execution, downloads or Cargo edits.
 //! The application supplies its real compiled capabilities through [`Runtime`].
+mod explanation;
+pub use explanation::PackageExplanation;
 mod project_identity;
 pub use project_identity::{format_game_id, ProgressProfile, ProjectProgress};
 
@@ -487,6 +489,12 @@ impl Project {
         };
         self.validate_lock(&lock)?;
         Ok(lock)
+    }
+    /// Explain activation from validated lock metadata without reading installed bytes.
+    /// This is not an integrity check; use `verify` before consuming whole packages.
+    pub fn explain(&self, name: &str) -> Result<PackageExplanation> {
+        crate::name(name)?;
+        explanation::explain(&self.list()?, name)
     }
     fn validate_lock(&self, lock: &Lock) -> Result<()> {
         if lock.schema != 1 || lock.packages.len() > MAX_PACKAGES {

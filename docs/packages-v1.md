@@ -67,6 +67,7 @@ lock entries, invalid content identities and incompatible runtime inventories.
 cargo run -p orr_package --bin orr_pkg -- inspect ./my-art
 cargo run -p orr_package --bin orr_pkg -- install ./my-game --path ./my-art --dependency-path ./dependency-art
 cargo run -p orr_package --bin orr_pkg -- list ./my-game
+cargo run -p orr_package --bin orr_pkg -- explain ./my-game my-art
 cargo run -p orr_package --bin orr_pkg -- verify ./my-game
 cargo run -p orr_package --bin orr_pkg -- remove ./my-game my-art
 ```
@@ -78,6 +79,23 @@ packages. Supplying a
 new version updates that direct selection if the complete graph remains valid.
 Reinstalling the same active name/version with changed content fails: bump its
 version. Package digests, not name/version alone, identify exact content.
+
+`explain PROJECT NAME` reads the validated lock and reports the package's exact
+version/digest, `direct` selection, declared `capabilities`, immediate `required_by`
+dependents, and `selected_by` chains from every direct root that reaches it.
+Each chain includes both endpoints; a direct selection includes `[NAME]`.
+It reports one shortest chain per root, breaking equal-length ties by sorted
+package name, rather than expanding every possible path. This explains why a
+package remains active after removing its own direct selection: other roots may
+still require it. Removing the last selecting root makes `explain` fail with
+`missing package`. No lock, source, installed object or writer guard is changed.
+
+Explanation is **lock metadata only**: it does not read or verify installed bytes
+(use `verify` for that). Listed capability names are requirements, not proof that
+code was compiled. Like the other management commands, CLI capability validation
+is deferred to the consuming host. `Project::explain` uses the same lock admission
+as `list`, so a host opened with its actual inventory still rejects unsupported
+capabilities, invalid identities and invalid dependency graphs.
 
 `remove` drops a direct selection and recomputes reachability. A package required
 by another direct selection remains installed transitively. Removing that last
