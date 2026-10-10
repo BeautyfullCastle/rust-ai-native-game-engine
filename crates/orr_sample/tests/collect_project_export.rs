@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -60,7 +61,10 @@ struct Work {
 }
 impl Work {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let base = root.path().canonicalize().unwrap();
         let project = base.join("edited project");
         fs::create_dir(&project).unwrap();
@@ -104,6 +108,14 @@ impl Work {
         }
     }
     fn isolated(&self, executable: &Path, bundle: Option<&Path>) -> Command {
+        self.isolated_with_progress_root(executable, bundle, None)
+    }
+    fn isolated_with_progress_root(
+        &self,
+        executable: &Path,
+        bundle: Option<&Path>,
+        progress_root: Option<(&Path, &Path)>,
+    ) -> Command {
         let base = self.root.path().canonicalize().unwrap();
         let mut c = Command::new("bwrap");
         c.args([
@@ -128,6 +140,12 @@ impl Work {
                 .arg("--ro-bind")
                 .arg(bundle)
                 .arg(bundle);
+        }
+        if let Some((host_root, progress_root)) = progress_root {
+            // Unprivileged bwrap maps only our uid: host-root-owned /tmp
+            // appears untrusted inside the namespace. Give the private fixture
+            // a direct mount below /, without relaxing production ancestor checks.
+            c.arg("--bind").arg(host_root).arg(progress_root);
         }
         c.arg("--")
             .arg(executable)
@@ -325,14 +343,26 @@ fn collect_progress_source_hidden_relaunch_and_no_headless_writes() {
     )
     .unwrap();
     let before = snapshot(&w.project);
-    let data = w.root.path().join("isolated progress data");
+    let host_root = w.root.path().join("progress profiles");
+    fs::create_dir(&host_root).unwrap();
+    fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let data = host_root.join("isolated progress data");
+    // / is read-only, so use an existing top-level mount point. Bind only
+    // the empty profile fixture, never the source project, tools or bundle.
+    let progress_root = Path::new("/opt");
+    assert!(fs::symlink_metadata(progress_root).unwrap().is_dir());
+    assert!(!w.root.path().starts_with(progress_root));
+    assert!(!w.workspace.starts_with(progress_root));
+    let isolated = |executable: &Path, bundle: Option<&Path>| {
+        w.isolated_with_progress_root(executable, bundle, Some((&host_root, progress_root)))
+    };
     let run = |c: &mut Command| {
-        c.env("XDG_DATA_HOME", &data)
-            .env("HOME", w.root.path().join("isolated home"));
+        c.env("XDG_DATA_HOME", progress_root.join("isolated progress data"))
+            .env("HOME", progress_root.join("isolated home"));
         good(c.output().unwrap())
     };
     for ticks in [0, 20, 600] {
-        let mut c = w.isolated(&w.runtime, None);
+        let mut c = isolated(&w.runtime, None);
         c.arg("--project").arg(&w.project).args([
             "--headless",
             "--ticks",
@@ -345,7 +375,7 @@ fn collect_progress_source_hidden_relaunch_and_no_headless_writes() {
     }
     let bundle = w.root.path().join("progress export");
     let hash = hex(&fs::read(&w.runtime).unwrap());
-    let mut c = w.isolated(&w.exporter, None);
+    let mut c = isolated(&w.exporter, None);
     c.arg("--project")
         .arg(&w.project)
         .arg("--runtime")
@@ -368,8 +398,11 @@ fn collect_progress_source_hidden_relaunch_and_no_headless_writes() {
     fs::create_dir(&harness_dir).unwrap();
     let harness = harness_dir.join("progress-test-harness");
     fs::copy(test_binary, &harness).unwrap();
-    for mode in ["win", "relaunch"] {
-        let mut c = w.isolated(&harness, Some(&bundle));
+    let untrusted = host_root.join("untrusted ancestor");
+    fs::create_dir(&untrusted).unwrap();
+    fs::set_permissions(&untrusted, fs::Permissions::from_mode(0o777)).unwrap();
+    for mode in ["untrusted-ancestor", "win", "relaunch"] {
+        let mut c = isolated(&harness, Some(&bundle));
         c.args([
             "--ignored",
             "--exact",
@@ -378,7 +411,16 @@ fn collect_progress_source_hidden_relaunch_and_no_headless_writes() {
         ])
         .env("ORR_PROGRESS_TEST_PROJECT", bundle.join("project"))
         .env("ORR_PROGRESS_TEST_MODE", mode);
-        let output = run(&mut c);
+        let output = if mode == "untrusted-ancestor" {
+            c.env("XDG_DATA_HOME", progress_root.join("untrusted ancestor/data"))
+                .env("HOME", progress_root.join("isolated home"));
+            let output = good(c.output().unwrap());
+            assert!(!untrusted.join("data").exists());
+            assert!(!data.exists(), "rejected ancestor created profile data");
+            output
+        } else {
+            run(&mut c)
+        };
         assert!(
             output.contains("1 passed"),
             "explicit helper did not execute: {output}"
