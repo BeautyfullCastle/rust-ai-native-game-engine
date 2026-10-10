@@ -297,6 +297,10 @@ impl eframe::App for EditorApp {
         }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
         self.editor.pump();
+        #[cfg(feature="terrain")]
+        let terrain_cancelled = self.terrain.observe_sculpt_context(&self.editor, &ctx, self.ui.dialog.is_some());
+        #[cfg(not(feature="terrain"))]
+        let terrain_cancelled = false;
         #[cfg(feature="navigation")]
         {
             self.terrain.sync_for_editor(&self.editor);
@@ -318,7 +322,7 @@ impl eframe::App for EditorApp {
         if ctx.input(|i| i.key_pressed(Key::Escape) || !i.focused) {
             // Escape cancels an active drag without changing its inspection
             // target. With no gesture, Escape clears the GUID selection.
-            let cancelling_gesture = self.editor.in_gesture();
+            let cancelling_gesture = self.editor.in_gesture() || terrain_cancelled;
             self.editor.cancel_edit();
             if !cancelling_gesture && ctx.input(|i| i.key_pressed(Key::Escape)) { self.editor.select(None); }
             // Focus loss may hide the physical release. Forget egui's drag
@@ -345,6 +349,8 @@ impl eframe::App for EditorApp {
         // A scrub widget can disappear after selection/navigation changes.
         // Release still closes its gesture even if that widget saw no End.
         if !ctx.input(|i| i.pointer.button_down(PointerButton::Primary)) {
+            #[cfg(feature="terrain")]
+            self.terrain.cancel_sculpt_stroke("Terrain pointer release was not handled; stroke cancelled");
             self.editor.end_edit();
             self.ui.body_drag = None;
         }
@@ -934,7 +940,11 @@ impl EditorApp {
             ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
         }
-        if (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
+        #[cfg(feature="terrain")]
+        let sculpt_consumed = self.terrain.sculpt_pointer(&self.editor, &resp, &camera, rect, px, frame_drawn || self.render_state.is_none());
+        #[cfg(not(feature="terrain"))]
+        let sculpt_consumed = false;
+        if !sculpt_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
             if let Some(at) = resp.interact_pointer_pos() {
                 let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
                 #[cfg(feature="terrain")]

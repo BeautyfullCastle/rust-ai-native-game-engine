@@ -13,6 +13,7 @@ pub enum TerrainSelectionMode {
     Entity,
     Vertex,
     Cell,
+    Sculpt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +137,51 @@ pub fn pick_cell(
     closest.map(|(_, cell)| cell)
 }
 
+/// Ray-pick the frozen terrain and snap its hit to the nearest grid center.
+/// Hole triangles participate in occlusion but can never admit a stroke.
+pub fn pick_sculpt_center(
+    terrain: &Terrain,
+    camera: &Camera3D,
+    pixel: [f32; 2],
+    size: (u32, u32),
+) -> Option<[u32; 2]> {
+    if !valid_input(pixel, size) {
+        return None;
+    }
+    let (origin, direction) = camera.screen_ray(pixel, size);
+    if origin.iter().chain(&direction).any(|v| !v.is_finite()) {
+        return None;
+    }
+    let mut closest: Option<(f32, [u32; 2])> = None;
+    for z in 0..terrain.depth() - 1 {
+        for x in 0..terrain.width() - 1 {
+            let [a, b, d, c] = cell_vertices(terrain, [x, z])?.map(|p| p.map(FP::to_f32));
+            for triangle in [[a, c, d], [a, d, b]] {
+                if let Some(distance) = ray_triangle(origin, direction, triangle) {
+                    if closest.is_none_or(|(old, _)| distance <= old) {
+                        closest = Some((distance, [x, z]));
+                    }
+                }
+            }
+        }
+    }
+    let (distance, [x, z]) = closest?;
+    if terrain.holes()[(z * (terrain.width() - 1) + x) as usize] {
+        return None;
+    }
+    let hit_x = origin[0] + direction[0] * distance;
+    let hit_z = origin[2] + direction[2] * distance;
+    let center = [
+        ((hit_x - terrain.origin()[0].to_f32()) / terrain.spacing().to_f32())
+            .round()
+            .clamp(0.0, (terrain.width() - 1) as f32) as u32,
+        ((hit_z - terrain.origin()[1].to_f32()) / terrain.spacing().to_f32())
+            .round()
+            .clamp(0.0, (terrain.depth() - 1) as f32) as u32,
+    ];
+    crate::terrain_document::stroke::center_is_surface(terrain, center).then_some(center)
+}
+
 fn valid_input(pixel: [f32; 2], size: (u32, u32)) -> bool {
     size.0 > 0 && size.1 > 0 && pixel.iter().all(|v| v.is_finite())
 }
@@ -145,14 +191,26 @@ fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a.into_iter().zip(b).map(|(a, b)| a * b).sum()
 }
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
+// Intersection is presentation-only. Promote original operands before any
+// subtraction/product: f32 barycentrics can disagree at a shared grid vertex.
+// Keep strict edge inequalities; no epsilon expands a surface into a hole.
 fn ray_triangle(origin: [f32; 3], direction: [f32; 3], p: [[f32; 3]; 3]) -> Option<f32> {
+    fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|i| a[i] - b[i])
+    }
+    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a.into_iter().zip(b).map(|(a, b)| a * b).sum()
+    }
+    fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+    let origin = origin.map(f64::from);
+    let direction = direction.map(f64::from);
+    let p = p.map(|point| point.map(f64::from));
     let e1 = sub(p[1], p[0]);
     let e2 = sub(p[2], p[0]);
     let h = cross(direction, e2);
@@ -165,8 +223,9 @@ fn ray_triangle(origin: [f32; 3], direction: [f32; 3], p: [[f32; 3]; 3]) -> Opti
     let q = cross(s, e1);
     let v = dot(direction, q) / determinant;
     let distance = dot(e2, q) / determinant;
-    (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && distance >= 0.0 && distance.is_finite())
-        .then_some(distance)
+    let result = distance as f32;
+    (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && distance >= 0.0 && result.is_finite())
+        .then_some(result)
 }
 
 #[cfg(test)]
@@ -189,6 +248,67 @@ mod tests {
         camera.up = [0.0, 0.0, -1.0];
         camera
     }
+    #[test]
+    fn oblique_projected_grid_vertices_have_no_ray_cracks() {
+        let terrain = Terrain::new(
+            "stroke-ray-regression".into(), 9, 9,
+            [FP::from_int(-4); 2], FP::ONE,
+            vec![FP::ONE; 81], vec![false; 64],
+        ).unwrap();
+        let camera = orr_render::OrbitCamera::new([0.0, 1.5, 0.0], 0.45, 0.75, 16.0).camera();
+        let size = (710, 904);
+        let viewport_origin = [230.0, 23.0];
+        // Include the actual GPU acceptance endpoint first, then every interior
+        // shared grid vertex. Preserve the viewport's screen-position round trip.
+        for vertex in std::iter::once([6, 6]).chain((1..8).flat_map(|z| (1..8).map(move |x| [x, z]))) {
+            let world = terrain.vertex_position(vertex[1] * 9 + vertex[0]).unwrap().map(FP::to_f32);
+            let screen = camera.world_to_screen(world, size).unwrap();
+            let dimensions = [size.0 as f32, size.1 as f32];
+            let pixel = std::array::from_fn(|axis| {
+                let pos = viewport_origin[axis] + screen[axis] * dimensions[axis] / dimensions[axis];
+                (pos - viewport_origin[axis]) * dimensions[axis] / dimensions[axis]
+            });
+            assert_eq!(pick_sculpt_center(&terrain, &camera, pixel, size), Some(vertex),
+                "projected shared vertex {vertex:?} at pixel {pixel:?} must remain pickable");
+        }
+    }
+
+    #[test]
+    fn ray_edges_remain_strict_and_invalid_intersections_are_rejected() {
+        let triangle = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]];
+        let down = [0.0, -1.0, 0.0];
+        for origin in [[0.0, 1.0, 0.0], [0.5, 1.0, 0.5], [1.0, 1.0, 0.0]] {
+            assert_eq!(ray_triangle(origin, down, triangle), Some(1.0));
+        }
+        for origin in [
+            [-f32::EPSILON, 1.0, 0.5],
+            [0.5, 1.0, -f32::EPSILON],
+            [0.5 + f32::EPSILON, 1.0, 0.5],
+            [0.25, -1.0, 0.25],
+            [f32::NAN, 1.0, 0.25],
+        ] {
+            assert_eq!(ray_triangle(origin, down, triangle), None, "{origin:?}");
+        }
+        for direction in [[1.0, 0.0, 0.0], [0.0; 3], [f32::NAN, -1.0, 0.0]] {
+            assert_eq!(ray_triangle([0.25, 1.0, 0.25], direction, triangle), None);
+        }
+        assert_eq!(ray_triangle([0.25, 1.0, 0.25], down, [[0.0; 3]; 3]), None);
+        assert_eq!(ray_triangle([0.0, f32::MAX, 0.0], [0.0, -f32::MIN_POSITIVE, 0.0], triangle), None);
+    }
+
+    #[test]
+    fn sculpt_picks_still_reject_hole_hits_hole_centers_and_outside() {
+        let terrain = terrain();
+        let camera = camera();
+        let size = (600, 600);
+        for point in [[1.25, 0.0, 0.25], [0.75, 0.0, 0.25], [-0.001, 0.0, 0.5], [2.001, 0.0, 0.5]] {
+            let pixel = camera.world_to_screen(point, size).unwrap();
+            assert_eq!(pick_sculpt_center(&terrain, &camera, pixel, size), None, "{point:?}");
+        }
+        let pixel = camera.world_to_screen([0.25, 0.0, 1.25], size).unwrap();
+        assert_eq!(pick_sculpt_center(&terrain, &camera, pixel, size), Some([0, 1]));
+    }
+
     #[test]
     fn picks_vertices_and_hole_cells_without_altering_exact_geometry() {
         let terrain = terrain();

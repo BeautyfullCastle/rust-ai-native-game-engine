@@ -1,0 +1,117 @@
+name: terrain-sculpt
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  terrain-sculpt-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      RUST_BACKTRACE: '1'
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: terrain-sculpt
+      - name: Mandatory software GPU prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sculpt-evidence
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -r "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+      - name: Default editor and optional dependency boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked --release -j1 -p orr_editor 2>&1 | tee sculpt-evidence/default-check.log
+          cargo test --locked --release -j1 -p orr_editor --test deps 2>&1 | tee sculpt-evidence/default-deps.log
+          grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' sculpt-evidence/default-deps.log
+      - name: Exact brush contracts and existing terrain document regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -j1 -p orr_editor --features terrain --lib terrain_document::brush::tests -- --test-threads=1 2>&1 | tee sculpt-evidence/brush.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' sculpt-evidence/brush.log
+          for name in radial_footprint_clips_boundaries_and_has_an_explicit_work_cap smoothing_uses_original_neighbors_clips_edges_and_floors_negative_means checked_delta_rejects_late_overflow_and_smoothing_handles_extreme_heights; do
+            grep -F "test terrain_document::brush::tests::$name ... ok" sculpt-evidence/brush.log
+          done
+          cargo test --locked --release -j1 -p orr_editor --features terrain --lib terrain_document::tests -- --test-threads=1 2>&1 | tee sculpt-evidence/terrain-document.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' sculpt-evidence/terrain-document.log
+      - name: Production sculpt and inherited terrain widgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -j1 -p orr_editor --features terrain --test terrain_brush_ui -- --test-threads=1 2>&1 | tee sculpt-evidence/sculpt-ui.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' sculpt-evidence/sculpt-ui.log
+          for name in real_stamp_widgets_raise_query_undo_redo_save_reopen_without_host_edits flatten_lower_and_snapshot_smooth_use_real_controls_and_preserve_holes invalid_text_bounds_admission_and_play_preserve_redo_mesh_and_query installed_package_stays_read_only_until_copied_to_scene; do
+            grep -F "test $name ... ok" sculpt-evidence/sculpt-ui.log
+          done
+          cargo test --locked --release -j1 -p orr_editor --features terrain --test yard3d_terrain_ui -- --test-threads=1 2>&1 | tee sculpt-evidence/terrain-ui.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' sculpt-evidence/terrain-ui.log
+      - name: Mandatory actual sculpt viewport readback and restoration
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: '1'
+        run: |
+          set -euo pipefail
+          export TERRAIN_SCULPT_CAPTURE_DIR="$PWD/sculpt-evidence/viewport"
+          cargo test --locked --release -j1 -p orr_editor --features terrain --test terrain_brush_gpu -- --exact sculpt_panel_viewport_changes_and_exact_undo_redo_saved_restore --test-threads=1 --show-output 2>&1 | tee sculpt-evidence/sculpt-gpu.log
+          grep -F 'test sculpt_panel_viewport_changes_and_exact_undo_redo_saved_restore ... ok' sculpt-evidence/sculpt-gpu.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' sculpt-evidence/sculpt-gpu.log
+          grep -F 'terrain sculpt captured viewport adapter=' sculpt-evidence/sculpt-gpu.log
+          for capture in 01-flat 02-raised-stamp 03-undo 04-redo 05-detached 06-reopened; do
+            test -s "sculpt-evidence/viewport/$capture.png"
+          done
+      - name: Bounded baseline stroke and ordered pointer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -j1 -p orr_editor --features terrain --lib terrain_document::stroke::tests -- --test-threads=1 2>&1 | tee sculpt-evidence/stroke-core.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' sculpt-evidence/stroke-core.log
+          for name in sparse_dense_segments_and_overlaps_commit_exactly_one_transaction smooth_reads_stroke_start_and_noop_retains_redo cancellation_overflow_and_admission_restore_saved_dirty_query_and_history sparse_hole_crossing_and_all_work_caps_cancel_the_whole_stroke; do
+            grep -F "test terrain_document::stroke::tests::$name ... ok" sculpt-evidence/stroke-core.log
+          done
+          cargo test --locked --release -j1 -p orr_editor --features terrain --test terrain_stroke_ui -- --test-threads=1 2>&1 | tee sculpt-evidence/stroke-ui.log
+          grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' sculpt-evidence/stroke-ui.log
+          for name in actual_drag_uses_frozen_path_and_commits_one_undo_save_reopen escape_focus_outside_play_and_context_replacement_restore_exact_history sparse_pointer_hole_crossing_and_vertex_limit_restore_the_entire_stroke sculpt_preserves_camera_selection_ownership_and_installed_package_bytes batched_and_stepped_pointer_paths_share_commit_and_cancellation_results; do
+            grep -F "test $name ... ok" sculpt-evidence/stroke-ui.log
+          done
+      - name: Mandatory actual held stroke viewport preview
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: '1'
+        run: |
+          set -euo pipefail
+          export TERRAIN_STROKE_CAPTURE_DIR="$PWD/sculpt-evidence/stroke-viewport"
+          cargo test --locked --release -j1 -p orr_editor --features terrain --test terrain_stroke_gpu -- --exact sculpt_drag_live_preview_commits_one_undoable_gpu_visible_stroke --test-threads=1 --show-output 2>&1 | tee sculpt-evidence/stroke-gpu.log
+          grep -F 'test sculpt_drag_live_preview_commits_one_undoable_gpu_visible_stroke ... ok' sculpt-evidence/stroke-gpu.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' sculpt-evidence/stroke-gpu.log
+          grep -F 'terrain stroke captured viewport adapter=' sculpt-evidence/stroke-gpu.log
+          for capture in 01-before 02-live-preview 03-committed 04-undo 05-redo 06-reopened; do
+            test -s "sculpt-evidence/stroke-viewport/$capture.png"
+          done
+      - name: Strict default and terrain lint with composed consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --release -j1 -p orr_editor --all-targets -- -D warnings 2>&1 | tee sculpt-evidence/default-clippy.log
+          cargo clippy --locked --release -j1 -p orr_editor --features terrain --all-targets -- -D warnings 2>&1 | tee sculpt-evidence/terrain-clippy.log
+          cargo check --locked --release -j1 -p orr_editor --features terrain-physics,navigation,irradiance-probes --lib 2>&1 | tee sculpt-evidence/composed-check.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terrain-sculpt-evidence
+          path: sculpt-evidence
+          if-no-files-found: warn
