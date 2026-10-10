@@ -635,3 +635,59 @@ fn gpu_normals_use_inverse_transpose_of_blended_skin_with_nonuniform_placement()
     }
     assert!(checked > 200, "insufficient normal coverage: {checked}");
 }
+
+#[test]
+fn cubic_sampled_skin_matches_independent_hermite_rotation_pixels() {
+    let Some(g) = gpu() else { return };
+    let mut source = fixture().source().clone();
+    source.clips[0].channels[0].interpolation = orr_model::animation::Interpolation::CubicSpline;
+    source.clips[0].channels[0].times = vec![0.0, 2.0];
+    source.clips[0].channels[0].values = ChannelValues::Rotation(vec![
+        [0.0; 4],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.2, 0.0],
+        [0.0; 4],
+        [0.0, 0.0, 0.5, 3.0f32.sqrt() / 2.0],
+        [0.0; 4],
+    ]);
+    let model = AnimatedModel::new(source).unwrap();
+    let model = AnimatedModel::from_bytes(&model.to_bytes().unwrap()).unwrap();
+    let cam = camera();
+    let t = target(&g, TextureFormat::Rgba8UnormSrgb);
+    let view = g.create_texture_view(&t, None);
+    let mut renderer =
+        SkinnedModelRenderer::new(g.clone(), TextureFormat::Rgba8UnormSrgb, model.clone()).unwrap();
+    renderer.clear = [0.0, 0.0, 0.0, 1.0];
+    for time in [0.0f32, 0.5, 1.0, 2.0, 0.5] {
+        let pose = model.sample_clip(0, time).unwrap();
+        let u = time / 2.0;
+        let smooth = 3.0 * u * u - 2.0 * u * u * u;
+        let outgoing = u * (1.0 - u) * (1.0 - u);
+        let z = 0.5 * smooth + 2.0 * 0.2 * outgoing;
+        let w = 1.0 + (3.0f32.sqrt() / 2.0 - 1.0) * smooth;
+        // Normalization cancels in atan2. This analytic angle is independent
+        // of the sampler, hierarchy, skin palette and CPU deformation helpers.
+        let positions = reference_positions(&model, 2.0 * z.atan2(w), IDENTITY);
+        for (vertex, expected) in model.deform(&pose).unwrap()[0]
+            .vertices
+            .iter()
+            .zip(&positions)
+        {
+            close(vertex.position, *expected);
+        }
+        renderer
+            .draw(
+                &view,
+                (SIZE, SIZE),
+                &cam,
+                &light(),
+                &[SkinnedInstance::new(&pose)],
+            )
+            .unwrap();
+        let pixels = g.read_texture(&t);
+        assert_pixels(&pixels, &model, &positions, &cam);
+        if time == 0.5 {
+            capture("cubic-quarter", &pixels);
+        }
+    }
+}
