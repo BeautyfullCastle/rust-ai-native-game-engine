@@ -779,6 +779,13 @@ pub(crate) fn exercise_window_progress(project: &PreparedProject, mode: &str) {
     // Exact production App constructor and persistence dispatch; no OS window
     // is claimed by this source-hidden test harness.
     let mut app = window_app(project).unwrap();
+    if mode == "untrusted-ancestor" {
+        assert_eq!(
+            app.progress.status(),
+            "progress ancestor must be trusted and not writable by other users"
+        );
+        return;
+    }
     if mode == "relaunch" {
         assert_eq!(app.progress.status(), "Best collected: 2");
         return;

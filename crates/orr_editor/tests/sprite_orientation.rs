@@ -26,13 +26,13 @@ fn open_collect(root: &std::path::Path) -> PreparedProject {
 }
 fn harness(fixture: &Fixture, collect: bool, gpu: bool) -> Harness<'static, EditorApp> {
     enum Project {
-        Arena(orr_editor::project::PreparedProject),
-        Collect(PreparedProject),
+        Arena(Box<orr_editor::project::PreparedProject>),
+        Collect(Box<PreparedProject>),
     }
     let prepared = if collect {
-        Project::Collect(open_collect(&fixture.project))
+        Project::Collect(Box::new(open_collect(&fixture.project)))
     } else {
-        Project::Arena(orr_editor::project::PreparedProject::open(&fixture.project).unwrap())
+        Project::Arena(Box::new(orr_editor::project::PreparedProject::open(&fixture.project).unwrap()))
     };
     let spec = match &prepared {
         Project::Arena(project) => project.host_spec(),
@@ -54,11 +54,11 @@ fn harness(fixture: &Fixture, collect: bool, gpu: bool) -> Harness<'static, Edit
     let build = move |cc: &mut eframe::CreationContext<'_>| {
         let mut app = match prepared {
             Project::Arena(project) => {
-                project.into_app(editor, cc.wgpu_render_state.clone(), &cc.egui_ctx)
+                (*project).into_app(editor, cc.wgpu_render_state.clone(), &cc.egui_ctx)
             }
             Project::Collect(project) => {
                 let mut app = EditorApp::new(editor, cc.wgpu_render_state.clone());
-                orr_editor::project::install_collect_presentation(&mut app, project, &cc.egui_ctx);
+                orr_editor::project::install_collect_presentation(&mut app, *project, &cc.egui_ctx);
                 app
             }
         };
