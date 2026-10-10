@@ -194,12 +194,16 @@ fn wait(h: &mut Harness<'_, EditorApp>, description: &str, ready: impl Fn(&Edito
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         settle(h);
-        if ready(h.state()) {
+        // Lifecycle state and the current frame can arrive before the GUID rows
+        // invalidated by stop/restart/seek. Camera assertions need both sources
+        // admitted by the same production coherence fence, not just Play mode.
+        if ready(h.state()) && h.state().editor.yard_rows_coherent() {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out: {description}; phase={:?}; hint={}; log={:?}",
+            "timed out: {description}; rows_coherent={}; phase={:?}; hint={}; log={:?}",
+            h.state().editor.yard_rows_coherent(),
             h.state().editor.input_phase(),
             h.state().editor.input_hint(),
             h.state().editor.log()
@@ -653,6 +657,16 @@ fn live_workflow(template: &str, gpu: bool) {
     h.state_mut().editor.pause();
     settle(&mut h);
     h.state_mut().editor.seek(0);
+    // A successful seek deterministically retires the GUID rows before they
+    // refresh. Preserve the fail-closed production behavior, then wait for
+    // coherent rows and the requested timeline together before comparing poses.
+    assert!(!h.state().editor.yard_rows_coherent());
+    assert!(h
+        .state()
+        .editor
+        .presentation_camera3d((1200, 800))
+        .unwrap_err()
+        .contains("requires a coherent local Room snapshot"));
     wait(&mut h, "seek to zero", |app| {
         app.editor
             .timeline()
