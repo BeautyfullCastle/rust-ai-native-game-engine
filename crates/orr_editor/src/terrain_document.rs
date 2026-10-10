@@ -21,6 +21,9 @@ use std::{
     sync::Arc,
 };
 
+pub mod brush;
+pub mod stroke;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerrainSource {
     Local {
@@ -86,6 +89,7 @@ pub fn format_fixed(value: FP) -> String {
     orr_reflect::decimal::fp_to_decimal(value)
 }
 
+#[derive(Clone)]
 struct AdmittedTerrain {
     document: CoreDocument,
     source: TerrainSource,
@@ -152,6 +156,7 @@ impl AdmittedTerrain {
 pub struct TerrainSession {
     scene: Option<PathBuf>,
     admitted: Option<AdmittedTerrain>,
+    stroke: Option<stroke::Stroke>,
     // Supplied by the current composed viewport. Never cooked or put in history.
     render_admission_error: Option<String>,
 }
@@ -190,14 +195,16 @@ impl TerrainSession {
         matches!(self.source(), Some(TerrainSource::Package { .. }))
     }
     pub fn can_undo(&self) -> bool {
-        !self.read_only()
+        !self.stroke_active()
+            && !self.read_only()
             && self
                 .admitted
                 .as_ref()
                 .is_some_and(|a| a.document.can_undo())
     }
     pub fn can_redo(&self) -> bool {
-        !self.read_only()
+        !self.stroke_active()
+            && !self.read_only()
             && self
                 .admitted
                 .as_ref()
@@ -282,6 +289,7 @@ impl TerrainSession {
     /// Copy to a new file, never overwrite an existing scene asset or package.
     /// Reverify the installed identity before copying the admitted canonical bytes.
     pub fn copy_to_scene(&mut self, relative: &str) -> Result<(), String> {
+        self.require_idle()?;
         let path = self.local_path(relative)?;
         require_missing(&path)?;
         let admitted = self.admitted.as_ref().ok_or("open a terrain first")?;
@@ -359,6 +367,7 @@ impl TerrainSession {
 
     /// Queries do not dirty the asset. Mesh and marker changes are staged together.
     pub fn set_query(&mut self, query: Option<[FP; 2]>) -> Result<(), String> {
+        self.require_idle()?;
         let admitted = self.admitted.as_mut().ok_or("open a terrain first")?;
         if admitted.query == query {
             return Ok(());
@@ -381,10 +390,12 @@ impl TerrainSession {
     /// Call only for the user's explicit Discard choice. The scene association
     /// remains so a subsequent New/Open can reuse the saved scene's directory.
     pub fn discard(&mut self) {
+        self.stroke = None;
         self.admitted = None;
     }
 
     fn require_clean(&self) -> Result<(), String> {
+        self.require_idle()?;
         if self.dirty() {
             Err("terrain has unsaved changes; Save or explicitly Discard before continuing".into())
         } else {
@@ -392,6 +403,7 @@ impl TerrainSession {
         }
     }
     fn require_editable(&self) -> Result<(), String> {
+        self.require_idle()?;
         self.scene_base()?;
         match self.source() {
             None => Err("open a terrain first".into()),
