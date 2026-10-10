@@ -11,6 +11,7 @@ description = "Orrery sim-only sample games (PhysGame 2D physics, Yard3D 3D phys
 workspace = true
 
 [features]
+room-escape = []
 collect-dodge = []
 navigation = ["dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
 default = []

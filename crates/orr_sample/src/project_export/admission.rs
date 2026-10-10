@@ -225,6 +225,7 @@ impl ProjectSnapshot {
             plan.add(PACKAGE_LOCK, MAX_JSON_BYTES)?;
         }
         plan.add(&entry.scene, MAX_SCENE_BYTES)?;
+        if let Some(sidecar) = &entry.models { plan.add(sidecar,MAX_JSON_BYTES)?; }
         if let Some(sidecar) = &entry.sprites {
             plan.add(sidecar, MAX_JSON_BYTES)?;
         }
@@ -275,6 +276,14 @@ impl ProjectSnapshot {
             }
             (None, None) => {}
             _ => return Err("sprite sidecar changed during runtime admission".into()),
+        }
+        #[cfg(feature = "room-project")]
+        if let Some(path) = &entry.models {
+            let super::Prepared::Room(room)=&prepared else { return Err("model sidecar requires Room consumer".into()); };
+            let mut file=SnapshotFile::read(&root.join(path),path,MAX_JSON_BYTES)?;
+            let document:orr_model_bindings::model_bindings::Document=serde_json::from_slice(&file.bytes).map_err(|e|format!("export model sidecar: {e}"))?;
+            if file.source!=room.models().path || document!=room.models().document { return Err("model sidecar changed after runtime admission".into()); }
+            file.role="model_sidecar"; files.push(file);
         }
         #[cfg(feature = "collect-ui")]
         if let Some(path) = entry.ui.as_ref().and_then(|ui| ui.document.as_ref()) {

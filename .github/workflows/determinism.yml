@@ -117,6 +117,40 @@ jobs:
           grep -F 'win -> restart -> hazard loss verified; checksum=a7b61c44ba9f26bd' collect-dodge-example.log
           cargo clippy --locked -p orr_games --all-features --all-targets -- -D warnings
 
+      - name: Required RoomEscapeV1 gameplay core
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_games --features room-escape --lib room_escape_game::tests:: -- --list > room-core-list.txt
+          cargo test --locked --release -p orr_games --features room-escape --lib room_escape_game::tests:: -- --ignored --list > room-core-ignored.txt
+          python - <<'PYROOM'
+          import pathlib, re
+          expected = ['room_escape_game::tests::admission_rejects_hostile_hidden_fields_missing_roles_and_anonymous_entities', 'room_escape_game::tests::canonical_setup_and_initial_only_admission', 'room_escape_game::tests::hostile_samples_are_wholly_neutral', 'room_escape_game::tests::key_then_exit_requires_separate_edges_and_won_freezes', 'room_escape_game::tests::movement_bounds_each_segment_before_casting', 'room_escape_game::tests::only_connected_slot_zero_controls_player', 'room_escape_game::tests::rejects_noncanonical_and_unbounded_authoring_before_math', 'room_escape_game::tests::snapshot_replay_and_initial_frame_restart_match_exact_bytes', 'room_escape_game::tests::wall_blocks_key_interaction_and_exit_stays_locked', 'room_escape_game::tests::walls_stop_motion_and_diagonal_is_normalized']
+          read = lambda name: pathlib.Path(name).read_text()
+          listed = lambda name: sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', read(name), re.M))
+          assert listed('room-core-list.txt') == expected
+          assert listed('room-core-ignored.txt') == []
+          PYROOM
+          cargo test --locked --release -p orr_games --features room-escape --lib room_escape_game::tests:: -- --nocapture 2>&1 | tee room-core.log
+          python - <<'PYROOM'
+          import pathlib, re
+          text = pathlib.Path('room-core.log').read_text()
+          rows = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;', text, re.M)
+          assert text.count('test result:') == 1
+          assert rows == [('10', '0', '0')], rows
+          assert not re.search(r'(?im)^\s*(?:SKIP:|.*\bskipping\b)', text)
+          PYROOM
+      - name: Upload RoomEscapeV1 native core evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-core-${{ matrix.name }}
+          path: |
+            room-core-list.txt
+            room-core-ignored.txt
+            room-core.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify orr_ffi artifacts (cdylib + staticlib + import library)
         # The C ABI tests always build and verify these, even when the runner
         # has no C compiler. Reuse their artifacts instead of rebuilding with
@@ -709,7 +743,13 @@ jobs:
           check_count remote 6 cargo test --locked --release -p orr_remote --features collect-dodge --test collect_authored
           check_count edit-admission 6 cargo test --locked --release -p orr_edit --test bake_admission
           check_count games 23 cargo test --locked --release -p orr_games --features collect-dodge --lib --test golden --test collect_dodge
-          check_count default-editor-cli 8 cargo test --locked --release -p orr_editor --no-default-features --lib cli::tests::
+          check_count default-editor-cli 10 cargo test --locked --release -p orr_editor --no-default-features --lib cli::tests::
+          python3 - "$RUNNER_TEMP/collect-authored-default-editor-cli-list.txt" <<'PYROOMCLI'
+          import pathlib,re,sys
+          expected = ['cli::tests::collect_project_has_one_authority_in_every_option_order', 'cli::tests::local_game_defaults_to_physics_and_accepts_arena', 'cli::tests::local_game_rejects_unknown_and_remote_selection', 'cli::tests::parses_connect', 'cli::tests::parses_flags', 'cli::tests::rejects_bad_flags', 'cli::tests::room_project_rejects_conflicting_authorities_in_either_order', 'cli::tests::room_project_route_requires_its_explicit_feature', 'cli::tests::saved_project_flags_have_one_explicit_authority', 'cli::tests::screenshot_settle_is_opt_in']
+          actual=sorted(re.findall(r'^([A-Za-z0-9_:]+): test$',pathlib.Path(sys.argv[1]).read_text(),re.M))
+          assert actual==expected,actual
+          PYROOMCLI
       - name: Build and pin production Collect runtime and exporter
         if: runner.os == 'Linux'
         shell: bash
@@ -3131,6 +3171,38 @@ jobs:
           cargo clippy --locked -p orr_sample -p orr_editor -p orr_remote -p orr_edit -p orr_reflect -p orr_package -p orr_games --all-targets -- -D warnings 2>&1 | tee "$ROOT/default-clippy.log"
         env:
           ORR_IMAGE_REIMPORT_EVIDENCE: /tmp/orr-image-reimport-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: RoomEscapeV1 contracts and optional feature combinations
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 90
+        run: tools/check-room-project.sh contracts
+        env:
+          ORR_ROOM_EVIDENCE: /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: RoomEscapeV1 actual GPU and source-hidden production export
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+          ORR_REQUIRE_PROJECT_ISOLATION: "1"
+          ORR_ROOM_EVIDENCE: /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}
+        run: tools/check-room-project.sh gpu
+      - name: Upload RoomEscapeV1 acceptance evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-project-evidence-${{ matrix.os }}
+          path: |
+            /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.log
+            /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.sha256
+            /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.txt
+            /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.png
+            /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.json
+            /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.jsonl
+            /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.stderr
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload generated Arena acceptance evidence
         if: ${{ always() && runner.os == 'Linux' }}
         uses: actions/upload-artifact@v4

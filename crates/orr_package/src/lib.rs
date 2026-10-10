@@ -128,6 +128,8 @@ pub enum ProjectGame {
     Arena,
     #[serde(rename = "collect-dodge-v1")]
     CollectDodgeV1,
+    #[serde(rename = "room-escape-v1")]
+    RoomEscapeV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +145,9 @@ pub struct ProjectEntry {
         deserialize_with = "present_sprites"
     )]
     pub sprites: Option<String>,
+    /// Existing model-binding sidecar, supported only by the closed 3D profile.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub models: Option<String>,
     /// Optional closed presentation preset. Assets are resolved only by the lock.
     #[serde(
         default,
@@ -223,6 +228,17 @@ impl ProjectManifest {
                     if sprites.eq_ignore_ascii_case(&entry.scene) {
                         return fail("entry scene and sprite sidecar must be different files");
                     }
+                }
+                if let Some(models) = &entry.models {
+                    portable(models)?;
+                    if entry.game != ProjectGame::RoomEscapeV1 || models.eq_ignore_ascii_case(&entry.scene) {
+                        return fail("model sidecar requires room-escape-v1 and must differ from scene");
+                    }
+                }
+                if entry.game == ProjectGame::RoomEscapeV1
+                    && (self.schema != 2 || entry.sprites.is_some() || entry.ui.is_some() || entry.models.is_none())
+                {
+                    return fail("room-escape-v1 requires schema 2 and models, without sprites/UI/progress");
                 }
                 if let Some(ui) = &entry.ui {
                     match (entry.game, ui.profile, &ui.document) {

@@ -64,6 +64,9 @@ pub enum HostSpec {
         listen: Option<ServerConfig>,
         debug_hooks: bool,
     },
+    /// Initial RoomEscape project bytes admitted before host startup.
+    #[cfg(feature = "room-project")]
+    PreparedRoom { scene: PathBuf, text: String, listen: Option<ServerConfig>, debug_hooks: bool },
     /// A host in another process.
     Remote {
         /// `ws://host:port` of its ERP server.
@@ -92,6 +95,8 @@ impl HostSpec {
             HostSpec::PreparedArena { listen: current, .. } => *current = Some(listen),
             #[cfg(feature = "collect-dodge")]
             HostSpec::PreparedCollect { listen: current, .. } => *current = Some(listen),
+            #[cfg(feature = "room-project")]
+            HostSpec::PreparedRoom { listen: current, .. } => *current = Some(listen),
             HostSpec::Remote { .. } => {}
         }
         self
@@ -119,6 +124,10 @@ impl HostSpec {
             #[cfg(feature = "collect-dodge")]
             HostSpec::PreparedCollect { listen, debug_hooks, .. } => {
                 *self = HostSpec::LocalGame { scene:path,game:EditorGame::CollectDodge,listen:listen.clone(),debug_hooks:*debug_hooks }; true
+            }
+            #[cfg(feature = "room-project")]
+            HostSpec::PreparedRoom { listen, debug_hooks, .. } => {
+                *self = HostSpec::LocalGame { scene:path,game:EditorGame::RoomEscape,listen:listen.clone(),debug_hooks:*debug_hooks }; true
             }
             HostSpec::Remote { .. } => false,
         }
@@ -202,6 +211,10 @@ impl Backend {
                 let restart = HostSpec::LocalGame { scene:scene.clone(),game:EditorGame::CollectDodge,listen:listen.clone(),debug_hooks:*debug_hooks };
                 Self::connect_local(&restart,scene,text.clone(),EditorGame::CollectDodge,listen,*debug_hooks)
             }
+            #[cfg(feature = "room-project")]
+            HostSpec::PreparedRoom { scene, text, listen, debug_hooks } => {
+                Self::connect_local(spec,scene,text.clone(),EditorGame::RoomEscape,listen,*debug_hooks)
+            }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());
                 let mut erp = match token {
@@ -249,6 +262,8 @@ impl Backend {
             EditorGame::Arena => spawn_arena_host(text, Some(scene.to_path_buf()), cfg)?,
             #[cfg(feature = "collect-dodge")]
             EditorGame::CollectDodge => orr_remote::collect_dodge::spawn_host(text, Some(scene.to_path_buf()), cfg)?,
+            #[cfg(feature = "room-project")]
+            EditorGame::RoomEscape => orr_remote::room_escape::spawn_host(text,Some(scene.to_path_buf()),cfg)?,
             EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.to_path_buf(), cfg)?,
             #[cfg(feature = "terrain-physics")]
             EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.to_path_buf(), cfg)?,
@@ -276,6 +291,8 @@ impl Backend {
     pub fn frame_stream(&self, source: &str) -> Result<EditorStream, String> {
         let mut rc = match &self.spec {
             HostSpec::Local { .. } | HostSpec::LocalGame { .. } => RemoteConfig::new(""),
+            #[cfg(feature = "room-project")]
+            HostSpec::PreparedRoom { .. } => RemoteConfig::new(""),
             #[cfg(feature = "collect-dodge")]
             HostSpec::PreparedCollect { .. } => RemoteConfig::new(""),
             #[cfg(feature = "sprites")]
@@ -347,6 +364,12 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         let mut types = orr_reflect::TypeRegistry::new();
         types.register_component::<orr_sample::collect_game::CollectInput>("CollectInput");
         serde_json::from_str(&types.type_json_schema("CollectInput").expect("registered input")).expect("reflected JSON schema")
+    } else { expected_input };
+    #[cfg(feature = "room-project")]
+    let expected_input = if game.is_room() {
+        let mut types = orr_reflect::TypeRegistry::new();
+        types.register_component::<orr_sample::room_game::RoomInput>("RoomInput");
+        serde_json::from_str(&types.type_json_schema("RoomInput").expect("registered room input")).expect("reflected room JSON schema")
     } else { expected_input };
     let managed_input = game.has_keyboard() && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
     Ok((game, RemoteIdentity { game: name.to_string(), build_id, schema }, own_client, managed_input))
