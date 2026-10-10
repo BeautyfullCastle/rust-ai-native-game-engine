@@ -34,11 +34,13 @@
       "project_identity::tests::rejects_unsupported_schema_and_profiles",
       "project_identity::tests::room_checkpoint_identity_roundtrip_and_fork_preserve_profile",
       "tests::ancestor_links_and_reserved_manifest_subtrees_are_rejected",
+      "tests::bounded_project_file_reads_cannot_bypass_install_or_package_capabilities",
       "tests::bounds_reject_before_large_reads_and_graph_walks",
       "tests::candidate_dependencies_are_transitive_and_pruned",
       "tests::canonical_paths_check_root_and_each_existing_component",
       "tests::checked_install_injected_failures_keep_old_lock",
       "tests::checked_install_requires_both_exact_locks_and_keeps_callback_failures_atomic",
+      "tests::collect_audio_metadata_is_optional_closed_and_noncolliding",
       "tests::competing_writer_cannot_modify_authority",
       "tests::dependency_conflict_cycle_and_failure_preserve_lock",
       "tests::digest_ignores_json_layout_and_source_location",
@@ -62,7 +64,7 @@
       "tests::tamper_and_writer_failure_preserve_authority"
     ],
     "ignored_names": [],
-    "passed": 34,
+    "passed": 36,
     "ignored": 0,
     "expected_summary_rows": [
       [
@@ -71,7 +73,7 @@
         0
       ],
       [
-        34,
+        36,
         0,
         0
       ]
