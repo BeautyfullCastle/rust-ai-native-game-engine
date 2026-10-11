@@ -556,6 +556,36 @@ impl AnimatedModel {
         }
         self.pose_from_local(local)
     }
+    /// Blend presentation poses in local TRS space, then rebuild the hierarchy
+    /// and skin palettes. Weight must be finite and in `[0, 1]`; both poses must
+    /// belong to this asset or its clones. Valid endpoints are cloned exactly.
+    /// Work and allocations are bounded by the asset's node and skin limits.
+    pub fn blend_poses(&self, from: &Pose, to: &Pose, weight: f32) -> Result<Pose, Error> {
+        if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+            return Err(invalid(
+                "animation pose blend weight must be finite and in [0, 1]",
+            ));
+        }
+        self.validate_pose(from)?;
+        self.validate_pose(to)?;
+        if weight == 0.0 {
+            return Ok(from.clone());
+        }
+        if weight == 1.0 {
+            return Ok(to.clone());
+        }
+        let local = from
+            .local
+            .iter()
+            .zip(&to.local)
+            .map(|(from, to)| Trs {
+                translation: lerp3(from.translation, to.translation, weight),
+                rotation: slerp(from.rotation, to.rotation, weight),
+                scale: lerp3(from.scale, to.scale, weight),
+            })
+            .collect();
+        self.pose_from_local(local)
+    }
     fn pose_from_local(&self, local: Vec<Trs>) -> Result<Pose, Error> {
         let mut global = vec![IDENTITY; local.len()];
         for &i in &self.order {

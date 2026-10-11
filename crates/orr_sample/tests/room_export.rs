@@ -1015,6 +1015,7 @@ fn follow_camera_character_export_case() {
         carrying: 1,
         escaped: 2,
         speeds: None,
+        crossfade_ticks: None,
     };
     let character_path = w.project.join("room.character.json");
     let character_bytes = character.to_bytes().unwrap();

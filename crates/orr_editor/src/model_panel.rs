@@ -52,6 +52,8 @@ pub struct ModelPanel {
     reserved_scene_models: usize,
     room_identity: Option<(PathBuf, String)>,
     room_character_enabled: bool,
+    #[cfg(feature = "room-character")]
+    room_character_playback: std::cell::RefCell<(Option<Arc<()>>, orr_sample::room_character::PlaybackCursor)>,
     material_draft: Option<MaterialOverrideDraft>,
     material_draft_requires_reload: bool,
 }
@@ -77,12 +79,22 @@ impl Default for ModelPanel {
             reserved_scene_models: 0,
             room_identity: None,
             room_character_enabled: false,
+            #[cfg(feature = "room-character")]
+            room_character_playback: Default::default(),
             material_draft: None,
             material_draft_requires_reload: false,
         }
     }
 }
 impl ModelPanel {
+    /// Retire the strong model reference together with its presentation history.
+    /// Call only after a replacement commits, never during candidate validation.
+    fn retire_character_playback(&mut self) {
+        #[cfg(feature = "room-character")]
+        {
+            *self.room_character_playback.get_mut() = Default::default();
+        }
+    }
     /// Install an admitted immutable room presentation without reopening files.
     #[cfg(feature = "room-project")]
     pub fn install_room(
@@ -123,6 +135,7 @@ impl ModelPanel {
             .to_string();
         self.bindings = Some(bindings);
         self.loaded = loaded;
+        self.retire_character_playback();
         self.material_draft = None;
         self.material_draft_requires_reload = false;
         self.error = None;
@@ -309,6 +322,7 @@ impl ModelPanel {
         )?;
         self.bindings = Some(candidate);
         self.loaded = loaded;
+        self.retire_character_playback();
         self.material_draft = None;
         self.material_draft_requires_reload = false;
         self.candidate = None;
@@ -423,6 +437,7 @@ impl ModelPanel {
             self.reserved_scene_models,
         )?;
         self.loaded = Self::reuse_loaded_assets(loaded, &self.loaded);
+        self.retire_character_playback();
         Ok(())
     }
     /// Loads exactly the currently selected kind/package/path into a transient
@@ -575,6 +590,7 @@ impl ModelPanel {
         )?;
         bindings.assign_validated(std::slice::from_ref(&guid), &binding, &loaded)?;
         self.loaded = candidate_loaded;
+        self.retire_character_playback();
         self.material_draft = None;
         self.material_draft_requires_reload = false;
         Ok(())
@@ -595,6 +611,7 @@ impl ModelPanel {
         }
         bindings.remove(&[guid])?;
         self.loaded = loaded;
+        self.retire_character_playback();
         Ok(())
     }
     pub(crate) fn validate_save(&self, editor: &Editor) -> Result<(), String> {
@@ -654,6 +671,7 @@ impl ModelPanel {
         }) {
             Ok(loaded) => {
                 self.loaded = loaded;
+                self.retire_character_playback();
                 Ok(())
             }
             Err(error) => {
@@ -685,6 +703,7 @@ impl ModelPanel {
         }) {
             Ok(loaded) => {
                 self.loaded = loaded;
+                self.retire_character_playback();
                 Ok(())
             }
             Err(error) => {
@@ -1134,6 +1153,7 @@ impl ModelPanel {
         let guid = orr_reflect::Guid::parse(&character.player)?;
         self.bindings.as_mut().unwrap().assign_validated(&[guid], &changed, loaded)?;
         editor.install_room_character(character.clone())?;
+        self.retire_character_playback();
         Ok(())
     }
     #[cfg(feature = "room-character")]
@@ -1265,18 +1285,30 @@ impl ModelPanel {
                 // Stopped and Edit scenes deliberately show the bind/rest pose.
                 (Mode::Edit, None) => None,
             };
-            let pose = match playback_time {
+            let sample_generic = || match playback_time {
                 Some(time) => model
                     .sample_clip(animation.clip_index, time)
-                    .map_err(|e| format!("{guid}: sample animation clip: {e}"))?,
+                    .map_err(|e| format!("{guid}: sample animation clip: {e}")),
                 None => model
                     .rest_pose()
-                    .map_err(|e| format!("{guid}: sample rest pose: {e}"))?,
+                    .map_err(|e| format!("{guid}: sample rest pose: {e}")),
             };
             #[cfg(feature="room-character")]
             let pose = if let Some(character) = room_character {
-                orr_sample::room_character::sample_pose(character, &model, snapshot.predicted(), snapshot.tick_rate(), playback_time.is_none())?
-            } else { pose };
+                let mut playback = self.room_character_playback.borrow_mut();
+                if playback.0.as_ref().is_none_or(|revision| !Arc::ptr_eq(revision, editor.room_character_revision())) {
+                    playback.1.reset();
+                    playback.0 = Some(editor.room_character_revision().clone());
+                }
+                playback.1.observe(character, &model, snapshot.predicted(), orr_sample::room_character::PlaybackContext {
+                    entity: row.entity,
+                    tick_rate: snapshot.tick_rate(),
+                    rest: playback_time.is_none(),
+                    revision: snapshot.timeline().map_or(0, |timeline| timeline.epoch),
+                })?.clone()
+            } else { sample_generic()? };
+            #[cfg(not(feature="room-character"))]
+            let pose = sample_generic()?;
             placements.push(AnimatedPlacement {
                 entity: row.entity,
                 instance: Self::animated_instance(*body_pose, binding.transform),
@@ -1308,6 +1340,7 @@ impl ModelPanel {
     fn discard_bindings(&mut self) {
         self.bindings = None;
         self.loaded.clear();
+        self.retire_character_playback();
         self.candidate = None;
         self.confirm_discard = false;
         self.material_draft = None;

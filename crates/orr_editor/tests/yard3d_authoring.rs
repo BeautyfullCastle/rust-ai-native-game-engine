@@ -80,6 +80,9 @@ fn real_editor_spawns_distinct_guids_and_picks_nearest_3d_body_without_vec2_nudg
     assert_eq!(field(&mut editor, &near, "pos"), Value::Vec3(pos(0, 2, 2)));
 
     editor.camera3d = orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.0, 0.0, 10.0);
+    // The field reads above ingest ERP notifications. A delayed history hint
+    // can invalidate the GUID map after sync, even when both counts are current.
+    wait_for_coherent_pick(&mut editor, &near, 5);
     assert_eq!(
         editor.pick3d([400.0, 300.0], (800, 600)),
         Some(near.clone())
@@ -115,7 +118,12 @@ fn wait_for_coherent_pick(editor: &mut Editor, expected: &Target, count: usize) 
         );
         assert!(
             Instant::now() < deadline,
-            "Yard3D rows never caught up with the snapshot"
+            "Yard3D rows never caught up with the snapshot: expected={expected:?}, \
+             expected_count={count}, rows={}, items={}, checksum={:#018x}, status={:?}",
+            editor.rows().len(),
+            editor.yard_frame().items.len(),
+            editor.checksum(),
+            editor.status()
         );
         editor.pump();
         std::thread::sleep(Duration::from_millis(1));

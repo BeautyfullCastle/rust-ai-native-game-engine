@@ -465,8 +465,18 @@ impl PreparedProject {
 pub fn validate_decoded_model_budget<'a>(
     assets: impl IntoIterator<Item = &'a LoadedAsset>,
 ) -> Result<(), String> {
+    validate_decoded_model_budget_with_extra(assets, 0)
+}
+/// Admission-only extra presentation storage, charged before accepting assets.
+pub fn validate_decoded_model_budget_with_extra<'a>(
+    assets: impl IntoIterator<Item = &'a LoadedAsset>,
+    extra_pose_bytes: usize,
+) -> Result<(), String> {
+    if extra_pose_bytes > MAX_DECODED_MODEL_BYTES {
+        return Err("room aggregate decoded model limit exceeded".into());
+    }
     let mut identities = BTreeSet::new();
-    let mut decoded = 0usize;
+    let mut decoded = extra_pose_bytes;
     for asset in assets {
         if !identities.insert((asset.package(), asset.asset())) {
             continue;

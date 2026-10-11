@@ -15,7 +15,8 @@ orr_new_arena --output /absolute/new-project --template room-escape-character-3d
 
 Open it in an editor built with `room-character` using `--room-project PATH`.
 The Room character panel assigns searching, carrying-key and escaped clips and
-per-state playback speeds (1/4x, 1/2x, 1x, 2x or 4x).
+per-state playback speeds (1/4x, 1/2x, 1x, 2x or 4x), and optional crossfade
+duration in simulation ticks (0..120).
 Apply validates all three clips and the complete reachable presentation before
 changing either in-memory document. Undo/Redo character edit coordinates the
 model binding's default searching clip with the character map and speed choices.
@@ -76,17 +77,35 @@ Every clip uses the absolute Frame tick / tick rate multiplied by its state's
 exact rational speed (fixed 1x in schema 1). The shared sampler reduces the
 dyadic period with bounded integer modular arithmetic before conversion to
 presentation floats, retaining adjacent-tick phase even near `u64::MAX`.
-Transitions do not reset phase. Pause, repeated draws, missing rendered frames, Seek and export
-therefore agree. Edit/Stop requests rest; Play or Seek at tick zero samples clip
-zero time. There is no renderer-history movement inference, animation clock in
-ECS, or modification to checkpoints/replays/golden checksums.
+Transitions do not reset phase. Schemas 1/2 snap directly to the selected clip;
+Edit/Stop requests rest, and Play or Seek at tick zero samples clip time zero.
+
+Schema 3 requires both the same complete speeds object and `crossfade_ticks`,
+an integer from 0 to 120. The editor upgrades a candidate to schema 3 when the
+crossfade duration changes. Zero preserves snap behavior and the legacy storage
+budget. Positive duration blends from the last observed visible pose to the
+incoming absolute-phase pose using local translation/scale lerp and shortest-path
+normalized quaternion slerp. Hierarchy, palettes and deformation are revalidated.
+
+Native and headless/export consumers observe every authoritative simulation tick,
+including ticks between draws. Editor presentation observes coherent snapshots;
+a missing snapshot gap snaps because the transition history is unknown. A new
+state during a blend freezes its current blended pose as the next outgoing pose.
+Repeated paused draws do not advance or resample transition history. Explicit
+seek (including same-tick local editor seek), restart, rewind, source revision,
+entity generation, document or tick-rate changes reset presentation history.
+There is no animation clock in ECS or modification to checkpoints, inputs,
+replays or golden checksums. See [crossfade contract](room-character-crossfade.md).
 
 ## Limits and failure handling
 
 Room keeps 68 bindings, eight unique verified assets, 64 MiB aggregate decoded
 storage and the existing shared imported-draw bound. Animated storage includes
 vertices, weights, hierarchy, palettes and every authored clip/key, plus pose
-working storage. Static and skinned geometry share one depth pass; an imported
+working storage. Legacy and zero-duration paths retain the existing two-buffer
+charge; positive crossfades charge three additional buffers before admission
+(five peak buffers total, at most two retained). Static and skinned geometry
+share one depth pass; an imported
 player replaces its proxy and the collected key is hidden in both paths.
 
 The editor pair save preflights both current files and the manifest, prepares

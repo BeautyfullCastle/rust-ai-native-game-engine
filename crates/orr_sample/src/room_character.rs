@@ -3,8 +3,9 @@
 //! The model sidecar owns verified asset identity and local TRS. This small
 //! map selects three distinct clips for its one PLAYER binding. Schema 1 keeps
 //! fixed 1x; schema 2 explicitly authors a closed playback rate for every state.
-//! State is derived from the same immutable frame as body placement. There is
-//! no transition clock, ECS animation state, or replay/checkpoint write-back.
+//! Schema 3 adds a bounded view-only crossfade observed on simulation ticks.
+//! State is derived from the same immutable frame as body placement. No animation
+//! state is written into ECS, replay, input, or checkpoints.
 
 use orr_bridge::FrameView;
 use orr_games::room_escape_game::{RoomActor, RoomRun, PLAYER};
@@ -15,9 +16,10 @@ use orr_model_bindings::{
 };
 use orr_reflect::{Guid, SceneIndex};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, mem::size_of};
+use std::{collections::BTreeMap, mem::size_of, sync::Arc};
 
 pub const MAX_BYTES: usize = 4096;
+pub const MAX_CROSSFADE_TICKS: u32 = 120;
 pub use orr_model_bindings::animation_time::PlaybackRate;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -65,6 +67,12 @@ fn present_speeds<'de, D: serde::Deserializer<'de>>(
     PlaybackRates::deserialize(deserializer).map(Some)
 }
 
+fn present_crossfade_ticks<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    u32::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Document {
     pub schema: u32,
@@ -74,6 +82,8 @@ pub struct Document {
     pub escaped: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speeds: Option<PlaybackRates>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crossfade_ticks: Option<u32>,
 }
 
 // A derived struct also accepts positional arrays. Route exclusively through
@@ -90,6 +100,8 @@ impl<'de> Deserialize<'de> for Document {
             escaped: u32,
             #[serde(default, deserialize_with = "present_speeds")]
             speeds: Option<PlaybackRates>,
+            #[serde(default, deserialize_with = "present_crossfade_ticks")]
+            crossfade_ticks: Option<u32>,
         }
         struct Object;
         impl<'de> serde::de::Visitor<'de> for Object {
@@ -99,26 +111,17 @@ impl<'de> Deserialize<'de> for Document {
             }
             fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Document, M::Error> {
                 let wire = Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                match (wire.schema, wire.speeds) {
-                    (1, None) | (2, Some(_)) => {}
-                    (1, Some(_)) => {
-                        return Err(serde::de::Error::custom("schema 1 does not accept speeds"));
-                    }
-                    (2, None) => return Err(serde::de::Error::missing_field("speeds")),
-                    _ => {
-                        return Err(serde::de::Error::custom(
-                            "unsupported room character schema",
-                        ));
-                    }
-                }
-                Ok(Document {
+                let document = Document {
                     schema: wire.schema,
                     player: wire.player,
                     searching: wire.searching,
                     carrying: wire.carrying,
                     escaped: wire.escaped,
                     speeds: wire.speeds,
-                })
+                    crossfade_ticks: wire.crossfade_ticks,
+                };
+                document.validate().map_err(serde::de::Error::custom)?;
+                Ok(document)
             }
         }
         deserializer.deserialize_map(Object)
@@ -167,11 +170,10 @@ impl Document {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        match (self.schema, self.speeds) {
-            (1, None) | (2, Some(_)) => {}
-            (1, Some(_)) => return Err("schema 1 does not accept speeds".into()),
-            (2, None) => return Err("schema 2 requires speeds for every state".into()),
-            _ => return Err("unsupported room character schema".into()),
+        match (self.schema, self.speeds, self.crossfade_ticks) {
+            (1, None, None) | (2, Some(_), None) => {}
+            (3, Some(_), Some(ticks)) if ticks <= MAX_CROSSFADE_TICKS => {}
+            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schema 3 requires speeds plus crossfade_ticks 0..120".into()),
         }
         let player =
             Guid::parse(&self.player).map_err(|e| format!("room character player GUID: {e}"))?;
@@ -342,6 +344,115 @@ pub fn sample_pose(
     Ok(pose)
 }
 
+/// Context identifying a coherent presentation source. Revision is caller-owned:
+/// explicit seek/restart/asset-authoring discontinuities replace it or reset the
+/// cursor. Entity includes its generation; it is never serialized into gameplay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlaybackContext {
+    pub entity: orr_ecs::Entity,
+    pub tick_rate: u32,
+    pub rest: bool,
+    pub revision: u64,
+}
+struct ObservedPose {
+    document: Document,
+    model: Arc<AnimatedModel>,
+    context: PlaybackContext,
+    tick: u64,
+    state: State,
+    current: Pose,
+    outgoing: Option<(u64, Pose)>,
+}
+/// Bounded presentation history: at most two retained poses, never a clip graph.
+/// A transition freezes the last visible pose and samples the incoming clip at
+/// its unchanged absolute phase. An interrupted transition freezes its blended
+/// result. Missing history snaps; it must never guess when a state changed.
+#[derive(Default)]
+pub struct PlaybackCursor {
+    observed: Option<ObservedPose>,
+}
+impl PlaybackCursor {
+    pub fn reset(&mut self) {
+        self.observed = None;
+    }
+    pub fn observe(
+        &mut self,
+        document: &Document,
+        model: &Arc<AnimatedModel>,
+        frame: FrameView<'_>,
+        context: PlaybackContext,
+    ) -> Result<&Pose, String> {
+        document.validate_clips(model)?;
+        if context.tick_rate == 0 {
+            return Err("room character cannot sample a zero tick rate".into());
+        }
+        let tick = frame.tick();
+        let state = state(frame);
+        let matching = self.observed.as_ref().filter(|old| {
+            old.document == *document && Arc::ptr_eq(&old.model, model) && old.context == context
+        });
+        // Repeated draws do not even resample a pose or mutate transition state.
+        if matching.is_some_and(|old| old.tick == tick && old.state == state) {
+            return Ok(&self.observed.as_ref().unwrap().current);
+        }
+        let target = sample_pose(document, model, frame, context.tick_rate, context.rest)?;
+        let duration = document.crossfade_ticks.unwrap_or(0);
+        let continuous = matching
+            .filter(|old| !context.rest && duration != 0 && old.tick.checked_add(1) == Some(tick));
+        let (current, outgoing) = if let Some(old) = continuous {
+            if old.state != state {
+                (old.current.clone(), Some((tick, old.current.clone())))
+            } else if let Some((start, outgoing)) = &old.outgoing {
+                let elapsed = tick - start;
+                if elapsed >= u64::from(duration) {
+                    (target, None)
+                } else {
+                    let weight = elapsed as f32 / duration as f32;
+                    let blended = model
+                        .blend_poses(outgoing, &target, weight)
+                        .map_err(|error| format!("room character blend: {error}"))?;
+                    validate_pose(model, &blended)?;
+                    (blended, Some((*start, outgoing.clone())))
+                }
+            } else {
+                (target, None)
+            }
+        } else {
+            (target, None)
+        };
+        self.observed = Some(ObservedPose {
+            document: document.clone(),
+            model: model.clone(),
+            context,
+            tick,
+            state,
+            current,
+            outgoing,
+        });
+        Ok(&self.observed.as_ref().unwrap().current)
+    }
+    /// Render only a pose already observed for this exact source and tick.
+    pub fn pose(
+        &self,
+        document: &Document,
+        model: &Arc<AnimatedModel>,
+        frame: FrameView<'_>,
+        context: PlaybackContext,
+    ) -> Result<&Pose, String> {
+        self.observed
+            .as_ref()
+            .filter(|old| {
+                old.document == *document
+                    && Arc::ptr_eq(&old.model, model)
+                    && old.context == context
+                    && old.tick == frame.tick()
+                    && old.state == state(frame)
+            })
+            .map(|old| &old.current)
+            .ok_or_else(|| "room character playback has not observed this source and tick".into())
+    }
+}
+
 fn validate_pose(model: &AnimatedModel, pose: &Pose) -> Result<(), String> {
     // bounds checks the complete finite CPU deformation as well as ownership,
     // hierarchy and palettes, without allocating a second copy of geometry.
@@ -425,6 +536,21 @@ pub fn decoded_model_bytes(model: &AnimatedModel) -> Result<usize, String> {
     )
 }
 
+/// Additional three buffers for a positive schema-3 crossfade: the total five
+/// covers retained current/outgoing, target, blend result and atomic outgoing
+/// replacement. Legacy and zero-duration consumers are not charged this amount.
+pub fn crossfade_extra_pose_bytes(model: &AnimatedModel) -> Result<usize, String> {
+    let mut bytes = add_bytes(
+        0,
+        model.source().nodes.len(),
+        3 * (size_of::<Trs>() + size_of::<Matrix4>()),
+    )?;
+    for skin in &model.source().skins {
+        bytes = add_bytes(bytes, skin.joints.len(), 3 * size_of::<Matrix4>())?;
+    }
+    Ok(bytes)
+}
+
 fn add_bytes(total: usize, count: usize, stride: usize) -> Result<usize, String> {
     count
         .checked_mul(stride)
@@ -450,6 +576,7 @@ mod tests {
             carrying: 1,
             escaped: 2,
             speeds: None,
+            crossfade_ticks: None,
         }
     }
     fn frame(tick: u64, key: u32, won: u32) -> Frame {
@@ -842,5 +969,346 @@ mod tests {
         assert!(full_bytes > 1024 * 1024);
         assert!(add_bytes(usize::MAX, 1, 1).is_err());
         assert!(add_bytes(0, usize::MAX, 2).is_err());
+    }
+    fn crossfade_document(ticks: u32) -> Document {
+        Document {
+            schema: 3,
+            speeds: Some(PlaybackRates::default()),
+            crossfade_ticks: Some(ticks),
+            ..document()
+        }
+    }
+    fn context() -> PlaybackContext {
+        PlaybackContext {
+            entity: orr_ecs::Entity {
+                index: 1,
+                version: 1,
+            },
+            tick_rate: 60,
+            rest: false,
+            revision: 0,
+        }
+    }
+    fn observe(
+        cursor: &mut PlaybackCursor,
+        doc: &Document,
+        model: &Arc<AnimatedModel>,
+        tick: u64,
+        key: u32,
+        won: u32,
+    ) -> Pose {
+        let frame = frame(tick, key, won);
+        let bytes = frame.to_bytes();
+        let pose = cursor
+            .observe(doc, model, FrameView::of(&frame), context())
+            .unwrap()
+            .clone();
+        assert_eq!(frame.to_bytes(), bytes);
+        pose
+    }
+
+    #[test]
+    fn crossfade_schema_is_strict_bounded_and_preserves_legacy_bytes() {
+        for ticks in [0, 1, MAX_CROSSFADE_TICKS] {
+            let doc = crossfade_document(ticks);
+            assert_eq!(Document::parse(&doc.to_bytes().unwrap()).unwrap(), doc);
+        }
+        let valid = serde_json::to_value(crossfade_document(6)).unwrap();
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!(-1),
+            serde_json::json!(121),
+            serde_json::json!(1.5),
+            serde_json::json!("6"),
+            serde_json::json!(4294967296u64),
+        ] {
+            let mut bad = valid.clone();
+            bad["crossfade_ticks"] = value;
+            assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        for field in ["speeds", "crossfade_ticks"] {
+            let mut bad = valid.clone();
+            bad.as_object_mut().unwrap().remove(field);
+            assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        for schema in [1, 2, 4] {
+            let mut bad = valid.clone();
+            bad["schema"] = serde_json::json!(schema);
+            assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        let bytes = String::from_utf8(crossfade_document(6).to_bytes().unwrap()).unwrap();
+        assert!(Document::parse(
+            bytes
+                .replace(
+                    "\"crossfade_ticks\": 6",
+                    "\"crossfade_ticks\": 6, \"crossfade_ticks\": 6"
+                )
+                .as_bytes()
+        )
+        .is_err());
+        let legacy = document().to_bytes().unwrap();
+        assert!(!std::str::from_utf8(&legacy).unwrap().contains("crossfade"));
+        assert_eq!(
+            Document::parse(&legacy).unwrap().to_bytes().unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn crossfade_blends_absolute_target_and_interrupts_from_visible_pose() {
+        let model = Arc::new(model());
+        let doc = crossfade_document(4);
+        let mut cursor = PlaybackCursor::default();
+        let start = observe(&mut cursor, &doc, &model, 10, 0, 0);
+        assert_eq!(observe(&mut cursor, &doc, &model, 11, 1, 0), start);
+        let f = frame(12, 1, 0);
+        let target = sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap();
+        let expected = model.blend_poses(&start, &target, 0.25).unwrap();
+        assert_eq!(observe(&mut cursor, &doc, &model, 12, 1, 0), expected);
+        for _ in 0..10 {
+            assert_eq!(observe(&mut cursor, &doc, &model, 12, 1, 0), expected);
+        }
+        assert_eq!(
+            cursor
+                .observed
+                .as_ref()
+                .unwrap()
+                .outgoing
+                .as_ref()
+                .unwrap()
+                .0,
+            11
+        );
+        assert_eq!(observe(&mut cursor, &doc, &model, 13, 1, 1), expected);
+        let f = frame(14, 1, 1);
+        let target = sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap();
+        assert_eq!(
+            observe(&mut cursor, &doc, &model, 14, 1, 1),
+            model.blend_poses(&expected, &target, 0.25).unwrap()
+        );
+        for tick in 15..=17 {
+            observe(&mut cursor, &doc, &model, tick, 1, 1);
+        }
+        assert!(cursor.observed.as_ref().unwrap().outgoing.is_none());
+        let f = frame(17, 1, 1);
+        assert_eq!(
+            cursor
+                .pose(&doc, &model, FrameView::of(&f), context())
+                .unwrap(),
+            &sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap()
+        );
+    }
+
+    #[test]
+    fn crossfade_duration_endpoints_preserve_rates_and_phase_near_max_tick() {
+        let model = Arc::new(model());
+        for duration in [1, MAX_CROSSFADE_TICKS] {
+            let mut doc = crossfade_document(duration);
+            doc.speeds = Some(PlaybackRates {
+                searching: PlaybackRate::Quarter,
+                carrying: PlaybackRate::Double,
+                escaped: PlaybackRate::Half,
+            });
+            let start = u64::MAX - u64::from(duration);
+            let mut cursor = PlaybackCursor::default();
+            let outgoing = observe(&mut cursor, &doc, &model, start - 1, 0, 0);
+            for elapsed in 0..=duration {
+                let tick = start + u64::from(elapsed);
+                let f = frame(tick, 1, 0);
+                let target = sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap();
+                let expected = model
+                    .blend_poses(&outgoing, &target, elapsed as f32 / duration as f32)
+                    .unwrap();
+                assert_eq!(observe(&mut cursor, &doc, &model, tick, 1, 0), expected);
+            }
+            assert!(cursor.observed.as_ref().unwrap().outgoing.is_none());
+            // u64 wrap is a discontinuity, never a consecutive simulation tick.
+            let f = frame(0, 0, 0);
+            assert_eq!(
+                observe(&mut cursor, &doc, &model, 0, 0, 0),
+                sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn crossfade_render_lookup_rejects_unobserved_source_tick_and_state() {
+        let model = Arc::new(model());
+        let doc = crossfade_document(4);
+        let mut cursor = PlaybackCursor::default();
+        let original = frame(0, 0, 0);
+        assert!(cursor
+            .pose(&doc, &model, FrameView::of(&original), context())
+            .is_err());
+        let visible = observe(&mut cursor, &doc, &model, 0, 0, 0);
+        for changed in [frame(1, 0, 0), frame(0, 1, 0)] {
+            assert!(cursor
+                .pose(&doc, &model, FrameView::of(&changed), context())
+                .is_err());
+        }
+        let replacement = Arc::new((*model).clone());
+        assert!(cursor
+            .pose(&doc, &replacement, FrameView::of(&original), context())
+            .is_err());
+        let mut revision = context();
+        revision.revision += 1;
+        assert!(cursor
+            .pose(&doc, &model, FrameView::of(&original), revision)
+            .is_err());
+        let mut revised = doc.clone();
+        revised.crossfade_ticks = Some(3);
+        assert!(cursor
+            .pose(&revised, &model, FrameView::of(&original), context())
+            .is_err());
+        assert_eq!(
+            cursor
+                .pose(&doc, &model, FrameView::of(&original), context())
+                .unwrap(),
+            &visible
+        );
+    }
+
+    #[test]
+    fn crossfade_unknown_history_and_every_source_discontinuity_snap() {
+        for trigger in 0..14 {
+            let model = Arc::new(model());
+            let mut doc = crossfade_document(10);
+            let mut cursor = PlaybackCursor::default();
+            observe(&mut cursor, &doc, &model, 10, 0, 0);
+            observe(&mut cursor, &doc, &model, 11, 1, 0);
+            let mut key = context();
+            let mut tick = 12;
+            let mut active_model = model.clone();
+            match trigger {
+                0 => tick = 9,
+                1 => tick = 14,
+                2 => cursor.reset(),
+                3 => key.revision += 1,
+                4 => key.entity.version += 1,
+                5 => key.tick_rate = 30,
+                6 => key.rest = true,
+                7 => doc.speeds.as_mut().unwrap().carrying = PlaybackRate::Double,
+                8 => active_model = Arc::new(AnimatedModel::new(model.source().clone()).unwrap()),
+                9 => {
+                    tick = 11;
+                    doc.crossfade_ticks = Some(9);
+                }
+                10 => doc.player = "e_00000002".into(),
+                11 => std::mem::swap(&mut doc.searching, &mut doc.carrying),
+                12 => active_model = Arc::new((*model).clone()),
+                13 => key.entity.index += 1,
+                _ => unreachable!(),
+            }
+            let f = frame(tick, 1, 0);
+            let expected = sample_pose(
+                &doc,
+                &active_model,
+                FrameView::of(&f),
+                key.tick_rate,
+                key.rest,
+            )
+            .unwrap();
+            assert_eq!(
+                cursor
+                    .observe(&doc, &active_model, FrameView::of(&f), key)
+                    .unwrap(),
+                &expected,
+                "trigger {trigger}"
+            );
+            assert!(cursor.observed.as_ref().unwrap().outgoing.is_none());
+        }
+        // A same-tick correction is unknowable history too.
+        let model = Arc::new(model());
+        let doc = crossfade_document(10);
+        let mut cursor = PlaybackCursor::default();
+        observe(&mut cursor, &doc, &model, 10, 0, 0);
+        let f = frame(10, 1, 0);
+        assert_eq!(
+            observe(&mut cursor, &doc, &model, 10, 1, 0),
+            sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_zero_crossfade_and_zero_length_clips_keep_exact_samples() {
+        let model = Arc::new(model());
+        for doc in [
+            document(),
+            Document {
+                schema: 2,
+                speeds: Some(PlaybackRates::default()),
+                ..document()
+            },
+            crossfade_document(0),
+        ] {
+            let mut cursor = PlaybackCursor::default();
+            for (tick, key, won) in [(0, 0, 0), (1, 1, 0), (2, 1, 1), (12, 0, 0)] {
+                let f = frame(tick, key, won);
+                assert_eq!(
+                    observe(&mut cursor, &doc, &model, tick, key, won),
+                    sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap()
+                );
+                assert!(cursor.observed.as_ref().unwrap().outgoing.is_none());
+            }
+        }
+        let mut source = model.source().clone();
+        for clip in &mut source.clips {
+            for channel in &mut clip.channels {
+                channel.times.truncate(1);
+                if let ChannelValues::Translation(values) = &mut channel.values {
+                    values.truncate(1);
+                }
+            }
+        }
+        let model = Arc::new(AnimatedModel::new(source).unwrap());
+        let doc = crossfade_document(2);
+        let mut cursor = PlaybackCursor::default();
+        let before = observe(&mut cursor, &doc, &model, 0, 0, 0);
+        assert_eq!(observe(&mut cursor, &doc, &model, 1, 1, 0), before);
+        observe(&mut cursor, &doc, &model, 2, 1, 0);
+        assert_eq!(
+            observe(&mut cursor, &doc, &model, 3, 1, 0),
+            model.sample_clip(doc.carrying, 0.0).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejected_observation_keeps_previous_pose_and_crossfade_storage_is_bounded() {
+        let model = Arc::new(model());
+        let doc = crossfade_document(4);
+        let mut cursor = PlaybackCursor::default();
+        observe(&mut cursor, &doc, &model, 0, 0, 0);
+        let before = observe(&mut cursor, &doc, &model, 1, 1, 0);
+        let mut invalid = doc.clone();
+        invalid.escaped = 31;
+        let f = frame(2, 1, 0);
+        assert!(cursor
+            .observe(&invalid, &model, FrameView::of(&f), context())
+            .is_err());
+        assert_eq!(cursor.observed.as_ref().unwrap().current, before);
+        assert_eq!(cursor.observed.as_ref().unwrap().tick, 1);
+        let source = model.source();
+        let one = source.nodes.len() * (size_of::<Trs>() + size_of::<Matrix4>())
+            + source
+                .skins
+                .iter()
+                .map(|skin| skin.joints.len() * size_of::<Matrix4>())
+                .sum::<usize>();
+        assert_eq!(crossfade_extra_pose_bytes(&model).unwrap(), one * 3);
+        let none: Vec<&LoadedAsset> = Vec::new();
+        assert!(
+            crate::room_project::validate_decoded_model_budget_with_extra(
+                none.iter().copied(),
+                usize::MAX
+            )
+            .is_err()
+        );
+        assert!(
+            crate::room_project::validate_decoded_model_budget_with_extra(
+                none.iter().copied(),
+                crate::room_project::MAX_DECODED_MODEL_BYTES
+            )
+            .is_ok()
+        );
     }
 }

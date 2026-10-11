@@ -314,8 +314,16 @@ impl Panel {
                         });
                 }
                 if speeds != original_speeds {
-                    self.candidate.schema = 2;
+                    self.candidate.schema = if self.candidate.crossfade_ticks.is_some() { 3 } else { 2 };
                     self.candidate.speeds = Some(speeds);
+                }
+                let mut ticks = self.candidate.crossfade_ticks.unwrap_or(0);
+                let previous_ticks = ticks;
+                ui.add(egui::Slider::new(&mut ticks, 0..=orr_sample::room_character::MAX_CROSSFADE_TICKS).text("Crossfade ticks"));
+                if ticks != previous_ticks {
+                    self.candidate.schema = 3;
+                    self.candidate.speeds = Some(speeds);
+                    self.candidate.crossfade_ticks = Some(ticks);
                 }
                 if ui.button("Apply character settings").clicked() {
                     self.error = self
