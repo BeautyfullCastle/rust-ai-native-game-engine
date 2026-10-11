@@ -1,0 +1,42 @@
+name: Arena input-map authoring
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+permissions:
+  contents: read
+jobs:
+  input-map-authoring:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_INPUT_MAP_EVIDENCE_ROOT: /tmp/orr-input-map-evidence
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install software GPU
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Actual widgets, Frame trace, exact inventories and optional boundaries
+        run: tools/check-input-map-authoring.sh contracts
+      - name: Actual Arena CLI and mandatory GUI GPU readback
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+        run: |
+          export XDG_RUNTIME_DIR=$(mktemp -d /tmp/orr-input-map-xdg.XXXXXXXX)
+          chmod 700 "$XDG_RUNTIME_DIR"
+          tools/check-input-map-authoring.sh acceptance
+      - name: Retain source, producer, CLI and GPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: input-map-authoring-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: /tmp/orr-input-map-evidence
