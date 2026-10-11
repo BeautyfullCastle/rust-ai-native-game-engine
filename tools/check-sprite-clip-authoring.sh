@@ -312,8 +312,49 @@ def commands(stderr, root):
     return result
 
 
+def producer_messages(name, stdout):
+    # Cargo -vv forwards build-script output alongside its JSON messages.
+    # Only the anchored Cargo verbose prefix is accepted as unrelated output;
+    # its payload is never parsed, even if it resembles a successful build.
+    verbose = re.compile(r'\[[A-Za-z0-9_][A-Za-z0-9_-]* '
+                         r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?'
+                         r'(?:\+[0-9A-Za-z.-]+)?\] [^\r\n]*')
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('duplicate JSON object key')
+            value[key] = item
+        return value
+
+    def invalid_constant(value):
+        raise ValueError('non-finite JSON constant')
+
+    rows = []
+    counts = {'json_objects': 0, 'verbose_build_script_lines': 0, 'blank_lines': 0}
+    verbose_digest = hashlib.sha256()
+    for number, raw_line in enumerate(stdout.splitlines(keepends=True), 1):
+        line = raw_line.rstrip('\r\n')
+        if not line.strip():
+            counts['blank_lines'] += 1
+        elif line.lstrip().startswith('{'):
+            try:
+                row = json.loads(line, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+            except ValueError as error:
+                raise AssertionError(f'{name}: malformed producer JSON at line {number}') from error
+            require(isinstance(row, dict), f'{name}: non-object producer JSON at line {number}')
+            rows.append(row)
+            counts['json_objects'] += 1
+        else:
+            require(verbose.fullmatch(line) is not None,
+                    f'{name}: unrecognized producer output at line {number}')
+            counts['verbose_build_script_lines'] += 1
+            verbose_digest.update(raw_line.encode('utf-8'))
+    return rows, {'counts': counts, 'verbose_build_script_sha256': verbose_digest.hexdigest()}
+
+
 def audit_producer(name, stdout, stderr, root, package, features, action):
-    rows = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    rows, stream_summary = producer_messages(name, stdout)
     require([row for row in rows if row.get('reason') == 'build-finished'] ==
             [{'reason': 'build-finished', 'success': True}], f'{name}: missing unique successful JSON build-finished')
     local = [row for row in rows if row.get('reason') == 'compiler-artifact'
@@ -362,6 +403,7 @@ def audit_producer(name, stdout, stderr, root, package, features, action):
     write_json(EVIDENCE / f'{name}.provenance.json', {
         'action': action, 'package': package, 'expected_features': features,
         'root': str(root), 'local_artifacts': proof, 'selected_artifacts': roots,
+        'producer_stdout_stream': stream_summary,
         'producer_stdout_sha256': digest(EVIDENCE / f'{name}.stdout'),
         'producer_stderr_sha256': digest(EVIDENCE / f'{name}.stderr')})
     return roots
