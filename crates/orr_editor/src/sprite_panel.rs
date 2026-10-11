@@ -263,6 +263,35 @@ impl SpritePanel {
             && editor.previewing().is_none()
             && Self::display_coherent(editor)
     }
+    /// Copy the selected entity's admitted appearance into the assignment draft.
+    /// Picking never refreshes packages or changes bindings/history. Assign still
+    /// revalidates installed bytes before committing the draft to a selection.
+    pub fn use_selected_settings(&mut self, editor: &Editor) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("sprite picking requires the matching settled scene in Edit".into());
+        }
+        let [guid] = editor.selected_guids() else {
+            return Err("select exactly one entity to pick sprite settings".into());
+        };
+        let guid = guid.to_string();
+        let row = binding_row(editor.rows(), &guid).ok_or("selected entity is unavailable")?;
+        if !editor.bodies().iter().any(|body| body.entity == row.entity) {
+            return Err("selected entity has no displayed sprite body".into());
+        }
+        let bindings = self.bindings.as_ref().ok_or("open a view sidecar first")?;
+        let binding = bindings.document().bindings.get(&guid)
+            .ok_or("selected entity has no sprite binding")?;
+        let asset = self.loaded.get(&(binding.package.clone(), binding.document.clone()))
+            .ok_or("selected sprite asset is unavailable; reload assets first")?;
+        binding.region(&asset.asset.document, 0)?;
+        // All fallible checks precede draft mutation, including both locomotion clips.
+        self.package.clone_from(&binding.package);
+        self.document.clone_from(&binding.document);
+        self.source.clone_from(&binding.source);
+        self.scale = binding.units_per_pixel;
+        self.preview_playing = false;
+        Ok(())
+    }
     /// Verify the currently installed bytes before committing an assignment.
     pub fn assign(&mut self, ctx: &egui::Context, editor: &Editor) -> Result<(), String> {
         if !self.editable(editor) {
@@ -406,6 +435,11 @@ impl SpritePanel {
                     self.bindings = None; self.loaded.clear(); self.error = None; self.preview_playing = false; self.playback.reset_document(); return;
                 }
                 ui.separator();
+                if ui.add_enabled(self.editable(editor) && editor.selected_guids().len() == 1,
+                    egui::Button::new("Use selected sprite settings")).clicked() {
+                    let result = self.use_selected_settings(editor); self.report(result);
+                }
+                ui.weak("Pick settings into the draft, then select targets and Assign. Picking does not change saved bindings.");
                 ui.label("Package name"); ui.text_edit_singleline(&mut self.package);
                 ui.label("Sprite document path in package"); ui.text_edit_singleline(&mut self.document);
                 if ui.button("Load sprite document").clicked() {
@@ -446,7 +480,7 @@ impl SpritePanel {
                         }
                         ui.weak("Movement uses displayed snapshot positions. Seek and discontinuities reset to idle; paused frames never advance.");
                     }
-                    ui.add(egui::Slider::new(&mut self.scale, 0.0001..=2.0).logarithmic(true).text("world units/pixel"));
+                    ui.add(egui::Slider::new(&mut self.scale, 0.0001..=100.0).logarithmic(true).text("world units/pixel"));
                     ui.horizontal(|ui| {
                         if ui.add_enabled(editor.mode() == Mode::Edit, egui::Button::new("Play sprite preview")).clicked() { self.preview_playing = true; self.preview_started = ui.input(|i| i.time); }
                         if ui.button("Stop sprite preview").clicked() { self.preview_playing = false; }
@@ -780,3 +814,7 @@ mod tests {
         assert!(h.query_by_label("Create bindings").is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "sprite_settings_tests.rs"]
+mod sprite_settings_tests;

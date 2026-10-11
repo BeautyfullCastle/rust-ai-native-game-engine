@@ -1,0 +1,27 @@
+name: sprite-settings-picker
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  sprite-settings-picker-linux:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: Required actual-widget and atomic failure checks
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_editor --features sprites --lib sprite_settings_picker_ 2>&1 | tee picker.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' picker.log
+          cargo test --locked --release -p orr_editor --features sprites --lib sprite_panel::tests
+          cargo test --locked --release -p orr_editor --test deps
+      - name: Optional boundaries and strict lint
+        run: |
+          cargo check --locked --release -p orr_editor
+          cargo clippy --locked --release -p orr_editor --features sprites --all-targets -- -D warnings

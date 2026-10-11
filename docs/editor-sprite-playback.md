@@ -95,3 +95,17 @@ not native-window interaction, physical-device coverage, or Windows validation.
 The bounded design follows the common explicit idle/move animation approach in
 [Godot's official 2D sprite animation guide](https://docs.godotengine.org/en/stable/tutorials/2d/2d_sprite_animation.html),
 while reusing this engine's existing `CameraFollow` and package contracts.
+
+## Reuse an existing entity's sprite settings
+
+Select one bound entity and click **Use selected sprite settings** in Sprite
+bindings. Its package, document, region/clip (including idle/walk) and scale fill
+the assignment draft. Select the destination entity or entities, then click
+**Assign sprite to selection**. Use the existing binding Undo/Redo and Save
+bindings controls; picking alone does not change the document or its history.
+
+Picking requires the matching settled scene in Edit and a loaded, valid
+sprite asset. Failed picks retain the draft and cached assets. Picking reads the
+already admitted asset without reloading packages; Assign separately verifies
+installed bytes. Sprite settings remain presentation-only and never alter
+colliders or simulation state. This workflow does not change the sidecar format.
