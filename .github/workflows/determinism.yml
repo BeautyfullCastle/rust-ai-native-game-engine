@@ -204,6 +204,12 @@ jobs:
         os: [ubuntu-22.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      # Room UI checker fixtures use the Python 3.11+ standard-library tomllib.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify sample checker Python
+        run: python -c "import sys, tomllib; print(sys.version); assert sys.version_info[:2] == (3, 12)"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
