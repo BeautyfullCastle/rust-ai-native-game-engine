@@ -16,6 +16,7 @@ use egui::Ui;
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub struct ModelPanel {
+    pub blockout: crate::blockout_panel::BlockoutPanel,
     pub bindings: Option<Bindings>,
     pub project: String,
     pub package: String,
@@ -38,6 +39,7 @@ pub struct ModelPanel {
 impl Default for ModelPanel {
     fn default() -> Self {
         Self {
+            blockout: crate::blockout_panel::BlockoutPanel::default(),
             bindings: None,
             project: ".".into(),
             package: String::new(),
@@ -976,6 +978,18 @@ impl ModelPanel {
             return;
         }
         self.sync_scene(editor);
+        let blockout_editable = self.editable(editor);
+        let blockout_root = if self.scene_matches(editor) {
+            self.bindings.as_ref().ok_or_else(|| "Open model bindings before authoring a box".to_owned()).and_then(Bindings::project_root)
+        } else {
+            Err("Open model bindings for the admitted local scene before authoring a box".into())
+        };
+        if let Some(baked) = self.blockout.show(ui, blockout_root, blockout_editable) {
+            self.package = baked.package;
+            self.asset = baked.asset;
+            self.kind = ModelKind::Static;
+            self.candidate = None;
+        }
         ui.collapsing("Static model binding", |ui| {
             ui.weak("Presentation only · scene and model saves/undo are separate");
             if !editor.spec().is_local() { ui.label("Remote host paths are not local asset authority"); return; }

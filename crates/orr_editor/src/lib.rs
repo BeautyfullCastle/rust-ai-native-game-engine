@@ -84,6 +84,10 @@ pub mod viewport3d;
 pub mod model_bindings;
 #[cfg(feature = "models")]
 pub mod model_panel;
+#[cfg(feature = "models")]
+pub mod blockout;
+#[cfg(feature = "models")]
+pub mod blockout_panel;
 
 #[cfg(feature = "animated-models")]
 pub mod yard_animation;
