@@ -283,5 +283,62 @@ class RoomUiGateTests(unittest.TestCase):
                 with self.assertRaises(AssertionError): gate.check_ui_export(evidence, export)
 
 
+class SerialLifecycleLogTests(unittest.TestCase):
+    """Reproduce libtest/--nocapture interleaving from the Ubuntu lifecycle lane."""
+
+    def setUp(self):
+        self.expected = INVENTORY['room-ui-editor-source-lifecycle']
+        self.name = 'actual_external_save_aba_before_editor_pump_permanently_retires_room_ui'
+        self.prefix = 'test ' + self.name + ' ... '
+        self.plain = fixtures.log_for(self.expected)
+        # libtest prints its prefix without a newline; stderr diagnostics arrive
+        # before the standalone status, including an expected failed save.
+        traces = '\n'.join('room-ui-save-trace ' + json.dumps({'case': case, 'ok': case != 'failed-write'})
+                           for case in ('no-write', 'failed-write', 'same-path', 'a-to-b', 'b-to-a'))
+        self.interleaved = self.plain.replace(self.prefix + 'ok', self.prefix + traces + '\nok')
+
+    def test_serial_diagnostics_keep_exact_lifecycle_identity(self):
+        for text in (self.plain, self.interleaved,
+                     self.interleaved.replace(' ... room-ui-save-trace', ' ... \nroom-ui-save-trace')):
+            with self.subTest(text=text):
+                gate.check_log(self.expected, 'result', text)
+
+    def test_interleaving_never_supplies_missing_or_failed_outcomes(self):
+        invalids = {
+            'missing status': self.interleaved.replace('\nok\n', '\n'),
+            'failed status despite success summary': self.interleaved.replace('\nok\n', '\nFAILED\n'),
+            'unexpected ignored status': self.interleaved.replace('\nok\n', '\nignored\n'),
+            'duplicate standalone status': self.interleaved.replace('\nok\n', '\nok\nok\n'),
+            'orphan status': 'ok\n' + self.interleaved,
+            'duplicate named outcome': self.interleaved + self.prefix + 'ok\n',
+            'extra failed outcome': self.interleaved + 'test unexpected ... FAILED\n',
+            'wrong identity': self.interleaved.replace(self.name, 'unexpected'),
+            'malformed identity': self.interleaved.replace(self.name, 'invalid name'),
+            'malformed status': self.interleaved.replace('\nok\n', '\nok trailing garbage\n'),
+            'borrow next status': self.interleaved.replace('\nok\n', '\ntest unexpected ... ok\n'),
+            'borrow after summary': self.interleaved.replace('\nok\n', '\n') + 'ok\n',
+            'missing final summary': self.interleaved.split('test result:')[0],
+            'failed summary': self.interleaved.replace('test result: ok.', 'test result: FAILED.'),
+            'wrong count': self.interleaved.replace('3 passed;', '2 passed;'),
+            'extra summary': self.interleaved + 'test result: ok. 0 passed; 0 failed; 0 ignored;\n',
+            'skip diagnostic': self.interleaved.replace('room-ui-save-trace', 'SKIP: room-ui-save-trace', 1),
+        }
+        for label, text in invalids.items():
+            with self.subTest(label=label), self.assertRaises(AssertionError):
+                gate.check_log(self.expected, 'result', text)
+        with self.assertRaises(AssertionError):
+            gate.shared.parse_test_outcomes(self.prefix + 'diagnostic\n')
+
+    def test_ignored_reason_and_multiple_serial_starts_remain_exact(self):
+        expected = {'names': ['first', 'second'], 'ignored_names': ['second'],
+                    'run_ignored': False, 'expected_summary_rows': [[1, 0, 1]]}
+        text = ('test first ... diagnostic\nok\n'
+                'test second ... diagnostic\nignored, explicit GPU\n'
+                'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        gate.check_log(expected, 'result', text)
+        with self.assertRaises(AssertionError):
+            gate.check_log(expected, 'result', text.replace('diagnostic\nok\n', 'diagnostic\n', 1))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

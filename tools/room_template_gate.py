@@ -115,6 +115,34 @@ def digest(path):
     return result.hexdigest()
 
 
+def parse_test_outcomes(text):
+    """Pair serial libtest starts with outcomes, allowing --nocapture diagnostics.
+
+    Never carry an unfinished test across another start or a harness summary.
+    A standalone status belongs to exactly one pending test, not to a diagnostic.
+    """
+    outcomes = []
+    pending = None
+    for line in text.splitlines():
+        if line.startswith('test result:'):
+            assert pending is None, ('missing test outcome before summary', pending)
+            continue
+        if line.startswith('test '):
+            assert pending is None, ('missing test outcome before next test', pending)
+            start = re.fullmatch(r'test ([A-Za-z0-9_:]+) \.\.\. (.*)', line)
+            assert start is not None, ('malformed test start', line)
+            pending, line = start.groups()
+        status = re.fullmatch(r'(ok|ignored|FAILED)(?:, [^\n]*)?', line)
+        if status:
+            assert pending is not None, ('orphan test outcome', line)
+            outcomes.append((pending, status[1]))
+            pending = None
+        else:
+            assert not re.match(r'(ok|ignored|FAILED)\b', line), ('malformed test outcome', line)
+    assert pending is None, ('missing final test outcome', pending)
+    return outcomes
+
+
 def check_log(expected, mode, text):
     assert not FORBIDDEN.search(text), 'skip/fallback diagnostic'
     if mode in ('list', 'ignored'):
@@ -127,7 +155,7 @@ def check_log(expected, mode, text):
     summaries = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;', text, re.M)
     assert text.count('test result:') == len(expected['expected_summary_rows']), 'extra/malformed/missing summary'
     assert [list(map(int, row)) for row in summaries] == expected['expected_summary_rows'], summaries
-    outcomes = re.findall(r'^test ([A-Za-z0-9_:]+) \.\.\. (ok|ignored)(?:, [^\n]*)?$', text, re.M)
+    outcomes = parse_test_outcomes(text)
     wanted = [(name, 'ignored' if name in expected['ignored_names'] and not expected['run_ignored'] else 'ok')
               for name in expected['names']]
     assert sorted(outcomes) == sorted(wanted), ('executed test names/outcomes', outcomes, wanted)
