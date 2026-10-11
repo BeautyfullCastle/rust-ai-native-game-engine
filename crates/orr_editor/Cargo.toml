@@ -13,6 +13,8 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+# Standalone optional Arena input-map authoring; no default runtime/UI wiring.
+input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/input-actions"]
 # Optional new-project creator for explicit authoring and acceptance workflows.
 project-create = ["orr_sample/project-create"]
 room-project = ["models", "orr_remote/room-project", "orr_sample/room-project"]
@@ -32,6 +34,7 @@ models = ["dep:orr_model_bindings", "dep:orr_model", "orr_render/imported-scene"
 animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/animation", "orr_render/animation"]
 
 [dependencies]
+orr_input = { path = "../orr_input", optional = true }
 orr_model_bindings = { path = "../orr_model_bindings", optional = true }
 orr_navigation = { path = "../orr_navigation", optional = true }
 orr_terrain = { path = "../orr_terrain", optional = true }
@@ -77,3 +80,8 @@ path = "src/main.rs"
 # No unit tests here; keep the normal binary build, skip its empty test harness.
 # Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
 test = false
+
+[[bin]]
+name = "orr_input_map"
+path = "src/bin/orr_input_map.rs"
+required-features = ["input-map-editor"]

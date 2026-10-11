@@ -6,7 +6,7 @@ use orr_sample::{
     collect_ui::CollectUi,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, Metadata},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -111,6 +111,16 @@ impl Panel {
         Ok(())
     }
 
+    fn duplicate_selected(&mut self) -> Result<(), String> {
+        let index = self.selected.ok_or("Select a UI node to duplicate")?;
+        let (candidate, root) = duplicate_subtree(&self.document, index)?;
+        // apply_document validates the complete document and its font before
+        // changing history. Selection changes only after that atomic commit.
+        self.apply_document(candidate)?;
+        self.selected = Some(root);
+        Ok(())
+    }
+
     pub fn undo(&mut self) -> bool {
         if let Some(previous) = self.undo.pop() {
             self.document = previous;
@@ -194,6 +204,15 @@ impl Panel {
                     }
                 });
             ui.add_enabled_ui(editable, |ui| {
+                if ui
+                    .add_enabled(
+                        self.selected.is_some_and(|i| i < self.document.nodes.len()),
+                        egui::Button::new("Duplicate node and descendants"),
+                    )
+                    .clicked()
+                {
+                    self.error = self.duplicate_selected().err();
+                }
                 let mut candidate = self.document.clone();
                 let mut changed = false;
                 if let Some(index) = self.selected.filter(|i| *i < candidate.nodes.len()) {
@@ -349,6 +368,49 @@ fn add_node(document: &mut Document, selected: Option<usize>, kind: Kind) {
         offset: [16, 16],
         size: [200, 36],
     });
+}
+
+/// Copy in draw order, including descendants separated by unrelated nodes.
+/// The candidate owns all strings; only internal parent references are remapped.
+fn duplicate_subtree(document: &Document, index: usize) -> Result<(Document, usize), String> {
+    document.to_bytes()?;
+    let root = document.nodes.get(index).ok_or("Select a UI node to duplicate")?;
+    let mut included = BTreeSet::from([root.id.as_str()]);
+    let mut copies = Vec::new();
+    for node in &document.nodes {
+        if included.contains(node.id.as_str())
+            || node.parent.as_deref().is_some_and(|id| included.contains(id))
+        {
+            included.insert(node.id.as_str());
+            copies.push(node.clone());
+        }
+    }
+    if document.nodes.len() + copies.len() > MAX_NODES {
+        return Err("Duplicating this subtree would exceed 32 UI nodes".into());
+    }
+    let mut used: BTreeSet<String> = document.nodes.iter().map(|node| node.id.clone()).collect();
+    let mut remap = BTreeMap::new();
+    for node in &copies {
+        // At most 32 occupied IDs, so this bounded namespace always has a free
+        // valid ID. Never append to a possibly already maximum-length source ID.
+        let id = (1..=MAX_NODES + 1)
+            .map(|number| format!("ui_copy_{number}"))
+            .find(|id| !used.contains(id))
+            .ok_or("No free UI copy ID")?;
+        used.insert(id.clone());
+        remap.insert(node.id.clone(), id);
+    }
+    for node in &mut copies {
+        node.id = remap[&node.id].clone();
+        if let Some(parent) = node.parent.as_ref().and_then(|id| remap.get(id)) {
+            node.parent = Some(parent.clone());
+        }
+    }
+    let new_root = document.nodes.len();
+    let mut candidate = document.clone();
+    candidate.nodes.extend(copies);
+    candidate.to_bytes()?;
+    Ok((candidate, new_root))
 }
 
 fn remove_subtree(document: &mut Document, index: usize) {
