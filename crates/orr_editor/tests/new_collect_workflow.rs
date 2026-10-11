@@ -40,6 +40,7 @@ use orr_sample::{
 use std::{
     collections::BTreeMap,
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
     time::{Duration, Instant},
@@ -931,9 +932,24 @@ fn generated_collect_progress_workflow() {
     fs::create_dir(&harness_dir).unwrap();
     let harness = harness_dir.join("sample-tests");
     fs::copy(&original, &harness).unwrap();
+    let host_root = work.root.path().join("progress profiles");
+    fs::create_dir(&host_root).unwrap();
+    fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let data = host_root.join("user data");
+    // Unprivileged bwrap can map host-owned /tmp ancestors to an untrusted uid.
+    // Bind only the private profile fixture directly below /, preserving the
+    // production ancestor checks and all source/tools/bundle isolation.
+    let progress_root = Path::new("/opt");
+    assert!(fs::symlink_metadata(progress_root).unwrap().is_dir());
+    assert!(!work.root.path().starts_with(progress_root));
+    assert!(!work.hidden_workspace.starts_with(progress_root));
+    assert!(work.original_bins.iter().all(|p| !p.starts_with(progress_root)));
+    let untrusted = host_root.join("untrusted ancestor");
+    fs::create_dir(&untrusted).unwrap();
+    fs::set_permissions(&untrusted, fs::Permissions::from_mode(0o777)).unwrap();
     // isolated() makes the executable's parent read-only and masks source/tools.
     // The separately relocated project bundle must also be read-only here.
-    for mode in ["win", "relaunch"] {
+    for mode in ["untrusted-ancestor", "win", "relaunch"] {
         let command = work.isolated(&harness, Some(&project));
         // Insert the additional bind before the existing namespace delimiter.
         let args = command
@@ -947,6 +963,9 @@ fn generated_collect_progress_workflow() {
             .arg("--ro-bind")
             .arg(&bundle)
             .arg(&bundle)
+            .arg("--bind")
+            .arg(&host_root)
+            .arg(progress_root)
             .args(&args[split..]);
         isolated.current_dir(command.get_current_dir().unwrap());
         for (key, value) in command.get_envs() {
@@ -956,23 +975,52 @@ fn generated_collect_progress_workflow() {
                 isolated.env_remove(key);
             }
         }
-        let output = success(
-            isolated
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "collect_progress::tests::isolated_window_progress_child",
-                    "--nocapture",
-                ])
-                .env("ORR_PROGRESS_TEST_PROJECT", bundle.join("project"))
-                .env("ORR_PROGRESS_TEST_MODE", mode)
-                .output()
-                .unwrap(),
-        );
+        isolated
+            .env("HOME", progress_root.join("user home"))
+            .env(
+                "XDG_DATA_HOME",
+                if mode == "untrusted-ancestor" {
+                    progress_root.join("untrusted ancestor/data")
+                } else {
+                    progress_root.join("user data")
+                },
+            );
+        let output = isolated
+            .args([
+                "--ignored",
+                "--exact",
+                "collect_progress::tests::isolated_window_progress_child",
+                "--nocapture",
+            ])
+            .env("ORR_PROGRESS_TEST_PROJECT", bundle.join("project"))
+            .env("ORR_PROGRESS_TEST_MODE", mode)
+            .output()
+            .unwrap();
+        // Preserve failing child diagnostics before success() can panic and
+        // the temporary workflow root is dropped during unwinding.
+        if let Some(destination) = std::env::var_os("ORR_COLLECT_CAPTURES") {
+            let destination = PathBuf::from(destination);
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(
+                destination.join(format!("generated-collect-progress-{mode}.stdout")),
+                &output.stdout,
+            )
+            .unwrap();
+            fs::write(
+                destination.join(format!("generated-collect-progress-{mode}.stderr")),
+                &output.stderr,
+            )
+            .unwrap();
+        }
+        let output = success(output);
         assert!(
             output.contains("1 passed"),
             "actual App helper must execute: {output}"
         );
+        if mode == "untrusted-ancestor" {
+            assert!(!untrusted.join("data").exists());
+            assert!(!data.exists(), "rejected ancestor created profile data");
+        }
         fs::write(
             work.root
                 .path()
@@ -982,7 +1030,6 @@ fn generated_collect_progress_workflow() {
         )
         .unwrap();
     }
-    let data = work.root.path().join("user data");
     assert!(data.join("orrery/games").is_dir());
     assert!(!snapshot(&data).is_empty());
     assert_eq!(snapshot(&project), source);
