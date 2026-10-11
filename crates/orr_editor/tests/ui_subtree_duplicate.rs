@@ -317,7 +317,7 @@ fn gpu_saved_duplicate_source_hidden_readonly_export_preserves_frames() {
     let original_image = image(&original_capture); let copied_image = image(&edited_capture);
     assert_eq!((original_image.0, original_image.1), (copied_image.0, copied_image.1));
     assert_ne!(original_image.2, copied_image.2, "copy must produce real new HUD pixels");
-    let changed: Vec<_> = original_image.2.chunks_exact(4).zip(copied_image.2.chunks_exact(4)).enumerate().filter(|(_, (a,b))| a != b).map(|(i,_)| i).collect();
+    let changed: Vec<_> = original_image.2.as_chunks::<4>().0.iter().zip(copied_image.2.as_chunks::<4>().0.iter()).enumerate().filter(|(_, (a,b))| a != b).map(|(i,_)| i).collect();
     assert!(changed.len() > 30, "visible duplicate is more than an incidental pixel");
     assert!(changed.iter().all(|i| { let x = *i as u32 % copied_image.0; let y = *i as u32 / copied_image.0; (24..204).contains(&x) && (180..228).contains(&y) }), "only copied HUD bounds may change");
     let hash = good(Command::new("sha256sum").arg(&bins[1]).output().unwrap());
