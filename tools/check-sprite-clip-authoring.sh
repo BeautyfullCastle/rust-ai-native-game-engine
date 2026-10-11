@@ -284,13 +284,38 @@ def options(tokens, name):
     return [tokens[i + 1] for i, token in enumerate(tokens[:-1]) if token == name]
 
 
+def running_commands(stderr):
+    # Cargo shell-quotes environment values, including literal newlines/backticks.
+    # A trailing backtick closes a record only outside an unfinished shell quote.
+    pending = None
+    start = None
+    for number, line in enumerate(stderr.splitlines(), 1):
+        match = re.match(r'^\s*Running `', line)
+        if match:
+            require(pending is None, f'nested verbose command at line {number}; unfinished line {start}')
+            pending = line[match.end():]
+            start = number
+        elif pending is not None:
+            pending += '\n' + line
+        else:
+            continue
+        closed = pending.endswith('`')
+        try:
+            tokens = shlex.split(pending[:-1] if closed else pending)
+        except ValueError as error:
+            require(str(error) == 'No closing quotation',
+                    f'malformed verbose command at line {start}: {error}')
+            continue
+        require(closed, f'missing verbose command delimiter at line {start}')
+        require(tokens, f'empty verbose command at line {start}')
+        yield tokens
+        pending = None
+    require(pending is None, f'unterminated verbose command at line {start}')
+
+
 def commands(stderr, root):
     result = []
-    for line in stderr.splitlines():
-        match = re.fullmatch(r'\s*Running `(.*)`', line)
-        if not match:
-            continue
-        tokens = shlex.split(match[1])
+    for tokens in running_commands(stderr):
         if '--crate-name' not in tokens:
             continue
         settings = dict(t.split('=', 1) for t in tokens if re.match(r'^CARGO_[A-Z_]+=.*', t))
