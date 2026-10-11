@@ -21,6 +21,95 @@ pub enum Source {
     },
 }
 
+/// Presentation-only orientation: mirror atlas axes, then rotate the quad
+/// counter-clockwise around its center. Colliders and gameplay are unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Orientation {
+    pub quarter_turns: u8,
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+impl Orientation {
+    pub fn validate(self) -> Result<(), String> {
+        if self.quarter_turns > 3 {
+            return Err("sprite quarter_turns must be between 0 and 3".into());
+        }
+        Ok(())
+    }
+    pub fn radians(self) -> f32 {
+        f32::from(self.quarter_turns) * std::f32::consts::FRAC_PI_2
+    }
+    pub fn uv_rect(self, mut uv: [f32; 4]) -> [f32; 4] {
+        if self.flip_x {
+            uv.swap(0, 2);
+        }
+        if self.flip_y {
+            uv.swap(1, 3);
+        }
+        uv
+    }
+}
+impl<'de> Deserialize<'de> for Orientation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Orientation;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a sprite orientation object")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let (mut turns, mut flip_x, mut flip_y) = (None, None, None);
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "quarter_turns" => {
+                            if turns.is_some() {
+                                return Err(serde::de::Error::duplicate_field("quarter_turns"));
+                            }
+                            turns = Some(map.next_value()?);
+                        }
+                        "flip_x" => {
+                            if flip_x.is_some() {
+                                return Err(serde::de::Error::duplicate_field("flip_x"));
+                            }
+                            flip_x = Some(map.next_value()?);
+                        }
+                        "flip_y" => {
+                            if flip_y.is_some() {
+                                return Err(serde::de::Error::duplicate_field("flip_y"));
+                            }
+                            flip_y = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(serde::de::Error::unknown_field(
+                                &key,
+                                &["quarter_turns", "flip_x", "flip_y"],
+                            ))
+                        }
+                    }
+                }
+                let orientation = Orientation {
+                    quarter_turns: turns
+                        .ok_or_else(|| serde::de::Error::missing_field("quarter_turns"))?,
+                    flip_x: flip_x.ok_or_else(|| serde::de::Error::missing_field("flip_x"))?,
+                    flip_y: flip_y.ok_or_else(|| serde::de::Error::missing_field("flip_y"))?,
+                };
+                orientation.validate().map_err(serde::de::Error::custom)?;
+                Ok(orientation)
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+}
+fn orientation_when_present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Orientation>, D::Error> {
+    // Missing is the legacy default. Explicit null is malformed, not absence.
+    Orientation::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -29,6 +118,12 @@ pub struct Binding {
     pub source: Source,
     /// World units per sprite pixel.
     pub units_per_pixel: f32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "orientation_when_present"
+    )]
+    pub orientation: Option<Orientation>,
 }
 impl Binding {
     /// Existing callers preview the idle clip of a locomotion binding.
@@ -41,6 +136,9 @@ impl Binding {
         elapsed_ms: u64,
         moving: bool,
     ) -> Result<u32, String> {
+        if let Some(orientation) = self.orientation {
+            orientation.validate()?;
+        }
         if !self.units_per_pixel.is_finite() || !(0.0001..=100.0).contains(&self.units_per_pixel) {
             return Err("units per pixel must be finite and between 0.0001 and 100".into());
         }
@@ -84,13 +182,10 @@ pub struct Document {
     pub camera_follow: Option<String>,
 }
 pub fn relative(path: &str) -> bool {
-    !path.is_empty()
-        && !Path::new(path).has_root()
-        && !path.contains('\\')
-        && !path.contains(':')
+    !path.is_empty() && !Path::new(path).has_root() && !path.contains('\\') && !path.contains(':')
 }
 impl Document {
-    /// Parse one bounded read-only v1/v2 presentation document.
+    /// Parse one bounded read-only v1/v2/v3 presentation document.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() as u64 > MAX_BYTES {
             return Err("binding file exceeds byte limit".into());
@@ -100,8 +195,11 @@ impl Document {
         Ok(document)
     }
     pub fn validate(&self) -> Result<(), String> {
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1..=3) {
             return Err("unsupported sprite binding version".into());
+        }
+        if self.version < 3 && self.has_v3_features() {
+            return Err("sprite orientation requires binding version 3".into());
         }
         if self.version == 1 && self.has_v2_features() {
             return Err(
@@ -119,6 +217,9 @@ impl Document {
             return Err("too many sprite bindings".into());
         }
         for (guid, binding) in &self.bindings {
+            if let Some(orientation) = binding.orientation {
+                orientation.validate()?;
+            }
             orr_reflect::Guid::parse(guid).map_err(|_| format!("invalid scene GUID: {guid}"))?;
             if binding.package.is_empty() || !relative(&binding.document) {
                 return Err(format!("invalid package/document binding for {guid}"));
@@ -144,6 +245,11 @@ impl Document {
                 .bindings
                 .values()
                 .any(|binding| matches!(binding.source, Source::Locomotion { .. }))
+    }
+    pub fn has_v3_features(&self) -> bool {
+        self.bindings
+            .values()
+            .any(|binding| binding.orientation.is_some())
     }
 }
 
