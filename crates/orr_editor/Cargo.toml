@@ -13,6 +13,8 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+# Optional installed-package clip authoring; never enabled by default.
+sprite-clip-editor = ["sprites", "dep:sha2", "dep:rustix"]
 # Standalone optional Arena input-map authoring; no default runtime/UI wiring.
 input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/input-actions"]
 # Optional new-project creator for explicit authoring and acceptance workflows.
@@ -85,3 +87,11 @@ test = false
 name = "orr_input_map"
 path = "src/bin/orr_input_map.rs"
 required-features = ["input-map-editor"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.5", features = ["fs", "process"], optional = true }
+
+[[bin]]
+name = "orr_sprite_clip"
+path = "src/bin/orr_sprite_clip.rs"
+required-features = ["sprite-clip-editor"]
