@@ -18,7 +18,7 @@ pub const MAX_SKINS: usize = 16;
 pub const MAX_CLIPS: usize = 32;
 pub const MAX_CHANNELS: usize = 256;
 pub const MAX_HIERARCHY_DEPTH: usize = 64;
-/// Aggregate across every clip/channel, including each channel's input times.
+/// Aggregate output elements across clips/channels; cubic tangents count too.
 pub const MAX_ANIMATION_KEYS: usize = 262_144;
 pub const MAX_ANIMATION_BYTES: usize = 16 * 1024 * 1024;
 
@@ -110,6 +110,8 @@ pub struct AnimatedPrimitive {
 pub enum Interpolation {
     Step,
     Linear,
+    /// glTF in-tangent, value, out-tangent triples per timestamp.
+    CubicSpline,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -334,8 +336,11 @@ impl AnimatedModel {
                 {
                     return Err(invalid("invalid/duplicate animation channel target"));
                 }
+                let cubic = channel.interpolation == Interpolation::CubicSpline;
+                let multiplier = if cubic { 3 } else { 1 };
                 if channel.times.is_empty()
-                    || channel.times.len() != channel.values.len()
+                    || (cubic && channel.times.len() < 2)
+                    || channel.times.len().checked_mul(multiplier) != Some(channel.values.len())
                     || channel.times.iter().any(|v| !v.is_finite() || *v < 0.0)
                     || channel.times.windows(2).any(|v| v[0] >= v[1])
                 {
@@ -343,35 +348,51 @@ impl AnimatedModel {
                 }
                 add_budget(
                     &mut keys,
-                    channel.times.len(),
+                    channel.values.len(),
                     MAX_ANIMATION_KEYS,
                     "aggregate animation key",
                 )?;
                 let stride = if matches!(channel.values, ChannelValues::Rotation(_)) {
-                    20
-                } else {
                     16
+                } else {
+                    12
                 };
                 add_budget(
                     &mut animation_bytes,
-                    channel.times.len() * stride,
+                    channel
+                        .times
+                        .len()
+                        .saturating_mul(4)
+                        .saturating_add(channel.values.len().saturating_mul(stride)),
                     MAX_ANIMATION_BYTES,
                     "aggregate animation byte",
                 )?;
                 match &channel.values {
                     ChannelValues::Translation(values) => {
-                        for value in values {
-                            validate_translation(*value)?;
+                        for (index, value) in values.iter().enumerate() {
+                            if cubic && index % 3 != 1 {
+                                validate_tangent(value)?;
+                            } else {
+                                validate_translation(*value)?;
+                            }
                         }
                     }
                     ChannelValues::Rotation(values) => {
-                        for value in values {
-                            validate_rotation(*value)?;
+                        for (index, value) in values.iter().enumerate() {
+                            if cubic && index % 3 != 1 {
+                                validate_tangent(value)?;
+                            } else {
+                                validate_rotation(*value)?;
+                            }
                         }
                     }
                     ChannelValues::Scale(values) => {
-                        for value in values {
-                            validate_scale(*value)?;
+                        for (index, value) in values.iter().enumerate() {
+                            if cubic && index % 3 != 1 {
+                                validate_tangent(value)?;
+                            } else {
+                                validate_scale(*value)?;
+                            }
                         }
                     }
                 }
@@ -508,6 +529,25 @@ impl AnimatedModel {
         for channel in &clip.channels {
             let (a, b, t) = sample_interval(&channel.times, time, channel.interpolation);
             let trs = &mut local[channel.node as usize];
+            if channel.interpolation == Interpolation::CubicSpline {
+                let delta = channel.times[b] as f64 - channel.times[a] as f64;
+                match &channel.values {
+                    ChannelValues::Translation(v) => {
+                        trs.translation = cubic_sample(v, a, b, t, delta)
+                    }
+                    ChannelValues::Scale(v) => trs.scale = cubic_sample(v, a, b, t, delta),
+                    ChannelValues::Rotation(v) => {
+                        // Component-wise Hermite, never shortest-path sign flipping.
+                        let q = cubic_sample(v, a, b, t, delta);
+                        let length = q.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt();
+                        if !length.is_finite() || length == 0.0 {
+                            return Err(invalid("degenerate cubic rotation quaternion"));
+                        }
+                        trs.rotation = q.map(|v| (v as f64 / length) as f32);
+                    }
+                }
+                continue;
+            }
             match &channel.values {
                 ChannelValues::Translation(v) => trs.translation = lerp3(v[a], v[b], t),
                 ChannelValues::Scale(v) => trs.scale = lerp3(v[a], v[b], t),
@@ -807,6 +847,12 @@ fn validate_name(name: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+fn validate_tangent<const N: usize>(value: &[f32; N]) -> Result<(), Error> {
+    if !value.iter().all(|v| v.is_finite()) {
+        return Err(invalid("nonfinite cubic animation tangent"));
+    }
+    Ok(())
+}
 fn validate_translation(value: [f32; 3]) -> Result<(), Error> {
     if !value.iter().all(|v| v.is_finite() && v.abs() <= 1.0e6) {
         return Err(invalid("invalid translation"));
@@ -906,6 +952,29 @@ fn transform_vector(m: Matrix4, p: [f32; 3]) -> [f32; 3] {
 }
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
+}
+// glTF 2.0 Appendix C.5: tangents are derivatives per second, so scale
+// them by this segment's duration. f64 intermediates avoid spurious overflow
+// for finite f32 inputs; the resulting pose still passes strict TRS validation.
+fn cubic_sample<const N: usize>(
+    values: &[[f32; N]],
+    a: usize,
+    b: usize,
+    t: f32,
+    delta: f64,
+) -> [f32; N] {
+    if a == b || t == 0.0 {
+        return values[a * 3 + 1];
+    }
+    let t = t as f64;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    std::array::from_fn(|i| {
+        ((2.0 * t3 - 3.0 * t2 + 1.0) * values[a * 3 + 1][i] as f64
+            + delta * (t3 - 2.0 * t2 + t) * values[a * 3 + 2][i] as f64
+            + (-2.0 * t3 + 3.0 * t2) * values[b * 3 + 1][i] as f64
+            + delta * (t3 - t2) * values[b * 3][i] as f64) as f32
+    })
 }
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     std::array::from_fn(|i| a[i] * (1.0 - t) + b[i] * t)
