@@ -66,6 +66,7 @@ pub(super) fn documents(
         searching: 0,
         carrying: 1,
         escaped: 2,
+        speeds: None,
     };
     character.validate()?;
     Ok((models, character))

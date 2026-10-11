@@ -46,6 +46,9 @@ jobs:
           cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_character_project
           cargo test --locked --release -p orr_editor --features room-character,project-create --lib room_character_panel::tests
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact character_edit_undo_redo_reopen_and_authoritative_play_states
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact character_playback_rates_widgets_save_reopen_seek_stop_restart 2>&1 | tee character-evidence/rates-editor-cpu.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/rates-editor-cpu.log
+          grep -F "test character_playback_rates_widgets_save_reopen_seek_stop_restart ... ok" character-evidence/rates-editor-cpu.log
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact same_path_role_replacement_and_descriptor_retirement_fail_closed 2>&1 | tee character-evidence/role-fence.log
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/role-fence.log
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --exact stale_room_character_binding_does_not_mutate_the_verified_cache 2>&1 | tee character-evidence/cache-fence.log
@@ -63,6 +66,9 @@ jobs:
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/mixed-gpu.log
           cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --ignored --exact character_actual_editor_gpu_three_states --nocapture 2>&1 | tee character-evidence/editor-gpu.log
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/editor-gpu.log
+          cargo test --locked --release -p orr_editor --features room-character,project-create --test room_character_workflow -- --ignored --exact character_playback_rates_actual_editor_gpu --nocapture 2>&1 | tee character-evidence/rates-editor-gpu.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/rates-editor-gpu.log
+          grep -F "test character_playback_rates_actual_editor_gpu ... ok" character-evidence/rates-editor-gpu.log
           cargo build --locked --release -p orr_sample --features room-character,project-create,project-export --bin room_escape --bin orr_export_room
           cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --lib --no-run --message-format=json > character-evidence/probe.jsonl
           export ORR_ROOM_CHARACTER_APP_PROBE=$(python3 -c 'import json; a=[r["executable"] for l in open("character-evidence/probe.jsonl") if (r:=json.loads(l)).get("reason")=="compiler-artifact" and r.get("executable") and r["target"]["name"]=="orr_sample"]; assert len(a)==1; print(a[0])')
@@ -70,6 +76,9 @@ jobs:
           export ORR_ROOM_EXPORTER="$PWD/target/release/orr_export_room"
           cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_character_export -- --ignored --exact room_character_real_export_source_hidden_gpu_workflow --nocapture 2>&1 | tee character-evidence/export.log
           grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/export.log
+          cargo test --locked --release -p orr_sample --features room-character,project-create,project-export --test room_character_export -- --ignored --exact room_character_rates_export_source_hidden_gpu_parity --nocapture 2>&1 | tee character-evidence/rates-export.log
+          grep -F "test result: ok. 1 passed; 0 failed; 0 ignored;" character-evidence/rates-export.log
+          grep -F "test room_character_rates_export_source_hidden_gpu_parity ... ok" character-evidence/rates-export.log
       - name: Checkpoint presentation remains a read-only consumer
         run: cargo test --locked --release -p orr_sample --features room-character,room-checkpoint,project-create --lib checkpoint_restore_selects_carrying_without_an_animation_checkpoint_field
       - name: Strict affected lint
