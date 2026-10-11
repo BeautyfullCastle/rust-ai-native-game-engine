@@ -193,6 +193,7 @@ fn actual_widget_workflow(gpu: bool) {
         1
     );
     click(&mut h, "Revert position");
+    detach_widget_workflow(&mut h, root.path(), gpu);
     assert!(h.state_mut().editor.save());
     let expected = h
         .state_mut()
@@ -242,6 +243,125 @@ fn actual_widget_workflow(gpu: bool) {
     if gpu {
         source_hidden_export(root.path(), edited_checksum, &idle_checksum);
     }
+}
+
+/// Extend the same real CPU/GPU editor workflow through metadata-only detach,
+/// independent Inspector editing, deleted-source detach, legacy reopen and Undo.
+fn detach_widget_workflow(h: &mut Harness<'_, EditorApp>, root: &Path, gpu: bool) {
+    use egui::accesskit::Role;
+    let source = root.join("actors.prefab.yaml");
+    let source_bytes = std::fs::read(&source).unwrap();
+    h.state_mut().linked_prefabs.position = ["6".into(), "7".into()];
+    click(h, "Override position");
+    let linked = editor_scene(h);
+    let state = h.state().linked_prefabs.state().unwrap().clone();
+    let first = state["instances"][0]["instance"].as_str().unwrap().to_owned();
+    let remaining = state["instances"][1].clone();
+    let target = state["instances"][0]["guids"]["e_00000002"].as_str().unwrap().to_owned();
+    h.state_mut().editor.sync();
+    let checksum = h.state().editor.checksum();
+    let before_pixels = gpu.then(|| viewport_rgba(h, "linked-before-detach"));
+    click(h, "Detach instance");
+    let detached = editor_scene(h);
+    assert_eq!(detached.entities, linked.entities);
+    assert_eq!(detached.singletons, linked.singletons);
+    assert_eq!(detached.prefab_links.len(), 1);
+    assert_eq!(h.state().linked_prefabs.state().unwrap()["instances"], json!([remaining]));
+    assert_eq!(h.state().editor.checksum(), checksum);
+    assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+    if let Some(before) = before_pixels {
+        assert_eq!(viewport_rgba(h, "linked-after-detach"), before, "detach must preserve every viewport RGBA pixel");
+    }
+    // Actual Edit-menu Undo and Redo restore the entire provenance, including
+    // overridden positions. Refresh explicitly fences the next panel mutation.
+    click(h, "Edit");
+    click(h, "Undo Ctrl+Z");
+    click(h, "Refresh linked prefabs");
+    assert_eq!(editor_scene(h), linked);
+    assert_eq!(h.state().linked_prefabs.state().unwrap()["instances"], state["instances"]);
+    click(h, "Edit");
+    click(h, "Redo Ctrl+Y");
+    click(h, "Refresh linked prefabs");
+    assert_eq!(editor_scene(h), detached);
+    assert!(h.state().linked_prefabs.state().unwrap()["instances"].as_array().unwrap().iter().all(|v| v["instance"] != first));
+    h.state_mut().linked_prefabs.position = ["0".into(), "0".into()];
+    h.state_mut().editor.select(Some(orr_editor::Target::Guid(orr_reflect::Guid::parse(&target).unwrap())));
+    h.state_mut().editor.sync();
+    h.run_steps(3);
+    h.get_by(|n| n.role() == Role::TextInput && n.value().as_deref() == Some("6")).focus();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    h.get_by(|n| n.role() == Role::TextInput && n.value().as_deref() == Some("6")).type_text("8");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    let guid = orr_reflect::Guid::parse(&target).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        h.state_mut().editor.sync();
+        let scene = editor_scene(h);
+        if scene.entities[&guid].components[0].1.field("position") == Some(&orr_reflect::Value::Vec2(orr_fp::FPVec2::new(orr_fp::FP::from_int(8), orr_fp::FP::from_int(7)))) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "detached actor Inspector edit did not reach host");
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let independently_edited = editor_scene(h).entities[&guid].clone();
+    click(h, "Refresh linked prefabs");
+    click(h, "Apply source update");
+    let updated = editor_scene(h);
+    assert_eq!(updated.entities[&guid], independently_edited);
+    let other = orr_reflect::Guid::parse(remaining["instance"].as_str().unwrap()).unwrap();
+    assert_ne!(updated.prefab_links[&other].digest, detached.prefab_links[&other].digest);
+    assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+    std::fs::remove_file(&source).unwrap();
+    let before_last = editor_scene(h);
+    let before_pixels = gpu.then(|| viewport_rgba(h, "linked-before-last-detach"));
+    click(h, "Detach instance");
+    let legacy = editor_scene(h);
+    assert!(legacy.prefab_links.is_empty());
+    assert_eq!(legacy.entities, before_last.entities);
+    assert!(legacy.to_yaml().contains("schema: orr.scene/1"));
+    assert!(!source.exists(), "detach must not recreate the missing source");
+    if let Some(before) = before_pixels {
+        assert_eq!(viewport_rgba(h, "linked-after-last-detach"), before);
+    }
+    assert!(h.state_mut().editor.save());
+    let saved = std::fs::read_to_string(root.join("level.scene.yaml")).unwrap();
+    assert_eq!(saved, legacy.to_yaml());
+    let mut reopened = Editor::open_game(&root.join("level.scene.yaml"), EditorGame::CollectDodge).unwrap();
+    assert_eq!(reopened.host_call("prefab.list", json!({})).unwrap()["instances"], json!([]));
+    reopened.sync();
+    h.state_mut().editor.sync();
+    assert_eq!(reopened.checksum(), h.state().editor.checksum());
+    drop(reopened);
+    click(h, "Edit");
+    click(h, "Undo Ctrl+Z");
+    click(h, "Refresh linked prefabs");
+    assert_eq!(editor_scene(h), before_last);
+    assert_eq!(h.state().linked_prefabs.state().unwrap()["instances"].as_array().unwrap().len(), 1);
+    assert!(!source.exists());
+}
+
+fn editor_scene(h: &mut Harness<'_, EditorApp>) -> orr_reflect::Scene {
+    let saved = h.state_mut().editor.host_call("scene.save", json!({})).unwrap();
+    orr_reflect::Scene::parse(saved["text"].as_str().unwrap(), &orr_sample::collect_project::types()).unwrap()
+}
+
+/// Exact cropped viewport pixels, independent of panel text and row count.
+fn viewport_rgba(h: &mut Harness<'_, EditorApp>, name: &str) -> Vec<[u8; 4]> {
+    viewport_capture(h, name);
+    let image = h.render().expect("mandatory composed editor GPU readback");
+    let rect = h.state().ui.viewport_rect.unwrap();
+    let mut rgba = Vec::new();
+    for y in rect.min.y.ceil() as u32..rect.max.y.floor() as u32 {
+        for x in rect.min.x.ceil() as u32..rect.max.x.floor() as u32 {
+            rgba.push(image.get_pixel(x, y).0);
+        }
+    }
+    assert!(!rgba.is_empty());
+    rgba
 }
 
 #[test]
@@ -489,7 +609,7 @@ fn source_hidden_export(original_project: &Path, expected_checksum: u64, idle_ch
         include_bytes!("../../../assets/collect_dodge_project/orr.project.json"),
     )
     .unwrap();
-    std::fs::remove_file(original_project.join("actors.prefab.yaml")).unwrap();
+    assert!(!original_project.join("actors.prefab.yaml").exists(), "detach workflow already removed the source before save/reopen");
     assert_eq!(
         PreparedProject::open(original_project)
             .unwrap()

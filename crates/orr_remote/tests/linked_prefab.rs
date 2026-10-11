@@ -101,6 +101,10 @@ fn requests(instance: &Value, text: &str, revision: u64) -> Vec<(&'static str, V
             json!({"instance":instance["instance"],"source_guid":"e_00000002","expected_revision":revision}),
         ),
         (
+            "prefab.detach",
+            json!({"instance":instance["instance"],"expected_revision":revision}),
+        ),
+        (
             "prefab.update",
             json!({"instance":instance["instance"],"source":SOURCE,"digest":instance["digest"],"text":text,"expected_revision":revision}),
         ),
@@ -115,6 +119,9 @@ fn kind(error: &RpcError) -> Option<&str> {
 fn read_capability_can_inspect_but_cannot_invoke_any_linked_mutator() {
     let mut host = Host::new();
     let (text, instance) = host.seed();
+    host.doc.apply(orr_edit::Op::Rename { guid: orr_reflect::Guid::from_u32(4), name: Some("redo witness".into()) }, orr_edit::Origin::User).unwrap();
+    host.doc.undo().unwrap();
+    assert!(host.doc.can_redo());
     let read = Caps::of(&[Cap::Read]);
     let listed = host.call(read, "prefab.list", json!({})).unwrap();
     assert_eq!(listed["instances"][0], instance);
@@ -134,6 +141,9 @@ fn read_capability_can_inspect_but_cannot_invoke_any_linked_mutator() {
 fn all_mutators_require_exact_revision_and_reject_unknown_parameters() {
     let mut host = Host::new();
     let (text, instance) = host.seed();
+    host.doc.apply(orr_edit::Op::Rename { guid: orr_reflect::Guid::from_u32(4), name: Some("redo witness".into()) }, orr_edit::Origin::User).unwrap();
+    host.doc.undo().unwrap();
+    assert!(host.doc.can_redo());
     let revision = host.doc.revision();
     let before = snapshot(&host);
     for (method, params) in requests(&instance, &text, revision) {
@@ -181,6 +191,9 @@ fn all_mutators_require_exact_revision_and_reject_unknown_parameters() {
 fn linked_mutations_reject_play_mode_and_open_transactions_without_document_changes() {
     let mut host = Host::new();
     let (text, instance) = host.seed();
+    host.doc.apply(orr_edit::Op::Rename { guid: orr_reflect::Guid::from_u32(4), name: Some("redo witness".into()) }, orr_edit::Origin::User).unwrap();
+    host.doc.undo().unwrap();
+    assert!(host.doc.can_redo());
     host.call(Caps::ALL, "sim.start", json!({})).unwrap();
     let before = snapshot(&host);
     for (method, params) in requests(&instance, &text, host.doc.revision()) {
@@ -205,6 +218,9 @@ fn linked_mutations_reject_play_mode_and_open_transactions_without_document_chan
 fn source_identity_and_baseline_digest_are_independent_update_guards() {
     let mut host = Host::new();
     let (text, instance) = host.seed();
+    host.doc.apply(orr_edit::Op::Rename { guid: orr_reflect::Guid::from_u32(4), name: Some("redo witness".into()) }, orr_edit::Origin::User).unwrap();
+    host.doc.undo().unwrap();
+    assert!(host.doc.can_redo());
     let before = snapshot(&host);
     let valid = requests(&instance, &text, host.doc.revision())
         .pop()
@@ -281,4 +297,60 @@ fn enabled_host_advertises_the_exact_linked_schema() {
         json!(["orr.scene/1", "orr.scene/2"])
     );
     assert!(actual["schema"]["properties"].get("prefabs").is_some());
+}
+
+#[test]
+fn detach_rpc_removes_only_one_link_and_returns_fresh_discovery_state() {
+    let mut host = Host::new();
+    let (text, first) = host.seed();
+    let revision = host.doc.revision();
+    host.call(Caps::ALL, "prefab.instantiate", json!({"source":SOURCE,"text":text,"expected_revision":revision})).unwrap();
+    let before = snapshot(&host);
+    let key = orr_reflect::Guid::parse(first["instance"].as_str().unwrap()).unwrap();
+    let result = host.call(Caps::of(&[Cap::SceneEdit]), "prefab.detach", json!({"instance":key.to_string(),"expected_revision":before.revision})).unwrap();
+    assert_eq!(result["revision"], before.revision + 1);
+    assert_eq!(result["instances"].as_array().unwrap().len(), 1);
+    assert_ne!(result["instances"][0]["instance"], first["instance"]);
+    assert_eq!(host.doc.scene().entities, before.scene.entities);
+    assert_eq!(host.doc.frame().to_bytes(), before.frame);
+    assert_eq!(format!("{:?}", host.doc.checksum()), before.checksum);
+    assert_eq!(host.doc.history().len(), before.history.len() + 1);
+    assert_eq!(host.doc.history().last().unwrap().origin, orr_edit::Origin::Agent("linked-test".into()));
+    host.doc.undo().unwrap();
+    assert_eq!(host.doc.scene(), &before.scene);
+    host.doc.redo().unwrap();
+    assert_eq!(host.doc.scene().prefab_links.len(), 1);
+    let discover = host.call(Caps::of(&[Cap::Read]), "rpc.discover", json!({})).unwrap();
+    let method = discover["methods"].as_array().unwrap().iter().find(|m| m["name"] == "prefab.detach").unwrap();
+    assert_eq!(method["capability"], "scene_edit");
+    assert_eq!(method["allowed"], false);
+    assert_eq!(method["params"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect::<Vec<_>>(), ["instance", "expected_revision"]);
+}
+
+#[test]
+fn malformed_unknown_and_repeated_detach_preserve_full_state_and_redo() {
+    let mut host = Host::new();
+    let (_, first) = host.seed();
+    host.doc.apply(orr_edit::Op::Rename { guid: orr_reflect::Guid::from_u32(4), name: Some("redo witness".into()) }, orr_edit::Origin::User).unwrap();
+    host.doc.undo().unwrap();
+    let before = snapshot(&host);
+    assert!(before.redo);
+    for instance in [Value::Null, json!(42), json!([]), json!({}), json!("bad-guid"), json!("e_ffffffff")] {
+        assert!(host.call(Caps::ALL, "prefab.detach", json!({"instance":instance,"expected_revision":before.revision})).is_err());
+        assert_eq!(snapshot(&host), before);
+    }
+    for revision in [Value::Null, json!("1"), json!(-1), json!(1.5), json!([])] {
+        assert!(host.call(Caps::ALL, "prefab.detach", json!({"instance":first["instance"],"expected_revision":revision})).is_err());
+        assert_eq!(snapshot(&host), before);
+    }
+    host.doc.redo().unwrap();
+    let revision = host.doc.revision();
+    host.call(Caps::ALL, "prefab.detach", json!({"instance":first["instance"],"expected_revision":revision})).unwrap();
+    host.doc.apply(orr_edit::Op::Rename { guid: orr_reflect::Guid::from_u32(4), name: Some("second redo witness".into()) }, orr_edit::Origin::User).unwrap();
+    host.doc.undo().unwrap();
+    let before = snapshot(&host);
+    assert!(before.redo);
+    assert!(host.call(Caps::ALL, "prefab.detach", json!({"instance":first["instance"],"expected_revision":before.revision})).is_err());
+    assert_eq!(snapshot(&host), before);
+    host.doc.redo().unwrap();
 }

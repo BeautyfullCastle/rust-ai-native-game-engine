@@ -491,3 +491,161 @@ fn no_policy_rejected_batch_restores_valid_prefix_revision_and_redo() {
     assert_eq!(snapshot(&doc), before);
     doc.redo().unwrap();
 }
+
+#[test]
+fn detach_preserves_two_group_entities_overrides_frame_and_exact_history() {
+    let mut doc = open(INITIAL);
+    let source = doc.capture_linked_collect_source(&[id(2), id(4)]).unwrap();
+    let first = doc.instantiate_linked_collect(SOURCE, &source, Origin::User).unwrap();
+    let second = doc.instantiate_linked_collect(SOURCE, &source, Origin::User).unwrap();
+    let key = first.guids.values().next().unwrap().clone();
+    let other = second.guids.values().next().unwrap().clone();
+    doc.override_linked_collect_position(&key, &id(4), point(7, 8), Origin::User).unwrap();
+    let saved = doc.save_yaml();
+    let before = snapshot(&doc);
+    let checksum = doc.checksum();
+    let origin = Origin::Agent("detach-test".into());
+    doc.detach_linked_collect(&key, origin.clone()).unwrap();
+    let detached = doc.scene().clone();
+    assert_eq!(detached.entities, before.scene.entities);
+    assert_eq!(detached.singletons, before.scene.singletons);
+    assert_eq!(detached.prefab_links.len(), 1);
+    assert_eq!(detached.prefab_links[&other], before.scene.prefab_links[&other]);
+    assert_eq!(doc.frame().to_bytes(), before.frame);
+    assert_eq!(doc.checksum(), checksum);
+    assert!(doc.to_yaml().contains("schema: orr.scene/2"));
+    assert_eq!(doc.revision(), before.revision + 1);
+    assert_eq!(doc.history().len(), before.history.len() + 1);
+    let entry = doc.history().pop().unwrap();
+    assert_eq!(entry.origin, origin);
+    assert_eq!(entry.label, "detach linked Collect group");
+    assert_eq!(entry.op_count, 0, "detach must not rewrite any actor");
+    assert!(doc.is_dirty());
+    assert!(!doc.can_redo());
+    doc.undo().unwrap();
+    assert_eq!(doc.scene(), &before.scene);
+    assert_eq!(doc.to_yaml(), saved);
+    assert_eq!(doc.frame().to_bytes(), before.frame);
+    assert!(!doc.is_dirty());
+    doc.redo().unwrap();
+    assert_eq!(doc.scene(), &detached);
+    assert_eq!(doc.frame().to_bytes(), before.frame);
+    assert_eq!(doc.checksum(), checksum);
+}
+
+#[test]
+fn detached_actors_edit_independently_and_only_remaining_link_updates() {
+    let mut doc = open(INITIAL);
+    let source = hazard(&doc);
+    let (first, target) = instantiate(&mut doc, &source);
+    let (second, other) = instantiate(&mut doc, &source);
+    doc.override_linked_collect_position(&first, &id(4), point(7, 8), Origin::User).unwrap();
+    doc.detach_linked_collect(&first, Origin::User).unwrap();
+    for (path, value) in [("position", Value::Vec2(point(6, 7))), ("velocity", Value::Vec2(point(1, 0)))] {
+        doc.apply(Op::SetField { guid: target.clone(), component: ACTOR.into(), path: path.into(), value }, Origin::User).unwrap();
+    }
+    doc.apply(Op::Rename { guid: target.clone(), name: Some("independent hazard".into()) }, Origin::User).unwrap();
+    let detached = doc.scene().entities[&target].clone();
+    let source_entity = doc.scene().entities[&id(4)].clone();
+    let digest = doc.scene().prefab_links[&second].digest.clone();
+    let changed = change(&source, &id(4), "position", Value::Vec2(point(3, 4)));
+    doc.update_linked_collect(&second, SOURCE, &digest, &changed, Origin::User).unwrap();
+    assert_eq!(doc.scene().entities[&target], detached);
+    assert_eq!(doc.scene().entities[&id(4)], source_entity);
+    assert_eq!(field(doc.scene(), &other, "position"), &Value::Vec2(point(3, 4)));
+    assert_eq!(doc.scene().prefab_links.len(), 1);
+    assert!(!doc.scene().prefab_links.contains_key(&first));
+    assert!(doc.capture_linked_collect_source(&[target]).is_ok());
+}
+
+#[test]
+fn last_detach_writes_legacy_scene_and_reopens_without_source_authority() {
+    let mut doc = open(INITIAL);
+    let source = hazard(&doc);
+    // SOURCE has never existed; detaching cannot require opening it.
+    let (key, _) = instantiate(&mut doc, &source);
+    doc.override_linked_collect_position(&key, &id(4), point(7, 8), Origin::User).unwrap();
+    let linked = doc.scene().clone();
+    let frame = doc.frame().to_bytes();
+    doc.detach_linked_collect(&key, Origin::User).unwrap();
+    let mut expected = linked.clone();
+    expected.prefab_links.clear();
+    let saved = doc.save_yaml();
+    assert_eq!(saved, expected.to_yaml());
+    assert!(saved.contains("schema: orr.scene/1"));
+    assert!(!saved.contains("prefabs:"));
+    // The mandatory gate passes these exact API-produced bytes to a separately
+    // compiled feature-disabled consumer, rather than using a hand-built fixture.
+    if let Some(path) = std::env::var_os("ORR_DETACHED_SCENE") {
+        let path = std::path::PathBuf::from(path);
+        std::fs::write(&path, &saved).unwrap();
+        std::fs::write(path.with_extension("checksum"), doc.checksum().to_string()).unwrap();
+    }
+    let reopened = open(&saved);
+    assert_eq!(reopened.scene(), &expected);
+    assert_eq!(reopened.frame().to_bytes(), frame);
+    doc.undo().unwrap();
+    assert_eq!(doc.scene(), &linked);
+    doc.redo().unwrap();
+    assert_eq!(doc.to_yaml(), saved);
+    assert_eq!(doc.frame().to_bytes(), frame);
+    assert!(!doc.is_dirty());
+}
+
+#[test]
+fn rejected_detach_preserves_unknown_repeated_transaction_and_redo_state() {
+    let mut doc = open(INITIAL);
+    let source = hazard(&doc);
+    let (key, _) = instantiate(&mut doc, &source);
+    doc.override_linked_collect_position(&key, &id(4), point(7, 8), Origin::User).unwrap();
+    doc.undo().unwrap();
+    doc.save_yaml();
+    let before = snapshot(&doc);
+    assert!(doc.detach_linked_collect(&id(999), Origin::User).is_err());
+    assert_eq!(snapshot(&doc), before);
+    doc.begin_tx("existing transaction", Origin::User).unwrap();
+    let in_tx = snapshot(&doc);
+    assert!(matches!(doc.detach_linked_collect(&key, Origin::User), Err(EditError::TxOpen)));
+    assert_eq!(snapshot(&doc), in_tx);
+    assert!(doc.in_tx());
+    doc.rollback_tx().unwrap();
+    doc.redo().unwrap();
+    doc.detach_linked_collect(&key, Origin::User).unwrap();
+    doc.apply(Op::Rename { guid: id(4), name: Some("redo witness".into()) }, Origin::User).unwrap();
+    doc.undo().unwrap();
+    let before = snapshot(&doc);
+    assert!(doc.can_redo());
+    assert!(doc.detach_linked_collect(&key, Origin::User).is_err());
+    assert_eq!(snapshot(&doc), before);
+    doc.redo().unwrap();
+    assert_eq!(doc.scene().entities[&id(4)].name.as_deref(), Some("redo witness"));
+}
+
+#[test]
+fn detach_final_admission_failure_preserves_every_state_and_redo() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Admission(Arc<AtomicBool>);
+    impl BakeAdmission for Admission {
+        fn admit(&self, scene: &Scene, frame: &mut Frame, index: &SceneIndex) -> Result<(), EditError> {
+            CollectAdmission.admit(scene, frame, index)?;
+            if self.0.load(Ordering::SeqCst) && scene.prefab_links.is_empty() {
+                return Err(EditError::Invalid("detached candidate refused".into()));
+            }
+            Ok(())
+        }
+    }
+    let reject = Arc::new(AtomicBool::new(false));
+    let mut doc = EditorDoc::from_yaml_with_admission(INITIAL, collect_project::types(), Simulation::<CollectDodgeV1>::build_registry(), collect_project::SEED, Some(Arc::new(Admission(reject.clone())))).unwrap();
+    let source = hazard(&doc);
+    let (key, _) = instantiate(&mut doc, &source);
+    doc.override_linked_collect_position(&key, &id(4), point(7, 8), Origin::User).unwrap();
+    doc.undo().unwrap();
+    doc.save_yaml();
+    reject.store(true, Ordering::SeqCst);
+    let before = snapshot(&doc);
+    assert!(doc.detach_linked_collect(&key, Origin::User).is_err());
+    assert_eq!(snapshot(&doc), before);
+    doc.redo().unwrap();
+    reject.store(false, Ordering::SeqCst);
+    doc.detach_linked_collect(&key, Origin::User).unwrap();
+}

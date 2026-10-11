@@ -151,6 +151,23 @@ impl EditorDoc {
         Ok(instance)
     }
 
+    /// Detach one validated instance, retaining every flattened actor and value.
+    /// This removes provenance only: no source bytes or filesystem access are needed.
+    pub fn detach_linked_collect(
+        &mut self,
+        instance: &Guid,
+        origin: Origin,
+    ) -> Result<(), EditError> {
+        self.scene
+            .validate_prefab_links(&self.types)
+            .map_err(invalid)?;
+        let mut links = self.scene.prefab_links.clone();
+        links
+            .remove(instance)
+            .ok_or_else(|| invalid("unknown linked instance"))?;
+        self.apply_linked_batch("detach linked Collect group", Vec::new(), links, origin)
+    }
+
     /// Explicit position override; ordinary untracked edits remain rejected.
     pub fn override_linked_collect_position(
         &mut self,
