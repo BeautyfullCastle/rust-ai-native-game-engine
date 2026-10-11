@@ -40,6 +40,7 @@ use orr_sample::{
 use std::{
     collections::BTreeMap,
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
     time::{Duration, Instant},
@@ -651,14 +652,91 @@ fn assert_texels(
         "each visible actor must contribute opaque atlas texels"
     );
 }
+fn editor_capture_ready(app: &EditorApp) -> bool {
+    app.editor.game().is_collect()
+        && app.sprites.scene_matches(&app.editor)
+        && app.editor.previewing().is_none()
+        && app.editor.yard_rows_coherent()
+        && app
+            .editor
+            .snapshot()
+            .is_some_and(|s| s.timeline().is_some() == app.editor.is_playing_mode())
+}
+fn retain_capture_file(path: &Path) {
+    if let Some(destination) = std::env::var_os("ORR_COLLECT_CAPTURES") {
+        let destination = PathBuf::from(destination);
+        fs::create_dir_all(&destination).unwrap();
+        fs::copy(path, destination.join(path.file_name().unwrap())).unwrap();
+    }
+}
 fn editor_capture(h: &mut Harness<'_, EditorApp>, captures: &Path, name: &str, expected: usize) {
-    settle(h);
-    assert!(h.state().has_gpu());
-    assert_eq!(h.ctx.pixels_per_point(), 1.0);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        // A later UI pump can ingest watch.history and retire previously ready
+        // GUID rows. Check the production fence after the final composed frame;
+        // render() reads that output without pumping the editor again.
+        h.run_steps(3);
+        if editor_capture_ready(h.state()) || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let app = h.state();
+    let scene = app.editor.sim().scene_path.as_deref();
+    let metadata = serde_json::json!({
+        "capture": name,
+        "expected_visible_actors": expected,
+        "ready": editor_capture_ready(app),
+        "has_gpu": app.has_gpu(),
+        "pixels_per_point": h.ctx.pixels_per_point(),
+        "game": format!("{:?}", app.editor.game()),
+        "mode": format!("{:?}", app.editor.mode()),
+        "scene_matches": app.sprites.scene_matches(&app.editor),
+        "rows_coherent": app.editor.yard_rows_coherent(),
+        "preview": app.editor.previewing(),
+        "scene_path": scene,
+        "saved_scene": scene.map(|path| fs::read_to_string(path).map_err(|e| e.to_string())),
+        "checksum": format!("0x{:016x}", app.editor.checksum()),
+        "snapshot": app.editor.snapshot().map(|s| serde_json::json!({
+            "seq": s.seq(), "tick": s.tick(),
+            "checksum": format!("0x{:016x}", s.predicted().checksum()),
+            "timeline": format!("{:?}", s.timeline()),
+        })),
+        "camera": {"center": app.editor.camera.center, "half_extent": app.editor.camera.half_extent},
+        "viewport_rect": app.ui.viewport_rect.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]),
+        "viewport_px": app.ui.viewport_px,
+        "rows": format!("{:?}", app.editor.rows()),
+        "bodies": app.editor.bodies().iter().map(|b| serde_json::json!({
+            "entity": format!("{:?}", b.entity), "position": b.pos, "angle": b.angle,
+        })).collect::<Vec<_>>(),
+        "bindings": app.sprites.bindings.as_ref().map(|b| b.document()),
+        "sampled_regions": app.sprites.bindings.as_ref().map(|b| {
+            b.document().bindings.keys().map(|guid| {
+                (guid.clone(), app.sprites.sampled_region(&app.editor, guid))
+            }).collect::<BTreeMap<_, _>>()
+        }),
+        "sprite_diagnostics": app.sprites.diagnostics(&app.editor),
+        "editor_diagnostics": format!("{:?}", app.editor.diagnostics()),
+        "status": format!("{:?}", app.editor.status()),
+        "log": format!("{:?}", app.editor.log()),
+    });
+    let metadata_path = captures.join(format!("{name}.json"));
+    fs::write(&metadata_path, serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
+    retain_capture_file(&metadata_path);
     let rendered = h
         .render()
         .expect("mandatory composed EditorApp GPU readback");
-    rendered.save(captures.join(format!("{name}.png"))).unwrap();
+    let capture_path = captures.join(format!("{name}.png"));
+    rendered.save(&capture_path).unwrap();
+    // Retain the actual frame and its admission state before any oracle can
+    // panic. Workflow's final retain() is never reached on an assertion failure.
+    retain_capture_file(&capture_path);
+    assert!(
+        editor_capture_ready(h.state()),
+        "capture readiness timed out: {metadata}"
+    );
+    assert!(h.state().has_gpu());
+    assert_eq!(h.ctx.pixels_per_point(), 1.0);
     let image = (rendered.width(), rendered.height(), rendered.into_raw());
     let app = h.state();
     let rect = app.ui.viewport_rect.unwrap();
@@ -931,9 +1009,24 @@ fn generated_collect_progress_workflow() {
     fs::create_dir(&harness_dir).unwrap();
     let harness = harness_dir.join("sample-tests");
     fs::copy(&original, &harness).unwrap();
+    let host_root = work.root.path().join("progress profiles");
+    fs::create_dir(&host_root).unwrap();
+    fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let data = host_root.join("user data");
+    // Unprivileged bwrap can map host-owned /tmp ancestors to an untrusted uid.
+    // Bind only the private profile fixture directly below /, preserving the
+    // production ancestor checks and all source/tools/bundle isolation.
+    let progress_root = Path::new("/opt");
+    assert!(fs::symlink_metadata(progress_root).unwrap().is_dir());
+    assert!(!work.root.path().starts_with(progress_root));
+    assert!(!work.hidden_workspace.starts_with(progress_root));
+    assert!(work.original_bins.iter().all(|p| !p.starts_with(progress_root)));
+    let untrusted = host_root.join("untrusted ancestor");
+    fs::create_dir(&untrusted).unwrap();
+    fs::set_permissions(&untrusted, fs::Permissions::from_mode(0o777)).unwrap();
     // isolated() makes the executable's parent read-only and masks source/tools.
     // The separately relocated project bundle must also be read-only here.
-    for mode in ["win", "relaunch"] {
+    for mode in ["untrusted-ancestor", "win", "relaunch"] {
         let command = work.isolated(&harness, Some(&project));
         // Insert the additional bind before the existing namespace delimiter.
         let args = command
@@ -947,6 +1040,9 @@ fn generated_collect_progress_workflow() {
             .arg("--ro-bind")
             .arg(&bundle)
             .arg(&bundle)
+            .arg("--bind")
+            .arg(&host_root)
+            .arg(progress_root)
             .args(&args[split..]);
         isolated.current_dir(command.get_current_dir().unwrap());
         for (key, value) in command.get_envs() {
@@ -956,23 +1052,52 @@ fn generated_collect_progress_workflow() {
                 isolated.env_remove(key);
             }
         }
-        let output = success(
-            isolated
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "collect_progress::tests::isolated_window_progress_child",
-                    "--nocapture",
-                ])
-                .env("ORR_PROGRESS_TEST_PROJECT", bundle.join("project"))
-                .env("ORR_PROGRESS_TEST_MODE", mode)
-                .output()
-                .unwrap(),
-        );
+        isolated
+            .env("HOME", progress_root.join("user home"))
+            .env(
+                "XDG_DATA_HOME",
+                if mode == "untrusted-ancestor" {
+                    progress_root.join("untrusted ancestor/data")
+                } else {
+                    progress_root.join("user data")
+                },
+            );
+        let output = isolated
+            .args([
+                "--ignored",
+                "--exact",
+                "collect_progress::tests::isolated_window_progress_child",
+                "--nocapture",
+            ])
+            .env("ORR_PROGRESS_TEST_PROJECT", bundle.join("project"))
+            .env("ORR_PROGRESS_TEST_MODE", mode)
+            .output()
+            .unwrap();
+        // Preserve failing child diagnostics before success() can panic and
+        // the temporary workflow root is dropped during unwinding.
+        if let Some(destination) = std::env::var_os("ORR_COLLECT_CAPTURES") {
+            let destination = PathBuf::from(destination);
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(
+                destination.join(format!("generated-collect-progress-{mode}.stdout")),
+                &output.stdout,
+            )
+            .unwrap();
+            fs::write(
+                destination.join(format!("generated-collect-progress-{mode}.stderr")),
+                &output.stderr,
+            )
+            .unwrap();
+        }
+        let output = success(output);
         assert!(
             output.contains("1 passed"),
             "actual App helper must execute: {output}"
         );
+        if mode == "untrusted-ancestor" {
+            assert!(!untrusted.join("data").exists());
+            assert!(!data.exists(), "rejected ancestor created profile data");
+        }
         fs::write(
             work.root
                 .path()
@@ -982,7 +1107,6 @@ fn generated_collect_progress_workflow() {
         )
         .unwrap();
     }
-    let data = work.root.path().join("user data");
     assert!(data.join("orrery/games").is_dir());
     assert!(!snapshot(&data).is_empty());
     assert_eq!(snapshot(&project), source);
