@@ -1,5 +1,9 @@
 //! Offline, content-only packages. No script execution, downloads or Cargo edits.
 //! The application supplies its real compiled capabilities through [`Runtime`].
+mod preview;
+pub use preview::{PackageChange, PackagePreview, PackageSelection};
+mod explanation;
+pub use explanation::PackageExplanation;
 mod project_identity;
 pub use project_identity::{format_game_id, ProgressProfile, ProjectProgress};
 
@@ -282,6 +286,10 @@ pub struct Project {
     runtime: Runtime,
     enforce_capabilities: bool,
 }
+struct PreparedInstall {
+    lock: Lock,
+    snapshots: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+}
 impl Project {
     /// Opens an existing directory. Optional `orr.project.json` constrains the engine;
     /// the lock is the sole authority for direct selection and resolved package state.
@@ -338,6 +346,12 @@ impl Project {
         };
         self.validate_lock(&lock)?;
         Ok(lock)
+    }
+    /// Explain activation from validated lock metadata without reading installed bytes.
+    /// This is not an integrity check; use `verify` before consuming whole packages.
+    pub fn explain(&self, name: &str) -> Result<PackageExplanation> {
+        crate::name(name)?;
+        explanation::explain(&self.list()?, name)
     }
     fn validate_lock(&self, lock: &Lock) -> Result<()> {
         if lock.schema != 1 || lock.packages.len() > MAX_PACKAGES {
@@ -451,6 +465,51 @@ impl Project {
         if expected.is_some_and(|expected| expected != &previous) {
             return fail("active package lock changed since preparation");
         }
+        let PreparedInstall { lock, snapshots } =
+            self.prepare_install(previous, sources, candidates)?;
+        if approved.is_some_and(|approved| approved != &lock) {
+            return fail("candidate package lock differs from preflighted content");
+        }
+        for p in lock.packages.values() {
+            if let Some(files) = snapshots.get(&p.digest) {
+                self.store(p, files)?;
+            }
+        }
+        before_publish().map_err(Error)?;
+        self.publish(&lock)?;
+        Ok(lock)
+    }
+    /// Preview verified content and graph changes without acquiring a writer,
+    /// staging objects or publishing a lock. This is an observation, not a reservation.
+    pub fn preview_install(&self, sources: &[PathBuf]) -> Result<PackagePreview> {
+        self.preview_install_with_dependencies(sources, &[])
+    }
+    /// Dependency candidates do not become direct selections. Compiled capability
+    /// validation follows this Project's existing host/install-only mode.
+    pub fn preview_install_with_dependencies(
+        &self,
+        sources: &[PathBuf],
+        candidates: &[PathBuf],
+    ) -> Result<PackagePreview> {
+        let previous = self.verify()?;
+        let prepared = self.prepare_install(previous.clone(), sources, candidates)?;
+        Ok(PackagePreview::between(previous, prepared.lock))
+    }
+    /// Preview removal of a direct selection. Stored objects are never deleted.
+    pub fn preview_remove(&self, name: &str) -> Result<PackagePreview> {
+        let previous = self.verify()?;
+        let candidate = self.prepare_remove(previous.clone(), name)?;
+        Ok(PackagePreview::between(previous, candidate))
+    }
+    fn prepare_install(
+        &self,
+        previous: Lock,
+        sources: &[PathBuf],
+        candidates: &[PathBuf],
+    ) -> Result<PreparedInstall> {
+        if sources.is_empty() || sources.len() + candidates.len() > MAX_PACKAGES {
+            return fail("supply 1..128 local package directories");
+        }
         let mut direct = previous.direct;
         let mut available = previous.packages;
         let mut snapshots = BTreeMap::new();
@@ -488,16 +547,20 @@ impl Project {
             direct,
             packages,
         };
-        if approved.is_some_and(|approved| approved != &lock) {
-            return fail("candidate package lock differs from preflighted content");
+        // Match publication validation and its encoded-byte limit before claiming
+        // feasibility, or before storing any new immutable objects.
+        self.encode_lock(&lock)?;
+        Ok(PreparedInstall { lock, snapshots })
+    }
+    fn prepare_remove(&self, old: Lock, name: &str) -> Result<Lock> {
+        crate::name(name)?;
+        let mut direct = old.direct;
+        if direct.remove(name).is_none() {
+            return fail(format!("not a direct package: {name}"));
         }
-        for p in lock.packages.values() {
-            if let Some(files) = snapshots.get(&p.digest) {
-                self.store(p, files)?;
-            }
-        }
-        before_publish().map_err(Error)?;
-        self.publish(&lock)?;
+        let packages = resolve(&direct, &old.packages)?;
+        let lock = Lock { schema: 1, direct, packages };
+        self.encode_lock(&lock)?;
         Ok(lock)
     }
     /// Remove a direct selection. A required transitive package remains active.
@@ -505,16 +568,7 @@ impl Project {
     pub fn remove(&self, name: &str) -> Result<Lock> {
         let _guard = self.writer()?;
         let old = self.verify()?;
-        let mut direct = old.direct;
-        if direct.remove(name).is_none() {
-            return fail(format!("not a direct package: {name}"));
-        }
-        let packages = resolve(&direct, &old.packages)?;
-        let lock = Lock {
-            schema: 1,
-            direct,
-            packages,
-        };
+        let lock = self.prepare_remove(old, name)?;
         self.publish(&lock)?;
         Ok(lock)
     }
@@ -563,17 +617,21 @@ impl Project {
         fs::rename(stage.path(), &destination)?;
         Ok(())
     }
-    fn publish(&self, lock: &Lock) -> Result<()> {
+    fn encode_lock(&self, lock: &Lock) -> Result<Vec<u8>> {
         self.validate_lock(lock)?;
+        let encoded = serde_json::to_vec_pretty(lock)?;
+        if encoded.len() as u64 >= MAX_JSON {
+            return fail("lock byte limit exceeded");
+        }
+        Ok(encoded)
+    }
+    fn publish(&self, lock: &Lock) -> Result<()> {
+        let encoded = self.encode_lock(lock)?;
         let path = self.root.join(LOCK);
         if fs::symlink_metadata(&path).is_ok() {
             no_links(&path)?;
         }
         let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
-        let encoded = serde_json::to_vec_pretty(lock)?;
-        if encoded.len() as u64 >= MAX_JSON {
-            return fail("lock byte limit exceeded");
-        }
         file.write_all(&encoded)?;
         file.write_all(b"\n")?;
         file.as_file().sync_all()?;

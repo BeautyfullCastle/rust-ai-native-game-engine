@@ -67,6 +67,7 @@ lock entries, invalid content identities and incompatible runtime inventories.
 cargo run -p orr_package --bin orr_pkg -- inspect ./my-art
 cargo run -p orr_package --bin orr_pkg -- install ./my-game --path ./my-art --dependency-path ./dependency-art
 cargo run -p orr_package --bin orr_pkg -- list ./my-game
+cargo run -p orr_package --bin orr_pkg -- explain ./my-game my-art
 cargo run -p orr_package --bin orr_pkg -- verify ./my-game
 cargo run -p orr_package --bin orr_pkg -- remove ./my-game my-art
 ```
@@ -78,6 +79,23 @@ packages. Supplying a
 new version updates that direct selection if the complete graph remains valid.
 Reinstalling the same active name/version with changed content fails: bump its
 version. Package digests, not name/version alone, identify exact content.
+
+`explain PROJECT NAME` reads the validated lock and reports the package's exact
+version/digest, `direct` selection, declared `capabilities`, immediate `required_by`
+dependents, and `selected_by` chains from every direct root that reaches it.
+Each chain includes both endpoints; a direct selection includes `[NAME]`.
+It reports one shortest chain per root, breaking equal-length ties by sorted
+package name, rather than expanding every possible path. This explains why a
+package remains active after removing its own direct selection: other roots may
+still require it. Removing the last selecting root makes `explain` fail with
+`missing package`. No lock, source, installed object or writer guard is changed.
+
+Explanation is **lock metadata only**: it does not read or verify installed bytes
+(use `verify` for that). Listed capability names are requirements, not proof that
+code was compiled. Like the other management commands, CLI capability validation
+is deferred to the consuming host. `Project::explain` uses the same lock admission
+as `list`, so a host opened with its actual inventory still rejects unsupported
+capabilities, invalid identities and invalid dependency graphs.
 
 `remove` drops a direct selection and recomputes reachability. A package required
 by another direct selection remains installed transitively. Removing that last
@@ -157,3 +175,32 @@ test-only failpoints exercise post-staging and pre-lock-publication failures;
 these hooks are absent from production builds. `cargo clippy -p orr_package --all-targets -- -D warnings`
 checks the standalone CPU-only crate. End-to-end rendered/playable-scene evidence
 belongs to the sample integration, not these filesystem unit tests.
+
+
+## Read-only transaction preview
+
+`orr_pkg install PROJECT --dry-run --path SOURCE [--dependency-path SOURCE]...`
+and `orr_pkg remove PROJECT NAME --dry-run` print a deterministic JSON report
+without creating `.orr`, acquiring a writer, staging objects or publishing a lock.
+The corresponding APIs are `Project::preview_install`,
+`preview_install_with_dependencies` and `preview_remove`.
+
+`previous` and `candidate` contain exact validated locks. `changes` is sorted by
+package name and includes before/after version, content digest and direct-selection
+status. Promotion/demotion is reported even when content is unchanged. Removing a
+root may retain its package transitively; deactivation does not delete stored bytes.
+No report entry means no activation identity/directness change.
+
+Preview verifies active installed bytes, bounded supplied sources, dependency and
+engine contracts and the resulting encoded-lock size. Host capability enforcement
+uses the same `Project` mode as existing operations; CLI mode cannot establish
+compiled capabilities. Errors are fail-fast, not an exhaustive conflict list.
+
+A preview is an observation, not a reserved transaction or apply token. It does
+not promise future permissions, writer availability, inactive destination-object
+integrity, scene-reference safety or disk reclamation. A concurrent edit can make
+it stale. Normal install/remove revalidate and recompute under the existing writer
+guard. `install_checked` retains its exact previous/approved-lock and callback
+checks; it does not accept dependency candidates, and there is no checked-remove
+API in this slice. Filesystem access-time updates from reading are outside the
+no-application-state-write guarantee.
