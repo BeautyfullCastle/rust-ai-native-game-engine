@@ -2,6 +2,7 @@
 """Semantic fixtures for the actual checker; never count these as Rust/GPU runs."""
 import copy
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -44,11 +45,19 @@ def artifacts(repo, output):
         rows.append({'reason': 'compiler-artifact', 'manifest_path': str(manifest),
                      'package_id': 'path+' + manifest.parent.as_uri() + '#orr_sample@0.0.1',
                      'target': {'name': name, 'kind': ['bin'], 'crate_types': ['bin'],
-                                'src_path': str(manifest.parent / 'src/bin' / (name + '.rs'))},
-                     'features': sorted(gate.FEATURES), 'profile': {'test': False, 'opt_level': '3'},
-                     'executable': str(path)})
+                                'src_path': str(manifest.parent / 'src/bin' / (name + '.rs')),
+                                'edition': '2021', 'doc': True, 'doctest': False, 'test': True},
+                     'features': sorted(gate.FEATURES),
+                     'profile': {'test': False, 'opt_level': '3', 'debuginfo': 0,
+                                 'debug_assertions': False, 'overflow_checks': False},
+                     'filenames': [str(path)], 'executable': str(path), 'fresh': False})
     rows.append({'reason': 'build-finished', 'success': True})
     return rows
+
+
+def camera_document():
+    return {'schema': 1, 'target': [0.0, 0.5, 0.0], 'yaw': 0.65, 'pitch': 1.02, 'distance': 24.0,
+            'projection': {'type': 'orthographic', 'half_height': 8.0}}
 
 
 class RoomTemplateGateTests(unittest.TestCase):
@@ -140,12 +149,85 @@ class RoomTemplateGateTests(unittest.TestCase):
                 lambda r: r[0].update(manifest_path=str(root / 'wrong/Cargo.toml')),
                 lambda r: r[0].update(package_id='path+file:///wrong#orr_sample@0.0.1'),
                 lambda r: r[0].update(executable=r[1]['executable']),
+                lambda r: r[-1].update(success=1), lambda r: r[-1].update(success='true'),
+                lambda r: r[0]['features'].append(r[0]['features'][0]),
+                lambda r: r[0]['profile'].update(test=0), lambda r: r[0]['profile'].update(opt_level=3),
+                lambda r: r[0].update(filenames=[]), lambda r: r[0].update(fresh=1),
+                lambda r: r[0].update(unknown='ignored before'),
+                lambda r: r[0]['target'].update(unknown=True), lambda r: r[0]['profile'].update(unknown=True),
+                lambda r: r[0]['target'].pop('src_path'), lambda r: r[0].update(target=[]),
+                lambda r: r[0].update(features='room-project'), lambda r: r[0].update(package_id=None),
+                lambda r: r.insert(0, {'reason': 'unrecognized-record'}),
+                lambda r: r.insert(0, {'reason': 'build-script-executed'}),
+                lambda r: r.insert(0, {'reason': 'compiler-message', 'message': False}),
+                lambda r: r.insert(0, []), lambda r: r.insert(0, {'reason': []}),
+                lambda r: r.reverse(),
             ]
             for modify in modifications:
                 altered = copy.deepcopy(rows)
                 modify(altered)
                 with self.assertRaises(AssertionError):
                     gate.check_artifacts(altered, root)
+
+    def test_supported_unrelated_cargo_records_are_accepted(self):
+        # The Cargo Book's external-tools JSON schema includes all four reasons.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = artifacts(root, root / 'target/release')
+            message = {'reason': 'compiler-message', 'package_id': rows[0]['package_id'],
+                       'manifest_path': rows[0]['manifest_path'], 'target': copy.deepcopy(rows[0]['target']),
+                       'message': {'message': 'fixture warning', 'code': None, 'level': 'warning',
+                                   'spans': [], 'children': [], 'rendered': 'warning: fixture\n'}}
+            message['target']['required-features'] = ['room-project']
+            script = {'reason': 'build-script-executed', 'package_id': 'registry+https://example.invalid/index#fixture@1.0.0',
+                      'linked_libs': ['static=fixture'], 'linked_paths': ['native=/tmp/fixture'],
+                      'cfgs': ['fixture'], 'env': [['FIXTURE', 'value']], 'out_dir': str(root / 'out')}
+            dependency = copy.deepcopy(rows[0])
+            dependency.update(package_id=script['package_id'], manifest_path=str(root / 'dependency/Cargo.toml'),
+                              features=[], executable=None, filenames=[str(root / 'libfixture.rlib')], fresh=True)
+            dependency['target'].update(name='fixture', kind=['lib'], crate_types=['lib'])
+            for debug in (None, 0, 1, 2, 'line-directives-only', 'line-tables-only'):
+                dependency['profile']['debuginfo'] = debug
+                valid = [script, message, dependency] + rows
+                self.assertEqual(len(gate.check_artifacts(valid, root)), 3)
+            for record, key, bad in [(script, 'env', [['only-one']]), (script, 'linked_libs', 'lib'),
+                                     (message, 'message', False), (message, 'unexpected', True)]:
+                altered = copy.deepcopy(record)
+                altered[key] = bad
+                with self.assertRaises(AssertionError):
+                    gate.check_artifacts([altered] + rows, root)
+
+    def test_raw_cargo_json_rejects_duplicate_keys_constants_and_malformed_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = artifacts(root / 'repo', root / 'target/release')
+            valid = '\n'.join(json.dumps(row) for row in rows)
+            cases = [valid.replace('"success": true', '"success": false, "success": true'),
+                     valid.replace('"test": false', '"test": true, "test": false', 1),
+                     valid.replace('"opt_level": "3"', '"opt_level": "0", "opt_level": "3"', 1),
+                     valid.replace('"debuginfo": 0', '"debuginfo": NaN', 1),
+                     valid + '\nnot JSON', valid + '\nnull']
+            evidence = root / 'evidence'
+            evidence.mkdir()
+            for text in cases:
+                (evidence / 'production-tools.jsonl').write_text(text)
+                with self.assertRaises((AssertionError, json.JSONDecodeError)):
+                    gate.pin_tools(evidence, root / 'repo')
+                self.assertFalse((evidence / 'tools').exists())
+
+    def test_artifacts_reject_hardlink_alias_and_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = artifacts(root, root / 'target/release')
+            first, second = (Path(row['executable']) for row in rows[:2])
+            second.unlink()
+            os.link(first, second)
+            with self.assertRaises(AssertionError):
+                gate.check_artifacts(rows, root)
+            second.unlink()
+            second.symlink_to(first)
+            with self.assertRaises(AssertionError):
+                gate.check_artifacts(rows, root)
 
     def make_evidence(self, root):
         rows = artifacts(root / 'repo', root / 'target/release')
@@ -166,14 +248,18 @@ class RoomTemplateGateTests(unittest.TestCase):
             (editor / (name + '.png')).write_bytes(png(64, 64, shade))
         project = evidence / 'export/authored-project'
         project.mkdir()
-        (project / 'orr.project.json').write_text('{"schema":2}')
+        entry = {'game': 'room-escape-v1', 'scene': 'room.scene.yaml', 'models': 'room.models.json',
+                 'camera': 'room.camera.json'}
+        (project / 'orr.project.json').write_text(json.dumps({'schema': 2, 'engine': '0.0.1', 'entry': entry}))
+        (project / 'room.camera.json').write_text(json.dumps(camera_document(), indent=2) + '\n')
         runtime_path = evidence / 'tools/room_escape'
         manifest = {'schema': 1, 'payload': {'profile': 'room-escape-authored-linux-x86_64-v1',
-                    'entry': {'game': 'room-escape-v1', 'scene': 'room.scene.yaml', 'models': 'room.models.json'},
+                    'entry': entry,
                     'runtime': {'sha256': gate.digest(runtime_path), 'bytes': runtime_path.stat().st_size},
                     'initial_checksum': '0x94ab9f06da16ca7f',
-                    'files': [{'path': 'project/orr.project.json', 'bytes': (project / 'orr.project.json').stat().st_size,
-                               'sha256': gate.digest(project / 'orr.project.json')}]}}
+                    'files': [{'path': 'project/' + name, 'role': role, 'mode': 0o644,
+                               'bytes': (project / name).stat().st_size, 'sha256': gate.digest(project / name)}
+                              for name, role in [('orr.project.json', 'project_manifest'), ('room.camera.json', 'camera_sidecar')]]}}
         (evidence / 'export/orr.export.json').write_text(json.dumps(manifest))
         return evidence
 
@@ -194,6 +280,152 @@ class RoomTemplateGateTests(unittest.TestCase):
             evidence = self.make_evidence(Path(directory))
             gate.check_captures(evidence)
             self.assertEqual(len(json.loads((evidence / 'capture-manifest.json').read_text())), 9)
+
+    def test_camera_schema_accepts_both_projections_and_exact_byte_boundary(self):
+        document = camera_document()
+        for projection in [{'type': 'orthographic', 'half_height': 1},
+                           {'type': 'orthographic', 'half_height': 64},
+                           {'type': 'perspective', 'fov_y_degrees': 20},
+                           {'type': 'perspective', 'fov_y_degrees': 100}]:
+            document['projection'] = projection
+            document.update(target=[-64, 0, 64], yaw=3.1415927, pitch=1.4, distance=128)
+            raw = json.dumps(document).encode()
+            self.assertEqual(gate.check_camera(raw), document)
+            padded = raw + b' ' * (4096 - len(raw))
+            self.assertEqual(gate.check_camera(padded), document)
+            with self.assertRaises(AssertionError):
+                gate.check_camera(padded + b' ')
+
+    def test_camera_closure_rejects_invalid_documents_even_with_matching_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.make_evidence(Path(directory))
+            export_path = evidence / 'export/orr.export.json'
+            manifest = json.loads(export_path.read_text())
+            camera_path = evidence / 'export/authored-project/room.camera.json'
+            camera_record = manifest['payload']['files'][1]
+            valid = camera_document()
+            raw = json.dumps(valid)
+            invalids = [b'', b'{', b'[]', b'null', b'true', json.dumps(list(valid.values())).encode(),
+                        raw.encode('utf-16'), raw.encode('utf-32'), b'\xef\xbb\xbf' + raw.encode(),
+                        raw.replace('"schema": 1', '"schema": 1, "schema": 1').encode(),
+                        raw.replace('"half_height": 8.0', '"half_height": 8.0, "half_height": 8.0').encode(),
+                        raw.replace('"yaw": 0.65', '"yaw": NaN').encode(),
+                        raw.replace('"yaw": 0.65', '"yaw": 1e999').encode(),
+                        raw.encode() + b' ' * 4096]
+            for key in valid:
+                changed = copy.deepcopy(valid)
+                del changed[key]
+                invalids.append(json.dumps(changed).encode())
+                changed = copy.deepcopy(valid)
+                changed[key] = None
+                invalids.append(json.dumps(changed).encode())
+            changes = [('schema', True), ('schema', 1.0), ('schema', 2), ('unknown', 0),
+                       ('target', [0, 0]), ('target', [0, 0, 0, 0]), ('target', [True, 0, 0]),
+                       ('target', [65, 0, 0]), ('target', {'x': 0, 'y': 0, 'z': 0}),
+                       ('yaw', '0.65'), ('yaw', False), ('yaw', 3.15), ('pitch', -1.41),
+                       ('distance', 0), ('distance', 129), ('projection', ['orthographic', 8]),
+                       ('projection', {'type': {'orthographic': None}, 'half_height': 8}),
+                       ('projection', {'type': 'Orthographic', 'half_height': 8}),
+                       ('projection', {'type': 'orthographic'}),
+                       ('projection', {'type': 'orthographic', 'half_height': True}),
+                       ('projection', {'type': 'orthographic', 'half_height': 0}),
+                       ('projection', {'type': 'orthographic', 'half_height': 65}),
+                       ('projection', {'type': 'orthographic', 'half_height': 8, 'fov_y_degrees': None}),
+                       ('projection', {'type': 'orthographic', 'half_height': 8, 'extra': 0}),
+                       ('projection', {'type': 'perspective', 'fov_y_degrees': 19}),
+                       ('projection', {'type': 'perspective', 'fov_y_degrees': 101}),
+                       ('projection', {'type': 'perspective', 'fov_y_degrees': 50, 'half_height': 8})]
+            for key, value in changes:
+                changed = copy.deepcopy(valid)
+                changed[key] = value
+                invalids.append(json.dumps(changed).encode())
+            for data in invalids:
+                with self.subTest(camera=data[:100]):
+                    camera_path.write_bytes(data)
+                    camera_record.update(bytes=len(data), sha256=gate.digest(camera_path))
+                    export_path.write_text(json.dumps(manifest))
+                    with self.assertRaises((AssertionError, ValueError, UnicodeDecodeError)):
+                        gate.check_export(evidence, evidence / 'export')
+
+    def test_camera_export_rejects_missing_aliased_duplicate_or_mismatched_closure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.make_evidence(Path(directory))
+            export_path = evidence / 'export/orr.export.json'
+            original = json.loads(export_path.read_text())
+            modifications = [
+                lambda p: p['entry'].pop('camera'), lambda p: p['entry'].update(camera=None),
+                lambda p: p['entry'].update(camera='nested/room.camera.json'),
+                lambda p: p['entry'].update(extra=True), lambda p: p['files'].pop(),
+                lambda p: p['files'].append(copy.deepcopy(p['files'][1])),
+                lambda p: p['files'][1].update(role='model_sidecar'),
+                lambda p: p['files'][1].update(path='project/other.camera.json'),
+                lambda p: p['files'][1].update(path='project/../room.camera.json'),
+                lambda p: p['files'][1].update(path='project/./room.camera.json'),
+                lambda p: p['files'][1].update(path='project//room.camera.json'),
+                lambda p: p['files'][1].update(path='project\\room.camera.json'),
+                lambda p: p['files'][1].update(path='/project/room.camera.json'),
+                lambda p: p['files'][1].update(bytes=True), lambda p: p['files'][1].update(bytes=4097),
+                lambda p: p['files'][1].update(sha256='0' * 64), lambda p: p['files'][1].update(mode=0o755),
+                lambda p: p['files'][0].update(role='camera_sidecar'),
+                lambda p: p['files'][1].update(extra=0),
+            ]
+            for change in modifications:
+                altered = copy.deepcopy(original)
+                change(altered['payload'])
+                export_path.write_text(json.dumps(altered))
+                with self.assertRaises(AssertionError):
+                    gate.check_export(evidence, evidence / 'export')
+            raw = json.dumps(original)
+            for altered in [raw.replace('"camera": "room.camera.json"', '"camera": "room.camera.json", "camera": "room.camera.json"'),
+                            raw.replace('"role": "camera_sidecar"', '"role": "model_sidecar", "role": "camera_sidecar"')]:
+                export_path.write_text(altered)
+                with self.assertRaises(AssertionError):
+                    gate.check_export(evidence, evidence / 'export')
+            export_path.write_text(raw)
+            camera_path = evidence / 'export/authored-project/room.camera.json'
+            original_bytes = camera_path.read_bytes()
+            camera_path.write_bytes(original_bytes.replace(b'0.65', b'0.75'))
+            with self.assertRaises(AssertionError):
+                gate.check_export(evidence, evidence / 'export')
+            camera_path.unlink()
+            with self.assertRaises(AssertionError):
+                gate.check_export(evidence, evidence / 'export')
+            other = evidence / 'outside.camera.json'
+            other.write_bytes(original_bytes)
+            camera_path.symlink_to(other)
+            with self.assertRaises(AssertionError):
+                gate.check_export(evidence, evidence / 'export')
+            camera_path.unlink()
+            camera_path.mkdir()
+            with self.assertRaises(AssertionError):
+                gate.check_export(evidence, evidence / 'export')
+
+    def test_export_helper_supports_separate_directory_and_explicit_legacy_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.make_evidence(Path(directory))
+            export = evidence / 'camera-export'
+            (evidence / 'export').rename(export)
+            gate.check_export(evidence, export)
+            with self.assertRaises(AssertionError):
+                gate.check_export(evidence, export, require_camera=False)
+            manifest_path = export / 'orr.export.json'
+            manifest = json.loads(manifest_path.read_text())
+            project_path = export / 'authored-project/orr.project.json'
+            project = json.loads(project_path.read_text())
+            del project['entry']['camera']
+            project_path.write_text(json.dumps(project))
+            record = manifest['payload']['files'][0]
+            record.update(bytes=project_path.stat().st_size, sha256=gate.digest(project_path))
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaises(AssertionError):
+                gate.check_export(evidence, export)
+            del manifest['payload']['entry']['camera']
+            manifest['payload']['files'].pop()
+            manifest_path.write_text(json.dumps(manifest))
+            (export / 'authored-project/room.camera.json').unlink()
+            gate.check_export(evidence, export, require_camera=False)
+            with self.assertRaises(AssertionError):
+                gate.check_export(evidence, export)
 
     def test_capture_checker_rejects_parity_blank_dimensions_and_model_controls(self):
         with tempfile.TemporaryDirectory() as directory:

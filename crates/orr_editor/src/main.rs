@@ -123,7 +123,11 @@ fn main() {
                 orr_editor::project::install_collect_presentation(&mut app, project, &cc.egui_ctx);
             }
             #[cfg(feature="room-project")]
-            if let Some(project)=room_project {
+            if let Some(mut project)=room_project {
+                if let Some(camera)=project.take_camera() {
+                    app.editor.install_room_camera(camera.document.clone()).unwrap_or_else(|error|fail(&error));
+                    app.room_camera=Some(orr_editor::room_camera_panel::Panel::new(camera));
+                }
                 let (_,_,_,models)=project.into_parts();
                 app.models.install_room(models).unwrap_or_else(|error|fail(&format!("room presentation: {error}")));
             }

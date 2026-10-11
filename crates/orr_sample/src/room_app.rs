@@ -165,7 +165,10 @@ pub fn headless(
             FrameView::of(sim.frame()),
             project.scene().index(),
             project.models(),
-            &room_view::camera(size),
+            &match project.camera() {
+                Some(camera) => camera.document.camera(&camera.document.orbit(), size)?,
+                None => room_view::camera(size),
+            },
         )?;
         let rgba = renderer.read_rgba8();
         if rgba.len() != (size.0 * size.1 * 4) as usize {
@@ -268,6 +271,11 @@ impl App {
     }
     fn restart(&mut self) -> Result<(), String> {
         self.sim = self.project.scene().simulation()?;
+        if let Some(camera) = self.project.camera() {
+            self.orbit = camera.document.orbit();
+            self.drag = None;
+            self.cursor = None;
+        }
         self.keys.clear();
         self.accumulated = Duration::ZERO;
         self.last = Instant::now();
@@ -303,7 +311,10 @@ impl App {
                 FrameView::of(self.sim.frame()),
                 self.project.scene().index(),
                 self.project.models(),
-                &self.orbit.camera(),
+                &match self.project.camera() {
+                    Some(camera) => camera.document.camera(&self.orbit, g.size)?,
+                    None => self.orbit.camera(),
+                },
                 orr_render::ImportedSceneTarget {
                     view,
                     size: g.size,
@@ -440,10 +451,21 @@ impl ApplicationHandler for App {
                 if let Some(previous) = self.cursor {
                     let delta = [next[0] - previous[0], next[1] - previous[1]];
                     match self.drag {
-                        Some(MouseButton::Left) => self.orbit.orbit(delta),
-                        Some(MouseButton::Middle | MouseButton::Right) => self
-                            .orbit
-                            .pan(delta, self.graphics.as_ref().map_or((1, 1), |g| g.size)),
+                        Some(MouseButton::Left) => {
+                            if let Some(camera) = self.project.camera() {
+                                camera.document.orbit_delta(&mut self.orbit, delta);
+                            } else {
+                                self.orbit.orbit(delta);
+                            }
+                        }
+                        Some(MouseButton::Middle | MouseButton::Right) => {
+                            let size = self.graphics.as_ref().map_or((1, 1), |g| g.size);
+                            if let Some(camera) = self.project.camera() {
+                                camera.document.pan(&mut self.orbit, delta, size);
+                            } else {
+                                self.orbit.pan(delta, size);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -456,10 +478,17 @@ impl ApplicationHandler for App {
                     None
                 };
             }
-            WindowEvent::MouseWheel { delta, .. } if self.focused => self.orbit.zoom(match delta {
-                MouseScrollDelta::LineDelta(_, y) => y,
-                MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
-            }),
+            WindowEvent::MouseWheel { delta, .. } if self.focused => {
+                let steps = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                if let Some(camera) = self.project.camera() {
+                    camera.document.zoom(&mut self.orbit, steps);
+                } else {
+                    self.orbit.zoom(steps);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.draw() {
                     self.fail(event_loop, e);
@@ -486,6 +515,10 @@ impl ApplicationHandler for App {
 }
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
     let sim = project.scene().simulation()?;
+    let orbit = project.camera().map_or_else(
+        || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
+        |camera| camera.document.orbit(),
+    );
     let mut app = App {
         project,
         sim,
@@ -494,7 +527,7 @@ pub fn run_window(project: PreparedProject) -> Result<(), String> {
         focused: false,
         last: Instant::now(),
         accumulated: Duration::ZERO,
-        orbit: OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
+        orbit,
         drag: None,
         cursor: None,
         error: None,

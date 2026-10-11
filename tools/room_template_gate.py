@@ -2,6 +2,7 @@
 """Strict evidence checks for the bounded generated Room acceptance lanes."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,92 @@ FORBIDDEN = re.compile(
     r'SKIP:|negative skipped|without capture|direct relocated execution used|'
     r'source-hiding acceptance not requested|without source hiding|source_hiding=false|'
     r'software GPU unavailable|\bskipping\b', re.I)
+
+
+def load_json(text):
+    """Keep duplicate keys and non-JSON constants observable at every depth."""
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            assert key not in result, ('duplicate JSON field', key)
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise AssertionError(('non-JSON number', value))
+
+    return json.loads(text, object_pairs_hook=object_pairs, parse_constant=invalid_constant)
+
+
+def fields(value, required, optional=()):
+    assert type(value) is dict, 'expected JSON object'
+    assert set(required) <= value.keys() <= set(required) | set(optional), ('JSON fields', value.keys())
+
+
+def strings(value):
+    return type(value) is list and all(type(item) is str for item in value)
+
+
+def cargo_target(target):
+    fields(target, ('kind', 'crate_types', 'name', 'src_path', 'edition', 'doc', 'doctest', 'test'),
+           ('required-features',))
+    for key in ('kind', 'crate_types'):
+        assert strings(target[key]) and target[key], ('target', key)
+    for key in ('name', 'src_path', 'edition'):
+        assert type(target[key]) is str and target[key], ('target', key)
+    assert Path(target['src_path']).is_absolute(), 'relative target source'
+    for key in ('doc', 'doctest', 'test'):
+        assert type(target[key]) is bool, ('target', key)
+    if 'required-features' in target:
+        assert strings(target['required-features']), 'target required-features'
+
+
+def check_cargo_rows(rows):
+    """Validate all supported Cargo records, including unrelated dependencies."""
+    assert type(rows) is list and rows, 'empty Cargo JSON stream'
+    for row in rows:
+        assert type(row) is dict and type(row.get('reason')) is str, 'malformed Cargo record'
+        reason = row['reason']
+        if reason == 'build-finished':
+            fields(row, ('reason', 'success'))
+            assert type(row['success']) is bool, 'build success must be boolean'
+        elif reason == 'build-script-executed':
+            fields(row, ('reason', 'package_id', 'linked_libs', 'linked_paths', 'cfgs', 'env', 'out_dir'))
+            for key in ('linked_libs', 'linked_paths', 'cfgs'):
+                assert strings(row[key]), ('build script', key)
+            assert type(row['env']) is list and all(strings(pair) and len(pair) == 2 for pair in row['env']), 'build script env'
+            assert type(row['out_dir']) is str and Path(row['out_dir']).is_absolute(), 'build script out_dir'
+        elif reason in ('compiler-artifact', 'compiler-message'):
+            common = ('reason', 'package_id', 'manifest_path', 'target')
+            extra = ('profile', 'features', 'filenames', 'executable', 'fresh') if reason == 'compiler-artifact' else ('message',)
+            fields(row, common + extra)
+            assert type(row['manifest_path']) is str and Path(row['manifest_path']).is_absolute(), 'artifact manifest path'
+            cargo_target(row['target'])
+            if reason == 'compiler-message':
+                message = row['message']
+                fields(message, ('message', 'code', 'level', 'spans', 'children'), ('rendered', '$message_type'))
+                assert type(message['message']) is str and type(message['level']) is str, 'compiler diagnostic'
+                assert type(message['spans']) is list and type(message['children']) is list, 'compiler diagnostic details'
+                assert message['code'] is None or type(message['code']) is dict, 'compiler diagnostic code'
+                assert message.get('rendered') is None or type(message['rendered']) is str, 'rendered diagnostic'
+            else:
+                profile = row['profile']
+                fields(profile, ('opt_level', 'debuginfo', 'debug_assertions', 'overflow_checks', 'test'))
+                assert type(profile['opt_level']) is str, 'profile optimization level'
+                debug = profile['debuginfo']
+                assert (debug is None or type(debug) is int and debug in (0, 1, 2)
+                        or type(debug) is str and debug in ('line-directives-only', 'line-tables-only')), 'profile debuginfo'
+                for key in ('debug_assertions', 'overflow_checks', 'test'):
+                    assert type(profile[key]) is bool, ('profile', key)
+                assert strings(row['features']) and len(set(row['features'])) == len(row['features']), 'artifact features'
+                assert strings(row['filenames']) and all(Path(path).is_absolute() for path in row['filenames']), 'artifact filenames'
+                assert row['executable'] is None or type(row['executable']) is str and Path(row['executable']).is_absolute(), 'artifact executable'
+                assert type(row['fresh']) is bool, 'artifact fresh'
+        else:
+            raise AssertionError(('unknown Cargo record', reason))
+        if reason != 'build-finished':
+            assert type(row['package_id']) is str and row['package_id'], 'Cargo package id'
+    assert rows[-1]['reason'] == 'build-finished', 'records after build-finished'
 
 
 def digest(path):
@@ -47,6 +134,7 @@ def check_log(expected, mode, text):
 
 
 def check_artifacts(rows, repo):
+    check_cargo_rows(rows)
     manifest = (repo / 'crates/orr_sample/Cargo.toml').resolve()
     finished = [row for row in rows if row.get('reason') == 'build-finished']
     assert len(finished) == 1 and finished[0].get('success') is True, 'build did not finish successfully'
@@ -64,7 +152,8 @@ def check_artifacts(rows, repo):
         package, _, version = row['package_id'].rpartition('#')
         assert package == 'path+' + manifest.parent.as_uri() and version in ('0.0.1', 'orr_sample@0.0.1'), row['package_id']
         source = Path(row['executable'])
-        assert source.is_absolute() and source.is_file() and os.access(source, os.X_OK), source
+        assert str(source) in row['filenames'], 'executable missing from artifact filenames'
+        assert source.is_absolute() and not source.is_symlink() and source.is_file() and os.access(source, os.X_OK), source
         selected.append(row)
     assert len({row['executable'] for row in selected}) == 3, 'tools alias one executable'
     assert len({(Path(row['executable']).stat().st_dev, Path(row['executable']).stat().st_ino) for row in selected}) == 3, 'tools alias one inode'
@@ -72,7 +161,7 @@ def check_artifacts(rows, repo):
 
 
 def pin_tools(evidence, repo):
-    rows = [json.loads(line) for line in (evidence / 'production-tools.jsonl').read_text().splitlines() if line.strip()]
+    rows = [load_json(line) for line in (evidence / 'production-tools.jsonl').read_text().splitlines() if line.strip()]
     selected = check_artifacts(rows, repo)
     copies = evidence / 'tools'
     copies.mkdir()
@@ -94,7 +183,7 @@ def pin_tools(evidence, repo):
 
 
 def verify_tools(evidence):
-    records = json.loads((evidence / 'production-tools-artifacts.json').read_text())
+    records = load_json((evidence / 'production-tools-artifacts.json').read_text())
     assert sorted(item['name'] for item in records) == sorted(TOOLS)
     for item in records:
         path = Path(item['copy'])
@@ -167,6 +256,103 @@ def different_pixels(a, b):
     return sum(a[2][i:i + 4] != b[2][i:i + 4] for i in range(0, len(a[2]), 4))
 
 
+def check_camera(data):
+    """Validate the persisted schema-1 sidecar, using the authored f32 bounds."""
+    assert 0 < len(data) <= 4096, 'camera byte limit'
+    document = load_json(data.decode('utf-8'))
+    fields(document, ('schema', 'target', 'yaw', 'pitch', 'distance', 'projection'))
+    assert type(document['schema']) is int and document['schema'] == 1, 'camera schema'
+
+    def bounded(value, low, high):
+        assert type(value) in (int, float), 'camera number'
+        # Rust reads these JSON numbers directly into f32 before validation.
+        def f32(number):
+            try:
+                return struct.unpack('f', struct.pack('f', number))[0]
+            except (OverflowError, struct.error):
+                raise AssertionError('camera number exceeds f32') from None
+        value = f32(value)
+        assert math.isfinite(value) and f32(low) <= value <= f32(high), 'camera bounds'
+
+    assert type(document['target']) is list and len(document['target']) == 3, 'camera target'
+    for value in document['target']:
+        bounded(value, -64, 64)
+    bounded(document['yaw'], -math.pi, math.pi)
+    bounded(document['pitch'], -1.4, 1.4)
+    bounded(document['distance'], 1, 128)
+    projection = document['projection']
+    assert type(projection) is dict and type(projection.get('type')) is str, 'camera projection object/tag'
+    if projection['type'] == 'orthographic':
+        fields(projection, ('type', 'half_height'))
+        bounded(projection['half_height'], 1, 64)
+    else:
+        assert projection['type'] == 'perspective', 'camera projection type'
+        fields(projection, ('type', 'fov_y_degrees'))
+        bounded(projection['fov_y_degrees'], 20, 100)
+    return document
+
+
+def check_export(evidence, directory, require_camera=True):
+    """Check saved export/source closure independently of capture layout."""
+    records = verify_tools(evidence)
+    export = load_json((directory / 'orr.export.json').read_text())
+    assert type(export) is dict and type(export['schema']) is int and export['schema'] == 1
+    payload = export['payload']
+    assert payload['profile'] == 'room-escape-authored-linux-x86_64-v1'
+    entry = {'game': 'room-escape-v1', 'scene': 'room.scene.yaml', 'models': 'room.models.json'}
+    if require_camera:
+        entry['camera'] = 'room.camera.json'
+    assert payload['entry'] == entry, 'export entry'
+    runtime_record = next(item for item in records if item['name'] == 'room_escape')
+    fields(payload['runtime'], ('sha256', 'bytes'))
+    assert payload['runtime']['sha256'] == runtime_record['sha256'], 'exported runtime differs from pinned binary'
+    assert type(payload['runtime']['bytes']) is int and payload['runtime']['bytes'] == Path(runtime_record['copy']).stat().st_size
+    assert type(payload['initial_checksum']) is str and re.fullmatch(r'0x[0-9a-f]{16}', payload['initial_checksum'])
+    files = payload['files']
+    assert type(files) is list and files, 'export files'
+    for item in files:
+        fields(item, ('path', 'role', 'mode', 'bytes', 'sha256'))
+        assert type(item['path']) is str and item['path'], 'export path'
+        relative = Path(item['path'])
+        assert (not relative.is_absolute() and '\\' not in item['path']
+                and all(part not in ('', '.', '..') for part in item['path'].split('/'))), 'export path traversal/alias'
+        assert type(item['role']) is str and item['role'], 'export file role'
+        assert type(item['mode']) is int and item['mode'] in (0o644, 0o755), 'export file mode'
+        assert type(item['bytes']) is int and item['bytes'] >= 0, 'export file bytes'
+        assert type(item['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', item['sha256']), 'export file digest'
+        if item['path'] == 'project/room.camera.json' or item['role'] == 'camera_sidecar':
+            assert 0 < item['bytes'] <= 4096, 'camera byte limit'
+    assert len({item['path'] for item in files}) == len(files), 'duplicate export path'
+    project = directory / 'authored-project'
+    assert not project.is_symlink() and project.is_dir(), 'saved authored project'
+    for item in files:
+        if item['path'].startswith('project/'):
+            relative = Path(item['path']).relative_to('project')
+            path = project / relative
+            assert all(not (project / Path(*relative.parts[:n])).is_symlink()
+                       for n in range(1, len(relative.parts) + 1)), 'symlink in saved source'
+            assert path.is_file() and path.stat().st_size == item['bytes'] and digest(path) == item['sha256'], relative
+    manifest_records = [item for item in files if item['path'] == 'project/orr.project.json' or item['role'] == 'project_manifest']
+    assert len(manifest_records) == 1 and manifest_records[0]['path'] == 'project/orr.project.json' and manifest_records[0]['role'] == 'project_manifest', 'project manifest record'
+    project_manifest = load_json((project / 'orr.project.json').read_text())
+    assert type(project_manifest['schema']) is int and project_manifest['schema'] == 2, 'saved project schema'
+    assert project_manifest['entry'] == entry, 'saved project entry differs from export'
+    camera_records = [item for item in files if item['path'] == 'project/room.camera.json' or item['role'] == 'camera_sidecar']
+    if require_camera:
+        assert len(camera_records) == 1, 'missing/duplicate camera sidecar record'
+        camera_record = camera_records[0]
+        assert camera_record['path'] == 'project/room.camera.json' and camera_record['role'] == 'camera_sidecar', 'camera path/role'
+        assert 0 < camera_record['bytes'] <= 4096 and camera_record['mode'] == 0o644, 'camera byte limit/mode'
+        camera_path = project / 'room.camera.json'
+        with camera_path.open('rb') as stream:
+            data = stream.read(4097)
+        assert len(data) == camera_record['bytes'] and hashlib.sha256(data).hexdigest() == camera_record['sha256'], 'saved camera bytes'
+        check_camera(data)
+    else:
+        assert not camera_records, 'unexpected legacy camera sidecar'
+    return export
+
+
 def check_captures(evidence):
     runtime = evidence / 'export/captures'
     editor = evidence / 'captures/editor'
@@ -183,24 +369,7 @@ def check_captures(evidence):
     assert different_pixels(frames['initial-source.png'], frames['no-models.png']) > 20, 'runtime model negative control'
     a, b = (read_png(editor / name) for name in ('room-editor-bound.png', 'room-editor-models-offscreen.png'))
     assert different_pixels(a, b) > 20, 'editor model negative control'
-    records = verify_tools(evidence)
-    export = json.loads((evidence / 'export/orr.export.json').read_text())
-    assert export['schema'] == 1
-    payload = export['payload']
-    assert payload['profile'] == 'room-escape-authored-linux-x86_64-v1'
-    assert payload['entry'] == {'game': 'room-escape-v1', 'scene': 'room.scene.yaml', 'models': 'room.models.json'}
-    runtime_record = next(item for item in records if item['name'] == 'room_escape')
-    assert payload['runtime']['sha256'] == runtime_record['sha256'], 'exported runtime differs from pinned binary'
-    assert payload['runtime']['bytes'] == Path(runtime_record['copy']).stat().st_size
-    assert re.fullmatch(r'0x[0-9a-f]{16}', payload['initial_checksum'])
-    files = payload['files']
-    assert len({item['path'] for item in files}) == len(files)
-    for item in files:
-        if item['path'].startswith('project/'):
-            relative = Path(item['path']).relative_to('project')
-            assert '..' not in relative.parts
-            path = evidence / 'export/authored-project' / relative
-            assert path.is_file() and path.stat().st_size == item['bytes'] and digest(path) == item['sha256'], relative
+    check_export(evidence, evidence / 'export')
     decoded = {runtime / name: frame for name, frame in frames.items()}
     decoded.update({editor / 'room-editor-bound.png': a, editor / 'room-editor-models-offscreen.png': b})
     entries = [{'path': str(path.relative_to(evidence)), 'width': frame[0], 'height': frame[1], 'sha256': digest(path)}

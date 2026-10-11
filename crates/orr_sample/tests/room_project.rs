@@ -520,3 +520,45 @@ fn admission_rejects_reused_model_aggregate_draw_budget_before_export_smoke() {
     // admission alone misses 4096 imported draws plus procedural reservations.
     assert_presentation_rejected_before_export(&fixture, "draw limit");
 }
+
+#[test]
+fn authored_camera_is_owned_presentation_without_simulation_changes() {
+    let f=Fixture::new();
+    let legacy=PreparedProject::open(&f.root).unwrap();
+    assert!(legacy.camera().is_none());
+    let checksum=legacy.scene().frame().checksum();
+    let doc=orr_sample::room_camera::Document::readable_default();
+    fs::write(f.root.join("room.camera.json"),doc.to_bytes().unwrap()).unwrap();
+    f.json("orr.project.json",|m|m["entry"]["camera"]="room.camera.json".into());
+    let authored=PreparedProject::open(&f.root).unwrap();
+    assert_eq!(authored.scene().frame().checksum(),checksum);
+    let camera=authored.camera().unwrap();
+    assert_eq!(camera.document,doc);
+    assert_eq!(camera.bytes,doc.to_bytes().unwrap());
+    fs::remove_dir_all(&f.root).unwrap();
+    assert_eq!(authored.scene().frame().checksum(),checksum);
+    assert_eq!(camera.document.camera(&doc.orbit(),(1024,768)).unwrap(),doc.camera(&doc.orbit(),(1024,768)).unwrap());
+}
+
+#[test]
+fn authored_camera_routes_paths_and_documents_fail_closed() {
+    for value in [serde_json::Value::Null,serde_json::json!("../camera.json"),serde_json::json!("/camera.json"),serde_json::json!("nested/camera.json"),serde_json::json!("room.scene.yaml"),serde_json::json!("ROOM.MODELS.JSON"),serde_json::json!("orr.project.json"),serde_json::json!("orr.packages.lock.json"),serde_json::json!(".orr") ] {
+        let f=Fixture::new(); f.json("orr.project.json",|m|m["entry"]["camera"]=value); f.rejected();
+    }
+    for bytes in [b"null".as_slice(),b"{}".as_slice(),&vec![b' ';4097]] {
+        let f=Fixture::new(); fs::write(f.root.join("room.camera.json"),bytes).unwrap();
+        f.json("orr.project.json",|m|m["entry"]["camera"]="room.camera.json".into()); f.rejected();
+    }
+    for game in ["arena","collect-dodge-v1"] {
+        let f=Fixture::new(); f.json("orr.project.json",|m| {m["entry"]["game"]=game.into();m["entry"]["camera"]="camera.json".into();m["entry"].as_object_mut().unwrap().remove("models");});
+        assert!(Project::open(&f.root,Runtime::content_only()).is_err());
+    }
+}
+#[cfg(unix)]
+#[test]
+fn camera_admission_rejects_nonregular_and_symlink_documents() {
+    let f=Fixture::new(); f.json("orr.project.json",|m|m["entry"]["camera"]="camera.json".into());
+    fs::create_dir(f.root.join("camera.json")).unwrap();f.rejected();fs::remove_dir(f.root.join("camera.json")).unwrap();
+    fs::write(f.root.join("other.json"),orr_sample::room_camera::Document::readable_default().to_bytes().unwrap()).unwrap();
+    std::os::unix::fs::symlink(f.root.join("other.json"),f.root.join("camera.json")).unwrap();f.rejected();
+}
