@@ -856,6 +856,17 @@ impl ModelPanel {
             }
         });
         let current = !self.material_draft_requires_reload && self.material_draft_is_current(editor, &draft);
+        // Investigation-only opt-in trace: observe fences without changing them.
+        let trace = std::env::var("ORR_MATERIAL_RELOAD_TRACE").as_deref() == Ok("1");
+        if trace {
+            let pointer = ui.input(|i| (i.focused, i.pointer.hover_pos(), i.pointer.any_down()));
+            let focus = ui.memory(|m| m.focused());
+            eprintln!("material-fence thread={:?} pass={} current={current} history_ready={history_ready} editable={} reload_required={} authoring_equal={} sidecar_equal={} checksum_equal={} entity_equal={} pointer={pointer:?} focus={focus:?}",
+                std::thread::current().id(), ui.ctx().cumulative_pass_nr(), self.editable(editor), self.material_draft_requires_reload,
+                Arc::ptr_eq(&editor.material_authoring_generation(), &draft.authoring_generation),
+                self.bindings.as_ref().is_some_and(|b| Arc::ptr_eq(&b.generation_token(), &draft.generation)),
+                editor.checksum() == draft.scene_checksum, row.entity == draft.entity);
+        }
         if !history_ready { ui.weak("Waiting for scene history"); }
         else if !current { ui.colored_label(egui::Color32::YELLOW, "Draft is stale. Reload it before applying"); }
         let mut action_attempted = false;
@@ -874,7 +885,18 @@ impl ModelPanel {
         });
         if action_attempted && self.material_draft.is_none() { return; }
         let mut reloaded = false;
-        if !current && ui.add_enabled(history_ready, egui::Button::new("Reload material draft")).clicked() {
+        if !current && {
+            let response = ui.add_enabled(history_ready, egui::Button::new("Reload material draft"));
+            if trace {
+                eprintln!("material-reload-response thread={:?} pass={} id={:?} rect={:?} interact_rect={:?} layer={:?} layer_at_center={:?} enabled={} hovered={} contains_pointer={} down_on={} focused={} clicked={}",
+                    std::thread::current().id(), ui.ctx().cumulative_pass_nr(), response.id, response.rect, response.interact_rect,
+                    response.layer_id, ui.ctx().layer_id_at(response.rect.center()), response.enabled(),
+                    response.hovered(), response.contains_pointer(), response.is_pointer_button_down_on(),
+                    response.has_focus(), response.clicked());
+            }
+            response.clicked()
+        } {
+            if trace { eprintln!("material-reload-entered thread={:?} pass={}", std::thread::current().id(), ui.ctx().cumulative_pass_nr()); }
             match self.reload(editor) {
                 Ok(()) => {
                     self.material_draft = None;
@@ -882,6 +904,8 @@ impl ModelPanel {
                     if let Err(error) = self.begin_material_draft(editor, guid.clone(), row.entity) {
                         self.error = Some(error);
                     }
+                    if trace { eprintln!("material-reload-completed thread={:?} pass={} draft_present={} error_present={}",
+                        std::thread::current().id(), ui.ctx().cumulative_pass_nr(), self.material_draft.is_some(), self.error.is_some()); }
                     reloaded = true;
                 }
                 Err(error) => self.error = Some(error),
