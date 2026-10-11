@@ -364,6 +364,9 @@ impl Panel {
                             })();
                             self.error = result.err();
                         }
+                        if ui.button("Detach instance").on_hover_text("Keep these actors and all current values as independent scene entities. Remove only this source link; the source file stays untouched. Undo restores the link.").clicked() {
+                            self.error = self.mutate(editor, "prefab.detach", json!({"instance":id})).err();
+                        }
                         if let Some(guids) = instance["guids"].as_object() {
                             for (source_guid, target) in guids {
                                 ui.push_id(source_guid, |ui| {

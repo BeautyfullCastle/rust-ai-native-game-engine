@@ -53,3 +53,39 @@ fn unsupported_host_advertises_only_legacy_schema_under_feature_unification() {
     );
     assert!(actual["schema"]["properties"].get("prefabs").is_none());
 }
+
+#[test]
+fn disabled_detach_is_not_discovered_or_callable_and_preserves_legacy_scene() {
+    use orr_remote::{call_local, Caps, ErpTarget, HostLimits};
+    use serde_json::json;
+    let initial = include_str!("../../../scenes/collect_dodge_v1.scene.yaml");
+    let mut doc = orr_remote::collect_dodge::document(initial).unwrap();
+    let frame = doc.frame().to_bytes();
+    let revision = doc.revision();
+    let mut limits = HostLimits::default();
+    orr_remote::collect_dodge::configure(&mut limits, None);
+    let mut play: Option<orr_edit::PlayController<CollectDodgeV1>> = None;
+    let mut target = ErpTarget { doc: &mut doc, play: &mut play };
+    let discovery = call_local(&mut target, &limits, "boundary-test", Caps::ALL, "rpc.discover", &json!({})).unwrap();
+    assert!(discovery["methods"].as_array().unwrap().iter().all(|method| !method["name"].as_str().unwrap().starts_with("prefab.")));
+    let error = call_local(&mut target, &limits, "boundary-test", Caps::ALL, "prefab.detach", &json!({"instance":"e_00000002","expected_revision":revision})).unwrap_err();
+    assert_eq!(error.code, orr_remote::METHOD_NOT_FOUND);
+    assert_eq!(doc.to_yaml(), initial);
+    assert_eq!(doc.frame().to_bytes(), frame);
+    assert_eq!(doc.revision(), revision);
+    assert!(doc.history().is_empty());
+    assert!(!doc.is_dirty());
+    assert!(!doc.can_redo());
+    if let Some(path) = std::env::var_os("ORR_DETACHED_SCENE") {
+        let path = std::path::PathBuf::from(path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("schema: orr.scene/1"));
+        assert!(text.contains("position: [7, 8]"));
+        assert!(!text.contains("prefabs:"));
+        let expected: u64 = std::fs::read_to_string(path.with_extension("checksum")).unwrap().parse().unwrap();
+        let detached = orr_remote::collect_dodge::document(&text).unwrap();
+        assert_eq!(detached.to_yaml(), text);
+        assert_eq!(detached.checksum(), expected);
+        assert_eq!(collect_project::PreparedScene::parse(&text).unwrap().frame().checksum(), expected);
+    }
+}

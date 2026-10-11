@@ -228,7 +228,7 @@ pub(crate) fn call<G: Game>(
         "registry.input" => input.map(|i| i.descriptor.clone()).ok_or_else(input_unavailable),
         "registry.types" => Ok(registry_types(t)),
         #[cfg(feature = "linked-prefabs")]
-        "prefab.list" | "prefab.capture" | "prefab.instantiate" | "prefab.position" | "prefab.revert" | "prefab.update" => linked_prefab_call(t, &p, method, origin),
+        "prefab.list" | "prefab.capture" | "prefab.instantiate" | "prefab.position" | "prefab.revert" | "prefab.update" | "prefab.detach" => linked_prefab_call(t, &p, method, origin),
         "world.query" => world_query(t, &p),
         "world.get" => world_get(t, &p),
         "world.singleton.get" => singleton_get(t, &p),
@@ -1226,6 +1226,7 @@ fn linked_prefab_call<G: Game>(t: &mut ErpTarget<'_,G>, p: &P<'_>, method: &str,
         "prefab.instantiate" => &["source","text","expected_revision"],
         "prefab.position" => &["instance","source_guid","value","expected_revision"],
         "prefab.revert" => &["instance","source_guid","expected_revision"],
+        "prefab.detach" => &["instance","expected_revision"],
         "prefab.update" => &["instance","source","digest","text","expected_revision"],
         _ => unreachable!(),
     };
@@ -1244,6 +1245,7 @@ fn linked_prefab_call<G: Game>(t: &mut ErpTarget<'_,G>, p: &P<'_>, method: &str,
     } else {
         let instance = Guid::parse(p.str("instance")?).map_err(RpcError::params)?;
         match method {
+            "prefab.detach" => t.doc.detach_linked_collect(&instance,origin)?,
             "prefab.update" => t.doc.update_linked_collect(&instance,p.str("source")?,p.str("digest")?,p.str("text")?,origin)?,
             _ => {
                 let source = Guid::parse(p.str("source_guid")?).map_err(RpcError::params)?;
