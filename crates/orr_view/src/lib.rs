@@ -49,3 +49,7 @@ pub use extract3::{fp_to_quat, fp_to_transform3, fp_to_vec3, Extracted3, Extract
 pub use math3::{Quat, Transform3, Vec3};
 pub use world::{RenderItem, ViewConfig, ViewLifecycle, ViewWorld};
 pub use world3::{RenderItem3, ViewWorld3};
+
+
+#[cfg(feature = "particles")]
+pub mod particles;

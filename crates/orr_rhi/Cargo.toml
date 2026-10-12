@@ -13,6 +13,8 @@ workspace = true
 # Native determinism jobs keep the RHI library and other default targets.
 [features]
 gpu-tests = []
+# Optional straight-alpha-weighted additive presentation blend.
+additive-blend = []
 
 [[test]]
 name = "hdr_texture"

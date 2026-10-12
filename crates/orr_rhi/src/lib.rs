@@ -335,6 +335,9 @@ pub enum Blend {
     Opaque,
     /// Straight alpha over.
     Alpha,
+    /// RGB = source.rgb * source.a + destination.rgb; retain destination alpha.
+    #[cfg(feature = "additive-blend")]
+    Additive,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
