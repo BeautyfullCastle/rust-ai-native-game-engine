@@ -3581,6 +3581,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_terrain_demo"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_render",
+ "orr_terrain",
+ "orr_terrain_view",
+ "orr_view",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "winit",
+]
+
+[[package]]
 name = "orr_terrain_physics3d"
 version = "0.0.1"
 dependencies = [
