@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Explicit optional pickup/preset preview; Arena default is unchanged.
+particle-demo = ["orr_games/collect-dodge", "orr_render/imported-scene", "orr_render/particles"]
 room-project = ["project", "orr_games/room-escape", "dep:orr_model", "dep:orr_model_bindings", "orr_render/imported-scene"]
 # Explicit Linux authoring transaction; does not execute the exporter or runtime.
 image-reimport = ["project-export", "collect-sprites", "dep:semver"]
@@ -142,4 +144,10 @@ test = false
 name = "orr_export_room"
 path = "src/bin/orr_export_room.rs"
 required-features = ["room-project", "project-export"]
+test = false
+
+[[bin]]
+name = "particle_demo"
+path = "src/bin/particle_demo.rs"
+required-features = ["particle-demo"]
 test = false
