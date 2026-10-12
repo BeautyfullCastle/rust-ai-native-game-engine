@@ -378,6 +378,23 @@ def producer_messages(name, stdout):
     return rows, {'counts': counts, 'verbose_build_script_sha256': verbose_digest.hexdigest()}
 
 
+def test_profile_matches(entry, row):
+    # Cargo's profile.test includes harness=false benches: these use --cfg test
+    # rather than --test. Admit that distinction only for an explicit manifest
+    # bench with the same name/source; target.test is not a harness flag.
+    if entry['test']:
+        return row['profile']['test'] is True
+    if 'test' not in options(entry['tokens'], '--cfg'):
+        return row['profile']['test'] is False
+    if row['profile']['test'] is not True or row['target']['kind'] != ['bench']:
+        return False
+    manifest = Path(row['manifest_path'])
+    targets = [target for target in tomllib.loads(manifest.read_text()).get('bench', [])
+               if target.get('name') == row['target']['name']]
+    return len(targets) == 1 and targets[0].get('harness') is False and str((manifest.parent / targets[0].get(
+        'path', f'benches/{row["target"]["name"]}.rs')).resolve()) == entry['source']
+
+
 def audit_producer(name, stdout, stderr, root, package, features, action):
     rows, stream_summary = producer_messages(name, stdout)
     require([row for row in rows if row.get('reason') == 'build-finished'] ==
@@ -396,7 +413,7 @@ def audit_producer(name, stdout, stderr, root, package, features, action):
         matches = [entry for entry in invocations if entry['manifest'] == str(manifest)
                    and entry['source'] == str(Path(row['target']['src_path']).resolve())
                    and entry['crate'] == row['target']['name'].replace('-', '_')
-                   and entry['test'] == row['profile']['test']
+                   and test_profile_matches(entry, row)
                    and entry['features'] == sorted(row['features'])]
         require(matches, f'{name}: no exact verbose source/test/feature identity for {row["target"]["name"]}')
         externs = []
@@ -419,7 +436,7 @@ def audit_producer(name, stdout, stderr, root, package, features, action):
         require(row['profile'] == expected, f'{name}: exact release profile changed: {row["profile"]}')
         matching = [entry for entry in invocations if entry['manifest'] == str(Path(row['manifest_path']).resolve())
                     and entry['source'] == str(Path(row['target']['src_path']).resolve())
-                    and entry['test'] == row['profile']['test'] and entry['features'] == sorted(row['features'])]
+                    and test_profile_matches(entry, row) and entry['features'] == sorted(row['features'])]
         require(all({'opt-level=3', 'codegen-units=1', 'debuginfo=1'} <= set(options(entry['tokens'], '-C'))
                     for entry in matching), f'{name}: selected verbose release flags differ')
         if row.get('executable'):
