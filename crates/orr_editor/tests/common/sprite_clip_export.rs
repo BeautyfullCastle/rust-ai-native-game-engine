@@ -543,7 +543,7 @@ fn assert_capture(output: &ChildResult, path: &Path, oracle: &Expected) -> Captu
     let info = reader.next_frame(&mut rgba).unwrap();
     rgba.truncate(info.buffer_size());
     assert_eq!(rgba.len(), 512 * 512 * 4);
-    assert!(rgba.chunks_exact(4).any(|pixel| pixel != &rgba[..4]), "blank capture");
+    assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel != &rgba[..4]), "blank capture");
     let mut texels = Vec::new();
     let mut opaque_count = 0;
     let mut distinctive_count = 0;
@@ -598,7 +598,7 @@ fn assert_changed_pose(before: &Capture, after: &Capture, left: &Expected, right
     let y1 = (center[1] + half[1]).ceil().min(512.0) as usize;
     let changed = (y0..y1).flat_map(|y| (x0..x1).map(move |x| (y * 512 + x) * 4))
         .filter(|offset| before.rgba[*offset..*offset + 4] != after.rgba[*offset..*offset + 4]).count();
-    let outside_changed = before.rgba.chunks_exact(4).zip(after.rgba.chunks_exact(4))
+    let outside_changed = before.rgba.as_chunks::<4>().0.iter().zip(after.rgba.as_chunks::<4>().0.iter())
         .enumerate().filter(|(index, (a, b))| {
             let x = *index % 512;
             let y = *index / 512;
