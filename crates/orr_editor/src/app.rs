@@ -233,6 +233,8 @@ pub struct EditorApp {
     pub collect_ui: Option<crate::collect_ui_panel::Panel>,
     #[cfg(feature="room-project")]
     pub room_camera: Option<crate::room_camera_panel::Panel>,
+    #[cfg(feature = "room-lighting")]
+    pub room_lighting: Option<crate::room_lighting_panel::Panel>,
     #[cfg(feature="room-character")]
     pub room_character: Option<crate::room_character_panel::Panel>,
     #[cfg(all(feature="room-checkpoint",target_os="linux"))]
@@ -247,7 +249,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="room-character")] room_character: None, #[cfg(feature="collect-audio")] collect_audio: None, #[cfg(all(feature="room-checkpoint",target_os="linux"))] room_checkpoint: None, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), # [cfg(any(feature="collect-ui", feature="room-ui"))] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="room-lighting")] room_lighting: None, #[cfg(feature="room-character")] room_character: None, #[cfg(feature="collect-audio")] collect_audio: None, #[cfg(all(feature="room-checkpoint",target_os="linux"))] room_checkpoint: None, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), # [cfg(any(feature="collect-ui", feature="room-ui"))] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Deliberately restrict HDR for compatibility. This one-way builder must
@@ -662,6 +664,11 @@ impl EditorApp {
         }
         #[cfg(feature="room-project")]
         {
+            #[cfg(feature="room-lighting")]
+            {
+                if self.editor.room_lighting_document().is_none() { self.room_lighting = None; }
+                if let Some(panel) = &mut self.room_lighting { panel.show_for_editor(ui, &mut self.editor); }
+            }
             if !self.editor.has_room_camera() { self.room_camera = None; }
             if let Some(panel) = &mut self.room_camera {
                 panel.show_for_editor(ui, &mut self.editor);
@@ -904,6 +911,11 @@ impl EditorApp {
         };
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
+            #[cfg(feature="models")]
+            if let Err(error) = gpu.set_point_light_settings(self.editor.room_point_light_settings()) {
+                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);
+                return;
+            }
             #[cfg(all(feature="animated-models", not(feature="irradiance-probes"), not(feature="terrain")))]
             let rendered = gpu.render_mixed_post_processed(px,&list,&camera,&placements,&animated_placements,self.ui.yard_post_process);
             #[cfg(all(feature="models", not(feature="animated-models"), not(feature="irradiance-probes"), not(feature="terrain")))]

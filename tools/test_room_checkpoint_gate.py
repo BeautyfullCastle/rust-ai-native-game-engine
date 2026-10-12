@@ -43,9 +43,9 @@ class InventoryChecks(unittest.TestCase):
     def test_all_four_inherited_package_gates_match_source_inventory(self):
         workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
         check_inherited_package_gates(workflow)
-        for command in ('check_count package 36', 'check_library package 36 0', 'check_result package 36 0'):
+        for command in ('check_count package 37', 'check_library package 37 0', 'check_result package 37 0'):
             with self.assertRaises(AssertionError):
-                check_inherited_package_gates(workflow.replace(command, command.replace('36', '28')))
+                check_inherited_package_gates(workflow.replace(command, command.replace('37', '28')))
 
     def test_all_exact_positive_inventories(self):
         for lane, spec in INVENTORIES.items():
@@ -85,10 +85,10 @@ class InventoryChecks(unittest.TestCase):
 
     def test_package_requires_fifo_child_and_full_parent(self):
         spec = INVENTORIES['package-closure']
-        self.assertEqual(spec['expected_summary_rows'], [[1, 0, 0], [36, 0, 0]])
-        for rows in ([[36, 0, 0]], [[1, 0, 0]], [[0, 0, 0], [36, 0, 0]]):
+        self.assertEqual(spec['expected_summary_rows'], [[1, 0, 0], [37, 0, 0]])
+        for rows in ([[37, 0, 0]], [[1, 0, 0]], [[0, 0, 0], [37, 0, 0]]):
             with self.assertRaises(AssertionError):
-                gate.check_log(spec, 'result', summaries({'expected_summary_rows': rows}), 36, 0)
+                gate.check_log(spec, 'result', summaries({'expected_summary_rows': rows}), 37, 0)
 
 
 if __name__ == '__main__':

@@ -705,31 +705,74 @@ fn collect_authored_ui_export_gpu_workflow() {
     fs::create_dir(w.root.path().join("test-tools")).unwrap();
     let child = w.root.path().join("test-tools/ui-progress-test");
     fs::copy(test_source, &child).unwrap();
-    let data = w.root.path().join("user-data");
-    fs::create_dir(&data).unwrap();
+    let host_root = w.root.path().join("progress profiles");
+    fs::create_dir(&host_root).unwrap();
+    fs::set_permissions(&host_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let data = host_root.join("user-data");
+    // Keep the production ancestor checks: unprivileged bwrap can remap host
+    // /tmp ownership, so mount only the private profile fixture below /.
+    let progress_root = Path::new("/opt");
+    assert!(fs::symlink_metadata(progress_root).unwrap().is_dir());
+    assert!(!w.root.path().starts_with(progress_root));
+    assert!(!w.workspace.starts_with(progress_root));
+    let untrusted = host_root.join("untrusted ancestor");
+    fs::create_dir(&untrusted).unwrap();
+    fs::set_permissions(&untrusted, fs::Permissions::from_mode(0o777)).unwrap();
     for (mode, root, relocated) in [
+        ("untrusted-ancestor", w.project.clone(), false),
         ("win", w.project.clone(), false),
         ("relaunch", bundle.join("project"), true),
     ] {
-        let text = good(
-            w.isolated(&child, if relocated { Some(&bundle) } else { None })
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "collect_progress::tests::isolated_window_progress_child",
-                    "--nocapture",
-                ])
-                .env("ORR_PROGRESS_TEST_PROJECT", root)
-                .env("ORR_PROGRESS_TEST_MODE", mode)
-                .env("XDG_DATA_HOME", &data)
-                .env("HOME", w.root.path().join("home"))
-                .output()
-                .unwrap(),
-        );
+        let output = w
+            .isolated_with_progress_root(
+                &child,
+                if relocated { Some(&bundle) } else { None },
+                Some((&host_root, progress_root)),
+            )
+            .args([
+                "--ignored",
+                "--exact",
+                "collect_progress::tests::isolated_window_progress_child",
+                "--nocapture",
+            ])
+            .env("ORR_PROGRESS_TEST_PROJECT", root)
+            .env("ORR_PROGRESS_TEST_MODE", mode)
+            .env(
+                "XDG_DATA_HOME",
+                if mode == "untrusted-ancestor" {
+                    progress_root.join("untrusted ancestor/data")
+                } else {
+                    progress_root.join("user-data")
+                },
+            )
+            .env("HOME", progress_root.join("home"))
+            .output()
+            .unwrap();
+        // Retain returned child diagnostics before good() can panic and the
+        // temporary project is dropped during unwinding.
+        if let Some(destination) = std::env::var_os("ORR_COLLECT_CAPTURES") {
+            let destination = PathBuf::from(destination);
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(
+                destination.join(format!("authored-ui-progress-{mode}.stdout")),
+                &output.stdout,
+            )
+            .unwrap();
+            fs::write(
+                destination.join(format!("authored-ui-progress-{mode}.stderr")),
+                &output.stderr,
+            )
+            .unwrap();
+        }
+        let text = good(output);
         assert!(
             text.contains("1 passed"),
             "actual window constructor/UI restart/progress hook must execute"
         );
+        if mode == "untrusted-ancestor" {
+            assert!(!untrusted.join("data").exists());
+            assert!(!data.exists(), "rejected ancestor created profile data");
+        }
     }
     assert!(data.join("orrery/games").is_dir());
     let ui_manifest = fs::read(&manifest).unwrap();

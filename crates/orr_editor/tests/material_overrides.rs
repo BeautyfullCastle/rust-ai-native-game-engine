@@ -475,11 +475,48 @@ fn sidecar_revision_change_fences_the_open_material_draft_until_reload() {
     );
 }
 
+// Diagnostic driver for the same-path replacement regression only. Each call
+// emits exactly one real pointer click after bounded repaint/layout convergence.
+fn material_click_diagnostic(h: &mut Harness<'_, EditorApp>, label: &str) -> egui::Rect {
+    h.get_by_role_and_label(Role::Button, label).scroll_to_me();
+    h.try_run().unwrap_or_else(|error| panic!("{label}: pre-click layout did not settle: {error}; {}", material_state_diagnostic(h)));
+    let before = h.get_by_role_and_label(Role::Button, label).rect();
+    h.run_steps(1);
+    h.try_run().unwrap_or_else(|error| panic!("{label}: geometry check did not settle: {error}; {}", material_state_diagnostic(h)));
+    let node = h.get_by_role_and_label(Role::Button, label);
+    let rect = node.rect();
+    assert_eq!(before, rect, "{label}: pointer target moved after settling; {}", material_state_diagnostic(h));
+    assert!(rect.is_finite() && rect.is_positive(), "{label}: invalid target rectangle {rect:?}");
+    assert!(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1500.0, 1200.0)).contains(rect.center()),
+        "{label}: target center outside viewport: {rect:?}");
+    assert!(!node.accesskit_node().is_disabled(), "{label}: target disabled before click; {}", material_state_diagnostic(h));
+    eprintln!("material pointer target={label:?} role=Button rect={rect:?} center={:?}; {}", rect.center(), material_state_diagnostic(h));
+    node.click();
+    h.try_run().unwrap_or_else(|error| panic!("{label}: post-click layout did not settle: {error}; {}", material_state_diagnostic(h)));
+    settle(h);
+    eprintln!("material post-click target={label:?}; {}", material_state_diagnostic(h));
+    rect
+}
+
+fn material_state_diagnostic(h: &Harness<'_, EditorApp>) -> String {
+    let app = h.state();
+    let selected = app.editor.selected_guid();
+    let value = selected.as_ref().and_then(|guid| app.models.bindings.as_ref()
+        .and_then(|bindings| bindings.document().bindings.get(&guid.to_string()))
+        .and_then(|binding| binding.material_override));
+    format!("selected={selected:?} rows_coherent={} scene_matches={} panel_error={:?} override={value:?}",
+        app.editor.yard_rows_coherent(),
+        app.models.scene_matches(&app.editor), app.models.error())
+}
+
 #[test]
 fn same_path_scene_replacement_fences_draft_until_reload() {
     let temp = tempfile::tempdir().unwrap();
     let scene = prepare(temp.path());
-    let mut h = harness(&scene);
+    let editor = editor(&scene);
+    let mut h = Harness::builder().with_size([1500.0, 1200.0])
+        .with_step_dt(1.0 / 60.0).with_max_steps(120)
+        .build_eframe(move |_| EditorApp::new(editor, None));
     settle(&mut h);
     click(&mut h, "box_right");
     click(&mut h, "Static model binding");
@@ -524,13 +561,13 @@ fn same_path_scene_replacement_fences_draft_until_reload() {
             .is_disabled(),
         "same-path scene replacement must stale the original draft"
     );
-    click(&mut h, "Reload material draft");
+    let reload_rect = material_click_diagnostic(&mut h, "Reload material draft");
     assert!(
         !h.get_by_label("Apply material override")
             .accesskit_node()
             .is_disabled()
     );
-    click(&mut h, "Apply material override");
+    let apply_rect = material_click_diagnostic(&mut h, "Apply material override");
     assert!(
         h.state()
             .models
@@ -540,7 +577,9 @@ fn same_path_scene_replacement_fences_draft_until_reload() {
             .document()
             .bindings[&guid.to_string()]
             .material_override
-            .is_some()
+            .is_some(),
+        "single Apply click did not set override; reload_rect={reload_rect:?} apply_rect={apply_rect:?}; {}",
+        material_state_diagnostic(&h)
     );
 }
 

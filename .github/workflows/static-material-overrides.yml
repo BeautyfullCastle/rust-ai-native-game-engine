@@ -38,7 +38,8 @@ jobs:
           cargo test --locked --release -p orr_editor --features models --test model_bindings
           cargo test --locked --release -p orr_editor --features models --lib editor::material_history_tests 2>&1 | tee material-evidence/history-models.log
           grep -F "test result: ok. 5 passed; 0 failed; 0 ignored;" material-evidence/history-models.log
-          cargo test --locked --release -p orr_editor --features models --test material_overrides -- --skip production_main_viewport_changes_after_material_override_edit
+          python3 -m unittest discover -s tools -p test_material_trace_gate.py
+          python3 tools/material_trace_gate.py
       - name: Mixed Room and animation authoring compatibility
         run: |
           set -euo pipefail

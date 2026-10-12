@@ -94,7 +94,7 @@ impl Prepared {
     pub fn open(root: &Path, profile: Profile) -> Result<Self, String> {
         match profile {
             #[cfg(feature = "room-project")]
-            Profile::Room => crate::room_project::PreparedProject::open_with_capabilities(
+            Profile::Room => crate::room_project::PreparedProject::open_with_presentation(
                 root,
                 cfg!(feature = "room-ui"),
                 if cfg!(all(feature = "room-checkpoint", target_os = "linux")) {
@@ -103,6 +103,7 @@ impl Prepared {
                     crate::room_project::CheckpointSupport::Disabled
                 },
                 cfg!(feature = "room-character"),
+                cfg!(feature = "room-lighting"),
             )
             .map(|value| Self::Room(Box::new(value))),
             #[cfg(feature = "navigation-project")]

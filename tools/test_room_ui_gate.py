@@ -51,6 +51,54 @@ def make_evidence(root):
     return evidence
 
 
+def feature_gated_test_inventory(source, enabled_features, prefix=''):
+    """Bounded native-app fixture syntax: test/ignore and literal feature cfg only.
+
+    This is a source consistency check, never a replacement for compiled inventory.
+    Unknown conditional syntax fails closed rather than silently including a test.
+    """
+    assert len(source) <= 1024 * 1024, 'source inventory byte bound'
+    # Comments between conditional and test attributes are outside this deliberately
+    # small scanner's grammar: reject rather than detach the conditional silently.
+    assert not re.search(r'#\[[^\]]*\]\s*(?://[^\n]*(?:\n|$)|/\*[\s\S]*?\*/)', source), 'comment-separated conditional attributes unsupported'
+    found = []
+    for match in re.finditer(r'((?:\s*#\[[^\]]*\]\s*)+)fn\s+(\w+)\s*\(', source):
+        attrs, name = match.groups()
+        attributes = re.findall(r'#\[([^\]]*)\]', attrs)
+        if 'test' not in attributes:
+            continue
+        active = True
+        ignored = False
+        for attr in attributes:
+            attr = attr.strip()
+            if attr == 'test':
+                continue
+            if attr == 'ignore':
+                ignored = True
+                continue
+            condition = re.fullmatch(r'cfg\(\s*feature\s*=\s*"([A-Za-z0-9_-]+)"\s*\)', attr)
+            assert condition is not None, ('unsupported native test attribute', attr, name)
+            active = active and condition[1] in enabled_features
+        if active:
+            found.append((prefix + name, ignored))
+    assert len({name for name, _ in found}) == len(found), 'duplicate test identity'
+    return found
+
+
+def local_feature_closure(package, requested):
+    features = tomllib.loads((ROOT / 'crates' / package / 'Cargo.toml').read_text())['features']
+    enabled = {'default', *filter(None, requested.split(','))}
+    pending = list(enabled)
+    while pending:
+        name = pending.pop()
+        assert name in features, ('unknown requested local feature', package, name)
+        for value in features[name]:
+            if value in features and value not in enabled:
+                enabled.add(value)
+                pending.append(value)
+    return enabled
+
+
 class RoomUiGateTests(unittest.TestCase):
     def test_source_inventory_cfg_and_feature_closure(self):
         paths = {'authored_ui': 'orr_sample/src/authored_ui.rs', 'collect_ui': 'orr_sample/src/collect_ui.rs',
@@ -70,6 +118,8 @@ class RoomUiGateTests(unittest.TestCase):
                     source = source[source.index('    #[cfg(feature = "room-ui")]'):source.index('    // Camera offsets')]
                     prefix = 'room::'
             found = [(prefix + name, '#[ignore' in attrs) for attrs, name in re.findall(r'#\[test\]\s*((?:#\[[^\n]*\]\s*)*)fn\s+(\w+)\s*\(', source)]
+            if lane == 'room-ui-native-app':
+                found = feature_gated_test_inventory(source, local_feature_closure(expected['package'], expected['features']), prefix)
             if expected.get('execution') == 'exact':
                 found = [(name, ignored) for name, ignored in found if name == expected['filter']]
             self.assertEqual(expected['names'], sorted(n for n, _ in found), lane)
@@ -96,6 +146,28 @@ class RoomUiGateTests(unittest.TestCase):
             rows = json.loads((ROOT / 'tools' / (name + '-inventories.json')).read_text())
             all_gpu.update(row['names'][0] for row in rows.values() if row['run_ignored'])
         self.assertEqual(len(all_gpu), 8)
+
+    def test_native_app_cfg_inventory_enabled_disabled_missing_and_ignored(self):
+        source = '#[test]\nfn base() {}\n#[cfg(feature = "room-checkpoint")]\n#[test]\nfn checkpoint() {}'
+        self.assertEqual(feature_gated_test_inventory(source, set()), [('base', False)])
+        expected = [('base', False), ('checkpoint', False)]
+        self.assertEqual(feature_gated_test_inventory(source, {'room-checkpoint'}), expected)
+        for name in ('base', 'checkpoint'):
+            missing = source.replace('fn ' + name + '()', 'fn missing_' + name + '()')
+            self.assertNotEqual(feature_gated_test_inventory(missing, {'room-checkpoint'}), expected)
+            ignored = source.replace('fn ' + name + '()', '#[ignore]\nfn ' + name + '()')
+            self.assertNotEqual(feature_gated_test_inventory(ignored, {'room-checkpoint'}), expected)
+        for condition in ('not(feature = "room-checkpoint")', 'all(feature = "room-checkpoint")', 'unix'):
+            with self.assertRaises(AssertionError):
+                feature_gated_test_inventory('#[cfg(' + condition + ')]\n#[test]\nfn unsupported() {}', set())
+        with self.assertRaises(AssertionError):
+            feature_gated_test_inventory('#[cfg_attr(feature = "room-checkpoint", ignore)]\n#[test]\nfn unsupported() {}', set())
+        for condition in ('feature = "disabled"', 'unix'):
+            for comment in ('// separated attribute\n', '/* separated attribute */\n'):
+                with self.assertRaises(AssertionError):
+                    feature_gated_test_inventory('#[cfg(' + condition + ')]\n' + comment + '#[test]\nfn base() {}', set())
+        self.assertNotIn('room-checkpoint', local_feature_closure('orr_sample', 'room-ui,project-create'))
+        self.assertIn('room-checkpoint', local_feature_closure('orr_sample', 'room-ui,project-create,room-checkpoint'))
 
     def test_save_aba_producer_and_lifecycle_are_separate_mandatory_positive_gates(self):
         producer = INVENTORY['room-ui-save-transition-producer']
@@ -209,6 +281,63 @@ class RoomUiGateTests(unittest.TestCase):
                            lambda p: p['runtime'].update(sha256='0'*64)]:
                 manifest = json.loads(good_manifest); mutate(manifest['payload']); manifest_path.write_text(json.dumps(manifest))
                 with self.assertRaises(AssertionError): gate.check_ui_export(evidence, export)
+
+
+class SerialLifecycleLogTests(unittest.TestCase):
+    """Reproduce libtest/--nocapture interleaving from the Ubuntu lifecycle lane."""
+
+    def setUp(self):
+        self.expected = INVENTORY['room-ui-editor-source-lifecycle']
+        self.name = 'actual_external_save_aba_before_editor_pump_permanently_retires_room_ui'
+        self.prefix = 'test ' + self.name + ' ... '
+        self.plain = fixtures.log_for(self.expected)
+        # libtest prints its prefix without a newline; stderr diagnostics arrive
+        # before the standalone status, including an expected failed save.
+        traces = '\n'.join('room-ui-save-trace ' + json.dumps({'case': case, 'ok': case != 'failed-write'})
+                           for case in ('no-write', 'failed-write', 'same-path', 'a-to-b', 'b-to-a'))
+        self.interleaved = self.plain.replace(self.prefix + 'ok', self.prefix + traces + '\nok')
+
+    def test_serial_diagnostics_keep_exact_lifecycle_identity(self):
+        for text in (self.plain, self.interleaved,
+                     self.interleaved.replace(' ... room-ui-save-trace', ' ... \nroom-ui-save-trace')):
+            with self.subTest(text=text):
+                gate.check_log(self.expected, 'result', text)
+
+    def test_interleaving_never_supplies_missing_or_failed_outcomes(self):
+        invalids = {
+            'missing status': self.interleaved.replace('\nok\n', '\n'),
+            'failed status despite success summary': self.interleaved.replace('\nok\n', '\nFAILED\n'),
+            'unexpected ignored status': self.interleaved.replace('\nok\n', '\nignored\n'),
+            'duplicate standalone status': self.interleaved.replace('\nok\n', '\nok\nok\n'),
+            'orphan status': 'ok\n' + self.interleaved,
+            'duplicate named outcome': self.interleaved + self.prefix + 'ok\n',
+            'extra failed outcome': self.interleaved + 'test unexpected ... FAILED\n',
+            'wrong identity': self.interleaved.replace(self.name, 'unexpected'),
+            'malformed identity': self.interleaved.replace(self.name, 'invalid name'),
+            'malformed status': self.interleaved.replace('\nok\n', '\nok trailing garbage\n'),
+            'borrow next status': self.interleaved.replace('\nok\n', '\ntest unexpected ... ok\n'),
+            'borrow after summary': self.interleaved.replace('\nok\n', '\n') + 'ok\n',
+            'missing final summary': self.interleaved.split('test result:')[0],
+            'failed summary': self.interleaved.replace('test result: ok.', 'test result: FAILED.'),
+            'wrong count': self.interleaved.replace('3 passed;', '2 passed;'),
+            'extra summary': self.interleaved + 'test result: ok. 0 passed; 0 failed; 0 ignored;\n',
+            'skip diagnostic': self.interleaved.replace('room-ui-save-trace', 'SKIP: room-ui-save-trace', 1),
+        }
+        for label, text in invalids.items():
+            with self.subTest(label=label), self.assertRaises(AssertionError):
+                gate.check_log(self.expected, 'result', text)
+        with self.assertRaises(AssertionError):
+            gate.shared.parse_test_outcomes(self.prefix + 'diagnostic\n')
+
+    def test_ignored_reason_and_multiple_serial_starts_remain_exact(self):
+        expected = {'names': ['first', 'second'], 'ignored_names': ['second'],
+                    'run_ignored': False, 'expected_summary_rows': [[1, 0, 1]]}
+        text = ('test first ... diagnostic\nok\n'
+                'test second ... diagnostic\nignored, explicit GPU\n'
+                'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        gate.check_log(expected, 'result', text)
+        with self.assertRaises(AssertionError):
+            gate.check_log(expected, 'result', text.replace('diagnostic\nok\n', 'diagnostic\n', 1))
 
 
 if __name__ == '__main__':

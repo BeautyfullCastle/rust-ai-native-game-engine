@@ -169,14 +169,14 @@ impl<'de> Deserialize<'de> for ProjectManifest {
         }
         let decoded = ProjectShape::<Wire>::deserialize(deserializer)?;
         let value = decoded.value;
-        if value.schema == 4 {
+        if value.schema == 4 || value.entry.as_ref().is_some_and(|e| e.value.lighting.is_some()) {
             if !decoded.object {
                 return Err(serde::de::Error::custom(
-                    "schema-4 project must be an object",
+                    "checkpoint or lighting project must be an object",
                 ));
             }
             if value.entry.as_ref().is_some_and(|entry| !entry.object) {
-                return Err(serde::de::Error::custom("schema-4 entry must be an object"));
+                return Err(serde::de::Error::custom("checkpoint or lighting entry must be an object"));
             }
         }
         Ok(Self {
@@ -235,6 +235,9 @@ pub struct ProjectEntry {
     /// Keep additive fields last to preserve the legacy sequence decoder's positions.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
     pub character: Option<String>,
+    /// Optional Room-only bounded point-light presentation document.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub lighting: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,6 +327,17 @@ impl ProjectManifest {
                     if sprites.eq_ignore_ascii_case(&entry.scene) {
                         return fail("entry scene and sprite sidecar must be different files");
                     }
+                }
+                if let Some(lighting) = &entry.lighting {
+                    portable(lighting)?;
+                    let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.character.as_deref(),
+                        entry.sprites.as_deref(), entry.audio.as_deref(),
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 4)
+                        || lighting.contains('/') || lighting.starts_with('.')
+                        || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(lighting))
+                    { return fail("lighting requires a distinct root-level Room presentation document"); }
                 }
                 if let Some(character) = &entry.character {
                     portable(character)?;
@@ -1922,6 +1936,7 @@ mod tests {
         assert_eq!(expected.game, ProjectGame::RoomEscapeV1);
         assert_eq!(expected.scene, "room.yaml");
         assert_eq!(expected.character, None);
+        assert_eq!(expected.lighting, None);
         // Preserve decoding even when separate runtime validation rejects a
         // legacy launch combination; wire hardening is conditional on schema 4.
         for schema in [1, 2, 3] {
@@ -1933,6 +1948,38 @@ mod tests {
                 assert_eq!(manifest.entry.as_ref(), Some(&expected));
             }
         }
+    }
+
+    #[test]
+    fn lighting_preserves_legacy_positions_and_requires_manifest_objects() {
+        let ui = serde_json::json!({"profile":"room-authored-v1", "document":"room.ui.json",
+            "font":{"package":"font", "asset":"font.otf"}});
+        let mut sequence = serde_json::json!(["room.camera.json", "room-escape-v1", "room.yaml",
+            "room.sprites.json", "room.models.json", ui, "room.audio.json", "room.character.json"]);
+        let legacy: ProjectEntry = serde_json::from_value(sequence.clone()).unwrap();
+        assert_eq!(legacy.camera.as_deref(), Some("room.camera.json"));
+        assert_eq!(legacy.character.as_deref(), Some("room.character.json"));
+        assert_eq!(legacy.lighting, None);
+        sequence.as_array_mut().unwrap().push("room.lighting.json".into());
+        let extended: ProjectEntry = serde_json::from_value(sequence.clone()).unwrap();
+        assert_eq!(extended.character, legacy.character);
+        assert_eq!(extended.lighting.as_deref(), Some("room.lighting.json"));
+        let entry = serde_json::json!({"game":"room-escape-v1", "scene":"room.yaml",
+            "lighting":"room.lighting.json"});
+        for schema in [1, 2, 3, 4] {
+            let root_sequence = serde_json::json!([schema, "*", entry]);
+            assert!(serde_json::from_value::<ProjectManifest>(root_sequence).unwrap_err()
+                .to_string().contains("project must be an object"));
+            let entry_sequence = serde_json::json!({"schema":schema,"engine":"*","entry":sequence});
+            assert!(serde_json::from_value::<ProjectManifest>(entry_sequence).unwrap_err()
+                .to_string().contains("entry must be an object"));
+        }
+        for lighting in ["null", "[1]", "42"] {
+            let encoded = format!(r#"{{"schema":2,"engine":"*","entry":{{"game":"room-escape-v1","scene":"room.yaml","lighting":{lighting}}}}}"#);
+            assert!(serde_json::from_str::<ProjectManifest>(&encoded).is_err());
+        }
+        let duplicate = r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","lighting":"a.json","lighting":"b.json"}}"#;
+        assert!(serde_json::from_str::<ProjectManifest>(duplicate).is_err());
     }
 
     #[test]

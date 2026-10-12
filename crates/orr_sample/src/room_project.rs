@@ -139,6 +139,15 @@ pub struct PreparedRoomCharacter {
     pub manifest_bytes: Vec<u8>,
     pub manifest_path: PathBuf,
 }
+#[cfg(feature = "room-lighting")]
+pub struct PreparedRoomLighting {
+    pub scene_path: PathBuf,
+    pub path: PathBuf,
+    pub document: crate::room_lighting::Document,
+    pub bytes: Vec<u8>,
+    pub manifest_bytes: Vec<u8>,
+    pub manifest_path: PathBuf,
+}
 pub struct PreparedRoomCamera {
     pub path: PathBuf,
     pub document: crate::room_camera::Document,
@@ -180,6 +189,8 @@ pub struct PreparedProject {
     #[cfg(feature = "room-ui")]
     ui: Option<PreparedRoomUi>,
     camera: Option<PreparedRoomCamera>,
+    #[cfg(feature = "room-lighting")]
+    lighting: Option<PreparedRoomLighting>,
     #[cfg(feature = "room-character")]
     character: Option<PreparedRoomCharacter>,
     root: PathBuf,
@@ -208,6 +219,13 @@ impl PreparedProject {
         root: impl AsRef<Path>, ui_supported: bool,
         checkpoint_support: CheckpointSupport, character_supported: bool,
     ) -> Result<Self, String> {
+        Self::open_with_presentation(root, ui_supported, checkpoint_support, character_supported, false)
+    }
+    /// Every presentation capability is selected by its actual consuming route.
+    pub fn open_with_presentation(
+        root: impl AsRef<Path>, ui_supported: bool, checkpoint_support: CheckpointSupport,
+        character_supported: bool, lighting_supported: bool,
+    ) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), compiled_runtime_with_character(character_supported))
             .map_err(|e| e.to_string())?;
         let manifest = project.manifest().ok_or("room project manifest missing")?;
@@ -222,6 +240,19 @@ impl PreparedProject {
         if entry.character.is_some() && !(character_supported && cfg!(feature = "room-character")) {
             return Err("room character requires explicit character consumer support".into());
         }
+        if entry.lighting.is_some() && !(lighting_supported && cfg!(feature = "room-lighting")) {
+            return Err("room lighting requires explicit lighting consumer support".into());
+        }
+        #[cfg(feature = "room-lighting")]
+        let lighting = entry.lighting.as_ref().map(|relative| {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, crate::room_lighting::MAX_BYTES as u64)?;
+            let document = crate::room_lighting::Document::parse(&bytes)?;
+            Ok::<_, String>(PreparedRoomLighting {
+                scene_path: crate::project::entry_file(project.root(), &entry.scene)?,
+                path, document, bytes, manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone(),
+            })
+        }).transpose()?;
         let checkpoint = match (manifest.schema, &manifest.progress, checkpoint_support) {
             (2, None, _) => None,
             (4, Some(progress), CheckpointSupport::MetadataOnly)
@@ -412,6 +443,8 @@ impl PreparedProject {
             #[cfg(feature = "room-ui")]
             ui,
             camera,
+            #[cfg(feature = "room-lighting")]
+            lighting,
             #[cfg(feature = "room-character")]
             character,
             root: project.root().to_path_buf(),
@@ -438,6 +471,15 @@ impl PreparedProject {
     pub fn character(&self) -> Option<&PreparedRoomCharacter> { self.character.as_ref() }
     #[cfg(feature = "room-character")]
     pub fn take_character(&mut self) -> Option<PreparedRoomCharacter> { self.character.take() }
+    #[cfg(feature = "room-lighting")]
+    pub fn lighting(&self) -> Option<&PreparedRoomLighting> { self.lighting.as_ref() }
+    #[cfg(feature = "room-lighting")]
+    pub fn take_lighting(&mut self) -> Option<PreparedRoomLighting> { self.lighting.take() }
+    pub fn point_light_settings(&self) -> orr_render::PointLightSettings {
+        #[cfg(feature = "room-lighting")]
+        if let Some(lighting) = &self.lighting { return lighting.document.settings(); }
+        orr_render::PointLightSettings::default()
+    }
     pub fn camera(&self) -> Option<&PreparedRoomCamera> {
         self.camera.as_ref()
     }
