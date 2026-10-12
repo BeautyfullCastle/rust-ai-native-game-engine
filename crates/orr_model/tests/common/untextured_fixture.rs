@@ -131,7 +131,11 @@ impl Scratch {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).expect("fresh private test directory");
-        Self(root)
+        let mut scratch = Self(root);
+        // Canonicalize only this newly owned fixture directory so system-temp
+        // aliases such as macOS /var do not reach production path validation.
+        scratch.0 = std::fs::canonicalize(&scratch.0).expect("canonical private test directory");
+        scratch
     }
 }
 impl Drop for Scratch {
