@@ -203,8 +203,28 @@ fn no_clobber_aliases_traversal_package_store_and_missing_parent_are_rejected() 
     fail(&cli(&args(&input, &root.path().join("missing/new.orrt"))));
     assert!(!root.path().join("missing").exists());
     fs::create_dir(root.path().join("sub")).unwrap();
-    fail(&cli(&args(&input, &root.path().join("sub/../new.orrt"))));
+    // Path::join normalizes away `..` on Windows verbatim temp paths.
+    // Preserve the untrusted spelling with native separators until CLI parsing.
+    let mut traversal = root.path().as_os_str().to_os_string();
+    for part in ["sub", "..", "new.orrt"] {
+        traversal.push(std::path::MAIN_SEPARATOR_STR);
+        traversal.push(part);
+    }
+    let traversal_args = args(&input, Path::new(&traversal));
+    assert!(
+        Path::new(traversal_args.last().unwrap())
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir)),
+        "the output argument must retain parent traversal at the CLI boundary"
+    );
+    let result = cli(&traversal_args);
+    fail(&result);
+    assert!(String::from_utf8_lossy(&result.stderr)
+        .contains("empty paths and parent traversal are not allowed"));
     assert!(!root.path().join("new.orrt").exists());
+    assert_eq!(fs::read_dir(root.path().join("sub")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 5);
+    assert_eq!(fs::read(&input).unwrap(), raw);
 }
 #[test]
 fn output_basename_is_portable_for_existing_editor_open() {
