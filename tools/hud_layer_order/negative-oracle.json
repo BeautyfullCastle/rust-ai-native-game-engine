@@ -1,0 +1,14 @@
+{
+  "file": "crates/orr_editor/tests/ui_layer_order_gpu_export.rs",
+  "sha256": "78fafd192578863f565555a329b7a9fd3fdff93f31d409ab28334d25b7031f33",
+  "line": 571,
+  "column": 5,
+  "text": "    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), expected);",
+  "diagnostics": [
+    "left: Document { schema: 1, nodes: [Node { id: \"lower\", parent: None, kind: Button { text: \"\", action: Menu }, screen: Playing, anchor: [0, 0], offset: [20, 20], size: [180, 100] }, Node { id: \"cover\", parent: None, kind: Container, screen: Playing, anchor: [0, 0], offset: [40, 20], size: [80, 80] }, Node { id: \"child\", parent: Some(\"cover\"), kind: Button { text: \"Restart\", action: Restart }, screen: Playing, anchor: [0, 0], offset: [20, 30], size: [100, 30] }] }",
+    "right: Document { schema: 1, nodes: [Node { id: \"cover\", parent: None, kind: Container, screen: Playing, anchor: [0, 0], offset: [40, 20], size: [80, 80] }, Node { id: \"child\", parent: Some(\"cover\"), kind: Button { text: \"Restart\", action: Restart }, screen: Playing, anchor: [0, 0], offset: [20, 30], size: [100, 30] }, Node { id: \"lower\", parent: None, kind: Button { text: \"\", action: Menu }, screen: Playing, anchor: [0, 0], offset: [20, 20], size: [180, 100] }] }"
+  ],
+  "debug_definition_file": "crates/orr_sample/src/authored_ui.rs",
+  "debug_definition_sha256": "a55a2aae5718b92a7f6f92a2f91ece8db060d0d8b7e792af36bd3aeced02f574",
+  "negative_claim": "source-pinned saved-document order assertion, before changed-order capture; not a pixel-mismatch negative"
+}

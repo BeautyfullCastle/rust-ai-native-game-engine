@@ -3524,11 +3524,19 @@ jobs:
           cargo test --release --target aarch64-linux-android -p orr_games --test golden -- --test-threads=1
           cargo test --release --target aarch64-linux-android -p orr_wasm_bench --test checksums -- --test-threads=1
 
+  hud-layer-order:
+    name: HUD layer order exact-head acceptance
+    uses: ./.github/workflows/hud-layer-order.yml
+    with:
+      expected_head: ${{ github.event.pull_request.head.sha || github.sha }}
+    permissions:
+      contents: read
+
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
     # target, sample graphics/audio/editor matrix, and linked-prefab lane must pass.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs]
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, hud-layer-order]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -3542,9 +3550,10 @@ jobs:
           BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
           LINKED_PREFABS_RESULT: ${{ needs['sample-linked-prefabs'].result }}
+          HUD_LAYER_ORDER_RESULT: ${{ needs['hud-layer-order'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT HUD_LAYER_ORDER_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then
