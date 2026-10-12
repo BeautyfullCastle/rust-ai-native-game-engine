@@ -3351,6 +3351,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_package_diff"
+version = "0.0.1"
+dependencies = [
+ "orr_package",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "orr_physics"
 version = "0.0.1"
 dependencies = [
