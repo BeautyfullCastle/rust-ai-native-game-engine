@@ -59,8 +59,20 @@ with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
     (evidence/'tools.sha256.json').write_text(json.dumps(hashes,indent=2)+'\n')
     source = root/'source'
     bundle = root/'bundle'
-    data = root/'data'; data.mkdir(mode=0o700)
-    home = root/'home'; home.mkdir(mode=0o700)
+    # Keep checkpoint ancestry inside the private fixture. In an unprivileged
+    # bwrap namespace host-root-owned ancestors can have an unmapped uid.
+    # Bind only profile data at an existing top-level mount, as in the Collect
+    # progress export gate; production ancestor ownership checks stay intact.
+    profiles_root = root/'profiles'; profiles_root.mkdir(mode=0o700)
+    data = profiles_root/'data'; data.mkdir(mode=0o700)
+    home = profiles_root/'home'; home.mkdir(mode=0o700)
+    profile_mount = Path('/opt')
+    assert profile_mount.is_dir() and not profile_mount.is_symlink()
+    assert not root.is_relative_to(profile_mount)
+    assert not workspace.is_relative_to(profile_mount)
+    assert not profile_mount.is_relative_to(workspace)
+    isolated_data = profile_mount/'data'
+    isolated_home = profile_mount/'home'
     captures = root/'captures'; captures.mkdir()
     traces = root/'traces'; traces.mkdir()
     env = dict(os.environ, XDG_DATA_HOME=str(data), HOME=str(home))
@@ -73,8 +85,9 @@ with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
         item.chmod(0o555 if item.is_dir() or os.access(item,os.X_OK) else 0o444)
     bundle.chmod(0o555)
     base = ['bwrap','--ro-bind','/','/','--tmpfs',workspace,'--tmpfs',source,
-            '--bind',data,data,'--bind',captures,captures,'--bind',traces,traces,
-            '--setenv','HOME',home,'--setenv','XDG_DATA_HOME',data,'--chdir','/']
+            '--bind',profiles_root,profile_mount,'--ro-bind',home,isolated_home,
+            '--bind',captures,captures,'--bind',traces,traces,
+            '--setenv','HOME',isolated_home,'--setenv','XDG_DATA_HOME',isolated_data,'--chdir','/']
     def isolated(name, command):
         traced = ['strace','-f','-qq','-yy','-o',traces/(name+'.trace'),'-e','trace=%file,fchdir,write,writev,pwrite64,pwritev,pwritev2,fsync,fdatasync,flock'] if a.syscall else []
         return run(name, base+['--']+traced+command,env)
@@ -87,7 +100,7 @@ with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
                    'ORR_ROOM_CHECKPOINT_MODE='+mode,tools/'app-tests','--ignored','--exact',child,'--nocapture']
         output = isolated(mode,command)
         assert 'test result: ok. 1 passed; 0 failed;' in output, f'zero-test {mode}'
-        assert f'mode={mode}' in output and 'profile='+str(data) in output
+        assert f'mode={mode}' in output and 'profile='+str(isolated_data) in output
     after = tree(bundle)
     assert after == before, 'readonly bundle bytes changed'
     assert all(digest(tools/name)==value for name,value in hashes.items()), 'copied executable changed'
@@ -99,9 +112,9 @@ with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
     shutil.copyfile(captures/'smoke.png', evidence/'smoke.png')
     if a.syscall:
         profile_match = re.search(r' profile=(\S+) status=', (evidence/'acquire.log').read_text())
-        assert profile_match and Path(profile_match[1]).is_relative_to(data)
+        assert profile_match and Path(profile_match[1]).is_relative_to(isolated_data)
         check_syscall_proof((traces/'readonly-export-smoke.trace').read_text(),
-                            (traces/'acquire.trace').read_text(), data, home,
+                            (traces/'acquire.trace').read_text(), isolated_data, isolated_home,
                             Path(profile_match[1]))
         for trace in traces.iterdir(): shutil.copyfile(trace,evidence/trace.name)
     (evidence/'result.json').write_text(json.dumps({'source_hidden':True,'bundle_readonly':True,'bundle_hashes_unchanged':True,'app_processes':4,'native_window':False,'physical_gpu':False,'syscall_proof':a.syscall},indent=2)+'\n')

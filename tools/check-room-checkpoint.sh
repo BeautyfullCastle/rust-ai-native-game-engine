@@ -33,6 +33,7 @@ features=room-checkpoint,project-create,project-export
 if [[ $mode == contracts ]]; then
  run checker-fixtures python3 tools/test_room_checkpoint_gate.py
  run syscall-checker-fixtures python3 tools/test_room_checkpoint_syscall.py
+ run export-fixture-checks python3 tools/test_room_checkpoint_export_fixture.py
  unset ORR_PACKAGE_FIFO_TEST_ROOT
  tests room-goldens 10 0 cargo test --release --locked -p orr_games --features room-escape --lib room_escape_game::tests::
  tests package-closure 37 0 cargo test --release --locked -p orr_package --lib
