@@ -58,6 +58,11 @@ pub use sprite_list::{SpriteDrawList, SpriteInstance};
 #[cfg(feature = "sprites")]
 pub use sprite_renderer::{SpriteRenderError, SpriteRenderer};
 
+#[cfg(feature = "metallic-roughness")]
+pub mod material_shading;
+#[cfg(feature = "metallic-roughness")]
+pub use material_shading::{MaterialShading, MaterialShadingError, ScalarMaterial, MIN_PERCEPTUAL_ROUGHNESS};
+
 #[cfg(feature = "models")]
 pub mod model_renderer;
 #[cfg(feature = "models")]
