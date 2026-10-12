@@ -8,6 +8,7 @@
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
 use egui::accesskit::Role;
+use egui_kittest::kittest::NodeT;
 use egui_kittest::{kittest::Queryable, Harness};
 use orr_bridge::PlayerSlot;
 use orr_editor::{
