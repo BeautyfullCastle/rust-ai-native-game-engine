@@ -19,6 +19,40 @@ MUTATION_TO='self.error = None; // test-only omitted reorder command'
 def sha(path):return audit.digest(path)
 def json_bytes(value):return (json.dumps(value,indent=2,sort_keys=True)+'\n').encode()
 
+def require_target_inventory(before,after,allocated,save,record):
+    """Retain failure-time observations without relaxing any inventory field.
+
+    Snapshots use the existing evidence allocation cap. The concise delta is
+    limited to 16 paths and 8 KiB; omitted rows remain in the full snapshots.
+    A diagnostic write failure must never replace or suppress the fence failure.
+    """
+    if after==before:return
+    changed=[path for path in sorted(before.keys()|after.keys()) if before.get(path)!=after.get(path)]
+    names=['target-failure-after.json','target-failure-before.json','target-failure-delta.json']
+    summary={'changed_paths':len(changed),'added_paths':sum(path not in before for path in changed),
+             'removed_paths':sum(path not in after for path in changed),'rows':[],'omitted_paths':len(changed)}
+    for path in changed:
+        old=before.get(path);new=after.get(path)
+        fields={key:{'before':(old or {}).get(key),'after':(new or {}).get(key)}
+                for key in sorted((old or {}).keys()|(new or {}).keys())
+                if key not in (old or {}) or key not in (new or {}) or old[key]!=new[key]}
+        row={'path':path,'kind':'added' if old is None else 'removed' if new is None else 'changed','fields':fields}
+        # Budget the complete nested document, including final counters and the
+        # worst JSON escaping of every bounded diagnostic error type name.
+        candidate={**summary,'rows':summary['rows']+[row],'omitted_paths':summary['omitted_paths']-1,
+                   'diagnostic_write_errors':{name:'\U0010ffff'*64 for name in names}}
+        if len(summary['rows'])<16 and len(json_bytes(candidate))<=8192 and len(
+                ('nonproducer target mutation: '+json.dumps(candidate,sort_keys=True)).encode())<=8192:
+            summary['rows'].append(row);summary['omitted_paths']-=1
+    record['target_mutation']=summary
+    errors={}
+    for name,value in [('target-failure-after.json',{'files':after,'allocated':allocated}),
+                       ('target-failure-before.json',before),('target-failure-delta.json',summary)]:
+        try:save(name,value)
+        except Exception as error:
+            errors[name]=type(error).__name__[:64];summary['diagnostic_write_errors']=errors
+    require(False,'nonproducer target mutation: '+json.dumps(summary,sort_keys=True))
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--run',action='store_true');args=parser.parse_args()
     if not args.run:
@@ -106,7 +140,8 @@ def main():
             for name,digest in tool_pins.items():require(sha(pathlib.Path(name))==digest,'tool/infrastructure identity drift')
             require(not runner.pending,'interrupted gate')
         def target_fence():
-            after,allocated=fs.disk_inventory(target,hash_content=False);require(after==target_state,'nonproducer target mutation')
+            after,allocated=fs.disk_inventory(target,hash_content=False)
+            require_target_inventory(target_state,after,allocated,save,record)
             for name,digest in retained_hashes.items():require(sha(target/name)==digest,'retained producer hash changed')
             require(fs.disk_inventory(target,hash_content=False)==(after,allocated),'posthash target inventory drift')
         def command(name,argv,expected_exit=0,timeout=3600,extra_env=None,producer=False):

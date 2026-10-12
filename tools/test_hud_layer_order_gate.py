@@ -330,4 +330,107 @@ class GateContracts(unittest.TestCase):
     def test_all_python_parses(self):
         for path in [HERE/'hud_layer_order_gate.py',*list((HERE/'hud_layer_order').glob('*.py'))]:ast.parse(path.read_text())
 
+class TargetMutationDiagnostics(unittest.TestCase):
+    def entry(self):
+        return dict(bytes=10,mode=0o755,allocated=4096,device='1',inode='2',mtime_ns='3',uid=1001,nlink=1)
+    def reject(self,before,after,save=None):
+        writer=save if save is not None else mock.Mock();record={}
+        original=copy.deepcopy((before,after))
+        with self.assertRaisesRegex(RuntimeError,'^nonproducer target mutation:') as caught:
+            gate.require_target_inventory(before,after,8192,writer,record)
+        self.assertEqual((before,after),original)
+        return writer,record['target_mutation'],str(caught.exception)
+    def test_equal_is_unchanged_and_writes_nothing(self):
+        before={'release/tool':self.entry()};writer=mock.Mock();record={}
+        self.assertIsNone(gate.require_target_inventory(before,copy.deepcopy(before),4096,writer,record))
+        writer.assert_not_called();self.assertEqual(record,{})
+    def test_every_inventory_field_still_fails_and_is_named(self):
+        for field in self.entry():
+            with self.subTest(field=field):
+                before={'release/tool':self.entry()};after=copy.deepcopy(before)
+                old=after['release/tool'][field];after['release/tool'][field]=str(int(old)+1) if isinstance(old,str) else old+1
+                writer,summary,_=self.reject(before,after)
+                self.assertEqual(summary['rows'][0]['fields'],{field:{'before':old,'after':after['release/tool'][field]}})
+                self.assertEqual(writer.call_args_list,[mock.call('target-failure-after.json',{'files':after,'allocated':8192}),
+                    mock.call('target-failure-before.json',before),mock.call('target-failure-delta.json',summary)])
+    def test_added_removed_and_missing_fields_still_fail(self):
+        before={'removed':self.entry(),'changed':self.entry()};after={'added':self.entry(),'changed':self.entry()}
+        del after['changed']['uid']
+        _,summary,_=self.reject(before,after)
+        self.assertEqual([summary[k] for k in ['changed_paths','added_paths','removed_paths']],[3,1,1])
+        self.assertEqual([row['path'] for row in summary['rows']],['added','changed','removed'])
+        self.assertIn('uid',summary['rows'][1]['fields'])
+    def test_path_count_and_byte_caps_do_not_drop_full_snapshot(self):
+        after={f'path-{i:03}':self.entry() for i in range(100)}
+        after['long-'+'x'*10000]=self.entry()
+        writer,summary,message=self.reject({},after)
+        self.assertLessEqual(len(summary['rows']),16)
+        self.assertEqual(summary['changed_paths'],101)
+        self.assertEqual(summary['omitted_paths'],101-len(summary['rows']))
+        self.assertLessEqual(len(gate.json_bytes(summary)),8192)
+        self.assertLessEqual(len(message.encode()),8192)
+        self.assertEqual(writer.call_args_list[0].args[1]['files'],after)
+    def test_unicode_paths_and_all_write_errors_respect_full_document_cap(self):
+        after={f'{i:03}-'+'한'*40:self.entry() for i in range(40)}
+        for error in [OSError('full'),type('한'*100,(Exception,),{})(),type('𐐀'*64,(Exception,),{})()]:
+            writer=mock.Mock(side_effect=error)
+            _,summary,message=self.reject({},after,writer)
+            self.assertEqual(writer.call_count,3)
+            self.assertEqual(summary['changed_paths'],40)
+            self.assertEqual(summary['omitted_paths'],40-len(summary['rows']))
+            self.assertLessEqual(len(gate.json_bytes(summary)),8192)
+            self.assertLessEqual(len(message.encode()),8192)
+            self.assertEqual(writer.call_args_list[0].args[1]['files'],after)
+            self.assertTrue(all(len(value)<=64 for value in summary['diagnostic_write_errors'].values()))
+    def test_short_unicode_paths_cap_delta_write_and_final_record(self):
+        after={str(n)+'界':self.entry() for n in range(40)}
+        for fail_delta in [False,True]:
+            snapshots=[]
+            def save(name,value):
+                snapshots.append((name,copy.deepcopy(value)))
+                if name!='target-failure-delta.json' or fail_delta:raise OSError('full')
+            _,summary,message=self.reject({},after,save)
+            self.assertEqual(len(snapshots),3)
+            self.assertEqual(snapshots[-1][0],'target-failure-delta.json')
+            self.assertLessEqual(len(gate.json_bytes(snapshots[-1][1])),8192)
+            self.assertLessEqual(len(gate.json_bytes(summary)),8192)
+            self.assertLessEqual(len(message.encode()),8192)
+            self.assertEqual(len(summary['diagnostic_write_errors']),3 if fail_delta else 2)
+    def test_supplementary_unicode_errors_fit_with_short_ascii_paths(self):
+        after={str(n):self.entry() for n in range(40)}
+        writer=mock.Mock(side_effect=type('𐐀'*64,(Exception,),{})())
+        _,summary,message=self.reject({},after,writer)
+        self.assertLessEqual(len(gate.json_bytes(summary)),8192)
+        self.assertLessEqual(len(message.encode()),8192)
+        self.assertEqual(writer.call_count,3)
+    def test_write_errors_preserve_failure_and_attempt_all_snapshots(self):
+        for error in [OSError('disk full'),FileExistsError('exists'),RuntimeError('evidence allocation cap')]:
+            with self.subTest(error=type(error).__name__):
+                writer=mock.Mock(side_effect=error)
+                _,summary,message=self.reject({}, {'release/tool':self.entry()},writer)
+                self.assertEqual(writer.call_count,3)
+                self.assertEqual(set(summary['diagnostic_write_errors'].values()),{type(error).__name__})
+                self.assertIn('nonproducer target mutation',message)
+                self.assertNotIn(str(error),message)
+    def test_one_write_error_does_not_prevent_remaining_evidence(self):
+        writer=mock.Mock(side_effect=[OSError('full'),None,None])
+        _,summary,_=self.reject({}, {'release/tool':self.entry()},writer)
+        self.assertEqual(writer.call_count,3)
+        self.assertEqual(summary['diagnostic_write_errors'],{'target-failure-after.json':'OSError'})
+    def test_nested_controller_fence_rejects_before_hash_or_command(self):
+        tree=ast.parse((HERE/'hud_layer_order_gate.py').read_text())
+        fence=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='target_fence')
+        before={'release/tool':self.entry()};after=copy.deepcopy(before);after['release/tool']['allocated']=8192
+        inventory=mock.Mock(return_value=(after,8192));digest=mock.Mock();writer=mock.Mock();record={}
+        namespace={'fs':types.SimpleNamespace(disk_inventory=inventory),'target':pathlib.Path('/never-read'),
+            'target_state':before,'save':writer,'record':record,'retained_hashes':{'release/tool':'digest'},
+            'sha':digest,'require':owner.require,'require_target_inventory':gate.require_target_inventory}
+        exec(compile(ast.Module(body=[fence],type_ignores=[]),'<controller-fence>','exec'),namespace)
+        command=mock.Mock()
+        with self.assertRaisesRegex(RuntimeError,'nonproducer target mutation'):
+            namespace['target_fence']();command()
+        inventory.assert_called_once_with(pathlib.Path('/never-read'),hash_content=False)
+        digest.assert_not_called();command.assert_not_called()
+        self.assertEqual(record['target_mutation']['rows'][0]['fields']['allocated'],{'before':4096,'after':8192})
+
 if __name__=='__main__':unittest.main()
