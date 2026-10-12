@@ -53,7 +53,13 @@ jobs:
           set -euo pipefail
           cargo test --locked --release -p orr_sample --features room-lighting,room-character,room-checkpoint,project-create,project-export --test room_lighting --test room_project --test room_character_project --test room_follow_camera --test material_overrides 2>&1 | tee lighting-evidence/mixed-admission.log
           grep -F 'test generated_room_lighting_admission_is_strict_and_presentation_only ... ok' lighting-evidence/mixed-admission.log
-          cargo test --locked --release -p orr_editor --features room-lighting,room-character,room-checkpoint,project-create --test room_lighting --test room_project_workflow --test room_character_workflow --test material_overrides -- --skip generated_room_lighting_actual_viewport_gpu_static_and_character 2>&1 | tee lighting-evidence/mixed-editor.log
+          python3 -m unittest discover -s tools -p test_material_trace_gate.py -v
+          set +e
+          python3 tools/material_trace_gate.py --profile lighting-mixed 2>&1 | tee lighting-evidence/mixed-editor.log
+          trace_status=("${PIPESTATUS[@]}")
+          set -e
+          if (( trace_status[0] != 0 )); then exit "${trace_status[0]}"; fi
+          if (( trace_status[1] != 0 )); then exit "${trace_status[1]}"; fi
           grep -F 'test character_room_lighting_actual_editor_lifecycle ... ok' lighting-evidence/mixed-editor.log
       - name: Mandatory renderer and actual editor GPU lighting proof
         env:
