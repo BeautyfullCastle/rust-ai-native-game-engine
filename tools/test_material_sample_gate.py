@@ -1,7 +1,7 @@
 """Fixed CPU-only contract negatives; no Cargo, window, adapter or network."""
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import struct
 import sys
 import tempfile
@@ -87,6 +87,24 @@ class MaterialGateTests(unittest.TestCase):
                 with self.assertRaises(AssertionError): gate.inspect(p,None)
 
     def test_capture_audit_requires_exact_files(self):
+        for root in [PureWindowsPath('C:/captures'),
+                     PureWindowsPath('//server/share/captures'),
+                     PurePosixPath('/captures')]:
+            with self.subTest(root=root):
+                self.assertEqual(
+                    {gate.relative_capture_key(root/key, root) for key in gate.SHAPES},
+                    set(gate.SHAPES))
+                self.assertEqual(gate.relative_capture_key(root/'static/capture.txt', root),
+                                 'static/capture.txt')
+                with self.assertRaises(ValueError):
+                    gate.relative_capture_key(root.parent/'outside/capture.txt', root)
+        with self.assertRaises(ValueError):
+            gate.relative_capture_key(PureWindowsPath('D:/captures/static/capture.txt'),
+                                      PureWindowsPath('C:/captures'))
+        root = PurePosixPath('/captures')
+        literal = root/'static\\capture.txt'
+        self.assertEqual(gate.relative_capture_key(literal, root), 'static\\capture.txt')
+        self.assertNotIn(gate.relative_capture_key(literal, root), gate.SHAPES)
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);(root/'static').mkdir()
             with patch.object(gate,'capture_root',root):
@@ -132,7 +150,7 @@ class MaterialGateTests(unittest.TestCase):
         # decode and raw size admission are covered separately above.
         for kind,directory,count in [('material','material-scene',10),('grounding','grounding',18)]:
             with tempfile.TemporaryDirectory() as folder:
-                root=Path(folder);d=root/directory;d.mkdir();records={};lines=[]
+                root=Path(folder)/'captures';root.mkdir();d=root/directory;d.mkdir();records={};lines=[]
                 names=([f'{mode}-{stage}.png' for stage in ['initial','pickup','spread','expired','restart'] for mode in ['legacy','showcase']] if kind=='material' else gate.GROUNDING_NAMES)
                 for name in names:
                     if kind=='material':
@@ -157,6 +175,7 @@ class MaterialGateTests(unittest.TestCase):
                 manifest=header+'\n'.join(lines)+'\n'+trailer;(d/'manifest.txt').write_text(manifest)
                 with patch.object(gate,'capture_root',root),patch.object(gate,'adapter','tuple'),patch.object(gate,'audits',[]),patch.object(gate,'inspect',side_effect=lambda path,shape:dict(records[path.name])):
                     gate.audit(kind)
+                    self.assertTrue((Path(folder)/('capture-audit-'+kind+'.json')).is_file())
                     # Wrong encoded/raw hash is rejected after the valid prefix.
                     first=names[0];image=first if kind=='material' else first+'.png'
                     old=records[image]['raw_rgba_sha256'];records[image]['raw_rgba_sha256']='f'*64

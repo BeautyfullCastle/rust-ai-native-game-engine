@@ -215,6 +215,10 @@ def bounded_run(argv, cwd, env, log_path, timeout, expected_exit=0, disk_floor=D
     return log_path.read_text(encoding="utf-8",errors="replace")
 
 
+def relative_capture_key(path, root):
+    return path.relative_to(root).as_posix()
+
+
 def inspect(path, shape):
     require(path.is_file() and not path.is_symlink(), "capture file")
     require(path.stat().st_size <= (640*480*4 if shape == "raw" else 2*1024**2 if shape else 64*1024), "capture size")
@@ -233,7 +237,7 @@ audits = []
 def audit(kind):
  directory={'material':'material-scene'}.get(kind,kind)
  keys=[k for k in SHAPES if k.startswith(directory+'/')]
- actual={str(p.relative_to(capture_root))for p in (capture_root/directory).rglob('*')if p.is_file()}
+ actual={relative_capture_key(p,capture_root)for p in (capture_root/directory).rglob('*')if p.is_file()}
  assert actual==set(keys),(kind,actual,set(keys))
  files={k:inspect(capture_root/k,SHAPES[k])for k in keys}
  if kind in ['static','temporal']:
@@ -411,7 +415,7 @@ class Gate:
                 if command["audit"]: audit(command["audit"])
                 require(sum(p.stat().st_size for p in capture_root.rglob("*") if p.is_file()) <= CAPTURE_CAP,"capture budget")
                 require({k:digest(p.read_bytes()) for k,p in baseline.items()} == baseline_hash,"baseline changed")
-            require({str(p.relative_to(capture_root)) for p in capture_root.rglob("*") if p.is_file()} == set(SHAPES),"62 capture artifacts")
+            require({relative_capture_key(p,capture_root) for p in capture_root.rglob("*") if p.is_file()} == set(SHAPES),"62 capture artifacts")
             save(lane/"summary.json",{"adapter":full_adapter,"audits":audits,"files":{k:digest((capture_root/k).read_bytes()) for k in SHAPES}})
         save(self.evidence/"device-summary.json",{"adapter":full_adapter,"invocations":14,"capture_artifacts":124,"pngs":80,"draw_readback_budget":128,"visual_review_required":True})
 
