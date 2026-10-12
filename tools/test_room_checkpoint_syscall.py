@@ -34,6 +34,7 @@ def exporter_trace_selection(source=None):
     assert len(functions) == 1
     namespace = {'a': SimpleNamespace(syscall=True), 'traces': PurePosixPath('/proof/traces'),
                  'base': ['bwrap', '--chdir', '/'], 'env': {},
+                 'retain_trace': lambda name, command_failed: None,
                  'run': lambda name, command, env: command}
     exec(compile(ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[])), '<exporter-command-construction>', 'exec'), namespace)
     command = namespace['isolated']('readonly-export-smoke', ['runtime-fixture'])

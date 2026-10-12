@@ -12,7 +12,9 @@ import os
 import re
 from pathlib import Path
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 
 from room_checkpoint_syscall import check_syscall_proof
@@ -43,6 +45,71 @@ def run(name, cmd, env=None):
     (evidence / (name + '.log')).write_text(result.stdout)
     assert result.returncode == 0, f'{name}: {result.returncode}\n{result.stdout}'
     return result.stdout
+
+TRACE_NAMES = frozenset(('readonly-export-smoke', 'acquire', 'resume', 'newgame', 'empty'))
+TRACE_MAX_BYTES = 16 * 1024 * 1024  # Five known traces, at most 80 MiB total.
+
+def retain_trace(name, command_failed):
+    """Keep bounded raw evidence before fixture cleanup, never certify a trace."""
+    assert name in TRACE_NAMES, 'unexpected trace name'
+    filename = name + '.trace'
+    report = {'trace': filename, 'limit_bytes': TRACE_MAX_BYTES, 'retained_bytes': None,
+              'byte_capture_complete': False, 'command_failed': command_failed,
+              'syscall_validation': 'not performed during retention'}
+    if command_failed:
+        report['incomplete_reason'] = 'isolated command failed; trace may be incomplete'
+    failure = None
+    evidence_fd = None
+    try:
+        # Both directories were created by the gate. Do not follow a replaced
+        # directory or source symlink, or open a FIFO/device in the trace slot.
+        assert evidence == evidence.resolve(strict=True), 'evidence directory is not canonical'
+        assert not evidence.is_symlink()
+        evidence_fd = os.open(evidence, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        assert traces == traces.resolve(strict=True), 'trace directory is not canonical'
+        assert not traces.is_symlink()
+        assert (traces/filename).parent == traces
+        assert (evidence/filename).parent == evidence
+        traces_fd = os.open(traces, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with os.fdopen(os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=traces_fd), 'rb') as source:
+                before = os.fstat(source.fileno())
+                assert stat.S_ISREG(before.st_mode), 'trace is not a regular file'
+                raw = source.read(TRACE_MAX_BYTES + 1)
+                after = os.fstat(source.fileno())
+        finally:
+            os.close(traces_fd)
+        payload = raw[:TRACE_MAX_BYTES]
+        # Exclusive creation refuses every preexisting destination, including
+        # symlinks. Unexpected files in traces are never enumerated or copied.
+        with os.fdopen(os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=evidence_fd), 'wb') as output:
+            output.write(payload)
+        report.update(source_bytes=after.st_size, retained_bytes=len(payload),
+                      sha256=hashlib.sha256(payload).hexdigest())
+        assert max(before.st_size, after.st_size, len(raw)) <= TRACE_MAX_BYTES, 'trace exceeds retention byte limit'
+        assert (before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (after.st_size, after.st_mtime_ns, after.st_ctime_ns), 'trace changed during retention'
+        assert len(raw) == after.st_size, 'incomplete trace byte capture'
+        report['byte_capture_complete'] = True
+    except Exception as error:
+        failure = error
+        report['incomplete_reason'] = str(error)
+        raise
+    finally:
+        try:
+            if evidence_fd is None:
+                # An invalid destination must not be followed for diagnostics.
+                print(f'{filename}: retention diagnostic: {json.dumps(report)}', file=sys.stderr)
+            else:
+                with os.fdopen(os.open(filename + '.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=evidence_fd), 'w') as output:
+                    json.dump(report, output, indent=2)
+                    output.write('\n')
+        except Exception as error:
+            if failure is None:
+                raise
+            print(f'{filename}: could not retain diagnostic: {error}', file=sys.stderr)
+        finally:
+            if evidence_fd is not None:
+                os.close(evidence_fd)
 
 with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
     root = Path(temporary).resolve()
@@ -90,7 +157,21 @@ with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
             '--setenv','HOME',isolated_home,'--setenv','XDG_DATA_HOME',isolated_data,'--chdir','/']
     def isolated(name, command):
         traced = ['strace','-f','-qq','-yy','-o',traces/(name+'.trace'),'-e','trace=%file,fchdir,write,writev,pwrite64,pwritev,pwritev2,fsync,fdatasync,flock'] if a.syscall else []
-        return run(name, base+['--']+traced+command,env)
+        failure = None
+        try:
+            return run(name, base+['--']+traced+command,env)
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            if a.syscall:
+                try:
+                    retain_trace(name, command_failed=failure is not None)
+                except Exception as error:
+                    if failure is None:
+                        raise
+                    # A retention problem must never replace the process error.
+                    print(f'{name}: trace retention failed: {error}', file=sys.stderr)
     smoke = isolated('readonly-export-smoke', [bundle/'run-room-escape','--headless','--ticks','0','--capture',captures/'smoke.png'])
     assert 'room key: 0 won: 0' in smoke and (captures/'smoke.png').is_file()
     assert not list(data.iterdir()), 'headless/capture discovered profile'
@@ -116,6 +197,5 @@ with tempfile.TemporaryDirectory(prefix='orr-checkpoint-export-') as temporary:
         check_syscall_proof((traces/'readonly-export-smoke.trace').read_text(),
                             (traces/'acquire.trace').read_text(), isolated_data, isolated_home,
                             Path(profile_match[1]))
-        for trace in traces.iterdir(): shutil.copyfile(trace,evidence/trace.name)
     (evidence/'result.json').write_text(json.dumps({'source_hidden':True,'bundle_readonly':True,'bundle_hashes_unchanged':True,'app_processes':4,'native_window':False,'physical_gpu':False,'syscall_proof':a.syscall},indent=2)+'\n')
 print('PASS: exported runtime smoke and 4 source-hidden App checkpoint processes; bundle unchanged')
