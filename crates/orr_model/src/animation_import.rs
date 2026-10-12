@@ -390,18 +390,20 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
 
 fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
     let has_skin = p.attributes.contains_key("JOINTS_0") || p.attributes.contains_key("WEIGHTS_0");
-    let expected = if has_skin { 5 } else { 3 };
+    let has_uv = p.attributes.contains_key("TEXCOORD_0");
+    let expected = 2 + usize::from(has_uv) + if has_skin { 2 } else { 0 };
     if p.mode.unwrap_or(4) != 4
         || p.attributes.len() != expected
-        || !["POSITION", "NORMAL", "TEXCOORD_0"]
+        || !["POSITION", "NORMAL"]
             .iter()
             .all(|key| p.attributes.contains_key(*key))
+        || (crate::import::requires_uv(doc, p)? && !has_uv)
         || (has_skin
             && (!p.attributes.contains_key("JOINTS_0") || !p.attributes.contains_key("WEIGHTS_0")))
     {
-        return Err(invalid("requires indexed TRIANGLES with POSITION/NORMAL/UV0 and at most JOINTS_0/WEIGHTS_0; additional influences unsupported"));
+        return Err(invalid("requires indexed TRIANGLES with POSITION/NORMAL, optional UV0 (required for textured materials), and at most JOINTS_0/WEIGHTS_0; additional influences unsupported"));
     }
-    at(&doc.materials, p.material, "primitive material")?;
+    crate::import::material_index(doc, p)?;
     let pos = at(&doc.accessors, p.attributes["POSITION"], "POSITION")?;
     if pos.count > MAX_VERTICES {
         return Err(invalid("vertex budget exceeded"));
@@ -411,7 +413,10 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
         ("NORMAL", "VEC3"),
         ("TEXCOORD_0", "VEC2"),
     ] {
-        let a = at(&doc.accessors, p.attributes[name], name)?;
+        let Some(&index) = p.attributes.get(name) else {
+            continue;
+        };
+        let a = at(&doc.accessors, index, name)?;
         if a.component_type != 5126 || a.normalized || a.kind != kind || a.count != pos.count {
             return Err(invalid("vertex attribute type/count mismatch"));
         }
@@ -562,7 +567,10 @@ fn read_primitives(
             let has_skin = validate_primitive(doc, primitive)?;
             let pos = &doc.accessors[primitive.attributes["POSITION"]];
             let normal = &doc.accessors[primitive.attributes["NORMAL"]];
-            let uv = &doc.accessors[primitive.attributes["TEXCOORD_0"]];
+            let uv = primitive
+                .attributes
+                .get("TEXCOORD_0")
+                .map(|&index| &doc.accessors[index]);
             let idx = &doc.accessors[primitive.indices];
             source_vertices = source_vertices.saturating_add(pos.count);
             source_indices = source_indices.saturating_add(idx.count);
@@ -573,7 +581,7 @@ fn read_primitives(
             for i in 0..pos.count {
                 let position = pos.floats::<3>(doc, buffers, i);
                 let normal = normal.floats::<3>(doc, buffers, i);
-                let uv = uv.floats::<2>(doc, buffers, i);
+                let uv = uv.map_or([0.0; 2], |a| a.floats::<2>(doc, buffers, i));
                 if (0..3).any(|c| {
                     !position[c].is_finite()
                         || position[c].abs() > 1.0e6
@@ -616,7 +624,10 @@ fn read_primitives(
             }
             let pos = &doc.accessors[primitive.attributes["POSITION"]];
             let normal = &doc.accessors[primitive.attributes["NORMAL"]];
-            let uv = &doc.accessors[primitive.attributes["TEXCOORD_0"]];
+            let uv = primitive
+                .attributes
+                .get("TEXCOORD_0")
+                .map(|&index| &doc.accessors[index]);
             let idx = &doc.accessors[primitive.indices];
             vertices_total = vertices_total.saturating_add(pos.count);
             indices_total = indices_total.saturating_add(idx.count);
@@ -657,7 +668,7 @@ fn read_primitives(
                     vertex: Vertex {
                         position,
                         normal: normal.floats(doc, buffers, i),
-                        uv: uv.floats(doc, buffers, i),
+                        uv: uv.map_or([0.0; 2], |a| a.floats(doc, buffers, i)),
                     },
                     joints,
                     weights,
@@ -682,7 +693,7 @@ fn read_primitives(
                 skin: node.skin.map(|i| i as u32),
                 vertices,
                 indices,
-                material: primitive.material as u32,
+                material: crate::import::material_index(doc, primitive)? as u32,
             });
         }
     }
