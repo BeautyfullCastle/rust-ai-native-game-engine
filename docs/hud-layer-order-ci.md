@@ -106,3 +106,74 @@ The child-ownership API contract follows the Linux man-pages project's
 [pidfd_send_signal](https://raw.githubusercontent.com/mkerrisk/man-pages/master/man2/pidfd_send_signal.2),
 [prctl](https://raw.githubusercontent.com/mkerrisk/man-pages/master/man2/prctl.2) and
 [wait](https://raw.githubusercontent.com/mkerrisk/man-pages/master/man2/wait.2) documentation.
+
+## Producer finalization and allocation observations
+
+After a successful Cargo command and the existing owned-process cleanup/ECHILD
+proof, output attribution remains provisional until a bounded finalization helper
+finishes. The helper admits only fresh, fully audited ELF outputs: selected test
+executables, their exact allowed editor companion, or the three selected production
+bins. An integration-test ELF has one link; a canonical bin has exactly its two
+proven Cargo/compiler aliases. The complete alias set must match `nlink`; an
+unknown link, including an external hardlink, fails. The auxiliary editor uses its
+own producer full-hash baseline, never the selected test's archive hash.
+
+The source-pinned helper runs through the unchanged owned `Runner`, using a pinned
+resolved Python interpreter. It walks directories with descriptor-relative
+`O_DIRECTORY|O_NOFOLLOW` opens and opens leaves read-only with `O_NOFOLLOW`,
+`O_CLOEXEC` and `O_NONBLOCK`. Before reads or flushes it proves regular type,
+owner, inode/device, mode, link count, size, mtime and ctime. It holds every alias
+and parent descriptor through full pre/post SHA-256, endpoint/path checks and
+close. The ELF header is checked within those same streamed reads. Each unique
+inode receives one `os.fsync` API invocation, with no application-level retry.
+CPython may internally retry an interrupted syscall; an exception reaching the
+helper fails. Read, flush, identity, content or close errors fail the producer.
+
+The finalizer allows only recorded allocation evolution on that proven closure
+before committing the first post-finalization inventory. The parent checks the
+receipt and exact metadata/alias closure without adding another ELF read pass;
+every other provisional target entry and the deduplicated allocation total must
+remain accounted for. Receipts are saved before state is committed. Later target
+inventory, allocated-block equality, retained hashes and posthash checks remain
+mandatory. A failed target fence never triggers a flush, retry or new baseline.
+
+Per producer, the helper admits at most eight distinct inodes, sixteen aliases,
+192 MiB per inode and 768 MiB combined logical bytes. Its two hash passes read at
+most 1,536 MiB, using a 1 MiB buffer; each request/result is at most 64 KiB and each
+relative path at most 512 UTF-8 bytes. The command deadline is 60 seconds within
+the unchanged whole-gate limit and existing owner cleanup rules. Existing
+producer/source/tool hashes and later retained-hash fences are separate inherited
+work, outside this new two-pass budget. Empty Clippy ELF closure needs no helper.
+A timeout or unclear cleanup fails; SIGKILL is not claimed to instantly end
+uninterruptible kernel I/O. No produced ELF is executed by the helper.
+
+On a later target mutation, preserve the original before/after/delta and failure.
+Supplementary diagnosis can read at most two already-known ELF inodes/four aliases,
+384 MiB total in one pass under a 30-second owned command. It compares the actual
+retained producer SHA and records phase, ctime/allocation endpoints and a bounded
+filesystem-type observation. It never calls fsync, admits a replacement inode or
+changes acceptance. Missing identity, insufficient time, lost ownership or evidence
+errors remain explicit supplementary failures; the original fence stays primary.
+No full mount table, mount source or options are retained.
+
+The original exact-head `7ebec9e754f043e333b50a685988c36ddbc037f1` failure preceded
+`cpu-exact-0`, after inventory and CPU archive readback. Only allocated accounting
+changed by 4,096 bytes on one inode exposed through the two editor aliases. The
+old snapshots lacked content hashes and ctime for that inode, and its filesystem
+and cause remain unproven. The CPU archive contains a different ELF. Successful
+finalization does not explain that historical event or guarantee that future
+`st_blocks` observations will never move. Any movement after the new baseline
+still fails the exact fence; real exact-head mandatory CI remains required.
+
+These contracts follow [Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html),
+[Linux open(2)](https://man7.org/linux/man-pages/man2/open.2.html),
+[Linux stat fields](https://man7.org/linux/man-pages/man3/stat.3type.html),
+[Linux mountinfo](https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html),
+and [CPython's fsync wrapper](https://github.com/python/cpython/blob/v3.12.15/Modules/posixmodule.c).
+Linux fsync flushes file data and associated metadata, not by itself the containing
+directory entry. A new descriptor does not establish that a closed producer never
+had an earlier writeback error. This ordinary owned-file I/O creates no new
+privilege, security policy, credentials, global sync operation or crash-durability
+claim. Deferred allocation is only one possible explanation until measured;
+[ext4 allocation documentation](https://docs.kernel.org/filesystems/ext4/allocators.html)
+is not evidence that this particular hosted inode used that mechanism.

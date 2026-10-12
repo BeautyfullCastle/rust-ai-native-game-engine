@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Pure/mocked maintained HUD gate controls. No payload or namespace probes."""
-import ast,copy,hashlib,importlib.util,json,pathlib,sys,tempfile,types,unittest
+import ast,copy,errno,os,hashlib,importlib.util,json,pathlib,sys,tempfile,types,unittest
 from unittest import mock
 import yaml
 sys.dont_write_bytecode=True
 HERE=pathlib.Path(__file__).resolve().parent;ROOT=HERE.parent
 sys.path.insert(0,str(HERE))
-from hud_layer_order import contracts as c,evidence as e,producer as p,filesystem as f,owned_process as owner
+from hud_layer_order import contracts as c,evidence as e,producer as p,filesystem as f,owned_process as owner,finalization as z
 import hud_layer_order_gate as gate
 
 class GateContracts(unittest.TestCase):
@@ -432,5 +432,356 @@ class TargetMutationDiagnostics(unittest.TestCase):
         inventory.assert_called_once_with(pathlib.Path('/never-read'),hash_content=False)
         digest.assert_not_called();command.assert_not_called()
         self.assertEqual(record['target_mutation']['rows'][0]['fields']['allocated'],{'before':4096,'after':8192})
+
+class ProducerFinalization(unittest.TestCase):
+    """Small files, mocked fsync only; no ELF is executed."""
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=pathlib.Path(self.temp.name);(self.root/'release/deps').mkdir(parents=True)
+        data=bytearray(256);data[:7]=b'\x7fELF\x02\x01\x01'
+        data[16:20]=b'\x03\x00\x3e\x00';data[52:54]=b'\x40\x00'
+        self.data=bytes(data);self.path=self.root/'release/deps/test-fixture'
+        self.path.write_bytes(self.data);self.path.chmod(0o700)
+    def request(self,paired=False,mode='finalize'):
+        aliases=['release/deps/test-fixture'];role='test'
+        if paired:
+            alias=self.root/'release/tool';os.link(self.path,alias);aliases.append('release/tool');role='canonical-bin'
+        return {'version':1,'mode':mode,'phase':'fixture','root':str(self.root),
+            'root_identity':z.root_identity(self.root.lstat()),'groups':[{'aliases':aliases,'role':role,
+            'stat':z.snapshot(self.path.lstat()),'sha256':hashlib.sha256(self.data).hexdigest()}]}
+    def execute(self,request,**kwargs):
+        with mock.patch.object(z.os,'fsync',**kwargs) as flush:
+            result=z.execute(request)
+        return result,flush
+    def nested(self,name,namespace):
+        tree=ast.parse((HERE/'hud_layer_order_gate.py').read_text())
+        node=copy.deepcopy(next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name==name))
+        node.body=[ast.copy_location(ast.Global(names=n.names),n) if isinstance(n,ast.Nonlocal) else n for n in node.body]
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[node],type_ignores=[])),'<nested-controller>','exec'),namespace)
+        return namespace[name]
+    def test_single_link_has_two_hash_passes_and_one_api_call(self):
+        request=self.request()
+        with mock.patch.object(z,'hash_fd',wraps=z.hash_fd) as digest:
+            result,flush=self.execute(request)
+        self.assertTrue(result['ok']);self.assertEqual(digest.call_count,2);flush.assert_called_once()
+        group=result['groups'][0];self.assertEqual(group['sha256'],request['groups'][0]['sha256'])
+        self.assertEqual(group['before'],group['after']);self.assertEqual(group['fsync_api_calls'],1)
+    def test_two_aliases_share_one_flush_and_descriptors_close(self):
+        request=self.request(True);fds=[];real_open=os.open
+        def opened(*args,**kwargs):
+            fd=real_open(*args,**kwargs);fds.append(fd);return fd
+        with mock.patch.object(z.os,'open',side_effect=opened):result,flush=self.execute(request)
+        self.assertTrue(result['ok']);flush.assert_called_once();self.assertEqual(len(result['groups'][0]['aliases']),2)
+        for fd in fds:
+            with self.assertRaises(OSError):os.fstat(fd)
+    def test_schema_and_resource_caps_reject_before_io(self):
+        request=self.request();cases=[]
+        for key,value in [('version',True),('mode','repair'),('phase','../bad'),('root','relative'),('groups',[])]:
+            bad=copy.deepcopy(request);bad[key]=value;cases.append(bad)
+        for key,value in [('bytes',z.ELF_CAP+1),('uid',os.geteuid()+1),('mode',0o600),('nlink',2),('device','-1')]:
+            bad=copy.deepcopy(request);bad['groups'][0]['stat'][key]=value;cases.append(bad)
+        for alias in ['.','/absolute','../escape','release/./x','release//x','', 'x'*513]:
+            bad=copy.deepcopy(request);bad['groups'][0]['aliases']=[alias];cases.append(bad)
+        bad=copy.deepcopy(request);bad['groups']*=9;cases.append(bad)
+        bad=copy.deepcopy(request);bad['groups'][0]['sha256']='wrong';cases.append(bad)
+        for bad in cases:
+            with self.subTest(bad=bad),mock.patch.object(z.os,'open') as opened,mock.patch.object(z.os,'fsync') as flush:
+                with self.assertRaises((RuntimeError,TypeError)):z.execute(bad)
+                opened.assert_not_called();flush.assert_not_called()
+    def test_combined_byte_cap_and_duplicate_closure_reject(self):
+        request=self.request();groups=[]
+        for index in range(5):
+            item=copy.deepcopy(request['groups'][0]);item['stat'].update(bytes=z.ELF_CAP,inode=str(index+1))
+            item['aliases']=[f'release/deps/test-{index}'];groups.append(item)
+        request['groups']=groups
+        with self.assertRaisesRegex(RuntimeError,'closure byte/alias bound'):z.validate_request(request)
+        request=self.request();request['groups']*=2
+        with self.assertRaisesRegex(RuntimeError,'duplicate alias'):z.validate_request(request)
+    def test_extra_external_hardlink_rejects_before_read_or_flush(self):
+        request=self.request();os.link(self.path,self.root/'external')
+        with mock.patch.object(z,'hash_fd') as digest:result,flush=self.execute(request)
+        self.assertFalse(result['ok']);self.assertEqual(result['errors'][0]['phase'],'alias-open')
+        digest.assert_not_called();flush.assert_not_called()
+    def test_missing_alias_and_symlink_leaf_reject_before_read(self):
+        for kind in ['missing','symlink']:
+            with self.subTest(kind=kind):
+                request=self.request();self.path.unlink()
+                if kind=='symlink':self.path.symlink_to(self.root/'other')
+                with mock.patch.object(z,'hash_fd') as digest:result,flush=self.execute(request)
+                self.assertFalse(result['ok']);digest.assert_not_called();flush.assert_not_called()
+                if self.path.is_symlink():self.path.unlink()
+                self.path.write_bytes(self.data);self.path.chmod(0o700)
+    def test_symlink_intermediate_and_fifo_reject_before_read(self):
+        request=self.request();parent=self.path.parent;parent.rename(parent.with_name('real-deps'))
+        parent.symlink_to(parent.with_name('real-deps'),target_is_directory=True)
+        with mock.patch.object(z,'hash_fd') as digest:result,flush=self.execute(request)
+        self.assertFalse(result['ok']);digest.assert_not_called();flush.assert_not_called()
+        parent.unlink();parent.with_name('real-deps').rename(parent)
+        request=self.request();self.path.unlink();os.mkfifo(self.path)
+        with mock.patch.object(z,'hash_fd') as digest:result,flush=self.execute(request)
+        self.assertFalse(result['ok']);digest.assert_not_called();flush.assert_not_called()
+    def test_parent_swap_after_open_fails_and_never_flushes(self):
+        request=self.request();real=z.Descriptors.prove_paths;swapped=False
+        def swap(descriptors):
+            nonlocal swapped
+            if not swapped:
+                parent=self.path.parent;parent.rename(parent.with_name('old-deps'));parent.mkdir();swapped=True
+            return real(descriptors)
+        with mock.patch.object(z.Descriptors,'prove_paths',swap),mock.patch.object(z,'hash_fd') as digest:
+            result,flush=self.execute(request)
+        self.assertFalse(result['ok']);digest.assert_not_called();flush.assert_not_called()
+    def test_wrong_preflush_hash_fails_before_flush(self):
+        request=self.request();request['groups'][0]['sha256']='0'*64
+        result,flush=self.execute(request)
+        self.assertFalse(result['ok']);self.assertEqual(result['errors'][0]['phase'],'pre-hash');flush.assert_not_called()
+    def test_non_elf_and_truncated_stream_reject(self):
+        request=self.request();self.path.write_bytes(b'x'*256)
+        request['groups'][0].update(stat=z.snapshot(self.path.lstat()),sha256=hashlib.sha256(b'x'*256).hexdigest())
+        result,flush=self.execute(request);self.assertFalse(result['ok']);flush.assert_not_called()
+        self.path.write_bytes(self.data);request=self.request()
+        with mock.patch.object(z.os,'read',return_value=b''):result,flush=self.execute(request)
+        self.assertFalse(result['ok']);flush.assert_not_called()
+    def test_same_size_content_change_during_flush_rejects(self):
+        request=self.request();mtime=self.path.stat().st_mtime_ns
+        def changed(fd):
+            self.path.write_bytes(self.data[:-1]+b'x');os.utime(self.path,ns=(mtime,mtime))
+        result,flush=self.execute(request,side_effect=changed)
+        self.assertFalse(result['ok']);self.assertEqual(result['errors'][0]['phase'],'post-hash');flush.assert_called_once()
+    def test_every_identity_field_change_during_flush_rejects(self):
+        for field in z.STAT_KEYS-{'allocated'}:
+            with self.subTest(field=field):
+                request=self.request();flushed=False;real=z.snapshot
+                def snapshot(info):
+                    value=real(info)
+                    if flushed:
+                        old=value[field];value[field]=str(int(old)+1) if isinstance(old,str) else old+1
+                    return value
+                def flush(fd):
+                    nonlocal flushed
+                    flushed=True
+                with mock.patch.object(z,'snapshot',side_effect=snapshot):result,called=self.execute(request,side_effect=flush)
+                self.assertFalse(result['ok']);called.assert_called_once()
+    def test_allocation_only_evolution_is_receipted_then_exactly_fenced(self):
+        request=self.request(True);before,allocated=f.disk_inventory(self.root,hash_content=False)
+        flushed=False;real=z.snapshot
+        def snapshot(info):
+            value=real(info)
+            if flushed:value['allocated']+=4096
+            return value
+        def flush(fd):
+            nonlocal flushed
+            flushed=True
+        with mock.patch.object(z,'snapshot',side_effect=snapshot):
+            result,called=self.execute(request,side_effect=flush)
+            after=copy.deepcopy(before)
+            for alias in request['groups'][0]['aliases']:after[alias]['allocated']+=4096
+            gate.verify_finalization(request,result,before,allocated,after,allocated+4096,self.root)
+        self.assertTrue(result['ok']);called.assert_called_once();self.assertFalse(result['groups'][0]['allocation_stable'])
+        with self.assertRaisesRegex(RuntimeError,'nonproducer target mutation'):
+            gate.require_target_inventory(before,after,allocated+4096,mock.Mock(),{})
+    def test_fsync_errors_surface_once_and_close_every_fd(self):
+        for code in [errno.EIO,errno.ENOSPC,errno.EDQUOT,errno.EROFS,errno.EINVAL,errno.EBADF,errno.EINTR]:
+            with self.subTest(code=code),mock.patch.object(z.Descriptors,'close',autospec=True,side_effect=z.Descriptors.close) as closed:
+                result,flush=self.execute(self.request(),side_effect=OSError(code,'mock'))
+                self.assertFalse(result['ok']);flush.assert_called_once();closed.assert_called_once()
+                self.assertEqual(result['errors'][0]['phase'],'fsync');self.assertEqual(result['errors'][0]['errno'],code)
+    def test_read_and_close_errors_fail_closed(self):
+        with mock.patch.object(z,'hash_fd',side_effect=OSError(errno.EIO,'read')):result,flush=self.execute(self.request())
+        self.assertFalse(result['ok']);flush.assert_not_called()
+        close=os.close;first=True
+        def failed(fd):
+            nonlocal first
+            close(fd)
+            if first:first=False;raise OSError(errno.EIO,'close')
+        with mock.patch.object(z.os,'close',side_effect=failed):result,flush=self.execute(self.request())
+        self.assertFalse(result['ok']);self.assertEqual(result['errors'][-1]['phase'],'close');flush.assert_called_once()
+    def test_diagnosis_hashes_once_reports_mismatch_without_fsync(self):
+        request=self.request(True,mode='diagnose');request['groups'][0]['sha256']='0'*64
+        with mock.patch.object(z,'hash_fd',wraps=z.hash_fd) as digest:result,flush=self.execute(request)
+        self.assertTrue(result['ok']);self.assertFalse(result['groups'][0]['hash_matches']);digest.assert_called_once();flush.assert_not_called()
+        self.assertEqual(result['groups'][0]['fsync_api_calls'],0)
+    def test_request_hash_symlink_and_cap_fail_before_execute(self):
+        request=self.request();path=self.root/'request.json';data=gate.json_bytes(request);path.write_bytes(data)
+        expected=hashlib.sha256(data).hexdigest();self.assertEqual(z.read_request(str(path),expected),request)
+        with self.assertRaisesRegex(RuntimeError,'request bytes differ'):z.read_request(str(path),'0'*64)
+        alias=self.root/'alias.json';alias.symlink_to(path)
+        with self.assertRaises(OSError):z.read_request(str(alias),expected)
+        path.write_bytes(b'x'*(z.JSON_CAP+1))
+        with self.assertRaisesRegex(RuntimeError,'request ownership/size'):z.read_request(str(path),expected)
+    def test_filesystem_parser_is_bounded_and_omits_source_options(self):
+        text='1 0 8:1 / / rw - ext4 private-source secret-option\n2 1 8:1 / /target\\040space rw - xfs secret other\n'
+        value=z.mount_type('/target space/sub','8:1',text)
+        self.assertEqual(value,{'state':'observed','type':'xfs','device':'8:1','mount_id':2})
+        self.assertNotIn('secret',json.dumps(value));self.assertNotIn('source',value)
+        for device,source in [('8:2',text),('8:1','bad'),('8:1','x'*(z.MIB+1))]:
+            self.assertEqual(z.mount_type('/target space','8:1' if device=='8:1' else device,source)['state'],'unknown')
+        stacked=text+'3 2 8:1 / /target\\040space rw - tmpfs hidden opts\n'
+        self.assertEqual(z.mount_type('/target space','8:1',stacked)['mount_id'],3)
+        ambiguous=text+'4 1 8:1 / /target\\040space rw - tmpfs hidden opts\n'
+        self.assertEqual(z.mount_type('/target space','8:1',ambiguous)['state'],'unknown')
+    def test_elf_closure_requires_exact_fresh_row_and_all_aliases(self):
+        request=self.request();inventory,_=f.disk_inventory(self.root,hash_content=False)
+        hashes={name:request['groups'][0]['sha256'] for name in inventory}
+        row={'executable':str(self.path),'fresh':False,'target':{'kind':['test']},'profile':{'test':True}}
+        args=({},inventory,hashes,self.root,inventory)
+        self.assertEqual(gate.elf_groups([row],*args),request['groups'])
+        for key,value in [('fresh',True),('profile',{'test':False}),('target',{'kind':['example']}),('executable','/outside')]:
+            bad=copy.deepcopy(row);bad[key]=value
+            with self.assertRaises(RuntimeError):gate.elf_groups([bad],*args)
+        bad=copy.deepcopy(inventory);bad['unknown-alias']=copy.deepcopy(next(iter(inventory.values())))
+        with self.assertRaisesRegex(RuntimeError,'unknown ELF hardlink'):gate.elf_groups([row],{},bad,hashes,self.root,bad)
+    def test_canonical_closure_requires_proof_and_independent_hash(self):
+        request=self.request(True);inventory,_=f.disk_inventory(self.root,hash_content=False)
+        hashes={name:request['groups'][0]['sha256'] for name in inventory}
+        row={'executable':str(self.root/'release/tool'),'fresh':False,'package_id':'pkg','target':{'kind':['bin'],'name':'tool'},'profile':{'test':False}}
+        proof={'artifact':row,'canonical_relative':'release/tool','compiler_relative':'release/deps/test-fixture','sha256':request['groups'][0]['sha256']}
+        self.assertEqual(gate.elf_groups([row],{'pkg|tool':proof},inventory,hashes,self.root,inventory),request['groups'])
+        proof['sha256']='0'*64
+        with self.assertRaisesRegex(RuntimeError,'canonical full hash'):gate.elf_groups([row],{'pkg|tool':proof},inventory,hashes,self.root,inventory)
+    def test_receipt_rejects_malformed_content_outside_change_and_endpoint_drift(self):
+        request=self.request();result,_=self.execute(request);before,allocated=f.disk_inventory(self.root,hash_content=False)
+        gate.verify_finalization(request,result,before,allocated,before,allocated,self.root)
+        for edit in ['ok','hash','calls','missing','outside','allocation','endpoint']:
+            bad=copy.deepcopy(result);after=copy.deepcopy(before);total=allocated
+            if edit=='ok':bad['ok']=False
+            if edit=='hash':bad['groups'][0]['sha256']='0'*64
+            if edit=='calls':bad['groups'][0]['fsync_api_calls']=2
+            if edit=='missing':bad['groups']=[]
+            if edit=='outside':after['unknown']={}
+            if edit=='allocation':total+=4096
+            if edit=='endpoint':bad['groups'][0]['after']['allocated']+=4096
+            with self.subTest(edit=edit),self.assertRaises(RuntimeError):gate.verify_finalization(request,bad,before,allocated,after,total,self.root)
+    def transaction(self,helper):
+        request=self.request();request['phase']='finalize-cpu';result,_=self.execute(request);after,allocated=f.disk_inventory(self.root,hash_content=False)
+        hashes={name:request['groups'][0]['sha256'] for name in after}
+        delta={'changed':{name:{'after':value,'after_sha256':hashes[name]} for name,value in after.items()},'removed':{}}
+        namespace={'target_state':{'old':{}},'retained_hashes':{'old':'old'},'retained_elfs':{},'phase':'old',
+            'elf_groups':mock.Mock(return_value=request['groups']),'target':self.root,'finalization':z,
+            'helper':helper if helper is not None else mock.Mock(return_value=result),
+            'fs':types.SimpleNamespace(disk_inventory=mock.Mock(return_value=(after,allocated))),
+            'verify_finalization':gate.verify_finalization,'observe':mock.Mock(),'save':mock.Mock(),'require':owner.require}
+        return namespace,self.nested('finalize',namespace), (after,allocated,{},delta,hashes),result
+    def test_transaction_commits_only_after_valid_receipt_and_evidence(self):
+        namespace,finalize,pending,_=self.transaction(None);events=[]
+        namespace['save'].side_effect=lambda *args:events.append(copy.deepcopy(namespace['target_state']))
+        finalize('cpu',pending,[])
+        self.assertEqual(events,[{'old':{}},{'old':{}}]);self.assertEqual(namespace['target_state'],pending[0])
+        self.assertEqual(namespace['retained_hashes'],pending[-1]);self.assertEqual(len(namespace['retained_elfs']),1)
+    def test_transaction_failure_timeout_unknown_or_write_never_commits(self):
+        for error in [RuntimeError('owner'),TimeoutError('deadline'),owner.OwnershipUnknown('cleanup')]:
+            namespace,finalize,pending,_=self.transaction(mock.Mock(side_effect=error))
+            with self.assertRaises(type(error)):finalize('cpu',pending,[])
+            self.assertEqual(namespace['target_state'],{'old':{}});self.assertEqual(namespace['retained_hashes'],{'old':'old'})
+        namespace,finalize,pending,_=self.transaction(None);namespace['save'].side_effect=OSError('full')
+        with self.assertRaises(OSError):finalize('cpu',pending,[])
+        self.assertEqual(namespace['target_state'],{'old':{}})
+    def test_empty_clippy_closure_uses_no_helper(self):
+        namespace,finalize,pending,_=self.transaction(None);namespace['elf_groups'].return_value=[]
+        finalize('clippy',pending,[]);namespace['helper'].assert_not_called();self.assertEqual(namespace['target_state'],pending[0])
+    def test_helper_requires_fence_reap_and_pinned_request(self):
+        namespace={'fence':mock.Mock(),'kernel_no_children':mock.Mock(return_value=False),'require':owner.require,
+            'finalization':z,'save':mock.Mock(),'json_bytes':gate.json_bytes,'evidence':self.root,'python':'python',
+            'work':self.root,'hashlib':hashlib,'run':mock.Mock(),'json':json}
+        helper=self.nested('helper',namespace)
+        with self.assertRaisesRegex(RuntimeError,'reaped owner'):helper('fixture',self.request(),60)
+        namespace['run'].assert_not_called();namespace['save'].assert_not_called()
+        namespace['kernel_no_children'].return_value=True
+        request=self.request();result,_=self.execute(request);namespace['run'].return_value=(json.dumps(result),'')
+        helper('fixture',request,60)
+        call=namespace['run'].call_args;self.assertEqual(call.kwargs,{'timeout':60})
+        self.assertEqual(call.args[1][-1],hashlib.sha256(gate.json_bytes(request)).hexdigest())
+        self.assertEqual(namespace['fence'].call_count,3)
+    def test_diagnostic_failure_and_write_do_not_escape_original_failure_handler(self):
+        namespace={'phase':'before-cpu-exact-0','time':types.SimpleNamespace(time_ns=lambda:1,monotonic=lambda:1),
+            'record':{'target_mutation':{'rows':[{'path':'release/deps/test-fixture'}]}},
+            'runner':types.SimpleNamespace(unknown=True,pending=[],deadline=100),
+            'kernel_no_children':mock.Mock(return_value=True),'require':owner.require,'save':mock.Mock(side_effect=OSError('full'))}
+        diagnose=self.nested('failure_diagnostic',namespace);diagnose()
+        self.assertEqual(namespace['record']['target_failure_identity']['state'],'unavailable')
+        self.assertEqual(namespace['record']['target_failure_identity']['write_error'],'OSError')
+        self.assertIn('target_mutation',namespace['record']);namespace['kernel_no_children'].assert_not_called()
+    def test_all_new_elf_reads_and_fsync_remain_inside_owned_helper(self):
+        tree=ast.parse((HERE/'hud_layer_order_gate.py').read_text())
+        for name in ['elf_groups','verify_finalization','helper','finalize','failure_diagnostic']:
+            node=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name==name)
+            calls=[ast.unparse(n.func) for n in ast.walk(node) if isinstance(n,ast.Call)]
+            self.assertFalse(set(calls)&{'sha','os.fsync','finalization.execute','finalization.hash_fd'})
+        helper=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='helper')
+        calls=[ast.unparse(n.func) for n in ast.walk(helper) if isinstance(n,ast.Call)]
+        self.assertIn('run',calls);self.assertNotIn('command',calls)
+        sync=ast.parse((HERE/'hud_layer_order/finalization.py').read_text())
+        self.assertEqual(sum(isinstance(n,ast.Call) and ast.unparse(n.func)=='os.fsync' for n in ast.walk(sync)),1)
+
+    def test_diagnostic_uses_retained_auxiliary_baseline_and_deduplicates(self):
+        request=self.request(True);item=request['groups'][0];after,_=f.disk_inventory(self.root,hash_content=False)
+        baseline={path:copy.deepcopy(item) for path in item['aliases']}
+        diagnostic_result={'ok':True,'groups':[{'hash_matches':False}]}
+        namespace={'phase':'before-cpu-exact-0','time':types.SimpleNamespace(time_ns=lambda:1,monotonic=lambda:1),
+            'record':{'target_mutation':{'rows':[{'path':path} for path in item['aliases']]}},
+            'runner':types.SimpleNamespace(unknown=False,pending=[],deadline=100),
+            'kernel_no_children':mock.Mock(return_value=True),'require':owner.require,'save':mock.Mock(),
+            'retained_elfs':baseline,'retained_hashes':{path:item['sha256'] for path in item['aliases']},
+            'fs':types.SimpleNamespace(disk_inventory=mock.Mock(return_value=(after,0))),
+            'target':self.root,'finalization':z,'MIB':z.MIB,'helper':mock.Mock(return_value=diagnostic_result)}
+        original=copy.deepcopy(namespace['record']['target_mutation'])
+        self.nested('failure_diagnostic',namespace)()
+        call=namespace['helper'].call_args;self.assertEqual(call.args[2],30)
+        self.assertEqual(call.args[1]['mode'],'diagnose');self.assertEqual(call.args[1]['groups'],[item])
+        self.assertEqual(namespace['record']['target_failure_identity']['state'],'observed')
+        self.assertEqual(namespace['record']['target_mutation'],original)
+        namespace['helper'].reset_mock();namespace['retained_hashes'][item['aliases'][0]]='missing'
+        self.nested('failure_diagnostic',namespace)();namespace['helper'].assert_not_called()
+        self.assertEqual(namespace['record']['target_failure_identity']['stage'],'known-identity-selection')
+    def test_diagnostic_exception_cannot_replace_original_fence_exception(self):
+        tree=ast.parse((HERE/'hud_layer_order_gate.py').read_text())
+        main=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='main')
+        handler=next(n.handlers[0] for n in main.body if isinstance(n,ast.Try))
+        template=ast.parse('def invoke():\n try:\n  raise original\n except BaseException as error:\n  pass\n')
+        template.body[0].body[0].handlers=[copy.deepcopy(handler)]
+        original=RuntimeError('original fence')
+        for diagnostic_error in [OSError('full'),TimeoutError('deadline'),KeyboardInterrupt()]:
+            namespace={'original':original,'record':{'target_mutation':{}},
+                'failure_diagnostic':mock.Mock(side_effect=diagnostic_error),'runner':types.SimpleNamespace(unknown=False)}
+            exec(compile(ast.fix_missing_locations(template),'<original-error-preservation>','exec'),namespace)
+            with self.assertRaises(RuntimeError) as caught:namespace['invoke']()
+            self.assertIs(caught.exception,original);self.assertEqual(namespace['record']['error'],repr(original))
+    def test_producer_failure_prevents_attribution_and_finalization(self):
+        namespace={'fence':mock.Mock(),'target_fence':mock.Mock(),'require':owner.require,
+            'shutil':types.SimpleNamespace(disk_usage=lambda path:types.SimpleNamespace(free=100*gate.GIB)),
+            'work':self.root,'GIB':gate.GIB,'MIB':gate.MIB,'ARCHIVE_CAP':gate.ARCHIVE_CAP,
+            'TEXT_CAP':gate.TEXT_CAP,'CAPTURE_CAP':gate.CAPTURE_CAP,'usage':lambda:{'archives':0,'evidence':0},
+            'c':c,'audit':types.SimpleNamespace(refresh=mock.Mock(),audit_producer=mock.Mock()),'active':{},
+            'tools':{'cargo':'never-executed'},'command':mock.Mock(side_effect=RuntimeError('producer failed')),
+            'attribute':mock.Mock(),'finalize':mock.Mock()}
+        with self.assertRaisesRegex(RuntimeError,'producer failed'):
+            self.nested('produce',namespace)('cpu','test','orr_editor','ui_layer_order_acceptance',{'ui_layer_order_acceptance':('test',True)})
+        namespace['attribute'].assert_not_called();namespace['finalize'].assert_not_called();namespace['audit'].audit_producer.assert_not_called()
+    def test_parent_identity_change_after_helper_is_rejected(self):
+        request=self.request();result,_=self.execute(request);before,allocated=f.disk_inventory(self.root,hash_content=False)
+        result['parents'][str(self.root)]['inode']='0'
+        with self.assertRaisesRegex(RuntimeError,'root receipt changed'):
+            gate.verify_finalization(request,result,before,allocated,before,allocated,self.root)
+    def test_helper_source_tool_fence_and_stderr_drift_fail(self):
+        namespace={'fence':mock.Mock(side_effect=RuntimeError('source/tool drift')),
+            'kernel_no_children':mock.Mock(return_value=True),'require':owner.require,
+            'finalization':z,'save':mock.Mock(),'json_bytes':gate.json_bytes,'evidence':self.root,'python':'python',
+            'work':self.root,'hashlib':hashlib,'run':mock.Mock(return_value=('{}','error')),'json':json}
+        helper=self.nested('helper',namespace)
+        with self.assertRaisesRegex(RuntimeError,'source/tool drift'):helper('fixture',self.request(),60)
+        namespace['run'].assert_not_called();namespace['fence'].side_effect=None
+        with self.assertRaisesRegex(RuntimeError,'helper result bound/stderr'):helper('fixture',self.request(),60)
+
+    def test_all_groups_are_opened_and_proven_before_first_flush(self):
+        request=self.request();other=self.root/'release/deps/other'
+        other.write_bytes(self.data);other.chmod(0o700)
+        item=copy.deepcopy(request['groups'][0]);item['aliases']=['release/deps/other']
+        item['stat']=z.snapshot(other.lstat());item['stat']['inode']=str(int(item['stat']['inode'])+1)
+        request['groups'].append(item)
+        with mock.patch.object(z,'hash_fd') as digest:result,flush=self.execute(request)
+        self.assertFalse(result['ok']);digest.assert_not_called();flush.assert_not_called()
+    def test_helper_cli_argument_rejection_precedes_file_access(self):
+        with mock.patch.object(z,'read_request') as reader:
+            self.assertEqual(z.main([]),2);self.assertEqual(z.main(['one']),2);self.assertEqual(z.main(['one','two','three']),2)
+            reader.assert_not_called()
 
 if __name__=='__main__':unittest.main()

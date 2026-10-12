@@ -7,7 +7,7 @@ acceptance. Missing capabilities, resources or evidence are failures.
 """
 import argparse,hashlib,json,os,pathlib,re,shutil,stat,sys,time,tomllib
 sys.dont_write_bytecode=True
-from hud_layer_order import contracts as c,evidence as tests,filesystem as fs,producer as audit
+from hud_layer_order import contracts as c,evidence as tests,filesystem as fs,producer as audit,finalization
 from hud_layer_order.owned_process import Runner,OwnershipUnknown,require,kernel_no_children
 MIB=1024**2;GIB=1024**3
 TEXT_CAP=128*MIB;CAPTURE_CAP=27*8*MIB;ARCHIVE_CAP=6*64*MIB
@@ -53,6 +53,66 @@ def require_target_inventory(before,after,allocated,save,record):
             errors[name]=type(error).__name__[:64];summary['diagnostic_write_errors']=errors
     require(False,'nonproducer target mutation: '+json.dumps(summary,sort_keys=True))
 
+def elf_groups(rows,bins,inventory,hashes,target,changed):
+    """Only exact fresh, already selected/attributed local executable rows."""
+    groups=[];seen=set()
+    for row in rows:
+        if not row.get('executable'):continue
+        require(row['fresh'] is False,'cached ELF cannot be finalized')
+        path=pathlib.Path(row['executable']);require(path.is_relative_to(target) and path.resolve()==path,'ELF path alias')
+        name=str(path.relative_to(target));kind=row['target']['kind']
+        if kind==['bin'] and row['profile']['test'] is False:
+            proof=bins[row['package_id']+'|'+row['target']['name']]
+            require(proof['artifact']==row,'canonical proof row mismatch')
+            aliases=sorted([proof['canonical_relative'],proof['compiler_relative']]);role='canonical-bin'
+            require(name==proof['canonical_relative'],'canonical executable differs')
+        else:
+            require(kind==['test'] and row['profile']['test'] is True,'unapproved ELF role')
+            aliases=[name];role='test';proof=None
+        require(all(alias in changed and alias in hashes for alias in aliases),'fresh ELF missing attributed hash')
+        expected=inventory[aliases[0]];key=expected['device'],expected['inode']
+        require(key not in seen,'duplicate ELF inode');seen.add(key)
+        all_aliases=sorted(p for p,value in inventory.items() if (value['device'],value['inode'])==key)
+        require(all_aliases==aliases and len(aliases)==expected['nlink'],'unknown ELF hardlink')
+        require(all(inventory[alias]==expected and hashes[alias]==hashes[name] for alias in aliases),'alias metadata/hash mismatch')
+        if proof is not None:require(proof['sha256']==hashes[name],'canonical full hash differs')
+        current=finalization.snapshot((target/name).lstat())
+        require({k:v for k,v in current.items() if k!='ctime_ns'}==expected,'ELF changed before request')
+        groups.append({'aliases':aliases,'role':role,'stat':current,'sha256':hashes[name]})
+    return groups
+
+
+def verify_finalization(request,result,before,allocated,after,after_allocated,target):
+    require(set(result)=={'version','mode','phase','groups','errors','filesystem','parents','ok'} and result['ok'] is True
+            and result['version']==1 and result['mode']=='finalize' and result['phase']==request['phase']
+            and result['errors']==[],'invalid finalization result')
+    require(len(result['groups'])==len(request['groups']),'incomplete finalized closure')
+    root=pathlib.Path(request['root']);parents={str(root),*[str(path) for path in root.parents]}
+    for group in request['groups']:
+        for alias in group['aliases']:
+            parents.update(str(path) for path in (root/alias).parents)
+    require(set(result['parents'])==parents,'incomplete parent closure')
+    require(result['parents'][str(root)]==request['root_identity'],'root receipt changed')
+    for name,identity in result['parents'].items():
+        require(finalization.root_identity(pathlib.Path(name).lstat())==identity,'finalized parent changed')
+    closure=set();allocation_delta=0
+    for expected,observed in zip(request['groups'],result['groups']):
+        require(set(observed)=={'aliases','role','expected_sha256','before','after','sha256','hash_matches','allocation_stable','fsync_api_calls'},'finalization group fields')
+        require(observed['aliases']==expected['aliases'] and observed['role']==expected['role']
+                and observed['expected_sha256']==observed['sha256']==expected['sha256']
+                and observed['hash_matches'] is True and observed['fsync_api_calls']==1,'finalized identity/content mismatch')
+        finalization.same_identity(expected['stat'],observed['before'])
+        finalization.same_identity(expected['stat'],observed['after'])
+        allocation_delta+=observed['after']['allocated']-expected['stat']['allocated']
+        for alias in expected['aliases']:
+            closure.add(alias);current=finalization.snapshot((target/alias).lstat())
+            require(current==observed['after'],'finalized ELF endpoint changed')
+            require(after.get(alias)=={k:v for k,v in current.items() if k!='ctime_ns'},'finalized inventory differs')
+    require(set(before)==set(after),'target paths changed during finalization')
+    require(all(before[name]==after[name] for name in before if name not in closure),'unfinalized target changed')
+    require(after_allocated==allocated+allocation_delta,'unattributed allocation change')
+
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--run',action='store_true');args=parser.parse_args()
     if not args.run:
@@ -87,7 +147,7 @@ def main():
     env={k:os.environ[k] for k in ['HOME','USER','LOGNAME','PATH','LANG','LC_ALL','TZ','CARGO_HOME','RUSTUP_HOME'] if k in os.environ}
     env.update(CARGO_TERM_COLOR='never',CARGO_BUILD_JOBS='1',CARGO_INCREMENTAL='0',CARGO_NET_OFFLINE='true',CARGO_TARGET_DIR=str(target),RUST_BACKTRACE='1',PYTHONDONTWRITEBYTECODE='1',TMPDIR=str(temp),XDG_RUNTIME_DIR=str(runtime_dir),WGPU_BACKEND='vulkan',ORR_REQUIRE_GPU='1')
     runner=Runner(evidence,env,observe);save('started.json',record);save('owner-capability.json',runner.capability)
-    mutated=False;original=None;active=None;baseline=None;source_names=[];archives={};fixtures={};tools={};tool_pins={};target_state={};retained_hashes={}
+    mutated=False;original=None;active=None;baseline=None;source_names=[];archives={};fixtures={};tools={};tool_pins={};target_state={};retained_hashes={};retained_elfs={};phase="setup"
     try:
         git=pathlib.Path(shutil.which('git',path=env['PATH'])).resolve(strict=True)
         def run(name,argv,expected_exit=0,timeout=3600,extra_env=None):return runner.run(name,[str(x) for x in argv],work,expected_exit,timeout,extra_env)
@@ -106,6 +166,8 @@ def main():
         # proxy under the wrong argv[0]. Every resolution/version is owner-guarded.
         rustup=pathlib.Path(shutil.which('rustup',path=env['PATH'])).resolve(strict=True)
         tool_pins[str(git)]=sha(git);tool_pins[str(rustup)]=sha(rustup)
+        python=pathlib.Path(sys.executable).resolve(strict=True);require(python.is_file(),'resolved Python required')
+        tool_pins[str(python)]=sha(python)
         for name in ['cargo','rustc','cargo-clippy','clippy-driver']:
             text,_=run('resolve-'+name,[rustup,'which',name],timeout=60)
             path=pathlib.Path(text.strip());require(path.is_absolute() and path.resolve()==path and path.is_file(),'canonical real tool required')
@@ -144,29 +206,100 @@ def main():
             require_target_inventory(target_state,after,allocated,save,record)
             for name,digest in retained_hashes.items():require(sha(target/name)==digest,'retained producer hash changed')
             require(fs.disk_inventory(target,hash_content=False)==(after,allocated),'posthash target inventory drift')
+        def helper(name,request,timeout):
+            fence();require(kernel_no_children(),'finalization/diagnosis requires reaped owner')
+            finalization.validate_request(request);save(name+'.request.json',request)
+            data=json_bytes(request);path=evidence/(name+'.request.json')
+            text,stderr=run(name,[python,work/'tools/hud_layer_order/finalization.py',path,hashlib.sha256(data).hexdigest()],timeout=timeout)
+            fence();require(not stderr and len(text.encode())<=finalization.JSON_CAP,'helper result bound/stderr')
+            result=json.loads(text)
+            require(set(result)=={'version','mode','phase','groups','errors','filesystem','parents','ok'}
+                    and result['version']==1 and result['mode']==request['mode'] and result['phase']==request['phase']
+                    and result['ok'] is True and result['errors']==[]
+                    and len(result['groups'])==len(request['groups']),'invalid helper receipt')
+            return result
+        def failure_diagnostic():
+            context={'phase':phase,'ns':str(time.time_ns()),'state':'unavailable','stage':'owner-admission'}
+            record['target_failure_identity']=context
+            try:
+                require(not runner.unknown and not runner.pending and kernel_no_children(),'diagnosis owner unavailable')
+                context['stage']='deadline-admission'
+                require(time.monotonic()+30<runner.deadline,'diagnosis deadline unavailable')
+                context['stage']='known-identity-selection'
+                names=[row['path'] for row in record['target_mutation']['rows']]
+                groups=[];seen=set();baseline={};total=0
+                observed,_=fs.disk_inventory(target,hash_content=False)
+                for name in names:
+                    if name not in retained_elfs:continue
+                    original=retained_elfs[name];key=original['stat']['device'],original['stat']['inode']
+                    if key in seen:continue
+                    if len(groups)==2 or total+original['stat']['bytes']>384*MIB:break
+                    aliases=original['aliases'];current=finalization.snapshot((target/name).lstat())
+                    require(all(observed.get(alias)=={k:v for k,v in current.items() if k!='ctime_ns'} for alias in aliases),'diagnosis alias instability')
+                    require(all(current[k]==original['stat'][k] for k in finalization.STAT_KEYS-{'allocated','ctime_ns'}),'diagnosis identity changed')
+                    require(all(retained_hashes.get(alias)==original['sha256'] for alias in aliases),'missing retained auxiliary baseline')
+                    groups.append({**original,'stat':current});baseline[name]=original['stat'];seen.add(key);total+=current['bytes']
+                require(groups,'no bounded known ELF available')
+                request={'version':1,'mode':'diagnose','phase':'target-failure','root':str(target),
+                         'root_identity':finalization.root_identity(target.lstat()),'groups':groups}
+                context['stage']='bounded-diagnostic-helper'
+                context.update(state='observed',baseline=baseline,result=helper('target-failure-identity',request,30))
+            except BaseException as error:
+                context.update(state='unavailable',error_type=type(error).__name__[:64])
+            try:save('target-failure-identity.json',context)
+            except BaseException as error:context['write_error']=type(error).__name__[:64]
         def command(name,argv,expected_exit=0,timeout=3600,extra_env=None,producer=False):
+            nonlocal phase
+            phase='before-'+name
             fence();target_fence();observe()
             result=run(name,argv,expected_exit,timeout,extra_env);fence()
+            phase='after-'+name
             if not producer:target_fence()
             return result
         def attribute(name,stdout):
-            nonlocal target_state
             after,allocated=fs.disk_inventory(target,hash_content=False);rows,_=audit.producer_messages(name,stdout)
             receipt=json.loads((evidence/(name+'.transport.json')).read_text());provenance=json.loads((evidence/(name+'.provenance.json')).read_text())
             bins=fs.canonical_bin_proofs(provenance,target,int(receipt['started_ns']),int(receipt['finished_ns']))
             delta=fs.attribute_output_changes(target_state,after,rows,target,identities,bins)
-            for path,value in delta['changed'].items():value['after_sha256']=sha(target/path);retained_hashes[path]=value['after_sha256']
-            for path in delta['removed']:retained_hashes.pop(path,None)
+            hashes=dict(retained_hashes)
+            for path,value in delta['changed'].items():value['after_sha256']=sha(target/path);hashes[path]=value['after_sha256']
+            for path in delta['removed']:hashes.pop(path,None)
             require(fs.disk_inventory(target,hash_content=False)==(after,allocated),'producer target drift during full hashes')
-            save(name+'.output-delta.json',delta);target_state=after
+            return after,allocated,bins,delta,hashes
+        def finalize(name,pending,rows):
+            nonlocal target_state,retained_hashes,retained_elfs,phase
+            after,allocated,bins,delta,hashes=pending
+            groups=elf_groups(rows,bins,after,hashes,target,delta['changed'])
+            phase='finalize-'+name
+            receipt={'state':'empty-closure','groups':[]}
+            if groups:
+                request={'version':1,'mode':'finalize','phase':phase,'root':str(target),
+                         'root_identity':finalization.root_identity(target.lstat()),'groups':groups}
+                receipt=helper(name+'-finalize',request,60)
+                latest,latest_allocated=fs.disk_inventory(target,hash_content=False)
+                verify_finalization(request,receipt,after,allocated,latest,latest_allocated,target)
+                after=latest
+                for item in receipt['groups']:
+                    for path in item['aliases']:delta['changed'][path]['after']=after[path]
+            else:
+                require(fs.disk_inventory(target,hash_content=False)==(after,allocated),'empty finalization target drift')
+            changed=set(delta['changed'])|set(delta['removed'])
+            elves={path:item for path,item in retained_elfs.items() if not changed.intersection(item['aliases'])}
+            for item in receipt['groups']:
+                proof={'aliases':item['aliases'],'role':item['role'],'stat':item['after'],'sha256':item['sha256']}
+                for path in item['aliases']:elves[path]=proof
+            observe();save(name+'.finalization.json',receipt);save(name+'.output-delta.json',delta)
+            target_state=after;retained_hashes=hashes;retained_elfs=elves
         def produce(name,action,package,target_name=None,selections=None):
             fence();target_fence();require(shutil.disk_usage(work).free>=GIB+1536*MIB+(ARCHIVE_CAP-usage()['archives'])+(TEXT_CAP+CAPTURE_CAP-usage()['evidence']),'compile/link/remaining-evidence floor admission')
             features=c.EDITOR_FEATURES if package=='orr_editor' else c.TOOL_FEATURES
             audit.refresh(name,work,active);argv=c.command(action,package,target_name);argv[0]=str(tools['cargo'])
             stdout,stderr=command(name,argv,producer=True)
-            rows=audit.audit_producer(name,stdout,stderr,work,package,features,action);attribute(name,stdout)
-            if selections is None:return {}
-            chosen=c.selected_roots(rows,work,package,selections,features);result={}
+            rows=audit.audit_producer(name,stdout,stderr,work,package,features,action);pending=attribute(name,stdout)
+            if selections is None:
+                require(not any(row.get('executable') for row in rows),'unexpected unselected producer executable')
+                finalize(name,pending,[]);return {}
+            chosen=c.selected_roots(rows,work,package,selections,features);finalize(name,pending,rows);result={}
             for key,row in chosen.items():
                 path=pathlib.Path(row['executable']);require(path.is_relative_to(target/'release') and path.resolve()==path,'selected executable escapes target')
                 result[key]={'path':str(path),'identity':audit.elf(path,192*MIB),'producer':row,'source_manifest_sha256':c.object_digest(active)}
@@ -184,6 +317,8 @@ def main():
             audit.elf(path,192*MIB,artifact['identity']);require('panicked at' not in stderr,'uncaptured or unrelated panic')
             save(label+'.verified.json',tests.result(text,[name],101 if negative_mode else 0,len(artifact['names'])-1,negative_oracle if negative_mode else None))
         def archive(label,artifact):
+            nonlocal phase
+            phase='archive-'+label
             fence();path=pathlib.Path(artifact['path']);audit.elf(path,192*MIB,artifact['identity'])
             require(len(archives)<6 and usage()['archives']+64*MIB<=ARCHIVE_CAP,'six archive capacity')
             receipt=tests.archive(path,evidence/(label+'.elf.gz'),compressed_cap=64*MIB);fs.require_archive_identity(receipt,artifact['identity'])
@@ -244,6 +379,9 @@ def main():
         require(kernel_no_children(),'terminal cleanup not empty')
         record.update(state='PASS_EXACT_HEAD_COMBINED_HUD_SCOPE',final_source_manifest_sha256=c.object_digest(fs.sources(work,source_names)),source_restored=True,negative_is_order_assertion_not_pixel_negative=True,kernel_ECHILD=True,final_resources=observe())
     except BaseException as error:
+        if 'target_mutation' in record:
+            try:failure_diagnostic()
+            except BaseException as diagnostic_error:record['target_failure_identity']={'state':'unavailable','error_type':type(diagnostic_error).__name__[:64]}
         record.update(state='FAIL_OWNERSHIP_UNKNOWN' if runner.unknown else 'FAIL',error=repr(error),ownership_unknown=runner.unknown);raise
     finally:
         if mutated and not runner.unknown:
