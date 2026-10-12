@@ -30,7 +30,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-pub const HELP: &str = "particle_demo --particles off|dust|sparks [--headless]\nWASD/arrows: move and collect gold spheres. R: new session. Escape: exit.\nDust previews a preset on pickup, not a landing event. --headless is CPU-only.";
+pub const HELP: &str = "particle_demo --particles off|dust|sparks [--headless] [--showcase]\n--showcase: genuine pickup, spread/fade, fresh-session cycling every two seconds.\nWASD/arrows: move and collect gold spheres. R: new session. Escape: exit.\nDust previews a preset on pickup, not a landing event. --headless is CPU-only.";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Off,
@@ -40,12 +40,14 @@ pub enum Mode {
 pub struct Options {
     pub mode: Mode,
     pub headless: bool,
+    pub showcase: bool,
 }
 impl Options {
     pub fn parse(args: Vec<String>) -> Result<Self, String> {
         let mut args = args.into_iter();
         let mut mode = None;
         let mut headless = false;
+        let mut showcase = false;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--particles" if mode.is_none() => {
@@ -57,12 +59,14 @@ impl Options {
                     })
                 }
                 "--headless" if !headless => headless = true,
+                "--showcase" if !showcase => showcase = true,
                 _ => return Err(HELP.into()),
             }
         }
         Ok(Self {
             mode: mode.ok_or_else(|| HELP.to_string())?,
             headless,
+            showcase,
         })
     }
 }
@@ -170,6 +174,51 @@ impl Demo {
         Ok(())
     }
 }
+/// A real-input preview: collect once, release movement, then start a fresh session.
+/// A frame uses one Demo update/poll. Excess cycle-boundary time is not replayed.
+#[derive(Default)]
+struct Showcase {
+    elapsed: Duration,
+    pickup_observed_at: Option<Duration>,
+    completed_cycles: u64,
+}
+impl Showcase {
+    const CYCLE: Duration = Duration::from_secs(2);
+    fn score(demo: &Demo) -> u32 {
+        demo.snapshot
+            .as_ref()
+            .map_or(0, |s| s.predicted().singleton::<CollectRun>().score)
+    }
+    fn restart(&mut self, demo: &mut Demo) {
+        *demo = Demo::new(demo.mode);
+        *self = Self::default();
+    }
+    fn update(&mut self, demo: &mut Demo, dt: Duration, focused: bool) -> Result<(), String> {
+        if !focused {
+            return Ok(());
+        }
+        let dt = dt.min(Duration::from_millis(250));
+        if !dt.is_zero() && self.elapsed >= Self::CYCLE {
+            let cycles = self.completed_cycles.saturating_add(1);
+            self.restart(demo);
+            self.completed_cycles = cycles;
+        }
+        let input = CollectInput {
+            x: if Self::score(demo) == 0 {
+                FP::ONE
+            } else {
+                FP::ZERO
+            },
+            ..CollectInput::default()
+        };
+        demo.update(dt, input)?;
+        self.elapsed += dt;
+        if Self::score(demo) > 0 && self.pickup_observed_at.is_none() {
+            self.pickup_observed_at = Some(self.elapsed);
+        }
+        Ok(())
+    }
+}
 fn geometry_settings() -> orr_render::Settings3D {
     // The composed scene owns a single-sample color/depth pair.
     orr_render::Settings3D {
@@ -239,6 +288,8 @@ struct App {
     demo: Demo,
     graphics: Option<Graphics>,
     keys: [bool; 4],
+    showcase: Option<Showcase>,
+    focused: bool,
     last: Instant,
     error: Option<String>,
 }
@@ -260,14 +311,19 @@ impl App {
                 -FP::ONE
             }
         };
-        if let Err(e) = self.demo.update(
-            dt,
-            CollectInput {
-                x: axis(self.keys[1], self.keys[0]),
-                y: axis(self.keys[3], self.keys[2]),
-                ..CollectInput::default()
-            },
-        ) {
+        let update = if let Some(showcase) = &mut self.showcase {
+            showcase.update(&mut self.demo, dt, self.focused)
+        } else {
+            self.demo.update(
+                dt,
+                CollectInput {
+                    x: axis(self.keys[1], self.keys[0]),
+                    y: axis(self.keys[3], self.keys[2]),
+                    ..CollectInput::default()
+                },
+            )
+        };
+        if let Err(e) = update {
             self.fail(event_loop, e);
             return;
         }
@@ -294,9 +350,15 @@ impl App {
             .snapshot
             .as_ref()
             .map_or(0, |s| s.predicted().singleton::<CollectRun>().score);
+        let controls = if self.showcase.is_some() {
+            "fresh-session showcase | focus loss pauses | R restart"
+        } else {
+            "WASD/arrows move | R restart"
+        };
         g.window.set_title(&format!(
-            "Particle preset preview | WASD/arrows move | R restart | {score}/2 pickups | {:?}",
-            self.demo.mode
+            "Particle preset preview | {controls} | {score}/2 pickups | {:?} | {} particles",
+            self.demo.mode,
+            self.demo.draws.len()
         ));
     }
 }
@@ -341,7 +403,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Focused(false) => self.keys = [false; 4],
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                self.keys = [false; 4];
+                self.last = Instant::now();
+            }
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
                     if let Some(g) = &mut self.graphics {
@@ -361,7 +427,12 @@ impl ApplicationHandler for App {
                         KeyCode::KeyS | KeyCode::ArrowDown => self.keys[3] = down,
                         KeyCode::Escape if down => event_loop.exit(),
                         KeyCode::KeyR if down && !event.repeat => {
-                            self.demo = Demo::new(self.demo.mode)
+                            if let Some(showcase) = &mut self.showcase {
+                                showcase.restart(&mut self.demo);
+                            } else {
+                                self.demo = Demo::new(self.demo.mode);
+                            }
+                            self.last = Instant::now();
                         }
                         _ => {}
                     }
@@ -379,7 +450,12 @@ impl ApplicationHandler for App {
 pub fn run(options: Options) -> Result<(), String> {
     let mut demo = Demo::new(options.mode);
     if options.headless {
-        for _ in 0..20 {
+        let mut showcase = Showcase::default();
+        for _ in 0..if options.showcase { 240 } else { 20 } {
+            if options.showcase {
+                showcase.update(&mut demo, Duration::from_millis(17), true)?;
+                continue;
+            }
             demo.update(
                 Duration::from_millis(17),
                 CollectInput {
@@ -405,6 +481,8 @@ pub fn run(options: Options) -> Result<(), String> {
         demo,
         graphics: None,
         keys: [false; 4],
+        showcase: options.showcase.then(Showcase::default),
+        focused: true,
         last: Instant::now(),
         error: None,
     };
@@ -414,3 +492,7 @@ pub fn run(options: Options) -> Result<(), String> {
 #[cfg(test)]
 #[path = "particle_demo_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "particle_showcase_tests.rs"]
+mod showcase_tests;

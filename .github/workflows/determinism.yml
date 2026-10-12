@@ -281,7 +281,12 @@ jobs:
       - name: Particle sample feature-off library tests
         run: cargo test --locked --release -p orr_sample --no-default-features --lib
       - name: Particle sample enabled library tests
-        run: cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib 2>&1 | tee "$RUNNER_TEMP/particle-sample-cpu.log"
+          test "$(grep -c '^test result:' "$RUNNER_TEMP/particle-sample-cpu.log")" -eq 1
+          grep -E '^test result: ok\. 19 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in [0-9.]+s$' "$RUNNER_TEMP/particle-sample-cpu.log"
       - name: Strict particle sample default Clippy
         run: cargo clippy --locked -p orr_sample --all-targets -- -D warnings
       - name: Strict particle sample feature-off Clippy
@@ -386,13 +391,14 @@ jobs:
           # Fresh exclusive capture directory; never reuse a prior image.
           mkdir -m 700 "$ORR_PARTICLE_CAPTURE_DIR"
           cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib -- --list > "$RUNNER_TEMP/particle-sample-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/particle-sample-list.txt")" -eq 16
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/particle-sample-list.txt")" -eq 21
           cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib -- --ignored --list > "$RUNNER_TEMP/particle-sample-ignored.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/particle-sample-ignored.txt")" -eq 1
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/particle-sample-ignored.txt")" -eq 2
           grep -Fx 'particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png: test' "$RUNNER_TEMP/particle-sample-ignored.txt"
+          grep -Fx 'particle_demo::showcase_tests::actual_temporal_dust_and_sparks_spread_fade_and_expire: test' "$RUNNER_TEMP/particle-sample-ignored.txt"
           cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png -- --exact --ignored --test-threads=1 --show-output 2>&1 | tee "$RUNNER_TEMP/particle-sample-device.log"
           test "$(grep -c '^test result:' "$RUNNER_TEMP/particle-sample-device.log")" -eq 1
-          grep -E '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in [0-9.]+s$' "$RUNNER_TEMP/particle-sample-device.log"
+          grep -E '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in [0-9.]+s$' "$RUNNER_TEMP/particle-sample-device.log"
           awk '
             /^---- / { active = ($0 == "---- particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png stdout ----"); if (active) blocks++; next }
             /^successes:$/ { active = 0 }
@@ -427,6 +433,71 @@ jobs:
             ${{ runner.temp }}/particle-sample-captures.sha256
             ${{ runner.temp }}/particle-sample-captures/*.png
             ${{ runner.temp }}/particle-sample-captures/capture.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required temporal particle sample device sequence
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          ORR_PARTICLE_SHOWCASE_CAPTURE_DIR: ${{ runner.temp }}/particle-temporal-captures
+        run: |
+          set -euo pipefail
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | sort)
+          test "${#icds[@]}" -eq 1
+          export VK_ICD_FILENAMES="${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          mkdir -m 700 "$ORR_PARTICLE_SHOWCASE_CAPTURE_DIR"
+          cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib particle_demo::showcase_tests::actual_temporal_dust_and_sparks_spread_fade_and_expire -- --exact --ignored --test-threads=1 --show-output 2>&1 | tee "$RUNNER_TEMP/particle-temporal-device.log"
+          test "$(grep -c '^test result:' "$RUNNER_TEMP/particle-temporal-device.log")" -eq 1
+          grep -E '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in [0-9.]+s$' "$RUNNER_TEMP/particle-temporal-device.log"
+          awk '
+            /^---- / { active = ($0 == "---- particle_demo::showcase_tests::actual_temporal_dust_and_sparks_spread_fade_and_expire stdout ----"); if (active) blocks++; next }
+            /^successes:$/ { active = 0 }
+            active && /^temporal particle adapter=.+ software=(true|false)$/ { adapters++ }
+            END { exit !(blocks == 1 && adapters == 1) }
+          ' "$RUNNER_TEMP/particle-temporal-device.log"
+          if grep -Ei 'SKIP:|skipping|adapter unavailable' "$RUNNER_TEMP/particle-temporal-device.log"; then exit 1; fi
+          total=0
+          for mode in dust sparks; do
+            for ms in 000 100 250 450 700; do
+              file="$ORR_PARTICLE_SHOWCASE_CAPTURE_DIR/$mode-${ms}ms.png"
+              test -f "$file"
+              test ! -L "$file"
+              test -s "$file"
+              bytes=$(stat -c %s "$file")
+              test "$bytes" -le 1572864
+              total=$((total + bytes))
+            done
+          done
+          sequence="$ORR_PARTICLE_SHOWCASE_CAPTURE_DIR/sequence.txt"
+          test -f "$sequence"
+          test ! -L "$sequence"
+          test -s "$sequence"
+          bytes=$(stat -c %s "$sequence")
+          test "$bytes" -le 16384
+          test "$((total + bytes))" -le 16777216
+          grep -Fx 'size=640x480' "$sequence"
+          test "$(grep -c '^mode=' "$sequence")" -eq 10
+          for mode in dust sparks; do
+            for ms in 0 100 250 450 700; do
+              test "$(grep -cE "^mode=$mode after_pickup_ms=$ms presentation_elapsed_us=[0-9]+ pickup_observed_us=[0-9]+ tick=[0-9]+ particles=[0-9]+ changed_pixels=[0-9]+ authoritative_checksum=[0-9a-f]{16}$" "$sequence")" -eq 1
+            done
+            grep -E "^mode=$mode after_pickup_ms=700 .* particles=0 changed_pixels=0 authoritative_checksum=[0-9a-f]{16}$" "$sequence"
+          done
+          sha256sum "$ORR_PARTICLE_SHOWCASE_CAPTURE_DIR/"*.png "$sequence" > "$RUNNER_TEMP/particle-temporal-captures.sha256"
+      - name: Retain temporal particle sample device sequence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: particle-temporal-device-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/particle-sample-cpu.log
+            ${{ runner.temp }}/particle-temporal-device.log
+            ${{ runner.temp }}/particle-temporal-captures.sha256
+            ${{ runner.temp }}/particle-temporal-captures/*.png
+            ${{ runner.temp }}/particle-temporal-captures/sequence.txt
           if-no-files-found: error
           retention-days: 7
       # HDR is an explicit required acceptance lane, not an optional adapter

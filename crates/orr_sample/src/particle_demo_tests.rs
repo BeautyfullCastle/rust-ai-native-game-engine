@@ -11,6 +11,7 @@ fn composed_geometry_settings_request_one_sample() {
 fn options_require_explicit_mode_and_reject_duplicate_or_unknown_flags() {
     for args in [
         vec![],
+        vec!["--particles", "dust", "--showcase", "--showcase"],
         vec!["--particles"],
         vec!["--particles", "auto"],
         vec!["--particles", "off", "--particles", "sparks"],
@@ -26,6 +27,16 @@ fn options_require_explicit_mode_and_reject_duplicate_or_unknown_flags() {
     .unwrap();
     assert_eq!(options.mode, Mode::Sparks);
     assert!(options.headless);
+    assert!(!options.showcase);
+    assert!(
+        Options::parse(vec![
+            "--particles".into(),
+            "dust".into(),
+            "--showcase".into()
+        ])
+        .unwrap()
+        .showcase
+    );
 }
 #[test]
 fn real_pickups_drive_presets_without_changing_authoritative_checksums() {
