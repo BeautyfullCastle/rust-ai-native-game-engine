@@ -576,6 +576,11 @@ impl Rhi for Wgpu {
         let blend = match desc.blend {
             Blend::Opaque => None,
             Blend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+            #[cfg(feature = "additive-blend")]
+            Blend::Additive => Some(wgpu::BlendState {
+                color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+                alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+            }),
         };
         let targets: Vec<Option<wgpu::ColorTargetState>> = desc
             .color_format

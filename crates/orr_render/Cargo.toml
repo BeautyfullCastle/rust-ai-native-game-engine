@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 default = []
+particles = ["orr_view/particles", "orr_rhi/additive-blend"]
 irradiance-probes = ["imported-scene", "bytemuck/min_const_generics"]
 sprites = ["dep:orr_sprite"]
 models = ["dep:orr_model"]

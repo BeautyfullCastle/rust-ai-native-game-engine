@@ -96,3 +96,8 @@ pub mod irradiance;
 pub mod irradiance_bake;
 #[cfg(feature = "irradiance-probes")]
 pub use irradiance::{IrradianceGrid, IrradianceProvenance, IrradianceSample, IrradianceUniform};
+
+#[cfg(feature = "particles")]
+pub mod particle_renderer;
+#[cfg(feature = "particles")]
+pub mod particle_presets;
