@@ -514,9 +514,16 @@ def running(pin, stderr):
     else:
         label = f'tests/{selector[1]}.rs'
     expected = re.fullmatch(r'\s*Running ' + re.escape(label) + r' \(([^\r\n]+)\)', candidates[0])
-    require(expected and expected[1] == str(pin['original']), f'Cargo Running label/path mismatch: {candidates[0]}')
+    # Cargo displays an executable beneath its invocation cwd without that
+    # prefix. Admit only these exact spellings of the already fenced ELF,
+    # never a basename match or resolved traversal/symlink alias.
+    paths = {str(pin['original'])}
+    if pin['original'].is_relative_to(pin['root']):
+        paths.add(str(pin['original'].relative_to(pin['root'])))
+    require(expected and expected[1] in paths, f'Cargo Running label/path mismatch: {candidates[0]}')
     require(not re.search(r'^\s*(Compiling|Checking|Dirty)\b', stderr, re.M), 'execution unexpectedly rebuilt its producer')
-    return {'line': candidates[0], 'label': label, 'path': expected[1], **pin['identity']}
+    return {'line': candidates[0], 'label': label, 'path': str(pin['original']),
+            'displayed_path': expected[1], **pin['identity']}
 
 
 def inventory(pin, expected, ignored=(), test_filter='', exact=False):
