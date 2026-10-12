@@ -41,6 +41,8 @@ pub enum ImportedSceneError {
     #[cfg(feature = "animation")]
     Skinned(SkinnedRenderError),
     PointLight(PointLightError),
+    #[cfg(feature = "particles")]
+    Particles(crate::particle_renderer::ParticleRenderError),
     #[cfg(feature = "irradiance-probes")]
     Irradiance(String),
 }
@@ -63,6 +65,8 @@ impl std::fmt::Display for ImportedSceneError {
             #[cfg(feature = "animation")]
             Self::Skinned(error) => write!(f, "imported scene: {error}"),
             Self::PointLight(error) => write!(f, "imported scene: {error}"),
+            #[cfg(feature = "particles")]
+            Self::Particles(error) => write!(f, "{error}"),
             #[cfg(feature = "irradiance-probes")]
             Self::Irradiance(error) => write!(f, "irradiance grid: {error}"),
         }
@@ -80,6 +84,13 @@ pub struct ImportedSceneTarget<'a, B: Rhi> {
     pub size: (u32, u32),
     pub format: TextureFormat,
     pub sample_count: u32,
+}
+
+/// Optional bounded particle batch, sharing the scene color and stored depth.
+#[cfg(feature = "particles")]
+pub struct ParticleBatch<'a, B: Rhi> {
+    pub renderer: &'a mut crate::particle_renderer::ParticleRenderer<B>,
+    pub items: &'a [orr_view::particles::ParticleDraw],
 }
 
 /// A renderer can occur only once in a frame: exclusive borrows prevent repeated
@@ -398,6 +409,26 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         point: &PointLightSettings,
         batches: &mut [ImportedBatch<'_, B>],
     ) -> Result<(), ImportedSceneError> {
+        self.draw_inner(target, camera, lighting, point, batches, #[cfg(feature = "particles")] None)
+    }
+
+    /// Adds a preflighted visual-only particle pass before HDR postprocessing.
+    #[cfg(feature = "particles")]
+    #[allow(clippy::too_many_arguments)] // Keep the existing draw arguments plus one optional pass.
+    pub fn draw_with_particles(
+        &mut self, target: ImportedSceneTarget<'_, B>, camera: &Camera3D,
+        lighting: &Lighting, point: &PointLightSettings, batches: &mut [ImportedBatch<'_, B>],
+        particles: Option<ParticleBatch<'_, B>>,
+    ) -> Result<(), ImportedSceneError> {
+        self.draw_inner(target, camera, lighting, point, batches, particles)
+    }
+
+    #[allow(clippy::too_many_arguments)] // Shared implementation preserves the existing draw API.
+    fn draw_inner(
+        &mut self, target: ImportedSceneTarget<'_, B>, camera: &Camera3D,
+        lighting: &Lighting, point: &PointLightSettings, batches: &mut [ImportedBatch<'_, B>],
+        #[cfg(feature = "particles")] mut particles: Option<ParticleBatch<'_, B>>,
+    ) -> Result<(), ImportedSceneError> {
         // CPU-only probe admission comes before all allocation, cache and upload effects.
         #[cfg(feature = "irradiance-probes")]
         let irradiance = match &self.irradiance {
@@ -405,7 +436,16 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             None => <crate::IrradianceUniform as bytemuck::Zeroable>::zeroed(),
         };
         self.validate_target(target.size, target.format, target.sample_count)?;
-        if batches.len() > MAX_IMPORTED_BATCHES {
+        #[cfg(feature = "particles")]
+        let particle_ready = if let Some(batch) = &particles {
+            if batch.renderer.format() != self.scene_format() { return Err(ImportedSceneError::FormatMismatch); }
+            Some(batch.renderer.prepare(camera, target.size, batch.items).map_err(ImportedSceneError::Particles)?)
+        } else { None };
+        #[cfg(feature = "particles")]
+        let particle_passes = usize::from(particle_ready.as_ref().is_some_and(|p| p.particle_count() > 0));
+        #[cfg(not(feature = "particles"))]
+        let particle_passes = 0usize;
+        if batches.len().checked_add(particle_passes).is_none_or(|n| n > MAX_IMPORTED_BATCHES) {
             return Err(ImportedSceneError::BatchLimit);
         }
         let (mut globals, shadow_ready) =
@@ -432,6 +472,9 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         }
 
         // Admit all formats and budgets before potentially expensive pose checks.
+        #[cfg(feature = "particles")]
+        let mut draw_count = particle_ready.as_ref().map_or(0, |p| p.draw_count());
+        #[cfg(not(feature = "particles"))]
         let mut draw_count = 0usize;
         let mut procedural_instances = 0usize;
         let mut caster_count = 0usize;
@@ -745,6 +788,16 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 }
                 _ => unreachable!("prepared batches preserve order and kind"),
             }
+        }
+        #[cfg(feature = "particles")]
+        if let (Some(batch), Some(ready)) = (&mut particles, &particle_ready) {
+            // Metadata is entirely determined by the completed preflight and
+            // the scene-owned attachments. No further fallible frame admission.
+            batch.renderer.upload_and_encode(&mut encoder, crate::particle_renderer::ParticleTarget {
+                color: scene_view, depth, size: target.size, color_format: self.scene_format(),
+                depth_format: TextureFormat::Depth32Float, sample_count: 1,
+                depth_size: target.size, depth_sample_count: 1,
+            }, ready).expect("preflighted scene particle target");
         }
         if let Some(post) = &self.post_processor {
             post.encode(
@@ -2157,6 +2210,12 @@ mod tests {
         );
         assert_eq!(rebound.pass_textures[2], vec![map]);
     }
+    #[cfg(feature = "particles")]
+    mod particle_composition {
+        use super::*;
+        include!("imported_scene/particle_composition_tests.rs");
+    }
+
 }
 
 #[cfg(all(test, feature = "animation"))]

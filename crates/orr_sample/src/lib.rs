@@ -107,3 +107,6 @@ pub mod room_view;
 
 #[cfg(feature = "room-project")]
 pub mod room_app;
+
+#[cfg(feature = "particle-demo")]
+pub mod particle_demo;
