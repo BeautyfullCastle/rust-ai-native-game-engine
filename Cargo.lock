@@ -3595,6 +3595,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_terrain_import"
+version = "0.0.1"
+dependencies = [
+ "orr_editor",
+ "orr_fp",
+ "orr_package",
+ "orr_render",
+ "orr_terrain",
+ "orr_terrain_view",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "orr_terrain_view"
 version = "0.0.1"
 dependencies = [
