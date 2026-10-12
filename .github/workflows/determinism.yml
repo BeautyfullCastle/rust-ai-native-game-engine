@@ -275,6 +275,23 @@ jobs:
         run: cargo clippy --locked -p orr_render --no-default-features --all-targets -- -D warnings
       - name: Strict particle renderer enabled Clippy
         run: cargo clippy --locked -p orr_render --no-default-features --features particles --all-targets -- -D warnings
+      # The actual sample/compositor seam is separately gated and default-off.
+      - name: Particle sample default library tests
+        run: cargo test --locked --release -p orr_sample --lib
+      - name: Particle sample feature-off library tests
+        run: cargo test --locked --release -p orr_sample --no-default-features --lib
+      - name: Particle sample enabled library tests
+        run: cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib
+      - name: Strict particle sample default Clippy
+        run: cargo clippy --locked -p orr_sample --all-targets -- -D warnings
+      - name: Strict particle sample feature-off Clippy
+        run: cargo clippy --locked -p orr_sample --no-default-features --all-targets -- -D warnings
+      - name: Strict particle sample enabled Clippy
+        run: cargo clippy --locked -p orr_sample --no-default-features --features particle-demo --all-targets -- -D warnings
+      - name: Particle imported-scene compositor library tests
+        run: cargo test --locked --release -p orr_render --no-default-features --features imported-scene,particles --lib
+      - name: Strict particle imported-scene compositor Clippy
+        run: cargo clippy --locked -p orr_render --no-default-features --features imported-scene,particles --all-targets -- -D warnings
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
       - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings
       - name: Upload sample release build timings
@@ -351,6 +368,65 @@ jobs:
           path: |
             ${{ runner.temp }}/particle-renderer-ignored.txt
             ${{ runner.temp }}/particle-renderer-device.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required actual particle sample device and PNG acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          ORR_PARTICLE_CAPTURE_DIR: ${{ runner.temp }}/particle-sample-captures
+        run: |
+          set -euo pipefail
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | sort)
+          test "${#icds[@]}" -eq 1
+          export VK_ICD_FILENAMES="${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          # Fresh exclusive capture directory; never reuse a prior image.
+          mkdir -m 700 "$ORR_PARTICLE_CAPTURE_DIR"
+          cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib -- --list > "$RUNNER_TEMP/particle-sample-list.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/particle-sample-list.txt")" -eq 16
+          cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib -- --ignored --list > "$RUNNER_TEMP/particle-sample-ignored.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/particle-sample-ignored.txt")" -eq 1
+          grep -Fx 'particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png: test' "$RUNNER_TEMP/particle-sample-ignored.txt"
+          cargo test --locked --release -p orr_sample --no-default-features --features particle-demo --lib particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png -- --exact --ignored --test-threads=1 --show-output 2>&1 | tee "$RUNNER_TEMP/particle-sample-device.log"
+          test "$(grep -c '^test result:' "$RUNNER_TEMP/particle-sample-device.log")" -eq 1
+          grep -E '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in [0-9.]+s$' "$RUNNER_TEMP/particle-sample-device.log"
+          awk '
+            /^---- / { active = ($0 == "---- particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png stdout ----"); if (active) blocks++; next }
+            /^successes:$/ { active = 0 }
+            active && /^sample particle adapter=.+ software=(true|false)$/ { adapters++ }
+            active && /^sample adapter supported samples=[1-9][0-9]*$/ { samples++ }
+            END { exit !(blocks == 1 && adapters == 1 && samples == 1) }
+          ' "$RUNNER_TEMP/particle-sample-device.log"
+          if grep -Ei 'SKIP:|skipping|adapter unavailable' "$RUNNER_TEMP/particle-sample-device.log"; then exit 1; fi
+          for capture in particles-off.png pickup-sparks.png capture.txt; do
+            test -f "$ORR_PARTICLE_CAPTURE_DIR/$capture"
+            test ! -L "$ORR_PARTICLE_CAPTURE_DIR/$capture"
+            test -s "$ORR_PARTICLE_CAPTURE_DIR/$capture"
+            test "$(stat -c %s "$ORR_PARTICLE_CAPTURE_DIR/$capture")" -le 409600
+          done
+          grep -Fx 'size=320x240' "$ORR_PARTICLE_CAPTURE_DIR/capture.txt"
+          grep -E '^changed_pixels=[1-9][0-9]*$' "$ORR_PARTICLE_CAPTURE_DIR/capture.txt"
+          changed_pixels=$(sed -n 's/^changed_pixels=//p' "$ORR_PARTICLE_CAPTURE_DIR/capture.txt")
+          test "$changed_pixels" -ge 4
+          test "$changed_pixels" -le 76800
+          grep -E '^authoritative_checksum=[0-9a-f]{16}$' "$ORR_PARTICLE_CAPTURE_DIR/capture.txt"
+          grep -Fx 'Off/on checksums equal; empty-particle route restored baseline exactly.' "$ORR_PARTICLE_CAPTURE_DIR/capture.txt"
+          sha256sum "$ORR_PARTICLE_CAPTURE_DIR/particles-off.png" "$ORR_PARTICLE_CAPTURE_DIR/pickup-sparks.png" "$ORR_PARTICLE_CAPTURE_DIR/capture.txt" > "$RUNNER_TEMP/particle-sample-captures.sha256"
+      - name: Retain actual particle sample device and PNG evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: particle-sample-device-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/particle-sample-list.txt
+            ${{ runner.temp }}/particle-sample-ignored.txt
+            ${{ runner.temp }}/particle-sample-device.log
+            ${{ runner.temp }}/particle-sample-captures.sha256
+            ${{ runner.temp }}/particle-sample-captures/*.png
+            ${{ runner.temp }}/particle-sample-captures/capture.txt
           if-no-files-found: error
           retention-days: 7
       # HDR is an explicit required acceptance lane, not an optional adapter
