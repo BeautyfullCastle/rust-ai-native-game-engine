@@ -76,10 +76,23 @@ def selected_roots(rows,work,package,selections,features):
     expected_manifest=str(work/'crates'/package/'Cargo.toml')
     require(rows and all(row['manifest_path']==expected_manifest for row in rows),'selected root manifest mismatch')
     require(all(row['features']==sorted(features) or sorted(row['features'])==sorted(features) for row in rows),'root feature closure mismatch')
-    selected={}
+    selected={};auxiliary_seen=False
     for row in rows:
         if not row.get('executable'):continue
-        name=row['target']['name'];require(name in selections,'unexpected executable selected package target')
+        name=row['target']['name']
+        if name not in selections:
+            # Cargo also builds the editor binary for these integration tests.
+            # It remains audited/attributed, but is never selected or executed.
+            require(package=='orr_editor' and selections in [
+                {'ui_layer_order_acceptance':('test',True)},
+                {'ui_layer_order_gpu_export':('test',True)}]
+                and name=='orr_editor' and row['target']['kind']==['bin']
+                and row['target']['src_path']==str(work/'crates/orr_editor/src/main.rs')
+                and row['profile']['test'] is False,
+                'unexpected executable selected package target')
+            require(not auxiliary_seen and row['fresh'] is False,'duplicate/cached auxiliary executable')
+            auxiliary_seen=True
+            continue
         kind,is_test=selections[name]
         require(row['target']['kind']==[kind] and row['profile']['test'] is is_test,'wrong target kind/test profile')
         require(name not in selected and row['fresh'] is False,'duplicate/cached selected executable')

@@ -90,6 +90,67 @@ class GateContracts(unittest.TestCase):
         for key,value in [('manifest_path','/source/crates/orr_editor/Cargo.toml'),('profile',{'test':True}),('fresh',True),('features',['default'])]:
             bad=copy.deepcopy(rows);bad[0][key]=value
             with self.assertRaises(RuntimeError):selected(bad)
+    def hud_root_rows(self,target):
+        def row(name,kind,is_test,source):
+            return {'manifest_path':'/source/crates/orr_editor/Cargo.toml','features':list(c.EDITOR_FEATURES),
+                    'target':{'name':name,'kind':[kind],'src_path':'/source/crates/orr_editor/'+source},
+                    'profile':{'test':is_test},'fresh':False,'executable':'/target/'+name}
+        return [row(target,'test',True,'tests/'+target+'.rs'),row('orr_editor','bin',False,'src/main.rs')]
+    def select_hud_roots(self,rows,target):
+        return c.selected_roots(rows,pathlib.Path('/source'),'orr_editor',{target:('test',True)},c.EDITOR_FEATURES)
+    def test_hud_selects_only_requested_test_with_audited_companion(self):
+        for target in ['ui_layer_order_acceptance','ui_layer_order_gpu_export']:
+            rows=self.hud_root_rows(target)
+            for values in [rows,rows[::-1],rows[:1]]:
+                with self.subTest(target=target,order=[r['target']['name'] for r in values]):
+                    selected=self.select_hud_roots(values,target)
+                    self.assertEqual(selected,{target:rows[0]})
+                    self.assertIs(selected[target],rows[0])
+    def test_hud_companion_cannot_replace_missing_requested_test(self):
+        target='ui_layer_order_acceptance';rows=self.hud_root_rows(target)
+        for values in [[],rows[1:]]:
+            with self.assertRaises(RuntimeError):self.select_hud_roots(values,target)
+        rows[0]['executable']=None
+        with self.assertRaisesRegex(RuntimeError,'missing selected executable'):self.select_hud_roots(rows,target)
+    def test_hud_companion_rejects_wrong_identity_and_cached_output(self):
+        target='ui_layer_order_acceptance';rows=self.hud_root_rows(target)
+        mutations=[('manifest_path','/source/crates/other/Cargo.toml'),('features',['default']),
+                   ('fresh',True),('profile',{'test':True}),('profile',{'test':0})]
+        for key,value in mutations:
+            bad=copy.deepcopy(rows);bad[1][key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(RuntimeError):self.select_hud_roots(bad,target)
+        for key,value in [('name','arbitrary'),('kind',['test']),('kind',['bin','test']),
+                          ('src_path','/source/crates/orr_editor/src/other.rs'),
+                          ('src_path','/source/crates/orr_editor/src/../src/main.rs')]:
+            bad=copy.deepcopy(rows);bad[1]['target'][key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(RuntimeError):self.select_hud_roots(bad,target)
+        with self.assertRaisesRegex(RuntimeError,'duplicate/cached auxiliary'):self.select_hud_roots(rows+[copy.deepcopy(rows[1])],target)
+    def test_hud_requested_test_still_rejects_wrong_identity_and_duplicates(self):
+        target='ui_layer_order_acceptance';rows=self.hud_root_rows(target)
+        for key,value in [('fresh',True),('profile',{'test':False}),('profile',{'test':1}),('features',['default']),
+                          ('manifest_path','/source/crates/other/Cargo.toml')]:
+            bad=copy.deepcopy(rows);bad[0][key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(RuntimeError):self.select_hud_roots(bad,target)
+        bad=copy.deepcopy(rows);bad[0]['target']['kind']=['bin']
+        with self.assertRaisesRegex(RuntimeError,'wrong target kind/test profile'):self.select_hud_roots(bad,target)
+        with self.assertRaisesRegex(RuntimeError,'duplicate/cached selected'):self.select_hud_roots(rows+[copy.deepcopy(rows[0])],target)
+    def test_hud_companion_exception_is_not_generic_extra_executable_permission(self):
+        for target in ['unrequested_test','ui_layer_order_acceptance']:
+            rows=self.hud_root_rows(target)
+            selections={target:('test',True)}
+            if target=='ui_layer_order_acceptance':selections['another_test']=('test',True)
+            with self.assertRaisesRegex(RuntimeError,'unexpected executable'):
+                c.selected_roots(rows,pathlib.Path('/source'),'orr_editor',selections,c.EDITOR_FEATURES)
+        rows=[{'manifest_path':'/source/crates/orr_sample/Cargo.toml','features':c.TOOL_FEATURES,
+               'target':{'name':n,'kind':['bin']},'profile':{'test':False},'fresh':False,
+               'executable':'/target/'+n} for n in [*c.TOOLS,'orr_editor']]
+        with self.assertRaisesRegex(RuntimeError,'unexpected executable'):
+            c.selected_roots(rows,pathlib.Path('/source'),'orr_sample',{n:('bin',False) for n in c.TOOLS},c.TOOL_FEATURES)
+    def test_hud_audit_and_attribution_precede_selection_and_only_selected_rows_are_pinned(self):
+        source=(HERE/'hud_layer_order_gate.py').read_text()
+        self.assertLess(source.index('rows=audit.audit_producer('),source.index('chosen=c.selected_roots('))
+        self.assertLess(source.index('attribute(name,stdout)'),source.index('chosen=c.selected_roots('))
+        self.assertIn('for key,row in chosen.items():',source)
     def test_archive_full_equality_and_corruption(self):
         with tempfile.TemporaryDirectory() as name:
             root=pathlib.Path(name);src=root/'producer';src.write_bytes(b'exact toy binary'*100);dest=root/'producer.gz';receipt=e.archive(src,dest)
