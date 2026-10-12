@@ -21,7 +21,7 @@ def disk_inventory(root,exclude_git=False,hash_content=True):
             if stat.S_ISDIR(s.st_mode):continue
             require(stat.S_ISREG(s.st_mode),'nonregular admitted file: '+str(p))
             if exclude_git:require(s.st_nlink==1,'source hardlink could mutate another checkout: '+str(p))
-            info={'bytes':s.st_size,'mode':stat.S_IMODE(s.st_mode),'allocated':s.st_blocks*512,'device':str(s.st_dev),'inode':str(s.st_ino),'mtime_ns':str(s.st_mtime_ns)}
+            info={'bytes':s.st_size,'mode':stat.S_IMODE(s.st_mode),'allocated':s.st_blocks*512,'device':str(s.st_dev),'inode':str(s.st_ino),'mtime_ns':str(s.st_mtime_ns),'uid':s.st_uid,'nlink':s.st_nlink}
             if hash_content:info['sha256']=digest(p)
             files[str(p.relative_to(root))]=info
     return files,allocated
@@ -125,6 +125,35 @@ def canonical_bin_proofs(provenance,target,start_ns,end_ns):
         result[key]={'artifact':row,'compiler_relative':str(compiled.relative_to(target)),'canonical_relative':str(canonical.relative_to(target)),'depinfo_relative':str(compiled.relative_to(target))+'.d','fingerprint_relative':'release/.fingerprint/'+pathlib.Path(row['manifest_path']).parent.name+'-'+extras[0],'sha256':canonical_sha,'bytes':a.st_size,'device':str(a.st_dev),'inode':str(a.st_ino),'nlink':a.st_nlink,'mtime_ns':str(a.st_mtime_ns),'producer_start_ns':str(start_ns),'producer_end_ns':str(end_ns)}
     return result
 
+# Exact native release-profile sentinels, not a prefix/suffix ignore. Cargo's
+# Layout::new opens these through Filesystem::open_rw_exclusive_create and
+# retains the empty files after unlocking. This is filesystem metadata only;
+# it does not prove producer success, unit provenance, or ownership quiescence.
+# https://doc.rust-lang.org/nightly/nightly-rustc/src/cargo/compiler/layout.rs.html
+CARGO_RELEASE_LOCKS=frozenset(['release/.cargo-build-lock','release/.cargo-artifact-lock'])
+
+def cargo_release_lock_owner(target,name,value):
+    require(name in CARGO_RELEASE_LOCKS,'unrecognized Cargo release lock')
+    path=target/name
+    require(target.is_absolute() and path.resolve()==path,'Cargo lock path alias')
+    for directory in [target,path.parent]:
+        info=directory.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid==os.geteuid(),
+                'Cargo lock parent must be an owned ordinary directory')
+    info=path.lstat()
+    require(stat.S_ISREG(info.st_mode),'Cargo lock must be an ordinary file')
+    require(info.st_uid==os.geteuid() and info.st_nlink==1,'Cargo lock owner/link count differs')
+    require(info.st_size==0 and stat.S_IMODE(info.st_mode) in [0o600,0o640,0o644],
+            'Cargo lock must be empty, owner-writable, nonexecutable metadata')
+    expected={'bytes':info.st_size,'mode':stat.S_IMODE(info.st_mode),'allocated':info.st_blocks*512,
+              'device':str(info.st_dev),'inode':str(info.st_ino),'mtime_ns':str(info.st_mtime_ns),
+              'uid':info.st_uid,'nlink':info.st_nlink}
+    require(all(value.get(k)==v for k,v in expected.items()),'Cargo lock inventory differs')
+    empty_sha=hashlib.sha256(b'').hexdigest()
+    require('sha256' not in value or value['sha256']==empty_sha,'Cargo lock content hash differs')
+    return {'class':'cargo-metadata','package':None,'metadata':'empty-release-lock',
+            'path':name,'uid':info.st_uid,'nlink':info.st_nlink,'sha256':empty_sha}
+
 def attribute_output_changes(before,after,rows,target,package_identities,canonical_bins=None):
     """Reject new/changed retained files without an exact emitted-unit/build-script owner.
 
@@ -170,8 +199,9 @@ all other payloads require an explicit compiler filename or build-script out_dir
             buildroots[str(out.parent)]=who;fingerprints['release/.fingerprint/'+out.parent.name]=who
     changed={}
     for name,value in after.items():
+        lock_owner=cargo_release_lock_owner(target,name,value) if name in CARGO_RELEASE_LOCKS else None
         if before.get(name)==value:continue
-        p=pathlib.Path(name);who=exact.get(name)
+        p=pathlib.Path(name);who=lock_owner if lock_owner is not None else exact.get(name)
         if who is None:
             for prefix,entry in fingerprints.items():
                 if p.parent==pathlib.Path(prefix) and value['bytes']<=16*MIB:who={**entry,'metadata':'fingerprint'};break

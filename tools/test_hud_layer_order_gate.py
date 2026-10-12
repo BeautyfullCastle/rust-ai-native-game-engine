@@ -166,6 +166,106 @@ class GateContracts(unittest.TestCase):
         with mock.patch.object(owner,'kernel_no_children',return_value=False),mock.patch.object(owner,'adopted_ids',side_effect=PermissionError),self.assertRaises(PermissionError):owner.reap_descendants(owner.time.monotonic()+1,[])
     def test_owner_source_does_not_claim_aggregate_memory(self):
         source=(HERE/'hud_layer_order/owned_process.py').read_text();self.assertIn("'aggregate_memory_hard_limit':False",source);self.assertIn('os.WNOWAIT',source);self.assertNotIn('systemd',source)
+    def test_release_locks_are_retained_audited_metadata(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=pathlib.Path(name);(root/'release').mkdir()
+            for lock in f.CARGO_RELEASE_LOCKS:(root/lock).touch(mode=0o600)
+            for hash_content in [False,True]:
+                after,_=f.disk_inventory(root,hash_content=hash_content)
+                delta=f.attribute_output_changes({},after,[],root,{})
+                self.assertEqual(set(delta['changed']),f.CARGO_RELEASE_LOCKS)
+                self.assertEqual(delta['removed'],[]);self.assertEqual(delta['classes'],['cargo-metadata'])
+                for lock in f.CARGO_RELEASE_LOCKS:
+                    entry=delta['changed'][lock]
+                    self.assertEqual(entry['after'],after[lock]);self.assertIsNone(entry['before'])
+                    self.assertEqual(entry['owner']['metadata'],'empty-release-lock')
+                    self.assertEqual(entry['owner']['sha256'],hashlib.sha256(b'').hexdigest())
+                    self.assertEqual(entry['owner']['uid'],f.os.geteuid());self.assertEqual(entry['owner']['nlink'],1)
+                self.assertEqual(f.attribute_output_changes(after,after,[],root,{})['changed'],{})
+    def test_release_locks_reject_nonempty_and_unsafe_modes(self):
+        for lock in f.CARGO_RELEASE_LOCKS:
+            for content,mode in [(b'payload',0o600),(b'',0o755),(b'',0o666),(b'',0o400),(b'',0o4644)]:
+                with self.subTest(lock=lock,mode=mode),tempfile.TemporaryDirectory() as name:
+                    root=pathlib.Path(name);(root/'release').mkdir();path=root/lock
+                    path.write_bytes(content);path.chmod(mode);after,_=f.disk_inventory(root)
+                    with self.assertRaisesRegex(RuntimeError,'must be empty'):
+                        f.attribute_output_changes({},after,[],root,{})
+    def test_release_locks_reject_aliases_special_files_and_hardlinks(self):
+        for kind in ['symlink','hardlink','directory','fifo']:
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as name:
+                root=pathlib.Path(name);(root/'release').mkdir();path=root/'release/.cargo-build-lock'
+                other=root/'other';other.touch(mode=0o600)
+                if kind=='symlink':path.symlink_to(other)
+                elif kind=='hardlink':f.os.link(other,path)
+                elif kind=='directory':path.mkdir()
+                else:f.os.mkfifo(path)
+                with self.assertRaises(RuntimeError):f.cargo_release_lock_owner(root,'release/.cargo-build-lock',{})
+                if kind in ['symlink','fifo']:
+                    with self.assertRaises(RuntimeError):f.disk_inventory(root)
+    def test_release_locks_reject_parent_alias(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=pathlib.Path(name);(root/'actual').mkdir();(root/'release').symlink_to(root/'actual',target_is_directory=True)
+            (root/'actual/.cargo-build-lock').touch()
+            with self.assertRaisesRegex(RuntimeError,'path alias'):
+                f.cargo_release_lock_owner(root,'release/.cargo-build-lock',{})
+    def test_release_locks_reject_foreign_owner_and_parent(self):
+        for foreign in ['target','release','lock']:
+            with self.subTest(foreign=foreign),tempfile.TemporaryDirectory() as name:
+                root=pathlib.Path(name);(root/'release').mkdir();path=root/'release/.cargo-build-lock';path.touch(mode=0o600)
+                after,_=f.disk_inventory(root);original=pathlib.Path.lstat
+                changed={'target':root,'release':root/'release','lock':path}[foreign]
+                def foreign_stat(p):
+                    result=original(p)
+                    if p==changed:
+                        values={key:getattr(result,key) for key in dir(result) if key.startswith('st_')}
+                        values['st_uid']=f.os.geteuid()+1;return types.SimpleNamespace(**values)
+                    return result
+                with mock.patch.object(pathlib.Path,'lstat',foreign_stat),self.assertRaisesRegex(RuntimeError,'owner|owned'):
+                    f.attribute_output_changes({},after,[],root,{})
+    def test_release_locks_reject_inventory_forgery_or_staleness(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=pathlib.Path(name);(root/'release').mkdir();lock='release/.cargo-build-lock';path=root/lock;path.touch(mode=0o600)
+            after,_=f.disk_inventory(root)
+            for key,value in [('bytes',1),('mode',0o755),('allocated',999),('device','bad'),('inode','bad'),('mtime_ns','bad'),('uid',-1),('nlink',2),('sha256','0'*64)]:
+                with self.subTest(key=key):
+                    forged=copy.deepcopy(after);forged[lock][key]=value
+                    with self.assertRaisesRegex(RuntimeError,'inventory|hash'):
+                        f.attribute_output_changes({},forged,[],root,{})
+            path.write_bytes(b'changed after inventory')
+            with self.assertRaisesRegex(RuntimeError,'must be empty'):
+                f.attribute_output_changes({},after,[],root,{})
+    def test_release_locks_validate_even_unchanged_and_emitted_names(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=pathlib.Path(name);(root/'release').mkdir();lock='release/.cargo-build-lock';path=root/lock;path.write_bytes(b'payload')
+            after,_=f.disk_inventory(root)
+            row={'reason':'compiler-artifact','package_id':'known','filenames':[str(path)],'target':{'name':'test','kind':['lib']}}
+            for before,rows in [(after,[]),({},[row])]:
+                with self.assertRaisesRegex(RuntimeError,'must be empty'):
+                    f.attribute_output_changes(before,after,rows,root,{'known':{'package':'test','class':'local'}})
+    def test_release_locks_do_not_allow_unknown_names_locations_or_removal(self):
+        for lock in ['.cargo-build-lock','debug/.cargo-build-lock','release/.cargo-build-lock.bak','release/.cargo-other-lock','release/deps/.cargo-build-lock','other/release/.cargo-build-lock']:
+            with self.subTest(lock=lock),tempfile.TemporaryDirectory() as name:
+                root=pathlib.Path(name);path=root/lock;path.parent.mkdir(parents=True,exist_ok=True);path.touch(mode=0o600)
+                after,_=f.disk_inventory(root)
+                with self.assertRaisesRegex(RuntimeError,'unrecognized retained Cargo output'):
+                    f.attribute_output_changes({},after,[],root,{})
+        for lock in f.CARGO_RELEASE_LOCKS:
+            with self.assertRaisesRegex(RuntimeError,'unrecognized target removal'):
+                f.attribute_output_changes({lock:{}},{},[],pathlib.Path('/target'),{})
+    def test_release_locks_do_not_mask_unknown_payload(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=pathlib.Path(name);(root/'release').mkdir();(root/'release/.cargo-build-lock').touch(mode=0o600);(root/'release/unknown').write_bytes(b'unowned')
+            after,_=f.disk_inventory(root)
+            with self.assertRaisesRegex(RuntimeError,'unrecognized retained Cargo output change: release/unknown'):
+                f.attribute_output_changes({},after,[],root,{})
+    def test_release_lock_inventory_tracks_owner_and_links_without_hashing(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=pathlib.Path(name);(root/'release').mkdir();lock='release/.cargo-build-lock';path=root/lock;path.touch(mode=0o600)
+            before,_=f.disk_inventory(root,hash_content=False);f.os.link(path,root/'release/external-link')
+            after,_=f.disk_inventory(root,hash_content=False)
+            self.assertEqual(before[lock]['nlink'],1);self.assertEqual(after[lock]['nlink'],2)
+            with self.assertRaisesRegex(RuntimeError,'owner/link count'):
+                f.attribute_output_changes(before,{lock:after[lock]},[],root,{})
     def test_all_python_parses(self):
         for path in [HERE/'hud_layer_order_gate.py',*list((HERE/'hud_layer_order').glob('*.py'))]:ast.parse(path.read_text())
 
