@@ -263,6 +263,18 @@ jobs:
         run: cargo clippy --locked -p orr_view --no-default-features --all-targets -- -D warnings
       - name: Strict view CPU particle feature Clippy
         run: cargo clippy --locked -p orr_view --no-default-features --features particles --all-targets -- -D warnings
+      # Optional particle renderer and additive RHI arm stay default-off.
+      # Separate commands preserve mandatory failures on Linux and Windows.
+      - name: Particle renderer feature-off RHI check
+        run: cargo check --locked -p orr_rhi --no-default-features --all-targets
+      - name: Particle renderer feature-off library tests
+        run: cargo test --locked --release -p orr_render --no-default-features --lib
+      - name: Particle renderer CPU and mock library tests
+        run: cargo test --locked --release -p orr_render --no-default-features --features particles --lib
+      - name: Strict particle renderer feature-off Clippy
+        run: cargo clippy --locked -p orr_render --no-default-features --all-targets -- -D warnings
+      - name: Strict particle renderer enabled Clippy
+        run: cargo clippy --locked -p orr_render --no-default-features --features particles --all-targets -- -D warnings
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
       - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings
       - name: Upload sample release build timings
@@ -304,6 +316,43 @@ jobs:
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:
           ORR_REQUIRE_GPU: "1"
+      - name: Required particle renderer actual-device readback
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          set -euo pipefail
+          # Reuse the installed Mesa dependency. Record actual adapter identity;
+          # selecting a Vulkan ICD does not prove which backend RHI chose.
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | sort)
+          test "${#icds[@]}" -eq 1
+          export VK_ICD_FILENAMES="${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          cargo test --locked --release -p orr_render --no-default-features --features particles --test particles -- --ignored --list > "$RUNNER_TEMP/particle-renderer-ignored.txt"
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/particle-renderer-ignored.txt")" -eq 1
+          grep -Fx 'particle_shader_depth_blend_order_camera_and_rejection_readback: test' "$RUNNER_TEMP/particle-renderer-ignored.txt"
+          cargo test --locked --release -p orr_render --no-default-features --features particles --test particles particle_shader_depth_blend_order_camera_and_rejection_readback -- --exact --ignored --test-threads=1 --show-output 2>&1 | tee "$RUNNER_TEMP/particle-renderer-device.log"
+          test "$(grep -c '^test result:' "$RUNNER_TEMP/particle-renderer-device.log")" -eq 1
+          grep -E '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [0-9.]+s$' "$RUNNER_TEMP/particle-renderer-device.log"
+          awk '
+            /^---- / { active = ($0 == "---- particle_shader_depth_blend_order_camera_and_rejection_readback stdout ----"); if (active) blocks++; next }
+            /^successes:$/ { active = 0 }
+            active && /^particle adapter=.+ software=(true|false)$/ { adapters++ }
+            END { exit !(blocks == 1 && adapters == 1) }
+          ' "$RUNNER_TEMP/particle-renderer-device.log"
+          if grep -Ei 'SKIP:|skipping|adapter unavailable' "$RUNNER_TEMP/particle-renderer-device.log"; then exit 1; fi
+      - name: Retain particle renderer actual-device evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: particle-renderer-device-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/particle-renderer-ignored.txt
+            ${{ runner.temp }}/particle-renderer-device.log
+          if-no-files-found: error
+          retention-days: 7
       # HDR is an explicit required acceptance lane, not an optional adapter
       # smoke test. Keep each feature configuration separate: animated-models
       # deliberately excludes the static-only editor test via its cfg.
