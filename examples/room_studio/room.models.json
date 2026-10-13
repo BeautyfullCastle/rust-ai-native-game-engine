@@ -1,0 +1,69 @@
+{
+  "version": 3,
+  "scene": "room.scene.yaml",
+  "project": ".",
+  "bindings": {
+    "e_88c5863e77f28fed0166d7d100000001": {
+      "kind": "animated",
+      "package": "sample-room-character",
+      "asset": "courier.orrmodel.json",
+      "package_digest": "219c26f901aaeef618b1811e02ca57b8080f38778fe71496731346cd76ceee2d",
+      "source_hash": "965b78a59df2e5c1b4cdf0a6e049def5a39fdb327f419da39b740b032fd780f3",
+      "transform": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "animation": {
+        "clip_index": 0,
+        "playback": "loop"
+      }
+    },
+    "e_88c5863e77f28fed0166d7d100000002": {
+      "kind": "static",
+      "package": "sample-imported-scene",
+      "asset": "foreground.glb",
+      "package_digest": "9c7708914c9e5fbe61dad5cc717dff6df0d811d0e14f3aa9a967896785522cf0",
+      "source_hash": "465f0e8acb9b567b575f05004113580302d57f585b18d14cee402841925652fd",
+      "transform": {
+        "translation": [
+          0,
+          0.1,
+          0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          0.22,
+          0.22,
+          0.22
+        ]
+      },
+      "material_override": {
+        "material_slot": 0,
+        "base_color_factor": [
+          1.0,
+          0.25,
+          0.035
+        ]
+      }
+    }
+  }
+}

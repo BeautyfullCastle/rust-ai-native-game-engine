@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "direct": {
+    "sample-imported-scene": "1.0.0",
+    "sample-room-character": "1.0.0"
+  },
+  "packages": {
+    "sample-imported-scene": {
+      "manifest": {
+        "schema": 1,
+        "name": "sample-imported-scene",
+        "version": "1.0.0",
+        "engine": "^0.0.1",
+        "capabilities": [
+          "models"
+        ],
+        "dependencies": {},
+        "files": [
+          "LICENSE.txt",
+          "background.glb",
+          "foreground.glb",
+          "generate.py"
+        ]
+      },
+      "digest": "9c7708914c9e5fbe61dad5cc717dff6df0d811d0e14f3aa9a967896785522cf0",
+      "files": {
+        "LICENSE.txt": "398039150c615dec7d81ca90231e4d94fa142fe2ffbec784d09ab3407c49f37c",
+        "background.glb": "f93967c23bec3fbbe3bf64445e364665e08fbebecd211429f2b16ca9e615340d",
+        "foreground.glb": "465f0e8acb9b567b575f05004113580302d57f585b18d14cee402841925652fd",
+        "generate.py": "b7bb27c9bcf2ea582a1babb9a7c9ea2475437f936c2a19d4b23f0cc31e9cc2e8"
+      }
+    },
+    "sample-room-character": {
+      "manifest": {
+        "schema": 1,
+        "name": "sample-room-character",
+        "version": "1.0.0",
+        "engine": "^0.0.1",
+        "capabilities": [
+          "animation"
+        ],
+        "dependencies": {},
+        "files": [
+          "LICENSE.txt",
+          "courier.orrmodel.json",
+          "generate.py"
+        ]
+      },
+      "digest": "219c26f901aaeef618b1811e02ca57b8080f38778fe71496731346cd76ceee2d",
+      "files": {
+        "LICENSE.txt": "1c7367bf89db3fbb6f8506d44f941946c9d4f06ffde576c4f23de86cac3e0c02",
+        "courier.orrmodel.json": "965b78a59df2e5c1b4cdf0a6e049def5a39fdb327f419da39b740b032fd780f3",
+        "generate.py": "c76c78931895af2bab0948eb6a2059d3c5c1d45603ca4fea5bba761021717eac"
+      }
+    }
+  }
+}

@@ -27,8 +27,9 @@ RESULTS = {
     "ANDROID_ARM64_RESULT": "${{ needs['android-arm64'].result }}",
     "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
     "SAMPLE_BUILD_RESULT": "${{ needs['sample-build'].result }}",
+    "NAVIGATION_RESULT": "${{ needs['navigation-playground'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "navigation-playground"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -306,12 +307,15 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_only_all_success_passes(self):
-        # 7776 combinations across all five jobs include all four GitHub result
-        # states, empty results, and an unknown state: allow success, rather
-        # than denylisting.
+        # Preserve all 7776 original five-job combinations. Navigation is
+        # independently exercised below; the exact common loop proves every
+        # result uses the same independent success-only predicate.
         states = ("success", "failure", "cancelled", "skipped", "", "unknown")
-        for values in itertools.product(states, repeat=len(RESULTS)):
-            results = dict(zip(RESULTS, values))
+        original = tuple(name for name in RESULTS if name != "NAVIGATION_RESULT")
+        self.assertEqual(len(original), 5)
+        for values in itertools.product(states, repeat=len(original)):
+            results = dict(zip(original, values))
+            results["NAVIGATION_RESULT"] = "success"
             with self.subTest(results=results):
                 result = self.run_gate(results)
                 self.assertEqual(result.returncode == 0, all(value == "success" for value in values), result.stdout + result.stderr)
@@ -329,6 +333,37 @@ class DeterminismWorkflowTests(unittest.TestCase):
                 result = self.run_gate(results)
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("::error::SAMPLE_BUILD_RESULT must be success", result.stdout)
+                self.assertNotIn("passed", result.stdout)
+
+    def test_all_six_results_share_the_same_independent_fail_closed_loop(self):
+        # Bind the factorized cases to the real script, not an assumed model:
+        # no result can override another failure or bypass the common predicate.
+        prefix = self.step["run"].split('echo "All native', 1)[0].strip()
+        expected = """failed=0
+for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT NAVIGATION_RESULT; do
+  result="${!result_var}"
+  echo "$result_var=$result"
+  if [[ "$result" != "success" ]]; then
+    echo "::error::$result_var must be success, got '$result'"
+    failed=1
+  fi
+done
+if [[ "$failed" != "0" ]]; then
+  exit 1
+fi"""
+        self.assertEqual(prefix, expected)
+
+    def test_navigation_failure_skip_cancel_or_missing_cannot_pass(self):
+        # The independent navigation GPU/export lane remains mandatory even
+        # when every checksum and sample-build target succeeds.
+        for navigation_result in ("failure", "skipped", "cancelled", "", "unknown", None):
+            results = {name: "success" for name in RESULTS if name != "NAVIGATION_RESULT"}
+            if navigation_result is not None:
+                results["NAVIGATION_RESULT"] = navigation_result
+            with self.subTest(navigation_result=navigation_result):
+                result = self.run_gate(results)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::NAVIGATION_RESULT must be success", result.stdout)
                 self.assertNotIn("passed", result.stdout)
 
     def test_unset_results_fail_closed(self):

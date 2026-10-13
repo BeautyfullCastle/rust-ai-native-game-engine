@@ -1,0 +1,23 @@
+Original Orrery imported-scene fixtures: CC0-1.0
+
+The static foreground geometry, background geometry, grid textures, and
+Python authoring script were created specifically for Orrery's imported-scene
+composition example in October 2026 by the OpenAI coding assistant under the
+repository user's task authorization. No third-party meshes or textures were
+downloaded or copied, and no image-generation service was used.
+
+To the extent copyright applies, foreground.glb, background.glb and generate.py
+are dedicated to the public domain under CC0 1.0 Universal:
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Reproduce from the repository root, with Python 3 (standard library only):
+  python3 assets/imported_scene_demo/generate.py
+
+The checked-in GLBs contain indexed triangle geometry, authored face normals,
+UVs and embedded original 8x8 opaque PNG textures. The background is a wall and
+floor; the foreground is a low crossbar and left post. The animated strip is
+from the separate assets/animation_demo package and retains its own license.
+
+The authoring script runs only on request. Neither the content-package installer
+nor lit_imported_scene executes this script. The running example loads all mesh
+and texture data through Project::read_asset from installed package snapshots.

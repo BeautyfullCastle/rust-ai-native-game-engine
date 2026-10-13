@@ -455,6 +455,8 @@ pub struct RoomRenderer {
 }
 
 struct RoomRenderCore {
+    studio: bool,
+    studio_shadows: bool,
     point_light: PointLightSettings,
     format: TextureFormat,
     procedural: Renderer3D<Wgpu>,
@@ -476,14 +478,39 @@ impl RoomRenderer {
         models: &PreparedModels,
         format: TextureFormat,
     ) -> Result<Self, String> {
+        Self::new_with_look(rhi, size, models, format, false)
+    }
+
+    /// Opt-in presentation preset. Uses the existing bounded shared directional
+    /// shadow and HDR/bloom paths; simulation and authored project bytes are untouched.
+    /// Unsupported HDR devices return the renderer's explicit capability error.
+    pub fn new_with_look(
+        rhi: &Wgpu,
+        size: (u32, u32),
+        models: &PreparedModels,
+        format: TextureFormat,
+        studio: bool,
+    ) -> Result<Self, String> {
         validate_models(models)?;
         if size.0 == 0 || size.1 == 0 || size.0 > 4096 || size.1 > 4096 {
             return Err("room target must be 1..=4096 pixels per dimension".into());
         }
         // The coordinator is CPU-only until draw. Check the complete admitted
         // local-placement workload before creating any GPU model or target.
-        let imported =
+        let mut imported =
             ImportedSceneRenderer::new(rhi.clone(), format).map_err(|e| e.to_string())?;
+        if studio {
+            imported.post_process = orr_render::PostProcessSettings {
+                enabled: true,
+                threshold: 1.1,
+                strength: 0.12,
+                radius: 4,
+                iterations: 2,
+                ..Default::default()
+            };
+            imported.clear = [0.009, 0.016, 0.027, 1.0];
+        }
+        let scene_format = imported.scene_format();
         let mut admission = Vec::new();
         #[cfg(feature = "room-character")]
         let mut character_admission = Vec::new();
@@ -573,7 +600,7 @@ impl RoomRenderer {
             if let Some(model) = loaded.static_model() {
                 cache.push(CachedModel {
                     model: model.clone(),
-                    renderer: ModelRenderer::new(rhi.clone(), format, (**model).clone())
+                    renderer: ModelRenderer::new(rhi.clone(), scene_format, (**model).clone())
                         .map_err(|e| e.to_string())?,
                     instances: Vec::new(),
                 });
@@ -584,7 +611,7 @@ impl RoomRenderer {
                     model: model.clone(),
                     renderer: orr_render::SkinnedModelRenderer::new(
                         rhi.clone(),
-                        format,
+                        scene_format,
                         (**model).clone(),
                     )
                     .map_err(|e| e.to_string())?,
@@ -594,9 +621,11 @@ impl RoomRenderer {
         Ok(Self {
             target: OffscreenTarget::new(rhi, size.0, size.1, format),
             core: RoomRenderCore {
+                studio,
+                studio_shadows: true,
                 point_light: PointLightSettings::default(),
                 format,
-                procedural: Renderer3D::with_settings(rhi.clone(), format, Settings3D::LOW),
+                procedural: Renderer3D::with_settings(rhi.clone(), scene_format, Settings3D::LOW),
                 imported,
                 models: cache,
                 #[cfg(feature = "room-character")]
@@ -770,6 +799,10 @@ impl RoomRenderCore {
         list.lighting = yard3d_view::yard_lighting();
         list.lighting.shadows = false;
         yard3d_view::fill_list(&visible, &mut list);
+        if self.studio {
+            super::room_studio::style(frame, &visible, &mut list);
+            list.lighting.shadows = self.studio_shadows;
+        }
         let prepared: Vec<_> = self
             .models
             .iter()
@@ -849,6 +882,64 @@ mod tests {
     use orr_fp::{fp, FPVec3};
     use orr_games::room_escape_game::{RoomConfig, RoomEscapeV1};
     use orr_sim::{Game, Simulation};
+
+    #[test]
+    #[ignore = "requires GPU, ORR_ROOM_STUDIO_PROJECT and a new ORR_ROOM_STUDIO_CAPTURE_DIR"]
+    fn studio_gpu_shadows_hdr_bloom_and_legacy_capture() {
+        use orr_render::orr_rhi::Rhi;
+        use std::{fs, io::BufWriter, path::PathBuf};
+        let project_path = PathBuf::from(std::env::var_os("ORR_ROOM_STUDIO_PROJECT").expect("project path"));
+        let output = PathBuf::from(std::env::var_os("ORR_ROOM_STUDIO_CAPTURE_DIR").expect("capture directory"));
+        fs::create_dir(&output).unwrap();
+        let project = crate::room_project::PreparedProject::open_with_presentation(
+            &project_path, false, crate::room_project::CheckpointSupport::Disabled,
+            cfg!(feature = "room-character"), cfg!(feature = "room-lighting"),
+        ).unwrap();
+        let sim = project.scene().simulation().unwrap();
+        let before = sim.frame().to_bytes();
+        let frame = FrameView::of(sim.frame());
+        let gpu = Wgpu::headless(Default::default()).expect("real GPU adapter required");
+        let size = (1024, 768);
+        let camera = project.camera().map_or_else(|| camera(size), |c| c.document.camera_for_frame(&c.document.orbit(), frame, project.scene().index(), size).unwrap());
+        let capture = |name: &str, rgba: &[u8]| {
+            let f = fs::OpenOptions::new().write(true).create_new(true).open(output.join(name)).unwrap();
+            let mut encoder = png::Encoder::new(BufWriter::new(f), size.0, size.1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(rgba).unwrap();
+        };
+        let mut legacy = RoomRenderer::new(&gpu, size, project.models()).unwrap();
+        legacy.set_point_light_settings(project.point_light_settings()).unwrap();
+        legacy.render(frame, project.scene().index(), project.models(), &camera).unwrap();
+        let baseline = legacy.read_rgba8();
+        capture("before.png", &baseline);
+        assert_eq!(legacy.core.imported.shadow_map_generation(), 0);
+        assert_eq!(legacy.core.imported.post_process_generation(), 0);
+        let mut studio = RoomRenderer::new_with_look(&gpu, size, project.models(), TARGET_FORMAT, true).unwrap();
+        studio.set_point_light_settings(project.point_light_settings()).unwrap();
+        studio.render(frame, project.scene().index(), project.models(), &camera).unwrap();
+        let after = studio.read_rgba8();
+        capture("after.png", &after);
+        assert_eq!(studio.core.imported.shadow_map_generation(), 1);
+        assert_eq!(studio.core.imported.post_process_generation(), 1);
+        assert_eq!(studio.core.imported.scene_format(), TextureFormat::Rgba16Float);
+        assert!(studio.core.imported.post_process_allocated_bytes() > 0);
+        assert!(studio.core.procedural.last_frame_stats().shadow.draw_calls > 0);
+        assert!(baseline.iter().zip(&after).filter(|(a,b)| a != b).count() > 100_000);
+        studio.core.studio_shadows = false;
+        studio.render(frame, project.scene().index(), project.models(), &camera).unwrap();
+        let no_shadows = studio.read_rgba8();
+        capture("after-no-shadows.png", &no_shadows);
+        assert_ne!(after, no_shadows, "shared directional shadows must affect actual GPU output");
+        studio.core.studio_shadows = true;
+        studio.core.imported.post_process.bloom = false;
+        studio.render(frame, project.scene().index(), project.models(), &camera).unwrap();
+        let no_bloom = studio.read_rgba8();
+        capture("after-no-bloom.png", &no_bloom);
+        assert_ne!(after, no_bloom, "bloom must affect actual GPU output");
+        assert_eq!(sim.frame().to_bytes(), before);
+        println!("studio GPU adapter: {}; directional shadow draws: {}; HDR bytes: {}; bloom changed channels: {}", gpu.adapter_name(), studio.core.procedural.last_frame_stats().shadow.draw_calls, studio.core.imported.post_process_allocated_bytes(), after.iter().zip(&no_bloom).filter(|(a,b)| a != b).count());
+    }
 
     #[test]
     fn current_pose_and_collected_key_are_read_only() {

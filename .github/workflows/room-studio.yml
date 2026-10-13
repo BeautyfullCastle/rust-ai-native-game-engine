@@ -1,0 +1,63 @@
+name: room-studio
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  room-studio-linux:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      RUST_BACKTRACE: 1
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Mandatory software GPU
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers
+          mapfile -t lavapipe < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd([.][^/]*)?[.]json$')
+          test "${#lavapipe[@]}" -eq 1
+          test -r "${lavapipe[0]}"
+          printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${lavapipe[0]}" "${lavapipe[0]}" >> "$GITHUB_ENV"
+          mkdir -p studio-evidence
+      - name: CPU presentation and legacy API contracts
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p orr_sample --features room-lighting,room-character,project-create --lib room_studio::tests 2>&1 | tee studio-evidence/cpu.log
+          grep -F 'test result: ok. 2 passed; 0 failed;' studio-evidence/cpu.log
+          cargo test --locked --release -p orr_sample --features room-lighting,room-character,project-create --lib room_app::tests
+          cargo test --locked --release -p orr_sample --features room-lighting,room-character,project-create --test room_project --test room_lighting
+      - name: Actual directional-shadow and bloom pixel witnesses
+        run: |
+          set -euo pipefail
+          cargo run --locked --release -p orr_sample --features room-lighting,room-character,project-create --bin orr_new_arena -- --output "$PWD/studio-evidence/project" --template room-escape-3d-v1 --seed studio-ci
+          export ORR_ROOM_STUDIO_PROJECT="$PWD/studio-evidence/project"
+          export ORR_ROOM_STUDIO_CAPTURE_DIR="$PWD/studio-evidence/captures"
+          cargo test --locked --release -p orr_sample --features room-lighting,room-character,project-create --lib -- --ignored --exact room_view::tests::studio_gpu_shadows_hdr_bloom_and_legacy_capture --nocapture 2>&1 | tee studio-evidence/gpu.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' studio-evidence/gpu.log
+          test -s studio-evidence/captures/before.png
+          test -s studio-evidence/captures/after.png
+          test -s studio-evidence/captures/after-no-shadows.png
+          test -s studio-evidence/captures/after-no-bloom.png
+      - name: Shipped Key Courier project GPU admission
+        run: |
+          set -euo pipefail
+          export ORR_ROOM_STUDIO_PROJECT="$PWD/examples/room_studio"
+          export ORR_ROOM_STUDIO_CAPTURE_DIR="$PWD/studio-evidence/courier-captures"
+          cargo test --locked --release -p orr_sample --features room-lighting,room-character,project-create --lib -- --ignored --exact room_view::tests::studio_gpu_shadows_hdr_bloom_and_legacy_capture --nocapture 2>&1 | tee studio-evidence/courier-gpu.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' studio-evidence/courier-gpu.log
+          test -s studio-evidence/courier-captures/after.png
+      - name: Strict default and opt-in configurations
+        run: |
+          cargo clippy --locked --release -p orr_sample --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-project,project-create --all-targets -- -D warnings
+          cargo clippy --locked --release -p orr_sample --features room-lighting,room-character,room-checkpoint,project-create,project-export --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: room-studio-evidence
+          path: studio-evidence

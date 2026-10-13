@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "point_light": {
+    "position": [
+      -2.0,
+      3.2,
+      -2.5
+    ],
+    "color": [
+      1.0,
+      0.64,
+      0.28
+    ],
+    "intensity": 2.2,
+    "range": 11.0
+  }
+}

@@ -100,7 +100,8 @@ class RoomProjectGateTests(unittest.TestCase):
             {'package': 'orr_sample', 'names': INVENTORIES['camera-schema']['names'], 'summary': [13, 0, 0]}])
 
     def test_room_view_character_scope_is_explicit_and_cannot_hide_default_growth(self):
-        default = ''.join(f'    #[test]\n    fn {name.rsplit("::", 1)[1]}() {{}}\n'
+        default = ''.join('    #[test]\n' + ('    #[ignore = "explicit studio GPU"]\n' if name in INVENTORIES['room-view-contracts']['ignored_names'] else '')
+                          + f'    fn {name.rsplit("::", 1)[1]}() {{}}\n'
                           for name in INVENTORIES['room-view-contracts']['names'])
         character = ''.join('        #[test]\n' + ('        #[ignore = "software GPU"]\n' if index == 2 else '')
                             + f'        fn {name.rsplit("::", 1)[1]}() {{}}\n'
@@ -121,6 +122,7 @@ class RoomProjectGateTests(unittest.TestCase):
             'unrelated unguarded nested module': valid.replace('    ' + guard, '    mod unrelated {\n        #[test]\n        fn unexpected_nested_default() {}\n    }\n    ' + guard),
             'extra nested test': valid.replace('mod character {', 'mod character {\n        #[test]\n        fn unexpected_character() {}'),
             'missing GPU ignore': valid.replace('        #[ignore = "software GPU"]\n', ''),
+            'missing studio GPU ignore': valid.replace('    #[ignore = "explicit studio GPU"]\n', ''),
             'comment guard decoy': '// ' + guard + '\n// mod character {\n' + valid.replace(guard, ''),
             'literal guard decoy': 'const DECOY: &str = r#"' + guard + '\nmod character {"#;\n' + valid.replace(guard, ''),
         }

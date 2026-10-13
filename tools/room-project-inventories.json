@@ -41,14 +41,17 @@
   "room-view-contracts": {
     "names": [
       "room_view::tests::current_pose_and_collected_key_are_read_only",
-      "room_view::tests::local_translation_rotates_with_body_and_scale_stays_local"
+      "room_view::tests::local_translation_rotates_with_body_and_scale_stays_local",
+      "room_view::tests::studio_gpu_shadows_hdr_bloom_and_legacy_capture"
     ],
-    "ignored_names": [],
+    "ignored_names": [
+      "room_view::tests::studio_gpu_shadows_hdr_bloom_and_legacy_capture"
+    ],
     "expected_summary_rows": [
       [
         2,
         0,
-        0
+        1
       ]
     ],
     "run_ignored": false
