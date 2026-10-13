@@ -275,6 +275,16 @@ jobs:
         run: cargo clippy --locked -p orr_render --no-default-features --all-targets -- -D warnings
       - name: Strict particle renderer enabled Clippy
         run: cargo clippy --locked -p orr_render --no-default-features --features particles --all-targets -- -D warnings
+      - name: Required material sample CPU CLI and strict feature boundaries
+        run: python tools/material_sample_gate.py cpu --evidence "${{ runner.temp }}/material-sample-cpu"
+      - name: Retain material sample CPU and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-sample-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/material-sample-cpu
+          if-no-files-found: error
+          retention-days: 7
       # The actual sample/compositor seam is separately gated and default-off.
       - name: Particle sample default library tests
         run: cargo test --locked --release -p orr_sample --lib
@@ -1406,6 +1416,27 @@ jobs:
             ${{ runner.temp }}/particle-temporal-captures.sha256
             ${{ runner.temp }}/particle-temporal-captures/*.png
             ${{ runner.temp }}/particle-temporal-captures/sequence.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required material sample actual grounding and paired captures
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          set -euo pipefail
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | sort)
+          test "${#icds[@]}" -eq 1
+          export VK_ICD_FILENAMES="${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          python tools/material_sample_gate.py gpu --evidence "$RUNNER_TEMP/material-sample-gpu" --baseline-root "$RUNNER_TEMP"
+      - name: Retain material sample actual and partial capture evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-sample-gpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/material-sample-gpu
           if-no-files-found: error
           retention-days: 7
       # HDR is an explicit required acceptance lane, not an optional adapter

@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Explicit material dressing of the existing playable pickup preview.
+material-demo = ["particle-demo", "dep:orr_model", "dep:sha2", "orr_render/metallic-roughness"]
 # Explicit optional pickup/preset preview; Arena default is unchanged.
 particle-demo = ["orr_games/collect-dodge", "orr_render/imported-scene", "orr_render/particles"]
 room-project = ["project", "orr_games/room-escape", "dep:orr_model", "dep:orr_model_bindings", "orr_render/imported-scene"]
@@ -150,4 +152,10 @@ test = false
 name = "particle_demo"
 path = "src/bin/particle_demo.rs"
 required-features = ["particle-demo"]
+test = false
+
+[[bin]]
+name = "material_demo"
+path = "src/bin/material_demo.rs"
+required-features = ["material-demo"]
 test = false
