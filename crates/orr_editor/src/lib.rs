@@ -126,3 +126,8 @@ pub mod linked_prefab_panel;
 
 #[cfg(feature="room-project")]
 pub mod room_camera_panel;
+
+#[cfg(feature = "sprite-clip-editor")]
+pub mod sprite_clip_authoring;
+#[cfg(feature = "sprite-clip-editor")]
+pub mod sprite_clip_panel;
