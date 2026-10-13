@@ -6,10 +6,12 @@ struct Globals {
     sky: vec4<f32>, ground: vec4<f32>, params: vec4<f32>,
     point_position_range: vec4<f32>, point_color_intensity: vec4<f32>,
     light_vp: mat4x4<f32>, shadow: vec4<f32>,
+    // MATERIAL_GLOBAL
     // IRRADIANCE_GLOBAL
 };
 struct Object {
     world: mat4x4<f32>, normal: mat4x4<f32>, color: vec4<f32>, sampling: vec4<u32>,
+    // MATERIAL_OBJECT
     joints: array<mat4x4<f32>, 64>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -98,6 +100,7 @@ fn shade(in:Varying, visibility:f32) -> vec4<f32> {
     let sun=globals.sun.xyz*globals.sun.w*max(dot(n,-globals.direction.xyz),0.0)*visibility;
     let point=point_diffuse(in.world_position,n);
     var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun+point);
+    // MATERIAL_SHADE
     // Finite admitted lighting may exceed half-float range; saturate only at
     // representation limits, never at display white, before the FP16 write.
     if globals.params.w>0.5 { return vec4<f32>(clamp(color,vec3<f32>(0.0),vec3<f32>(65504.0)),1.0); }

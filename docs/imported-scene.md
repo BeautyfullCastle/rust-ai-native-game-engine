@@ -276,3 +276,57 @@ texels exactly. Results are RGB24-packed into an RGBA8 COPY_SRC target. No PCF o
 linear filtering is involved in this test readout. The independent scalar CPU
 oracle checks interior coverage, clear regions, light projection and raster slope
 bias with the reconstruction bound plus 5e-6 for floating-point plane arithmetic.
+
+## Solid-color source assets without dummy textures
+
+The diffuse glTF/GLB importer accepts an explicitly authored
+`pbrMetallicRoughness` material with `metallicFactor: 0`, `roughnessFactor: 1`
+(or omitted roughness), and no `baseColorTexture`. `baseColorFactor` is linear
+RGBA and defaults to `[1,1,1,1]`; for example:
+
+```json
+{"pbrMetallicRoughness":{"metallicFactor":0,"baseColorFactor":[0.25,0.5,0.75,1]}}
+```
+
+Keep the primitive's material index, indexed triangles, POSITION and NORMAL.
+TEXCOORD_0 may be omitted only when that primitive's material has no texture.
+A supplied UV accessor is preserved and validated even when unused. Textured
+primitives still require their UV0 data. Static and animated imports follow the
+same rules; this does not add metallic PBR shading, vertex colors, extra UV sets,
+material extensions, alpha blending/masking, or double-sided rendering.
+
+A missing material, missing PBR object, or missing metallic factor means
+metallic=1 in glTF. That valid glTF default is outside this diffuse import subset
+and produces an explanatory unsupported-material error; it is never silently
+changed to metallic=0. Explicit null fields remain malformed.
+
+The importer appends one shared opaque-white 1×1 image only when factor-only
+materials exist. It counts against the existing 32-image and 32MiB decoded-image
+budgets. Existing authored images retain their indices; malformed authored image
+references cannot address the synthesized image. The cooked v1 format is
+unchanged and the fallback adds no external dependency or fake URI.
+
+Author the mesh/material in your existing exporter, declare the source GLB (or
+glTF and its real buffer/image dependencies) in a content package, and install
+that package with `orr_pkg install PROJECT --path PACKAGE`. The existing model
+asset loader and scene binding use the verified installed source identity.
+No dummy PNG, new renderer option, package script, or new editor UI is needed.
+For animated assets declare the existing `animation` capability and use the
+animated model binding route. Removing the package makes its saved binding
+unresolvable; reinstalling the same package restores the verified identity.
+
+The new `untextured` integration tests cover importer/cook compatibility and
+package binding persistence. Renderer device fixtures are explicitly ignored
+by ordinary CPU test runs. Their leased capture requires a fresh
+`ORR_FACTOR_CAPTURE_DIR`, retains raw 192×192 RGBA frames, and compares source-hidden
+installed factor-only imports against equivalent explicitly white-textured
+imports at static and three fixed animated poses. These offscreen checks do not
+claim native editor interaction coverage.
+
+The existing renderer writes display-encoded sRGB bytes even to its
+`Rgba8Unorm` target (manual shader encoding); its `Rgba8UnormSrgb` target uses
+hardware encoding instead. The factor-only proof independently derives the
+standard sRGB transfer from the authored linear factors, checks display bytes
+within two code values, and decodes them back to check linear-factor error within
+2/255. Missing or doubled encoding is rejected by fixed CPU controls. This is
+an oracle correction to the test, not a new transfer function in the renderer.

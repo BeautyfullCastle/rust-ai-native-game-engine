@@ -1,6 +1,7 @@
 //! Optional static imported model renderer. Real indexed POS/NORMAL/UV geometry,
 //! opaque sRGB base-color diffuse lighting, depth and mirrored-node winding.
-//! Standalone: single sample, no shadows/PBR/animation. Shared directional shadows
+//! Standalone: single sample, no shadows/animation. Opt-in scalar GGX uses explicit
+//! immutable material overrides; cooked/imported material formats stay unchanged. Shared directional shadows
 //! are admitted only by ImportedSceneRenderer. External TRS instances can be composed
 //! with procedural and animated geometry by the imported-scene coordinator.
 use crate::{
@@ -96,10 +97,14 @@ pub enum ModelRenderError {
     InvalidTarget,
     InvalidCamera,
     InvalidLighting,
+    #[cfg(feature = "metallic-roughness")]
+    InvalidMaterial(crate::MaterialShadingError),
 }
 impl std::fmt::Display for ModelRenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "metallic-roughness")]
+            Self::InvalidMaterial(e) => write!(f, "material shading: {e}"),
             Self::Upload(e) => write!(f, "model texture: {e}"),
             Self::InvalidTarget => {
                 f.write_str("model target must be a nonempty color target, at most 8192 per axis")
@@ -139,8 +144,19 @@ pub(crate) struct Globals {
     pub(crate) point_color_intensity: [f32; 4],
     pub(crate) light_vp: [[f32; 4]; 4],
     pub(crate) shadow: [f32; 4],
+    #[cfg(feature = "metallic-roughness")]
+    material_eye: [f32; 4],
+    #[cfg(feature = "metallic-roughness")]
+    material_view: [f32; 4],
     #[cfg(feature = "irradiance-probes")]
     pub(crate) irradiance: crate::IrradianceUniform,
+}
+#[cfg(feature = "imported-scene")]
+impl Globals {
+    /// Replace only the admitted main matrix, preserving shadow/material fields.
+    pub(crate) fn set_view_proj(&mut self, matrix: [[f32; 4]; 4]) {
+        self.view_proj = matrix;
+    }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -149,6 +165,8 @@ struct Object {
     normal: [[f32; 4]; 4],
     color: [f32; 4],
     sampling: [u32; 4],
+    #[cfg(feature = "metallic-roughness")]
+    material: [f32; 4],
 }
 #[cfg(feature = "imported-scene")]
 struct InstanceDraw<B: Rhi> {
@@ -183,6 +201,8 @@ pub struct ModelRenderer<B: Rhi> {
     rhi: B,
     format: TextureFormat,
     model: StaticModel,
+    #[cfg(feature = "metallic-roughness")]
+    materials: Vec<crate::MaterialShading>,
     pipeline: B::Pipeline,
     #[cfg(feature = "imported-scene")]
     shadow: crate::shared_shadow::ShadowPipelines<B>,
@@ -203,15 +223,51 @@ impl<B: Rhi> ModelRenderer<B> {
         format: TextureFormat,
         model: StaticModel,
     ) -> Result<Self, ModelRenderError> {
+        Self::new_inner(
+            rhi,
+            format,
+            model,
+            #[cfg(feature = "metallic-roughness")]
+            None,
+        )
+    }
+
+    /// Immutable presentation overrides, exactly one per model material slot.
+    /// Validates before GPU allocation. This does not widen glTF/cooked support.
+    #[cfg(feature = "metallic-roughness")]
+    pub fn new_with_materials(
+        rhi: B,
+        format: TextureFormat,
+        model: StaticModel,
+        materials: &[crate::MaterialShading],
+    ) -> Result<Self, ModelRenderError> {
+        Self::new_inner(rhi, format, model, Some(materials))
+    }
+
+    fn new_inner(
+        rhi: B,
+        format: TextureFormat,
+        model: StaticModel,
+        #[cfg(feature = "metallic-roughness")] materials: Option<&[crate::MaterialShading]>,
+    ) -> Result<Self, ModelRenderError> {
+        #[cfg(feature = "metallic-roughness")]
+        let materials =
+            crate::material_shading::prepare_materials(model.source().materials.len(), materials)
+                .map_err(ModelRenderError::InvalidMaterial)?;
         if format.is_depth() {
             return Err(ModelRenderError::InvalidTarget);
         }
         #[cfg(feature = "irradiance-probes")]
-        let source = crate::renderer3d::irradiance::shader(include_str!("shader_model.wgsl"), "globals");
+        let source =
+            crate::renderer3d::irradiance::shader(include_str!("shader_model.wgsl"), "globals");
         #[cfg(feature = "irradiance-probes")]
         let source = source.as_str();
         #[cfg(not(feature = "irradiance-probes"))]
         let source = include_str!("shader_model.wgsl");
+        #[cfg(feature = "metallic-roughness")]
+        let material_source = crate::material_shading::shader(source);
+        #[cfg(feature = "metallic-roughness")]
+        let source = material_source.as_str();
         let shader = rhi.create_shader("static textured model", source);
         let attrs = [
             VertexAttr {
@@ -323,6 +379,8 @@ impl<B: Rhi> ModelRenderer<B> {
                 // StaticModel has already validated invertibility/finite normal matrix.
                 normal: orr_model::normal_matrix(p.transform).expect("validated model transform"),
                 color: m.base_color,
+                #[cfg(feature = "metallic-roughness")]
+                material: materials[p.material as usize].uniform(),
                 sampling: [
                     wrap(m.wrap_s),
                     wrap(m.wrap_t),
@@ -378,6 +436,8 @@ impl<B: Rhi> ModelRenderer<B> {
             rhi,
             format,
             model,
+            #[cfg(feature = "metallic-roughness")]
+            materials,
             pipeline,
             #[cfg(feature = "imported-scene")]
             shadow,
@@ -395,6 +455,11 @@ impl<B: Rhi> ModelRenderer<B> {
     }
     pub fn model(&self) -> &StaticModel {
         &self.model
+    }
+    /// Immutable per-slot presentation shading selected at upload.
+    #[cfg(feature = "metallic-roughness")]
+    pub fn material_shading(&self) -> &[crate::MaterialShading] {
+        &self.materials
     }
     pub fn rhi(&self) -> &B {
         &self.rhi
@@ -471,7 +536,20 @@ impl<B: Rhi> ModelRenderer<B> {
         &self,
         instances: &[StaticInstance],
     ) -> Result<PreparedStatic, StaticInstanceError> {
-        prepare_static_instances(&self.model, &self.local_bounds, instances)
+        let prepared = prepare_static_instances(&self.model, &self.local_bounds, instances)?;
+        #[cfg(feature = "metallic-roughness")]
+        let prepared = {
+            let mut prepared = prepared;
+            for (object, primitive) in prepared
+                .objects
+                .iter_mut()
+                .zip(self.model.source().primitives.iter().cycle())
+            {
+                object.material = self.materials[primitive.material as usize].uniform();
+            }
+            prepared
+        };
+        Ok(prepared)
     }
 
     #[cfg(feature = "imported-scene")]
@@ -714,6 +792,8 @@ fn prepare_static_instances(
                 world: world.0,
                 normal,
                 color: material.base_color,
+                #[cfg(feature = "metallic-roughness")]
+                material: crate::MaterialShading::LegacyDiffuse.uniform(),
                 sampling: [
                     wrap(material.wrap_s),
                     wrap(material.wrap_t),
@@ -760,18 +840,33 @@ pub(crate) fn prepare_globals(
             if lighting.tonemap { 1.0 } else { 0.0 },
             if format.is_srgb() { 0.0 } else { 1.0 },
             // HDR output is scene-linear before exposure, tone mapping and encoding.
-            if format == TextureFormat::Rgba16Float { 1.0 } else { 0.0 },
+            if format == TextureFormat::Rgba16Float {
+                1.0
+            } else {
+                0.0
+            },
         ],
         point_position_range: [0.0; 4],
         point_color_intensity: [0.0; 4],
         light_vp: orr_model::IDENTITY,
         shadow: [0.0; 4],
+        #[cfg(feature = "metallic-roughness")]
+        material_eye: vector(
+            camera.eye,
+            if matches!(camera.projection, Projection::Orthographic { .. }) {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        #[cfg(feature = "metallic-roughness")]
+        material_view: vector(camera.forward(), 0.0),
         #[cfg(feature = "irradiance-probes")]
         irradiance: crate::IrradianceUniform::zeroed(),
     })
 }
 
-fn validate_camera(camera: &Camera3D, size: (u32, u32)) -> Result<[[f32; 4]; 4], ModelRenderError> {
+pub(crate) fn validate_camera(camera: &Camera3D, size: (u32, u32)) -> Result<[[f32; 4]; 4], ModelRenderError> {
     let f = sub(camera.target, camera.eye);
     // Match Camera3D::view / Mat4::look_at, which crosses the normalized forward.
     let right = cross(normalize(f), camera.up);

@@ -74,6 +74,46 @@ impl std::fmt::Display for ImportedSceneError {
 }
 impl std::error::Error for ImportedSceneError {}
 
+/// Immutable, device-independent camera admission for one exact viewport.
+///
+/// The stored column-major main matrix is computed once by the renderer's camera
+/// validation and uploaded unchanged by [`ImportedSceneRenderer::draw_prepared`].
+/// This token does not certify terrain clearance or the target view's metadata.
+/// Existing preparation still performs redundant camera calculations for admission;
+/// successful prepared draws replace their main matrices before any frame effects.
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedSceneCamera {
+    camera: Camera3D,
+    viewport: (u32, u32),
+    view_proj: [[f32; 4]; 4],
+}
+impl PreparedSceneCamera {
+    /// CPU-only, fixed-size preparation. Dimensions are checked before division.
+    pub fn new(camera: Camera3D, viewport: (u32, u32)) -> Result<Self, ImportedSceneError> {
+        if viewport.0 == 0 || viewport.1 == 0 || viewport.0 > 8192 || viewport.1 > 8192 {
+            return Err(ImportedSceneError::InvalidTarget);
+        }
+        let view_proj = crate::model_renderer::validate_camera(&camera, viewport)
+            .map_err(ImportedSceneError::Model)?;
+        Ok(Self { camera, viewport, view_proj })
+    }
+
+    /// Camera snapshot used for all eye/projection/forward metadata.
+    pub fn camera(&self) -> Camera3D {
+        self.camera
+    }
+
+    pub fn viewport(&self) -> (u32, u32) {
+        self.viewport
+    }
+
+    /// Exact stored column-major f32 coefficients; modifying this copy cannot
+    /// alter the token. Certify these coefficients, then draw this same token.
+    pub fn view_proj(&self) -> [[f32; 4]; 4] {
+        self.view_proj
+    }
+}
+
 /// Color attachment metadata, checked before any frame effects.
 ///
 /// The RHI deliberately exposes no view introspection. The caller must supply
@@ -409,7 +449,27 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         point: &PointLightSettings,
         batches: &mut [ImportedBatch<'_, B>],
     ) -> Result<(), ImportedSceneError> {
-        self.draw_inner(target, camera, lighting, point, batches, #[cfg(feature = "particles")] None)
+        self.draw_inner(target, camera, lighting, point, batches, None, #[cfg(feature = "particles")] None)
+    }
+
+    /// Draw using the token's exact stored main matrix for all scene batches.
+    ///
+    /// A viewport mismatch rejects before frame effects, even for equal aspect
+    /// ratios. All existing target, lighting, batch and postprocess admission
+    /// remains in force. The target metadata must truthfully describe its view.
+    /// This entry accepts no particles; their independent camera path is unchanged.
+    pub fn draw_prepared(
+        &mut self,
+        target: ImportedSceneTarget<'_, B>,
+        camera: &PreparedSceneCamera,
+        lighting: &Lighting,
+        point: &PointLightSettings,
+        batches: &mut [ImportedBatch<'_, B>],
+    ) -> Result<(), ImportedSceneError> {
+        if target.size != camera.viewport {
+            return Err(ImportedSceneError::InvalidTarget);
+        }
+        self.draw_inner(target, &camera.camera, lighting, point, batches, Some(camera), #[cfg(feature = "particles")] None)
     }
 
     /// Adds a preflighted visual-only particle pass before HDR postprocessing.
@@ -420,13 +480,14 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         lighting: &Lighting, point: &PointLightSettings, batches: &mut [ImportedBatch<'_, B>],
         particles: Option<ParticleBatch<'_, B>>,
     ) -> Result<(), ImportedSceneError> {
-        self.draw_inner(target, camera, lighting, point, batches, particles)
+        self.draw_inner(target, camera, lighting, point, batches, None, particles)
     }
 
     #[allow(clippy::too_many_arguments)] // Shared implementation preserves the existing draw API.
     fn draw_inner(
         &mut self, target: ImportedSceneTarget<'_, B>, camera: &Camera3D,
         lighting: &Lighting, point: &PointLightSettings, batches: &mut [ImportedBatch<'_, B>],
+        prepared_camera: Option<&PreparedSceneCamera>,
         #[cfg(feature = "particles")] mut particles: Option<ParticleBatch<'_, B>>,
     ) -> Result<(), ImportedSceneError> {
         // CPU-only probe admission comes before all allocation, cache and upload effects.
@@ -572,6 +633,15 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         for ready in &mut prepared {
             if let PreparedBatch::Procedural(ready) = ready {
                 ready.set_irradiance(irradiance);
+            }
+        }
+
+        if let Some(camera) = prepared_camera {
+            globals.set_view_proj(camera.view_proj);
+            for ready in &mut prepared {
+                if let PreparedBatch::Procedural(ready) = ready {
+                    ready.set_view_proj(camera.view_proj);
+                }
             }
         }
 
@@ -844,6 +914,9 @@ mod tests {
     #[derive(Clone, Debug, Default, PartialEq)]
     struct Effects {
         allocations: usize,
+        allocation_kinds: Vec<&'static str>,
+        buffers: Vec<(String, u64, String)>,
+        upload_lengths: Vec<usize>,
         writes: usize,
         encoders: usize,
         submits: usize,
@@ -855,6 +928,7 @@ mod tests {
         shadow_passes: Vec<(usize, bool, bool, usize)>,
         pass_buffers: Vec<Vec<usize>>,
         written_buffers: Vec<usize>,
+        pass_uniforms: Vec<Vec<usize>>,
         pass_textures: Vec<Vec<usize>>,
         post_passes: Vec<(String, usize, Vec<usize>)>,
     }
@@ -880,17 +954,22 @@ mod tests {
     /// Records every potentially mutating RHI call; no adapter is required.
     type BoundResources = (Vec<usize>, Vec<usize>);
     type BindRecords = Rc<RefCell<std::collections::BTreeMap<usize, BoundResources>>>;
+    // Kept separate from Effects: existing material resource-trace equality
+    // intentionally compares resource work, not material-dependent uniform bytes.
+    type UploadRecords = Rc<RefCell<Vec<(usize, u64, Vec<u8>)>>>;
     #[derive(Clone, Default)]
     struct Mock(
         Rc<RefCell<Effects>>,
         Rc<RefCell<usize>>,
         BindRecords,
         Rc<RefCell<Option<orr_rhi::TextureFormatCapabilities>>>,
+        UploadRecords,
     );
     impl Mock {
-        fn allocate(&self) -> usize {
+        fn allocate(&self, kind: &'static str) -> usize {
             let mut effects = self.0.borrow_mut();
             effects.allocations += 1;
+            effects.allocation_kinds.push(kind);
             *self.1.borrow_mut() += 1;
             *self.1.borrow()
         }
@@ -912,11 +991,16 @@ mod tests {
         fn adapter_name(&self) -> String {
             "recording mock".into()
         }
-        fn create_buffer(&self, _: &BufferDesc<'_>) -> usize {
-            self.allocate()
+        fn create_buffer(&self, desc: &BufferDesc<'_>) -> usize {
+            self.0.borrow_mut().buffers.push((
+                desc.label.to_owned(), desc.size, format!("{:?}", desc.usage),
+            ));
+            self.allocate("buffer")
         }
-        fn write_buffer(&self, buffer: &usize, _: u64, _: &[u8]) {
+        fn write_buffer(&self, buffer: &usize, offset: u64, bytes: &[u8]) {
+            self.0.borrow_mut().upload_lengths.push(bytes.len());
             self.0.borrow_mut().written_buffers.push(*buffer);
+            self.4.borrow_mut().push((*buffer, offset, bytes.to_vec()));
             self.0.borrow_mut().writes += 1;
         }
         fn texture_view_formats_supported(&self) -> bool {
@@ -933,7 +1017,7 @@ mod tests {
                 (desc.width, desc.height),
             ));
             RecordedTexture {
-                id: self.allocate(),
+                id: self.allocate("texture"),
                 format: desc.format,
                 effects: self.0.clone(),
             }
@@ -941,8 +1025,9 @@ mod tests {
         fn write_texture_rgba8(
             &self,
             _: &RecordedTexture,
-            _: &TextureUpload<'_>,
+            upload: &TextureUpload<'_>,
         ) -> Result<(), TextureUploadError> {
+            self.0.borrow_mut().upload_lengths.push(upload.data.len());
             self.0.borrow_mut().writes += 1;
             Ok(())
         }
@@ -951,11 +1036,11 @@ mod tests {
             texture: &RecordedTexture,
             _: Option<TextureFormat>,
         ) -> usize {
-            self.allocate();
+            self.allocate("texture_view");
             texture.id
         }
         fn create_sampler(&self, _: &SamplerDesc) -> usize {
-            self.allocate()
+            self.allocate("sampler")
         }
         fn sample_count_supported(&self, _: TextureFormat, samples: u32) -> bool {
             samples == 1
@@ -978,13 +1063,13 @@ mod tests {
                 })
         }
         fn create_shader(&self, _: &str, _: &str) -> usize {
-            self.allocate()
+            self.allocate("shader")
         }
         fn create_pipeline(&self, _: &PipelineDesc<'_, Self>) -> usize {
-            self.allocate()
+            self.allocate("pipeline")
         }
         fn create_bind_group(&self, _: &usize, _: u32, entries: &[Binding<'_, Self>]) -> usize {
-            let id = self.allocate();
+            let id = self.allocate("bind_group");
             self.2.borrow_mut().insert(
                 id,
                 (
@@ -1024,6 +1109,7 @@ mod tests {
                 .count();
             let mut buffers = Vec::new();
             let mut textures = Vec::new();
+            let mut uniforms = Vec::new();
             for command in commands {
                 match command {
                     Command::SetVertexBuffer(_, b) | Command::SetIndexBuffer(b) => {
@@ -1033,6 +1119,7 @@ mod tests {
                         let binds = self.2.borrow();
                         let (bound_buffers, bound_textures) = binds.get(b).expect("recorded bind");
                         buffers.extend(bound_buffers.iter().copied());
+                        uniforms.extend(bound_buffers.iter().copied());
                         textures.extend(bound_textures.iter().copied());
                     }
                     _ => {}
@@ -1051,6 +1138,7 @@ mod tests {
                 return;
             };
             self.0.borrow_mut().pass_buffers.push(buffers);
+            self.0.borrow_mut().pass_uniforms.push(uniforms);
             self.0.borrow_mut().pass_textures.push(textures);
             let Some(color) = color else {
                 self.0.borrow_mut().shadow_passes.push((
@@ -1097,6 +1185,11 @@ mod tests {
         fn present(&self, _: usize) {
             unimplemented!()
         }
+    }
+    #[cfg(feature = "metallic-roughness")]
+    mod material_resource_tests {
+        use super::*;
+        include!("imported_scene/material_resource_tests.rs");
     }
     const FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
     fn model(rhi: &Mock, format: TextureFormat) -> ModelRenderer<Mock> {
@@ -1282,7 +1375,8 @@ mod tests {
     #[test]
     fn probe_globals_remain_below_portable_uniform_limit() {
         assert_eq!(std::mem::size_of::<crate::IrradianceUniform>(), 9280);
-        assert_eq!(std::mem::size_of::<crate::model_renderer::Globals>(), 9536);
+        let material_globals = if cfg!(feature = "metallic-roughness") { 32 } else { 0 };
+        assert_eq!(std::mem::size_of::<crate::model_renderer::Globals>(), 9536 + material_globals);
         assert!(std::mem::size_of::<crate::model_renderer::Globals>() <= 16 * 1024);
     }
 
@@ -2216,8 +2310,572 @@ mod tests {
         include!("imported_scene/particle_composition_tests.rs");
     }
 
+    mod prepared_camera_tests {
+        use super::*;
+
+        fn camera() -> Camera3D {
+            Camera3D::perspective([3.0, 2.0, 7.0], [0.5, -0.25, 0.0], 53.0)
+        }
+
+        fn light() -> Lighting {
+            Lighting { shadows: false, ..Lighting::default() }
+        }
+
+        fn target(size: (u32, u32)) -> ImportedSceneTarget<'static, Mock> {
+            ImportedSceneTarget { view: &0, size, format: FORMAT, sample_count: 1 }
+        }
+
+        fn bits(matrix: [[f32; 4]; 4]) -> [[u32; 4]; 4] {
+            matrix.map(|column| column.map(f32::to_bits))
+        }
+
+        fn upload(uploads: &[(usize, u64, Vec<u8>)], id: usize) -> &[u8] {
+            let matches: Vec<_> = uploads.iter()
+                .filter(|(buffer, _, _)| *buffer == id).collect();
+            assert_eq!(matches.len(), 1, "expected exactly one upload to bound buffer {id}");
+            assert_eq!(matches[0].1, 0, "globals must start at byte zero");
+            &matches[0].2
+        }
+
+        #[test]
+        fn prepared_camera_constructor_bounds_and_snapshot_are_cpu_only() {
+            let mut original = camera();
+            let token = PreparedSceneCamera::new(original, (63, 37)).unwrap();
+            let snapshot = token.camera();
+            let matrix = bits(token.view_proj());
+            original.eye = [f32::NAN; 3];
+            let mut copy = token.camera();
+            copy.target = [99.0; 3];
+            let mut matrix_copy = token.view_proj();
+            matrix_copy[0][0] = f32::NAN;
+            assert_ne!(copy, snapshot);
+            assert!(original.eye[0].is_nan() && matrix_copy[0][0].is_nan());
+            assert_eq!(token.camera(), snapshot);
+            assert_eq!(token.viewport(), (63, 37));
+            assert_eq!(bits(token.view_proj()), matrix);
+            assert!(token.view_proj().iter().flatten().all(|v| v.is_finite()));
+            for size in [(0, 1), (1, 0), (8193, 1), (1, 8193), (u32::MAX, u32::MAX)] {
+                // Target precedence is observable even with a bad camera.
+                assert!(matches!(PreparedSceneCamera::new(original, size), Err(ImportedSceneError::InvalidTarget)));
+            }
+            for size in [(1, 1), (8192, 1), (1, 8192), (8192, 8192)] {
+                for c in [camera(), Camera3D::orthographic([0.0, 0.0, 5.0], [0.0; 3], 2.0)] {
+                    assert_eq!(PreparedSceneCamera::new(c, size).unwrap().viewport(), size);
+                }
+            }
+        }
+
+        #[test]
+        fn prepared_camera_reuses_camera_admission_for_invalid_inputs() {
+            use crate::Projection;
+            let valid = camera();
+            let mut invalid = Vec::new();
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                invalid.push(Camera3D { eye: [value, 2.0, 3.0], ..valid });
+                invalid.push(Camera3D { target: [value, 0.0, 0.0], ..valid });
+                invalid.push(Camera3D { up: [0.0, value, 0.0], ..valid });
+            }
+            invalid.push(Camera3D { target: valid.eye, ..valid });
+            invalid.push(Camera3D { up: [0.0; 3], ..valid });
+            invalid.push(Camera3D { up: crate::math3::sub(valid.target, valid.eye), ..valid });
+            invalid.push(Camera3D { eye: [f32::MAX; 3], ..valid });
+            for projection in [
+                Projection::Perspective { fov_y: 0.0, near: 0.1, far: 10.0 },
+                Projection::Perspective { fov_y: std::f32::consts::PI, near: 0.1, far: 10.0 },
+                Projection::Perspective { fov_y: 1.0, near: 0.0, far: 10.0 },
+                Projection::Perspective { fov_y: 1.0, near: 1.0, far: 1.0 },
+                Projection::Perspective { fov_y: 1.0, near: 0.1, far: f32::INFINITY },
+                Projection::Perspective { fov_y: f32::NAN, near: 0.1, far: 10.0 },
+                Projection::Orthographic { half_height: 0.0, near: -1.0, far: 1.0 },
+                Projection::Orthographic { half_height: 1.0, near: 1.0, far: 1.0 },
+                Projection::Orthographic { half_height: 1.0, near: f32::NAN, far: 1.0 },
+            ] {
+                invalid.push(Camera3D { projection, ..valid });
+            }
+            for c in invalid {
+                assert!(matches!(PreparedSceneCamera::new(c, (64, 48)), Err(ImportedSceneError::Model(ModelRenderError::InvalidCamera))));
+            }
+        }
+
+        #[test]
+        fn prepared_camera_nonsymmetric_orthographic_profile_has_exact_coefficients() {
+            // Axis-aligned dyadic profile, derived independently: translation is
+            // (-8,4,-2), x/y scale is 1/4 and 1/2, z maps [-2,-6] to [0,1].
+            let c = Camera3D {
+                eye: [8.0, -4.0, 2.0], target: [8.0, -4.0, 1.0], up: [0.0, 1.0, 0.0],
+                projection: crate::Projection::Orthographic { half_height: 2.0, near: 2.0, far: 6.0 },
+            };
+            let matrix = PreparedSceneCamera::new(c, (64, 32)).unwrap().view_proj();
+            let expected = [[0.25, 0.0, 0.0, 0.0], [0.0, 0.5, 0.0, 0.0], [0.0, 0.0, -0.25, 0.0], [-2.0, 2.0, 0.0, 1.0]];
+            assert_eq!(matrix, expected);
+            let transpose = std::array::from_fn(|i| std::array::from_fn(|j| expected[j][i]));
+            assert_ne!(matrix, transpose, "profile must detect row/column confusion");
+        }
+
+        #[test]
+        fn prepared_camera_exact_uploads_cover_all_batches_orders_and_metadata() {
+            for c in [camera(), Camera3D::orthographic([8.0, -4.0, 2.0], [8.0, -4.0, 0.0], 2.0)] {
+                for reverse in [false, true] {
+                    for shadows in [false, true] {
+                      for sentinel in [false, true] {
+                        let rhi = Mock::default();
+                        let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+                        let mut a = model(&rhi, FORMAT);
+                        let mut b = model(&rhi, FORMAT);
+                        let mut p = Renderer3D::with_settings(rhi.clone(), FORMAT, crate::Settings3D::LOW);
+                        let mut q = Renderer3D::with_settings(rhi.clone(), FORMAT, crate::Settings3D::LOW);
+                        let mut list = RenderList3D::new();
+                        list.cuboid([0.0; 3], crate::IDENTITY_ROT, [0.5; 3], &crate::Material::new([0.3; 3]));
+                        let instances = [StaticInstance::default(); 2];
+                        #[cfg(feature = "animation")]
+                        let animated = orr_model::animation_import::import_with_resolver(
+                            "fixtures/animated_strip.glb", include_bytes!("../../orr_model/tests/fixtures/animated_strip.glb"), |_| panic!("embedded fixture"),
+                        ).unwrap();
+                        #[cfg(feature = "animation")]
+                        let pose = animated.rest_pose().unwrap();
+                        #[cfg(feature = "animation")]
+                        let skinned_instances = [SkinnedInstance::new(&pose)];
+                        #[cfg(feature = "animation")]
+                        let mut skin = SkinnedModelRenderer::new(rhi.clone(), FORMAT, animated).unwrap();
+                        let mut batches = vec![
+                            ImportedBatch::Static(&mut a),
+                            ImportedBatch::Procedural { renderer: &mut p, list: &list },
+                            ImportedBatch::StaticInstances { renderer: &mut b, instances: &instances },
+                            ImportedBatch::Procedural { renderer: &mut q, list: &list },
+                        ];
+                        #[cfg(feature = "animation")]
+                        batches.push(ImportedBatch::Skinned { renderer: &mut skin, instances: &skinned_instances });
+                        if reverse { batches.reverse(); }
+                        let lighting = Lighting { shadows, ..light() };
+                        let mut token = PreparedSceneCamera::new(c, (63, 37)).unwrap();
+                        // Private test-only sentinel: differing nonsymmetric bits,
+                        // including both signed zeros, detect recomputation or transpose.
+                        // No production arbitrary-matrix constructor exists.
+                        if sentinel {
+                            token.view_proj = [[1.0, -0.0, 3.0, 4.0], [5.0, 6.0, 0.0, 8.0], [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]];
+                        }
+                        rhi.take();
+                        rhi.4.borrow_mut().clear();
+                        scene.draw(target(token.viewport()), &c, &lighting, &PointLightSettings::default(), &mut batches).unwrap();
+                        let raw = rhi.take();
+                        let raw_uploads = std::mem::take(&mut *rhi.4.borrow_mut());
+                        scene.draw_prepared(target(token.viewport()), &token, &lighting, &PointLightSettings::default(), &mut batches).unwrap();
+                        let prepared = rhi.take();
+                        let prepared_uploads = std::mem::take(&mut *rhi.4.borrow_mut());
+                        let count = batches.len();
+                        assert_eq!(prepared.submits, 1);
+                        assert_eq!(prepared.passes.len(), count);
+                        assert_eq!(prepared.shadow_passes.len(), usize::from(shadows));
+                        let main = &prepared.pass_uniforms[prepared.pass_uniforms.len() - count..];
+                        let raw_main = &raw.pass_uniforms[raw.pass_uniforms.len() - count..];
+                        let mut ids = std::collections::BTreeSet::new();
+                        for ((batch, bound), raw_bound) in batches.iter().zip(main).zip(raw_main) {
+                            let id = bound[0];
+                            assert!(ids.insert(id), "each batch owns a distinct globals buffer");
+                            assert_eq!(id, raw_bound[0]);
+                            let actual = upload(&prepared_uploads, id);
+                            let old = upload(&raw_uploads, id);
+                            let actual_bits: Vec<_> = actual[..64].chunks_exact(4).map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap())).collect();
+                            assert_eq!(actual_bits, bits(token.view_proj()).into_iter().flatten().collect::<Vec<_>>());
+                            if sentinel {
+                                assert_ne!(&actual[..64], &old[..64], "sentinel must defeat recomputation");
+                            }
+                            assert_eq!(&actual[64..], &old[64..], "shadow/light/material/viewport metadata changed");
+                            #[cfg(feature = "metallic-roughness")]
+                            if !matches!(batch, ImportedBatch::Procedural { .. }) {
+                                let eye = [c.eye[0], c.eye[1], c.eye[2], if matches!(c.projection, crate::Projection::Orthographic { .. }) { 1.0 } else { 0.0 }];
+                                let forward = c.forward();
+                                assert_eq!(&actual[256..272], bytemuck::bytes_of(&eye));
+                                assert_eq!(&actual[272..288], bytemuck::bytes_of(&[forward[0], forward[1], forward[2], 0.0]));
+                            }
+                            #[cfg(not(feature = "metallic-roughness"))]
+                            let _ = batch;
+                        }
+                        // Object and instance uploads must remain unchanged. Shared
+                        // shadow shaders consume the preserved light_vp fields above.
+                        for (id, offset, bytes) in &prepared_uploads {
+                            if !ids.contains(id) {
+                                assert!(raw_uploads.iter().any(|(old_id, old_offset, old)| old_id == id && old_offset == offset && old == bytes));
+                            }
+                        }
+                      }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn prepared_camera_viewport_mismatch_preserves_initial_and_existing_state() {
+            for existing in [false, true] {
+                let rhi = Mock::default();
+                let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+                scene.post_process.enabled = true;
+                let token = PreparedSceneCamera::new(camera(), (32, 32)).unwrap();
+                if existing { scene.draw_prepared(target((32, 32)), &token, &light(), &PointLightSettings::default(), &mut []).unwrap(); }
+                let before = (scene.depth_generation(), scene.depth_size(), scene.post_process_generation(), scene.post_process_allocated_bytes(), scene.shadow_map_generation());
+                rhi.take();
+                for size in [(64, 64), (32, 31), (0, 0)] {
+                    assert!(matches!(scene.draw_prepared(target(size), &token, &light(), &PointLightSettings::default(), &mut []), Err(ImportedSceneError::InvalidTarget)));
+                    assert_eq!(rhi.take(), Effects::default());
+                    assert_eq!((scene.depth_generation(), scene.depth_size(), scene.post_process_generation(), scene.post_process_allocated_bytes(), scene.shadow_map_generation()), before);
+                }
+            }
+        }
+
+        #[test]
+        fn prepared_camera_late_rejection_preserves_caches_stats_and_generations() {
+            for existing in [false, true] {
+                let rhi = Mock::default();
+                let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+                scene.post_process.enabled = true;
+                let mut a = model(&rhi, TextureFormat::Rgba16Float);
+                let mut p = Renderer3D::with_settings(rhi.clone(), TextureFormat::Rgba16Float, crate::Settings3D::LOW);
+                let mut good = RenderList3D::new();
+                good.cuboid([0.0; 3], crate::IDENTITY_ROT, [0.5; 3], &crate::Material::new([0.3; 3]));
+                let mut bad = RenderList3D::new();
+                bad.cuboid([0.0; 3], [0.0; 4], [0.5; 3], &crate::Material::new([0.3; 3]));
+                let token = PreparedSceneCamera::new(camera(), (32, 32)).unwrap();
+                if existing {
+                    scene.draw_prepared(target((32, 32)), &token, &light(), &PointLightSettings::default(), &mut [ImportedBatch::Procedural { renderer: &mut p, list: &good }, ImportedBatch::Static(&mut a)]).unwrap();
+                }
+                let before = (scene.depth_generation(), scene.depth_size(), scene.post_process_generation(), scene.post_process_allocated_bytes(), scene.shadow_map_generation());
+                let stats = p.last_frame_stats();
+                let resized = PreparedSceneCamera::new(camera(), (64, 64)).unwrap();
+                let instances = [StaticInstance::default(); 3];
+                rhi.take();
+                assert!(matches!(scene.draw_prepared(target((64, 64)), &resized, &light(), &PointLightSettings::default(), &mut [ImportedBatch::StaticInstances { renderer: &mut a, instances: &instances }, ImportedBatch::Procedural { renderer: &mut p, list: &bad }]), Err(ImportedSceneError::Procedural(ProceduralSceneError::InvalidInstance))));
+                assert_eq!(rhi.take(), Effects::default());
+                assert_eq!(p.last_frame_stats(), stats);
+                assert_eq!((scene.depth_generation(), scene.depth_size(), scene.post_process_generation(), scene.post_process_allocated_bytes(), scene.shadow_map_generation()), before);
+            }
+        }
+
+        #[test]
+        fn prepared_camera_target_and_hdr_admission_still_precede_uploads() {
+            let rhi = Mock::default();
+            let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+            let token = PreparedSceneCamera::new(camera(), (32, 32)).unwrap();
+            for bad in [ImportedSceneTarget { sample_count: 4, ..target((32, 32)) }, ImportedSceneTarget { format: TextureFormat::Depth32Float, ..target((32, 32)) }] {
+                assert!(matches!(scene.draw_prepared(bad, &token, &light(), &PointLightSettings::default(), &mut []), Err(ImportedSceneError::InvalidTarget)));
+                assert_eq!(rhi.take(), Effects::default());
+            }
+            assert!(matches!(scene.draw_prepared(ImportedSceneTarget { format: TextureFormat::Bgra8Unorm, ..target((32, 32)) }, &token, &light(), &PointLightSettings::default(), &mut []), Err(ImportedSceneError::FormatMismatch)));
+            scene.post_process.enabled = true;
+            *rhi.3.borrow_mut() = Some(orr_rhi::TextureFormatCapabilities::default());
+            assert!(matches!(scene.draw_prepared(target((32, 32)), &token, &light(), &PointLightSettings::default(), &mut []), Err(ImportedSceneError::UnsupportedHdr)));
+            assert_eq!(rhi.take(), Effects::default());
+            *rhi.3.borrow_mut() = None;
+            scene.post_process.threshold = f32::NAN;
+            assert!(matches!(scene.draw_prepared(target((32, 32)), &token, &light(), &PointLightSettings::default(), &mut []), Err(ImportedSceneError::InvalidPostProcess)));
+            assert_eq!(rhi.take(), Effects::default());
+            scene.post_process.threshold = 1.0;
+            let large = PreparedSceneCamera::new(camera(), (4000, 4000)).unwrap();
+            assert!(matches!(scene.draw_prepared(target(large.viewport()), &large, &light(), &PointLightSettings::default(), &mut []), Err(ImportedSceneError::PostProcessBudget)));
+            assert_eq!(rhi.take(), Effects::default());
+            assert_eq!(scene.depth_generation(), 0);
+        }
+
+        #[cfg(feature = "animation")]
+        #[test]
+        fn prepared_camera_late_pose_rejection_preserves_submitted_bounds() {
+            let rhi = Mock::default();
+            let animated = || orr_model::animation_import::import_with_resolver(
+                "fixtures/animated_strip.glb", include_bytes!("../../orr_model/tests/fixtures/animated_strip.glb"), |_| panic!("embedded fixture"),
+            ).unwrap();
+            let source = animated();
+            let pose = source.rest_pose().unwrap();
+            let foreign = animated().rest_pose().unwrap();
+            for existing in [false, true] {
+                let mut skin = SkinnedModelRenderer::new(rhi.clone(), TextureFormat::Rgba16Float, source.clone()).unwrap();
+                let mut a = model(&rhi, TextureFormat::Rgba16Float);
+                let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+                scene.post_process.enabled = true;
+                let token = PreparedSceneCamera::new(camera(), (32, 32)).unwrap();
+                if existing {
+                    scene.draw_prepared(target((32, 32)), &token, &light(), &PointLightSettings::default(), &mut [ImportedBatch::Skinned { renderer: &mut skin, instances: &[SkinnedInstance::new(&pose)] }]).unwrap();
+                }
+                let bounds = skin.bounds().to_vec();
+                let before = (scene.depth_generation(), scene.depth_size(), scene.post_process_generation(), scene.post_process_allocated_bytes());
+                let resized = PreparedSceneCamera::new(camera(), (64, 64)).unwrap();
+                rhi.take();
+                assert!(matches!(scene.draw_prepared(target((64, 64)), &resized, &light(), &PointLightSettings::default(), &mut [ImportedBatch::StaticInstances { renderer: &mut a, instances: &[StaticInstance::default(); 3] }, ImportedBatch::Skinned { renderer: &mut skin, instances: &[SkinnedInstance::new(&foreign)] }]), Err(ImportedSceneError::Skinned(SkinnedRenderError::InvalidPose(_)))));
+                assert_eq!(rhi.take(), Effects::default());
+                assert_eq!(skin.bounds(), bounds);
+                assert_eq!((scene.depth_generation(), scene.depth_size(), scene.post_process_generation(), scene.post_process_allocated_bytes()), before);
+            }
+        }
+
+        #[test]
+        fn prepared_camera_raw_error_order_and_particle_entry_remain_compatible() {
+            let rhi = Mock::default();
+            let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+            let invalid = Camera3D { eye: [f32::NAN; 3], ..camera() };
+            let lighting = Lighting { intensity: f32::NAN, ..light() };
+            assert!(matches!(scene.draw(target((0, 0)), &invalid, &lighting, &PointLightSettings::default(), &mut []), Err(ImportedSceneError::InvalidTarget)));
+            assert!(matches!(scene.draw(target((32, 32)), &invalid, &lighting, &PointLightSettings::default(), &mut []), Err(ImportedSceneError::Model(ModelRenderError::InvalidCamera))));
+            assert!(matches!(scene.draw(target((32, 32)), &camera(), &lighting, &PointLightSettings::default(), &mut []), Err(ImportedSceneError::Model(ModelRenderError::InvalidLighting))));
+            #[cfg(feature = "particles")]
+            assert!(matches!(scene.draw_with_particles(target((32, 32)), &invalid, &lighting, &PointLightSettings::default(), &mut [], None), Err(ImportedSceneError::Model(ModelRenderError::InvalidCamera))));
+            assert_eq!(rhi.take(), Effects::default());
+        }
+    }
+
 }
 
 #[cfg(all(test, feature = "animation"))]
 #[path = "imported_scene/shadow_gpu_tests.rs"]
 mod shadow_gpu_tests;
+
+#[cfg(test)]
+mod prepared_camera_gpu_tests {
+    use super::*;
+    use orr_rhi::{Wgpu, WgpuOptions};
+    use std::io::Write;
+
+    const FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
+
+    fn capture(name: &str, pixels: &[u8], token: &PreparedSceneCamera, gpu: &Wgpu) {
+        if let Some(root) = std::env::var_os("ORR_PREPARED_CAMERA_CAPTURE_DIR") {
+            let root = std::path::PathBuf::from(root);
+            assert!(root.is_dir(), "runner must provide the empty capture directory");
+            let write = |suffix: &str, data: &[u8]| {
+                let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+                    .open(root.join(format!("{name}.{suffix}"))).unwrap();
+                file.write_all(data).unwrap();
+            };
+            let size = token.viewport();
+            let mut ppm = format!("P6\n{} {}\n255\n", size.0, size.1).into_bytes();
+            for pixel in pixels.chunks_exact(4) { ppm.extend_from_slice(&pixel[..3]); }
+            write("ppm", &ppm);
+            write("rgba", pixels);
+            let metadata = serde_json::json!({
+                "fixture": name, "size": [size.0, size.1],
+                "matrix_bits": token.view_proj().map(|column| column.map(f32::to_bits)),
+                "eye": token.camera().eye, "target": token.camera().target,
+                "adapter": gpu.adapter_name(), "software": gpu.is_software(),
+                "metallic_roughness": cfg!(feature = "metallic-roughness"),
+                "animation": cfg!(feature = "animation"),
+            });
+            write("json", &serde_json::to_vec_pretty(&metadata).unwrap());
+        }
+    }
+
+    // Independent axis-aligned projection of the frozen world-space landmarks.
+    // This uses neither Camera3D::world_to_screen nor the uploaded matrix.
+    fn landmark(pixels: &[u8], size: (u32, u32), perspective: bool, point: [f64; 3], kind: u8) {
+        let half_h = if perspective {
+            (8.0 - point[2]) * (53.0_f64.to_radians() * 0.5).tan()
+        } else { 2.4 };
+        let half_w = half_h * f64::from(size.0) / f64::from(size.1);
+        let x = (f64::from(size.0) * (0.5 + (point[0] - 0.125) / (2.0 * half_w))).floor() as u32;
+        let y = (f64::from(size.1) * (0.5 - (point[1] - 0.2) / (2.0 * half_h))).floor() as u32;
+        assert!(x > 0 && x + 1 < size.0 && y > 0 && y + 1 < size.1);
+        let mut count = 0;
+        for row in y - 1..=y + 1 {
+            for column in x - 1..=x + 1 {
+                let at = ((row * size.0 + column) * 4) as usize;
+                let rgb = &pixels[at..at + 3];
+                let [r, g, b] = [u16::from(rgb[0]), u16::from(rgb[1]), u16::from(rgb[2])];
+                count += usize::from(match kind {
+                    0 => r > g + 20 && r > b + 20,
+                    1 => b > r + 20 && b > g + 20,
+                    2 => g > r + 20 && g > b + 20,
+                    _ => r.max(g).max(b) > 10,
+                });
+            }
+        }
+        assert!(count >= if kind == 3 { 1 } else { 3 }, "landmark {point:?}, kind {kind}, coverage {count}");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn batches<'a>(
+        model: &'a mut ModelRenderer<Wgpu>, instances: &'a mut ModelRenderer<Wgpu>,
+        placements: &'a [StaticInstance],
+        a: &'a mut Renderer3D<Wgpu>, a_list: &'a RenderList3D,
+        b: &'a mut Renderer3D<Wgpu>, b_list: &'a RenderList3D,
+        #[cfg(feature = "animation")] skin: &'a mut SkinnedModelRenderer<Wgpu>,
+        #[cfg(feature = "animation")] poses: &'a [SkinnedInstance<'a>],
+    ) -> Vec<ImportedBatch<'a, Wgpu>> {
+        let mut result = vec![
+            ImportedBatch::Static(model),
+            ImportedBatch::StaticInstances { renderer: instances, instances: placements },
+            ImportedBatch::Procedural { renderer: a, list: a_list },
+        ];
+        #[cfg(feature = "animation")]
+        result.push(ImportedBatch::Skinned { renderer: skin, instances: poses });
+        result.push(ImportedBatch::Procedural { renderer: b, list: b_list });
+        result
+    }
+
+    #[test]
+    #[ignore = "opt-in actual software GPU acceptance; run explicitly with ORR_REQUIRE_GPU=1"]
+    fn prepared_camera_matches_raw_pixels_and_rejects_without_target_changes() {
+        let gpu = Wgpu::headless(WgpuOptions { force_software: true, ..WgpuOptions::default() })
+            .expect("prepared-camera acceptance requires a software GPU");
+        assert!(gpu.is_software());
+        let info = gpu.adapter().get_info();
+        eprintln!("prepared-camera adapter: name={:?} backend={:?} device_type={:?} vendor={} device={} driver={:?} driver_info={:?} software={}",
+            info.name, info.backend, info.device_type, info.vendor, info.device, info.driver, info.driver_info, gpu.is_software());
+        let imported = orr_model::import::import_with_resolver(
+            "fixtures/model.glb", include_bytes!("../../orr_model/tests/fixtures/model.glb"), |_| panic!("embedded fixture"),
+        ).unwrap();
+        let mut source = imported.source().clone();
+        source.primitives.truncate(1);
+        source.primitives[0].transform = orr_model::IDENTITY;
+        source.primitives[0].transform[3][0] = -1.0;
+        for vertex in &mut source.primitives[0].vertices {
+            vertex.position = vertex.position.map(|v| v * 0.5);
+        }
+        for image in &mut source.images {
+            for pixel in image.rgba8.chunks_exact_mut(4) { pixel.copy_from_slice(&[220, 35, 35, 255]); }
+        }
+        for material in &mut source.materials { material.base_color = [1.0; 4]; }
+        let source = orr_model::StaticModel::new(source).unwrap();
+        let make_model = || {
+            #[cfg(feature = "metallic-roughness")]
+            { ModelRenderer::new_with_materials(gpu.clone(), FORMAT, source.clone(),
+                &vec![crate::MaterialShading::MetallicRoughness(crate::ScalarMaterial::new(0.65, 0.35).unwrap()); source.source().materials.len()]).unwrap() }
+            #[cfg(not(feature = "metallic-roughness"))]
+            { ModelRenderer::new(gpu.clone(), FORMAT, source.clone()).unwrap() }
+        };
+        let mut model = make_model();
+        let mut instanced = make_model();
+        let placements = [StaticInstance { translation: [2.0, 0.0, 0.0], ..StaticInstance::default() }];
+        let mut a = Renderer3D::with_settings(gpu.clone(), FORMAT, crate::Settings3D::LOW);
+        let mut b = Renderer3D::with_settings(gpu.clone(), FORMAT, crate::Settings3D::LOW);
+        let mut a_list = RenderList3D::new();
+        a_list.cuboid([-1.0, 0.0, 1.0], crate::IDENTITY_ROT, [0.2; 3], &crate::Material::new([0.05, 0.1, 0.9]));
+        let mut b_list = RenderList3D::new();
+        b_list.cuboid([0.0, -0.9, 0.5], crate::IDENTITY_ROT, [0.25; 3], &crate::Material::new([0.05, 0.8, 0.1]));
+        let mut bad = RenderList3D::new();
+        bad.cuboid([0.0; 3], [0.0; 4], [0.5; 3], &crate::Material::new([0.3; 3]));
+        #[cfg(feature = "animation")]
+        let animated = orr_model::animation_import::import_with_resolver(
+            "fixtures/animated_strip.glb", include_bytes!("../../orr_model/tests/fixtures/animated_strip.glb"), |_| panic!("embedded fixture"),
+        ).unwrap();
+        #[cfg(feature = "animation")]
+        let pose = animated.rest_pose().unwrap();
+        #[cfg(feature = "animation")]
+        let mut skin = SkinnedModelRenderer::new(gpu.clone(), FORMAT, animated).unwrap();
+        #[cfg(feature = "animation")]
+        let poses = [SkinnedInstance { pose: &pose, transform: [
+            [0.4, 0.0, 0.0, 0.0], [0.0, 0.4, 0.0, 0.0], [0.0, 0.0, 0.4, 0.0], [-0.12, 0.6, 0.1, 1.0],
+        ] }];
+        let mut scene = ImportedSceneRenderer::new(gpu.clone(), FORMAT).unwrap();
+        scene.clear = [0.0, 0.0, 0.0, 1.0];
+        // Raw reference rendering must not allocate or resize the prepared coordinator.
+        let mut raw_scene = ImportedSceneRenderer::new(gpu.clone(), FORMAT).unwrap();
+        raw_scene.clear = scene.clear;
+        let lighting = Lighting {
+            shadows: cfg!(feature = "metallic-roughness"), shadow_center: [0.0, 0.5, 0.5], shadow_radius: 3.0,
+            sky: [1.0; 3], ground: [1.0; 3], ambient: 0.6, intensity: 0.8, direction: [0.3, -0.6, -1.0],
+            tonemap: false, exposure: 1.0, ..Lighting::default()
+        };
+        let points = PointLightSettings::default();
+        let mut captures = 0;
+        for (size_index, size) in [(128, 96), (96, 128)].into_iter().enumerate() {
+            for (profile, perspective) in [("perspective", true), ("orthographic", false)] {
+                let camera = if perspective {
+                    Camera3D::perspective([0.125, 0.2, 8.0], [0.125, 0.2, 0.0], 53.0)
+                } else { Camera3D::orthographic([0.125, 0.2, 8.0], [0.125, 0.2, 0.0], 2.4) };
+                let token = PreparedSceneCamera::new(camera, size).unwrap();
+                let matrix = token.view_proj();
+                let transposed = std::array::from_fn(|i| std::array::from_fn(|j| matrix[j][i]));
+                assert_ne!(matrix, transposed, "fixture must use a nonsymmetric matrix");
+                let texture = gpu.create_texture(&TextureDesc {
+                    label: "prepared-camera parity and rejection", width: size.0, height: size.1, format: FORMAT,
+                    usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC, sample_count: 1, view_formats: &[],
+                });
+                let view = gpu.create_texture_view(&texture, None);
+                let target = || ImportedSceneTarget { view: &view, size, format: FORMAT, sample_count: 1 };
+                let prefix = format!("{profile}-{}x{}", size.0, size.1);
+                let initial = scene.depth_generation() == 0;
+                let mut before = Vec::new();
+                if initial {
+                    let mut encoder = gpu.create_encoder("known initial target");
+                    gpu.encode_render_pass(&mut encoder, "known magenta seed", &ColorAttachment {
+                        view: &view, clear: Some([1.0, 0.0, 1.0, 1.0]), resolve: None,
+                    }, &[]);
+                    gpu.submit(encoder);
+                    before = gpu.read_texture(&texture);
+                    assert!(before.chunks_exact(4).all(|pixel| pixel == [255, 0, 255, 255]));
+                    capture("initial-seed", &before, &token, &gpu);
+                    captures += 1;
+                }
+                for phase in ["initial", "accepted"] {
+                    if phase == "initial" && !initial { continue; }
+                    if phase == "accepted" {
+                        let mut raw = Vec::new();
+                        for kind in ["raw", "prepared", "reversed"] {
+                            let mut submitted = batches(&mut model, &mut instanced, &placements, &mut a, &a_list, &mut b, &b_list,
+                                #[cfg(feature = "animation")] &mut skin,
+                                #[cfg(feature = "animation")] &poses);
+                            if kind == "reversed" { submitted.reverse(); }
+                            if kind == "raw" {
+                                let depth_before_reference = (scene.depth_size(), scene.depth_generation());
+                                let shadow_before_reference = (scene.shadow_map_size(), scene.shadow_map_generation());
+                                raw_scene.draw(target(), &token.camera(), &lighting, &points, &mut submitted).unwrap();
+                                assert_eq!((scene.depth_size(), scene.depth_generation()), depth_before_reference);
+                                assert_eq!((scene.shadow_map_size(), scene.shadow_map_generation()), shadow_before_reference);
+                            } else {
+                                if kind == "prepared" {
+                                    let previous_generation = size_index as u64 + u64::from(!perspective);
+                                    assert_eq!(scene.depth_generation(), previous_generation);
+                                }
+                                scene.draw_prepared(target(), &token, &lighting, &points, &mut submitted).unwrap();
+                                assert_eq!(scene.depth_size(), Some(size));
+                                assert_eq!(scene.depth_generation(), size_index as u64 + 1);
+                                assert_eq!(scene.shadow_map_generation(), u64::from(lighting.shadows));
+                            }
+                            let pixels = gpu.read_texture(&texture);
+                            assert_eq!(pixels.len(), (size.0 * size.1 * 4) as usize);
+                            assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+                            landmark(&pixels, size, perspective, [-1.35, 0.35, 0.0], 0);
+                            landmark(&pixels, size, perspective, [1.0, 0.25, 0.0], 0);
+                            // Blue front face is nearer than the red panel at z=0.
+                            landmark(&pixels, size, perspective, [-1.0, 0.0, 1.2], 1);
+                            landmark(&pixels, size, perspective, [0.0, -0.9, 0.75], 2);
+                            #[cfg(feature = "animation")]
+                            landmark(&pixels, size, perspective, [-0.12, 1.2, 0.1], 3);
+                            if kind == "raw" { raw = pixels.clone(); }
+                            else { assert_eq!(pixels, raw, "{prefix}/{kind} changed actual pixels"); }
+                            capture(&format!("{prefix}-{kind}"), &pixels, &token, &gpu);
+                            captures += 1;
+                            before = pixels;
+                        }
+                    }
+                    let depth = (scene.depth_size(), scene.depth_generation());
+                    let hdr = (scene.post_process_size(), scene.post_process_generation(), scene.post_process_allocated_bytes());
+                    let stats = (a.last_frame_stats(), b.last_frame_stats());
+                    let shadow = (scene.shadow_map_size(), scene.shadow_map_generation());
+                    #[cfg(feature = "animation")]
+                    let bounds = skin.bounds().to_vec();
+                    let mismatch = PreparedSceneCamera::new(camera, (size.0 / 2, size.1 / 2)).unwrap();
+                    assert!(matches!(scene.draw_prepared(target(), &mismatch, &lighting, &points, &mut []), Err(ImportedSceneError::InvalidTarget)));
+                    let after = gpu.read_texture(&texture);
+                    assert_eq!(after, before);
+                    capture(&format!("{phase}-{prefix}-mismatch"), &after, &token, &gpu);
+                    captures += 1;
+                    assert!(matches!(scene.draw_prepared(target(), &token, &lighting, &points,
+                        &mut batches(&mut model, &mut instanced, &placements, &mut a, &a_list, &mut b, &bad,
+                            #[cfg(feature = "animation")] &mut skin,
+                            #[cfg(feature = "animation")] &poses)), Err(ImportedSceneError::Procedural(ProceduralSceneError::InvalidInstance))));
+                    let after = gpu.read_texture(&texture);
+                    assert_eq!(after, before);
+                    assert_eq!((scene.depth_size(), scene.depth_generation()), depth);
+                    assert_eq!((scene.post_process_size(), scene.post_process_generation(), scene.post_process_allocated_bytes()), hdr);
+                    assert_eq!((a.last_frame_stats(), b.last_frame_stats()), stats);
+                    assert_eq!((scene.shadow_map_size(), scene.shadow_map_generation()), shadow);
+                    #[cfg(feature = "animation")]
+                    assert_eq!(skin.bounds(), bounds);
+                    capture(&format!("{phase}-{prefix}-late"), &after, &token, &gpu);
+                    captures += 1;
+                }
+                assert_eq!(scene.depth_generation(), size_index as u64 + 1);
+                assert_eq!(scene.shadow_map_generation(), u64::from(lighting.shadows));
+            }
+        }
+        assert_eq!(captures, 23);
+        eprintln!("prepared-camera actual-device acceptance: 12 successful frames, 23 captures; raw/prepared/reversed parity, separate coverage, nearer overlap, resize and rejected-target preservation passed; native interaction untested");
+    }
+}

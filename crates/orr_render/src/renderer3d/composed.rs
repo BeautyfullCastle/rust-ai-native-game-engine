@@ -29,8 +29,13 @@ pub(crate) struct PreparedProcedural {
     lines: u32,
     stats: FrameStats,
 }
-#[cfg(feature = "irradiance-probes")]
 impl PreparedProcedural {
+    /// Replace only the main matrix; directional-light/shadow data is unchanged.
+    pub(crate) fn set_view_proj(&mut self, matrix: [[f32; 4]; 4]) {
+        self.globals.view_proj = matrix;
+    }
+
+    #[cfg(feature = "irradiance-probes")]
     pub(crate) fn set_irradiance(&mut self, uniform: crate::IrradianceUniform) {
         self.globals.irradiance = uniform;
     }

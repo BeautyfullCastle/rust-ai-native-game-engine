@@ -30,6 +30,11 @@ use winit::{
     window::{Window, WindowId},
 };
 
+#[cfg(feature = "material-demo")]
+mod material_scene;
+#[cfg(feature = "material-demo")]
+pub use material_scene::{MaterialMode, MaterialOptions, MATERIAL_HELP};
+
 pub const HELP: &str = "particle_demo --particles off|dust|sparks [--headless] [--showcase]\n--showcase: genuine pickup, spread/fade, fresh-session cycling every two seconds.\nWASD/arrows: move and collect gold spheres. R: new session. Escape: exit.\nDust previews a preset on pickup, not a landing event. --headless is CPU-only.";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -278,13 +283,46 @@ impl<B: Rhi> DemoRenderer<B> {
             .map_err(|e| e.to_string())
     }
 }
+#[derive(Clone, Copy, Default)]
+enum SceneRoute {
+    #[default]
+    Procedural,
+    #[cfg(feature = "material-demo")]
+    Materials(MaterialMode),
+}
+
+enum PreviewRenderer {
+    Procedural(Box<DemoRenderer<Wgpu>>),
+    #[cfg(feature = "material-demo")]
+    Materials(Box<material_scene::MaterialScene<Wgpu>>),
+}
+impl PreviewRenderer {
+    fn new(gpu: &Wgpu, format: TextureFormat, mode: Mode, route: SceneRoute) -> Result<Self, String> {
+        match route {
+            SceneRoute::Procedural => DemoRenderer::new(gpu, format, mode)
+                .map(|r| Self::Procedural(Box::new(r))),
+            #[cfg(feature = "material-demo")]
+            SceneRoute::Materials(materials) => material_scene::MaterialScene::new(gpu, format, mode, materials)
+                .map(|r| Self::Materials(Box::new(r))),
+        }
+    }
+    fn draw(&mut self, view: &<Wgpu as Rhi>::TextureView, size: (u32, u32), demo: &Demo) -> Result<(), String> {
+        match self {
+            Self::Procedural(r) => r.draw(view, size, demo),
+            #[cfg(feature = "material-demo")]
+            Self::Materials(r) => r.draw(view, size, demo),
+        }
+    }
+}
+
 struct Graphics {
     window: Arc<Window>,
     gpu: Wgpu,
     surface: <Wgpu as Rhi>::Surface,
-    renderer: DemoRenderer<Wgpu>,
+    renderer: PreviewRenderer,
 }
 struct App {
+    route: SceneRoute,
     demo: Demo,
     graphics: Option<Graphics>,
     keys: [bool; 4],
@@ -355,8 +393,15 @@ impl App {
         } else {
             "WASD/arrows move | R restart"
         };
+        let label = match self.route {
+            SceneRoute::Procedural => "Particle preset preview",
+            #[cfg(feature = "material-demo")]
+            SceneRoute::Materials(MaterialMode::Legacy) => "Material preview: legacy diffuse",
+            #[cfg(feature = "material-demo")]
+            SceneRoute::Materials(MaterialMode::Showcase) => "Material preview: matte / coated / metal",
+        };
         g.window.set_title(&format!(
-            "Particle preset preview | {controls} | {score}/2 pickups | {:?} | {} particles",
+            "{label} | {controls} | {score}/2 pickups | {:?} | {} particles",
             self.demo.mode,
             self.demo.draws.len()
         ));
@@ -384,7 +429,7 @@ impl ApplicationHandler for App {
                 true,
                 WgpuOptions::default(),
             )?;
-            let renderer = DemoRenderer::new(&gpu, gpu.surface_format(&surface), self.demo.mode)?;
+            let renderer = PreviewRenderer::new(&gpu, gpu.surface_format(&surface), self.demo.mode, self.route)?;
             Ok(Graphics {
                 window,
                 gpu,
@@ -448,8 +493,22 @@ impl ApplicationHandler for App {
     }
 }
 pub fn run(options: Options) -> Result<(), String> {
+    run_route(options, SceneRoute::Procedural)
+}
+
+/// Opt-in presentation route; simulation, input and particle events are shared.
+#[cfg(feature = "material-demo")]
+pub fn run_with_materials(options: Options, materials: MaterialMode) -> Result<(), String> {
+    run_route(options, SceneRoute::Materials(materials))
+}
+
+fn run_route(options: Options, route: SceneRoute) -> Result<(), String> {
     let mut demo = Demo::new(options.mode);
     if options.headless {
+        #[cfg(feature = "material-demo")]
+        if let SceneRoute::Materials(_) = route {
+            material_scene::validate_headless(&demo)?;
+        }
         let mut showcase = Showcase::default();
         for _ in 0..if options.showcase { 240 } else { 20 } {
             if options.showcase {
@@ -478,6 +537,7 @@ pub fn run(options: Options) -> Result<(), String> {
     }
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     let mut app = App {
+        route,
         demo,
         graphics: None,
         keys: [false; 4],
