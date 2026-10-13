@@ -1945,13 +1945,19 @@ jobs:
           cargo build --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --bin collect_dodge --bin orr_export_collect
           # The actual Editor acceptance requires its trusted tools inside the
           # workspace it subsequently hides; copies survive later Cargo builds.
-          mkdir "$GITHUB_WORKSPACE/target/collect-authored-tools"
+          # Exclusive run/attempt-owned staging cannot reuse a cached prior run.
+          # Fail closed on a same-attempt collision; never remove or accept it.
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          test -d "$GITHUB_WORKSPACE/target"
+          test "$(realpath -e "$GITHUB_WORKSPACE/target")" = "$(realpath -e "$GITHUB_WORKSPACE")/target"
+          tools="$GITHUB_WORKSPACE/target/collect-authored-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$tools"
           for binary in collect_dodge orr_export_collect; do
-            cp "${CARGO_TARGET_DIR:-target}/release/$binary" "$GITHUB_WORKSPACE/target/collect-authored-tools/$binary"
-            test -x "$GITHUB_WORKSPACE/target/collect-authored-tools/$binary"
-            cmp "${CARGO_TARGET_DIR:-target}/release/$binary" "$GITHUB_WORKSPACE/target/collect-authored-tools/$binary"
+            cp "${CARGO_TARGET_DIR:-target}/release/$binary" "$tools/$binary"
+            test -x "$tools/$binary"
+            cmp "${CARGO_TARGET_DIR:-target}/release/$binary" "$tools/$binary"
           done
-          sha256sum "$GITHUB_WORKSPACE/target/collect-authored-tools/collect_dodge" "$GITHUB_WORKSPACE/target/collect-authored-tools/orr_export_collect" > "$RUNNER_TEMP/collect-authored-tools.sha256"
+          sha256sum "$tools/collect_dodge" "$tools/orr_export_collect" > "$RUNNER_TEMP/collect-authored-tools.sha256"
           cat "$RUNNER_TEMP/collect-authored-tools.sha256"
       - name: Mandatory Collect source-hidden export and actual Editor GPU proofs
         if: runner.os == 'Linux'
@@ -1977,8 +1983,8 @@ jobs:
           if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/collect-authored-collect_real_export_cpu_workflow.log" "$RUNNER_TEMP/collect-authored-collect_real_export_gpu_workflow.log" "$RUNNER_TEMP/collect-authored-editor-gpu.log"; then exit 1; fi
           sha256sum -c "$RUNNER_TEMP/collect-authored-tools.sha256"
         env:
-          ORR_COLLECT_RUNTIME: ${{ github.workspace }}/target/collect-authored-tools/collect_dodge
-          ORR_COLLECT_EXPORTER: ${{ github.workspace }}/target/collect-authored-tools/orr_export_collect
+          ORR_COLLECT_RUNTIME: ${{ github.workspace }}/target/collect-authored-tools-${{ github.run_id }}-${{ github.run_attempt }}/collect_dodge
+          ORR_COLLECT_EXPORTER: ${{ github.workspace }}/target/collect-authored-tools-${{ github.run_id }}-${{ github.run_attempt }}/orr_export_collect
           ORR_COLLECT_CAPTURES: ${{ runner.temp }}/collect-authored-captures
           ORR_REQUIRE_GPU: "1"
           ORR_REQUIRE_PROJECT_ISOLATION: "1"
