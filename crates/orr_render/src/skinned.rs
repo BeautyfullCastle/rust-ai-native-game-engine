@@ -5,7 +5,8 @@
 //! current bounds. Each instance/primitive owns a separate 64-matrix uniform.
 //! All instances share one fresh depth/color pass. This is not an overlay into
 //! the procedural renderer's depth buffer. Shared directional shadows are available
-//! through ImportedSceneRenderer; standalone shadows, PBR, and HDR are unsupported.
+//! through ImportedSceneRenderer; standalone shadows remain unsupported. Opt-in
+//! scalar GGX uses explicit immutable overrides, not expanded glTF PBR import.
 use crate::{
     Camera3D, Lighting,
     math3::Mat4,
@@ -32,6 +33,8 @@ pub enum SkinnedRenderError {
     InvalidTarget,
     InvalidCamera,
     InvalidLighting,
+    #[cfg(feature = "metallic-roughness")]
+    InvalidMaterial(crate::MaterialShadingError),
     InvalidPlacement,
     InvalidPose(orr_model::Error),
     InstanceLimit,
@@ -39,6 +42,8 @@ pub enum SkinnedRenderError {
 impl std::fmt::Display for SkinnedRenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "metallic-roughness")]
+            Self::InvalidMaterial(e) => write!(f, "material shading: {e}"),
             Self::Upload(e) => write!(f, "skinned texture: {e}"),
             Self::InvalidTarget => f.write_str("skinned target must be a nonempty color target, at most 8192 per axis"),
             Self::InvalidCamera => f.write_str("skinned camera requires valid finite view and projection"),
@@ -102,6 +107,8 @@ struct Object {
     normal: Matrix4,
     color: [f32; 4],
     sampling: [u32; 4],
+    #[cfg(feature = "metallic-roughness")]
+    material: [f32; 4],
     joints: [Matrix4; 64],
 }
 struct Geometry<B: Rhi> {
@@ -135,6 +142,8 @@ pub struct SkinnedModelRenderer<B: Rhi> {
     rhi: B,
     format: TextureFormat,
     model: AnimatedModel,
+    #[cfg(feature = "metallic-roughness")]
+    materials: Vec<crate::MaterialShading>,
     pipeline: B::Pipeline,
     #[cfg(feature = "imported-scene")]
     shadow: crate::shared_shadow::ShadowPipelines<B>,
@@ -152,15 +161,51 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         format: TextureFormat,
         model: AnimatedModel,
     ) -> Result<Self, SkinnedRenderError> {
+        Self::new_inner(
+            rhi,
+            format,
+            model,
+            #[cfg(feature = "metallic-roughness")]
+            None,
+        )
+    }
+
+    /// Immutable presentation overrides, exactly one per model material slot.
+    /// Validates before GPU allocation. This does not widen glTF/cooked support.
+    #[cfg(feature = "metallic-roughness")]
+    pub fn new_with_materials(
+        rhi: B,
+        format: TextureFormat,
+        model: AnimatedModel,
+        materials: &[crate::MaterialShading],
+    ) -> Result<Self, SkinnedRenderError> {
+        Self::new_inner(rhi, format, model, Some(materials))
+    }
+
+    fn new_inner(
+        rhi: B,
+        format: TextureFormat,
+        model: AnimatedModel,
+        #[cfg(feature = "metallic-roughness")] materials: Option<&[crate::MaterialShading]>,
+    ) -> Result<Self, SkinnedRenderError> {
+        #[cfg(feature = "metallic-roughness")]
+        let materials =
+            crate::material_shading::prepare_materials(model.source().materials.len(), materials)
+                .map_err(SkinnedRenderError::InvalidMaterial)?;
         if format.is_depth() {
             return Err(SkinnedRenderError::InvalidTarget);
         }
         #[cfg(feature = "irradiance-probes")]
-        let source = crate::renderer3d::irradiance::shader(include_str!("shader_skinned.wgsl"), "globals");
+        let source =
+            crate::renderer3d::irradiance::shader(include_str!("shader_skinned.wgsl"), "globals");
         #[cfg(feature = "irradiance-probes")]
         let source = source.as_str();
         #[cfg(not(feature = "irradiance-probes"))]
         let source = include_str!("shader_skinned.wgsl");
+        #[cfg(feature = "metallic-roughness")]
+        let material_source = crate::material_shading::shader(source);
+        #[cfg(feature = "metallic-roughness")]
+        let source = material_source.as_str();
         let shader = rhi.create_shader("skinned textured model", source);
         let attrs = [
             VertexAttr {
@@ -309,6 +354,8 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             rhi,
             format,
             model,
+            #[cfg(feature = "metallic-roughness")]
+            materials,
             pipeline,
             #[cfg(feature = "imported-scene")]
             shadow,
@@ -323,6 +370,11 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
     }
     pub fn model(&self) -> &AnimatedModel {
         &self.model
+    }
+    /// Immutable per-slot presentation shading selected at upload.
+    #[cfg(feature = "metallic-roughness")]
+    pub fn material_shading(&self) -> &[crate::MaterialShading] {
+        &self.materials
     }
     pub fn rhi(&self) -> &B {
         &self.rhi
@@ -365,6 +417,10 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                 ModelRenderError::InvalidLighting => SkinnedRenderError::InvalidLighting,
                 ModelRenderError::InvalidTarget => SkinnedRenderError::InvalidTarget,
                 ModelRenderError::Upload(error) => SkinnedRenderError::Upload(error),
+                #[cfg(feature = "metallic-roughness")]
+                ModelRenderError::InvalidMaterial(error) => {
+                    SkinnedRenderError::InvalidMaterial(error)
+                }
             })?;
         let prepared = self.prepare_instances(instances)?;
         if self.depth.as_ref().is_none_or(|d| d.size != size) {
@@ -443,6 +499,8 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                     world: instance.transform,
                     normal,
                     color: m.base_color,
+                    #[cfg(feature = "metallic-roughness")]
+                    material: self.materials[p.material as usize].uniform(),
                     sampling: [
                         wrap(m.wrap_s),
                         wrap(m.wrap_t),

@@ -760,28 +760,34 @@ fn assert_shadow_oracle(map: &[u8], surfaces: &[Surface], lighting: &Lighting, l
     let triangles = projected_triangles(surfaces, |p| light_project(p, lighting));
     let mut checked = 0;
     let mut clear_checked = 0;
+    let intervals: Vec<_> = triangles.iter().map(|t| {
+        depth_oracle::RasterTriangle::new(t.p).expect("supported, conditioned depth triangle")
+    }).collect();
+    let mut maximum_width = 0.0_f64;
     // Full actual texture is read; a regular 2x2 sample grid bounds CPU cost.
     for y in (0..1024).step_by(2) {
         for x in (0..1024).step_by(2) {
             let (near, expected) = oracle_sample(&triangles, x, y);
             let at = (y as usize * 1024 + x as usize) * 4;
             let actual = &map[at..at + 4];
-            if let Some((z, slope)) = expected {
+            if expected.is_some() {
                 assert_eq!(
                     actual[3], 255,
                     "{label}: missing actual shadow coverage at {x},{y}"
                 );
-                // Production depth bias is 2 * maximum depth slope plus two
-                // representable depth units. Comparison reconstruction is
-                // <= 1/65536; allow only another 5e-6 for CPU/GPU plane math.
-                let biased = z + 2.0 * slope;
-                assert!(
-                    (depth(actual) - biased).abs() < 1.0 / 65536.0 + 5e-6,
-                    "{label}: actual depth {} != analytic biased depth {biased} (unbiased {z}, slope {slope}) at {x},{y}",
-                    depth(actual)
-                );
+                // Retain the old edge band, but bound raster-coordinate and slope
+                // uncertainty independently instead of assuming an unsnapped plane.
+                let interval = depth_oracle::sample(&intervals, [f64::from(x)+0.5, f64::from(y)+0.5])
+                    .expect("requested depth sample has unambiguous coverage")
+                    .expect("requested depth sample is robustly covered");
+                maximum_width = maximum_width.max(interval.width());
+                assert!(interval.contains(f64::from(depth(actual))),
+                    "{label}: actual depth {} outside independently derived interval {interval:?} at {x},{y}",
+                    depth(actual));
                 checked += 1;
             } else if !near {
+                assert!(depth_oracle::sample(&intervals, [f64::from(x)+0.5, f64::from(y)+0.5])
+                    .expect("requested clear sample has unambiguous coverage").is_none());
                 assert_eq!(
                     actual,
                     [255, 255, 255, 0],
@@ -791,6 +797,7 @@ fn assert_shadow_oracle(map: &[u8], surfaces: &[Surface], lighting: &Lighting, l
             }
         }
     }
+    eprintln!("SHADOW_ORACLE_CHECK label={label} depth_checked={checked} clear_checked={clear_checked} maximum_interval_width={maximum_width:.12}");
     assert!(
         checked > 500,
         "{label}: insufficient analytic depth coverage ({checked})"
@@ -1440,3 +1447,6 @@ fn shared_shadow_gpu_joint_pose_moves_shadow_on_another_renderer_receiver() {
         );
     }
 }
+
+#[path = "shadow_depth_oracle.rs"]
+mod depth_oracle;

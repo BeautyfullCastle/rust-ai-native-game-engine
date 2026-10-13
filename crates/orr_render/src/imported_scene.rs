@@ -844,6 +844,9 @@ mod tests {
     #[derive(Clone, Debug, Default, PartialEq)]
     struct Effects {
         allocations: usize,
+        allocation_kinds: Vec<&'static str>,
+        buffers: Vec<(String, u64, String)>,
+        upload_lengths: Vec<usize>,
         writes: usize,
         encoders: usize,
         submits: usize,
@@ -888,9 +891,10 @@ mod tests {
         Rc<RefCell<Option<orr_rhi::TextureFormatCapabilities>>>,
     );
     impl Mock {
-        fn allocate(&self) -> usize {
+        fn allocate(&self, kind: &'static str) -> usize {
             let mut effects = self.0.borrow_mut();
             effects.allocations += 1;
+            effects.allocation_kinds.push(kind);
             *self.1.borrow_mut() += 1;
             *self.1.borrow()
         }
@@ -912,10 +916,14 @@ mod tests {
         fn adapter_name(&self) -> String {
             "recording mock".into()
         }
-        fn create_buffer(&self, _: &BufferDesc<'_>) -> usize {
-            self.allocate()
+        fn create_buffer(&self, desc: &BufferDesc<'_>) -> usize {
+            self.0.borrow_mut().buffers.push((
+                desc.label.to_owned(), desc.size, format!("{:?}", desc.usage),
+            ));
+            self.allocate("buffer")
         }
-        fn write_buffer(&self, buffer: &usize, _: u64, _: &[u8]) {
+        fn write_buffer(&self, buffer: &usize, _: u64, bytes: &[u8]) {
+            self.0.borrow_mut().upload_lengths.push(bytes.len());
             self.0.borrow_mut().written_buffers.push(*buffer);
             self.0.borrow_mut().writes += 1;
         }
@@ -933,7 +941,7 @@ mod tests {
                 (desc.width, desc.height),
             ));
             RecordedTexture {
-                id: self.allocate(),
+                id: self.allocate("texture"),
                 format: desc.format,
                 effects: self.0.clone(),
             }
@@ -941,8 +949,9 @@ mod tests {
         fn write_texture_rgba8(
             &self,
             _: &RecordedTexture,
-            _: &TextureUpload<'_>,
+            upload: &TextureUpload<'_>,
         ) -> Result<(), TextureUploadError> {
+            self.0.borrow_mut().upload_lengths.push(upload.data.len());
             self.0.borrow_mut().writes += 1;
             Ok(())
         }
@@ -951,11 +960,11 @@ mod tests {
             texture: &RecordedTexture,
             _: Option<TextureFormat>,
         ) -> usize {
-            self.allocate();
+            self.allocate("texture_view");
             texture.id
         }
         fn create_sampler(&self, _: &SamplerDesc) -> usize {
-            self.allocate()
+            self.allocate("sampler")
         }
         fn sample_count_supported(&self, _: TextureFormat, samples: u32) -> bool {
             samples == 1
@@ -978,13 +987,13 @@ mod tests {
                 })
         }
         fn create_shader(&self, _: &str, _: &str) -> usize {
-            self.allocate()
+            self.allocate("shader")
         }
         fn create_pipeline(&self, _: &PipelineDesc<'_, Self>) -> usize {
-            self.allocate()
+            self.allocate("pipeline")
         }
         fn create_bind_group(&self, _: &usize, _: u32, entries: &[Binding<'_, Self>]) -> usize {
-            let id = self.allocate();
+            let id = self.allocate("bind_group");
             self.2.borrow_mut().insert(
                 id,
                 (
@@ -1097,6 +1106,11 @@ mod tests {
         fn present(&self, _: usize) {
             unimplemented!()
         }
+    }
+    #[cfg(feature = "metallic-roughness")]
+    mod material_resource_tests {
+        use super::*;
+        include!("imported_scene/material_resource_tests.rs");
     }
     const FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
     fn model(rhi: &Mock, format: TextureFormat) -> ModelRenderer<Mock> {
@@ -1282,7 +1296,8 @@ mod tests {
     #[test]
     fn probe_globals_remain_below_portable_uniform_limit() {
         assert_eq!(std::mem::size_of::<crate::IrradianceUniform>(), 9280);
-        assert_eq!(std::mem::size_of::<crate::model_renderer::Globals>(), 9536);
+        let material_globals = if cfg!(feature = "metallic-roughness") { 32 } else { 0 };
+        assert_eq!(std::mem::size_of::<crate::model_renderer::Globals>(), 9536 + material_globals);
         assert!(std::mem::size_of::<crate::model_renderer::Globals>() <= 16 * 1024);
     }
 

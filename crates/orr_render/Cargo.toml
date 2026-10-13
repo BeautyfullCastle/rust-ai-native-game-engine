@@ -15,6 +15,8 @@ particles = ["orr_view/particles", "orr_rhi/additive-blend"]
 irradiance-probes = ["imported-scene", "bytemuck/min_const_generics"]
 sprites = ["dep:orr_sprite"]
 models = ["dep:orr_model"]
+# Immutable runtime overrides only; cooked/imported material formats stay unchanged.
+metallic-roughness = ["models"]
 animation = ["models", "orr_model/animation"]
 imported-scene = ["models", "dep:serde", "dep:serde_json"]
 
