@@ -285,6 +285,16 @@ jobs:
           path: ${{ runner.temp }}/material-sample-cpu
           if-no-files-found: error
           retention-days: 7
+      - name: Required factor-only import package binding and CPU contracts
+        run: python -B tools/factor_import_gate.py cpu --evidence "${{ runner.temp }}/factor-import-cpu"
+      - name: Retain factor import CPU and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factor-import-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/factor-import-cpu
+          if-no-files-found: error
+          retention-days: 7
       # The actual sample/compositor seam is separately gated and default-off.
       - name: Particle sample default library tests
         run: cargo test --locked --release -p orr_sample --lib
@@ -1278,6 +1288,27 @@ jobs:
         with:
           name: material-sample-gpu-${{ matrix.os }}
           path: ${{ runner.temp }}/material-sample-gpu
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required factor-only static and animated device captures
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          set -euo pipefail
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | sort)
+          test "${#icds[@]}" -eq 1
+          export VK_ICD_FILENAMES="${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          python -B tools/factor_import_gate.py gpu --evidence "$RUNNER_TEMP/factor-import-gpu"
+      - name: Retain factor import actual and partial capture evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: factor-import-gpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/factor-import-gpu
           if-no-files-found: error
           retention-days: 7
       # HDR is an explicit required acceptance lane, not an optional adapter
