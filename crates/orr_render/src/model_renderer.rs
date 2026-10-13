@@ -151,6 +151,13 @@ pub(crate) struct Globals {
     #[cfg(feature = "irradiance-probes")]
     pub(crate) irradiance: crate::IrradianceUniform,
 }
+#[cfg(feature = "imported-scene")]
+impl Globals {
+    /// Replace only the admitted main matrix, preserving shadow/material fields.
+    pub(crate) fn set_view_proj(&mut self, matrix: [[f32; 4]; 4]) {
+        self.view_proj = matrix;
+    }
+}
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Object {
@@ -859,7 +866,7 @@ pub(crate) fn prepare_globals(
     })
 }
 
-fn validate_camera(camera: &Camera3D, size: (u32, u32)) -> Result<[[f32; 4]; 4], ModelRenderError> {
+pub(crate) fn validate_camera(camera: &Camera3D, size: (u32, u32)) -> Result<[[f32; 4]; 4], ModelRenderError> {
     let f = sub(camera.target, camera.eye);
     // Match Camera3D::view / Mat4::look_at, which crosses the normalized forward.
     let right = cross(normalize(f), camera.up);
