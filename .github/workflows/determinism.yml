@@ -275,6 +275,16 @@ jobs:
         run: cargo clippy --locked -p orr_render --no-default-features --all-targets -- -D warnings
       - name: Strict particle renderer enabled Clippy
         run: cargo clippy --locked -p orr_render --no-default-features --features particles --all-targets -- -D warnings
+      - name: Required material sample CPU CLI and strict feature boundaries
+        run: python tools/material_sample_gate.py cpu --evidence "${{ runner.temp }}/material-sample-cpu"
+      - name: Retain material sample CPU and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-sample-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/material-sample-cpu
+          if-no-files-found: error
+          retention-days: 7
       # The actual sample/compositor seam is separately gated and default-off.
       - name: Particle sample default library tests
         run: cargo test --locked --release -p orr_sample --lib
@@ -297,6 +307,340 @@ jobs:
         run: cargo test --locked --release -p orr_render --no-default-features --features imported-scene,particles --lib
       - name: Strict particle imported-scene compositor Clippy
         run: cargo clippy --locked -p orr_render --no-default-features --features imported-scene,particles --all-targets -- -D warnings
+      - name: Required material CPU contracts and strict feature boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYMATERIAL'
+          PHASE = 'cpu'
+          GROUPS = [{'label': 'feature-off-camera',
+            'package': 'orr_render',
+            'features': '',
+            'target': '--lib',
+            'names': ['camera3d::tests::a_point_behind_the_camera_has_no_screen_position',
+                      'camera3d::tests::orbit_keeps_the_distance_and_clamps_the_pitch',
+                      'camera3d::tests::orthographic_has_no_perspective_shrink',
+                      'camera3d::tests::pan_moves_the_target_with_the_mouse',
+                      'camera3d::tests::plane_pick_finds_the_ground_point',
+                      'camera3d::tests::screen_ray_round_trips_with_world_to_screen',
+                      'camera3d::tests::target_maps_to_the_screen_center',
+                      'camera3d::tests::up_is_up_and_right_is_right_on_screen'],
+            'selected': ['camera3d::tests::a_point_behind_the_camera_has_no_screen_position',
+                         'camera3d::tests::orbit_keeps_the_distance_and_clamps_the_pitch',
+                         'camera3d::tests::orthographic_has_no_perspective_shrink',
+                         'camera3d::tests::pan_moves_the_target_with_the_mouse',
+                         'camera3d::tests::plane_pick_finds_the_ground_point',
+                         'camera3d::tests::screen_ray_round_trips_with_world_to_screen',
+                         'camera3d::tests::target_maps_to_the_screen_center',
+                         'camera3d::tests::up_is_up_and_right_is_right_on_screen'],
+            'ignored': [],
+            'adapter': None,
+            'filter': 'camera3d::tests::'},
+           {'label': 'material-only',
+            'package': 'orr_render',
+            'features': 'metallic-roughness',
+            'target': 'material_shading',
+            'names': ['gpu_shared_brdf_matches_independent_f64_oracle_at_endpoints_and_grazing',
+                      'independent_oracle_has_analytic_limits_reciprocity_and_no_energy_gain',
+                      'panel_fixture_is_admitted_and_cooked_without_a_gpu',
+                      'perspective_material_uses_fragment_view_direction_against_analytic_plane_oracle',
+                      'static_override_linear_color_orthographic_and_legacy_contract',
+                      'validated_scalars_reject_nonfinite_and_out_of_range_without_clamping'],
+            'selected': ['independent_oracle_has_analytic_limits_reciprocity_and_no_energy_gain',
+                         'panel_fixture_is_admitted_and_cooked_without_a_gpu',
+                         'validated_scalars_reject_nonfinite_and_out_of_range_without_clamping'],
+            'ignored': [],
+            'adapter': None,
+            'filter': ''},
+           {'label': 'material-only-units',
+            'package': 'orr_render',
+            'features': 'metallic-roughness',
+            'target': '--lib',
+            'names': ['material_shading::tests::shader_hooks_and_roughness_floor_match',
+                      'material_shading::tests::table_is_exact_and_legacy_is_explicit'],
+            'selected': ['material_shading::tests::shader_hooks_and_roughness_floor_match',
+                         'material_shading::tests::table_is_exact_and_legacy_is_explicit'],
+            'ignored': [],
+            'adapter': None,
+            'filter': 'material_shading::tests::'},
+           {'label': 'material-combined',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': 'material_shading',
+            'names': ['composed_constant_probe_replaces_hemisphere_and_suppresses_metal_diffuse',
+                      'composed_opposing_grazing_sun_point_and_exposure_remain_finite_in_ldr',
+                      'composed_shadow_removes_only_sun_for_dielectric_and_metal',
+                      'gpu_shared_brdf_matches_independent_f64_oracle_at_endpoints_and_grazing',
+                      'independent_oracle_has_analytic_limits_reciprocity_and_no_energy_gain',
+                      'nonrest_skinned_material_matches_independent_tilted_normal_reference',
+                      'panel_fixture_is_admitted_and_cooked_without_a_gpu',
+                      'perspective_material_uses_fragment_view_direction_against_analytic_plane_oracle',
+                      'skinned_material_matches_deformed_static_geometry_and_preserves_legacy',
+                      'static_override_linear_color_orthographic_and_legacy_contract',
+                      'tilted_strip_midpoint_and_key_match_independent_positions_and_normals_without_gpu',
+                      'validated_scalars_reject_nonfinite_and_out_of_range_without_clamping'],
+            'selected': ['independent_oracle_has_analytic_limits_reciprocity_and_no_energy_gain',
+                         'panel_fixture_is_admitted_and_cooked_without_a_gpu',
+                         'tilted_strip_midpoint_and_key_match_independent_positions_and_normals_without_gpu',
+                         'validated_scalars_reject_nonfinite_and_out_of_range_without_clamping'],
+            'ignored': [],
+            'adapter': None,
+            'filter': ''},
+           {'label': 'material-combined-units',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': '--lib',
+            'names': ['material_shading::tests::shader_hooks_and_roughness_floor_match',
+                      'material_shading::tests::table_is_exact_and_legacy_is_explicit'],
+            'selected': ['material_shading::tests::shader_hooks_and_roughness_floor_match',
+                         'material_shading::tests::table_is_exact_and_legacy_is_explicit'],
+            'ignored': [],
+            'adapter': None,
+            'filter': 'material_shading::tests::'},
+           {'label': 'combined-mocks',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': '--lib',
+            'names': ['imported_scene::tests::hdr_capability_settings_peak_budget_and_late_batches_fail_closed',
+                      'imported_scene::tests::hdr_every_required_capability_is_checked_before_effects',
+                      'imported_scene::tests::hdr_final_target_must_be_display_format',
+                      'imported_scene::tests::hdr_targets_passes_reuse_resize_and_off_are_recorded',
+                      'imported_scene::tests::material_resource_tests::skinned_feature_on_legacy_and_material_resource_traces_match',
+                      'imported_scene::tests::material_resource_tests::skinned_material_table_rejection_has_no_rhi_effects',
+                      'imported_scene::tests::material_resource_tests::static_feature_on_legacy_and_material_resource_traces_match',
+                      'imported_scene::tests::material_resource_tests::static_material_table_rejection_has_no_rhi_effects',
+                      'imported_scene::tests::mock_late_format_rejection_has_zero_gpu_effects_even_on_resize',
+                      'imported_scene::tests::mock_late_pose_rejection_keeps_uniform_cache_depth_and_submitted_bounds',
+                      'imported_scene::tests::mock_mixed_preflight_validates_skinned_pose_before_any_gpu_effect',
+                      'imported_scene::tests::mock_preflight_before_cache_or_resize_matches_frame_validation_without_gpu_effects',
+                      'imported_scene::tests::mock_procedural_and_static_instances_share_depth_and_late_failures_have_no_effects',
+                      'imported_scene::tests::mock_shared_shadow_preflight_retains_main_draw_limit_precedence',
+                      'imported_scene::tests::mock_shared_shadow_resources_upload_once_and_reject_before_any_mutation',
+                      'imported_scene::tests::mock_static_instances_validate_composed_nodes_and_capacity_before_gpu_effects',
+                      'imported_scene::tests::mock_static_shared_depth_clear_submit_reuse_and_empty_frame',
+                      'imported_scene::tests::particle_composition::aggregate_draws_accept_4096_and_reject_4097_before_frame_changes',
+                      'imported_scene::tests::particle_composition::full_geometry_batch_budget_rejects_extra_particle_pass_atomically',
+                      'imported_scene::tests::particle_composition::hdr_scene_format_mismatch_rejects_before_allocations_or_writes',
+                      'imported_scene::tests::particle_composition::invalid_trailing_particle_rejects_resize_before_any_scene_effect',
+                      'imported_scene::tests::particle_composition::malformed_final_geometry_after_valid_particles_is_atomic',
+                      'imported_scene::tests::particle_composition::particle_pass_loads_shared_depth_on_one_encoder_before_hdr',
+                      'imported_scene::tests::particle_composition::unchanged_default_and_empty_particle_routes_have_equal_frame_effects',
+                      'imported_scene::tests::probe_globals_remain_below_portable_uniform_limit',
+                      'imported_scene::tests::probe_toggle_reuses_all_gpu_state_and_bad_grid_resize_is_atomic'],
+            'selected': ['imported_scene::tests::hdr_capability_settings_peak_budget_and_late_batches_fail_closed',
+                         'imported_scene::tests::hdr_every_required_capability_is_checked_before_effects',
+                         'imported_scene::tests::hdr_final_target_must_be_display_format',
+                         'imported_scene::tests::hdr_targets_passes_reuse_resize_and_off_are_recorded',
+                         'imported_scene::tests::material_resource_tests::skinned_feature_on_legacy_and_material_resource_traces_match',
+                         'imported_scene::tests::material_resource_tests::skinned_material_table_rejection_has_no_rhi_effects',
+                         'imported_scene::tests::material_resource_tests::static_feature_on_legacy_and_material_resource_traces_match',
+                         'imported_scene::tests::material_resource_tests::static_material_table_rejection_has_no_rhi_effects',
+                         'imported_scene::tests::mock_late_format_rejection_has_zero_gpu_effects_even_on_resize',
+                         'imported_scene::tests::mock_late_pose_rejection_keeps_uniform_cache_depth_and_submitted_bounds',
+                         'imported_scene::tests::mock_mixed_preflight_validates_skinned_pose_before_any_gpu_effect',
+                         'imported_scene::tests::mock_preflight_before_cache_or_resize_matches_frame_validation_without_gpu_effects',
+                         'imported_scene::tests::mock_procedural_and_static_instances_share_depth_and_late_failures_have_no_effects',
+                         'imported_scene::tests::mock_shared_shadow_preflight_retains_main_draw_limit_precedence',
+                         'imported_scene::tests::mock_shared_shadow_resources_upload_once_and_reject_before_any_mutation',
+                         'imported_scene::tests::mock_static_instances_validate_composed_nodes_and_capacity_before_gpu_effects',
+                         'imported_scene::tests::mock_static_shared_depth_clear_submit_reuse_and_empty_frame',
+                         'imported_scene::tests::particle_composition::aggregate_draws_accept_4096_and_reject_4097_before_frame_changes',
+                         'imported_scene::tests::particle_composition::full_geometry_batch_budget_rejects_extra_particle_pass_atomically',
+                         'imported_scene::tests::particle_composition::hdr_scene_format_mismatch_rejects_before_allocations_or_writes',
+                         'imported_scene::tests::particle_composition::invalid_trailing_particle_rejects_resize_before_any_scene_effect',
+                         'imported_scene::tests::particle_composition::malformed_final_geometry_after_valid_particles_is_atomic',
+                         'imported_scene::tests::particle_composition::particle_pass_loads_shared_depth_on_one_encoder_before_hdr',
+                         'imported_scene::tests::particle_composition::unchanged_default_and_empty_particle_routes_have_equal_frame_effects',
+                         'imported_scene::tests::probe_globals_remain_below_portable_uniform_limit',
+                         'imported_scene::tests::probe_toggle_reuses_all_gpu_state_and_bad_grid_resize_is_atomic'],
+            'ignored': [],
+            'adapter': None,
+            'filter': 'imported_scene::tests::'},
+           {'label': 'combined-sample',
+            'package': 'orr_sample',
+            'features': 'particle-demo,orr_render/metallic-roughness,orr_render/animation,orr_render/irradiance-probes',
+            'target': '--lib',
+            'names': ['arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device',
+                      'arena_audio::tests::missing_native_feature_is_reported_and_required_fails',
+                      'net_client::wss_options_tests::cli_parses_wss_ca_and_name_without_changing_quic_default',
+                      'net_client::wss_options_tests::wss_defaults_to_webpki_and_url_name',
+                      'net_client::wss_options_tests::wt_cli_defaults_to_webpki_and_url_host',
+                      'particle_demo::showcase_tests::actual_temporal_dust_and_sparks_spread_fade_and_expire',
+                      'particle_demo::showcase_tests::explicit_restart_clears_old_cycle_and_zero_time_does_not_restart_boundary',
+                      'particle_demo::showcase_tests::focus_pause_and_zero_delta_preserve_time_state_and_particles',
+                      'particle_demo::showcase_tests::genuine_pickup_cycles_keep_modes_authoritatively_identical',
+                      'particle_demo::showcase_tests::unchanged_presets_spread_fade_and_expire_after_real_pickup',
+                      'particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png',
+                      'particle_demo::tests::checked_pickup_origins_and_fresh_session_restart_discard_effects',
+                      'particle_demo::tests::composed_geometry_settings_request_one_sample',
+                      'particle_demo::tests::options_require_explicit_mode_and_reject_duplicate_or_unknown_flags',
+                      'particle_demo::tests::real_pickups_drive_presets_without_changing_authoritative_checksums',
+                      'particle_demo::tests::repeated_zero_delta_poll_does_not_replay_bursts',
+                      'yard3d_stream::tests::authoritative_frame_preserves_entities_floor_and_poses',
+                      'yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags',
+                      'yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command',
+                      'yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh',
+                      'yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding'],
+            'selected': ['arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device',
+                         'arena_audio::tests::missing_native_feature_is_reported_and_required_fails',
+                         'net_client::wss_options_tests::cli_parses_wss_ca_and_name_without_changing_quic_default',
+                         'net_client::wss_options_tests::wss_defaults_to_webpki_and_url_name',
+                         'net_client::wss_options_tests::wt_cli_defaults_to_webpki_and_url_host',
+                         'particle_demo::showcase_tests::explicit_restart_clears_old_cycle_and_zero_time_does_not_restart_boundary',
+                         'particle_demo::showcase_tests::focus_pause_and_zero_delta_preserve_time_state_and_particles',
+                         'particle_demo::showcase_tests::genuine_pickup_cycles_keep_modes_authoritatively_identical',
+                         'particle_demo::showcase_tests::unchanged_presets_spread_fade_and_expire_after_real_pickup',
+                         'particle_demo::tests::checked_pickup_origins_and_fresh_session_restart_discard_effects',
+                         'particle_demo::tests::composed_geometry_settings_request_one_sample',
+                         'particle_demo::tests::options_require_explicit_mode_and_reject_duplicate_or_unknown_flags',
+                         'particle_demo::tests::real_pickups_drive_presets_without_changing_authoritative_checksums',
+                         'particle_demo::tests::repeated_zero_delta_poll_does_not_replay_bursts',
+                         'yard3d_stream::tests::authoritative_frame_preserves_entities_floor_and_poses',
+                         'yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags',
+                         'yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command',
+                         'yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh',
+                         'yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding'],
+            'ignored': ['particle_demo::showcase_tests::actual_temporal_dust_and_sparks_spread_fade_and_expire',
+                        'particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png'],
+            'adapter': None,
+            'filter': ''},
+           {'label': 'combined-uniform-bound',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': '--lib',
+            'names': ['renderer3d::tests::probe_globals_remain_below_portable_uniform_limit'],
+            'selected': ['renderer3d::tests::probe_globals_remain_below_portable_uniform_limit'],
+            'ignored': [],
+            'adapter': None,
+            'filter': 'renderer3d::tests::probe_globals_remain_below_portable_uniform_limit'},
+           {'label': 'combined-shadow-oracle-cpu',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': '--lib',
+            'names': ['imported_scene::shadow_gpu_tests::depth_oracle::tests::fixed_wrong_depth_pose_and_bias_controls_are_rejected',
+                      'imported_scene::shadow_gpu_tests::depth_oracle::tests::nonfinite_range_degeneracy_and_ambiguous_coverage_fail',
+                      'imported_scene::shadow_gpu_tests::depth_oracle::tests::overlapping_depth_competition_uses_biased_intervals',
+                      'imported_scene::shadow_gpu_tests::depth_oracle::tests::perturbation_corners_and_precision_variants_stay_in_derived_interval'],
+            'selected': ['imported_scene::shadow_gpu_tests::depth_oracle::tests::fixed_wrong_depth_pose_and_bias_controls_are_rejected',
+                         'imported_scene::shadow_gpu_tests::depth_oracle::tests::nonfinite_range_degeneracy_and_ambiguous_coverage_fail',
+                         'imported_scene::shadow_gpu_tests::depth_oracle::tests::overlapping_depth_competition_uses_biased_intervals',
+                         'imported_scene::shadow_gpu_tests::depth_oracle::tests::perturbation_corners_and_precision_variants_stay_in_derived_interval'],
+            'ignored': [],
+            'adapter': None,
+            'filter': 'imported_scene::shadow_gpu_tests::depth_oracle::tests::'}]
+          import json, os, pathlib, re, subprocess
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "material-ci" / PHASE
+          root.mkdir(parents=True, exist_ok=True)
+          # Keep stdout and stderr even when Cargo fails; every command fails closed.
+          def run(label, argv, extra_env=None):
+              path = root / (label + ".log")
+              with path.open("w", encoding="utf-8") as log:
+                  log.write("COMMAND " + json.dumps(argv) + "\n")
+                  log.flush()
+                  env = os.environ.copy()
+                  for key in ["ORR_MODEL_SCREENSHOT", "ORR_SKINNED_CAPTURE_DIR", "ORR_PARTICLE_CAPTURE_DIR", "ORR_PARTICLE_SHOWCASE_CAPTURE_DIR"]:
+                      env.pop(key, None)
+                  env.update(extra_env or {})
+                  result = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT, text=True, env=env)
+              text = path.read_text(encoding="utf-8", errors="replace")
+              print(text, flush=True)
+              assert result.returncode == 0, (label, result.returncode)
+              return text
+
+          def listed(text):
+              return sorted(re.findall(r"^([A-Za-z0-9_:]+): test$", text, re.M))
+
+          def check_result(text, name, adapter, filtered):
+              assert text.count("test result:") == 1, name
+              assert re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out; finished in [0-9.]+s$", text, re.M) == [("1", "0", "0", "0", str(filtered))], name
+              assert re.findall(r"^running (\d+) test(?:s)?$", text, re.M) == ["1"], name
+              # External driver stderr may split `test name ... ok` across lines.
+              # The exact prefix and authoritative successes list still identify it.
+              assert re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\. ", text, re.M) == [name], name
+              assert re.findall(r"^successes:\n((?:    [A-Za-z0-9_:]+\n)+)", text, re.M) == ["    " + name + "\n"], name
+              assert not re.search(r"(?i)SKIP:|skipping|adapter unavailable|SKIP software", text), name
+              if adapter:
+                  # Require a real observation within this exact successful test's output.
+                  marker = "---- " + name + " stdout ----\n"
+                  assert re.findall(r"^---- .* stdout ----$", text, re.M) == [marker.rstrip("\n")], name
+                  output = text.split(marker, 1)[1].split("\nsuccesses:", 1)[0]
+                  observed = sorted(set(re.findall("^" + adapter + "$", output, re.M)))
+                  assert len(observed) == 1, (name, "missing or inconsistent adapter observation")
+                  return observed[0]
+              return None
+              # SH9's historical driver label carries driver_info; retain the literal
+              # log without promoting it to a richer adapter identity claim.
+
+          capture_adapters = {}
+          parity_records = []
+          def audit_capture_pair(kind):
+              import hashlib
+              off_label, on_label = kind + "-off", kind + "-on"
+              assert capture_adapters[off_label] == capture_adapters[on_label], "cross-feature adapter mismatch"
+              names, size = (["static"], 128) if kind == "model" else (["rest", "midpoint", "key"], 192)
+              for name in names:
+                  off = root / "captures" / off_label / (name + ".ppm")
+                  on = root / "captures" / on_label / (name + ".ppm")
+                  header = f"P6\n{size} {size}\n255\n".encode()
+                  a, b = off.read_bytes(), on.read_bytes()
+                  assert a.startswith(header) and len(a) == len(header) + size * size * 3, str(off)
+                  assert b.startswith(header) and len(b) == len(header) + size * size * 3, str(on)
+                  assert a == b, (kind, name, "feature-off/on RGB differs")
+                  parity_records.append({"off": str(off), "on": str(on), "adapter_observation": capture_adapters[off_label], "sha256": hashlib.sha256(a).hexdigest(), "bytes": len(a)})
+                  (root / "pixel-parity.json").write_text(json.dumps(parity_records, indent=2) + "\n")
+
+          for g in GROUPS:
+              base = ["cargo", "test", "--locked", "--release", "-p", g["package"], "--no-default-features"]
+              if g["features"]:
+                  base += ["--features", g["features"]]
+              base += ["--lib"] if g["target"] == "--lib" else ["--test", g["target"]]
+              query = base + ([g["filter"]] if g["filter"] else [])
+              names = listed(run(g["label"] + "-list", query + ["--", "--list"]))
+              assert names == g["names"], g["label"]
+              full_names = listed(run(g["label"] + "-full-list", base + ["--", "--list"])) if g["filter"] else names
+              assert full_names and len(full_names) == len(set(full_names)) and set(names) <= set(full_names), g["label"]
+              assert listed(run(g["label"] + "-ignored", query + ["--", "--ignored", "--list"])) == g["ignored"], g["label"]
+              assert g["selected"] and set(g["selected"]) <= set(g["names"]), g["label"]
+              for index, name in enumerate(g["selected"]):
+                  args = base + [name, "--", "--exact", "--test-threads=1", "--show-output"]
+                  if name in g["ignored"]:
+                      args += ["--ignored"]
+                  capture_env = {}
+                  if PHASE == "gpu" and g["label"] in ["model-off", "model-on"] and name == "imported_uv_material_slots_child_transform_depth_camera_and_rejection_readback":
+                      folder = root / "captures" / g["label"]
+                      folder.mkdir(parents=True, exist_ok=False)
+                      capture_env["ORR_MODEL_SCREENSHOT"] = str(folder / "static.ppm")
+                  if PHASE == "gpu" and g["label"] in ["skin-off", "skin-on"] and name == "gltf_and_glb_cook_reload_rest_midpoint_key_match_analytic_pixels_and_current_bounds":
+                      folder = root / "captures" / g["label"]
+                      folder.mkdir(parents=True, exist_ok=False)
+                      capture_env["ORR_SKINNED_CAPTURE_DIR"] = str(folder)
+                  text = run(g["label"] + "-" + str(index + 1), args, capture_env)
+                  observed = check_result(text, name, g["adapter"], len(full_names) - 1)
+                  if capture_env:
+                      capture_adapters[g["label"]] = observed
+                      (root / "capture-adapters.json").write_text(json.dumps(capture_adapters, indent=2) + "\n")
+                      if g["label"].endswith("-on"):
+                          audit_capture_pair(g["label"].split("-", 1)[0])
+
+          for label, package, features in [
+              ("feature-off", "orr_render", ""),
+              ("material-only", "orr_render", "metallic-roughness"),
+              ("combined", "orr_render", "metallic-roughness,animation,irradiance-probes,particles"),
+              ("sample-combined", "orr_sample", "particle-demo,orr_render/metallic-roughness,orr_render/animation,orr_render/irradiance-probes"),
+          ]:
+              args = ["cargo", "clippy", "--locked", "-p", package, "--no-default-features"]
+              if features:
+                  args += ["--features", features]
+              run(label + "-strict", args + ["--all-targets", "--", "-D", "warnings"])
+          PYMATERIAL
+      - name: Retain material CPU and strict evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/material-ci/cpu
+          if-no-files-found: error
+          retention-days: 7
       # Includes `orr_sample`'s relay end-to-end tests (real loopback QUIC/WebSocket).
       - run: cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings
       - name: Upload sample release build timings
@@ -338,6 +682,421 @@ jobs:
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:
           ORR_REQUIRE_GPU: "1"
+      - name: Required material and SH9 actual-device acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          set -euo pipefail
+          # Reuse existing Mesa installation; never change runner/security setup.
+          mkdir -p "$RUNNER_TEMP/material-ci/gpu"
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | sort)
+          printf '%s\n' "${icds[@]}" > "$RUNNER_TEMP/material-ci/gpu/icds.log"
+          test "${#icds[@]}" -eq 1
+          export VK_ICD_FILENAMES="${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          python - <<'PYMATERIAL'
+          PHASE = 'gpu'
+          GROUPS = [{'label': 'model-off',
+            'package': 'orr_render',
+            'features': 'models',
+            'target': 'models',
+            'names': ['explicit_nearest_and_bilinear_wrap_seams_match_linear_space_cpu_reference',
+                      'imported_uv_material_slots_child_transform_depth_camera_and_rejection_readback',
+                      'large_uvs_preserve_half_texel_wrap_seams_at_max_texture_extent'],
+            'selected': ['explicit_nearest_and_bilinear_wrap_seams_match_linear_space_cpu_reference',
+                         'imported_uv_material_slots_child_transform_depth_camera_and_rejection_readback',
+                         'large_uvs_preserve_half_texel_wrap_seams_at_max_texture_extent'],
+            'ignored': [],
+            'adapter': 'model acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ device_type=\\w+ '
+                       'vendor=\\d+ device=\\d+ driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" '
+                       'software=(?:true|false)',
+            'filter': ''},
+           {'label': 'model-on',
+            'package': 'orr_render',
+            'features': 'metallic-roughness',
+            'target': 'models',
+            'names': ['explicit_nearest_and_bilinear_wrap_seams_match_linear_space_cpu_reference',
+                      'imported_uv_material_slots_child_transform_depth_camera_and_rejection_readback',
+                      'large_uvs_preserve_half_texel_wrap_seams_at_max_texture_extent'],
+            'selected': ['explicit_nearest_and_bilinear_wrap_seams_match_linear_space_cpu_reference',
+                         'imported_uv_material_slots_child_transform_depth_camera_and_rejection_readback',
+                         'large_uvs_preserve_half_texel_wrap_seams_at_max_texture_extent'],
+            'ignored': [],
+            'adapter': 'model acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ device_type=\\w+ '
+                       'vendor=\\d+ device=\\d+ driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" '
+                       'software=(?:true|false)',
+            'filter': ''},
+           {'label': 'skin-off',
+            'package': 'orr_render',
+            'features': 'animation',
+            'target': 'skinned_model',
+            'names': ['gltf_and_glb_cook_reload_rest_midpoint_key_match_analytic_pixels_and_current_bounds',
+                      'gpu_normals_use_inverse_transpose_of_blended_skin_with_nonuniform_placement',
+                      'invalid_pose_placement_camera_and_shadow_requests_leave_frame_unchanged',
+                      'two_instances_keep_separate_palettes_one_clear_and_change_independently'],
+            'selected': ['gltf_and_glb_cook_reload_rest_midpoint_key_match_analytic_pixels_and_current_bounds',
+                         'gpu_normals_use_inverse_transpose_of_blended_skin_with_nonuniform_placement',
+                         'invalid_pose_placement_camera_and_shadow_requests_leave_frame_unchanged',
+                         'two_instances_keep_separate_palettes_one_clear_and_change_independently'],
+            'ignored': [],
+            'adapter': 'skinned acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ device_type=\\w+ '
+                       'vendor=\\d+ device=\\d+ driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" '
+                       'software=(?:true|false)',
+            'filter': ''},
+           {'label': 'skin-on',
+            'package': 'orr_render',
+            'features': 'animation,metallic-roughness',
+            'target': 'skinned_model',
+            'names': ['gltf_and_glb_cook_reload_rest_midpoint_key_match_analytic_pixels_and_current_bounds',
+                      'gpu_normals_use_inverse_transpose_of_blended_skin_with_nonuniform_placement',
+                      'invalid_pose_placement_camera_and_shadow_requests_leave_frame_unchanged',
+                      'two_instances_keep_separate_palettes_one_clear_and_change_independently'],
+            'selected': ['gltf_and_glb_cook_reload_rest_midpoint_key_match_analytic_pixels_and_current_bounds',
+                         'gpu_normals_use_inverse_transpose_of_blended_skin_with_nonuniform_placement',
+                         'invalid_pose_placement_camera_and_shadow_requests_leave_frame_unchanged',
+                         'two_instances_keep_separate_palettes_one_clear_and_change_independently'],
+            'ignored': [],
+            'adapter': 'skinned acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ device_type=\\w+ '
+                       'vendor=\\d+ device=\\d+ driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" '
+                       'software=(?:true|false)',
+            'filter': ''},
+           {'label': 'material-only',
+            'package': 'orr_render',
+            'features': 'metallic-roughness',
+            'target': 'material_shading',
+            'names': ['gpu_shared_brdf_matches_independent_f64_oracle_at_endpoints_and_grazing',
+                      'independent_oracle_has_analytic_limits_reciprocity_and_no_energy_gain',
+                      'panel_fixture_is_admitted_and_cooked_without_a_gpu',
+                      'perspective_material_uses_fragment_view_direction_against_analytic_plane_oracle',
+                      'static_override_linear_color_orthographic_and_legacy_contract',
+                      'validated_scalars_reject_nonfinite_and_out_of_range_without_clamping'],
+            'selected': ['gpu_shared_brdf_matches_independent_f64_oracle_at_endpoints_and_grazing',
+                         'perspective_material_uses_fragment_view_direction_against_analytic_plane_oracle',
+                         'static_override_linear_color_orthographic_and_legacy_contract'],
+            'ignored': [],
+            'adapter': 'material acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ device_type=\\w+ '
+                       'vendor=\\d+ device=\\d+ driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" '
+                       'software=(?:true|false)',
+            'filter': ''},
+           {'label': 'material-combined',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': 'material_shading',
+            'names': ['composed_constant_probe_replaces_hemisphere_and_suppresses_metal_diffuse',
+                      'composed_opposing_grazing_sun_point_and_exposure_remain_finite_in_ldr',
+                      'composed_shadow_removes_only_sun_for_dielectric_and_metal',
+                      'gpu_shared_brdf_matches_independent_f64_oracle_at_endpoints_and_grazing',
+                      'independent_oracle_has_analytic_limits_reciprocity_and_no_energy_gain',
+                      'nonrest_skinned_material_matches_independent_tilted_normal_reference',
+                      'panel_fixture_is_admitted_and_cooked_without_a_gpu',
+                      'perspective_material_uses_fragment_view_direction_against_analytic_plane_oracle',
+                      'skinned_material_matches_deformed_static_geometry_and_preserves_legacy',
+                      'static_override_linear_color_orthographic_and_legacy_contract',
+                      'tilted_strip_midpoint_and_key_match_independent_positions_and_normals_without_gpu',
+                      'validated_scalars_reject_nonfinite_and_out_of_range_without_clamping'],
+            'selected': ['composed_constant_probe_replaces_hemisphere_and_suppresses_metal_diffuse',
+                         'composed_opposing_grazing_sun_point_and_exposure_remain_finite_in_ldr',
+                         'composed_shadow_removes_only_sun_for_dielectric_and_metal',
+                         'gpu_shared_brdf_matches_independent_f64_oracle_at_endpoints_and_grazing',
+                         'nonrest_skinned_material_matches_independent_tilted_normal_reference',
+                         'perspective_material_uses_fragment_view_direction_against_analytic_plane_oracle',
+                         'skinned_material_matches_deformed_static_geometry_and_preserves_legacy',
+                         'static_override_linear_color_orthographic_and_legacy_contract'],
+            'ignored': [],
+            'adapter': 'material acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ device_type=\\w+ '
+                       'vendor=\\d+ device=\\d+ driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" '
+                       'software=(?:true|false)',
+            'filter': ''},
+           {'label': 'sh9-off',
+            'package': 'orr_render',
+            'features': 'animation,irradiance-probes,particles',
+            'target': 'irradiance_gpu',
+            'names': ['all_three_default_off_paths_are_byte_identical_to_legacy_standalone_after_probe_use',
+                      'disabled_outside_and_boundary_preserve_exact_legacy_pixels_and_fade_is_linear',
+                      'malformed_grid_combined_with_resize_and_cache_growth_preserves_last_accepted_frame_and_bounds',
+                      'mixed_procedural_static_and_skinned_probes_follow_independent_poses_and_world_positions',
+                      'opposing_valid_vertex_normals_interpolating_to_zero_preserve_legacy_fallback',
+                      'probes_preserve_sun_point_and_real_shadow_terms_and_keep_hdr_finite',
+                      'procedural_and_static_pixels_follow_world_space_red_blue_irradiance_with_one_pi',
+                      'signed_sh9_uses_transformed_world_normals_and_clamps_only_after_reconstruction',
+                      'zero_normal_contract::production_probe_helper_preserves_exact_zero_and_samples_tiny_nonzero_normals'],
+            'selected': ['all_three_default_off_paths_are_byte_identical_to_legacy_standalone_after_probe_use',
+                         'disabled_outside_and_boundary_preserve_exact_legacy_pixels_and_fade_is_linear',
+                         'malformed_grid_combined_with_resize_and_cache_growth_preserves_last_accepted_frame_and_bounds',
+                         'mixed_procedural_static_and_skinned_probes_follow_independent_poses_and_world_positions',
+                         'opposing_valid_vertex_normals_interpolating_to_zero_preserve_legacy_fallback',
+                         'probes_preserve_sun_point_and_real_shadow_terms_and_keep_hdr_finite',
+                         'procedural_and_static_pixels_follow_world_space_red_blue_irradiance_with_one_pi',
+                         'signed_sh9_uses_transformed_world_normals_and_clamps_only_after_reconstruction',
+                         'zero_normal_contract::production_probe_helper_preserves_exact_zero_and_samples_tiny_nonzero_normals'],
+            'ignored': [],
+            'adapter': 'SH9 acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ driver="[^"\\r\\n]*" '
+                       'software=true',
+            'filter': ''},
+           {'label': 'sh9-on',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': 'irradiance_gpu',
+            'names': ['all_three_default_off_paths_are_byte_identical_to_legacy_standalone_after_probe_use',
+                      'disabled_outside_and_boundary_preserve_exact_legacy_pixels_and_fade_is_linear',
+                      'malformed_grid_combined_with_resize_and_cache_growth_preserves_last_accepted_frame_and_bounds',
+                      'mixed_procedural_static_and_skinned_probes_follow_independent_poses_and_world_positions',
+                      'opposing_valid_vertex_normals_interpolating_to_zero_preserve_legacy_fallback',
+                      'probes_preserve_sun_point_and_real_shadow_terms_and_keep_hdr_finite',
+                      'procedural_and_static_pixels_follow_world_space_red_blue_irradiance_with_one_pi',
+                      'signed_sh9_uses_transformed_world_normals_and_clamps_only_after_reconstruction',
+                      'zero_normal_contract::production_probe_helper_preserves_exact_zero_and_samples_tiny_nonzero_normals'],
+            'selected': ['all_three_default_off_paths_are_byte_identical_to_legacy_standalone_after_probe_use',
+                         'disabled_outside_and_boundary_preserve_exact_legacy_pixels_and_fade_is_linear',
+                         'malformed_grid_combined_with_resize_and_cache_growth_preserves_last_accepted_frame_and_bounds',
+                         'mixed_procedural_static_and_skinned_probes_follow_independent_poses_and_world_positions',
+                         'opposing_valid_vertex_normals_interpolating_to_zero_preserve_legacy_fallback',
+                         'probes_preserve_sun_point_and_real_shadow_terms_and_keep_hdr_finite',
+                         'procedural_and_static_pixels_follow_world_space_red_blue_irradiance_with_one_pi',
+                         'signed_sh9_uses_transformed_world_normals_and_clamps_only_after_reconstruction',
+                         'zero_normal_contract::production_probe_helper_preserves_exact_zero_and_samples_tiny_nonzero_normals'],
+            'ignored': [],
+            'adapter': 'SH9 acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ driver="[^"\\r\\n]*" '
+                       'software=true',
+            'filter': ''},
+           {'label': 'combined-shadows',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': '--lib',
+            'names': ['imported_scene::shadow_gpu_tests::depth_oracle::tests::fixed_wrong_depth_pose_and_bias_controls_are_rejected',
+                      'imported_scene::shadow_gpu_tests::depth_oracle::tests::nonfinite_range_degeneracy_and_ambiguous_coverage_fail',
+                      'imported_scene::shadow_gpu_tests::depth_oracle::tests::overlapping_depth_competition_uses_biased_intervals',
+                      'imported_scene::shadow_gpu_tests::depth_oracle::tests::perturbation_corners_and_precision_variants_stay_in_derived_interval',
+                      'imported_scene::shadow_gpu_tests::shared_shadow_gpu_actual_depth_matches_independent_cpu_skinning_and_light_projection',
+                      'imported_scene::shadow_gpu_tests::shared_shadow_gpu_all_cross_type_cast_receive_pairs_and_reversed_batches',
+                      'imported_scene::shadow_gpu_tests::shared_shadow_gpu_joint_pose_moves_shadow_on_another_renderer_receiver',
+                      'imported_scene::shadow_gpu_tests::shared_shadow_gpu_offscreen_casters_survive_and_outside_coverage_receivers_are_lit',
+                      'imported_scene::shadow_gpu_tests::shared_shadow_gpu_two_independent_poses_repeat_empty_and_resize_without_stale_depth'],
+            'selected': ['imported_scene::shadow_gpu_tests::shared_shadow_gpu_actual_depth_matches_independent_cpu_skinning_and_light_projection',
+                         'imported_scene::shadow_gpu_tests::shared_shadow_gpu_all_cross_type_cast_receive_pairs_and_reversed_batches',
+                         'imported_scene::shadow_gpu_tests::shared_shadow_gpu_joint_pose_moves_shadow_on_another_renderer_receiver',
+                         'imported_scene::shadow_gpu_tests::shared_shadow_gpu_offscreen_casters_survive_and_outside_coverage_receivers_are_lit',
+                         'imported_scene::shadow_gpu_tests::shared_shadow_gpu_two_independent_poses_repeat_empty_and_resize_without_stale_depth'],
+            'ignored': [],
+            'adapter': 'shared shadow acceptance adapter: .+ \\(software: true\\)',
+            'filter': 'imported_scene::shadow_gpu_tests::'},
+           {'label': 'combined-particles',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': 'particles',
+            'names': ['particle_shader_depth_blend_order_camera_and_rejection_readback'],
+            'selected': ['particle_shader_depth_blend_order_camera_and_rejection_readback'],
+            'ignored': ['particle_shader_depth_blend_order_camera_and_rejection_readback'],
+            'adapter': 'particle adapter=.+ software=(?:true|false)',
+            'filter': ''},
+           {'label': 'combined-sample',
+            'package': 'orr_sample',
+            'features': 'particle-demo,orr_render/metallic-roughness,orr_render/animation,orr_render/irradiance-probes',
+            'target': '--lib',
+            'names': ['arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device',
+                      'arena_audio::tests::missing_native_feature_is_reported_and_required_fails',
+                      'net_client::wss_options_tests::cli_parses_wss_ca_and_name_without_changing_quic_default',
+                      'net_client::wss_options_tests::wss_defaults_to_webpki_and_url_name',
+                      'net_client::wss_options_tests::wt_cli_defaults_to_webpki_and_url_host',
+                      'particle_demo::showcase_tests::actual_temporal_dust_and_sparks_spread_fade_and_expire',
+                      'particle_demo::showcase_tests::explicit_restart_clears_old_cycle_and_zero_time_does_not_restart_boundary',
+                      'particle_demo::showcase_tests::focus_pause_and_zero_delta_preserve_time_state_and_particles',
+                      'particle_demo::showcase_tests::genuine_pickup_cycles_keep_modes_authoritatively_identical',
+                      'particle_demo::showcase_tests::unchanged_presets_spread_fade_and_expire_after_real_pickup',
+                      'particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png',
+                      'particle_demo::tests::checked_pickup_origins_and_fresh_session_restart_discard_effects',
+                      'particle_demo::tests::composed_geometry_settings_request_one_sample',
+                      'particle_demo::tests::options_require_explicit_mode_and_reject_duplicate_or_unknown_flags',
+                      'particle_demo::tests::real_pickups_drive_presets_without_changing_authoritative_checksums',
+                      'particle_demo::tests::repeated_zero_delta_poll_does_not_replay_bursts',
+                      'yard3d_stream::tests::authoritative_frame_preserves_entities_floor_and_poses',
+                      'yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags',
+                      'yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command',
+                      'yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh',
+                      'yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding'],
+            'selected': ['particle_demo::showcase_tests::actual_temporal_dust_and_sparks_spread_fade_and_expire',
+                         'particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png'],
+            'ignored': ['particle_demo::showcase_tests::actual_temporal_dust_and_sparks_spread_fade_and_expire',
+                        'particle_demo::tests::actual_sample_pixels_preserve_frame_and_optionally_capture_png'],
+            'adapter': '(?:sample particle|temporal particle) adapter=.+ software=(?:true|false)',
+            'filter': ''},
+           {'label': 'combined-hdr',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': 'hdr',
+            'names': ['aligned_view_and_light_keep_procedural_fresnel_radiance_finite',
+                      'bloom_has_a_bounded_above_threshold_halo_and_zero_below_threshold_or_strength',
+                      'debug_lines_keep_hdr_color_until_the_display_pass',
+                      'default_off_preserves_legacy_standalone_pixels_without_hdr_allocations',
+                      'display_pass_matches_independent_exposure_aces_srgb_oracle_in_both_formats',
+                      'genuine_gpu_skinned_vertices_preserve_radiance_at_rest_and_animated_pose',
+                      'invalid_late_batch_target_settings_and_budget_leave_accepted_hdr_frame_untouched',
+                      'invalid_late_skinned_pose_preserves_submitted_bounds_and_all_hdr_targets',
+                      'maximum_scene_plus_maximum_bloom_and_exposure_has_finite_display_output',
+                      'odd_resizes_empty_frames_and_background_display_never_reuse_stale_hdr_or_bloom',
+                      'procedural_and_static_store_unexposed_radiance_above_one_and_finite_half_maximum'],
+            'selected': ['aligned_view_and_light_keep_procedural_fresnel_radiance_finite',
+                         'bloom_has_a_bounded_above_threshold_halo_and_zero_below_threshold_or_strength',
+                         'debug_lines_keep_hdr_color_until_the_display_pass',
+                         'default_off_preserves_legacy_standalone_pixels_without_hdr_allocations',
+                         'display_pass_matches_independent_exposure_aces_srgb_oracle_in_both_formats',
+                         'genuine_gpu_skinned_vertices_preserve_radiance_at_rest_and_animated_pose',
+                         'invalid_late_batch_target_settings_and_budget_leave_accepted_hdr_frame_untouched',
+                         'invalid_late_skinned_pose_preserves_submitted_bounds_and_all_hdr_targets',
+                         'maximum_scene_plus_maximum_bloom_and_exposure_has_finite_display_output',
+                         'odd_resizes_empty_frames_and_background_display_never_reuse_stale_hdr_or_bloom',
+                         'procedural_and_static_store_unexposed_radiance_above_one_and_finite_half_maximum'],
+            'ignored': [],
+            'adapter': 'HDR acceptance adapter: name="[^"\\r\\n]+" backend=\\w+ device_type=\\w+ vendor=\\d+ '
+                       'device=\\d+ driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" software=(?:true|false)',
+            'filter': ''},
+           {'label': 'combined-imported_scene',
+            'package': 'orr_render',
+            'features': 'metallic-roughness,animation,irradiance-probes,particles',
+            'target': 'imported_scene',
+            'names': ['bounded_batch_and_aggregate_draw_limits_accept_boundary_and_reject_without_effects',
+                      'external_static_trs_composes_mirrored_sheared_nodes_and_preserves_standalone',
+                      'invalid_later_pose_format_placement_or_light_preserves_all_submitted_bounds',
+                      'invalid_later_static_batch_target_camera_and_light_leave_image_and_depth_unchanged',
+                      'invalid_mixed_frame_preserves_pixels_depth_and_procedural_statistics',
+                      'point_light_is_added_before_exposure_and_aces_in_linear_and_srgb_targets',
+                      'point_light_near_far_range_backface_color_and_zero_match_scalar_oracle',
+                      'procedural_and_static_instances_mutually_occlude_in_both_orders',
+                      'procedural_point_light_matches_diffuse_oracle_and_off_preserves_standalone_pixels',
+                      'procedural_static_and_skinned_share_one_depth_across_animation_and_batch_orders',
+                      'resize_empty_frames_and_subsequent_far_geometry_never_reuse_stale_depth',
+                      'saved_reloaded_and_failed_reload_settings_preserve_identical_gpu_output',
+                      'skinned_point_lighting_follows_deformed_world_positions_normals_and_separate_instances',
+                      'static_batches_share_depth_in_both_orders_and_ignore_private_clear_colors',
+                      'static_point_lighting_uses_transformed_world_position_and_inverse_transpose_normal',
+                      'static_skinned_batches_occlude_in_both_orders_as_animated_vertices_cross_plane'],
+            'selected': ['bounded_batch_and_aggregate_draw_limits_accept_boundary_and_reject_without_effects',
+                         'external_static_trs_composes_mirrored_sheared_nodes_and_preserves_standalone',
+                         'invalid_later_pose_format_placement_or_light_preserves_all_submitted_bounds',
+                         'invalid_later_static_batch_target_camera_and_light_leave_image_and_depth_unchanged',
+                         'invalid_mixed_frame_preserves_pixels_depth_and_procedural_statistics',
+                         'point_light_is_added_before_exposure_and_aces_in_linear_and_srgb_targets',
+                         'point_light_near_far_range_backface_color_and_zero_match_scalar_oracle',
+                         'procedural_and_static_instances_mutually_occlude_in_both_orders',
+                         'procedural_point_light_matches_diffuse_oracle_and_off_preserves_standalone_pixels',
+                         'procedural_static_and_skinned_share_one_depth_across_animation_and_batch_orders',
+                         'resize_empty_frames_and_subsequent_far_geometry_never_reuse_stale_depth',
+                         'saved_reloaded_and_failed_reload_settings_preserve_identical_gpu_output',
+                         'skinned_point_lighting_follows_deformed_world_positions_normals_and_separate_instances',
+                         'static_batches_share_depth_in_both_orders_and_ignore_private_clear_colors',
+                         'static_point_lighting_uses_transformed_world_position_and_inverse_transpose_normal',
+                         'static_skinned_batches_occlude_in_both_orders_as_animated_vertices_cross_plane'],
+            'ignored': [],
+            'adapter': 'imported scene acceptance adapter: .+ \\(software: true\\)',
+            'filter': ''}]
+          import json, os, pathlib, re, subprocess
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "material-ci" / PHASE
+          root.mkdir(parents=True, exist_ok=True)
+          # Keep stdout and stderr even when Cargo fails; every command fails closed.
+          def run(label, argv, extra_env=None):
+              path = root / (label + ".log")
+              with path.open("w", encoding="utf-8") as log:
+                  log.write("COMMAND " + json.dumps(argv) + "\n")
+                  log.flush()
+                  env = os.environ.copy()
+                  for key in ["ORR_MODEL_SCREENSHOT", "ORR_SKINNED_CAPTURE_DIR", "ORR_PARTICLE_CAPTURE_DIR", "ORR_PARTICLE_SHOWCASE_CAPTURE_DIR"]:
+                      env.pop(key, None)
+                  env.update(extra_env or {})
+                  result = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT, text=True, env=env)
+              text = path.read_text(encoding="utf-8", errors="replace")
+              print(text, flush=True)
+              assert result.returncode == 0, (label, result.returncode)
+              return text
+
+          def listed(text):
+              return sorted(re.findall(r"^([A-Za-z0-9_:]+): test$", text, re.M))
+
+          def check_result(text, name, adapter, filtered):
+              assert text.count("test result:") == 1, name
+              assert re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out; finished in [0-9.]+s$", text, re.M) == [("1", "0", "0", "0", str(filtered))], name
+              assert re.findall(r"^running (\d+) test(?:s)?$", text, re.M) == ["1"], name
+              # External driver stderr may split `test name ... ok` across lines.
+              # The exact prefix and authoritative successes list still identify it.
+              assert re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\. ", text, re.M) == [name], name
+              assert re.findall(r"^successes:\n((?:    [A-Za-z0-9_:]+\n)+)", text, re.M) == ["    " + name + "\n"], name
+              assert not re.search(r"(?i)SKIP:|skipping|adapter unavailable|SKIP software", text), name
+              if adapter:
+                  # Require a real observation within this exact successful test's output.
+                  marker = "---- " + name + " stdout ----\n"
+                  assert re.findall(r"^---- .* stdout ----$", text, re.M) == [marker.rstrip("\n")], name
+                  output = text.split(marker, 1)[1].split("\nsuccesses:", 1)[0]
+                  observed = sorted(set(re.findall("^" + adapter + "$", output, re.M)))
+                  assert len(observed) == 1, (name, "missing or inconsistent adapter observation")
+                  return observed[0]
+              return None
+              # SH9's historical driver label carries driver_info; retain the literal
+              # log without promoting it to a richer adapter identity claim.
+
+          capture_adapters = {}
+          parity_records = []
+          def audit_capture_pair(kind):
+              import hashlib
+              off_label, on_label = kind + "-off", kind + "-on"
+              assert capture_adapters[off_label] == capture_adapters[on_label], "cross-feature adapter mismatch"
+              names, size = (["static"], 128) if kind == "model" else (["rest", "midpoint", "key"], 192)
+              for name in names:
+                  off = root / "captures" / off_label / (name + ".ppm")
+                  on = root / "captures" / on_label / (name + ".ppm")
+                  header = f"P6\n{size} {size}\n255\n".encode()
+                  a, b = off.read_bytes(), on.read_bytes()
+                  assert a.startswith(header) and len(a) == len(header) + size * size * 3, str(off)
+                  assert b.startswith(header) and len(b) == len(header) + size * size * 3, str(on)
+                  assert a == b, (kind, name, "feature-off/on RGB differs")
+                  parity_records.append({"off": str(off), "on": str(on), "adapter_observation": capture_adapters[off_label], "sha256": hashlib.sha256(a).hexdigest(), "bytes": len(a)})
+                  (root / "pixel-parity.json").write_text(json.dumps(parity_records, indent=2) + "\n")
+
+          for g in GROUPS:
+              base = ["cargo", "test", "--locked", "--release", "-p", g["package"], "--no-default-features"]
+              if g["features"]:
+                  base += ["--features", g["features"]]
+              base += ["--lib"] if g["target"] == "--lib" else ["--test", g["target"]]
+              query = base + ([g["filter"]] if g["filter"] else [])
+              names = listed(run(g["label"] + "-list", query + ["--", "--list"]))
+              assert names == g["names"], g["label"]
+              full_names = listed(run(g["label"] + "-full-list", base + ["--", "--list"])) if g["filter"] else names
+              assert full_names and len(full_names) == len(set(full_names)) and set(names) <= set(full_names), g["label"]
+              assert listed(run(g["label"] + "-ignored", query + ["--", "--ignored", "--list"])) == g["ignored"], g["label"]
+              assert g["selected"] and set(g["selected"]) <= set(g["names"]), g["label"]
+              for index, name in enumerate(g["selected"]):
+                  args = base + [name, "--", "--exact", "--test-threads=1", "--show-output"]
+                  if name in g["ignored"]:
+                      args += ["--ignored"]
+                  capture_env = {}
+                  if PHASE == "gpu" and g["label"] in ["model-off", "model-on"] and name == "imported_uv_material_slots_child_transform_depth_camera_and_rejection_readback":
+                      folder = root / "captures" / g["label"]
+                      folder.mkdir(parents=True, exist_ok=False)
+                      capture_env["ORR_MODEL_SCREENSHOT"] = str(folder / "static.ppm")
+                  if PHASE == "gpu" and g["label"] in ["skin-off", "skin-on"] and name == "gltf_and_glb_cook_reload_rest_midpoint_key_match_analytic_pixels_and_current_bounds":
+                      folder = root / "captures" / g["label"]
+                      folder.mkdir(parents=True, exist_ok=False)
+                      capture_env["ORR_SKINNED_CAPTURE_DIR"] = str(folder)
+                  text = run(g["label"] + "-" + str(index + 1), args, capture_env)
+                  observed = check_result(text, name, g["adapter"], len(full_names) - 1)
+                  if capture_env:
+                      capture_adapters[g["label"]] = observed
+                      (root / "capture-adapters.json").write_text(json.dumps(capture_adapters, indent=2) + "\n")
+                      if g["label"].endswith("-on"):
+                          audit_capture_pair(g["label"].split("-", 1)[0])
+
+          # PPM compares RGB only, with identical observed adapters in each pair.
+          assert len(parity_records) == 4
+          PYMATERIAL
+      - name: Retain material actual-device evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-device-${{ matrix.os }}
+          path: ${{ runner.temp }}/material-ci/gpu
+          if-no-files-found: error
+          retention-days: 7
       - name: Required particle renderer actual-device readback
         if: runner.os == 'Linux'
         shell: bash
@@ -498,6 +1257,27 @@ jobs:
             ${{ runner.temp }}/particle-temporal-captures.sha256
             ${{ runner.temp }}/particle-temporal-captures/*.png
             ${{ runner.temp }}/particle-temporal-captures/sequence.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required material sample actual grounding and paired captures
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          set -euo pipefail
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | sort)
+          test "${#icds[@]}" -eq 1
+          export VK_ICD_FILENAMES="${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          python tools/material_sample_gate.py gpu --evidence "$RUNNER_TEMP/material-sample-gpu" --baseline-root "$RUNNER_TEMP"
+      - name: Retain material sample actual and partial capture evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-sample-gpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/material-sample-gpu
           if-no-files-found: error
           retention-days: 7
       # HDR is an explicit required acceptance lane, not an optional adapter
