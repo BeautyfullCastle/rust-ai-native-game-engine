@@ -1502,62 +1502,74 @@ fn assert_legacy_toggles(
     }
 }
 
+#[path = "irradiance_gpu/zero_normal_contract.rs"]
+mod zero_normal_contract;
+
 #[test]
 fn opposing_valid_vertex_normals_interpolating_to_zero_preserve_legacy_fallback() {
     let (_lock, g) = gpu();
-    let t = target(&g, FORMAT, SIZE);
-    let view = g.create_texture_view(&t, None);
-    let mut s = scene(&g, FORMAT, true);
-    let original = panel([2.3, 1.0], [1., 0., 0.], [0.6, 0.8, 0.4]);
-    let mut source = original.source().clone();
-    // All authored normals are valid and unit length. Interpolation along the
-    // screen's exactly centered column cancels -X and +X to the zero vector.
-    // Odd target dimensions put a real fragment exactly at world x=0.
-    for v in &mut source.primitives[0].vertices {
-        v.normal = [if v.position[0] < 0.0 { -1.0 } else { 1.0 }, 0.0, 0.0];
-    }
-    let asset = StaticModel::new(source).unwrap();
-    let asset = StaticModel::from_bytes(&asset.to_bytes().unwrap()).unwrap();
-    let mut model = ModelRenderer::new(g.clone(), s.scene_format(), asset).unwrap();
-    let lighting = light(0.35);
-    draw(
-        &mut s,
-        &view,
-        SIZE,
-        &camera(),
-        &lighting,
-        &PointLightSettings::default(),
-        &mut [ImportedBatch::Static(&mut model)],
-    )
-    .unwrap();
-    let before = hdr(&s);
-    let center = (SIZE.1 / 2 * SIZE.0 + SIZE.0 / 2) as usize;
-    near(
-        before[center],
-        [0.21, 0.28, 0.14],
-        "legacy zero-normal hemisphere fallback",
-    );
-    s.irradiance = Some(constant_grid([2.0, 3.0, 4.0]));
-    draw(
-        &mut s,
-        &view,
-        SIZE,
-        &camera(),
-        &lighting,
-        &PointLightSettings::default(),
-        &mut [ImportedBatch::Static(&mut model)],
-    )
-    .unwrap();
-    let after = hdr(&s);
-    assert_eq!(
-        after[center], before[center],
-        "zero interpolated normal has no SH direction and must preserve exact legacy ambient"
-    );
-    for offset in [-10_isize, 10] {
-        near(
-            after[(center as isize + offset) as usize],
-            [1.2, 2.4, 1.6],
-            "neighboring nonzero interpolated normals must still receive probes",
-        );
+    // Dyadic screen endpoints32.5/96.5 produce exact normal slope1/32.
+    // Unlike the old193px fixture, exact cancellation is a measured precondition.
+    let size = (128, 128);
+    let cam = Camera3D::orthographic([0.0, 0.0, 8.0], [0.0; 3], 2.0);
+    let tiny = f32::from_bits(0x2b80_0000); // 2^-40; normal length rounds to1 in f32.
+    let read = |scene: &ImportedSceneRenderer<Wgpu>| {
+        let pixels = scene.read_hdr_rgba().expect("accepted zero-normal HDR scene");
+        assert_eq!(pixels.len(), (size.0 * size.1) as usize);
+        for pixel in &pixels {
+            assert!(pixel.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 65504.0));
+            assert_eq!(pixel[3], 1.0);
+        }
+        pixels
+    };
+    for shared_y in [0.0, tiny] {
+        let t = target(&g, FORMAT, size);
+        let view = g.create_texture_view(&t, None);
+        let mut s = scene(&g, FORMAT, true);
+        let original = panel([1.0, 1.0], [1.0, 0.0, 0.0], [0.6, 0.8, 0.4]);
+        let mut source = original.source().clone();
+        for vertex in &mut source.primitives[0].vertices {
+            let x_sign = if vertex.position[0] < 0.0 { -1.0 } else { 1.0 };
+            vertex.position[0] += 1.0 / 64.0;
+            vertex.position[1] -= 1.0 / 64.0;
+            vertex.normal = [x_sign, shared_y, 0.0];
+        }
+        let asset = StaticModel::new(source).unwrap();
+        let asset = StaticModel::from_bytes(&asset.to_bytes().unwrap()).unwrap();
+        let observations = zero_normal_contract::observe(&g, &asset, &cam, size);
+        let center_observation = &observations[1];
+        assert_eq!(center_observation.raw[0] & 0x7fff_ffff, 0, "exact raster cancellation is required, never skipped");
+        assert_eq!(center_observation.raw[1], shared_y.to_bits(), "tiny nonzero must survive lossless observation");
+        assert_eq!(center_observation.raw[2] & 0x7fff_ffff, 0);
+        if shared_y == 0.0 {
+            assert!(center_observation.normalized.iter().all(|bits| bits & 0x7fff_ffff == 0));
+            assert_eq!(f32::from_bits(center_observation.gate), 0.0);
+        } else {
+            assert!(f32::from_bits(center_observation.normalized[1]) > 0.0);
+            assert_eq!(f32::from_bits(center_observation.gate), 1.0);
+        }
+        assert!(f32::from_bits(observations[0].raw[0]) < 0.0);
+        assert!(f32::from_bits(observations[2].raw[0]) > 0.0);
+        let mut model = ModelRenderer::new(g.clone(), s.scene_format(), asset).unwrap();
+        let lighting = light(0.35);
+        draw(&mut s, &view, size, &cam, &lighting, &PointLightSettings::default(),
+            &mut [ImportedBatch::Static(&mut model)]).unwrap();
+        let before = read(&s);
+        let center = (60 * size.0 + 64) as usize;
+        near(before[center], [0.21, 0.28, 0.14], "legacy hemisphere fallback");
+        s.irradiance = Some(constant_grid([2.0, 3.0, 4.0]));
+        draw(&mut s, &view, size, &cam, &lighting, &PointLightSettings::default(),
+            &mut [ImportedBatch::Static(&mut model)]).unwrap();
+        let after = read(&s);
+        if shared_y == 0.0 {
+            assert_eq!(after[center], before[center],
+                "exact zero interpolated normal has no SH direction and must preserve exact legacy ambient");
+        } else {
+            near(after[center], [1.2, 2.4, 1.6], "tiny nonzero normal retains independently expected SH0 probe response");
+        }
+        for offset in [-10_isize, 10] {
+            near(after[(center as isize + offset) as usize], [1.2, 2.4, 1.6],
+                "neighboring nonzero interpolated normals must still receive probes");
+        }
     }
 }

@@ -9,10 +9,11 @@ const SIZE: u32 = 128;
 fn gpu() -> Option<Wgpu> {
     match Wgpu::headless(WgpuOptions::default()) {
         Ok(g) => {
+            let info = g.adapter().get_info();
             eprintln!(
-                "model acceptance adapter: {} (software: {})",
-                g.adapter_name(),
-                g.is_software()
+                "model acceptance adapter: name={:?} backend={:?} device_type={:?} vendor={} device={} driver={:?} driver_info={:?} software={}",
+                info.name, info.backend, info.device_type, info.vendor, info.device,
+                info.driver, info.driver_info, g.is_software()
             );
             Some(g)
         }
