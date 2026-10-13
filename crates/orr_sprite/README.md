@@ -123,3 +123,29 @@ unchanged. Tests cover asymmetric coordinates, exact limits/overflow, byte limit
 round-trip/sampling, CLI equivalence/error channels and no file mutation. This is
 a GPU-free document-authoring tool, not an image slicer UI or complete editor
 workflow; image rendering, native interaction and export acceptance are separate.
+
+## Author a ping-pong clip
+
+`sequence::ping_pong_clip(id: String, forward_frames: &[Frame])` returns a
+`Result<ClipSource, Error>` using the existing version-1 `Loop` mode. It expands
+forward positions `0, 1, ..., n-1, n-2, ..., 1`, preserving each visited frame's
+region and individual duration. Endpoints occur once per cycle. One input frame
+stays one frame; two stay `A, B`. Repeated region IDs are preserved by position.
+For example, `A:10ms, B:20ms, C:30ms` becomes `A:10, B:20, C:30, B:20`, totaling
+80ms. The return visit to B samples at expanded `frame_index = 3`; sample indices
+refer to this generated sequence, not the original forward leg. Existing
+half-open sampling, seek/reset and saturating playback advance apply unchanged.
+
+The helper checks a nonblank ID of at most 128 UTF-8 bytes, nonempty input,
+positive durations, checked cycle duration and at most 4096 expanded frames
+before allocating generated frames. Thus 2049 forward frames fit exactly, while
+2050 reject. Cycle duration adds the forward and return-interior durations;
+singleton and two-frame cycles totaling `u64::MAX` remain valid. Input frames
+are never modified, and equal inputs produce equal output.
+
+The returned clip is still authoring data. Add it to a `SpriteSource` and call
+`SpriteDocument::new` to validate region references, duplicate clip IDs and
+document-wide limits (including 16384 total frames). There is no new serialized
+playback mode or schema version, runtime direction state, image/file operation,
+grid CLI option, or editor integration. This helper does not validate an atlas
+or establish editor, rendering or export acceptance.
