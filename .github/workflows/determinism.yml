@@ -415,6 +415,15 @@ jobs:
                       'imported_scene::tests::particle_composition::malformed_final_geometry_after_valid_particles_is_atomic',
                       'imported_scene::tests::particle_composition::particle_pass_loads_shared_depth_on_one_encoder_before_hdr',
                       'imported_scene::tests::particle_composition::unchanged_default_and_empty_particle_routes_have_equal_frame_effects',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_constructor_bounds_and_snapshot_are_cpu_only',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_exact_uploads_cover_all_batches_orders_and_metadata',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_late_pose_rejection_preserves_submitted_bounds',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_late_rejection_preserves_caches_stats_and_generations',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_nonsymmetric_orthographic_profile_has_exact_coefficients',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_raw_error_order_and_particle_entry_remain_compatible',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_reuses_camera_admission_for_invalid_inputs',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_target_and_hdr_admission_still_precede_uploads',
+                      'imported_scene::tests::prepared_camera_tests::prepared_camera_viewport_mismatch_preserves_initial_and_existing_state',
                       'imported_scene::tests::probe_globals_remain_below_portable_uniform_limit',
                       'imported_scene::tests::probe_toggle_reuses_all_gpu_state_and_bad_grid_resize_is_atomic'],
             'selected': ['imported_scene::tests::hdr_capability_settings_peak_budget_and_late_batches_fail_closed',
@@ -441,6 +450,15 @@ jobs:
                          'imported_scene::tests::particle_composition::malformed_final_geometry_after_valid_particles_is_atomic',
                          'imported_scene::tests::particle_composition::particle_pass_loads_shared_depth_on_one_encoder_before_hdr',
                          'imported_scene::tests::particle_composition::unchanged_default_and_empty_particle_routes_have_equal_frame_effects',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_constructor_bounds_and_snapshot_are_cpu_only',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_exact_uploads_cover_all_batches_orders_and_metadata',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_late_pose_rejection_preserves_submitted_bounds',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_late_rejection_preserves_caches_stats_and_generations',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_nonsymmetric_orthographic_profile_has_exact_coefficients',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_raw_error_order_and_particle_entry_remain_compatible',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_reuses_camera_admission_for_invalid_inputs',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_target_and_hdr_admission_still_precede_uploads',
+                         'imported_scene::tests::prepared_camera_tests::prepared_camera_viewport_mismatch_preserves_initial_and_existing_state',
                          'imported_scene::tests::probe_globals_remain_below_portable_uniform_limit',
                          'imported_scene::tests::probe_toggle_reuses_all_gpu_state_and_bad_grid_resize_is_atomic'],
             'ignored': [],
@@ -689,7 +707,27 @@ jobs:
           export VK_DRIVER_FILES="${icds[0]}"
           python - <<'PYMATERIAL'
           PHASE = 'gpu'
-          GROUPS = [{'label': 'model-off',
+          GROUPS = [{'label': 'prepared-minimal',
+           'package': 'orr_render',
+           'features': 'imported-scene',
+           'target': '--lib',
+           'names': ['imported_scene::prepared_camera_gpu_tests::prepared_camera_matches_raw_pixels_and_rejects_without_target_changes'],
+           'selected': ['imported_scene::prepared_camera_gpu_tests::prepared_camera_matches_raw_pixels_and_rejects_without_target_changes'],
+           'ignored': ['imported_scene::prepared_camera_gpu_tests::prepared_camera_matches_raw_pixels_and_rejects_without_target_changes'],
+           'adapter': 'prepared-camera adapter: name="[^"\\r\\n]+" backend=Vulkan device_type=Cpu vendor=\\d+ device=\\d+ '
+                      'driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" software=true',
+           'filter': 'imported_scene::prepared_camera_gpu_tests::'},
+          {'label': 'prepared-full',
+           'package': 'orr_render',
+           'features': 'imported-scene,metallic-roughness,animation,irradiance-probes,particles',
+           'target': '--lib',
+           'names': ['imported_scene::prepared_camera_gpu_tests::prepared_camera_matches_raw_pixels_and_rejects_without_target_changes'],
+           'selected': ['imported_scene::prepared_camera_gpu_tests::prepared_camera_matches_raw_pixels_and_rejects_without_target_changes'],
+           'ignored': ['imported_scene::prepared_camera_gpu_tests::prepared_camera_matches_raw_pixels_and_rejects_without_target_changes'],
+           'adapter': 'prepared-camera adapter: name="[^"\\r\\n]+" backend=Vulkan device_type=Cpu vendor=\\d+ device=\\d+ '
+                      'driver="[^"\\r\\n]*" driver_info="[^"\\r\\n]*" software=true',
+           'filter': 'imported_scene::prepared_camera_gpu_tests::'},
+          {'label': 'model-off',
             'package': 'orr_render',
             'features': 'models',
             'target': 'models',
@@ -1043,7 +1081,121 @@ jobs:
                   parity_records.append({"off": str(off), "on": str(on), "adapter_observation": capture_adapters[off_label], "sha256": hashlib.sha256(a).hexdigest(), "bytes": len(a)})
                   (root / "pixel-parity.json").write_text(json.dumps(parity_records, indent=2) + "\n")
 
+          def prepared_source():
+              import hashlib
+              paths = ["Cargo.lock", ".github/workflows/determinism.yml",
+                       "crates/orr_render/src/imported_scene.rs",
+                       "crates/orr_render/src/model_renderer.rs",
+                       "crates/orr_render/src/renderer3d/composed.rs"]
+              return {name: hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() for name in paths}
+
+          prepared_records = {}
+          def audit_prepared_capture(label, observed, text, source_before, checkout):
+              import hashlib, math, struct
+              assert prepared_source() == source_before, "prepared source changed during commands"
+              adapter = re.fullmatch(r'prepared-camera adapter: name="([^"\r\n]+)" backend=Vulkan device_type=Cpu vendor=\d+ device=\d+ driver="[^"\r\n]*" driver_info="[^"\r\n]*" software=true', observed)
+              assert adapter is not None, "prepared fixture requires observed software Vulkan"
+              summary = "prepared-camera actual-device acceptance: 12 successful frames, 23 captures; raw/prepared/reversed parity, separate coverage, nearer overlap, resize and rejected-target preservation passed; native interaction untested"
+              assert text.count(summary) == 1
+              folder = root / "captures" / label
+              specs = {"initial-seed": {"size": [128, 96], "seed": True}}
+              for width, height in [(128, 96), (96, 128)]:
+                  for projection in ["perspective", "orthographic"]:
+                      prefix = f"{projection}-{width}x{height}"
+                      for kind in ["raw", "prepared", "reversed"]:
+                          specs[f"{prefix}-{kind}"] = {"size": [width, height], "projection": projection, "success": True, "equals": f"{prefix}-raw"}
+                      for kind in ["mismatch", "late"]:
+                          specs[f"accepted-{prefix}-{kind}"] = {"size": [width, height], "equals": f"{prefix}-reversed"}
+              for kind in ["mismatch", "late"]:
+                  specs[f"initial-perspective-128x96-{kind}"] = {"size": [128, 96], "equals": "initial-seed"}
+              assert len(specs) == 23
+              assert {p.name for p in folder.iterdir()} == {name + ext for name in specs for ext in [".ppm", ".rgba", ".json"]}
+              pixels, metadata, files, coverage = {}, {}, {}, {}
+              full = label == "prepared-full"
+              f32 = lambda bits: struct.unpack("<f", struct.pack("<I", bits))[0]
+              for name, expected in specs.items():
+                  paths = {ext: folder / (name + ext) for ext in [".ppm", ".rgba", ".json"]}
+                  assert all(p.is_file() and not p.is_symlink() for p in paths.values())
+                  raw = paths[".rgba"].read_bytes()
+                  width, height = expected["size"]
+                  assert len(raw) == width * height * 4
+                  assert all(raw[i] == 255 for i in range(3, len(raw), 4))
+                  header = f"P6\n{width} {height}\n255\n".encode()
+                  rgb = bytes(channel for offset in range(0, len(raw), 4) for channel in raw[offset:offset + 3])
+                  assert paths[".ppm"].read_bytes() == header + rgb
+                  meta = json.loads(paths[".json"].read_text())
+                  assert set(meta) == {"fixture", "size", "matrix_bits", "eye", "target", "adapter", "software", "metallic_roughness", "animation"}
+                  assert meta["fixture"] == name and meta["size"] == expected["size"]
+                  assert meta["eye"] == [f32(0x3e000000), f32(0x3e4ccccd), 8.0]
+                  assert meta["target"] == [f32(0x3e000000), f32(0x3e4ccccd), 0.0]
+                  assert meta["adapter"] == adapter.group(1) and meta["software"] is True
+                  assert meta["metallic_roughness"] is full and meta["animation"] is full
+                  bits = meta["matrix_bits"]
+                  assert len(bits) == 4 and all(len(column) == 4 for column in bits)
+                  assert all(type(v) is int and 0 <= v <= 0xffffffff and math.isfinite(f32(v)) for column in bits for v in column)
+                  assert bits != [list(row) for row in zip(*bits)]
+                  pixels[name], metadata[name] = raw, meta
+                  if expected.get("success"):
+                      points = [([-1.35, 0.35, 0.0], 0), ([1.0, 0.25, 0.0], 0),
+                                ([-1.0, 0.0, 1.2], 1), ([0.0, -0.9, 0.75], 2)]
+                      if full:
+                          points.append(([-0.12, 1.2, 0.1], 3))
+                      coverage[name] = []
+                      for point, kind in points:
+                          half_h = (8.0 - point[2]) * math.tan(math.radians(53.0) * 0.5) if expected["projection"] == "perspective" else 2.4
+                          half_w = half_h * width / height
+                          x = math.floor(width * (0.5 + (point[0] - 0.125) / (2.0 * half_w)))
+                          y = math.floor(height * (0.5 - (point[1] - 0.2) / (2.0 * half_h)))
+                          assert 0 < x < width - 1 and 0 < y < height - 1
+                          samples = [list(raw[(row * width + column) * 4:(row * width + column) * 4 + 3])
+                                     for row in range(y - 1, y + 2) for column in range(x - 1, x + 2)]
+                          def match(rgb):
+                              r, g, b = rgb
+                              if kind == 0: return r > g + 20 and r > b + 20
+                              if kind == 1: return b > r + 20 and b > g + 20
+                              if kind == 2: return g > r + 20 and g > b + 20
+                              return max(rgb) > 10
+                          count = sum(map(match, samples))
+                          assert count >= (1 if kind == 3 else 3), (name, point, samples)
+                          coverage[name].append({"world": point, "pixel_center": [x, y], "samples": samples, "passing_pixels": count})
+                  for path in paths.values():
+                      files[path.name] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
+              for name, expected in specs.items():
+                  if expected.get("seed"):
+                      assert pixels[name] == bytes([255, 0, 255, 255]) * (128 * 96)
+                  else:
+                      assert pixels[name] == pixels[expected["equals"]], name
+                      assert metadata[name]["matrix_bits"] == metadata[expected["equals"]]["matrix_bits"]
+              for dimensions in ["128x96", "96x128"]:
+                  assert metadata[f"perspective-{dimensions}-raw"]["matrix_bits"] != metadata[f"orthographic-{dimensions}-raw"]["matrix_bits"]
+              for projection in ["perspective", "orthographic"]:
+                  assert metadata[f"{projection}-128x96-raw"]["matrix_bits"] != metadata[f"{projection}-96x128-raw"]["matrix_bits"]
+              record = {"checkout": checkout, "source_sha256": source_before, "adapter_observation": observed,
+                        "successful_readbacks": 12, "seed_or_rejection_readbacks": 11,
+                        "files": files, "coverage": coverage,
+                        "scope": "Actual hosted software-Vulkan fixture; no physical-GPU, native-window or terrain-clearance claim. Cargo cache freshness is not claimed."}
+              with (root / (label + "-capture-audit.json")).open("x") as output:
+                  json.dump(record, output, indent=2)
+                  output.write("\n")
+              prepared_records[label] = record
+
+          def verify_prepared_records():
+              import hashlib
+              assert set(prepared_records) == {"prepared-minimal", "prepared-full"}
+              assert prepared_records["prepared-minimal"]["adapter_observation"] == prepared_records["prepared-full"]["adapter_observation"]
+              for label, record in prepared_records.items():
+                  assert prepared_source() == record["source_sha256"]
+                  for name, expected in record["files"].items():
+                      assert hashlib.sha256((root / "captures" / label / name).read_bytes()).hexdigest() == expected["sha256"]
+              assert sum(len(record["files"]) for record in prepared_records.values()) == 138
+
           for g in GROUPS:
+              if g["label"].startswith("prepared-"):
+                  source_before = prepared_source()
+                  checkout_log = run(g["label"] + "-checkout", ["git", "rev-parse", "HEAD"])
+                  checkout_lines = re.findall(r"^[0-9a-f]{40}$", checkout_log, re.M)
+                  assert len(checkout_lines) == 1
+                  checkout = checkout_lines[0]
               base = ["cargo", "test", "--locked", "--release", "-p", g["package"], "--no-default-features"]
               if g["features"]:
                   base += ["--features", g["features"]]
@@ -1068,8 +1220,14 @@ jobs:
                       folder = root / "captures" / g["label"]
                       folder.mkdir(parents=True, exist_ok=False)
                       capture_env["ORR_SKINNED_CAPTURE_DIR"] = str(folder)
+                  if g["label"].startswith("prepared-"):
+                      folder = root / "captures" / g["label"]
+                      folder.mkdir(parents=True, exist_ok=False)
+                      capture_env["ORR_PREPARED_CAMERA_CAPTURE_DIR"] = str(folder)
                   text = run(g["label"] + "-" + str(index + 1), args, capture_env)
                   observed = check_result(text, name, g["adapter"], len(full_names) - 1)
+                  if g["label"].startswith("prepared-"):
+                      audit_prepared_capture(g["label"], observed, text, source_before, checkout)
                   if capture_env:
                       capture_adapters[g["label"]] = observed
                       (root / "capture-adapters.json").write_text(json.dumps(capture_adapters, indent=2) + "\n")
@@ -1078,6 +1236,7 @@ jobs:
 
           # PPM compares RGB only, with identical observed adapters in each pair.
           assert len(parity_records) == 4
+          verify_prepared_records()
           PYMATERIAL
       - name: Retain material actual-device evidence
         if: ${{ always() && runner.os == 'Linux' }}
