@@ -1,0 +1,14 @@
+[package]
+name = "orr_terrain_camera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Optional GPU-free continuous camera-boom queries against immutable rendered terrain"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_terrain = { path = "../orr_terrain" }
+orr_terrain_view = { path = "../orr_terrain_view", default-features = false }
