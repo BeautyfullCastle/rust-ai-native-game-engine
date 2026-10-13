@@ -483,7 +483,9 @@ fn concurrent_processes_merge_without_lost_highscore() {
     let (_root, mut store) = sandbox();
     submit_after_transient_lock(&mut store, 1).unwrap();
     let exe = std::env::current_exe().unwrap();
-    let mut children = [4, 9].map(|score| {
+    use std::io::Write;
+
+    let children = [4, 9].map(|score| {
         std::process::Command::new(&exe)
             .args([
                 "--ignored",
@@ -493,11 +495,30 @@ fn concurrent_processes_merge_without_lost_highscore() {
             ])
             .env("ORR_PROGRESS_CHILD_DIRECTORY", store.paths.directory())
             .env("ORR_PROGRESS_CHILD_SCORE", score.to_string())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap()
     });
-    for child in &mut children {
-        assert!(child.wait().unwrap().success());
+    // Both writers run concurrently. Drain and reap both before any assertion,
+    // then replay complete child output without mixing their libtest summaries
+    // with each other or with the parent's parallel test-result writes.
+    let outputs = children.map(|child| child.wait_with_output());
+    {
+        let stdout = std::io::stdout();
+        let mut stdout = stdout.lock();
+        for output in outputs.iter().filter_map(|output| output.as_ref().ok()) {
+            // A parent test may have printed a prefix without its newline yet.
+            stdout.write_all(b"\n").unwrap();
+            stdout.write_all(&output.stdout).unwrap();
+            stdout.write_all(b"\n").unwrap();
+            stdout.write_all(&output.stderr).unwrap();
+            stdout.write_all(b"\n").unwrap();
+        }
+        stdout.flush().unwrap();
+    }
+    for output in outputs {
+        assert!(output.unwrap().status.success());
     }
     assert_eq!(reopen(&store).best(), 9);
 }

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "title": "Terrain Trail",
+  "terrain": "hill_course.orrt",
+  "spawn": ["-6", "6"],
+  "beacons": [["-5", "3"], ["-4", "-2"], ["1", "-5"], ["5", "-2"]],
+  "finish": ["4", "-4"],
+  "radius": "0.5"
+}

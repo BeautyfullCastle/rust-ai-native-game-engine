@@ -317,6 +317,521 @@ jobs:
         run: cargo test --locked --release -p orr_render --no-default-features --features imported-scene,particles --lib
       - name: Strict particle imported-scene compositor Clippy
         run: cargo clippy --locked -p orr_render --no-default-features --features imported-scene,particles --all-targets -- -D warnings
+      - name: Required Terrain Trail default, render and window CPU contracts
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYTERRAIN'
+          PHASE = 'cpu'
+          def enable_subreaper():
+              if os.name != "posix" or not Path("/proc/self/stat").is_file():
+                  raise RuntimeError("owned group audit requires Linux procfs")
+              libc = ctypes.CDLL(None, use_errno=True)
+              # /usr/include/linux/prctl.h: PR_SET_CHILD_SUBREAPER=36, GET=37.
+              if libc.prctl(36, 1, 0, 0, 0) != 0:
+                  raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
+              value = ctypes.c_int()
+              if libc.prctl(37, ctypes.byref(value), 0, 0, 0) != 0 or value.value != 1:
+                  raise RuntimeError("subreaper state was not verified")
+          
+          def identity(pid):
+              try:
+                  text = Path(f"/proc/{pid}/stat").read_text()
+              except FileNotFoundError:
+                  return None
+              # comm may contain spaces/parentheses; the final ')' terminates it.
+              fields = text.rsplit(") ", 1)[1].split()
+              return {"pid": pid, "state": fields[0], "ppid": int(fields[1]),
+                      "pgid": int(fields[2]), "sid": int(fields[3]), "starttime": int(fields[19])}
+          
+          def group_members(pgid, deadline):
+              members = []
+              for ordinal, path in enumerate(Path("/proc").iterdir()):
+                  if ordinal >= 32768 or time.monotonic() >= deadline:
+                      raise RuntimeError("bounded proc scan exhausted")
+                  if path.name.isdecimal():
+                      record = identity(int(path.name))
+                      if record is not None and record["pgid"] == pgid:
+                          members.append(record)
+                          if len(members) > 512:
+                              raise RuntimeError("owned group member bound exceeded")
+              return sorted(members, key=lambda item: item["pid"])
+          
+          def reap_owned(members):
+              reaped = []
+              for original in members:
+                  current = identity(original["pid"])
+                  if current is None:
+                      continue
+                  if current["starttime"] != original["starttime"]:
+                      raise RuntimeError("owned child start identity changed before reap")
+                  if current["ppid"] != os.getpid():
+                      continue
+                  try:
+                      pid, status = os.waitpid(original["pid"], os.WNOHANG)
+                  except ChildProcessError:
+                      continue
+                  if pid:
+                      reaped.append({"pid": pid, "starttime": original["starttime"], "wait_status": status})
+              return reaped
+          
+          def audit(groups, timeout=10):
+              deadline = time.monotonic() + timeout
+              reaped = []
+              observed = []
+              while True:
+                  remaining = []
+                  for original in groups:
+                      leader = identity(original["pid"])
+                      if leader is not None and leader["starttime"] != original["starttime"]:
+                          raise RuntimeError("owned leader PID was reused; no signal sent to that group")
+                      members = group_members(original["pgid"], deadline)
+                      if any(m["sid"] != original["sid"] or m["starttime"] < original["starttime"] for m in members):
+                          raise RuntimeError("unexpected process group identity; no signal sent to that group")
+                      if members:
+                          if len(observed) < 16:
+                              observed.append({"leader": original, "members": members})
+                          remaining.extend(members)
+                          try:
+                              os.killpg(original["pgid"], signal.SIGKILL)
+                          except ProcessLookupError:
+                              pass
+                          # Signal before waiting: an unreaped owned member keeps the
+                          # original group ID reserved while the signal is issued.
+                          reaped.extend(reap_owned(members))
+                  if not remaining:
+                      return {"verified_owned_process_groups_absent": True,
+                              "reaped_adopted_children": reaped, "cleanup_observations": observed,
+                              "remaining_owned_group_members": []}
+                  if time.monotonic() >= deadline:
+                      raise RuntimeError(f"owned groups still observable after bounded cleanup: {remaining!r}")
+                  time.sleep(0.01)
+          
+          def signal_owned_group(original):
+              leader = identity(original["pid"])
+              require(leader is None or leader["starttime"] == original["starttime"], "owned leader PID reused; no signal")
+              members = group_members(original["pgid"], time.monotonic() + 10)
+              require(not any(m["sid"] != original["sid"] or m["starttime"] < original["starttime"] for m in members), "unexpected owned group identity; no signal")
+              if members:
+                  try:
+                      os.killpg(original["pgid"], signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+          
+          import ctypes, hashlib, json, math, os, queue, re, shutil, signal, struct, subprocess, sys, threading, time, zlib
+          from pathlib import Path
+          if sys.flags.optimize:
+              raise RuntimeError("Python optimization disables validation")
+          LOG_CAP = 8 * 1024 * 1024
+          DISK_FLOOR = 1024**3
+          def require(condition, message="contract failed"):
+              if not condition:
+                  raise AssertionError(message)
+          
+          def digest(data):
+              return hashlib.sha256(data).hexdigest()
+          
+          def save(path, value):
+              with path.open("x", encoding="utf-8") as file:
+                  json.dump(value, file, indent=2)
+                  file.write("\n")
+          
+          def inventory(text, expected):
+              names = re.findall(r"^([A-Za-z0-9_:]+): test$", text, re.M)
+              require(sorted(names) == sorted(expected) and len(set(names)) == len(names), "test inventory mismatch")
+              require(re.findall(r"^\s*(\d+) tests?, 0 benchmarks\s*$", text, re.M) == [str(len(expected))], "inventory summary")
+          
+          def result(text, passed, ignored, filtered):
+              require(not re.search(r"SKIP:|skipping|adapter unavailable|SKIP software", text, re.I), "device skip")
+              require(re.findall(r"^test result: (.+)$", text, re.M) and text.count("test result:") == 1, "one result summary")
+              expected = (str(len(passed)), "0", str(len(ignored)), "0", str(filtered))
+              require(re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out; finished in [0-9.]+s$", text, re.M) == [expected], "result summary")
+              require(re.findall(r"^running (\d+) test(?:s)?$", text, re.M) == [str(len(passed) + len(ignored))], "running count")
+              require(sorted(re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\. ", text, re.M)) == sorted(passed + ignored), "named test prefixes")
+              require(sorted(re.findall(r"^test (.+) \.\.\. ignored(?:,.*)?$", text, re.M)) == sorted(ignored), "ignored names")
+              require(re.findall(r"^successes:\n((?:    [A-Za-z0-9_:]+\n)+)", text, re.M) == ["".join("    " + n + "\n" for n in sorted(passed))], "successful named results")
+          
+          
+          def png_rgba(data, shape):
+              """Decode only bounded, noninterlaced RGBA8 PNG; reject malformed chunks."""
+              require(len(data) <= 2 * 1024**2 and data[:8] == b"\x89PNG\r\n\x1a\n", "PNG signature/size")
+              width, height = shape
+              require(0 < width <= 640 and 0 < height <= 480, "PNG dimensions")
+              pos, compressed, state, seen_header = 8, bytearray(), 0, False
+              while pos < len(data):
+                  require(pos + 12 <= len(data), "truncated chunk")
+                  length = struct.unpack_from(">I", data, pos)[0]
+                  require(length <= 2 * 1024**2 and pos + 12 + length <= len(data), "chunk length")
+                  kind = data[pos+4:pos+8]; payload = data[pos+8:pos+8+length]
+                  require(all(65 <= v <= 90 or 97 <= v <= 122 for v in kind) and 65 <= kind[2] <= 90, "chunk type/reserved bit")
+                  crc = struct.unpack_from(">I", data, pos+8+length)[0]
+                  require(zlib.crc32(kind+payload) & 0xffffffff == crc, "chunk CRC")
+                  pos += length + 12
+                  if kind == b"IHDR":
+                      require(not seen_header and pos == 33 and length == 13, "IHDR order")
+                      require(struct.unpack(">IIBBBBB", payload) == (width, height, 8, 6, 0, 0, 0), "RGBA8 format")
+                      seen_header = True
+                  elif kind == b"IDAT":
+                      require(seen_header and state in (0, 1), "IDAT order")
+                      state = 1; compressed.extend(payload)
+                  elif kind == b"IEND":
+                      require(state in (1, 2) and length == 0 and pos == len(data), "IEND/order/trailing bytes")
+                      state = 3
+                  else:
+                      require(seen_header and kind[0] & 32, "unknown critical chunk")
+                      if state == 1:
+                          state = 2
+              require(state == 3, "missing IEND")
+              count = height * (1 + width * 4)
+              decoder = zlib.decompressobj()
+              raw = decoder.decompress(compressed, count + 1)
+              require(len(raw) == count and decoder.eof and not decoder.unused_data and not decoder.unconsumed_tail, "bounded zlib stream")
+              stride = width * 4; pixels = bytearray(); previous = bytearray(stride)
+              for y in range(height):
+                  start = y * (stride + 1); filt = raw[start]
+                  require(filt <= 4, "PNG filter")
+                  row = bytearray(raw[start+1:start+1+stride])
+                  for x in range(stride):
+                      a = row[x-4] if x >= 4 else 0; b = previous[x]; c = previous[x-4] if x >= 4 else 0
+                      if filt == 1: prediction = a
+                      elif filt == 2: prediction = b
+                      elif filt == 3: prediction = (a+b)//2
+                      elif filt == 4:
+                          q = a+b-c; pa,pb,pc = abs(q-a),abs(q-b),abs(q-c)
+                          prediction = a if pa <= pb and pa <= pc else b if pb <= pc else c
+                      else: prediction = 0
+                      row[x] = (row[x]+prediction) & 255
+                  pixels.extend(row); previous = row
+              return bytes(pixels)
+          
+          class WindowsJob:
+              """Place a gated launcher in a kill-on-close job before it starts cargo/tests."""
+              def __init__(self):
+                  from ctypes import wintypes as w
+                  class Basic(ctypes.Structure):
+                      _fields_ = [("process_time",ctypes.c_int64),("job_time",ctypes.c_int64),("flags",w.DWORD),("min_ws",ctypes.c_size_t),("max_ws",ctypes.c_size_t),("active",w.DWORD),("affinity",ctypes.c_size_t),("priority",w.DWORD),("scheduling",w.DWORD)]
+                  class Io(ctypes.Structure):
+                      _fields_ = [(name,ctypes.c_uint64) for name in ("ro","wo","oo","rt","wt","ot")]
+                  class Extended(ctypes.Structure):
+                      _fields_ = [("basic",Basic),("io",Io),("process_mem",ctypes.c_size_t),("job_mem",ctypes.c_size_t),("peak_process",ctypes.c_size_t),("peak_job",ctypes.c_size_t)]
+                  self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+                  self.api.CreateJobObjectW.argtypes = [ctypes.c_void_p,w.LPCWSTR]; self.api.CreateJobObjectW.restype = w.HANDLE
+                  self.api.SetInformationJobObject.argtypes = [w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD]
+                  self.api.AssignProcessToJobObject.argtypes = [w.HANDLE,w.HANDLE]
+                  self.api.TerminateJobObject.argtypes = [w.HANDLE,w.UINT]
+                  self.api.CloseHandle.argtypes = [w.HANDLE]
+                  self.api.QueryInformationJobObject.argtypes = [w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD,ctypes.c_void_p]
+                  self.handle = self.api.CreateJobObjectW(None,None)
+                  require(bool(self.handle), "CreateJobObjectW")
+                  info = Extended(); info.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                  if not self.api.SetInformationJobObject(self.handle,9,ctypes.byref(info),ctypes.sizeof(info)):
+                      self.api.CloseHandle(self.handle); raise OSError(ctypes.get_last_error(), "SetInformationJobObject")
+              def assign(self, process):
+                  require(bool(self.api.AssignProcessToJobObject(self.handle,int(process._handle))), "AssignProcessToJobObject")
+              def close(self):
+                  if self.handle:
+                      require(bool(self.api.TerminateJobObject(self.handle,1)), "TerminateJobObject")
+                      accounting = ctypes.create_string_buffer(48)
+                      deadline = time.monotonic()+10
+                      while True:
+                          require(bool(self.api.QueryInformationJobObject(self.handle,1,accounting,48,None)), "QueryInformationJobObject")
+                          active = struct.unpack_from("<I",accounting.raw,40)[0]
+                          if active == 0: break
+                          require(time.monotonic() < deadline, "Windows job descendants not reaped")
+                          time.sleep(.01)
+                      require(bool(self.api.CloseHandle(self.handle)), "CloseHandle job"); self.handle = None
+          
+          def bounded_run(argv, cwd, env, log_path, timeout, expected_exit=0, disk_floor=DISK_FLOOR):
+              """Bound output with a reader queue, reap descendants on success and failure."""
+              require(not log_path.exists(), "fresh command log")
+              start = time.monotonic(); reason = None; count = 0; job = None; process = None; reaped = False; assigned = False; owned = None; cleanup = None
+              events = queue.Queue(maxsize=16); stopped = threading.Event(); reader = None
+              def pump(pipe):
+                  try:
+                      while True:
+                          chunk = pipe.read1(65536)
+                          while not stopped.is_set():
+                              try: events.put(chunk, timeout=.05); break
+                              except queue.Full: pass
+                          if not chunk or stopped.is_set(): break
+                  finally:
+                      pipe.close()
+              try:
+                  if os.name == "nt":
+                      job = WindowsJob()
+                      # Waiting for GO prevents the target or any descendants escaping
+                      # before assignment to the job; argv is JSON, never a shell string.
+                      launcher = "import sys,json,subprocess; a=json.loads(sys.argv[1]); assert sys.stdin.readline()=='GO\\n'; sys.exit(subprocess.call(a))"
+                      process = subprocess.Popen([sys.executable,"-c",launcher,json.dumps(argv)],cwd=cwd,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                      job.assign(process); assigned = True; process.stdin.write(b"GO\n"); process.stdin.flush(); process.stdin.close()
+                  else:
+                      process = subprocess.Popen(argv,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
+                      owned = identity(process.pid)
+                      if owned is None or owned["pgid"] != process.pid or owned["sid"] != process.pid:
+                          process.kill(); process.wait(timeout=10)
+                          raise RuntimeError("cannot establish owned child start identity")
+                  reader = threading.Thread(target=pump,args=(process.stdout,),daemon=True); reader.start()
+                  with log_path.open("xb") as log:
+                      while True:
+                          if time.monotonic()-start > timeout: reason = "timeout"; break
+                          if shutil.disk_usage(log_path.parent).free < disk_floor: reason = "disk floor"; break
+                          try: chunk = events.get(timeout=.05)
+                          except queue.Empty: continue
+                          if not chunk: break
+                          if count+len(chunk) > LOG_CAP:
+                              retained = chunk[:LOG_CAP-count]; log.write(retained); log.flush(); count += len(retained)
+                              reason = "log cap"; break
+                          log.write(chunk); log.flush(); count += len(chunk)
+                  if reason is None:
+                      process.wait(timeout=max(.01,timeout-(time.monotonic()-start)))
+              except BaseException as error:
+                  reason = reason or repr(error)
+              finally:
+                  try:
+                      if job is not None:
+                          if process is not None and not assigned:
+                              process.kill(); process.wait(timeout=10)
+                          job.close()
+                      elif process is not None:
+                          require(owned is not None, "owned child identity was never established")
+                          signal_owned_group(owned)
+                      if process is not None:
+                          process.wait(timeout=10)
+                          if owned is not None:
+                              cleanup = audit([owned])
+                          if process.stdin is not None and not process.stdin.closed: process.stdin.close()
+                          if reader is None and process.stdout is not None: process.stdout.close()
+                      stopped.set()
+                      if reader is not None:
+                          reader.join(timeout=10)
+                          require(not reader.is_alive(), "output reader not reaped")
+                      reaped = True
+                  except BaseException as error:
+                      reason = (reason or "") + " cleanup: " + repr(error)
+                  receipt = {"argv":argv,"exit":process.returncode if process else None,"stop_reason":reason,"seconds":time.monotonic()-start,"log_bytes":count,"log_sha256":digest(log_path.read_bytes()) if log_path.exists() else None,"owned_children_reaped":reaped,"owned_group_identity":owned,"owned_group_cleanup":cleanup,"global_process_claim":False}
+                  save(log_path.with_suffix(".json"),receipt)
+              require(reason is None and process.returncode == expected_exit, f"command failed: {receipt}")
+              return log_path.read_text(encoding="utf-8",errors="replace")
+          DEFAULT_NAMES = {'cli': ['actual_binary_rejects_bad_arguments_and_bad_snapshot_without_writes',
+                   'actual_binary_rejects_fifo_before_open_without_blocking',
+                   'actual_headless_binary_loads_builtin_and_explicit_course_without_writing',
+                   'default_binary_explains_window_opt_in',
+                   'help_is_cpu_only_and_describes_controls'],
+           'controller': ['cardinal_and_integer_diagonal_speeds_are_bounded',
+                          'default_course_completes_through_real_keyboard_ticks_and_restart_matches',
+                          'exact_owner_seams_and_negative_hole_corners_block_without_diagonal_jump',
+                          'hole_barrier_cannot_be_crossed_by_repeated_positive_or_negative_steps',
+                          'identical_inputs_produce_identical_supported_states',
+                          'lag_cap_discards_whole_backlog_instead_of_fast_forwarding',
+                          'opposing_and_duplicate_bindings_and_focus_clear_are_exact',
+                          'ordered_beacons_never_skip_and_finish_requires_a_later_tick',
+                          'outer_maxima_and_negative_origin_edges_never_leave_surface',
+                          'rational_clock_frame_partitions_match_and_reset_discards_fraction',
+                          'sampled_y_uses_canonical_triangles_and_negative_height_floor'],
+           'course': ['builtin_canonical_snapshot_is_asymmetric_bounded_and_has_a_hole',
+                      'file_snapshot_survives_source_changes_and_restart_never_reopens',
+                      'loader_failures_preserve_source_bytes_and_reject_oversize_missing_directory',
+                      'loader_rejects_symlink_files_ancestors_and_special_devices',
+                      'malformed_terrain_and_byte_caps_are_rejected',
+                      'minimum_spacing_and_inclusive_coordinate_limits_are_admitted',
+                      'schema_limits_and_filenames_fail_closed',
+                      'strict_json_rejects_duplicate_unknown_missing_and_wrong_types',
+                      'terrain_profile_limits_are_checked_before_view_creation',
+                      'unsupported_spawn_beacon_finish_and_all_holes_reject',
+                      'windows_canonical_and_ordinary_absolute_paths_load_the_same_snapshot',
+                      'windows_drive_relative_policy_rejects_before_filesystem_access']}
+          RENDER_NAMES = ['actor_geometry_uses_sampled_xyz_and_camera_changes_do_not_change_gameplay', 'default_follow_frames_explorer_and_active_goal_through_every_script_tick', 'nonfinite_and_extreme_camera_input_remains_bounded', 'production_shared_depth_projection_progress_resize_and_restart']
+          WINDOW_NAMES = ['window::tests::autorepeat_cannot_restore_movement_after_an_input_reset', 'window::tests::focus_and_suspension_clear_input_drag_and_elapsed_backlog', 'window::tests::pointer_requires_fresh_finite_positions_and_bounds_huge_deltas', 'window::tests::redundant_resume_resize_minimize_and_occlusion_do_not_advance_stale_input', 'window::tests::restart_is_edge_triggered_and_synthetic_releases_clear_controls']
+          DEVICE_NAME = "production_shared_depth_projection_progress_resize_and_restart"
+          # All new evidence is private to this step's fresh RUNNER_TEMP directory.
+          # Existing Cargo cache reuse is allowed and recorded; fresh rustc is not claimed.
+          E = Path(os.environ["RUNNER_TEMP"]) / "terrain-course-ci" / PHASE
+          E.mkdir(parents=True, exist_ok=False)
+          W = Path.cwd().resolve()
+          sha = lambda path: digest(path.read_bytes())
+          env = os.environ.copy()
+          for key in list(env):
+              if key.startswith("ORR_") or key.startswith("PYTHON"):
+                  env.pop(key, None)
+          env.update(CARGO_BUILD_JOBS="2", RUST_TEST_THREADS="1")
+          if PHASE == "gpu":
+              env.update(ORR_REQUIRE_GPU="1", LIBGL_ALWAYS_SOFTWARE="1", WGPU_BACKEND="vulkan")
+              require(os.name == "posix", "Linux device lane only")
+              for name in ["captures", "cache", "scratch", "runtime"]:
+                  (E / name).mkdir(mode=0o700)
+              env.update(ORR_TERRAIN_CAPTURE_DIR=str(E / "captures"), XDG_CACHE_HOME=str(E / "cache"),
+                         XDG_RUNTIME_DIR=str(E / "runtime"), TMPDIR=str(E / "scratch"))
+          status = {"state": "RUNNING", "phase": PHASE, "commands": [], "producers": {},
+                    "actual_device_invocations": 0, "native_window_executed": False,
+                    "fresh_compiler_invocation_claim": False, "scope": "hosted optional Terrain Trail coverage"}
+          source = {}
+          phase_started = time.monotonic()
+          
+          def evidence_budget():
+              require(time.monotonic() - phase_started < (2400 if PHASE == "cpu" else 1200), "phase deadline")
+              require(shutil.disk_usage(E).free >= DISK_FLOOR, "evidence disk floor")
+              files = list(E.rglob("*"))
+              require(len(files) <= 512 and not any(p.is_symlink() for p in files), "evidence count/symlink bound")
+              require(sum(p.stat().st_size for p in files if p.is_file()) <= 128 * 1024**2, "evidence byte cap")
+          
+          def source_fence():
+              for name, record in source.items():
+                  path = W / name
+                  require(path.is_file() and not path.is_symlink(), "source file " + name)
+                  require(sha(path) == record["sha256"], "source drift " + name)
+                  if os.name != "nt":
+                      require(("100755" if path.stat().st_mode & 0o111 else "100644") == record["mode"], "source mode " + name)
+          
+          def run(label, argv, timeout=900):
+              evidence_budget()
+              source_fence()
+              remaining = (2400 if PHASE == "cpu" else 1200) - (time.monotonic() - phase_started)
+              log = E / (label + ".log")
+              try:
+                  return bounded_run(argv, W, env, log, min(timeout, remaining))
+              finally:
+                  receipt = log.with_suffix(".json")
+                  status["commands"].append({"label": label, "argv": argv,
+                      "receipt": receipt.name if receipt.exists() else None,
+                      "receipt_sha256": sha(receipt) if receipt.exists() else None})
+                  source_fence()
+                  evidence_budget()
+          
+          def build(label, target, features=None):
+              flags = [] if features is None else ["--no-default-features"] + (["--features", features] if features else [])
+              selector = ["--lib"] if target == "--lib" else ["--test", target]
+              argv = ["cargo", "test", "--locked", "--release", "-p", "orr_terrain_demo"] + flags + selector + ["--no-run", "--message-format=json"]
+              text = run(label + "-compile", argv)
+              records = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+              require([r.get("success") for r in records if r.get("reason") == "build-finished"] == [True], "Cargo build completion")
+              manifest = (W / "crates/orr_terrain_demo/Cargo.toml").resolve()
+              selected = [r for r in records if r.get("reason") == "compiler-artifact" and r.get("executable") and
+                          Path(r.get("manifest_path", "")).resolve() == manifest and
+                          r["target"]["name"] == ("orr_terrain_demo" if target == "--lib" else target) and r["profile"]["test"]]
+              require(len(selected) == 1, "one exact Cargo test producer " + label)
+              artifact = selected[0]
+              expected_features = ["default"] if features is None else sorted(features.split(",")) if features else []
+              if features == "window":
+                  expected_features = ["render", "window"]
+              require(sorted(artifact["features"]) == expected_features, "producer features " + label)
+              require(artifact["target"]["kind"] == (["lib"] if target == "--lib" else ["test"]), "producer target kind")
+              expected_src = W / "crates/orr_terrain_demo" / ("src/lib.rs" if target == "--lib" else "tests/" + target + ".rs")
+              require(Path(artifact["target"]["src_path"]).resolve() == expected_src.resolve(), "producer source path")
+              require(artifact["profile"]["opt_level"] == "3", "release producer")
+              executable = Path(artifact["executable"]).resolve()
+              target_root = Path(env.get("CARGO_TARGET_DIR", str(W / "target"))).resolve()
+              require(executable.is_file() and not executable.is_symlink() and executable.is_relative_to(target_root), "emitted executable location")
+              producer = {"cargo_artifact": artifact, "executable": str(executable), "sha256": sha(executable),
+                          "bytes": executable.stat().st_size, "checkout": status["checkout"],
+                          "source_manifest_sha256": sha(E / "source.json"), "compile_log_sha256": sha(E / (label + "-compile.log")),
+                          "cargo_fresh": artifact["fresh"], "compiler_reinvocation_claim": False}
+              save(E / (label + "-producer.json"), producer)
+              status["producers"][label] = producer
+              return producer
+          
+          def execute(label, producer, args):
+              path = Path(producer["executable"])
+              require(sha(path) == producer["sha256"], "producer changed before execution")
+              text = run(label, [str(path)] + args, 180)
+              require(sha(path) == producer["sha256"], "producer changed after execution")
+              return text
+          
+          def check_inventory(label, producer, names, ignored):
+              inventory(execute(label + "-list", producer, ["--list"]), names)
+              inventory(execute(label + "-ignored-list", producer, ["--ignored", "--list"]), ignored)
+          
+          try:
+              if os.name == "posix":
+                  enable_subreaper()
+              checkout = run("checkout", ["git", "rev-parse", "HEAD"], 20).strip()
+              require(re.fullmatch(r"[0-9a-f]{40}", checkout), "checkout identity")
+              status["checkout"] = checkout
+              tracked = run("source-tree", ["git", "ls-tree", "-rz", "--full-tree", "HEAD"], 20)
+              for row in tracked.split("\0"):
+                  if not row:
+                      continue
+                  match = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40})\t(.+)", row)
+                  require(match, "tracked source record")
+                  mode, blob, name = match.groups()
+                  require(name not in source and not Path(name).is_absolute() and ".." not in Path(name).parts, "source path")
+                  path = W / name
+                  require(path.is_file() and not path.is_symlink(), "tracked file " + name)
+                  data = path.read_bytes()
+                  require(hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() == blob, "checkout source bytes " + name)
+                  source[name] = {"sha256": digest(data), "blob": blob, "mode": mode, "bytes": len(data)}
+              require(source and ".github/workflows/determinism.yml" in source, "complete source identity")
+              save(E / "source.json", {"checkout": checkout, "files": source})
+              run("toolchain", ["rustc", "-Vv"], 20)
+              if PHASE == "cpu":
+                  defaults = {k: list(v) for k, v in DEFAULT_NAMES.items()}
+                  if os.name == "nt":
+                      defaults["cli"].remove("actual_binary_rejects_fifo_before_open_without_blocking")
+                      defaults["course"].remove("loader_rejects_symlink_files_ancestors_and_special_devices")
+                  else:
+                      defaults["course"].remove("windows_canonical_and_ordinary_absolute_paths_load_the_same_snapshot")
+                      defaults["course"].remove("windows_drive_relative_policy_rejects_before_filesystem_access")
+                  require(sum(map(len, defaults.values())) == 26, "default census")
+                  for target, names in defaults.items():
+                      producer = build("default-" + target, target)
+                      check_inventory("default-" + target, producer, names, [])
+                      text = execute("default-" + target + "-tests", producer, ["--test-threads=1", "--show-output"])
+                      result(text, names, [], 0)
+                  producer = build("render", "render", "render")
+                  check_inventory("render", producer, RENDER_NAMES, [DEVICE_NAME])
+                  selected = [name for name in RENDER_NAMES if name != DEVICE_NAME]
+                  require(len(selected) == 3, "three render CPU tests")
+                  for index, name in enumerate(selected):
+                      text = execute("render-cpu-" + str(index + 1), producer, [name, "--exact", "--test-threads=1", "--show-output"])
+                      result(text, [name], [], 3)
+                  producer = build("window", "--lib", "window")
+                  check_inventory("window", producer, WINDOW_NAMES, [])
+                  text = execute("window-reducers", producer, ["--test-threads=1", "--show-output"])
+                  result(text, WINDOW_NAMES, [], 0)
+                  run("window-all-targets-check", ["cargo", "check", "--locked", "-p", "orr_terrain_demo", "--no-default-features", "--features", "window", "--all-targets"])
+                  for label, flags in [("default", []), ("no-default", ["--no-default-features"]),
+                                       ("render", ["--no-default-features", "--features", "render"]),
+                                       ("window", ["--no-default-features", "--features", "window"])]:
+                      run(label + "-strict", ["cargo", "clippy", "--locked", "-p", "orr_terrain_demo"] + flags + ["--all-targets", "--", "-D", "warnings"])
+                  status.update(state="CPU_PASSED", default_passes=26, render_cpu_passes=3, window_state_reducer_passes=5, strict_configurations=4)
+              else:
+                  producer = build("render-device", "render", "render")
+                  check_inventory("render-device", producer, RENDER_NAMES, [DEVICE_NAME])
+                  status["actual_device_invocations"] = 1
+                  text = execute("render-device-test", producer, [DEVICE_NAME, "--exact", "--ignored", "--test-threads=1", "--show-output"])
+                  result(text, [DEVICE_NAME], [], 3)
+                  marker = "---- " + DEVICE_NAME + " stdout ----\n"
+                  require(re.findall(r"^---- .* stdout ----$", text, re.M) == [marker.rstrip("\n")], "exact device output section")
+                  output = text.split(marker, 1)[1].split("\nsuccesses:", 1)[0]
+                  adapter = capture_audit(output)
+                  status.update(state="DEVICE_PASSED_VISUAL_REVIEW_PENDING", adapter=adapter,
+                                software=True, capture_triples=22, capture_audit_sha256=sha(E / "capture-audit.json"))
+              source_fence()
+              evidence_budget()
+              require(run("checkout-after", ["git", "rev-parse", "HEAD"], 20).strip() == checkout, "checkout changed")
+              for producer in status["producers"].values():
+                  require(sha(Path(producer["executable"])) == producer["sha256"], "final producer drift")
+              if PHASE == "gpu":
+                  audit = json.loads((E / "capture-audit.json").read_text())
+                  require({p.name for p in (E / "captures").iterdir()} == set(audit["files"]), "final capture set")
+                  for name, record in audit["files"].items():
+                      require(sha(E / "captures" / name) == record["sha256"], "final capture drift")
+          except BaseException as error:
+              status.update(state="STOPPED", error=repr(error))
+              raise
+          finally:
+              status["seconds"] = time.monotonic() - phase_started
+              save(E / "terminal.json", status)
+              print(json.dumps({k: v for k, v in status.items() if k not in ["commands", "producers"]}, indent=2), flush=True)
+          PYTERRAIN
+      - name: Retain Terrain Trail cpu evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terrain-course-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/terrain-course-ci/cpu
+          if-no-files-found: error
+          retention-days: 7
       - name: Required material CPU contracts and strict feature boundaries
         shell: bash
         run: |
@@ -1264,6 +1779,799 @@ jobs:
         with:
           name: material-device-${{ matrix.os }}
           path: ${{ runner.temp }}/material-ci/gpu
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required Terrain Trail software-device production captures
+        if: runner.os == 'Linux'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          ORR_REQUIRE_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          set -euo pipefail
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | sort)
+          test "${#icds[@]}" -eq 1
+          export VK_ICD_FILENAMES="${icds[0]}"
+          export VK_DRIVER_FILES="${icds[0]}"
+          export WGPU_BACKEND=vulkan
+          python - <<'PYTERRAIN'
+          PHASE = 'gpu'
+          def enable_subreaper():
+              if os.name != "posix" or not Path("/proc/self/stat").is_file():
+                  raise RuntimeError("owned group audit requires Linux procfs")
+              libc = ctypes.CDLL(None, use_errno=True)
+              # /usr/include/linux/prctl.h: PR_SET_CHILD_SUBREAPER=36, GET=37.
+              if libc.prctl(36, 1, 0, 0, 0) != 0:
+                  raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
+              value = ctypes.c_int()
+              if libc.prctl(37, ctypes.byref(value), 0, 0, 0) != 0 or value.value != 1:
+                  raise RuntimeError("subreaper state was not verified")
+          
+          def identity(pid):
+              try:
+                  text = Path(f"/proc/{pid}/stat").read_text()
+              except FileNotFoundError:
+                  return None
+              # comm may contain spaces/parentheses; the final ')' terminates it.
+              fields = text.rsplit(") ", 1)[1].split()
+              return {"pid": pid, "state": fields[0], "ppid": int(fields[1]),
+                      "pgid": int(fields[2]), "sid": int(fields[3]), "starttime": int(fields[19])}
+          
+          def group_members(pgid, deadline):
+              members = []
+              for ordinal, path in enumerate(Path("/proc").iterdir()):
+                  if ordinal >= 32768 or time.monotonic() >= deadline:
+                      raise RuntimeError("bounded proc scan exhausted")
+                  if path.name.isdecimal():
+                      record = identity(int(path.name))
+                      if record is not None and record["pgid"] == pgid:
+                          members.append(record)
+                          if len(members) > 512:
+                              raise RuntimeError("owned group member bound exceeded")
+              return sorted(members, key=lambda item: item["pid"])
+          
+          def reap_owned(members):
+              reaped = []
+              for original in members:
+                  current = identity(original["pid"])
+                  if current is None:
+                      continue
+                  if current["starttime"] != original["starttime"]:
+                      raise RuntimeError("owned child start identity changed before reap")
+                  if current["ppid"] != os.getpid():
+                      continue
+                  try:
+                      pid, status = os.waitpid(original["pid"], os.WNOHANG)
+                  except ChildProcessError:
+                      continue
+                  if pid:
+                      reaped.append({"pid": pid, "starttime": original["starttime"], "wait_status": status})
+              return reaped
+          
+          def audit(groups, timeout=10):
+              deadline = time.monotonic() + timeout
+              reaped = []
+              observed = []
+              while True:
+                  remaining = []
+                  for original in groups:
+                      leader = identity(original["pid"])
+                      if leader is not None and leader["starttime"] != original["starttime"]:
+                          raise RuntimeError("owned leader PID was reused; no signal sent to that group")
+                      members = group_members(original["pgid"], deadline)
+                      if any(m["sid"] != original["sid"] or m["starttime"] < original["starttime"] for m in members):
+                          raise RuntimeError("unexpected process group identity; no signal sent to that group")
+                      if members:
+                          if len(observed) < 16:
+                              observed.append({"leader": original, "members": members})
+                          remaining.extend(members)
+                          try:
+                              os.killpg(original["pgid"], signal.SIGKILL)
+                          except ProcessLookupError:
+                              pass
+                          # Signal before waiting: an unreaped owned member keeps the
+                          # original group ID reserved while the signal is issued.
+                          reaped.extend(reap_owned(members))
+                  if not remaining:
+                      return {"verified_owned_process_groups_absent": True,
+                              "reaped_adopted_children": reaped, "cleanup_observations": observed,
+                              "remaining_owned_group_members": []}
+                  if time.monotonic() >= deadline:
+                      raise RuntimeError(f"owned groups still observable after bounded cleanup: {remaining!r}")
+                  time.sleep(0.01)
+          
+          def signal_owned_group(original):
+              leader = identity(original["pid"])
+              require(leader is None or leader["starttime"] == original["starttime"], "owned leader PID reused; no signal")
+              members = group_members(original["pgid"], time.monotonic() + 10)
+              require(not any(m["sid"] != original["sid"] or m["starttime"] < original["starttime"] for m in members), "unexpected owned group identity; no signal")
+              if members:
+                  try:
+                      os.killpg(original["pgid"], signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+          
+          import ctypes, hashlib, json, math, os, queue, re, shutil, signal, struct, subprocess, sys, threading, time, zlib
+          from pathlib import Path
+          if sys.flags.optimize:
+              raise RuntimeError("Python optimization disables validation")
+          LOG_CAP = 8 * 1024 * 1024
+          DISK_FLOOR = 1024**3
+          def require(condition, message="contract failed"):
+              if not condition:
+                  raise AssertionError(message)
+          
+          def digest(data):
+              return hashlib.sha256(data).hexdigest()
+          
+          def save(path, value):
+              with path.open("x", encoding="utf-8") as file:
+                  json.dump(value, file, indent=2)
+                  file.write("\n")
+          
+          def inventory(text, expected):
+              names = re.findall(r"^([A-Za-z0-9_:]+): test$", text, re.M)
+              require(sorted(names) == sorted(expected) and len(set(names)) == len(names), "test inventory mismatch")
+              require(re.findall(r"^\s*(\d+) tests?, 0 benchmarks\s*$", text, re.M) == [str(len(expected))], "inventory summary")
+          
+          def result(text, passed, ignored, filtered):
+              require(not re.search(r"SKIP:|skipping|adapter unavailable|SKIP software", text, re.I), "device skip")
+              require(re.findall(r"^test result: (.+)$", text, re.M) and text.count("test result:") == 1, "one result summary")
+              expected = (str(len(passed)), "0", str(len(ignored)), "0", str(filtered))
+              require(re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out; finished in [0-9.]+s$", text, re.M) == [expected], "result summary")
+              require(re.findall(r"^running (\d+) test(?:s)?$", text, re.M) == [str(len(passed) + len(ignored))], "running count")
+              require(sorted(re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\. ", text, re.M)) == sorted(passed + ignored), "named test prefixes")
+              require(sorted(re.findall(r"^test (.+) \.\.\. ignored(?:,.*)?$", text, re.M)) == sorted(ignored), "ignored names")
+              require(re.findall(r"^successes:\n((?:    [A-Za-z0-9_:]+\n)+)", text, re.M) == ["".join("    " + n + "\n" for n in sorted(passed))], "successful named results")
+          
+          
+          def png_rgba(data, shape):
+              """Decode only bounded, noninterlaced RGBA8 PNG; reject malformed chunks."""
+              require(len(data) <= 2 * 1024**2 and data[:8] == b"\x89PNG\r\n\x1a\n", "PNG signature/size")
+              width, height = shape
+              require(0 < width <= 640 and 0 < height <= 480, "PNG dimensions")
+              pos, compressed, state, seen_header = 8, bytearray(), 0, False
+              while pos < len(data):
+                  require(pos + 12 <= len(data), "truncated chunk")
+                  length = struct.unpack_from(">I", data, pos)[0]
+                  require(length <= 2 * 1024**2 and pos + 12 + length <= len(data), "chunk length")
+                  kind = data[pos+4:pos+8]; payload = data[pos+8:pos+8+length]
+                  require(all(65 <= v <= 90 or 97 <= v <= 122 for v in kind) and 65 <= kind[2] <= 90, "chunk type/reserved bit")
+                  crc = struct.unpack_from(">I", data, pos+8+length)[0]
+                  require(zlib.crc32(kind+payload) & 0xffffffff == crc, "chunk CRC")
+                  pos += length + 12
+                  if kind == b"IHDR":
+                      require(not seen_header and pos == 33 and length == 13, "IHDR order")
+                      require(struct.unpack(">IIBBBBB", payload) == (width, height, 8, 6, 0, 0, 0), "RGBA8 format")
+                      seen_header = True
+                  elif kind == b"IDAT":
+                      require(seen_header and state in (0, 1), "IDAT order")
+                      state = 1; compressed.extend(payload)
+                  elif kind == b"IEND":
+                      require(state in (1, 2) and length == 0 and pos == len(data), "IEND/order/trailing bytes")
+                      state = 3
+                  else:
+                      require(seen_header and kind[0] & 32, "unknown critical chunk")
+                      if state == 1:
+                          state = 2
+              require(state == 3, "missing IEND")
+              count = height * (1 + width * 4)
+              decoder = zlib.decompressobj()
+              raw = decoder.decompress(compressed, count + 1)
+              require(len(raw) == count and decoder.eof and not decoder.unused_data and not decoder.unconsumed_tail, "bounded zlib stream")
+              stride = width * 4; pixels = bytearray(); previous = bytearray(stride)
+              for y in range(height):
+                  start = y * (stride + 1); filt = raw[start]
+                  require(filt <= 4, "PNG filter")
+                  row = bytearray(raw[start+1:start+1+stride])
+                  for x in range(stride):
+                      a = row[x-4] if x >= 4 else 0; b = previous[x]; c = previous[x-4] if x >= 4 else 0
+                      if filt == 1: prediction = a
+                      elif filt == 2: prediction = b
+                      elif filt == 3: prediction = (a+b)//2
+                      elif filt == 4:
+                          q = a+b-c; pa,pb,pc = abs(q-a),abs(q-b),abs(q-c)
+                          prediction = a if pa <= pb and pa <= pc else b if pb <= pc else c
+                      else: prediction = 0
+                      row[x] = (row[x]+prediction) & 255
+                  pixels.extend(row); previous = row
+              return bytes(pixels)
+          
+          class WindowsJob:
+              """Place a gated launcher in a kill-on-close job before it starts cargo/tests."""
+              def __init__(self):
+                  from ctypes import wintypes as w
+                  class Basic(ctypes.Structure):
+                      _fields_ = [("process_time",ctypes.c_int64),("job_time",ctypes.c_int64),("flags",w.DWORD),("min_ws",ctypes.c_size_t),("max_ws",ctypes.c_size_t),("active",w.DWORD),("affinity",ctypes.c_size_t),("priority",w.DWORD),("scheduling",w.DWORD)]
+                  class Io(ctypes.Structure):
+                      _fields_ = [(name,ctypes.c_uint64) for name in ("ro","wo","oo","rt","wt","ot")]
+                  class Extended(ctypes.Structure):
+                      _fields_ = [("basic",Basic),("io",Io),("process_mem",ctypes.c_size_t),("job_mem",ctypes.c_size_t),("peak_process",ctypes.c_size_t),("peak_job",ctypes.c_size_t)]
+                  self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+                  self.api.CreateJobObjectW.argtypes = [ctypes.c_void_p,w.LPCWSTR]; self.api.CreateJobObjectW.restype = w.HANDLE
+                  self.api.SetInformationJobObject.argtypes = [w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD]
+                  self.api.AssignProcessToJobObject.argtypes = [w.HANDLE,w.HANDLE]
+                  self.api.TerminateJobObject.argtypes = [w.HANDLE,w.UINT]
+                  self.api.CloseHandle.argtypes = [w.HANDLE]
+                  self.api.QueryInformationJobObject.argtypes = [w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD,ctypes.c_void_p]
+                  self.handle = self.api.CreateJobObjectW(None,None)
+                  require(bool(self.handle), "CreateJobObjectW")
+                  info = Extended(); info.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                  if not self.api.SetInformationJobObject(self.handle,9,ctypes.byref(info),ctypes.sizeof(info)):
+                      self.api.CloseHandle(self.handle); raise OSError(ctypes.get_last_error(), "SetInformationJobObject")
+              def assign(self, process):
+                  require(bool(self.api.AssignProcessToJobObject(self.handle,int(process._handle))), "AssignProcessToJobObject")
+              def close(self):
+                  if self.handle:
+                      require(bool(self.api.TerminateJobObject(self.handle,1)), "TerminateJobObject")
+                      accounting = ctypes.create_string_buffer(48)
+                      deadline = time.monotonic()+10
+                      while True:
+                          require(bool(self.api.QueryInformationJobObject(self.handle,1,accounting,48,None)), "QueryInformationJobObject")
+                          active = struct.unpack_from("<I",accounting.raw,40)[0]
+                          if active == 0: break
+                          require(time.monotonic() < deadline, "Windows job descendants not reaped")
+                          time.sleep(.01)
+                      require(bool(self.api.CloseHandle(self.handle)), "CloseHandle job"); self.handle = None
+          
+          def bounded_run(argv, cwd, env, log_path, timeout, expected_exit=0, disk_floor=DISK_FLOOR):
+              """Bound output with a reader queue, reap descendants on success and failure."""
+              require(not log_path.exists(), "fresh command log")
+              start = time.monotonic(); reason = None; count = 0; job = None; process = None; reaped = False; assigned = False; owned = None; cleanup = None
+              events = queue.Queue(maxsize=16); stopped = threading.Event(); reader = None
+              def pump(pipe):
+                  try:
+                      while True:
+                          chunk = pipe.read1(65536)
+                          while not stopped.is_set():
+                              try: events.put(chunk, timeout=.05); break
+                              except queue.Full: pass
+                          if not chunk or stopped.is_set(): break
+                  finally:
+                      pipe.close()
+              try:
+                  if os.name == "nt":
+                      job = WindowsJob()
+                      # Waiting for GO prevents the target or any descendants escaping
+                      # before assignment to the job; argv is JSON, never a shell string.
+                      launcher = "import sys,json,subprocess; a=json.loads(sys.argv[1]); assert sys.stdin.readline()=='GO\\n'; sys.exit(subprocess.call(a))"
+                      process = subprocess.Popen([sys.executable,"-c",launcher,json.dumps(argv)],cwd=cwd,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                      job.assign(process); assigned = True; process.stdin.write(b"GO\n"); process.stdin.flush(); process.stdin.close()
+                  else:
+                      process = subprocess.Popen(argv,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
+                      owned = identity(process.pid)
+                      if owned is None or owned["pgid"] != process.pid or owned["sid"] != process.pid:
+                          process.kill(); process.wait(timeout=10)
+                          raise RuntimeError("cannot establish owned child start identity")
+                  reader = threading.Thread(target=pump,args=(process.stdout,),daemon=True); reader.start()
+                  with log_path.open("xb") as log:
+                      while True:
+                          if time.monotonic()-start > timeout: reason = "timeout"; break
+                          if shutil.disk_usage(log_path.parent).free < disk_floor: reason = "disk floor"; break
+                          try: chunk = events.get(timeout=.05)
+                          except queue.Empty: continue
+                          if not chunk: break
+                          if count+len(chunk) > LOG_CAP:
+                              retained = chunk[:LOG_CAP-count]; log.write(retained); log.flush(); count += len(retained)
+                              reason = "log cap"; break
+                          log.write(chunk); log.flush(); count += len(chunk)
+                  if reason is None:
+                      process.wait(timeout=max(.01,timeout-(time.monotonic()-start)))
+              except BaseException as error:
+                  reason = reason or repr(error)
+              finally:
+                  try:
+                      if job is not None:
+                          if process is not None and not assigned:
+                              process.kill(); process.wait(timeout=10)
+                          job.close()
+                      elif process is not None:
+                          require(owned is not None, "owned child identity was never established")
+                          signal_owned_group(owned)
+                      if process is not None:
+                          process.wait(timeout=10)
+                          if owned is not None:
+                              cleanup = audit([owned])
+                          if process.stdin is not None and not process.stdin.closed: process.stdin.close()
+                          if reader is None and process.stdout is not None: process.stdout.close()
+                      stopped.set()
+                      if reader is not None:
+                          reader.join(timeout=10)
+                          require(not reader.is_alive(), "output reader not reaped")
+                      reaped = True
+                  except BaseException as error:
+                      reason = (reason or "") + " cleanup: " + repr(error)
+                  receipt = {"argv":argv,"exit":process.returncode if process else None,"stop_reason":reason,"seconds":time.monotonic()-start,"log_bytes":count,"log_sha256":digest(log_path.read_bytes()) if log_path.exists() else None,"owned_children_reaped":reaped,"owned_group_identity":owned,"owned_group_cleanup":cleanup,"global_process_claim":False}
+                  save(log_path.with_suffix(".json"),receipt)
+              require(reason is None and process.returncode == expected_exit, f"command failed: {receipt}")
+              return log_path.read_text(encoding="utf-8",errors="replace")
+          DEFAULT_NAMES = {'cli': ['actual_binary_rejects_bad_arguments_and_bad_snapshot_without_writes',
+                   'actual_binary_rejects_fifo_before_open_without_blocking',
+                   'actual_headless_binary_loads_builtin_and_explicit_course_without_writing',
+                   'default_binary_explains_window_opt_in',
+                   'help_is_cpu_only_and_describes_controls'],
+           'controller': ['cardinal_and_integer_diagonal_speeds_are_bounded',
+                          'default_course_completes_through_real_keyboard_ticks_and_restart_matches',
+                          'exact_owner_seams_and_negative_hole_corners_block_without_diagonal_jump',
+                          'hole_barrier_cannot_be_crossed_by_repeated_positive_or_negative_steps',
+                          'identical_inputs_produce_identical_supported_states',
+                          'lag_cap_discards_whole_backlog_instead_of_fast_forwarding',
+                          'opposing_and_duplicate_bindings_and_focus_clear_are_exact',
+                          'ordered_beacons_never_skip_and_finish_requires_a_later_tick',
+                          'outer_maxima_and_negative_origin_edges_never_leave_surface',
+                          'rational_clock_frame_partitions_match_and_reset_discards_fraction',
+                          'sampled_y_uses_canonical_triangles_and_negative_height_floor'],
+           'course': ['builtin_canonical_snapshot_is_asymmetric_bounded_and_has_a_hole',
+                      'file_snapshot_survives_source_changes_and_restart_never_reopens',
+                      'loader_failures_preserve_source_bytes_and_reject_oversize_missing_directory',
+                      'loader_rejects_symlink_files_ancestors_and_special_devices',
+                      'malformed_terrain_and_byte_caps_are_rejected',
+                      'minimum_spacing_and_inclusive_coordinate_limits_are_admitted',
+                      'schema_limits_and_filenames_fail_closed',
+                      'strict_json_rejects_duplicate_unknown_missing_and_wrong_types',
+                      'terrain_profile_limits_are_checked_before_view_creation',
+                      'unsupported_spawn_beacon_finish_and_all_holes_reject',
+                      'windows_canonical_and_ordinary_absolute_paths_load_the_same_snapshot',
+                      'windows_drive_relative_policy_rejects_before_filesystem_access']}
+          RENDER_NAMES = ['actor_geometry_uses_sampled_xyz_and_camera_changes_do_not_change_gameplay', 'default_follow_frames_explorer_and_active_goal_through_every_script_tick', 'nonfinite_and_extreme_camera_input_remains_bounded', 'production_shared_depth_projection_progress_resize_and_restart']
+          WINDOW_NAMES = ['window::tests::autorepeat_cannot_restore_movement_after_an_input_reset', 'window::tests::focus_and_suspension_clear_input_drag_and_elapsed_backlog', 'window::tests::pointer_requires_fresh_finite_positions_and_bounds_huge_deltas', 'window::tests::redundant_resume_resize_minimize_and_occlusion_do_not_advance_stale_input', 'window::tests::restart_is_edge_triggered_and_synthetic_releases_clear_controls']
+          DEVICE_NAME = "production_shared_depth_projection_progress_resize_and_restart"
+          CAPTURES = {'ramp-start': {'size': [480, 360],
+                          'anchor_raw': [-196608, 65536, 0],
+                          'tick': 0,
+                          'collected': 0,
+                          'finished': False,
+                          'reversed': False},
+           'ramp-uphill': {'size': [480, 360],
+                           'anchor_raw': [65536, 327680, 0],
+                           'tick': 64,
+                           'collected': 0,
+                           'finished': False,
+                           'reversed': False},
+           'ridge-near': {'size': [480, 360],
+                          'anchor_raw': [0, 0, 196608],
+                          'tick': 0,
+                          'collected': 0,
+                          'finished': False,
+                          'reversed': False},
+           'ridge-near-reversed': {'size': [480, 360],
+                                   'anchor_raw': [0, 0, 196608],
+                                   'tick': 0,
+                                   'collected': 0,
+                                   'finished': False,
+                                   'reversed': True},
+           'ridge-far': {'size': [480, 360],
+                         'anchor_raw': [0, 0, -131072],
+                         'tick': 80,
+                         'collected': 0,
+                         'finished': False,
+                         'reversed': False},
+           'ridge-far-reversed': {'size': [480, 360],
+                                  'anchor_raw': [0, 0, -131072],
+                                  'tick': 80,
+                                  'collected': 0,
+                                  'finished': False,
+                                  'reversed': True},
+           'builtin-start': {'size': [480, 360],
+                             'anchor_raw': [-393216, 8192, 393216],
+                             'tick': 0,
+                             'collected': 0,
+                             'finished': False,
+                             'reversed': False},
+           'builtin-orbit': {'size': [480, 360],
+                             'anchor_raw': [-393216, 8192, 393216],
+                             'tick': 0,
+                             'collected': 0,
+                             'finished': False,
+                             'reversed': False},
+           'builtin-stage-1': {'size': [480, 360],
+                               'anchor_raw': [-327680, 55296, 196608],
+                               'tick': 64,
+                               'collected': 1,
+                               'finished': False,
+                               'reversed': False},
+           'builtin-stage-2': {'size': [480, 360],
+                               'anchor_raw': [-262144, 151552, -131072],
+                               'tick': 160,
+                               'collected': 2,
+                               'finished': False,
+                               'reversed': False},
+           'builtin-stage-3': {'size': [480, 360],
+                               'anchor_raw': [65536, 249856, -327680],
+                               'tick': 288,
+                               'collected': 3,
+                               'finished': False,
+                               'reversed': False},
+           'builtin-stage-4': {'size': [480, 360],
+                               'anchor_raw': [327680, 274432, -131072],
+                               'tick': 400,
+                               'collected': 4,
+                               'finished': False,
+                               'reversed': False},
+           'builtin-stage-5': {'size': [480, 360],
+                               'anchor_raw': [262144, 319488, -229376],
+                               'tick': 440,
+                               'collected': 4,
+                               'finished': True,
+                               'reversed': False},
+           'builtin-small-window': {'size': [320, 240],
+                                    'anchor_raw': [262144, 319488, -229376],
+                                    'tick': 440,
+                                    'collected': 4,
+                                    'finished': True,
+                                    'reversed': False},
+           'builtin-reset': {'size': [480, 360],
+                             'anchor_raw': [-393216, 8192, 393216],
+                             'tick': 0,
+                             'collected': 0,
+                             'finished': False,
+                             'reversed': False},
+           'builtin-blocked-hole': {'size': [480, 360],
+                                    'anchor_raw': [0, 159744, 131072],
+                                    'tick': 192,
+                                    'collected': 0,
+                                    'finished': False,
+                                    'reversed': False},
+           'builtin-hole-top': {'size': [480, 360],
+                                'anchor_raw': [0, 159744, 131072],
+                                'tick': 192,
+                                'collected': 0,
+                                'finished': False,
+                                'reversed': False},
+           'builtin-small-start': {'size': [320, 240],
+                                   'anchor_raw': [-393216, 8192, 393216],
+                                   'tick': 0,
+                                   'collected': 0,
+                                   'finished': False,
+                                   'reversed': False},
+           'builtin-small-stage-1': {'size': [320, 240],
+                                     'anchor_raw': [-327680, 55296, 196608],
+                                     'tick': 64,
+                                     'collected': 1,
+                                     'finished': False,
+                                     'reversed': False},
+           'builtin-small-stage-2': {'size': [320, 240],
+                                     'anchor_raw': [-262144, 151552, -131072],
+                                     'tick': 160,
+                                     'collected': 2,
+                                     'finished': False,
+                                     'reversed': False},
+           'builtin-small-stage-3': {'size': [320, 240],
+                                     'anchor_raw': [65536, 249856, -327680],
+                                     'tick': 288,
+                                     'collected': 3,
+                                     'finished': False,
+                                     'reversed': False},
+           'builtin-small-stage-4': {'size': [320, 240],
+                                     'anchor_raw': [327680, 274432, -131072],
+                                     'tick': 400,
+                                     'collected': 4,
+                                     'finished': False,
+                                     'reversed': False}}
+          def blue_mask(pixels):
+              return [i // 4 for i in range(0, len(pixels), 4)
+                      if pixels[i + 2] > pixels[i] + 70 and pixels[i + 2] > pixels[i + 1] + 35]
+          
+          def capture_audit(text):
+              adapter = re.findall(r"^terrain acceptance adapter: (.+) \(software: (true|false)\)$", text, re.M)
+              assert len(adapter) == 1 and adapter[0][1] == "true" and adapter[0][0].strip(), "actual software adapter observation"
+              adapter_name = adapter[0][0]
+              assert re.findall(r"^terrain acceptance executed (\d+) GPU captures; native window interaction was not tested$", text, re.M) == ["22"]
+              root = E / "captures"
+              expected_files = {name + ext for name in CAPTURES for ext in [".png", ".rgba", ".json"]}
+              assert {x.name for x in root.iterdir()} == expected_files
+              pixels, metadata, files = {}, {}, {}
+              for name, expected in CAPTURES.items():
+                  paths = [root / (name + ext) for ext in [".png", ".rgba", ".json"]]
+                  assert all(x.is_file() and not x.is_symlink() for x in paths)
+                  png, raw, meta = paths
+                  assert png.stat().st_size <= 2 * 1024**2 and meta.stat().st_size <= 16384, "capture size cap"
+                  assert raw.stat().st_size == expected["size"][0] * expected["size"][1] * 4, "RGBA byte cap"
+                  data = raw.read_bytes()
+                  width, height = expected["size"]
+                  assert len(data) == width * height * 4
+                  assert png_rgba(png.read_bytes(), [width, height]) == data
+                  assert all(data[i] == 255 for i in range(3, len(data), 4))
+                  m = json.loads(meta.read_text())
+                  assert set(m) == {"fixture", "size", "reversed", "tick", "anchor_raw", "collected", "finished", "terrain_revision", "adapter", "software", "camera_eye", "camera_target"}, "metadata schema"
+                  assert type(m["tick"]) is int and type(m["collected"]) is int and type(m["finished"]) is bool and type(m["reversed"]) is bool
+                  assert len(m["anchor_raw"]) == 3 and all(type(v) is int for v in m["anchor_raw"])
+                  assert all(len(m[k]) == 3 and all(type(v) in (int, float) for v in m[k]) for k in ["camera_eye", "camera_target"])
+                  for key, value in expected.items():
+                      assert m[key] == value, (name, key, m[key], value)
+                  assert m["fixture"] == name and m["adapter"] == adapter_name and m["software"] is True
+                  revision = m["terrain_revision"]
+                  assert isinstance(revision, list) and len(revision) == 32
+                  assert all(type(v) is int and 0 <= v <= 255 for v in revision)
+                  assert all(math.isfinite(v) for key in ["camera_eye", "camera_target"] for v in m[key])
+                  pixels[name], metadata[name] = data, m
+                  for path in paths:
+                      files[path.name] = {"sha256": sha(path), "bytes": path.stat().st_size}
+              for group in [list(CAPTURES)[:2], [n for n in CAPTURES if n.startswith("ridge-")], [n for n in CAPTURES if n.startswith("builtin-")]]:
+                  assert len({tuple(metadata[n]["terrain_revision"]) for n in group}) == 1
+              # Independent fixed side-camera projection. These constants come from the
+              # frozen fixture definition, never the observed image or production helpers.
+              projection = {}
+              for name, x, y in [("ramp-start", -3, 1), ("ramp-uphill", 1, 5)]:
+                  mask = blue_mask(pixels[name])
+                  assert len(mask) > 25
+                  mean = [sum(i % 480 + 0.5 for i in mask) / len(mask), sum(i // 480 + 0.5 for i in mask) / len(mask)]
+                  expected = [240 + x * 36, 180 - (y + 0.56 - 4) * 36]
+                  assert abs(mean[0] - expected[0]) < 2.5 and abs(mean[1] - expected[1]) < 3.5
+                  projection[name] = {"blue_fragments": len(mask), "centroid": mean, "expected": expected}
+              assert metadata["ramp-start"]["camera_eye"] == metadata["ramp-uphill"]["camera_eye"] == [0, 4, 16]
+              assert metadata["ramp-start"]["camera_target"] == metadata["ramp-uphill"]["camera_target"] == [0, 4, 0]
+              ridge = {}
+              for name in ["ridge-near", "ridge-far"]:
+                  a, b = blue_mask(pixels[name]), blue_mask(pixels[name + "-reversed"])
+                  assert a == b
+                  assert len(a) > 25 if name == "ridge-near" else not a
+                  ridge[name] = len(a)
+              assert pixels["builtin-start"] == pixels["builtin-reset"]
+              assert pixels["builtin-start"] != pixels["builtin-orbit"]
+              assert blue_mask(pixels["builtin-start"])
+              center = (180 * 480 + 240) * 4
+              clear = [0.055, 0.085, 0.12]
+              expected = [(12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055) * 255 for v in clear]
+              actual = list(pixels["builtin-hole-top"][center:center + 3])
+              assert all(abs(a - b) <= 1 for a, b in zip(actual, expected))
+              framing = {}
+              def dot(a, b):
+                  return sum(x * y for x, y in zip(a, b))
+              def cross(a, b):
+                  return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+              def unit(a):
+                  length = math.sqrt(dot(a, a))
+                  assert length > 0
+                  return [v / length for v in a]
+              def project(m, point):
+                  eye, target = m["camera_eye"], m["camera_target"]
+                  forward = unit([t - e for t, e in zip(target, eye)])
+                  right = unit(cross(forward, [0, 1, 0]))
+                  up = cross(right, forward)
+                  offset = [v - e for v, e in zip(point, eye)]
+                  depth = dot(offset, forward)
+                  assert depth > 0
+                  width, height = m["size"]
+                  half_height = depth * math.tan(math.radians(50) / 2)
+                  half_width = half_height * width / height
+                  return [(0.5 + dot(offset, right) / (2 * half_width)) * width,
+                          (0.5 - dot(offset, up) / (2 * half_height)) * height]
+              def bounds(m, box):
+                  corners = [project(m, [box[(i >> axis) & 1][axis] for axis in range(3)]) for i in range(8)]
+                  result = [min(v[0] for v in corners), min(v[1] for v in corners),
+                            max(v[0] for v in corners), max(v[1] for v in corners)]
+                  width, height = m["size"]
+                  assert result[0] >= 16 and result[1] >= 16 and result[2] <= width - 16 and result[3] <= height - 16, result
+                  return result
+              stage_names = ["builtin-start"] + ["builtin-stage-" + str(i) for i in range(1, 6)] + ["builtin-small-start"] + ["builtin-small-stage-" + str(i) for i in range(1, 5)] + ["builtin-small-window"]
+              beacons = [[-5, 55296/65536, 3], [-4, 151552/65536, -2], [1, 249856/65536, -5], [5, 274432/65536, -2]]
+              digits = [[[.16,.14],[.16,-.14]], [[0,.28],[.16,.14],[0,0],[-.16,-.14],[0,-.28]], [[0,.28],[.16,.14],[.16,-.14],[0,-.28],[0,0]], [[-.16,.14],[.16,.14],[.16,-.14],[0,0]]]
+              for name in stage_names:
+                  m, rgba = metadata[name], pixels[name]
+                  x, y, z = [v / 65536 for v in m["anchor_raw"]]
+                  player = bounds(m, [[x-.24,y,z-.24],[x+.24,y+1.13,z+.24]])
+                  width, height = m["size"]
+                  visible = sum(player[0] <= i % width + .5 <= player[2] and player[1] <= i // width + .5 <= player[3] for i in blue_mask(rgba))
+                  assert visible >= 8
+                  if m["collected"] < 4:
+                      x, y, z = beacons[m["collected"]]
+                      goal = bounds(m, [[x-.28,y,z-.28],[x+.28,y+1.728,z+.28]])
+                      probes = [[x,y+.85,z]] + [[x+dx,y+1.42+dy,z] for dx,dy in digits[m["collected"]]]
+                  else:
+                      x,y,z = 4,5,-4
+                      goal = bounds(m, [[x-.06,y,z-.06],[x+.65,y+1.6,z+.06]])
+                      probes = [[x+.35,y+1.4,z]]
+                  counts = []
+                  for point in probes:
+                      sx, sy = project(m, point)
+                      cx, cy = math.floor(sx), math.floor(sy)
+                      count = 0
+                      for py in range(cy-2,cy+3):
+                          for px in range(cx-2,cx+3):
+                              assert 0 <= px < width and 0 <= py < height
+                              i = (py*width+px)*4
+                              r,g,b = rgba[i:i+3]
+                              count += (g >= 240 and g-r >= 20 and g-b >= 10) if m["finished"] else (r >= 180 and g >= 120 and r-b >= 60 and g-b >= 45)
+                      assert count >= 1, (name, point, sx, sy)
+                      counts.append({"world":point,"screen":[sx,sy],"fragments":count})
+                  framing[name] = {"player_bounds":player,"goal_bounds":goal,"blue_fragments":visible,"goal_probes":counts}
+              audit = {"files": files, "adapter": adapter[0][0], "software": True,
+                       "projection": projection, "ridge_blue_fragments": ridge, "framing": framing,
+                       "hole_center_rgb": actual, "hole_expected_srgb": expected,
+                       "capture_fixture_source": "Unchanged PR191 original fixture; original per-pixel thresholds retained",
+                       "scope": "22 raw/PNG/metadata triples, independent projection, shared-depth masks, exact scripted states and reset/orbit/hole controls. Human visual review remains required."}
+              with (E / "capture-audit.json").open("x") as out:
+                  json.dump(audit, out, indent=2)
+                  out.write("\n")
+              return adapter[0][0]
+          # All new evidence is private to this step's fresh RUNNER_TEMP directory.
+          # Existing Cargo cache reuse is allowed and recorded; fresh rustc is not claimed.
+          E = Path(os.environ["RUNNER_TEMP"]) / "terrain-course-ci" / PHASE
+          E.mkdir(parents=True, exist_ok=False)
+          W = Path.cwd().resolve()
+          sha = lambda path: digest(path.read_bytes())
+          env = os.environ.copy()
+          for key in list(env):
+              if key.startswith("ORR_") or key.startswith("PYTHON"):
+                  env.pop(key, None)
+          env.update(CARGO_BUILD_JOBS="2", RUST_TEST_THREADS="1")
+          if PHASE == "gpu":
+              env.update(ORR_REQUIRE_GPU="1", LIBGL_ALWAYS_SOFTWARE="1", WGPU_BACKEND="vulkan")
+              require(os.name == "posix", "Linux device lane only")
+              for name in ["captures", "cache", "scratch", "runtime"]:
+                  (E / name).mkdir(mode=0o700)
+              env.update(ORR_TERRAIN_CAPTURE_DIR=str(E / "captures"), XDG_CACHE_HOME=str(E / "cache"),
+                         XDG_RUNTIME_DIR=str(E / "runtime"), TMPDIR=str(E / "scratch"))
+          status = {"state": "RUNNING", "phase": PHASE, "commands": [], "producers": {},
+                    "actual_device_invocations": 0, "native_window_executed": False,
+                    "fresh_compiler_invocation_claim": False, "scope": "hosted optional Terrain Trail coverage"}
+          source = {}
+          phase_started = time.monotonic()
+          
+          def evidence_budget():
+              require(time.monotonic() - phase_started < (2400 if PHASE == "cpu" else 1200), "phase deadline")
+              require(shutil.disk_usage(E).free >= DISK_FLOOR, "evidence disk floor")
+              files = list(E.rglob("*"))
+              require(len(files) <= 512 and not any(p.is_symlink() for p in files), "evidence count/symlink bound")
+              require(sum(p.stat().st_size for p in files if p.is_file()) <= 128 * 1024**2, "evidence byte cap")
+          
+          def source_fence():
+              for name, record in source.items():
+                  path = W / name
+                  require(path.is_file() and not path.is_symlink(), "source file " + name)
+                  require(sha(path) == record["sha256"], "source drift " + name)
+                  if os.name != "nt":
+                      require(("100755" if path.stat().st_mode & 0o111 else "100644") == record["mode"], "source mode " + name)
+          
+          def run(label, argv, timeout=900):
+              evidence_budget()
+              source_fence()
+              remaining = (2400 if PHASE == "cpu" else 1200) - (time.monotonic() - phase_started)
+              log = E / (label + ".log")
+              try:
+                  return bounded_run(argv, W, env, log, min(timeout, remaining))
+              finally:
+                  receipt = log.with_suffix(".json")
+                  status["commands"].append({"label": label, "argv": argv,
+                      "receipt": receipt.name if receipt.exists() else None,
+                      "receipt_sha256": sha(receipt) if receipt.exists() else None})
+                  source_fence()
+                  evidence_budget()
+          
+          def build(label, target, features=None):
+              flags = [] if features is None else ["--no-default-features"] + (["--features", features] if features else [])
+              selector = ["--lib"] if target == "--lib" else ["--test", target]
+              argv = ["cargo", "test", "--locked", "--release", "-p", "orr_terrain_demo"] + flags + selector + ["--no-run", "--message-format=json"]
+              text = run(label + "-compile", argv)
+              records = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+              require([r.get("success") for r in records if r.get("reason") == "build-finished"] == [True], "Cargo build completion")
+              manifest = (W / "crates/orr_terrain_demo/Cargo.toml").resolve()
+              selected = [r for r in records if r.get("reason") == "compiler-artifact" and r.get("executable") and
+                          Path(r.get("manifest_path", "")).resolve() == manifest and
+                          r["target"]["name"] == ("orr_terrain_demo" if target == "--lib" else target) and r["profile"]["test"]]
+              require(len(selected) == 1, "one exact Cargo test producer " + label)
+              artifact = selected[0]
+              expected_features = ["default"] if features is None else sorted(features.split(",")) if features else []
+              if features == "window":
+                  expected_features = ["render", "window"]
+              require(sorted(artifact["features"]) == expected_features, "producer features " + label)
+              require(artifact["target"]["kind"] == (["lib"] if target == "--lib" else ["test"]), "producer target kind")
+              expected_src = W / "crates/orr_terrain_demo" / ("src/lib.rs" if target == "--lib" else "tests/" + target + ".rs")
+              require(Path(artifact["target"]["src_path"]).resolve() == expected_src.resolve(), "producer source path")
+              require(artifact["profile"]["opt_level"] == "3", "release producer")
+              executable = Path(artifact["executable"]).resolve()
+              target_root = Path(env.get("CARGO_TARGET_DIR", str(W / "target"))).resolve()
+              require(executable.is_file() and not executable.is_symlink() and executable.is_relative_to(target_root), "emitted executable location")
+              producer = {"cargo_artifact": artifact, "executable": str(executable), "sha256": sha(executable),
+                          "bytes": executable.stat().st_size, "checkout": status["checkout"],
+                          "source_manifest_sha256": sha(E / "source.json"), "compile_log_sha256": sha(E / (label + "-compile.log")),
+                          "cargo_fresh": artifact["fresh"], "compiler_reinvocation_claim": False}
+              save(E / (label + "-producer.json"), producer)
+              status["producers"][label] = producer
+              return producer
+          
+          def execute(label, producer, args):
+              path = Path(producer["executable"])
+              require(sha(path) == producer["sha256"], "producer changed before execution")
+              text = run(label, [str(path)] + args, 180)
+              require(sha(path) == producer["sha256"], "producer changed after execution")
+              return text
+          
+          def check_inventory(label, producer, names, ignored):
+              inventory(execute(label + "-list", producer, ["--list"]), names)
+              inventory(execute(label + "-ignored-list", producer, ["--ignored", "--list"]), ignored)
+          
+          try:
+              if os.name == "posix":
+                  enable_subreaper()
+              checkout = run("checkout", ["git", "rev-parse", "HEAD"], 20).strip()
+              require(re.fullmatch(r"[0-9a-f]{40}", checkout), "checkout identity")
+              status["checkout"] = checkout
+              tracked = run("source-tree", ["git", "ls-tree", "-rz", "--full-tree", "HEAD"], 20)
+              for row in tracked.split("\0"):
+                  if not row:
+                      continue
+                  match = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40})\t(.+)", row)
+                  require(match, "tracked source record")
+                  mode, blob, name = match.groups()
+                  require(name not in source and not Path(name).is_absolute() and ".." not in Path(name).parts, "source path")
+                  path = W / name
+                  require(path.is_file() and not path.is_symlink(), "tracked file " + name)
+                  data = path.read_bytes()
+                  require(hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() == blob, "checkout source bytes " + name)
+                  source[name] = {"sha256": digest(data), "blob": blob, "mode": mode, "bytes": len(data)}
+              require(source and ".github/workflows/determinism.yml" in source, "complete source identity")
+              save(E / "source.json", {"checkout": checkout, "files": source})
+              run("toolchain", ["rustc", "-Vv"], 20)
+              if PHASE == "cpu":
+                  defaults = {k: list(v) for k, v in DEFAULT_NAMES.items()}
+                  if os.name == "nt":
+                      defaults["cli"].remove("actual_binary_rejects_fifo_before_open_without_blocking")
+                      defaults["course"].remove("loader_rejects_symlink_files_ancestors_and_special_devices")
+                  else:
+                      defaults["course"].remove("windows_canonical_and_ordinary_absolute_paths_load_the_same_snapshot")
+                      defaults["course"].remove("windows_drive_relative_policy_rejects_before_filesystem_access")
+                  require(sum(map(len, defaults.values())) == 26, "default census")
+                  for target, names in defaults.items():
+                      producer = build("default-" + target, target)
+                      check_inventory("default-" + target, producer, names, [])
+                      text = execute("default-" + target + "-tests", producer, ["--test-threads=1", "--show-output"])
+                      result(text, names, [], 0)
+                  producer = build("render", "render", "render")
+                  check_inventory("render", producer, RENDER_NAMES, [DEVICE_NAME])
+                  selected = [name for name in RENDER_NAMES if name != DEVICE_NAME]
+                  require(len(selected) == 3, "three render CPU tests")
+                  for index, name in enumerate(selected):
+                      text = execute("render-cpu-" + str(index + 1), producer, [name, "--exact", "--test-threads=1", "--show-output"])
+                      result(text, [name], [], 3)
+                  producer = build("window", "--lib", "window")
+                  check_inventory("window", producer, WINDOW_NAMES, [])
+                  text = execute("window-reducers", producer, ["--test-threads=1", "--show-output"])
+                  result(text, WINDOW_NAMES, [], 0)
+                  run("window-all-targets-check", ["cargo", "check", "--locked", "-p", "orr_terrain_demo", "--no-default-features", "--features", "window", "--all-targets"])
+                  for label, flags in [("default", []), ("no-default", ["--no-default-features"]),
+                                       ("render", ["--no-default-features", "--features", "render"]),
+                                       ("window", ["--no-default-features", "--features", "window"])]:
+                      run(label + "-strict", ["cargo", "clippy", "--locked", "-p", "orr_terrain_demo"] + flags + ["--all-targets", "--", "-D", "warnings"])
+                  status.update(state="CPU_PASSED", default_passes=26, render_cpu_passes=3, window_state_reducer_passes=5, strict_configurations=4)
+              else:
+                  producer = build("render-device", "render", "render")
+                  check_inventory("render-device", producer, RENDER_NAMES, [DEVICE_NAME])
+                  status["actual_device_invocations"] = 1
+                  text = execute("render-device-test", producer, [DEVICE_NAME, "--exact", "--ignored", "--test-threads=1", "--show-output"])
+                  result(text, [DEVICE_NAME], [], 3)
+                  marker = "---- " + DEVICE_NAME + " stdout ----\n"
+                  require(re.findall(r"^---- .* stdout ----$", text, re.M) == [marker.rstrip("\n")], "exact device output section")
+                  output = text.split(marker, 1)[1].split("\nsuccesses:", 1)[0]
+                  adapter = capture_audit(output)
+                  status.update(state="DEVICE_PASSED_VISUAL_REVIEW_PENDING", adapter=adapter,
+                                software=True, capture_triples=22, capture_audit_sha256=sha(E / "capture-audit.json"))
+              source_fence()
+              evidence_budget()
+              require(run("checkout-after", ["git", "rev-parse", "HEAD"], 20).strip() == checkout, "checkout changed")
+              for producer in status["producers"].values():
+                  require(sha(Path(producer["executable"])) == producer["sha256"], "final producer drift")
+              if PHASE == "gpu":
+                  audit = json.loads((E / "capture-audit.json").read_text())
+                  require({p.name for p in (E / "captures").iterdir()} == set(audit["files"]), "final capture set")
+                  for name, record in audit["files"].items():
+                      require(sha(E / "captures" / name) == record["sha256"], "final capture drift")
+          except BaseException as error:
+              status.update(state="STOPPED", error=repr(error))
+              raise
+          finally:
+              status["seconds"] = time.monotonic() - phase_started
+              save(E / "terminal.json", status)
+              print(json.dumps({k: v for k, v in status.items() if k not in ["commands", "producers"]}, indent=2), flush=True)
+          PYTERRAIN
+      - name: Retain Terrain Trail gpu evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terrain-course-gpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/terrain-course-ci/gpu
           if-no-files-found: error
           retention-days: 7
       - name: Required particle renderer actual-device readback
