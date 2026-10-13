@@ -179,6 +179,17 @@ jobs:
           cargo clippy --workspace --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu --all-targets
           cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream -p orr_tui -p orr_net -p orr_web -p orr_games -p orr_wasm_bench --all-targets -- -D warnings
 
+      - name: Required RAW16 native inventories and strict feature boundary
+        run: python -B tools/raw16_import_gate.py native --evidence "${{ runner.temp }}/raw16-native-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain RAW16 native and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw16-native-${{ matrix.name }}
+          path: ${{ runner.temp }}/raw16-native-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: cargo build -p orr_sim --features hotpatch
         # Desktop-only, off-by-default hot-patch hook (design doc decision
         # #10 — see crates/orr_sim/src/hotpatch.rs): build-only check (not
@@ -251,6 +262,17 @@ jobs:
       # Particles are presentation-only and default-off. Separate steps keep
       # every configuration mandatory under both bash and Windows PowerShell.
       # sample-build already feeds the required cross-platform aggregate.
+      - name: Required RAW16 editor inventory and strict feature combinations
+        run: python -B tools/raw16_import_gate.py editor --evidence "${{ runner.temp }}/raw16-editor-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain RAW16 editor and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw16-editor-${{ matrix.os }}
+          path: ${{ runner.temp }}/raw16-editor-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: View CPU library default tests
         run: cargo test --locked --release -p orr_view --lib
       - name: View CPU library explicit feature-off tests
@@ -334,6 +356,22 @@ jobs:
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Required RAW16 explicit software-device readback
+        if: runner.os == 'Linux'
+        env:
+          ORR_REQUIRE_GPU: "1"
+          ORR_RAW16_REQUIRE_SOFTWARE: "1"
+          WGPU_BACKEND: vulkan
+        run: python -B tools/raw16_import_gate.py device --evidence "${{ runner.temp }}/raw16-device-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain RAW16 device and partial failure evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw16-device-${{ matrix.os }}
+          path: ${{ runner.temp }}/raw16-device-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - if: runner.os == 'Linux'
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:

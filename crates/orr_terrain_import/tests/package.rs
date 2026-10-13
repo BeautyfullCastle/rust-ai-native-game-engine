@@ -67,14 +67,26 @@ fn installed_tamper_fails_verification_and_read_asset() {
         .join(installed.package_digest)
         .join(package::ASSET_PATH);
     // Deliberate fixture-local corruption is not an importer production write.
-    let mut permissions = fs::metadata(&object).unwrap().permissions();
     #[cfg(unix)]
-    {
+    let permissions = {
         use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
         permissions.set_mode(permissions.mode() | 0o200);
-    }
+        permissions
+    };
     #[cfg(windows)]
-    permissions.set_readonly(false);
+    let permissions = {
+        // Restore the writable permissions of this fixture's real source file.
+        // On Windows this clears only the installed copy's read-only attribute.
+        let source = fs::symlink_metadata(root.path().join("source").join(package::ASSET_PATH))
+            .unwrap();
+        assert!(source.file_type().is_file());
+        let permissions = source.permissions();
+        assert!(!permissions.readonly());
+        permissions
+    };
+    #[cfg(not(any(unix, windows)))]
+    let permissions = fs::metadata(&object).unwrap().permissions();
     fs::set_permissions(&object, permissions).unwrap();
     fs::write(object, b"tampered").unwrap();
     let fresh = Project::open(&project_root, package::runtime()).unwrap();
