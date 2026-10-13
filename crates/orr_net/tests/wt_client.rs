@@ -21,6 +21,23 @@ fn message(ep: &mut Endpoint, channel: Channel, payload: &[u8]) {
     }
 }
 
+fn connect_failure_message(event: &Event) -> &str {
+    let Event::Disconnected { reason: DisconnectReason::ConnectFailed(message), .. } = event else {
+        panic!("expected ConnectFailed");
+    };
+    assert!(message.len() <= 80);
+    assert!(matches!(message.as_str(),
+        "WT connect timed out (stage=session_connect)" |
+        "WT connect timed out (stage=open_bi)" |
+        "WT connect timed out (stage=initialize_bi)" |
+        "WT connect timed out (stage=hello_write)" |
+        "WT connection failed (stage=session_connect)" |
+        "WT connection failed (stage=open_bi)" |
+        "WT connection failed (stage=initialize_bi)" |
+        "WT connection failed (stage=hello_write)"));
+    message
+}
+
 #[test]
 fn bidirectional_stream_datagram_fallback_stats_and_close() {
     let (mut server, mut client, sid, id) = pair(NetConfig::default());
@@ -61,6 +78,7 @@ fn trust_hostname_and_disabled_server_reject_without_secrets() {
         let mut client = Endpoint::connect_wt(&format!("https://{}/private-sentinel?token=private-sentinel", server.local_addr()), trust, NetConfig::default()).unwrap();
         let ev = wait_for(&mut client, WAIT, |e| matches!(e, Event::Disconnected { .. })).unwrap();
         assert!(matches!(ev, Event::Disconnected { reason: DisconnectReason::ConnectFailed(_), .. }));
+        connect_failure_message(&ev);
         assert!(!format!("{ev:?}").contains("private-sentinel"));
         assert!(client.stats(client.client_conn().unwrap()).is_none());
         assert!(server.poll_event().is_none());
@@ -85,9 +103,16 @@ fn deadline_and_drop_cleanup() {
     let cfg = NetConfig { connect_timeout: Duration::from_millis(100), ..NetConfig::default() };
     let start = Instant::now();
     let mut client = Endpoint::connect_wt(&format!("https://{}/private-sentinel", socket.local_addr().unwrap()), QuicTrust::WebPki, cfg).unwrap();
-    assert!(matches!(client.wait_event(Duration::from_secs(2)), Some(Event::Disconnected { reason: DisconnectReason::ConnectFailed(_), .. })));
+    let ev = client.wait_event(Duration::from_secs(2)).expect("terminal timeout event");
+    assert!(matches!(ev, Event::Disconnected { reason: DisconnectReason::ConnectFailed(_), .. }));
+    assert_eq!(connect_failure_message(&ev), "WT connect timed out (stage=session_connect)");
+    assert!(!format!("{ev:?}").contains("private-sentinel"));
+    assert!(client.stats(client.client_conn().unwrap()).is_none());
     assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(client.wait_event(Duration::from_millis(50)).is_none());
+    let start = Instant::now();
     drop(client);
+    assert!(start.elapsed() < Duration::from_secs(2));
     let (mut server, client, _, id) = pair(NetConfig::default());
     client.send(id, Channel::Reliable, b"flush on drop").unwrap();
     let start = Instant::now(); drop(client);
@@ -154,6 +179,7 @@ fn reflected_peer_close_reason_is_redacted() {
     let mut client = Endpoint::connect_wt(&format!("https://{}/private-sentinel?token=private-sentinel", rx.recv().unwrap()), QuicTrust::CertDer(der), NetConfig::default()).unwrap();
     let ev = client.wait_event(WAIT).unwrap();
     assert!(matches!(ev, Event::Disconnected { reason: DisconnectReason::ConnectFailed(_), .. }));
+    connect_failure_message(&ev);
     assert!(!format!("{ev:?}").contains("private-sentinel"));
     worker.join().unwrap();
 }

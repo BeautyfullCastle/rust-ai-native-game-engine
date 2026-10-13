@@ -21,9 +21,18 @@ one byte), return `Backpressure` when full, and refuse sends after local close.
 Incoming reliable events apply backpressure; excess datagrams may be dropped.
 Stats, event ordering, graceful-close and bounded endpoint-drop follow `Endpoint`.
 
-One connection deadline includes DNS, QUIC/TLS, HTTP/3 CONNECT, stream opening and
-hello. Diagnostic errors omit URL/path/query and reflected peer errors. The
-client uses pinned `wtransport 0.7.2` with only `ring` and QUIC-access support;
+One cumulative connection deadline includes DNS, QUIC/TLS, HTTP/3 CONNECT, stream
+opening and hello (five seconds by default). It is not restarted at phase boundaries.
+The existing `ConnectFailed` diagnostic appends one fixed current-operation label:
+`session_connect`, `open_bi`, `initialize_bi`, or `hello_write`, for both timeout and
+non-timeout setup failures. The eight possible messages are at most 80 bytes and
+omit URL/host/path/query, reflected peer errors, credentials and payloads.
+`session_connect` covers the dependency's entire session connection operation;
+it cannot distinguish QUIC/TLS from HTTP/3 SETTINGS/CONNECT or establish a root
+cause. The two stream labels distinguish obtaining the opening future from
+initializing the WebTransport stream; `hello_write` is the Orrery HELLO write.
+This diagnostic does not retry, extend a deadline or change connection events.
+The client uses pinned `wtransport 0.7.2` with only `ring` and QUIC-access support;
 no new transport feature gate is needed in the existing native-only net crate.
 
 Focused verification: `cargo test -p orr_net --test wt_client`, existing QUIC/WS/WSS
