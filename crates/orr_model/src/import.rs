@@ -1,6 +1,6 @@
 //! Bounded original parser for an explicit glTF 2.0/GLB subset. This is not a
 //! general glTF implementation. Unknown schema fields/extensions fail closed.
-//! Indexed triangles, f32 POSITION/NORMAL/UV0, node TRS/affine matrices, PNG,
+//! Indexed triangles, f32 POSITION/NORMAL and optional unused UV0, node TRS/affine matrices, PNG,
 //! opaque diffuse base-color materials. No network or ambient filesystem reads.
 use crate::*;
 use base64::Engine;
@@ -143,7 +143,8 @@ pub(crate) struct Sampler {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct MaterialDef {
-    pub(crate) pbr_metallic_roughness: Pbr,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) pbr_metallic_roughness: Option<Pbr>,
     pub(crate) alpha_mode: Option<String>,
     #[serde(default)]
     pub(crate) double_sided: bool,
@@ -155,7 +156,8 @@ pub(crate) struct MaterialDef {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Pbr {
-    pub(crate) base_color_texture: TextureInfo,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) base_color_texture: Option<TextureInfo>,
     pub(crate) base_color_factor: Option<[f32; 4]>,
     pub(crate) metallic_factor: Option<f32>,
     pub(crate) roughness_factor: Option<f32>,
@@ -185,7 +187,8 @@ pub(crate) struct Mesh {
 pub(crate) struct PrimitiveDef {
     pub(crate) attributes: BTreeMap<String, usize>,
     pub(crate) indices: usize,
-    pub(crate) material: usize,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) material: Option<usize>,
     pub(crate) mode: Option<u32>,
     #[serde(default, rename = "extras")]
     pub(crate) _extras: Option<serde_json::Value>,
@@ -559,24 +562,52 @@ pub(crate) fn load_resources(
             at(&doc.samplers, i, "sampler")?;
         }
     }
+    // Every authored texture reference was checked against authored images above.
+    // The fallback must never turn an invalid source index into a valid reference.
     let mut materials = Vec::new();
+    let mut white_image = None;
     for m in &doc.materials {
-        let p = &m.pbr_metallic_roughness;
+        let p = diffuse_pbr(m)?;
         if m.alpha_mode.as_deref().unwrap_or("OPAQUE") != "OPAQUE"
             || m.double_sided
-            || p.metallic_factor.unwrap_or(1.0) != 0.0
-            || p.roughness_factor.unwrap_or(1.0) != 1.0
-            || p.base_color_texture.tex_coord != 0
+            || p.base_color_texture
+                .as_ref()
+                .is_some_and(|t| t.tex_coord != 0)
         {
             return Err(invalid(
-                "requires opaque single-sided diffuse material (metallic=0, roughness=1), UV0",
+                "requires opaque single-sided diffuse material, UV0",
             ));
         }
-        let t = at(
-            &doc.textures,
-            p.base_color_texture.index,
-            "base color texture",
-        )?;
+        let Some(texture) = &p.base_color_texture else {
+            let image = match white_image {
+                Some(index) => index,
+                None => {
+                    if images.len() >= MAX_IMAGES || decoded > MAX_DECODED_BYTES - 4 {
+                        return Err(invalid(
+                            "factor-only white image exceeds image/decoded budget",
+                        ));
+                    }
+                    let index = images.len() as u32;
+                    images.push(Image {
+                        width: 1,
+                        height: 1,
+                        rgba8: vec![255; 4],
+                    });
+                    decoded += 4;
+                    white_image = Some(index);
+                    index
+                }
+            };
+            materials.push(Material {
+                base_color: p.base_color_factor.unwrap_or([1.0; 4]),
+                image,
+                linear_filter: false,
+                wrap_s: Wrap::Clamp,
+                wrap_t: Wrap::Clamp,
+            });
+            continue;
+        };
+        let t = at(&doc.textures, texture.index, "base color texture")?;
         let default = Sampler::default();
         let s = match t.sampler {
             Some(i) => at(&doc.samplers, i, "sampler")?,
@@ -755,18 +786,43 @@ impl Accessor {
         })
     }
 }
+fn diffuse_pbr(material: &MaterialDef) -> Result<&Pbr, Error> {
+    let pbr = material.pbr_metallic_roughness.as_ref().ok_or_else(|| {
+        invalid("default glTF PBR material has metallic=1; importer requires explicit metallic=0 and roughness=1")
+    })?;
+    if pbr.metallic_factor.unwrap_or(1.0) != 0.0 || pbr.roughness_factor.unwrap_or(1.0) != 1.0 {
+        return Err(invalid("diffuse importer requires explicit metallic=0 and roughness=1; omitted metallic defaults to 1"));
+    }
+    Ok(pbr)
+}
+
+pub(crate) fn material_index(doc: &Document, primitive: &PrimitiveDef) -> Result<usize, Error> {
+    let index = primitive.material.ok_or_else(|| {
+        invalid("absent glTF material defaults to metallic=1; importer requires an explicit diffuse material")
+    })?;
+    at(&doc.materials, index, "primitive material")?;
+    Ok(index)
+}
+
+pub(crate) fn requires_uv(doc: &Document, primitive: &PrimitiveDef) -> Result<bool, Error> {
+    let material = &doc.materials[material_index(doc, primitive)?];
+    Ok(diffuse_pbr(material)?.base_color_texture.is_some())
+}
+
 fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
+    let has_uv = p.attributes.contains_key("TEXCOORD_0");
     if p.mode.unwrap_or(4) != 4
-        || p.attributes.len() != 3
-        || !["POSITION", "NORMAL", "TEXCOORD_0"]
+        || p.attributes.len() != 2 + usize::from(has_uv)
+        || !["POSITION", "NORMAL"]
             .iter()
             .all(|s| p.attributes.contains_key(*s))
+        || (requires_uv(doc, p)? && !has_uv)
     {
         return Err(invalid(
-            "requires indexed TRIANGLES with only POSITION/NORMAL/TEXCOORD_0",
+            "requires indexed TRIANGLES with POSITION/NORMAL and only optional TEXCOORD_0 (required for textured materials)",
         ));
     }
-    at(&doc.materials, p.material, "primitive material")?;
+    material_index(doc, p)?;
     let pos = at(&doc.accessors, p.attributes["POSITION"], "POSITION")?;
     if pos.count > MAX_VERTICES {
         return Err(invalid("vertex count exceeds budget"));
@@ -776,7 +832,10 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
         ("NORMAL", "VEC3"),
         ("TEXCOORD_0", "VEC2"),
     ] {
-        let a = at(&doc.accessors, p.attributes[name], name)?;
+        let Some(&index) = p.attributes.get(name) else {
+            continue;
+        };
+        let a = at(&doc.accessors, index, name)?;
         let view = &doc.buffer_views[a.buffer_view];
         if a.component_type != 5126
             || a.kind != kind
@@ -827,7 +886,10 @@ impl Builder<'_> {
             for (slot, p) in self.doc.meshes[mesh].primitives.iter().enumerate() {
                 let pos = &self.doc.accessors[p.attributes["POSITION"]];
                 let normal = &self.doc.accessors[p.attributes["NORMAL"]];
-                let uv = &self.doc.accessors[p.attributes["TEXCOORD_0"]];
+                let uv = p
+                    .attributes
+                    .get("TEXCOORD_0")
+                    .map(|&index| &self.doc.accessors[index]);
                 let idx = &self.doc.accessors[p.indices];
                 self.vertices += pos.count;
                 self.indices += idx.count;
@@ -853,7 +915,7 @@ impl Builder<'_> {
                     vertices.push(Vertex {
                         position,
                         normal: normal.floats(self.doc, self.buffers, v),
-                        uv: uv.floats(self.doc, self.buffers, v),
+                        uv: uv.map_or([0.0; 2], |a| a.floats(self.doc, self.buffers, v)),
                     });
                 }
                 let mut indices = Vec::with_capacity(idx.count);
@@ -873,7 +935,7 @@ impl Builder<'_> {
                     id: format!("{}#node={i}/mesh={mesh}/primitive={slot}", self.asset_id),
                     vertices,
                     indices,
-                    material: p.material as u32,
+                    material: material_index(self.doc, p)? as u32,
                     transform,
                 });
             }
