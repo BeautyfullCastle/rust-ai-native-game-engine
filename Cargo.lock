@@ -3581,20 +3581,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orr_terrain_physics3d"
-version = "0.0.1"
-dependencies = [
- "bytemuck",
- "orr_ecs",
- "orr_fp",
- "orr_physics3d",
- "orr_session",
- "orr_sim",
- "orr_terrain",
- "sha2",
-]
-
-[[package]]
 name = "orr_terrain_import"
 version = "0.0.1"
 dependencies = [
@@ -3606,6 +3592,20 @@ dependencies = [
  "orr_terrain_view",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "orr_terrain_physics3d"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_ecs",
+ "orr_fp",
+ "orr_physics3d",
+ "orr_session",
+ "orr_sim",
+ "orr_terrain",
+ "sha2",
 ]
 
 [[package]]
