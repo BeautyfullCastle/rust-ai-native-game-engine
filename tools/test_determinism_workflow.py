@@ -31,8 +31,9 @@ RESULTS = {
     "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
     "SAMPLE_BUILD_RESULT": "${{ needs['sample-build'].result }}",
     "LINKED_PREFABS_RESULT": "${{ needs['sample-linked-prefabs'].result }}",
+    "HUD_LAYER_ORDER_RESULT": "${{ needs['hud-layer-order'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs", "hud-layer-order"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -422,17 +423,27 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_only_all_success_passes(self):
-        # 46656 combinations across all six jobs include all four GitHub result
-        # states, empty results, and an unknown state: allow success, rather
-        # than denylisting.
+        # Preserve all 46656 baseline six-job combinations with the new HUD
+        # factor successful. Its independent fail-closed factor is tested below;
+        # do not multiply an already expensive shell-control matrix by six.
         states = ("success", "failure", "cancelled", "skipped", "", "unknown")
-        for values in itertools.product(states, repeat=len(RESULTS)):
-            results = dict(zip(RESULTS, values))
+        original_names = [name for name in RESULTS if name != "HUD_LAYER_ORDER_RESULT"]
+        for values in itertools.product(states, repeat=len(original_names)):
+            results = dict(zip(original_names, values))
+            results["HUD_LAYER_ORDER_RESULT"] = "success"
             with self.subTest(results=results):
                 result = self.run_gate(results)
                 self.assertEqual(result.returncode == 0, all(value == "success" for value in values), result.stdout + result.stderr)
                 for name, value in results.items():
                     self.assertIn(f"{name}={value}", result.stdout)
+
+    def test_hud_failure_skip_cancel_unknown_or_missing_cannot_pass(self):
+        for state in ("success", "failure", "skipped", "cancelled", "unknown", "", None):
+            results = {name: "success" for name in RESULTS if name != "HUD_LAYER_ORDER_RESULT"}
+            if state is not None:
+                results["HUD_LAYER_ORDER_RESULT"] = state
+            result = self.run_gate(results)
+            self.assertEqual(result.returncode == 0, state == "success", result.stdout + result.stderr)
 
     def test_sample_failure_skip_cancel_or_missing_cannot_pass(self):
         # Even when every checksum target passes, a non-success/missing sample

@@ -20,9 +20,21 @@ pub struct Panel {
     document: Document,
     saved: Document,
     font: Vec<u8>,
-    undo: Vec<Document>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
     selected: Option<usize>,
     error: Option<String>,
+}
+
+struct HistoryEntry {
+    document: Document,
+    selected: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum LayerEdge {
+    Front,
+    Back,
 }
 
 struct RootPin {
@@ -85,6 +97,7 @@ impl Panel {
             document: prepared.document,
             font: prepared.font,
             undo: Vec::new(),
+            redo: Vec::new(),
             selected: None,
             error,
         }
@@ -102,8 +115,10 @@ impl Panel {
             if self.undo.len() == MAX_UNDO {
                 self.undo.remove(0);
             }
-            self.undo
-                .push(std::mem::replace(&mut self.document, candidate));
+            let previous = self.history_entry();
+            self.document = candidate;
+            self.undo.push(previous);
+            self.redo.clear();
             self.selected = self
                 .selected
                 .filter(|index| *index < self.document.nodes.len());
@@ -121,16 +136,47 @@ impl Panel {
         Ok(())
     }
 
+    fn history_entry(&self) -> HistoryEntry {
+        HistoryEntry {
+            document: self.document.clone(),
+            selected: self.selected.and_then(|index| self.document.nodes.get(index))
+                .map(|node| node.id.clone()),
+        }
+    }
+
+    fn restore_history(&mut self, entry: HistoryEntry) {
+        self.document = entry.document;
+        self.selected = entry.selected.and_then(|id| {
+            self.document.nodes.iter().position(|node| node.id == id)
+        });
+    }
+
     pub fn undo(&mut self) -> bool {
         if let Some(previous) = self.undo.pop() {
-            self.document = previous;
-            self.selected = self
-                .selected
-                .filter(|index| *index < self.document.nodes.len());
+            self.redo.push(self.history_entry());
+            self.restore_history(previous);
             true
         } else {
             false
         }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(self.history_entry());
+            self.restore_history(next);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reorder_selected(&mut self, edge: LayerEdge) -> Result<(), String> {
+        let index = self.selected.ok_or("Select a UI node to reorder")?;
+        let (candidate, selected) = reorder_subtree(&self.document, index, edge)?;
+        self.apply_document(candidate)?;
+        self.selected = Some(selected);
+        Ok(())
     }
 
     pub fn save(&mut self) -> Result<(), String> {
@@ -186,6 +232,10 @@ impl Panel {
                         self.undo();
                         self.error = None;
                     }
+                    if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo UI edit")).clicked() {
+                        self.redo();
+                        self.error = None;
+                    }
                     if ui.button("Save UI document").clicked() {
                         self.error = self.save().err();
                     }
@@ -213,8 +263,22 @@ impl Panel {
                 {
                     self.error = self.duplicate_selected().err();
                 }
+                ui.horizontal(|ui| {
+                    for (label, edge) in [
+                        ("Bring subtree to front", LayerEdge::Front),
+                        ("Send subtree to back", LayerEdge::Back),
+                    ] {
+                        if ui.add_enabled(
+                            self.selected.is_some_and(|index| index < self.document.nodes.len()),
+                            egui::Button::new(label),
+                        ).on_hover_text("Changes this screen's draw order; children stay above their parents.").clicked() {
+                            self.error = self.reorder_selected(edge).err();
+                        }
+                    }
+                });
                 let mut candidate = self.document.clone();
                 let mut changed = false;
+                let mut candidate_selected = self.selected;
                 if let Some(index) = self.selected.filter(|i| *i < candidate.nodes.len()) {
                     let node = &mut candidate.nodes[index];
                     ui.label(format!("Stable id: {}", node.id));
@@ -288,7 +352,7 @@ impl Panel {
                     }
                     if ui.button("Remove node and descendants").clicked() {
                         remove_subtree(&mut candidate, index);
-                        self.selected = None;
+                        candidate_selected = None;
                         changed = true;
                     }
                 }
@@ -315,13 +379,19 @@ impl Panel {
                             .clicked()
                         {
                             add_node(&mut candidate, self.selected, kind);
-                            self.selected = Some(candidate.nodes.len() - 1);
+                            candidate_selected = Some(candidate.nodes.len() - 1);
                             changed = true;
                         }
                     }
                 });
                 if changed {
-                    self.error = self.apply_document(candidate).err();
+                    match self.apply_document(candidate) {
+                        Ok(()) => {
+                            self.selected = candidate_selected;
+                            self.error = None;
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
                 }
             });
             if let Some(error) = &self.error {
@@ -411,6 +481,53 @@ fn duplicate_subtree(document: &Document, index: usize) -> Result<(Document, usi
     candidate.nodes.extend(copies);
     candidate.to_bytes()?;
     Ok((candidate, new_root))
+}
+
+/// Move every descendant, including interleaved descendants, as one stable group.
+/// Orrery uses a flat draw order, not depth-first sibling stacking. Back stops
+/// immediately after the parent; Front reaches the last node on this screen.
+/// Unselected nodes retain their relative order, including other screens.
+fn reorder_subtree(
+    document: &Document,
+    index: usize,
+    edge: LayerEdge,
+) -> Result<(Document, usize), String> {
+    document.to_bytes()?;
+    let root = document.nodes.get(index).ok_or("Select a UI node to reorder")?;
+    let mut included = BTreeSet::from([root.id.as_str()]);
+    let mut moved = Vec::new();
+    let mut retained = Vec::new();
+    for node in &document.nodes {
+        if included.contains(node.id.as_str())
+            || node.parent.as_deref().is_some_and(|id| included.contains(id))
+        {
+            included.insert(node.id.as_str());
+            moved.push(node.clone());
+        } else {
+            retained.push(node.clone());
+        }
+    }
+    let insertion = match edge {
+        LayerEdge::Front => retained.iter().rposition(|node| node.screen == root.screen)
+            .map_or(0, |position| position + 1),
+        LayerEdge::Back => if let Some(parent) = &root.parent {
+            retained.iter().position(|node| node.id == *parent)
+                .ok_or("UI parent disappeared during reorder")? + 1
+        } else {
+            retained.iter().position(|node| node.screen == root.screen).unwrap_or(0)
+        },
+    };
+    retained.splice(insertion..insertion, moved);
+    let candidate = Document { schema: document.schema, nodes: retained };
+    candidate.to_bytes()?;
+    // Other screens do not participate in this layer operation. Do not create
+    // history merely to move an unchanged screen order across their entries.
+    if candidate.nodes.iter().filter(|node| node.screen == root.screen)
+        .eq(document.nodes.iter().filter(|node| node.screen == root.screen))
+    {
+        return Ok((document.clone(), index));
+    }
+    Ok((candidate, insertion))
 }
 
 fn remove_subtree(document: &mut Document, index: usize) {
@@ -639,3 +756,7 @@ mod tests {
         std::fs::remove_dir_all(moved).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "collect_ui_layer_order_tests.rs"]
+mod layer_order_tests;

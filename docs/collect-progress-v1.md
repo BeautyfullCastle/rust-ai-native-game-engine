@@ -70,6 +70,15 @@ reset or migration. Postpublication sync failure reports durability uncertain
 and disables further automatic writes for that session. Gameplay continues on
 storage failure and never claims the score was saved.
 
+Discovery does not take the writer lock or create files. If a concurrent atomic
+publication changes a file during discovery, its trust/identity checks may
+conservatively make that session read-only. It does not automatically reopen or
+retry the rejected discovery. Concurrent commits from already admitted stores
+merge under the lock; successful startup during another writer's publication is
+not guaranteed. The two-process max-merge test admits both seed snapshots before
+releasing both writers together. Its rendezvous does not change this production
+availability limit or relax any file checks.
+
 ## Evidence requirements and remaining scope
 
 Run focused identity, challenge, store failure/concurrency/path safety, reliable

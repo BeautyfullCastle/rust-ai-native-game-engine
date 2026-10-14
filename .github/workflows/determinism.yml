@@ -3042,6 +3042,16 @@ jobs:
               "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
             ],
             "editor-panel": [
+              "collect_ui_panel::layer_order_tests::actual_add_remove_duplicate_widgets_undo_redo_restore_selected_ids",
+              "collect_ui_panel::layer_order_tests::actual_widgets_save_reopen_and_runtime_pointer_route_follow_order",
+              "collect_ui_panel::layer_order_tests::front_and_back_preserve_subtree_fields_and_parent_order",
+              "collect_ui_panel::layer_order_tests::malformed_or_missing_selection_is_atomic_and_history_bounded",
+              "collect_ui_panel::layer_order_tests::nested_interleaved_descendants_and_two_foreign_screens_preserve_outside_order",
+              "collect_ui_panel::layer_order_tests::no_selection_and_play_widgets_cannot_mutate_history_selection_or_disk",
+              "collect_ui_panel::layer_order_tests::other_screens_and_noop_do_not_create_spurious_edits",
+              "collect_ui_panel::layer_order_tests::panel_edge_noops_and_failed_candidates_preserve_complete_history_and_selection",
+              "collect_ui_panel::layer_order_tests::rejected_add_and_remove_widget_commits_preserve_selection_and_both_stacks",
+              "collect_ui_panel::layer_order_tests::reorder_undo_redo_save_reopen_restore_exact_selection",
               "collect_ui_panel::tests::headless_widgets_edit_undo_save_reopen_and_share_runtime_document",
               "collect_ui_panel::tests::invalid_or_missing_font_glyph_edit_is_atomic_and_history_bounded",
               "collect_ui_panel::tests::property_edit_undo_save_and_reopen",
@@ -3124,7 +3134,7 @@ jobs:
           PYRESULT
           }
           check_result ui-library 137 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
-          check_result editor-panel 6 0 cargo test --locked --release -p orr_editor --no-default-features --features collect-ui --lib collect_ui_panel
+          check_result editor-panel 16 0 cargo test --locked --release -p orr_editor --no-default-features --features collect-ui --lib collect_ui_panel
           unset ORR_PACKAGE_FIFO_TEST_ROOT
           check_result package 29 0 cargo test --locked --release -p orr_package --lib
         env:
@@ -4711,11 +4721,19 @@ jobs:
           cargo test --release --target aarch64-linux-android -p orr_games --test golden -- --test-threads=1
           cargo test --release --target aarch64-linux-android -p orr_wasm_bench --test checksums -- --test-threads=1
 
+  hud-layer-order:
+    name: HUD layer order exact-head acceptance
+    uses: ./.github/workflows/hud-layer-order.yml
+    with:
+      expected_head: ${{ github.event.pull_request.head.sha || github.sha }}
+    permissions:
+      contents: read
+
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
     # target, sample graphics/audio/editor matrix, and linked-prefab lane must pass.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs]
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, hud-layer-order]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -4729,9 +4747,10 @@ jobs:
           BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
           LINKED_PREFABS_RESULT: ${{ needs['sample-linked-prefabs'].result }}
+          HUD_LAYER_ORDER_RESULT: ${{ needs['hud-layer-order'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT HUD_LAYER_ORDER_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then

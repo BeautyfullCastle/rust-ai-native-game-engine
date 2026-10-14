@@ -1,0 +1,51 @@
+name: HUD layer order exact-head acceptance
+on:
+  workflow_call:
+    inputs:
+      expected_head:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  combined-hud:
+    # Matches the maintained namespace-compatible baseline acceptance lanes.
+    # Migrate before 2027-04-17 without weakening source masks or GPU requirements.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
+      ORR_HUD_EXPECTED_HEAD: ${{ inputs.expected_head }}
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_head }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install maintained software GPU and namespace prerequisites
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers bubblewrap
+      - name: Pure gate and required-workflow controls
+        run: |
+          python3 -m pip install PyYAML
+          python3 tools/test_hud_layer_order_gate.py
+          python3 tools/test_determinism_workflow.py
+      - name: Fetch exactly locked dependencies
+        run: cargo fetch --locked
+      - name: Exact combined CPU strict tools and positive negative restored GPU acceptance
+        run: python3 tools/hud_layer_order_gate.py --run
+      - name: Retain all source producer ownership resource and fixture evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hud-layer-order-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hud-layer-order-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 7

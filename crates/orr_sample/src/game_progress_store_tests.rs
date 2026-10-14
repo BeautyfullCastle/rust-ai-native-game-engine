@@ -348,6 +348,45 @@ fn links_special_files_and_unwritable_files_are_refused() {
             assert_eq!(fs::read(&outside).unwrap(), bytes(3));
         }
     }
+
+    // A discovery trust error stays read-only for this session even after the
+    // offending alias is removed. This deterministic nlink=2 case proves the
+    // error latch, not the timing of a concurrent rename's possible nlink=0.
+    let (root, mut seed) = sandbox();
+    assert_eq!(
+        submit_after_transient_lock(&mut seed, 3).unwrap(),
+        CommitOutcome::DurablySaved
+    );
+    let backup = seed.paths.directory().join(BACKUP_NAME);
+    let alias = root.path().join("backup-alias");
+    fs::hard_link(&backup, &alias).unwrap();
+    assert_eq!(fs::metadata(&backup).unwrap().nlink(), 2);
+    let mut refused = reopen(&seed);
+    let reason = format!(
+        "{BACKUP_NAME} must be a user-owned regular file without links or other-user writes"
+    );
+    assert_eq!(refused.notice(), Some(reason.as_str()));
+    assert!(!refused.loaded.writable);
+    fs::remove_file(alias).unwrap();
+    assert_eq!(fs::metadata(&backup).unwrap().nlink(), 1);
+    let before = copies(&seed);
+    let best = refused.best();
+    let mut reached_checkpoint = false;
+    assert_eq!(
+        refused
+            .submit_with_checkpoint(5, |_| {
+                reached_checkpoint = true;
+                Ok(())
+            })
+            .unwrap_err(),
+        reason
+    );
+    assert!(!reached_checkpoint);
+    assert_eq!(copies(&seed), before);
+    assert_eq!(refused.best(), best);
+    let fresh = reopen(&seed);
+    assert!(fresh.loaded.writable);
+    assert_eq!(fresh.best(), 3);
 }
 #[test]
 fn changed_public_names_and_ancestor_symlinks_block_publication() {
@@ -466,6 +505,27 @@ fn concurrent_process_child() {
         key(),
     )
     .unwrap();
+    // Discovery is deliberately fail-closed and is not protected by the commit
+    // lock. Start both writers from the same admitted snapshot before either
+    // may publish; this test covers concurrent stale-writer commits, not the
+    // availability of a session opened during another process's publication.
+    assert!(matches!(score, 4 | 9));
+    assert_eq!(store.best(), 1);
+    assert!(store.loaded.writable);
+    assert_eq!(store.notice(), None);
+    let rendezvous = PathBuf::from(
+        std::env::var_os("ORR_PROGRESS_CHILD_RENDEZVOUS")
+            .expect("child fixture requires rendezvous"),
+    );
+    fs::create_dir(rendezvous.join(format!("ready-{score}"))).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !rendezvous_marker_exists(&rendezvous.join("start")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "parent did not release both ready writers"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     for _ in 0..100 {
         match store.submit_completed(score) {
             Ok(CommitOutcome::DurablySaved) => return,
@@ -478,26 +538,115 @@ fn concurrent_process_child() {
     }
     panic!("test writers did not release the lock");
 }
+// Marker directories are created atomically in a unique test-owned sibling of
+// the profile, so rendezvous I/O never changes the persistence namespace.
+fn rendezvous_marker_exists(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            assert!(metadata.is_dir(), "rendezvous marker is not a directory");
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("cannot inspect rendezvous marker: {error}"),
+    }
+}
+
+#[derive(Default)]
+struct ProgressChildren(Vec<std::process::Child>);
+impl Drop for ProgressChildren {
+    fn drop(&mut self) {
+        // Kill every surviving child before waiting for any one of them. This
+        // also runs if the second spawn, a marker operation or an assertion fails.
+        for child in &mut self.0 {
+            if !matches!(child.try_wait(), Ok(Some(_))) {
+                let _ = child.kill();
+            }
+        }
+        for child in &mut self.0 {
+            let _ = child.wait();
+        }
+    }
+}
+
 #[test]
 fn concurrent_processes_merge_without_lost_highscore() {
-    let (_root, mut store) = sandbox();
-    submit_after_transient_lock(&mut store, 1).unwrap();
+    let (root, mut store) = sandbox();
+    assert_eq!(
+        submit_after_transient_lock(&mut store, 1).unwrap(),
+        CommitOutcome::DurablySaved
+    );
+    let lock_inode = fs::metadata(store.paths.directory().join(LOCK_NAME))
+        .unwrap()
+        .ino();
+    let rendezvous = root.path().join("writer-rendezvous");
+    fs::create_dir(&rendezvous).unwrap();
     let exe = std::env::current_exe().unwrap();
-    let mut children = [4, 9].map(|score| {
-        std::process::Command::new(&exe)
-            .args([
-                "--ignored",
-                "--exact",
-                "game_progress::tests::concurrent_process_child",
-                "--nocapture",
-            ])
-            .env("ORR_PROGRESS_CHILD_DIRECTORY", store.paths.directory())
-            .env("ORR_PROGRESS_CHILD_SCORE", score.to_string())
-            .spawn()
-            .unwrap()
-    });
-    for child in &mut children {
+    let mut children = ProgressChildren::default();
+    for score in [4, 9] {
+        children.0.push(
+            std::process::Command::new(&exe)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "game_progress::tests::concurrent_process_child",
+                    "--nocapture",
+                ])
+                .env("ORR_PROGRESS_CHILD_DIRECTORY", store.paths.directory())
+                .env("ORR_PROGRESS_CHILD_SCORE", score.to_string())
+                .env("ORR_PROGRESS_CHILD_RENDEZVOUS", &rendezvous)
+                .spawn()
+                .unwrap(),
+        );
+    }
+    let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        for child in &mut children.0 {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "writer exited before both snapshots were ready"
+            );
+        }
+        if [4, 9]
+            .iter()
+            .all(|score| rendezvous_marker_exists(&rendezvous.join(format!("ready-{score}"))))
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < ready_deadline,
+            "writers did not admit both initial snapshots"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    // Release both together. Neither child waits for the other to finish, and
+    // the ordinary parallel Rust test harness remains unchanged.
+    fs::create_dir(rendezvous.join("start")).unwrap();
+    let completion_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut complete = true;
+        for child in &mut children.0 {
+            match child.try_wait().unwrap() {
+                Some(status) => assert!(status.success(), "writer failed: {status}"),
+                None => complete = false,
+            }
+        }
+        if complete {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < completion_deadline,
+            "concurrent writers did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    for child in &mut children.0 {
         assert!(child.wait().unwrap().success());
     }
     assert_eq!(reopen(&store).best(), 9);
+    assert_eq!(
+        fs::metadata(store.paths.directory().join(LOCK_NAME))
+            .unwrap()
+            .ino(),
+        lock_inode
+    );
 }
