@@ -10,6 +10,7 @@ use orr_model::{
     animation_import::import_with_resolver,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
     fs,
@@ -75,6 +76,7 @@ fn options(start: f32, end: f32) -> ExtractOptions {
         start,
         end,
         name: "extracted".into(),
+        speed: 1.0,
     }
 }
 
@@ -909,4 +911,753 @@ fn cli_rejects_symlink_sources_targets_and_ancestors_including_dangling_targets(
     fs::write(directory.join("source.glb"), FIXTURE).unwrap();
     assert!(authoring::run(cli_args(&linked_directory.join("source.glb"), &output)).is_err());
     assert!(!output.exists());
+}
+
+const SPEEDS: [f32; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
+
+fn speed_options(start: f32, end: f32, speed: f32) -> ExtractOptions {
+    let mut opts = options(start, end);
+    opts.speed = speed;
+    opts
+}
+
+fn generated_accessor(document: &Value, binary: &[u8], index: usize) -> Vec<f32> {
+    let accessor = &document["accessors"][index];
+    assert_eq!(accessor["componentType"], 5126);
+    let width = match accessor["type"].as_str().unwrap() {
+        "SCALAR" => 1,
+        "VEC3" => 3,
+        "VEC4" => 4,
+        kind => panic!("unexpected generated accessor type {kind}"),
+    };
+    let view = &document["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+    assert_eq!(view["buffer"], 0);
+    let start = view["byteOffset"].as_u64().unwrap() as usize;
+    let length = accessor["count"].as_u64().unwrap() as usize * width * 4;
+    assert_eq!(view["byteLength"].as_u64().unwrap() as usize, length);
+    binary[start..start + length]
+        .chunks_exact(4)
+        .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
+        .collect()
+}
+
+fn assert_generated_payload(output: &[u8], model: &AnimatedModel, clip_index: usize) {
+    let (document, binary) = split_glb(output);
+    let clip = &model.source().clips[clip_index];
+    let generated = &document["animations"][clip_index];
+    assert_eq!(
+        generated["samplers"].as_array().unwrap().len(),
+        clip.channels.len()
+    );
+    for (index, channel) in clip.channels.iter().enumerate() {
+        assert_eq!(generated["channels"][index]["sampler"], json!(index));
+        assert_eq!(generated["channels"][index]["target"]["node"], channel.node);
+        let sampler = &generated["samplers"][index];
+        let input = sampler["input"].as_u64().unwrap() as usize;
+        let output = sampler["output"].as_u64().unwrap() as usize;
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            bits(&generated_accessor(&document, &binary, input)),
+            bits(&channel.times)
+        );
+        for (bound, expected) in [
+            ("min", channel.times[0]),
+            ("max", *channel.times.last().unwrap()),
+        ] {
+            let values = document["accessors"][input][bound].as_array().unwrap();
+            assert_eq!(values.len(), 1, "scalar accessor requires one bound");
+            let value = values[0].as_f64().unwrap();
+            assert!(value.is_finite());
+            // JSON numbers are parsed as f64, while componentType 5126 and
+            // the BIN payload use f32. Decimal round trips may differ in f64
+            // while retaining the exact same f32 value; require its exact bits.
+            let typed = value as f32;
+            assert!(typed.is_finite());
+            assert_eq!(typed.to_bits(), expected.to_bits());
+        }
+        let (path, values): (&str, Vec<f32>) = match &channel.values {
+            ChannelValues::Translation(values) => {
+                ("translation", values.iter().flatten().copied().collect())
+            }
+            ChannelValues::Scale(values) => ("scale", values.iter().flatten().copied().collect()),
+            ChannelValues::Rotation(values) => {
+                ("rotation", values.iter().flatten().copied().collect())
+            }
+        };
+        assert_eq!(generated["channels"][index]["target"]["path"], path);
+        assert_eq!(
+            bits(&generated_accessor(&document, &binary, output)),
+            bits(&values)
+        );
+        assert_eq!(
+            sampler["interpolation"],
+            match channel.interpolation {
+                Interpolation::Linear => "LINEAR",
+                Interpolation::Step => "STEP",
+            }
+        );
+    }
+}
+
+fn timing_fixture(times: &[f32]) -> Vec<u8> {
+    let mut fixture = Fixture::new();
+    let values: Vec<f32> = (0..times.len())
+        .flat_map(|i| [i as f32, 0.0, 0.0])
+        .collect();
+    fixture.track(0, "translation", "STEP", times, &values);
+    fixture.bytes()
+}
+
+#[test]
+fn retimed_linear_tracks_have_analytic_values_and_exact_generated_keys_for_every_speed() {
+    let mut fixture = Fixture::new();
+    fixture.track(
+        0,
+        "translation",
+        "LINEAR",
+        &[0.0, 2.0, 4.0],
+        &[0.0, 2.0, 4.0, 4.0, -2.0, 8.0, 0.0, 6.0, 12.0],
+    );
+    fixture.track(
+        1,
+        "scale",
+        "LINEAR",
+        &[0.0, 1.0, 4.0],
+        &[1.0, 2.0, 3.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    );
+    let theta = std::f32::consts::PI / 3.0;
+    let interior_rotation = [0.0, 0.0, -theta.sin(), -theta.cos()];
+    fixture.track(
+        2,
+        "rotation",
+        "LINEAR",
+        &[0.0, 2.0],
+        &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -theta.sin(), -theta.cos()],
+    );
+    let bytes = fixture.bytes();
+    let original = import(&bytes);
+    for speed in SPEEDS {
+        let opts = speed_options(0.5, 3.0, speed);
+        let output = extract_glb(&bytes, &opts).unwrap();
+        assert_eq!(extract_glb(&bytes, &opts).unwrap(), output);
+        assert_eq!(bytes, fixture.bytes());
+        let model = import(&output);
+        let clip = &model.source().clips[1];
+        assert_eq!(clip.duration(), 2.5 / speed);
+        assert_eq!(clip.channels[0].times, [0.0, 1.5 / speed, 2.5 / speed]);
+        assert_eq!(clip.channels[1].times, [0.0, 0.5 / speed, 2.5 / speed]);
+        assert_eq!(clip.channels[2].times, [0.0, 1.5 / speed, 2.5 / speed]);
+        assert_eq!(
+            clip.channels[0].values,
+            ChannelValues::Translation(vec![[1.0, 1.0, 5.0], [4.0, -2.0, 8.0], [2.0, 2.0, 10.0],])
+        );
+        assert_eq!(
+            clip.channels[1].values,
+            ChannelValues::Scale(vec![[2.0, 3.0, 4.0], [3.0, 4.0, 5.0], [5.0, 6.0, 7.0],])
+        );
+        let ChannelValues::Rotation(rotations) = &clip.channels[2].values else {
+            panic!("rotation channel changed type");
+        };
+        assert_eq!(
+            rotations[1].map(f32::to_bits),
+            interior_rotation.map(f32::to_bits)
+        );
+        close_array(
+            rotations[0],
+            [0.0, 0.0, (theta * 0.25).sin(), (theta * 0.25).cos()],
+        );
+        close_array(rotations[2], interior_rotation);
+        assert_generated_payload(&output, &model, 1);
+        for (elapsed, translation, scale, half_angle) in [
+            (0.0, [1.0, 1.0, 5.0], [2.0, 3.0, 4.0], theta * 0.25),
+            (0.5, [2.0, 0.0, 6.0], [3.0, 4.0, 5.0], theta * 0.5),
+            (1.0, [3.0, -1.0, 7.0], [3.5, 4.5, 5.5], theta * 0.75),
+            (1.5, [4.0, -2.0, 8.0], [4.0, 5.0, 6.0], theta),
+            (2.0, [3.0, 0.0, 9.0], [4.5, 5.5, 6.5], theta),
+            (2.5, [2.0, 2.0, 10.0], [5.0, 6.0, 7.0], theta),
+        ] {
+            let time = elapsed / speed;
+            let pose = model.sample_clip(1, time).unwrap();
+            close_array(pose.local()[0].translation, translation);
+            close_array(pose.local()[1].scale, scale);
+            close_array(
+                pose.local()[2].matrix()[0],
+                [(2.0 * half_angle).cos(), (2.0 * half_angle).sin(), 0.0, 0.0],
+            );
+            assert_eq!(pose.local()[3], model.source().nodes[3].rest);
+            close_deformation(&model, 1, time, &original, 0, elapsed + 0.5);
+        }
+    }
+}
+
+#[test]
+fn retimed_step_tracks_preserve_jumps_clamping_single_keys_and_rest_for_every_speed() {
+    let mut fixture = Fixture::new();
+    fixture.track(
+        0,
+        "translation",
+        "STEP",
+        &[1.0, 2.0, 4.0],
+        &[10.0, 0.0, 0.0, 20.0, 0.0, 0.0, 40.0, 0.0, 0.0],
+    );
+    fixture.track(1, "scale", "STEP", &[3.0], &[2.0, 3.0, 4.0]);
+    fixture.track(
+        2,
+        "rotation",
+        "STEP",
+        &[0.0, 2.0, 4.0, 6.0],
+        &[
+            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+    );
+    let bytes = fixture.bytes();
+    let original = import(&bytes);
+    for speed in SPEEDS {
+        let output = extract_glb(&bytes, &speed_options(0.25, 5.0, speed)).unwrap();
+        let model = import(&output);
+        let clip = &model.source().clips[1];
+        assert_eq!(clip.duration(), 4.75 / speed);
+        assert_eq!(
+            clip.channels[0].times,
+            [0.0, 0.75 / speed, 1.75 / speed, 3.75 / speed, 4.75 / speed]
+        );
+        assert_eq!(clip.channels[1].times, [0.0, 2.75 / speed, 4.75 / speed]);
+        assert_eq!(
+            clip.channels[2].times,
+            [0.0, 1.75 / speed, 3.75 / speed, 4.75 / speed]
+        );
+        assert_eq!(
+            clip.channels[0].values,
+            ChannelValues::Translation(vec![
+                [10.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [20.0, 0.0, 0.0],
+                [40.0, 0.0, 0.0],
+                [40.0, 0.0, 0.0],
+            ])
+        );
+        assert_eq!(
+            clip.channels[1].values,
+            ChannelValues::Scale(vec![[2.0, 3.0, 4.0]; 3])
+        );
+        assert_eq!(
+            clip.channels[2].values,
+            ChannelValues::Rotation(vec![
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, -1.0],
+                [0.0, 0.0, 0.0, -1.0],
+            ])
+        );
+        assert!(clip
+            .channels
+            .iter()
+            .all(|channel| channel.interpolation == Interpolation::Step));
+        assert_generated_payload(&output, &model, 1);
+        // The binary fractions straddle each jump without decimal-rounding ambiguity.
+        let edge = 1.0 / 256.0;
+        for source_time in [
+            0.25,
+            0.5,
+            1.0 - edge,
+            1.0,
+            1.5,
+            2.0 - edge,
+            2.0,
+            2.0 + edge,
+            3.0,
+            4.0 - edge,
+            4.0,
+            4.0 + edge,
+            5.0,
+        ] {
+            let time = (source_time - 0.25) / speed;
+            let pose = model.sample_clip(1, time).unwrap();
+            let x = if source_time < 2.0 {
+                10.0
+            } else if source_time < 4.0 {
+                20.0
+            } else {
+                40.0
+            };
+            assert_eq!(pose.local()[0].translation, [x, 0.0, 0.0]);
+            assert_eq!(pose.local()[1].scale, [2.0, 3.0, 4.0]);
+            assert_eq!(pose.local()[3], model.source().nodes[3].rest);
+            close_deformation(&model, 1, time, &original, 0, source_time);
+        }
+        close_pose(
+            &model.sample_clip(1, -1.0).unwrap(),
+            &model.sample_clip(1, 0.0).unwrap(),
+        );
+        close_pose(
+            &model.sample_clip(1, clip.duration() + 1.0).unwrap(),
+            &model.sample_clip(1, clip.duration()).unwrap(),
+        );
+        // Exact source keys at both boundaries occur once, including the end jump.
+        let exact_output = extract_glb(&bytes, &speed_options(1.0, 4.0, speed)).unwrap();
+        let exact = import(&exact_output);
+        let channel = &exact.source().clips[1].channels[0];
+        assert_eq!(channel.times, [0.0, 1.0 / speed, 3.0 / speed]);
+        assert_eq!(
+            channel.values,
+            ChannelValues::Translation(vec![[10.0, 0.0, 0.0], [20.0, 0.0, 0.0], [40.0, 0.0, 0.0],])
+        );
+        assert_eq!(
+            exact.sample_clip(1, 3.0 / speed).unwrap().local()[0].translation,
+            [40.0, 0.0, 0.0]
+        );
+        assert_generated_payload(&exact_output, &exact, 1);
+        assert_eq!(bytes, fixture.bytes());
+    }
+}
+
+#[test]
+fn retimed_demo_preserves_original_content_and_cooks_reloads_for_every_speed() {
+    let original = import(DEMO);
+    for speed in SPEEDS {
+        for clip_index in 0..2 {
+            let mut opts = speed_options(0.25, 0.75, speed);
+            opts.clip_index = clip_index;
+            let bytes = DEMO.to_vec();
+            let output = extract_glb(&bytes, &opts).unwrap();
+            assert_eq!(bytes, DEMO);
+            assert_eq!(extract_glb(&bytes, &opts).unwrap(), output);
+            let model = import(&output);
+            let old = original.source();
+            let new = model.source();
+            assert_eq!(new.clips.len(), old.clips.len() + 1);
+            assert_eq!(&new.clips[..old.clips.len()], old.clips.as_slice());
+            assert_eq!(new.clips[2].name, "extracted");
+            assert_eq!(new.clips[2].duration(), 0.5 / speed);
+            assert_eq!(new.asset_id, old.asset_id);
+            assert_eq!(new.nodes, old.nodes);
+            assert_eq!(new.skins, old.skins);
+            assert_eq!(new.primitives, old.primitives);
+            assert_eq!(new.materials, old.materials);
+            assert_eq!(new.images, old.images);
+            assert_generated_payload(&output, &model, 2);
+            let cooked = model.to_bytes().unwrap();
+            let reloaded = AnimatedModel::from_bytes(&cooked).unwrap();
+            assert_eq!(reloaded.to_bytes().unwrap(), cooked);
+            assert_eq!(reloaded.source(), model.source());
+            for elapsed in [0.0, 0.0625, 0.125, 0.25, 0.375, 0.5] {
+                close_deformation(
+                    &reloaded,
+                    2,
+                    elapsed / speed,
+                    &original,
+                    clip_index,
+                    elapsed + 0.25,
+                );
+            }
+            for old_index in 0..2 {
+                for time in [-1.0, 0.0, 0.5, 1.0, 2.0, 3.0] {
+                    close_deformation(&reloaded, old_index, time, &original, old_index, time);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn retimed_glb_preserves_json_indices_metadata_and_complete_binary_prefix_for_every_speed() {
+    let (mut document, binary) = split_glb(FIXTURE);
+    document["extras"] = json!({"retimed":false,"id":123456789012345u64});
+    document["buffers"][0]["name"] = json!("retained buffer");
+    document["buffers"][0]["extras"] = json!([null, "original metadata"]);
+    document["nodes"][0]["extras"] = json!({"retained":[1,2,3]});
+    document["animations"][0]["extras"] = json!({"author":"original"});
+    document["animations"][0]["samplers"][0]["extras"] = json!({"retained":true});
+    document["accessors"][0]["extras"] = json!({"retained":true});
+    let source = pack_glb(&document, &binary);
+    for speed in SPEEDS {
+        let output = extract_glb(&source, &speed_options(0.25, 1.75, speed)).unwrap();
+        let (generated, generated_binary) = split_glb(&output);
+        assert!(generated_binary.starts_with(&binary));
+        assert!(generated_binary.len() > binary.len());
+        for (key, value) in document.as_object().unwrap() {
+            match key.as_str() {
+                "animations" | "bufferViews" | "accessors" => {
+                    let old = value.as_array().unwrap();
+                    let new = generated[key].as_array().unwrap();
+                    assert_eq!(
+                        &new[..old.len()],
+                        old.as_slice(),
+                        "changed original {key} indices"
+                    );
+                }
+                "buffers" => {
+                    assert_eq!(generated[key].as_array().unwrap().len(), 1);
+                    let mut expected = value[0].clone();
+                    expected["byteLength"] = generated[key][0]["byteLength"].clone();
+                    assert_eq!(generated[key][0], expected);
+                }
+                _ => assert_eq!(&generated[key], value, "changed original {key}"),
+            }
+        }
+        assert_eq!(generated["animations"].as_array().unwrap().len(), 3);
+        assert_eq!(source, pack_glb(&document, &binary));
+        let model = import(&output);
+        assert_eq!(model.source().clips[2].duration(), 1.5 / speed);
+        assert_generated_payload(&output, &model, 2);
+    }
+}
+
+#[test]
+fn retiming_rejects_invalid_rates_without_mutating_source() {
+    let bytes = FIXTURE.to_vec();
+    for speed in [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -4.0,
+        -1.0,
+        -0.0,
+        0.0,
+        0.125,
+        0.75,
+        1.5,
+        3.0,
+        8.0,
+        f32::from_bits(1),
+        f32::MAX,
+        f32::from_bits(1.0f32.to_bits() + 1),
+    ] {
+        assert!(
+            extract_glb(&bytes, &speed_options(0.25, 1.75, speed)).is_err(),
+            "accepted unsupported speed {speed:?}"
+        );
+        assert_eq!(bytes, FIXTURE);
+    }
+}
+
+#[test]
+fn retiming_rejects_overflow_and_duration_underflow_without_mutating_source() {
+    for (end, speed) in [
+        (f32::MAX, 0.25),
+        (f32::MAX, 0.5),
+        (f32::from_bits(1), 2.0),
+        (f32::from_bits(1), 4.0),
+        (f32::from_bits(2), 4.0),
+    ] {
+        let bytes = timing_fixture(&[0.0, end]);
+        let before = bytes.clone();
+        assert_eq!(import(&bytes).source().clips[0].duration(), end);
+        assert!(
+            extract_glb(&bytes, &speed_options(0.0, end, speed)).is_err(),
+            "accepted duration overflow/underflow: {end:?} / {speed}"
+        );
+        assert_eq!(bytes, before);
+    }
+}
+
+#[test]
+fn retiming_rejects_precision_loss_and_collapsed_interior_keys() {
+    // These durations round to a positive subnormal, so a positivity check is insufficient.
+    for (end_bits, speed) in [(3, 2.0), (5, 4.0), (7, 4.0)] {
+        let end = f32::from_bits(end_bits);
+        assert!(end / speed > 0.0);
+        let bytes = timing_fixture(&[0.0, end]);
+        let before = bytes.clone();
+        import(&bytes);
+        assert!(extract_glb(&bytes, &speed_options(0.0, end, speed)).is_err());
+        assert_eq!(bytes, before);
+    }
+    // Duration is exact in every case; only an interior key loses information or collapses.
+    for (bits, speed) in [
+        (vec![0, 1, 8], 2.0),
+        (vec![0, 3, 8], 2.0),
+        (vec![0, 4, 5, 8], 4.0),
+        (vec![0, 7, 8], 4.0),
+    ] {
+        let times: Vec<f32> = bits.into_iter().map(f32::from_bits).collect();
+        let end = *times.last().unwrap();
+        assert_eq!(f64::from(end / speed), f64::from(end) / f64::from(speed));
+        let bytes = timing_fixture(&times);
+        let before = bytes.clone();
+        import(&bytes);
+        assert!(
+            extract_glb(&bytes, &speed_options(0.0, end, speed)).is_err(),
+            "accepted inexact or collapsed interior key at speed {speed}"
+        );
+        assert_eq!(bytes, before);
+    }
+}
+
+#[test]
+fn retiming_preserves_exact_subnormal_times_and_adjacent_interior_keys() {
+    // Exactly representable subnormals are valid input and remain valid at every speed.
+    let times = [0, 4, 8, 12, 16].map(f32::from_bits);
+    let bytes = timing_fixture(&times);
+    let original = import(&bytes);
+    for speed in SPEEDS {
+        let output = extract_glb(&bytes, &speed_options(times[1], times[4], speed)).unwrap();
+        let model = import(&output);
+        let channel = &model.source().clips[1].channels[0];
+        let expected = [0, 4, 8, 12].map(|bits| f32::from_bits(bits) / speed);
+        assert_eq!(
+            channel
+                .times
+                .iter()
+                .map(|time| time.to_bits())
+                .collect::<Vec<_>>(),
+            expected.map(f32::to_bits)
+        );
+        assert_eq!(
+            channel.values,
+            ChannelValues::Translation(vec![
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+            ])
+        );
+        assert_generated_payload(&output, &model, 1);
+        let cooked = model.to_bytes().unwrap();
+        let reloaded = AnimatedModel::from_bytes(&cooked).unwrap();
+        assert_eq!(reloaded.to_bytes().unwrap(), cooked);
+        for (time, source_time) in expected.into_iter().zip(&times[1..]) {
+            close_deformation(&reloaded, 1, time, &original, 0, *source_time);
+        }
+    }
+    let adjacent = [
+        1.0,
+        f32::from_bits(1.0f32.to_bits() + 1),
+        f32::from_bits(1.0f32.to_bits() + 2),
+    ];
+    let bytes = timing_fixture(&adjacent);
+    for speed in SPEEDS {
+        let output = extract_glb(&bytes, &speed_options(adjacent[0], adjacent[2], speed)).unwrap();
+        let model = import(&output);
+        assert_eq!(
+            model.source().clips[1].channels[0].times,
+            [
+                0.0,
+                (adjacent[1] - 1.0) / speed,
+                (adjacent[2] - 1.0) / speed
+            ]
+        );
+        assert_eq!(
+            model.source().clips[1].channels[0].values,
+            ChannelValues::Translation(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+        );
+        assert_generated_payload(&output, &model, 1);
+    }
+    // A huge finite source is not rejected merely for its magnitude when the result is exact.
+    let bytes = timing_fixture(&[0.0, f32::MAX]);
+    let output = extract_glb(&bytes, &speed_options(0.0, f32::MAX, 4.0)).unwrap();
+    let model = import(&output);
+    assert_eq!(model.source().clips[1].duration(), f32::MAX / 4.0);
+    assert_generated_payload(&output, &model, 1);
+}
+
+#[test]
+fn cli_accepts_each_speed_in_every_option_position_and_preserves_source() {
+    let temp = TempDir::new();
+    let input = temp.join("source.glb");
+    fs::write(&input, FIXTURE).unwrap();
+    for (rate_index, (token, speed)) in ["0.25", "0.5", "1", "2", "4"]
+        .into_iter()
+        .zip(SPEEDS)
+        .enumerate()
+    {
+        for pair_index in 0..=6 {
+            let output = temp.join(&format!("speed-{rate_index}-position-{pair_index}.glb"));
+            let mut args = cli_args(&input, &output);
+            args.splice(
+                pair_index * 2..pair_index * 2,
+                [OsString::from("--speed"), OsString::from(token)],
+            );
+            authoring::run(args).unwrap();
+            let generated = fs::read(&output).unwrap();
+            let mut opts = speed_options(0.25, 1.75, speed);
+            opts.name = "authored".into();
+            assert_eq!(generated, extract_glb(FIXTURE, &opts).unwrap());
+            let model = import(&generated);
+            assert_eq!(model.source().clips[2].duration(), 1.5 / speed);
+            assert_generated_payload(&generated, &model, 2);
+            assert_eq!(fs::read(&input).unwrap(), FIXTURE);
+        }
+    }
+    assert_eq!(
+        fs::read_dir(&temp.0).unwrap().count(),
+        36,
+        "unexpected staging files"
+    );
+}
+
+#[test]
+fn cli_speed_one_matches_omitted_speed_and_prior_output_bytes() {
+    let temp = TempDir::new();
+    let input = temp.join("source.glb");
+    let omitted = temp.join("omitted.glb");
+    let explicit = temp.join("explicit.glb");
+    fs::write(&input, DEMO).unwrap();
+    let mut omitted_args = cli_args(&input, &omitted);
+    omitted_args[9] = OsString::from("0.75");
+    omitted_args[11] = OsString::from("short-action");
+    authoring::run(omitted_args.clone()).unwrap();
+    let mut explicit_args = omitted_args;
+    explicit_args[3] = explicit.as_os_str().to_owned();
+    explicit_args.extend([OsString::from("--speed"), OsString::from("1")]);
+    authoring::run(explicit_args).unwrap();
+    let generated = fs::read(&omitted).unwrap();
+    assert_eq!(fs::read(&explicit).unwrap(), generated);
+    // Independently retained pre-retiming CLI output: clip 0, 0.25..0.75, short-action.
+    // This immutable digest predates the speed implementation; never regenerate it from the helper.
+    let digest: String = Sha256::digest(&generated)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(generated.len(), 4292);
+    assert_eq!(
+        digest,
+        "fb9f3e53c02e69bd46798b7af2d92e712137fb9a091f92eecfefa83a01a9ac57"
+    );
+    assert_eq!(fs::read(&input).unwrap(), DEMO);
+    assert_eq!(import(&generated).source().clips[2].duration(), 0.5);
+    assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 3);
+}
+
+#[test]
+fn cli_rejects_invalid_speed_tokens_duplicate_odd_extra_and_missing_options() {
+    let temp = TempDir::new();
+    let input = temp.join("source.glb");
+    let output = temp.join("clip.glb");
+    fs::write(&input, FIXTURE).unwrap();
+    let good = cli_args(&input, &output);
+    let mut cases = Vec::new();
+    for token in [
+        "0", "-0", "-1", "0.125", "0.75", "1.5", "3", "8", "NaN", "nan", "inf", "-inf", "Infinity",
+        "+1", "1.0", "01", "1e0", "2.0", "4.0", "0.50", ".5", "0.250", " 1", "1 ", "", "--name",
+    ] {
+        let mut args = good.clone();
+        args.extend([OsString::from("--speed"), OsString::from(token)]);
+        cases.push(args);
+    }
+    let mut with_speed = good.clone();
+    with_speed.extend([OsString::from("--speed"), OsString::from("2")]);
+    for index in (0..good.len()).step_by(2) {
+        let mut missing = with_speed.clone();
+        missing.drain(index..index + 2);
+        cases.push(missing);
+        let mut duplicate = with_speed.clone();
+        duplicate.extend_from_slice(&good[index..index + 2]);
+        cases.push(duplicate);
+        let mut replaced = with_speed.clone();
+        replaced[index] = OsString::from("--speed");
+        replaced[index + 1] = OsString::from("2");
+        cases.push(replaced);
+    }
+    for extra in [
+        vec!["--speed"],
+        vec!["--speed", "4"],
+        vec!["--unknown", "value"],
+        vec!["positional"],
+        vec!["extra", "value"],
+    ] {
+        let mut args = with_speed.clone();
+        args.extend(extra.into_iter().map(OsString::from));
+        cases.push(args);
+    }
+    let mut dangling = good.clone();
+    dangling.push(OsString::from("--speed"));
+    cases.push(dangling);
+    let mut absent_value = with_speed.clone();
+    absent_value.remove(13);
+    cases.push(absent_value);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut args = with_speed.clone();
+        args[13] = OsString::from_vec(vec![0xff]);
+        cases.push(args);
+    }
+    for args in cases {
+        assert!(authoring::run(args).is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), FIXTURE);
+        assert_eq!(
+            fs::read_dir(&temp.0).unwrap().count(),
+            1,
+            "failed CLI left staging files"
+        );
+    }
+}
+
+#[test]
+fn cli_retiming_failures_preserve_existing_targets_sources_and_leave_no_staging_files() {
+    for (times, speed) in [
+        (vec![0.0, f32::MAX], "0.25"),
+        (vec![0.0, f32::from_bits(1)], "2"),
+        (vec![0.0, f32::from_bits(3)], "2"),
+        (vec![0.0, f32::from_bits(3), f32::from_bits(8)], "2"),
+        (
+            vec![0.0, f32::from_bits(4), f32::from_bits(5), f32::from_bits(8)],
+            "4",
+        ),
+    ] {
+        let temp = TempDir::new();
+        let input = temp.join("source.glb");
+        let output = temp.join("clip.glb");
+        let existing = temp.join("existing.glb");
+        let bytes = timing_fixture(&times);
+        import(&bytes);
+        fs::write(&input, &bytes).unwrap();
+        fs::write(&existing, b"keep existing unrelated file").unwrap();
+        let mut args = cli_args(&input, &output);
+        args[7] = OsString::from("0");
+        args[9] = OsString::from(format!("{:e}", times.last().unwrap()));
+        args.extend([OsString::from("--speed"), OsString::from(speed)]);
+        assert!(authoring::run(args.clone()).is_err());
+        assert!(!output.exists());
+        args[3] = existing.as_os_str().to_owned();
+        assert!(authoring::run(args.clone()).is_err());
+        args[3] = input.as_os_str().to_owned();
+        assert!(authoring::run(args).is_err());
+        assert_eq!(fs::read(&input).unwrap(), bytes);
+        assert_eq!(
+            fs::read(&existing).unwrap(),
+            b"keep existing unrelated file"
+        );
+        assert_eq!(
+            fs::read_dir(&temp.0).unwrap().count(),
+            2,
+            "failed retiming left staging files"
+        );
+    }
+    // Successful retiming still never replaces a source, prior result, or unrelated target.
+    for speed in ["0.25", "0.5", "1", "2", "4"] {
+        let temp = TempDir::new();
+        let input = temp.join("source.glb");
+        let output = temp.join("clip.glb");
+        let existing = temp.join("existing.glb");
+        fs::write(&input, FIXTURE).unwrap();
+        fs::write(&existing, b"keep existing unrelated file").unwrap();
+        let mut args = cli_args(&input, &output);
+        args.extend([OsString::from("--speed"), OsString::from(speed)]);
+        authoring::run(args.clone()).unwrap();
+        let generated = fs::read(&output).unwrap();
+        assert!(authoring::run(args.clone()).is_err());
+        args[3] = input.as_os_str().to_owned();
+        assert!(authoring::run(args.clone()).is_err());
+        args[3] = existing.as_os_str().to_owned();
+        assert!(authoring::run(args).is_err());
+        assert_eq!(fs::read(&input).unwrap(), FIXTURE);
+        assert_eq!(fs::read(&output).unwrap(), generated);
+        assert_eq!(
+            fs::read(&existing).unwrap(),
+            b"keep existing unrelated file"
+        );
+        assert_eq!(
+            fs::read_dir(&temp.0).unwrap().count(),
+            3,
+            "publication left staging files"
+        );
+    }
 }

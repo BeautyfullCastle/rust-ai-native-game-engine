@@ -365,7 +365,19 @@ jobs:
           cli_rejects_unsafe_output_names_directories_and_package_store_paths
           cli_rejects_oversized_sparse_input_before_reading_or_creating_output
           cli_rejects_symlink_sources_targets_and_ancestors_including_dangling_targets
-          near_parallel_nonunit_quaternions_use_runtime_normalization_and_interpolation'''.splitlines()
+          near_parallel_nonunit_quaternions_use_runtime_normalization_and_interpolation
+          retimed_linear_tracks_have_analytic_values_and_exact_generated_keys_for_every_speed
+          retimed_step_tracks_preserve_jumps_clamping_single_keys_and_rest_for_every_speed
+          retimed_demo_preserves_original_content_and_cooks_reloads_for_every_speed
+          retimed_glb_preserves_json_indices_metadata_and_complete_binary_prefix_for_every_speed
+          retiming_rejects_invalid_rates_without_mutating_source
+          retiming_rejects_overflow_and_duration_underflow_without_mutating_source
+          retiming_rejects_precision_loss_and_collapsed_interior_keys
+          retiming_preserves_exact_subnormal_times_and_adjacent_interior_keys
+          cli_accepts_each_speed_in_every_option_position_and_preserves_source
+          cli_speed_one_matches_omitted_speed_and_prior_output_bytes
+          cli_rejects_invalid_speed_tokens_duplicate_odd_extra_and_missing_options
+          cli_retiming_failures_preserve_existing_targets_sources_and_leave_no_staging_files'''.splitlines()
           if os.name == 'nt':
               expected.remove('cli_rejects_symlink_sources_targets_and_ancestors_including_dangling_targets')
           base = ['--locked', '--release', '-p', 'orr_model']
@@ -1011,7 +1023,19 @@ jobs:
                   for variant in ['original-source-time', 'trimmed-rebased-time', 'preserved-original-clip', 'wrong-unrebased-time']:
                       expected.update(f'sample-{index}-{variant}.{extension}' for extension in ['rgba', 'ppm'])
               expected.update(['empty-draw-clear.rgba', 'empty-draw-clear.ppm'])
-              assert len(expected) == 53 and {path.name for path in captures.iterdir()} == expected
+              assert len(expected) == 53  # Preserve every existing unretimed capture.
+              retiming_cases = [('half-speed', 0.5), ('double-speed', 2.0)]
+              for label, speed in retiming_cases:
+                  prefix = f'retimed-{label}'
+                  added = {f'{prefix}.glb', f'{prefix}.glb.cooked.json', f'{prefix}.json',
+                           f'{prefix}-wrong-rate-control.rgba', f'{prefix}-wrong-rate-control.ppm'}
+                  for index in range(5):
+                      added.add(f'{prefix}-sample-{index}.json')
+                      for variant in ['original-source-time', 'retimed-mapped-time', 'preserved-original-clip']:
+                          added.update(f'{prefix}-sample-{index}-{variant}.{extension}' for extension in ['rgba', 'ppm'])
+                  assert len(added) == 40 and expected.isdisjoint(added)
+                  expected.update(added)
+              assert len(expected) == 133 and {path.name for path in captures.iterdir()} == expected
               for path in captures.iterdir():
                   assert path.is_file() and not path.is_symlink()
                   if path.suffix == '.rgba': assert path.stat().st_size == 147456
@@ -1024,6 +1048,27 @@ jobs:
               assert accepted['source_hidden_after_install'] is True and accepted['cooked_reload_before_render'] is True
               assert adapter == accepted['adapter'] and adapter['backend'] == 'Vulkan' and adapter['software'] is True
               assert len(accepted['samples']) == 5
+              assert accepted['schema_version'] == 1
+              assert [(entry['label'], entry['speed']) for entry in accepted['retiming']] == retiming_cases
+              for entry, (label, speed) in zip(accepted['retiming'], retiming_cases):
+                  prefix = f'retimed-{label}'
+                  assert entry == json.loads((captures / f'{prefix}.json').read_text())
+                  assert entry['status'] == 'passed' and entry['source_clip'] == 0 and entry['extracted_clip'] == 2
+                  assert entry['start'] == 0.25 and entry['end'] == 1.5 and entry['duration'] == 1.25 / speed
+                  assert entry['key_times'] == [0.0, 0.75 / speed, 1.25 / speed]
+                  assert entry['source_hidden_after_install'] is True and entry['cooked_reload_before_render'] is True
+                  assert len(entry['samples']) == 5
+                  for index, (sample, offset) in enumerate(zip(entry['samples'], [0.0, 0.25, 0.75, 1.0, 1.25])):
+                      assert sample == json.loads((captures / f'{prefix}-sample-{index}.json').read_text())
+                      assert sample['local_time'] == offset / speed and sample['source_time'] == 0.25 + offset
+                      assert 0 <= sample['equivalent_pixel_differences'] <= 32
+                      assert sample['preserved_pixel_differences'] == 0
+                      if index == 0: assert sample['temporal_pixel_differences'] is None
+                      else: assert sample['temporal_pixel_differences'] > 100
+                  control = entry['wrong_rate_control']
+                  assert control['sample_index'] == 1 and control['local_time'] == 0.25 / speed
+                  assert control['correct_source_time'] == 0.5 and control['wrong_source_time'] == 0.25 + 0.25 / speed
+                  assert control['pixel_differences'] > 100
               assert digest(pathlib.Path(test_binary)) == report['device-test-executable']['sha256']
               report['capture_sha256'] = {path.name: {'sha256': digest(path), 'bytes': path.stat().st_size} for path in sorted(captures.iterdir())}
               report['status'] = 'passed'

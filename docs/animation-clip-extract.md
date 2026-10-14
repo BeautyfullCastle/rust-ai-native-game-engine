@@ -2,8 +2,9 @@
 
 This optional offline authoring tool appends one named subclip to an existing,
 self-contained GLB. Use it when an imported take contains several actions, or
-when only a shorter interval should loop. The output is a normal GLB accepted
-by the existing animation importer. No new runtime format or public runtime API
+when a shorter interval should loop or play faster/slower. The output is a
+normal GLB accepted by the existing animation importer. No new runtime format or
+public runtime API
 is introduced. This is a bounded part of #100, not a complete animation editor.
 
 ```sh
@@ -14,8 +15,13 @@ cargo run --locked --release -p orr_model --features animation,import \
   --output /existing/trusted/directory/short-action.glb
 ```
 
-The six options are required and may appear in any order. `--help` is supported
-alone. Without both Cargo features, the example exits with a clear error. Time
+The six options are required and may appear in any order. Optional
+`--speed 0.25|0.5|1|2|4` also may appear anywhere among them; the exact listed
+spellings are accepted. It defaults to `1`. A speed of `2` makes the appended
+clip twice as fast, while `0.5` makes it half as fast. For example, add
+`--speed 0.5` to produce a one-second clip from the half-second interval above.
+`--help` is supported alone. Without both Cargo features, the example exits with
+a clear error. Time
 is in seconds, parsed as finite `f32`; the range must satisfy
 `0 <= start < end <= selected clip duration`. Clip selection uses its zero-based
 index, avoiding ambiguous original names. The new name must be nonblank, at most
@@ -24,10 +30,11 @@ index, avoiding ambiguous original names. The new name must be nonblank, at most
 ## Authored result
 
 - All original animation indices and animation JSON are preserved. Exactly one
-  new clip is appended. It begins at time zero and ends at `end - start`
+  new clip is appended. It begins at time zero and ends at `(end - start) / speed`
 - Original interior keys strictly within the selected interval are retained with
-  rebased times. Sampled start/end keys preserve the existing per-channel clamp
-  behavior, including late-starting, early-ending and single-key channels
+  times `(original time - start) / speed`. Sampled start/end values preserve the
+  existing per-channel clamp behavior, including late-starting, early-ending
+  and single-key channels
 - Translation/scale use the existing LINEAR or STEP semantics. Quaternion tracks
   use the existing normalized shortest-arc interpolation. Floating-point
   subdivision can introduce rounding differences; this is not bit-identical pose
@@ -41,6 +48,10 @@ index, avoiding ambiguous original names. The new name must be nonblank, at most
 - Existing JSON metadata, including supported `extras`, is preserved as JSON
   values. Whitespace and object-key order are reserialized; the output is not a
   byte-for-byte source copy. Source files are never changed
+- Omitting `--speed` and explicitly choosing `1` produce identical output bytes
+  to the original extraction behavior. The five positive powers-of-two speeds
+  change only newly authored times and their accessor bounds; sampled values,
+  interpolation and all original clips retain their existing meaning
 
 Only GLB 2 with exactly one JSON chunk followed by one embedded BIN chunk is
 accepted. There must be one buffer with no URI. Images, when present, must use
@@ -55,7 +66,15 @@ any output file is published. Existing source limits remain: 64 MiB file,
 4 MiB GLB JSON, 32 clips, 256 channels per clip, 262,144 aggregate animation keys,
 16 MiB animation data and 1,024 accessor/buffer-view entries. The tool checks
 original plus appended counts, including unused original samplers, before
-allocating generated keys. Non-increasing rebased keys are rejected.
+allocating generated keys. Non-increasing rebased keys are rejected. Retimed
+duration must remain finite and positive. Rebasing retains the original `f32`
+subtraction and its rounding; dividing each resulting rebased `f32` time by the
+chosen speed must then be exactly representable as `f32`. Overflow, underflow
+and rounded subnormal times introduced by that division are
+rejected before output publication, even when rounding would still leave two
+distinct positive times. Exactly representable subnormal times retain the
+existing importer/sampler contract. Negative speed/reverse playback, arbitrary
+rates and time-warp curves are outside this tool.
 
 ## Filesystem and publication contract
 
@@ -88,12 +107,13 @@ Author a new animation package or immutable higher version containing the new
 GLB using the existing package workflow. Install it explicitly, load the model
 with the existing animation-capable editor and select the appended clip index.
 The tool does not install a package, mutate its lock, update an existing scene or
-expand the Room character workflow. Existing consumers compute the output's own
-source/resource digests on import; hashes from the old input are not reused.
+expand the Room character workflow. These are authored asset speeds, independent
+of per-state runtime playback settings. Existing consumers compute the output's
+own source/resource digests on import; hashes from the old input are not reused.
 
 Focused tests exercise independent GLB fixtures, original-clip/non-animation
-preservation, analytic clip cuts, import/cook/reload/deformation and CLI failure
-preservation. Local CPU proof does not establish actual editor, rendered output,
+preservation, analytic clip cuts/retiming, import/cook/reload/deformation and CLI
+failure preservation. Local CPU proof does not establish actual editor, rendered output,
 source-hidden export, native-window or physical-GPU acceptance. Mandatory hosted
 consumer/device checks and independent review remain separate gates.
 

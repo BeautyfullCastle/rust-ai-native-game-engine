@@ -1,4 +1,5 @@
-//! Mandatory CLI file IO -> installed package -> cook/reload -> GPU acceptance.
+//! Mandatory CLI file IO -> installed package -> cook/reload -> GPU acceptance,
+//! including half/double-speed extraction against independently mapped source time.
 //!
 //! Run this target with BOTH animation,imported-scene and an explicit, fresh
 //! ORR_CLIP_EXTRACT_CAPTURE_DIR. Missing adapters or captures are failures, never
@@ -176,12 +177,16 @@ fn assert_preserved(original: &[u8], extracted: &[u8]) {
 }
 
 fn installed(scratch: &Scratch) -> (Project, Vec<u8>) {
+    installed_with_speed(scratch, "trimmed.glb", None)
+}
+
+fn installed_with_speed(scratch: &Scratch, asset: &str, speed: Option<&str>) -> (Project, Vec<u8>) {
     let source = scratch.0.join("source");
     fs::create_dir(&source).unwrap();
     let input = source.join("original.glb");
-    let output = source.join("trimmed.glb");
+    let output = source.join(asset);
     fs::write(&input, ORIGINAL).unwrap();
-    authoring::run([
+    let mut arguments = vec![
         OsString::from("--input"),
         input.into_os_string(),
         OsString::from("--output"),
@@ -194,8 +199,11 @@ fn installed(scratch: &Scratch) -> (Project, Vec<u8>) {
         OsString::from("1.5"),
         OsString::from("--name"),
         OsString::from(CLIP_NAME),
-    ])
-    .expect("the same run() used by the CLI must publish a new GLB");
+    ];
+    if let Some(speed) = speed {
+        arguments.extend([OsString::from("--speed"), OsString::from(speed)]);
+    }
+    authoring::run(arguments).expect("the same run() used by the CLI must publish a new GLB");
     assert_eq!(fs::read(source.join("original.glb")).unwrap(), ORIGINAL);
     let authored = fs::read(output).unwrap();
     assert_preserved(ORIGINAL, &authored);
@@ -204,7 +212,7 @@ fn installed(scratch: &Scratch) -> (Project, Vec<u8>) {
         serde_json::to_vec(&json!({
             "schema":1,"name":"clip-extract-acceptance","version":"1.0.0",
             "engine":"^0.0.1","capabilities":["animation"],"dependencies":{},
-            "files":["original.glb","trimmed.glb"]
+            "files":["original.glb",asset]
         }))
         .unwrap(),
     )
@@ -229,7 +237,7 @@ fn installed(scratch: &Scratch) -> (Project, Vec<u8>) {
     );
     assert_eq!(
         project
-            .read_asset("clip-extract-acceptance", "trimmed.glb")
+            .read_asset("clip-extract-acceptance", asset)
             .unwrap(),
         authored
     );
@@ -557,6 +565,147 @@ fn cli_extract_installed_cooked_clip_matches_source_time_gpu_and_analytic_oracle
         );
         samples.push(sample);
     }
+
+    let mut retiming = Vec::new();
+    for (label, speed_argument, speed) in
+        [("half-speed", "0.5", 0.5_f32), ("double-speed", "2", 2.0)]
+    {
+        let retimed_scratch = Scratch::new();
+        let asset = format!("retimed-{label}.glb");
+        let (retimed_project, retimed_authored) =
+            installed_with_speed(&retimed_scratch, &asset, Some(speed_argument));
+        let authored_record = captures.write(&asset, &retimed_authored);
+        let (retimed, retimed_cooked) = cook_reload(&retimed_project, &asset, &captures);
+        let retimed_source = retimed.source();
+        assert_eq!(retimed_source.clips.len(), old.clips.len() + 1);
+        assert_eq!(&retimed_source.clips[..old.clips.len()], &old.clips);
+        assert_eq!(retimed_source.nodes, old.nodes);
+        assert_eq!(retimed_source.skins, old.skins);
+        assert_eq!(retimed_source.primitives, old.primitives);
+        assert_eq!(retimed_source.materials, old.materials);
+        assert_eq!(retimed_source.images, old.images);
+        let clip = &retimed_source.clips[extracted_index as usize];
+        assert_eq!(clip.name, CLIP_NAME);
+        assert_eq!(clip.duration(), (END - START) / speed);
+        assert_eq!(clip.channels.len(), 1);
+        assert_eq!(clip.channels[0].times, [0.0, 0.75 / speed, 1.25 / speed]);
+        let mut retimed_renderer =
+            SkinnedModelRenderer::new(g.clone(), format, retimed.clone()).unwrap();
+        retimed_renderer.clear = source_renderer.clear;
+        let mut retimed_samples = Vec::new();
+        let mut previous: Option<Vec<u8>> = None;
+        let mut wrong_rate_control = None;
+        for (index, source_offset) in LOCAL_TIMES.into_iter().enumerate() {
+            // All constants are dyadic, so both directions of this mapping
+            // are exact f32 operations. No production retiming helper is used.
+            let source_time = START + source_offset;
+            let local_time = source_offset / speed;
+            assert_eq!(START + local_time * speed, source_time);
+            let source_pose = original.sample_clip(0, source_time).unwrap();
+            let retimed_pose = retimed.sample_clip(extracted_index, local_time).unwrap();
+            let preserved_pose = retimed.sample_clip(0, source_time).unwrap();
+            assert_pose(&original, &source_pose, source_time);
+            assert_pose(&retimed, &retimed_pose, source_time);
+            assert_pose(&retimed, &preserved_pose, source_time);
+            let source_pixels = render(&g, &mut source_renderer, &source_pose, &target, &view);
+            let retimed_pixels = render(&g, &mut retimed_renderer, &retimed_pose, &target, &view);
+            let preserved_pixels =
+                render(&g, &mut retimed_renderer, &preserved_pose, &target, &view);
+            let images = json!({
+                "source":captures.frame(&format!("retimed-{label}-sample-{index}-original-source-time"), &source_pixels),
+                "retimed":captures.frame(&format!("retimed-{label}-sample-{index}-retimed-mapped-time"), &retimed_pixels),
+                "preserved":captures.frame(&format!("retimed-{label}-sample-{index}-preserved-original-clip"), &preserved_pixels)
+            });
+            // Forgetting the speed factor gives t=.75 for half speed and
+            // t=.375 for double speed, rather than the correct source t=.5.
+            // These interior dyadic times avoid clamping and the fixture's
+            // symmetric poses either side of t=1, so both controls must move.
+            if index == 1 {
+                let wrong_source_time = START + local_time;
+                assert!(wrong_source_time > START && wrong_source_time < END);
+                assert_ne!(wrong_source_time, source_time);
+                let wrong_pose = original.sample_clip(0, wrong_source_time).unwrap();
+                assert_pose(&original, &wrong_pose, wrong_source_time);
+                let wrong_pixels = render(&g, &mut source_renderer, &wrong_pose, &target, &view);
+                let image = captures.frame(
+                    &format!("retimed-{label}-wrong-rate-control"),
+                    &wrong_pixels,
+                );
+                let coverage = assert_pixels(&wrong_pixels, wrong_source_time);
+                let differences = differing_pixels(&retimed_pixels, &wrong_pixels);
+                assert!(
+                    differences > MIN_CHANGED_PIXELS,
+                    "{label} wrong-rate control must differ visibly: {differences}"
+                );
+                wrong_rate_control = Some(json!({
+                    "sample_index":index,"local_time":local_time,
+                    "correct_source_time":source_time,"wrong_source_time":wrong_source_time,
+                    "image":image,"coverage":coverage,"pixel_differences":differences
+                }));
+            }
+            let source_coverage = assert_pixels(&source_pixels, source_time);
+            let retimed_coverage = assert_pixels(&retimed_pixels, source_time);
+            let preserved_coverage = assert_pixels(&preserved_pixels, source_time);
+            let equivalent_differences = differing_pixels(&source_pixels, &retimed_pixels);
+            let preserved_differences = differing_pixels(&source_pixels, &preserved_pixels);
+            assert!(equivalent_differences <= MAX_BOUNDARY_PIXELS,
+                "{label} source t={source_time}/retimed t={local_time}: {equivalent_differences} pixel differences");
+            assert!(
+                source_pixels == preserved_pixels,
+                "{label} retained original clip must render byte-identically"
+            );
+            let temporal_differences = previous
+                .as_ref()
+                .map(|p| differing_pixels(p, &retimed_pixels));
+            if let Some(changed) = temporal_differences {
+                assert!(
+                    changed > MIN_CHANGED_PIXELS,
+                    "{label} retimed clip must visibly animate: {changed}"
+                );
+            }
+            previous = Some(retimed_pixels);
+            let sample = json!({
+                "local_time":local_time,"source_time":source_time,"images":images,
+                "source_coverage":source_coverage,"retimed_coverage":retimed_coverage,
+                "preserved_coverage":preserved_coverage,
+                "equivalent_pixel_differences":equivalent_differences,
+                "preserved_pixel_differences":preserved_differences,
+                "temporal_pixel_differences":temporal_differences
+            });
+            captures.write(
+                &format!("retimed-{label}-sample-{index}.json"),
+                &serde_json::to_vec_pretty(&sample).unwrap(),
+            );
+            retimed_samples.push(sample);
+        }
+        retimed_project.verify().unwrap();
+        assert_eq!(
+            retimed_project
+                .read_asset("clip-extract-acceptance", "original.glb")
+                .unwrap(),
+            ORIGINAL
+        );
+        assert_eq!(
+            retimed_project
+                .read_asset("clip-extract-acceptance", &asset)
+                .unwrap(),
+            retimed_authored
+        );
+        let retimed_report = json!({
+            "status":"passed","label":label,"speed":speed,
+            "source_clip":0,"extracted_clip":extracted_index,"start":START,"end":END,
+            "duration":clip.duration(),"key_times":clip.channels[0].times,
+            "authored":authored_record,"cooked":retimed_cooked,"samples":retimed_samples,
+            "wrong_rate_control":wrong_rate_control.expect("both speeds require a wrong-rate control"),
+            "source_hidden_after_install":true,"cooked_reload_before_render":true
+        });
+        captures.write(
+            &format!("retimed-{label}.json"),
+            &serde_json::to_vec_pretty(&retimed_report).unwrap(),
+        );
+        retiming.push(retimed_report);
+    }
+
     // A fresh empty draw must clear the previously rendered mesh; stale contents
     // cannot satisfy any nonblank or movement assertion above.
     extracted_renderer
@@ -589,7 +738,7 @@ fn cli_extract_installed_cooked_clip_matches_source_time_gpu_and_analytic_oracle
         "original_cooked":original_cooked,"trimmed_cooked":trimmed_cooked,
         "position_tolerance":POSITION_EPSILON,"color_byte_tolerance":COLOR_EPSILON,
         "max_boundary_pixels":MAX_BOUNDARY_PIXELS,"min_changed_pixels_exclusive":MIN_CHANGED_PIXELS,
-        "samples":samples,"empty_draw":clear_record,
+        "samples":samples,"retiming":retiming,"empty_draw":clear_record,
         "source_hidden_after_install":true,"cooked_reload_before_render":true
     });
     captures.write(
