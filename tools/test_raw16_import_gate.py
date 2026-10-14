@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """CPU-only negative controls for the RAW16 acceptance gate. No Cargo or GPU."""
+import errno
 import json
 import os
 from pathlib import Path
+import signal
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -372,7 +375,152 @@ class Raw16GateTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     gate.bounded_run(command("print('x'*1000)"), root, os.environ.copy(), path, 10, disk_floor=0)
                 self.assertLessEqual(path.stat().st_size, 64)
-                self.assertEqual(json.loads(path.with_suffix('.json').read_text())['stop_reason'], 'log cap')
+                receipt = json.loads(path.with_suffix('.json').read_text())
+                self.assertEqual(receipt['stop_reason'], 'log cap')
+                self.assertTrue(receipt['owned_children_reaped'])
+                self.assertIsNotNone(receipt['exit'])
+            self._posix_cleanup_controls(root)
+            if os.name != 'nt':
+                self._real_posix_permission_cleanup(root)
+                self._exited_leader_cleanup(root)
+
+    def _posix_cleanup_controls(self, root):
+        # Deterministic Darwin syscall outcomes, also run on other platforms.
+        # No real PIDs are signalled by these controls.
+        denied = PermissionError(1, 'Operation not permitted')
+        missing = ProcessLookupError(3, 'No such process')
+        sigkill = getattr(signal, 'SIGKILL', 9)
+        cases = [
+            ('zombie-only', 'darwin', denied, missing, None, False, True),
+            ('live-group', 'darwin', denied, None, None, False, False),
+            ('denied-group', 'darwin', denied, denied, None, False, False),
+            ('probe-error', 'darwin', denied, OSError(5, 'probe failed'), None, False, False),
+            ('wait-timeout', 'darwin', denied, missing,
+             subprocess.TimeoutExpired(['fixture'], 10), False, False),
+            ('other-platform-denial', 'linux', denied, missing, None, False, False),
+            ('other-permission-error', 'darwin', PermissionError(errno.EACCES, 'Permission denied'),
+             missing, None, False, False),
+            ('signal-error', 'darwin', OSError(5, 'signal failed'), missing, None, False, False),
+            ('missing-group', 'darwin', missing, missing, None, False, True),
+            ('reader-live', 'darwin', None, missing, None, True, False),
+        ]
+        for label, platform, signal_error, probe_error, wait_error, reader_live, complete in cases:
+            with self.subTest(cleanup=label):
+                path = root / (label + '.log'); calls = []
+                process = mock.Mock(pid=12345, returncode=None, stdin=None)
+                def wait(timeout):
+                    calls.append(('wait', timeout))
+                    if wait_error is not None: raise wait_error
+                    process.returncode = 0
+                    return 0
+                process.wait.side_effect = wait
+                def killpg(pid, sig):
+                    calls.append(('killpg', pid, sig))
+                    error = signal_error if sig == sigkill else probe_error
+                    if error is not None: raise error
+                reader = mock.Mock()
+                reader.is_alive.return_value = reader_live
+                reader.join.side_effect = lambda timeout: calls.append(('join', timeout))
+                events = mock.Mock()
+                events.get.return_value = b'x' * 1000
+                stopped = gate.threading.Event()
+                with mock.patch.object(gate.os, 'name', 'posix'), \
+                     mock.patch.object(gate.sys, 'platform', platform), \
+                     mock.patch.object(gate.signal, 'SIGKILL', sigkill, create=True), \
+                     mock.patch.object(gate.os, 'killpg', side_effect=killpg, create=True), \
+                     mock.patch.object(gate.subprocess, 'Popen', return_value=process) as popen, \
+                     mock.patch.object(gate.threading, 'Thread', return_value=reader), \
+                     mock.patch.object(gate.threading, 'Event', return_value=stopped), \
+                     mock.patch.object(gate.queue, 'Queue', return_value=events), \
+                     mock.patch.object(gate, 'LOG_CAP', 64):
+                    with self.assertRaises(AssertionError):
+                        gate.bounded_run(['fixture'], root, {}, path, 10, disk_floor=0)
+                receipt = json.loads(path.with_suffix('.json').read_text())
+                self.assertEqual(path.stat().st_size, 64)
+                self.assertEqual(receipt['owned_children_reaped'], complete)
+                self.assertEqual(popen.call_args.kwargs['start_new_session'], True)
+                self.assertEqual(calls[:2], [('killpg', process.pid, sigkill), ('wait', 10)])
+                self.assertEqual(calls[-1], ('join', 10))
+                reader.start.assert_called_once_with()
+                self.assertTrue(stopped.is_set())
+                signals = [call for call in calls if call[0] == 'killpg']
+                self.assertEqual([call for call in signals if call[2] != 0],
+                                 [('killpg', process.pid, sigkill)])
+                if complete:
+                    self.assertEqual(receipt['stop_reason'], 'log cap')
+                else:
+                    self.assertIn('cleanup:', receipt['stop_reason'])
+                if isinstance(signal_error, PermissionError):
+                    proof = receipt['posix_group_cleanup']
+                    self.assertEqual(proof['signal_error'], repr(signal_error))
+                    self.assertEqual(proof['child_reaped'], wait_error is None)
+                    self.assertEqual(proof['group_absent_after_reap'], label == 'zombie-only')
+                    if not complete: self.assertIn(repr(signal_error), receipt['stop_reason'])
+                    should_probe = platform == 'darwin' and signal_error.errno == errno.EPERM and wait_error is None
+                    self.assertEqual(signals[1:], [('killpg', process.pid, 0)] if should_probe else [])
+                    if should_probe and probe_error is not None and probe_error is not missing:
+                        self.assertEqual(proof['probe_error'], repr(probe_error))
+                else:
+                    self.assertNotIn('posix_group_cleanup', receipt)
+
+    def _real_posix_permission_cleanup(self, root):
+        # Inject Darwin's signal error around a real child and real absence probe.
+        path = root / 'real-zombie.log'; children = []; signals = []
+        real_popen, real_killpg = subprocess.Popen, os.killpg
+        def launch(*args, **kwargs):
+            process = real_popen(*args, **kwargs); children.append(process); return process
+        def killpg(pid, sig):
+            self.assertEqual(pid, children[0].pid)
+            signals.append(sig)
+            if sig == signal.SIGKILL: raise PermissionError(1, 'Operation not permitted')
+            self.assertEqual(sig, 0)
+            self.assertIsNotNone(children[0].returncode)
+            return real_killpg(pid, sig)
+        with mock.patch.object(gate.subprocess, 'Popen', side_effect=launch), \
+             mock.patch.object(gate.os, 'killpg', side_effect=killpg), \
+             mock.patch.object(gate.sys, 'platform', 'darwin'), \
+             mock.patch.object(gate, 'LOG_CAP', 64):
+            with self.assertRaises(AssertionError):
+                gate.bounded_run([sys.executable, '-c', "print('x'*1000)"],
+                                 root, os.environ.copy(), path, 10, disk_floor=0)
+        receipt = json.loads(path.with_suffix('.json').read_text())
+        self.assertEqual(signals, [signal.SIGKILL, 0])
+        self.assertEqual(receipt['stop_reason'], 'log cap')
+        self.assertEqual(receipt['exit'], 0)
+        self.assertTrue(receipt['owned_children_reaped'])
+        self.assertEqual(receipt['posix_group_cleanup'], {
+            'signal_error': repr(PermissionError(1, 'Operation not permitted')),
+            'child_reaped': True, 'group_absent_after_reap': True})
+        self.assertTrue(children[0].stdout.closed)
+
+    def _exited_leader_cleanup(self, root):
+        # The child emits excess output only after its group leader exits.
+        # It holds stdout until killed, or records failure before a bounded exit.
+        path = root / 'descendant.log'
+        survived = root / 'descendant-survived'
+        child_code = ('import os,sys,time\nfrom pathlib import Path\n'
+                      'while os.getppid() == int(sys.argv[1]): time.sleep(.01)\n'
+                      'print("x"*1000,flush=True)\ntime.sleep(5)\n'
+                      'Path(sys.argv[2]).write_text("group cleanup missed live child")\n')
+        code = ('import os,subprocess,sys; '
+                'subprocess.Popen([sys.executable,"-c",sys.argv[1],str(os.getpid()),sys.argv[2]]); '
+                'os._exit(0)')
+        children = []
+        real_popen = subprocess.Popen
+        def launch(*args, **kwargs):
+            process = real_popen(*args, **kwargs); children.append(process); return process
+        with mock.patch.object(gate.subprocess, 'Popen', side_effect=launch), \
+             mock.patch.object(gate, 'LOG_CAP', 64):
+            with self.assertRaises(AssertionError):
+                gate.bounded_run([sys.executable, '-c', code, child_code, str(survived)],
+                                 root, os.environ.copy(), path, 10, disk_floor=0)
+        receipt = json.loads(path.with_suffix('.json').read_text())
+        self.assertEqual(receipt['stop_reason'], 'log cap')
+        self.assertEqual(receipt['exit'], 0)
+        self.assertTrue(receipt['owned_children_reaped'])
+        self.assertTrue(children[0].stdout.closed)
+        self.assertEqual(path.read_bytes(), b'x' * 64)
+        self.assertFalse(survived.exists())
 
 
 if __name__ == '__main__':

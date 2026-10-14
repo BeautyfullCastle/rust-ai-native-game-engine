@@ -7,6 +7,7 @@ local work requires a separate offline plan. The existing job target is reused.
 """
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -296,6 +297,7 @@ def bounded_run(argv, cwd, env, log_path, timeout, expected_exit=0, disk_floor=D
     except BaseException as error:
         reason = reason or repr(error)
     finally:
+        cleanup_errors = []; group_error = None; group_cleanup = None
         try:
             if job is not None:
                 if process is not None and not assigned:
@@ -304,18 +306,47 @@ def bounded_run(argv, cwd, env, log_path, timeout, expected_exit=0, disk_floor=D
             elif process is not None:
                 try: os.killpg(process.pid,signal.SIGKILL)
                 except ProcessLookupError: pass
+                except PermissionError as error: group_error = error
+        except BaseException as error:
+            cleanup_errors.append(repr(error))
+        child_reaped = False
+        try:
             if process is not None:
                 process.wait(timeout=10)
+            child_reaped = True
+        except BaseException as error:
+            cleanup_errors.append(repr(error))
+        if group_error is not None:
+            group_cleanup = {"signal_error":repr(group_error), "child_reaped":child_reaped,
+                             "group_absent_after_reap":False}
+            # Darwin can report EPERM for a group containing only zombies.
+            # Reaping the known child is not sufficient: prove the entire group
+            # absent, without sending another destructive signal after reap.
+            if sys.platform == "darwin" and group_error.errno == errno.EPERM and child_reaped:
+                try: os.killpg(process.pid,0)
+                except ProcessLookupError: group_cleanup["group_absent_after_reap"] = True
+                except BaseException as error: group_cleanup["probe_error"] = repr(error)
+            if not group_cleanup["group_absent_after_reap"]:
+                cleanup_errors.append(repr(group_error))
+        try:
+            if process is not None:
                 if process.stdin is not None and not process.stdin.closed: process.stdin.close()
                 if reader is None and process.stdout is not None: process.stdout.close()
-            stopped.set()
+        except BaseException as error:
+            cleanup_errors.append(repr(error))
+        stopped.set()
+        try:
             if reader is not None:
                 reader.join(timeout=10)
                 require(not reader.is_alive(), "output reader not reaped")
-            reaped = True
         except BaseException as error:
-            reason = (reason or "") + " cleanup: " + repr(error)
+            cleanup_errors.append(repr(error))
+        reaped = not cleanup_errors
+        if cleanup_errors:
+            reason = (reason or "") + " cleanup: " + "; ".join(cleanup_errors)
         receipt = {"argv":argv,"exit":process.returncode if process else None,"stop_reason":reason,"seconds":time.monotonic()-start,"log_bytes":count,"log_sha256":digest(log_path.read_bytes()) if log_path.exists() else None,"owned_children_reaped":reaped}
+        if group_cleanup is not None:
+            receipt["posix_group_cleanup"] = group_cleanup
         save(log_path.with_suffix(".json"),receipt)
     require(reason is None and process.returncode == expected_exit, f"command failed: {receipt}")
     return log_path.read_text(encoding="utf-8",errors="replace")
