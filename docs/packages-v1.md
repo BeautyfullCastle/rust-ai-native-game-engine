@@ -72,6 +72,48 @@ cargo run -p orr_package --bin orr_pkg -- verify ./my-game
 cargo run -p orr_package --bin orr_pkg -- remove ./my-game my-art
 ```
 
+### Reactivate an exact cached revision
+
+After an art upgrade or removal, retained immutable objects can be selected again
+without the original authoring directory:
+
+```sh
+orr_pkg restore ./my-game my-art PREVIOUS_SHA256_DIGEST --dry-run
+orr_pkg restore ./my-game my-art PREVIOUS_SHA256_DIGEST
+```
+
+Replace `PREVIOUS_SHA256_DIGEST` with the exact 64-character lowercase digest
+previously recorded by `list`, `explain`, or a transaction preview. The command
+looks up only that cached revision and recomputes its bounded canonical identity,
+while also verifying every active package object before planning. Both the requested
+package name and digest must match. It does not scan
+the cache, find history, pick the latest version, download, or execute anything.
+The existing `install --path` can already reinstall a retained object directory;
+`restore` adds explicit name/digest pinning and checked activation to that workflow.
+
+`Project::preview_restore_cached(name, digest)` returns the existing
+`PackagePreview` without filesystem changes. `Project::restore_cached(name,
+digest)` prepares a fresh plan, then uses `install_checked` to reject changes to
+the previous or approved candidate lock during its transaction. A separate earlier
+dry-run is an observation, not an apply token or writer reservation. Restore selects
+the package directly; a transitively active package can therefore become direct.
+Repeated restoration preserves the same effective lock, but is still a write
+operation. Use dry-run when no write is wanted.
+
+Dependencies must already be active at the exact versions required by the cached
+manifest. Missing or conflicting dependencies reject the operation; other cached
+revisions are not automatically selected. Existing engine, host-capability,
+same-version/content, file/path/size and writer checks remain in force. Invalid or
+corrupted active packages are not repaired or bypassed. Source and object bytes
+are never overwritten or deleted; failed preview/admission keeps activation intact.
+
+This restores one package selection, not a historical project, scene, prefab,
+binding document or gameplay save. A package revision can be incompatible with
+authored references even when its package graph is valid. Reopen and validate it
+through the actual consuming host before treating the game as playable. Digests
+establish recorded content identity, not publisher authentication or proof of
+previous installation. The CLI still cannot assert compiled capabilities.
+
 Each `--path` is an explicit direct selection; `--dependency-path` supplies a
 candidate without selecting it directly. Only reachable candidates are activated.
 Dependencies resolve from sources in that transaction or already active installed
