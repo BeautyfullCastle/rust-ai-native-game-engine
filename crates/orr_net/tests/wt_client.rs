@@ -158,6 +158,7 @@ fn unread_event_queue_drop_is_bounded_and_zero_budget_applies_to_datagrams() {
 
 #[test]
 fn reflected_peer_close_reason_is_redacted() {
+    const REFLECTED_PATH: &str = "/private-sentinel?token=private-sentinel";
     let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
     let der = cert.cert.der().to_vec();
     let tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
@@ -171,15 +172,26 @@ fn reflected_peer_close_reason_is_redacted() {
         rt.block_on(async {
             let ep = quinn::Endpoint::server(server_cfg, loopback()).unwrap();
             tx.send(ep.local_addr().unwrap()).unwrap();
-            let conn = ep.accept().await.unwrap().await.unwrap();
-            conn.close(9u32.into(), b"private-sentinel: echoed credential");
+            // Complete QUIC plus H3 SETTINGS/CONNECT before injecting a reflected
+            // close while the session response is still pending.
+            let request = tokio::time::timeout(NetConfig::default().connect_timeout, async {
+                let incoming = ep.accept().await.expect("mock peer stopped accepting");
+                wtransport::endpoint::IncomingSessionFuture::with_quic_incoming(incoming).await
+            }).await.expect("mock CONNECT deadline").expect("mock CONNECT request");
+            assert_eq!(request.path(), REFLECTED_PATH);
+            ep.close(9u32.into(), request.path().as_bytes());
             let _ = tokio::time::timeout(Duration::from_secs(1), ep.wait_idle()).await;
-        });
+            // Keep the request alive through close servicing and return the exact
+            // injection witness. A missing peer close cannot count as a pass.
+            request.path().to_owned()
+        })
     });
-    let mut client = Endpoint::connect_wt(&format!("https://{}/private-sentinel?token=private-sentinel", rx.recv().unwrap()), QuicTrust::CertDer(der), NetConfig::default()).unwrap();
-    let ev = client.wait_event(WAIT).unwrap();
+    let addr = rx.recv_timeout(WAIT).expect("mock peer address");
+    let mut client = Endpoint::connect_wt(&format!("https://{addr}{REFLECTED_PATH}"), QuicTrust::CertDer(der), NetConfig::default()).unwrap();
+    let ev = client.wait_event(WAIT);
+    assert_eq!(worker.join().expect("mock peer completed injection"), REFLECTED_PATH);
+    let ev = ev.expect("client terminal event");
     assert!(matches!(ev, Event::Disconnected { reason: DisconnectReason::ConnectFailed(_), .. }));
-    connect_failure_message(&ev);
+    assert_eq!(connect_failure_message(&ev), "WT connection failed (stage=session_connect)");
     assert!(!format!("{ev:?}").contains("private-sentinel"));
-    worker.join().unwrap();
 }
