@@ -31,8 +31,9 @@ RESULTS = {
     "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
     "SAMPLE_BUILD_RESULT": "${{ needs['sample-build'].result }}",
     "LINKED_PREFABS_RESULT": "${{ needs['sample-linked-prefabs'].result }}",
+    "ROOM_RESULT": "${{ needs['sample-room'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs", "sample-room"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -192,6 +193,62 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertFalse(any(step.get("name") in migrated_names
                              or "tools/check-linked-prefabs.sh" in step.get("run", "")
                              for step in sample["steps"]))
+
+    def test_room_lane_is_independent_mandatory_and_preserves_migrated_commands(self):
+        from test_room_project_gate import check_room_workflow, ROOM_MIGRATED_NAMES
+        check_room_workflow(WORKFLOW.read_text(encoding="utf-8"))
+        job = self.jobs["sample-room"]
+        self.assert_required(job)
+        self.assertEqual(set(job), {"name", "runs-on", "steps"})
+        self.assertEqual(job["name"], "sample room acceptance (ubuntu-22.04)")
+        self.assertEqual(job["runs-on"], "ubuntu-22.04")
+        steps = job["steps"]
+        self.assertEqual(len(steps), 12)
+        self.assertEqual(steps[:3], [
+            {"uses": "actions/checkout@v4"},
+            {"uses": "dtolnay/rust-toolchain@stable"},
+            {"uses": "Swatinem/rust-cache@v2"},
+        ])
+        self.assertEqual(steps[3:5], [
+            {"name": "Install Room software Vulkan dependency",
+             "run": "sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers"},
+            {"name": "Install Room namespace acceptance dependency",
+             "run": "sudo apt-get install -y -q bubblewrap"},
+        ])
+        self.assertEqual([step["name"] for step in steps[5:]], list(ROOM_MIGRATED_NAMES))
+        # Exact pre-split command bodies from development bea5becf. Moving jobs
+        # must not merge feature combinations, change producers, or relax gates.
+        expected_hashes = {
+            "RoomEscapeV1 contracts and optional feature combinations":
+                "88ed25068f32ac4f3e12783c0a4695fae8b2d2ddf5d5bb945edb17d2acfbcf9d",
+            "RoomEscapeV1 actual GPU and source-hidden production export":
+                "c00d2ed483107154ca108b5e17fba019a41728d0474833031f02bd0451e8d6c4",
+            "Room creator checker semantic fixtures":
+                "302f80d14ad9f5bf84e93235e9c59896ddd6bd25c320fe5e488167d8caf94917",
+            "Required Room creator API CLI editor and joint inventories":
+                "fb8acab6c4e2da8141df5334435425f0421da75c4c50c29ff4d5d96ba1219989",
+            "Required generated Room GPU and source-hidden production export":
+                "edf70cd3eac722bdf3c5fc6971de8adde7c0a2f2cb4b81a50a7775ac154e810a",
+        }
+        for step in steps[5:]:
+            self.assertFalse(step.get("continue-on-error", False))
+            if "run" in step:
+                self.assertEqual(hashlib.sha256(step["run"].encode()).hexdigest(), expected_hashes[step["name"]])
+                result = subprocess.run(["bash", "-n"], input=step["run"], capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        sample_steps = self.jobs["sample-build"]["steps"]
+        self.assertFalse(any(step.get("name") in ROOM_MIGRATED_NAMES
+                             or any(helper in step.get("run", "") for helper in
+                                    ("tools/check-room-project.sh", "tools/check-room-template.sh"))
+                             for step in sample_steps))
+        self.assertEqual(sum(step.get("name") == "Upload generated Arena acceptance evidence"
+                             for step in sample_steps), 1)
+        room_artifacts = [step["with"]["name"] for step in steps if "with" in step]
+        self.assertEqual(room_artifacts, ["room-project-evidence-ubuntu-22.04", "room-template-evidence-ubuntu-22.04"])
+        for name in room_artifacts:
+            owners = [job_id for job_id, entry in self.jobs.items() for step in entry["steps"]
+                      if step.get("with", {}).get("name") == name]
+            self.assertEqual(owners, ["sample-room"])
 
     def test_linked_prefab_migration_allows_required_downstream_feature(self):
         step = {
@@ -422,7 +479,7 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_only_all_success_passes(self):
-        # 46656 combinations across all six jobs include all four GitHub result
+        # 279936 combinations across all seven jobs include all four GitHub result
         # states, empty results, and an unknown state: allow success, rather
         # than denylisting.
         states = ("success", "failure", "cancelled", "skipped", "", "unknown")

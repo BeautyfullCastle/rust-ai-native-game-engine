@@ -4723,6 +4723,88 @@ jobs:
           cargo clippy --locked -p orr_sample -p orr_editor -p orr_remote -p orr_edit -p orr_reflect -p orr_package -p orr_games --all-targets -- -D warnings 2>&1 | tee "$ROOT/default-clippy.log"
         env:
           ORR_IMAGE_REIMPORT_EVIDENCE: /tmp/orr-image-reimport-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Upload generated Arena acceptance evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-arena-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/new-arena-captures
+            ${{ runner.temp }}/new-arena-*-list.txt
+            ${{ runner.temp }}/new-arena-*.log
+            ${{ runner.temp }}/new-arena-tools.sha256
+            ${{ runner.temp }}/collect-authored-*-list.txt
+            ${{ runner.temp }}/collect-authored-*.log
+            ${{ runner.temp }}/collect-authored-tools.sha256
+            ${{ runner.temp }}/collect-authored-export-ignored.txt
+            ${{ runner.temp }}/collect-authored-editor-ignored.txt
+            ${{ runner.temp }}/collect-authored-captures
+            ${{ runner.temp }}/collect-authored-candidate.txt
+            ${{ runner.temp }}/collect-progress-*.txt
+            ${{ runner.temp }}/collect-progress-*.log
+            ${{ runner.temp }}/collect-progress-*.stderr
+            ${{ runner.temp }}/collect-progress-*.json
+            ${{ runner.temp }}/collect-progress-*.jsonl
+            ${{ runner.temp }}/collect-progress-tools.sha256
+            ${{ runner.temp }}/collect-progress-captures
+            /tmp/orr-collect-sprite-${{ github.run_id }}-${{ github.run_attempt }}
+            /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
+            /tmp/orr-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
+            /tmp/orr-new-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
+            /tmp/orr-image-reimport-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+      # The physics sample's headless benchmark: no window, no GPU. Runs the
+      # physics game through the bridge with rollbacks (the checksum tests
+      # are in `crates/orr_sample/tests/physics_e2e.rs`, run above).
+      - run: cargo run -p orr_sample --release --bin physics -- --headless --bodies 300 --ticks 300
+      # The 3D sample (orr_physics3d yard): headless sim plus the view's CPU work
+      # (extraction, slerp interpolation, instance lists), no window, no GPU.
+      - run: cargo run -p orr_sample --release --bin physics3d -- --headless --bodies 300 --ticks 300
+      # The 3D sample in a real (virtual X11) window on lavapipe: renders a fixed
+      # number of frames and reads the presented frame back as a PNG.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y -q xvfb libxkbcommon-x11-0
+      # Real Arena editor windows, served by the existing integration-test host.
+      # No additional host/CLI build and no renderer fallback: missing windows,
+      # screenshots, expected pixels, or authoritative checksums fail this step.
+      - name: Arena editor native-window smoke
+        if: runner.os == 'Linux'
+        timeout-minutes: 3
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" cargo test -p orr_editor --release --test arena arena_native_window_smoke -- --exact --nocapture
+        env:
+          ORR_REQUIRE_NATIVE_EDITOR: "1"
+          ORR_NATIVE_EDITOR_ARTIFACT_DIR: ${{ runner.temp }}/arena-editor-native
+          WGPU_BACKEND: vulkan
+      - name: Upload Arena editor native-window evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-editor-native-${{ matrix.os }}
+          path: ${{ runner.temp }}/arena-editor-native
+          if-no-files-found: error
+          retention-days: 7
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
+      # The mobile / weak-GPU preset (no MSAA, 512 texel shadow map, 12-segment meshes) on the same adapter.
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --low --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d_low.png"
+
+  sample-room:
+    # Keep Room contracts, pinned producers and GPU consumers together, while
+    # running independently of the sample matrix. Do not import other job binaries.
+    # Same unprivileged bubblewrap-compatible runner as sample-build; migrate
+    # before 2027-04-17 removal: https://github.com/actions/runner-images/issues/14254
+    name: sample room acceptance (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Room software Vulkan dependency
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Install Room namespace acceptance dependency
+        run: sudo apt-get install -y -q bubblewrap
       - name: RoomEscapeV1 contracts and optional feature combinations
         if: runner.os == 'Linux' && runner.arch == 'X64'
         shell: bash
@@ -4745,14 +4827,14 @@ jobs:
           import sys
           import tempfile
           import time
-          
-          
+
+
           LIMIT_BYTES = 65536
           LIMIT_RECORDS = 32
           LIMIT_PATH_BYTES = 1024
           LIMIT_SECONDS = 5.0
-          
-          
+
+
           def collect(command, budget):
               result = {
                   "exit_code": None, "timed_out": False, "output_truncated": False,
@@ -4823,16 +4905,16 @@ jobs:
                       process.stderr.close()
                   selector.close()
               return bytes(output), result
-          
-          
+
+
           def encode_path(path):
               return {
                   "bytes": len(path),
                   "base64": base64.b64encode(path[:LIMIT_PATH_BYTES]).decode("ascii"),
                   "truncated": len(path) > LIMIT_PATH_BYTES,
               }
-          
-          
+
+
           def parse_raw(data):
               result = {
                   "records": [], "records_parsed": 0, "records_omitted": 0,
@@ -4884,13 +4966,13 @@ jobs:
                       result["records_truncated"] = True
                   index += path_count + 1
               return result
-          
-          
+
+
           def successful(result):
               return (result["exit_code"] == 0 and result["child_reaped"] and
                       not any(result[key] for key in ("timed_out", "output_truncated", "start_failed", "read_failed")))
-          
-          
+
+
           def main():
               root = Path(os.environ["ORR_ROOM_EVIDENCE"])
               checkout = Path.cwd().resolve()
@@ -4932,8 +5014,8 @@ jobs:
               descriptor, _ = tempfile.mkstemp(prefix="tracked-worktree-failure-", suffix=".json", dir=root)
               with os.fdopen(descriptor, "wb") as output:
                   output.write(payload)
-          
-          
+
+
           if __name__ == "__main__":
               try:
                   main()
@@ -4964,7 +5046,7 @@ jobs:
         if: always() && runner.os == 'Linux' && runner.arch == 'X64'
         uses: actions/upload-artifact@v4
         with:
-          name: room-project-evidence-${{ matrix.os }}
+          name: room-project-evidence-ubuntu-22.04
           path: |
             /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.log
             /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.sha256
@@ -5001,7 +5083,7 @@ jobs:
         if: always() && runner.os == 'Linux' && runner.arch == 'X64'
         uses: actions/upload-artifact@v4
         with:
-          name: room-template-evidence-${{ matrix.os }}
+          name: room-template-evidence-ubuntu-22.04
           path: |
             /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.log
             /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.sha256
@@ -5012,73 +5094,6 @@ jobs:
             /tmp/orr-room-template-${{ github.run_id }}-${{ github.run_attempt }}/**/*.stderr
           if-no-files-found: error
           retention-days: 7
-      - name: Upload generated Arena acceptance evidence
-        if: ${{ always() && runner.os == 'Linux' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: new-arena-${{ matrix.os }}
-          path: |
-            ${{ runner.temp }}/new-arena-captures
-            ${{ runner.temp }}/new-arena-*-list.txt
-            ${{ runner.temp }}/new-arena-*.log
-            ${{ runner.temp }}/new-arena-tools.sha256
-            ${{ runner.temp }}/collect-authored-*-list.txt
-            ${{ runner.temp }}/collect-authored-*.log
-            ${{ runner.temp }}/collect-authored-tools.sha256
-            ${{ runner.temp }}/collect-authored-export-ignored.txt
-            ${{ runner.temp }}/collect-authored-editor-ignored.txt
-            ${{ runner.temp }}/collect-authored-captures
-            ${{ runner.temp }}/collect-authored-candidate.txt
-            ${{ runner.temp }}/collect-progress-*.txt
-            ${{ runner.temp }}/collect-progress-*.log
-            ${{ runner.temp }}/collect-progress-*.stderr
-            ${{ runner.temp }}/collect-progress-*.json
-            ${{ runner.temp }}/collect-progress-*.jsonl
-            ${{ runner.temp }}/collect-progress-tools.sha256
-            ${{ runner.temp }}/collect-progress-captures
-            /tmp/orr-collect-sprite-${{ github.run_id }}-${{ github.run_attempt }}
-            /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
-            /tmp/orr-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
-            /tmp/orr-new-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
-            /tmp/orr-image-reimport-${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          retention-days: 7
-      # The physics sample's headless benchmark: no window, no GPU. Runs the
-      # physics game through the bridge with rollbacks (the checksum tests
-      # are in `crates/orr_sample/tests/physics_e2e.rs`, run above).
-      - run: cargo run -p orr_sample --release --bin physics -- --headless --bodies 300 --ticks 300
-      # The 3D sample (orr_physics3d yard): headless sim plus the view's CPU work
-      # (extraction, slerp interpolation, instance lists), no window, no GPU.
-      - run: cargo run -p orr_sample --release --bin physics3d -- --headless --bodies 300 --ticks 300
-      # The 3D sample in a real (virtual X11) window on lavapipe: renders a fixed
-      # number of frames and reads the presented frame back as a PNG.
-      - if: runner.os == 'Linux'
-        run: sudo apt-get install -y -q xvfb libxkbcommon-x11-0
-      # Real Arena editor windows, served by the existing integration-test host.
-      # No additional host/CLI build and no renderer fallback: missing windows,
-      # screenshots, expected pixels, or authoritative checksums fail this step.
-      - name: Arena editor native-window smoke
-        if: runner.os == 'Linux'
-        timeout-minutes: 3
-        run: xvfb-run -a -s "-screen 0 1280x1024x24" cargo test -p orr_editor --release --test arena arena_native_window_smoke -- --exact --nocapture
-        env:
-          ORR_REQUIRE_NATIVE_EDITOR: "1"
-          ORR_NATIVE_EDITOR_ARTIFACT_DIR: ${{ runner.temp }}/arena-editor-native
-          WGPU_BACKEND: vulkan
-      - name: Upload Arena editor native-window evidence
-        if: ${{ always() && runner.os == 'Linux' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: arena-editor-native-${{ matrix.os }}
-          path: ${{ runner.temp }}/arena-editor-native
-          if-no-files-found: error
-          retention-days: 7
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
-      # The mobile / weak-GPU preset (no MSAA, 512 texel shadow map, 12-segment meshes) on the same adapter.
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --low --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d_low.png"
-
   wasm32:
     name: wasm32-wasip1 (wasmtime)
     runs-on: ubuntu-latest
@@ -5293,8 +5308,8 @@ jobs:
   cross_platform_checksum_compare:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
-    # target, sample graphics/audio/editor matrix, and linked-prefab lane must pass.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs]
+    # target, sample graphics/audio/editor matrix, linked-prefab and Room lanes must pass.
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -5308,9 +5323,10 @@ jobs:
           BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
           LINKED_PREFABS_RESULT: ${{ needs['sample-linked-prefabs'].result }}
+          ROOM_RESULT: ${{ needs['sample-room'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT ROOM_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then
@@ -5325,6 +5341,7 @@ jobs:
           echo "All native matrix legs, wasm32-wasip1 (including SIMD), and"
           echo "aarch64-linux-android passed their pinned golden-checksum assertions."
           echo "Chromium passed native/wasm checkpoint comparisons and required GPU views."
+          echo "Room contracts, creator and source-hidden GPU/export checks passed."
           echo "Both sample-build matrix legs passed their graphics/audio/editor checks,"
           echo "including required Linux software-GPU and Arena native-window smoke tests."
           echo "The independent linked-prefab contracts, GPU/export, and strict lint lane passed."

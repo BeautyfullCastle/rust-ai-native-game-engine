@@ -21,6 +21,19 @@ ROOM_GPU = 'RoomEscapeV1 actual GPU and source-hidden production export'
 TEMPLATE_CONTRACTS = 'Required Room creator API CLI editor and joint inventories'
 TEMPLATE_GPU = 'Required generated Room GPU and source-hidden production export'
 ROOM_CONDITION = "runner.os == 'Linux' && runner.arch == 'X64'"
+ROOM_MIGRATED_NAMES = (
+    ROOM_CONTRACTS, ROOM_GPU, 'Upload RoomEscapeV1 acceptance evidence',
+    'Room creator checker semantic fixtures', TEMPLATE_CONTRACTS, TEMPLATE_GPU,
+    'Upload Room creator acceptance evidence',
+)
+ROOM_SETUP = '''      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Room software Vulkan dependency
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Install Room namespace acceptance dependency
+        run: sudo apt-get install -y -q bubblewrap
+'''
 
 
 def workflow_section(text, header, indent):
@@ -45,9 +58,9 @@ def room_workflow_steps(workflow):
     trigger = workflow_section(workflow, 'on:', 0)
     assert trigger == 'on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:\n', 'workflow triggers'
     jobs = workflow_section(workflow, 'jobs:', 0)
-    job = workflow_section(jobs, '  sample-build:', 2)
-    assert job.count('    steps:\n') == 1, 'sample-build steps'
-    header, body = job.split('    steps:\n', 1)
+    sample = workflow_section(jobs, '  sample-build:', 2)
+    assert sample.count('    steps:\n') == 1, 'sample-build steps'
+    header, body = sample.split('    steps:\n', 1)
     assert all(len(line) - len(line.lstrip()) >= 6
                for line in body.splitlines() if line.strip() and not line.lstrip().startswith('#')), 'trailing job fields'
     header = '\n'.join(line for line in header.splitlines() if line.strip() and not line.lstrip().startswith('#'))
@@ -56,6 +69,42 @@ def room_workflow_steps(workflow):
         '    runs-on: ${{ matrix.os }}', '    strategy:', '      fail-fast: false',
         '      matrix:', '        os: [ubuntu-22.04, windows-latest]',
     ]), 'sample-build runner/trigger must remain mandatory'
+    assert not any(name in sample for name in ROOM_MIGRATED_NAMES), 'Room steps must have one owner'
+    for helper in ('tools/check-room-project.sh', 'tools/check-room-template.sh'):
+        assert helper not in sample, 'renamed duplicate Room helper in sample-build'
+
+    job = workflow_section(jobs, '  sample-room:', 2)
+    assert job.count('    steps:\n') == 1, 'sample-room steps'
+    header, body = job.split('    steps:\n', 1)
+    assert all(len(line) - len(line.lstrip()) >= 6
+               for line in body.splitlines() if line.strip() and not line.lstrip().startswith('#')), 'trailing Room job fields'
+    header = '\n'.join(line for line in header.splitlines() if line.strip() and not line.lstrip().startswith('#'))
+    assert header == '\n'.join([
+        '  sample-room:', '    name: sample room acceptance (ubuntu-22.04)',
+        '    runs-on: ubuntu-22.04',
+    ]), 'Room runner/trigger must remain mandatory and independent'
+    assert body.startswith(ROOM_SETUP), 'Room must provision its own compiler, cache, GPU and namespace'
+    assert len(re.findall(r'^      - ', body, re.M)) == 12, 'exact Room setup and migrated steps'
+    assert re.findall(r'^      - name: (.+)$', body, re.M) == [
+        'Install Room software Vulkan dependency', 'Install Room namespace acceptance dependency',
+        *ROOM_MIGRATED_NAMES,
+    ], 'Room step order and unique producer ownership'
+    fixture = workflow_section(job, '      - name: Room creator checker semantic fixtures', 6)
+    assert fixture == ('      - name: Room creator checker semantic fixtures\n'
+                       '        if: ' + ROOM_CONDITION + '\n        shell: bash\n'
+                       '        run: python3 tools/test_room_template_gate.py\n'), 'Room checker fixture remains mandatory'
+    for name, root, artifact in [
+        ('Upload RoomEscapeV1 acceptance evidence', 'orr-room-project', 'room-project-evidence'),
+        ('Upload Room creator acceptance evidence', 'orr-room-template', 'room-template-evidence'),
+    ]:
+        expected = ('      - name: ' + name + '\n'
+                    '        if: always() && ' + ROOM_CONDITION + '\n'
+                    '        uses: actions/upload-artifact@v4\n        with:\n'
+                    '          name: ' + artifact + '-ubuntu-22.04\n          path: |\n')
+        expected += ''.join('            /tmp/' + root + '-${{ github.run_id }}-${{ github.run_attempt }}/**/*.'
+                            + extension + '\n' for extension in ('log', 'sha256', 'txt', 'png', 'json', 'jsonl', 'stderr'))
+        expected += '          if-no-files-found: error\n          retention-days: 7\n'
+        assert workflow_section(job, '      - name: ' + name, 6) == expected, ('mandatory Room evidence upload', name)
     names = (ROOM_CONTRACTS, ROOM_GPU, TEMPLATE_CONTRACTS, TEMPLATE_GPU)
     return {name: workflow_section(job, '      - name: ' + name, 6) for name in names}
 
@@ -83,7 +132,7 @@ def check_room_workflow(workflow):
             continue
         assert step.startswith(prefix + '        run: |\n') and step.endswith(env), 'Room contracts step fields'
         lines = step[len(prefix + '        run: |\n'):-len(env)].splitlines()
-        assert all(line.startswith('          ') for line in lines), 'Room run block indentation'
+        assert all(not line or line.startswith('          ') for line in lines), 'Room run block indentation'
         run = '\n'.join(line[10:] for line in lines) + '\n'
         before = ('if ' + command + '; then\n  exit 0\nelse\n  room_status=$?\nfi\n'
                   'if python3 - "$room_status" <<\'PY\'\n')
@@ -327,6 +376,58 @@ class RoomProjectGateTests(unittest.TestCase):
                 self.assertIn(old, workflow)
                 with self.assertRaises(AssertionError):
                     check_room_workflow(workflow.replace(old, new, 1))
+
+    def test_independent_room_job_rejects_placement_provision_and_evidence_changes(self):
+        workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
+        check_room_workflow(workflow)
+        job = workflow_section(workflow, '  sample-room:', 2)
+        for field in ('if: false', 'continue-on-error: true', 'needs: [sample-build]',
+                      'env: {ORR_REQUIRE_GPU: "0"}', 'steps: []'):
+            for changed in (job.replace('    steps:\n', '    ' + field + '\n    steps:\n', 1),
+                            job + '    ' + field + '\n'):
+                with self.subTest(job_field=field), self.assertRaises(AssertionError):
+                    check_room_workflow(workflow.replace(job, changed, 1))
+        mutations = [
+            ('missing Room job', '  sample-room:\n', '  unrelated-room:\n'),
+            ('renamed check', 'name: sample room acceptance (ubuntu-22.04)', 'name: unrelated acceptance'),
+            ('wrong runner', '    runs-on: ubuntu-22.04\n', '    runs-on: ubuntu-latest\n'),
+            ('missing checkout', '      - uses: actions/checkout@v4\n', ''),
+            ('missing toolchain', '      - uses: dtolnay/rust-toolchain@stable\n', ''),
+            ('missing cache', '      - uses: Swatinem/rust-cache@v2\n', ''),
+            ('missing GPU provision', '        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers\n', ''),
+            ('missing namespace provision', '        run: sudo apt-get install -y -q bubblewrap\n', ''),
+            ('disabled provision', '      - name: Install Room namespace acceptance dependency\n',
+             '      - name: Install Room namespace acceptance dependency\n        if: false\n'),
+            ('disabled fixture', '        run: python3 tools/test_room_template_gate.py\n', '        run: true\n'),
+            ('missing failure evidence', '        if: always() && ' + ROOM_CONDITION,
+             '        if: success() && ' + ROOM_CONDITION),
+            ('missing evidence accepted', '          if-no-files-found: error\n', '          if-no-files-found: ignore\n'),
+            ('wrong artifact name', 'name: room-project-evidence-ubuntu-22.04', 'name: unrelated-evidence'),
+            ('artifact collision', 'name: room-template-evidence-ubuntu-22.04', 'name: room-project-evidence-ubuntu-22.04'),
+            ('missing capture glob', '            /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}/**/*.png\n', ''),
+        ]
+        for label, old, new in mutations:
+            self.assertIn(old, job, label)
+            with self.subTest(mutation=label), self.assertRaises(AssertionError):
+                check_room_workflow(workflow.replace(job, job.replace(old, new, 1), 1))
+        for name in ROOM_MIGRATED_NAMES:
+            step = workflow_section(job, '      - name: ' + name, 6)
+            for changed in (job.replace(step, '', 1), job.replace(step, step + step, 1)):
+                with self.subTest(step=name), self.assertRaises(AssertionError):
+                    check_room_workflow(workflow.replace(job, changed, 1))
+        provision = workflow_section(job, '      - name: Install Room namespace acceptance dependency', 6)
+        reordered = job.replace(provision, '', 1) + provision
+        with self.subTest(mutation='provision after GPU'), self.assertRaises(AssertionError):
+            check_room_workflow(workflow.replace(job, reordered, 1))
+        relocated = workflow.replace(job, '', 1).replace('jobs:\n', 'unrelated:\n' + job + '\njobs:\n', 1)
+        with self.subTest(mutation='Room outside jobs'), self.assertRaises(AssertionError):
+            check_room_workflow(relocated)
+        sample = workflow_section(workflow, '  sample-build:', 2)
+        for helper in ('check-room-project.sh', 'check-room-template.sh'):
+            duplicate = sample + ('      - name: Renamed duplicate Room gate\n'
+                                  '        run: tools/' + helper + ' contracts\n')
+            with self.subTest(duplicate=helper), self.assertRaises(AssertionError):
+                check_room_workflow(workflow.replace(sample, duplicate, 1))
 
 
 if __name__ == '__main__':
