@@ -483,8 +483,9 @@ class RoomTemplateGateTests(unittest.TestCase):
         script = (ROOT / 'tools/check-room-template.sh').read_text()
         for command in ['run_test creator-default normal', 'run_test creator-room normal', 'run_test creator-joint normal', 'run_test sample-disabled normal', 'run_test sample-room normal', 'run_test editor-room normal', 'run_test source-hidden-gpu ignored', 'run_test editor-gpu ignored']:
             self.assertIn(command, script)
-        for mode in ['contracts', 'gpu']:
-            self.assertIn(f'run: tools/check-room-project.sh {mode}', text)
+        # Import at call time: the project fixture also imports our PNG/log helpers.
+        from test_room_project_gate import check_room_workflow
+        check_room_workflow(text)
         self.assertIn('Required RoomEscapeV1 gameplay core', text)
 
 

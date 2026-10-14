@@ -137,16 +137,33 @@ pub enum CommitOutcome {
     DurabilityUncertain(String),
 }
 #[derive(Clone, Debug)]
+enum WriteState {
+    #[cfg(target_os = "linux")]
+    Ready,
+    ReadOnly,
+    /// No snapshot was admitted. A later commit must validate it under its lock.
+    #[cfg(target_os = "linux")]
+    Deferred,
+}
+#[derive(Clone, Debug)]
 struct Loaded {
     best: u32,
-    writable: bool,
+    write_state: WriteState,
     notice: Option<String>,
 }
 impl Loaded {
     fn readonly(best: u32, notice: impl Into<String>) -> Self {
         Self {
             best,
-            writable: false,
+            write_state: WriteState::ReadOnly,
+            notice: Some(notice.into()),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn deferred(notice: impl Into<String>) -> Self {
+        Self {
+            best: 0,
+            write_state: WriteState::Deferred,
             notice: Some(notice.into()),
         }
     }
@@ -183,7 +200,7 @@ impl ProgressStore {
         if score > self.key.goal {
             return Err("score exceeds challenge goal".into());
         }
-        if !self.loaded.writable {
+        if matches!(self.loaded.write_state, WriteState::ReadOnly) {
             return Err(self
                 .loaded
                 .notice
@@ -199,12 +216,13 @@ impl ProgressStore {
                 checkpoint,
             )?;
             self.loaded.best = best;
+            self.loaded.write_state = WriteState::Ready;
             self.loaded.notice = match &outcome {
                 CommitOutcome::DurablySaved => None,
                 CommitOutcome::DurabilityUncertain(reason) => Some(reason.clone()),
             };
             if matches!(outcome, CommitOutcome::DurabilityUncertain(_)) {
-                self.loaded.writable = false;
+                self.loaded.write_state = WriteState::ReadOnly;
             }
             Ok(outcome)
         }
@@ -486,14 +504,14 @@ mod linux {
         if matches!(primary, Snapshot::Valid { .. }) {
             return Loaded {
                 best,
-                writable: true,
+                write_state: WriteState::Ready,
                 notice: None,
             };
         }
         if let Snapshot::Valid { best, .. } = backup {
             return Loaded {
                 best: *best,
-                writable: true,
+                write_state: WriteState::Ready,
                 notice: Some(
                     "Primary progress missing or corrupt; recovered matching backup".into(),
                 ),
@@ -502,7 +520,7 @@ mod linux {
         if matches!((primary, backup), (Snapshot::Missing, Snapshot::Missing)) {
             return Loaded {
                 best: 0,
-                writable: true,
+                write_state: WriteState::Ready,
                 notice: None,
             };
         }
@@ -512,22 +530,62 @@ mod linux {
         )
     }
     pub(super) fn load(paths: &ProgressPaths, key: &ProgressKey) -> Loaded {
+        load_with_checkpoint(paths, key, || {})
+    }
+
+    pub(super) fn load_with_checkpoint(
+        paths: &ProgressPaths,
+        key: &ProgressKey,
+        checkpoint: impl FnOnce(),
+    ) -> Loaded {
         let directory = match open_directory(paths, false) {
             Ok(Some(d)) => d,
             Ok(None) => return loaded(&Snapshot::Missing, &Snapshot::Missing),
             Err(e) => return Loaded::readonly(0, e),
         };
-        let primary = match read_snapshot(&directory, PRIMARY_NAME, key) {
+        // Reading must cooperate with publication too. Never create a lock or
+        // directory merely to discover saved progress.
+        let guard = match read_lock(&directory) {
+            Ok(ReadLock::Busy) => {
+                return Loaded::deferred("progress load deferred: another writer holds the lock");
+            }
+            Ok(guard) => guard,
+            Err(e) => return Loaded::readonly(0, e),
+        };
+        checkpoint();
+        let result = load_snapshots(&directory, key);
+        let named = match stat_regular(&directory, LOCK_NAME) {
+            Ok(named) => named,
+            Err(e) => return Loaded::readonly(0, e),
+        };
+        match guard {
+            ReadLock::Missing if named.is_some() => {
+                // The first writer creates its permanent lock before any
+                // publication. Discard even a failed unlocked observation.
+                Loaded::deferred("progress load deferred: writer lock appeared during discovery")
+            }
+            ReadLock::Held(file) => match fs::fstat(&file) {
+                Ok(opened) if named.as_ref().is_some_and(|s| same_file(s, &opened)) => result,
+                Ok(_) => Loaded::readonly(0, "progress lock changed while loading"),
+                Err(e) => Loaded::readonly(0, e.to_string()),
+            },
+            ReadLock::Missing => result,
+            ReadLock::Busy => unreachable!("busy load returned before reading"),
+        }
+    }
+
+    fn load_snapshots(directory: &File, key: &ProgressKey) -> Loaded {
+        let primary = match read_snapshot(directory, PRIMARY_NAME, key) {
             Ok(v) => v,
             Err(e) => return Loaded::readonly(0, e),
         };
-        let backup = match read_snapshot(&directory, BACKUP_NAME, key) {
+        let backup = match read_snapshot(directory, BACKUP_NAME, key) {
             Ok(v) => v,
             Err(e) => return Loaded::readonly(loaded(&primary, &Snapshot::Missing).best, e),
         };
         let mut result = loaded(&primary, &backup);
         for name in [PRIMARY_NAME, BACKUP_NAME, LOCK_NAME] {
-            let failure = match stat_regular(&directory, name) {
+            let failure = match stat_regular(directory, name) {
                 Ok(Some(s)) if s.st_mode & 0o200 == 0 => Some(format!("{name} is read-only")),
                 Err(e) => Some(e),
                 _ => None,
@@ -540,6 +598,43 @@ mod linux {
             result = Loaded::readonly(result.best, "progress directory is read-only");
         }
         result
+    }
+
+    enum ReadLock {
+        Missing,
+        Held(File),
+        Busy,
+    }
+    fn read_lock(directory: &File) -> Result<ReadLock, String> {
+        let Some(before) = stat_regular(directory, LOCK_NAME)? else {
+            return Ok(ReadLock::Missing);
+        };
+        let file = File::from(
+            fs::openat(
+                directory,
+                LOCK_NAME,
+                OFlags::RDONLY | FILE_FLAGS,
+                Mode::empty(),
+            )
+            .map_err(error)?,
+        );
+        let opened = fs::fstat(&file).map_err(error)?;
+        let named = stat_regular(directory, LOCK_NAME)?
+            .ok_or("progress lock disappeared while opening for load")?;
+        if !same_file(&before, &opened) || !same_file(&named, &opened) {
+            return Err("progress lock changed while opening for load".into());
+        }
+        match fs::flock(&file, FlockOperation::NonBlockingLockShared) {
+            Ok(()) => (),
+            Err(rustix::io::Errno::AGAIN) => return Ok(ReadLock::Busy),
+            Err(failure) => return Err(format!("progress read locking is unavailable: {failure}")),
+        }
+        let named = stat_regular(directory, LOCK_NAME)?
+            .ok_or("progress lock disappeared while acquiring read lock")?;
+        if !same_file(&named, &fs::fstat(&file).map_err(error)?) {
+            return Err("progress lock changed while acquiring read lock".into());
+        }
+        Ok(ReadLock::Held(file))
     }
     fn lock(directory: &File) -> Result<File, String> {
         let old = stat_regular(directory, LOCK_NAME)?;
@@ -637,7 +732,7 @@ mod linux {
             let primary_identity = stat_regular(&directory, PRIMARY_NAME)?;
             let backup_identity = stat_regular(&directory, BACKUP_NAME)?;
             let state = loaded(&primary, &backup);
-            if !state.writable {
+            if !matches!(state.write_state, WriteState::Ready) {
                 return Err(state
                     .notice
                     .unwrap_or_else(|| "progress are read-only".into()));

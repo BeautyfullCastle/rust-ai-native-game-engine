@@ -2,11 +2,37 @@
 use crate::endpoint::{ConnShared, Link, Out, Shared};
 use crate::stats::StatsCell;
 use crate::{Channel, ConnId, DisconnectReason, Event, NetConfig, NetError, QuicTrust, HELLO_PAYLOAD, TAG_HELLO, TAG_RELIABLE, TAG_UNRELIABLE};
+use std::future::Future;
 use std::sync::{atomic::Ordering::Relaxed, Arc};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use wtransport::{Connection, RecvStream, SendStream};
+
+// Local setup progress only. SessionConnect includes opaque QUIC/TLS/H3 work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectStage { SessionConnect, OpenBi, InitializeBi, HelloWrite }
+
+impl ConnectStage {
+    fn failure_message(self, timed_out: bool) -> &'static str {
+        match (self, timed_out) {
+            (Self::SessionConnect, true) => "WT connect timed out (stage=session_connect)",
+            (Self::OpenBi, true) => "WT connect timed out (stage=open_bi)",
+            (Self::InitializeBi, true) => "WT connect timed out (stage=initialize_bi)",
+            (Self::HelloWrite, true) => "WT connect timed out (stage=hello_write)",
+            (Self::SessionConnect, false) => "WT connection failed (stage=session_connect)",
+            (Self::OpenBi, false) => "WT connection failed (stage=open_bi)",
+            (Self::InitializeBi, false) => "WT connection failed (stage=initialize_bi)",
+            (Self::HelloWrite, false) => "WT connection failed (stage=hello_write)",
+        }
+    }
+}
+
+// No timer or error formatting here: all four awaits share the outer deadline.
+async fn in_stage<F: Future>(stage: &mut ConnectStage, current: ConnectStage, future: F) -> F::Output {
+    *stage = current;
+    future.await
+}
 
 pub(crate) fn target(url: &str) -> Result<String, NetError> {
     let invalid = || NetError("invalid https:// WebTransport URL".into());
@@ -29,10 +55,12 @@ pub(crate) fn config(trust: &QuicTrust, cfg: &NetConfig) -> Result<wtransport::C
 
 pub(crate) async fn client_conn(ep: wtransport::Endpoint<wtransport::endpoint::endpoint_side::Client>, shared: Arc<Shared>, id: ConnId, url: String) {
     let mut shutdown = shared.shutdown.subscribe();
+    let mut stage = ConnectStage::SessionConnect;
     let setup = async {
-        let conn = ep.connect(url).await.map_err(|_| ())?;
-        let (mut send, recv) = conn.open_bi().await.map_err(|_| ())?.await.map_err(|_| ())?;
-        crate::wt::write_frame(&mut send, TAG_HELLO, HELLO_PAYLOAD).await.map_err(|_| ())?;
+        let conn = in_stage(&mut stage, ConnectStage::SessionConnect, ep.connect(url)).await.map_err(|_| ())?;
+        let opening = in_stage(&mut stage, ConnectStage::OpenBi, conn.open_bi()).await.map_err(|_| ())?;
+        let (mut send, recv) = in_stage(&mut stage, ConnectStage::InitializeBi, opening).await.map_err(|_| ())?;
+        in_stage(&mut stage, ConnectStage::HelloWrite, crate::wt::write_frame(&mut send, TAG_HELLO, HELLO_PAYLOAD)).await.map_err(|_| ())?;
         Ok::<_, ()>((conn, send, recv))
     };
     let result = tokio::select! {
@@ -43,7 +71,7 @@ pub(crate) async fn client_conn(ep: wtransport::Endpoint<wtransport::endpoint::e
         Ok(Ok(v)) => v,
         failure => {
             ep.close(0u32.into(), b"bye");
-            let message = if failure.is_err() { "WT connect timed out" } else { "WT connection failed" };
+            let message = stage.failure_message(failure.is_err());
             shared.finish(id, DisconnectReason::ConnectFailed(message.into())).await;
             return;
         }
@@ -165,7 +193,79 @@ async fn writer(cs: &ConnShared, conn: &Connection, mut rx: mpsc::UnboundedRecei
 
 #[cfg(test)]
 mod tests {
-    use super::payload_limit;
+    use super::{in_stage, payload_limit, ConnectStage};
+    use std::future::{pending, ready, Future};
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
+    const STAGES: [ConnectStage; 4] = [ConnectStage::SessionConnect, ConnectStage::OpenBi, ConnectStage::InitializeBi, ConnectStage::HelloWrite];
+
+    // Synthetic ready prefixes exercise the same tracker at each boundary;
+    // they are not protocol reproductions or cumulative elapsed-time controls.
+    async fn through_stage<F: Future<Output = Result<u8, &'static str>>>(stage: &mut ConnectStage, stop: usize, terminal: F) -> Result<u8, &'static str> {
+        for &current in &STAGES[..stop] {
+            in_stage(stage, current, ready(Ok::<_, &'static str>(0))).await?;
+        }
+        in_stage(stage, STAGES[stop], terminal).await
+    }
+
+    #[test]
+    fn setup_failure_messages_are_bounded_and_allowlisted() {
+        let labels = ["session_connect", "open_bi", "initialize_bi", "hello_write"];
+        for (stage, label) in STAGES.into_iter().zip(labels) {
+            for timed_out in [false, true] {
+                let prefix = if timed_out { "WT connect timed out" } else { "WT connection failed" };
+                let message = stage.failure_message(timed_out);
+                assert_eq!(message, format!("{prefix} (stage={label})"));
+                assert!(message.len() <= 80);
+                assert!(message.is_ascii());
+                assert!(!message.contains("private-sentinel"));
+            }
+        }
+    }
+
+    #[test]
+    fn setup_stage_tracks_pending_success_and_error_boundaries() {
+        let mut cx = Context::from_waker(Waker::noop());
+        for (stop, expected) in STAGES.into_iter().enumerate() {
+            let mut stage = ConnectStage::HelloWrite;
+            {
+                let mut setup = std::pin::pin!(through_stage(&mut stage, stop, pending()));
+                assert!(setup.as_mut().poll(&mut cx).is_pending());
+                assert!(setup.as_mut().poll(&mut cx).is_pending());
+            }
+            assert_eq!(stage, expected);
+            for value in [Ok(7), Err("private-sentinel")] {
+                stage = ConnectStage::HelloWrite;
+                {
+                    let mut setup = std::pin::pin!(through_stage(&mut stage, stop, ready(value)));
+                    assert_eq!(setup.as_mut().poll(&mut cx), Poll::Ready(value));
+                }
+                assert_eq!(stage, expected);
+                assert!(!stage.failure_message(false).contains("private-sentinel"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_timeout_retains_pending_stage_and_drops_future() {
+        struct DropSignal<'a>(&'a mut bool);
+        impl Drop for DropSignal<'_> { fn drop(&mut self) { *self.0 = true; } }
+
+        for (stop, expected) in STAGES.into_iter().enumerate() {
+            let mut stage = ConnectStage::HelloWrite;
+            let mut dropped = false;
+            let terminal = async {
+                let _signal = DropSignal(&mut dropped);
+                pending::<Result<u8, &'static str>>().await
+            };
+            let result = tokio::time::timeout(Duration::ZERO, through_stage(&mut stage, stop, terminal)).await;
+            assert!(result.is_err());
+            assert_eq!(stage, expected);
+            assert!(dropped);
+            assert!(stage.failure_message(true).starts_with("WT connect timed out (stage="));
+        }
+    }
 
     #[test]
     fn tiny_peer_datagram_limits_do_not_underflow() {
