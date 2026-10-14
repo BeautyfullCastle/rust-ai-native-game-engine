@@ -7,6 +7,8 @@ pub use explanation::PackageExplanation;
 mod project_identity;
 pub use project_identity::{format_game_id, ProgressProfile, ProjectProgress};
 mod cached_revision;
+mod verification;
+pub use verification::PackageVerification;
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};

@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
-        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT | inspect SOURCE>\nOffline content only. Runtime capabilities must be validated by the consuming host.");
+        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT [--package NAME] | inspect SOURCE>\nOffline content only. Runtime capabilities must be validated by the consuming host.");
         return Ok(());
     }
     let engine = Runtime::content_only().engine_version;
@@ -15,6 +15,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let root = args.get(1).ok_or("project directory required")?;
         let project = Project::open_for_install(root, engine)?;
+        if args[0] == "verify" && args.len() == 4 && args[2] == "--package" {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&project.verify_package(&args[3])?)?
+            );
+            eprintln!("Scoped verification: complete lock structure admitted; only the requested package and its dependencies had installed bytes verified. Other active packages are listed in unverified_packages and their payloads were not checked. This is not whole-project or consuming-host validation; compiled capability validation is deferred to the consuming host.");
+            return Ok(());
+        }
         if args[0] == "explain" && args.len() == 3 {
             println!(
                 "{}",

@@ -69,8 +69,42 @@ cargo run -p orr_package --bin orr_pkg -- install ./my-game --path ./my-art --de
 cargo run -p orr_package --bin orr_pkg -- list ./my-game
 cargo run -p orr_package --bin orr_pkg -- explain ./my-game my-art
 cargo run -p orr_package --bin orr_pkg -- verify ./my-game
+cargo run -p orr_package --bin orr_pkg -- verify ./my-game --package my-art
 cargo run -p orr_package --bin orr_pkg -- remove ./my-game my-art
 ```
+
+### Verify one active package and its dependencies
+
+`orr_pkg verify PROJECT --package NAME` and `Project::verify_package(name)` check
+the stored manifest and every declared file of one active package and its
+transitive dependencies. Shared dependencies are checked once. This is useful
+when investigating one installed art bundle after authoring or restoring it:
+unrelated corrupt payloads do not hide the result for that bundle.
+
+The complete active lock is still admitted first, including all manifests,
+canonical identities, exact dependency edges, reachability, cycles and engine
+requirements. A consuming host's capability inventory is enforced across the
+whole lock. Invalid metadata in an unrelated package therefore still rejects the
+request. The existing package count, path, file and byte limits remain unchanged.
+
+The distinct JSON report contains `requested_package`, sorted `verified_packages`
+and sorted `unverified_packages`. Both maps identify each entry's exact version,
+digest and direct-selection status. Only `verified_packages` had installed bytes
+checked; the other map is admitted lock metadata and explicitly has no payload
+integrity claim. A missing or transitively selected package is not silently
+replaced by a direct root: missing names fail, and transitive selections verify
+their own dependency closure, not their dependents. Any failure emits no success
+JSON. No payload decoding, scene/reference validation or playability is established.
+
+This operation is read-only, does not acquire or remove a writer guard, and does
+not repair content or activate a revision. Its report is an observation, not an
+apply token or a replacement for full install, export or runtime admission.
+Concurrent hostile mutation remains outside the existing trust boundary. CLI
+capability validation is still deferred to the actual consuming host.
+
+Plain `verify PROJECT` and `Project::verify()` retain whole-project byte
+verification and their existing output. Use those when every active package
+must be checked, including packages outside a scoped report.
 
 ### Reactivate an exact cached revision
 
