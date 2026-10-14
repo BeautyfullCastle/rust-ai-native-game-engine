@@ -470,21 +470,23 @@ class RoomTemplateGateTests(unittest.TestCase):
 
     def test_gpu_gate_is_mandatory_after_gpu_and_namespace_provision(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
+        # Import at call time: the project fixture also imports our PNG/log helpers.
+        # Provision in another parallel job cannot satisfy this runner's needs.
+        from test_room_project_gate import check_room_workflow, workflow_section
+        job = workflow_section(workflow_section(text, 'jobs:', 0), '  sample-room:', 2)
         gate_name = '- name: Required generated Room GPU and source-hidden production export'
-        start = text.index(gate_name)
-        stop = text.index('- name: Upload Room creator acceptance evidence', start)
-        block = text[start:stop]
+        start = job.index(gate_name)
+        stop = job.index('- name: Upload Room creator acceptance evidence', start)
+        block = job[start:stop]
         self.assertIn("if: runner.os == 'Linux' && runner.arch == 'X64'", block)
         for required in ['ORR_REQUIRE_GPU: "1"', 'ORR_REQUIRE_PROJECT_ISOLATION: "1"', 'WGPU_BACKEND: vulkan', 'run: tools/check-room-template.sh gpu']:
             self.assertIn(required, block)
         self.assertNotIn('continue-on-error', block)
-        self.assertLess(text.index('mesa-vulkan-drivers'), start)
-        self.assertLess(text.index('install -y -q bubblewrap'), start)
+        self.assertLess(job.index('mesa-vulkan-drivers'), start)
+        self.assertLess(job.index('install -y -q bubblewrap'), start)
         script = (ROOT / 'tools/check-room-template.sh').read_text()
         for command in ['run_test creator-default normal', 'run_test creator-room normal', 'run_test creator-joint normal', 'run_test sample-disabled normal', 'run_test sample-room normal', 'run_test editor-room normal', 'run_test source-hidden-gpu ignored', 'run_test editor-gpu ignored']:
             self.assertIn(command, script)
-        # Import at call time: the project fixture also imports our PNG/log helpers.
-        from test_room_project_gate import check_room_workflow
         check_room_workflow(text)
         self.assertIn('Required RoomEscapeV1 gameplay core', text)
 

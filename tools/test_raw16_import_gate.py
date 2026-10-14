@@ -33,9 +33,10 @@ NATIVE_HEADER = '''  native:
           - os: ubuntu-24.04-arm
             name: ubuntu-24.04-arm64
 '''
-# Exact unchanged aggregate at both PR190 head1f3434f9 and accepted synthetic
-# badac36c. This pins execution/exit behavior, not just presence of keywords.
-AGGREGATE_SHA256 = '28122b86ba8d54b46453f131d138ae7842eec0e188f6bec3daec2134a18357ef'
+# Exact fail-closed aggregate after adding the independent mandatory Room lane.
+# All six inherited dependencies remain required. Pin execution/exit behavior,
+# not just presence of keywords; the seven-way result matrix is tested separately.
+AGGREGATE_SHA256 = 'e3f4919a8632d4f30de1ec1fa1e8796a7bd558663e8f31807807119d16608f5f'
 
 
 def listing(names):
@@ -340,6 +341,9 @@ class Raw16GateTests(unittest.TestCase):
                     workflow_contract(workflow.replace(upload, changed, 1))
         for old, new in [('ORR_RAW16_REQUIRE_SOFTWARE: "1"', 'ORR_RAW16_REQUIRE_SOFTWARE: "0"'),
                          ('needs: [native, wasm32', 'needs: [wasm32'),
+                         (', sample-room]', ']'),
+                         ("          ROOM_RESULT: ${{ needs['sample-room'].result }}\n", ''),
+                         ('LINKED_PREFABS_RESULT ROOM_RESULT; do', 'LINKED_PREFABS_RESULT; do'),
                          ('  native:\n', '  native:\n    if: false\n'),
                          ('          - os: macos-latest\n', ''),
                          ('    runs-on: ${{ matrix.os }}\n', '    runs-on: ubuntu-latest\n'),
