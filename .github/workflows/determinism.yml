@@ -259,6 +259,174 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Required animation clip extraction cpu acceptance
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_CLIP_EXTRACT_EVIDENCE: ${{ runner.temp }}/clip-extract-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python -B - <<'PYCLIPCPU'
+          import hashlib, importlib.util, json, urllib.parse, os, pathlib, re, shutil, subprocess, sys, time, traceback
+          
+          repo = pathlib.Path.cwd()
+          # Reuse the reviewed stdlib lifecycle primitive; no RAW16 commands run on import.
+          sys.dont_write_bytecode = True
+          spec = importlib.util.spec_from_file_location('clip_process_lifecycle', repo / 'tools/raw16_import_gate.py')
+          lifecycle = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(lifecycle)
+          evidence = pathlib.Path(os.environ['ORR_CLIP_EXTRACT_EVIDENCE'])
+          evidence.mkdir(parents=True, exist_ok=False)
+          paths = ['Cargo.lock', 'Cargo.toml', 'tools/raw16_import_gate.py',
+                   'crates/orr_model/Cargo.toml', 'crates/orr_render/Cargo.toml', 'crates/orr_model/examples/animation_clip_extract.rs',
+                   'crates/orr_model/examples/animation_clip_extract/authoring.rs',
+                   'crates/orr_model/tests/animation_clip_extract.rs',
+                   'crates/orr_render/tests/animation_clip_extract.rs', 'docs/animation-clip-extract.md']
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          identity = lambda: {name: digest(repo / name) for name in paths}
+          frozen = identity()
+          report = {'status': 'started', 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                    'tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+                    'source_sha256': frozen, 'platform': sys.platform, 'commands': []}
+          def record():
+              (evidence / 'receipt.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          def producer_fence():
+              for item in report.values():
+                  if isinstance(item, dict) and 'producer' in item:
+                      assert digest(evidence / item['file']) == item['sha256'], 'retained producer changed'
+          def run(label, command, expected=0):
+              producer_fence()
+              log = evidence / (label + '.log')
+              entry = {'label': label, 'argv': command, 'expected_exit': expected, 'log': log.name, 'state': 'running'}
+              report['commands'].append(entry)
+              record()  # A durable pending receipt exists even if the enclosing job is interrupted.
+              try:
+                  output = lifecycle.bounded_run(command, repo, os.environ.copy(), log, 1200, expected_exit=expected)
+                  entry['state'] = 'passed'
+                  print(output, flush=True)
+                  return output
+              except BaseException:
+                  entry['state'] = 'failed'
+                  raise
+              finally:
+                  producer_fence()
+                  child_receipt = log.with_suffix('.json')
+                  if child_receipt.is_file():
+                      entry['process'] = json.loads(child_receipt.read_text())
+                  record()
+          def inventory(output):
+              return re.findall(r'^([A-Za-z0-9_:]+): test$', output, re.M)
+          def executable(output, label, package, kind, features, limit):
+              artifacts = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
+              producers = [a for a in artifacts if a.get('reason') == 'compiler-artifact'
+                           and a.get('target', {}).get('name') == 'animation_clip_extract' and a.get('executable')]
+              assert len(producers) == 1, producers
+              producer = producers[0]
+              target = producer['target']
+              crate = repo / 'crates' / package
+              assert pathlib.Path(producer['manifest_path']).resolve() == (crate / 'Cargo.toml').resolve()
+              assert producer['package_id'].startswith('path+')
+              package_uri = urllib.parse.urlsplit(producer['package_id'][5:].split('#', 1)[0])
+              assert package_uri.scheme == 'file' and package_uri.netloc == ''
+              package_path = urllib.parse.unquote(package_uri.path)
+              if os.name == 'nt': package_path = package_path.lstrip('/')
+              assert pathlib.Path(package_path).resolve() == crate.resolve()
+              assert target['kind'] == [kind] and target['crate_types'] == ['bin']
+              source = crate / ('examples' if kind == 'example' else 'tests') / 'animation_clip_extract.rs'
+              assert pathlib.Path(target['src_path']).resolve() == source.resolve()
+              assert producer['profile']['test'] is (kind == 'test') and producer['profile']['opt_level'] == '3'
+              assert set(producer['features']) == set(features), producer['features']
+              original = pathlib.Path(producer['executable'])
+              assert original.is_file() and not original.is_symlink() and 0 < original.stat().st_size <= limit
+              original_hash = digest(original)
+              copy = evidence / (label + original.suffix)
+              assert not copy.exists()
+              shutil.copy2(original, copy)
+              assert digest(copy) == original_hash
+              report[label] = {'producer': producer, 'sha256': original_hash, 'file': copy.name,
+                               'bytes': copy.stat().st_size, 'max_bytes': limit}
+              record()
+              return str(copy)
+          expected = '''actual_demo_appends_one_clip_preserves_originals_and_cooks_reloads
+          semantic_json_indices_metadata_and_complete_binary_prefix_are_preserved
+          linear_translation_scale_and_shortest_arc_rotation_have_analytic_values
+          staggered_channels_single_keys_and_absent_tracks_keep_clamping_semantics
+          step_keys_jump_at_exact_start_interior_and_end_without_linear_ramps
+          interior_values_and_exact_endpoint_keys_are_retained_once
+          invalid_names_ranges_and_clip_indices_reject_without_mutation
+          zero_duration_clip_rejects_but_nonzero_single_key_clip_can_be_extracted
+          old_empty_or_duplicate_names_do_not_prevent_a_new_unique_name
+          external_data_uri_unsupported_and_unknown_sources_fail_closed
+          malformed_glb_headers_chunk_order_extra_chunks_and_truncation_reject
+          source_validation_rejects_nonfinite_values_duplicate_times_and_invalid_targets
+          appending_must_respect_clip_accessor_and_buffer_view_budgets
+          appending_must_respect_aggregate_animation_key_budget
+          cli_writes_importable_output_once_and_never_changes_source_or_existing_target
+          cli_rejects_bad_arguments_or_inputs_without_leaving_output
+          cli_rejects_unsafe_output_names_directories_and_package_store_paths
+          cli_rejects_oversized_sparse_input_before_reading_or_creating_output
+          cli_rejects_symlink_sources_targets_and_ancestors_including_dangling_targets
+          near_parallel_nonunit_quaternions_use_runtime_normalization_and_interpolation'''.splitlines()
+          if os.name == 'nt':
+              expected.remove('cli_rejects_symlink_sources_targets_and_ancestors_including_dangling_targets')
+          base = ['--locked', '--release', '-p', 'orr_model']
+          focused = ['cargo', 'test', *base, '--features', 'animation,import', '--test', 'animation_clip_extract']
+          try:
+              assert sorted(inventory(run('inventory', [*focused, '--', '--list']))) == sorted(expected)
+              assert inventory(run('ignored-inventory', [*focused, '--', '--ignored', '--list'])) == []
+              output = run('focused', [*focused, '--', '--test-threads=1'])
+              assert re.search(r'test result: ok\. ' + str(len(expected)) + r' passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;', output)
+              for name in expected:
+                  assert re.search(r'^test ' + re.escape(name) + r' \.\.\. ', output, re.M), name
+              run('model-regressions', ['cargo', 'test', *base, '--features', 'animation,import'])
+              run('strict-model', ['cargo', 'clippy', *base, '--features', 'animation,import', '--all-targets', '--', '-D', 'warnings'])
+              run('default-check', ['cargo', 'check', *base, '--all-targets'])
+              build = run('default-build', ['cargo', 'build', *base, '--no-default-features', '--example', 'animation_clip_extract', '--message-format=json'])
+              disabled = executable(build, 'feature-off-executable', 'orr_model', 'example', [], 64 * 1024**2)
+              run('feature-off-exit2', [disabled, '--help'], 2)
+              assert b'requires --features animation,import' in (evidence / 'feature-off-exit2.log').read_bytes()
+              build = run('enabled-build', ['cargo', 'build', *base, '--features', 'animation,import', '--example', 'animation_clip_extract', '--message-format=json'])
+              enabled = executable(build, 'enabled-executable', 'orr_model', 'example', ['animation', 'default', 'import'], 64 * 1024**2)
+              assert 'Usage:' in run('enabled-help', [enabled, '--help'])
+              source = repo / 'assets/animation_demo/animated.glb'
+              before = source.read_bytes()
+              output = evidence / 'authored.glb'
+              cli = [enabled, '--input', str(source), '--clip', '0', '--start', '0.25', '--end', '0.75', '--name', 'short-action', '--output', str(output)]
+              run('actual-publication', cli)
+              authored = output.read_bytes()
+              run('actual-no-replace', cli, 2)
+              alias = cli.copy(); alias[-1] = str(source)
+              run('actual-source-alias', alias, 2)
+              invalid = cli.copy(); invalid[-1] = str(evidence / 'invalid.glb'); invalid[invalid.index('--start') + 1] = '-1'
+              run('actual-invalid-range', invalid, 2)
+              unknown = cli.copy(); unknown[-1] = str(evidence / 'unknown.glb'); unknown.append('--force')
+              run('actual-unknown-option', unknown, 2)
+              assert not (evidence / 'invalid.glb').exists() and not (evidence / 'unknown.glb').exists()
+              assert output.read_bytes() == authored and source.read_bytes() == before
+              assert not list(evidence.glob('.orr-clip-*')), 'owned stage must be cleaned'
+              report['actual_cli'] = {'source_sha256': digest(source), 'output_sha256': digest(output),
+                                      'source_and_output_preserved_after_rejections': True}
+              run('strict-render-consumer', ['cargo', 'clippy', '--locked', '--release', '-p', 'orr_render', '--features', 'animation,imported-scene', '--test', 'animation_clip_extract', '--', '-D', 'warnings'])
+              report['status'] = 'passed'
+          except BaseException:
+              report['status'] = 'failed'
+              report['failure'] = traceback.format_exc()
+              raise
+          finally:
+              report['source_unchanged'] = identity() == frozen
+              if not report['source_unchanged']:
+                  report['status'] = 'failed'
+              record()
+              assert report['source_unchanged'], 'source or lock mutation during acceptance'
+          PYCLIPCPU
+      - name: Retain clip extraction cpu and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip-extract-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/clip-extract-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       # Particles are presentation-only and default-off. Separate steps keep
       # every configuration mandatory under both bash and Windows PowerShell.
       # sample-build already feeds the required cross-platform aggregate.
@@ -728,6 +896,159 @@ jobs:
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Required animation clip extraction gpu acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_CLIP_EXTRACT_EVIDENCE: ${{ runner.temp }}/clip-extract-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python -B - <<'PYCLIPGPU'
+          import hashlib, importlib.util, json, urllib.parse, os, pathlib, re, shutil, subprocess, sys, time, traceback
+          
+          repo = pathlib.Path.cwd()
+          # Reuse the reviewed stdlib lifecycle primitive; no RAW16 commands run on import.
+          sys.dont_write_bytecode = True
+          spec = importlib.util.spec_from_file_location('clip_process_lifecycle', repo / 'tools/raw16_import_gate.py')
+          lifecycle = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(lifecycle)
+          evidence = pathlib.Path(os.environ['ORR_CLIP_EXTRACT_EVIDENCE'])
+          evidence.mkdir(parents=True, exist_ok=False)
+          captures = evidence / 'captures'
+          paths = ['Cargo.lock', 'Cargo.toml', 'tools/raw16_import_gate.py',
+                   'crates/orr_model/Cargo.toml', 'crates/orr_render/Cargo.toml', 'crates/orr_model/examples/animation_clip_extract.rs',
+                   'crates/orr_model/examples/animation_clip_extract/authoring.rs',
+                   'crates/orr_model/tests/animation_clip_extract.rs',
+                   'crates/orr_render/tests/animation_clip_extract.rs', 'docs/animation-clip-extract.md']
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          identity = lambda: {name: digest(repo / name) for name in paths}
+          frozen = identity()
+          report = {'status': 'started', 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                    'tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+                    'source_sha256': frozen, 'commands': []}
+          def record():
+              (evidence / 'receipt.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          def producer_fence():
+              for item in report.values():
+                  if isinstance(item, dict) and 'producer' in item:
+                      assert digest(evidence / item['file']) == item['sha256'], 'retained producer changed'
+          def run(label, command, expected=0):
+              producer_fence()
+              log = evidence / (label + '.log')
+              entry = {'label': label, 'argv': command, 'expected_exit': expected, 'log': log.name, 'state': 'running'}
+              report['commands'].append(entry)
+              record()  # A durable pending receipt exists even if the enclosing job is interrupted.
+              try:
+                  output = lifecycle.bounded_run(command, repo, os.environ.copy(), log, 1200, expected_exit=expected)
+                  entry['state'] = 'passed'
+                  print(output, flush=True)
+                  return output
+              except BaseException:
+                  entry['state'] = 'failed'
+                  raise
+              finally:
+                  producer_fence()
+                  child_receipt = log.with_suffix('.json')
+                  if child_receipt.is_file():
+                      entry['process'] = json.loads(child_receipt.read_text())
+                  record()
+          def executable(output, label, package, kind, features, limit):
+              artifacts = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
+              producers = [a for a in artifacts if a.get('reason') == 'compiler-artifact'
+                           and a.get('target', {}).get('name') == 'animation_clip_extract' and a.get('executable')]
+              assert len(producers) == 1, producers
+              producer = producers[0]
+              target = producer['target']
+              crate = repo / 'crates' / package
+              assert pathlib.Path(producer['manifest_path']).resolve() == (crate / 'Cargo.toml').resolve()
+              assert producer['package_id'].startswith('path+')
+              package_uri = urllib.parse.urlsplit(producer['package_id'][5:].split('#', 1)[0])
+              assert package_uri.scheme == 'file' and package_uri.netloc == ''
+              package_path = urllib.parse.unquote(package_uri.path)
+              if os.name == 'nt': package_path = package_path.lstrip('/')
+              assert pathlib.Path(package_path).resolve() == crate.resolve()
+              assert target['kind'] == [kind] and target['crate_types'] == ['bin']
+              source = crate / ('examples' if kind == 'example' else 'tests') / 'animation_clip_extract.rs'
+              assert pathlib.Path(target['src_path']).resolve() == source.resolve()
+              assert producer['profile']['test'] is (kind == 'test') and producer['profile']['opt_level'] == '3'
+              assert set(producer['features']) == set(features), producer['features']
+              original = pathlib.Path(producer['executable'])
+              assert original.is_file() and not original.is_symlink() and 0 < original.stat().st_size <= limit
+              original_hash = digest(original)
+              copy = evidence / (label + original.suffix)
+              assert not copy.exists()
+              shutil.copy2(original, copy)
+              assert digest(copy) == original_hash
+              report[label] = {'producer': producer, 'sha256': original_hash, 'file': copy.name,
+                               'bytes': copy.stat().st_size, 'max_bytes': limit}
+              record()
+              return str(copy)
+          name = 'cli_extract_installed_cooked_clip_matches_source_time_gpu_and_analytic_oracle'
+          command = ['cargo', 'test', '--locked', '--release', '-p', 'orr_render', '--features',
+                     'animation,imported-scene', '--test', 'animation_clip_extract']
+          try:
+              icds = sorted(pathlib.Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))
+              report['icds'] = [str(path) for path in icds]; record()
+              assert len(icds) == 1, 'exactly one existing Lavapipe manifest is required'
+              os.environ.update(VK_ICD_FILENAMES=str(icds[0]), VK_DRIVER_FILES=str(icds[0]),
+                                WGPU_BACKEND='vulkan', ORR_REQUIRE_GPU='1',
+                                ORR_CLIP_EXTRACT_REQUIRE_SOFTWARE='1', ORR_CLIP_EXTRACT_CAPTURE_DIR=str(captures))
+              report['device_environment'] = {key: os.environ[key] for key in [
+                  'VK_ICD_FILENAMES', 'VK_DRIVER_FILES', 'WGPU_BACKEND', 'ORR_REQUIRE_GPU',
+                  'ORR_CLIP_EXTRACT_REQUIRE_SOFTWARE', 'ORR_CLIP_EXTRACT_CAPTURE_DIR']}
+              build = run('build-render-consumer', [*command, '--no-run', '--message-format=json'])
+              test_binary = executable(build, 'device-test-executable', 'orr_render', 'test',
+                                       ['animation', 'default', 'imported-scene', 'models'], 128 * 1024**2)
+              for label, flags in [('inventory', []), ('ignored-inventory', ['--ignored'])]:
+                  output = run(label, [test_binary, *flags, '--list'])
+                  assert re.findall(r'^([A-Za-z0-9_:]+): test$', output, re.M) == [name]
+              output = run('device', [test_binary, name, '--ignored', '--exact', '--nocapture', '--test-threads=1'])
+              assert re.search(r'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;', output)
+              assert re.search(r'^test ' + name + r' \.\.\. ', output, re.M)
+              expected = {'original.glb', 'trimmed.glb', 'original.glb.cooked.json', 'trimmed.glb.cooked.json', 'adapter.json', 'acceptance.json'}
+              for index in range(5):
+                  expected.add(f'sample-{index}.json')
+                  for variant in ['original-source-time', 'trimmed-rebased-time', 'preserved-original-clip', 'wrong-unrebased-time']:
+                      expected.update(f'sample-{index}-{variant}.{extension}' for extension in ['rgba', 'ppm'])
+              expected.update(['empty-draw-clear.rgba', 'empty-draw-clear.ppm'])
+              assert len(expected) == 53 and {path.name for path in captures.iterdir()} == expected
+              for path in captures.iterdir():
+                  assert path.is_file() and not path.is_symlink()
+                  if path.suffix == '.rgba': assert path.stat().st_size == 147456
+                  if path.suffix == '.ppm':
+                      assert path.stat().st_size == 110607 and path.read_bytes().startswith(b'P6\n192 192\n255\n')
+              accepted = json.loads((captures / 'acceptance.json').read_text())
+              adapter = json.loads((captures / 'adapter.json').read_text())
+              assert accepted['status'] == 'passed' and accepted['mandatory_gpu'] is True
+              assert accepted['required_software_vulkan'] is True
+              assert accepted['source_hidden_after_install'] is True and accepted['cooked_reload_before_render'] is True
+              assert adapter == accepted['adapter'] and adapter['backend'] == 'Vulkan' and adapter['software'] is True
+              assert len(accepted['samples']) == 5
+              assert digest(pathlib.Path(test_binary)) == report['device-test-executable']['sha256']
+              report['capture_sha256'] = {path.name: {'sha256': digest(path), 'bytes': path.stat().st_size} for path in sorted(captures.iterdir())}
+              report['status'] = 'passed'
+          except BaseException:
+              report['status'] = 'failed'
+              report['failure'] = traceback.format_exc()
+              raise
+          finally:
+              report['source_unchanged'] = identity() == frozen
+              if captures.exists():
+                  report['partial_capture_sha256'] = {path.name: {'sha256': digest(path), 'bytes': path.stat().st_size} for path in sorted(captures.iterdir()) if path.is_file() and not path.is_symlink()}
+              if not report['source_unchanged']:
+                  report['status'] = 'failed'
+              record()
+              assert report['source_unchanged'], 'source or lock mutation during acceptance'
+          PYCLIPGPU
+      - name: Retain clip extraction gpu and partial failure evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip-extract-gpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/clip-extract-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Required RAW16 explicit software-device readback
         if: runner.os == 'Linux'
         env:
