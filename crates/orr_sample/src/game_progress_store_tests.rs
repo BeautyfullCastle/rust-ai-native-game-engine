@@ -20,7 +20,33 @@ fn sandbox() -> (tempfile::TempDir, ProgressStore) {
     (root, store)
 }
 fn reopen(store: &ProgressStore) -> ProgressStore {
-    ProgressStore::open(store.paths.clone(), store.key.clone()).unwrap()
+    let loaded = load_after_transient_lock(&store.paths, &store.key, || {});
+    ProgressStore {
+        paths: store.paths.clone(),
+        key: store.key.clone(),
+        loaded,
+    }
+}
+fn load_after_transient_lock(
+    paths: &ProgressPaths,
+    key: &ProgressKey,
+    mut checkpoint: impl FnMut(),
+) -> Loaded {
+    for _ in 0..100 {
+        let mut reached_checkpoint = false;
+        let loaded = linux::load_with_checkpoint(paths, key, || {
+            reached_checkpoint = true;
+            checkpoint();
+        });
+        // A parallel fork can retain a released writer's open-file description
+        // until exec. Retry only actual busy loads that admitted no snapshot.
+        if !reached_checkpoint && matches!(loaded.write_state, WriteState::Deferred) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
+        return loaded;
+    }
+    panic!("test writer did not release the load lock");
 }
 fn bytes(score: u32) -> Vec<u8> {
     serde_json::to_vec(&ProgressV1::new(&key(), score)).unwrap()
@@ -37,6 +63,7 @@ fn copies(store: &ProgressStore) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
 }
 #[test]
 fn pure_discovery_and_missing_load_do_not_write() {
+    existing_directory_load_does_not_create_a_lock();
     let (_root, store) = sandbox();
     assert_eq!(store.best(), 0);
     assert!(!store.paths.directory().exists());
@@ -256,6 +283,9 @@ fn postpublication_failure_keeps_published_best_and_disallows_blind_retry() {
 }
 #[test]
 fn stable_nonblocking_lock_and_reread_before_merge() {
+    opening_during_publication_defers_then_merges();
+    shared_load_lock_excludes_writer_until_snapshot_finishes();
+    first_writer_lock_appearance_discards_unlocked_snapshot();
     let (_root, mut a) = sandbox();
     submit_after_transient_lock(&mut a, 2).unwrap();
     let inode = fs::metadata(a.paths.directory().join(LOCK_NAME))
@@ -323,6 +353,8 @@ fn stable_nonblocking_lock_and_reread_before_merge() {
 }
 #[test]
 fn links_special_files_and_unwritable_files_are_refused() {
+    readonly_lock_preserves_saved_best_without_allowing_commit();
+    deferred_load_still_rejects_unsafe_or_future_storage();
     for name in [PRIMARY_NAME, BACKUP_NAME, LOCK_NAME] {
         for kind in ["symlink", "hardlink", "fifo", "readonly"] {
             let (root, store) = sandbox();
@@ -351,6 +383,7 @@ fn links_special_files_and_unwritable_files_are_refused() {
 }
 #[test]
 fn changed_public_names_and_ancestor_symlinks_block_publication() {
+    replacement_of_read_lock_inode_is_terminal();
     let (root, mut store) = sandbox();
     submit_after_transient_lock(&mut store, 2).unwrap();
     let path = store.paths.directory().join(BACKUP_NAME);
@@ -500,4 +533,232 @@ fn concurrent_processes_merge_without_lost_highscore() {
         assert!(child.wait().unwrap().success());
     }
     assert_eq!(reopen(&store).best(), 9);
+}
+// This deterministic invariant test uses the real existing commit checkpoint.
+// It reproduces unguarded load admission, not the unrecorded CI stat predicate.
+fn opening_during_publication_defers_then_merges() {
+    let (_root, mut writer) = sandbox();
+    submit_after_transient_lock(&mut writer, 2).unwrap();
+    let paths = writer.paths.clone();
+    let mut reader = None;
+    submit_checkpoint_after_transient_lock(&mut writer, 6, |point| {
+        if point == "after-publication" {
+            let before = (
+                fs::read(paths.directory().join(PRIMARY_NAME)).unwrap(),
+                fs::read(paths.directory().join(BACKUP_NAME)).unwrap(),
+            );
+            let opened = ProgressStore::open(paths.clone(), key()).unwrap();
+            assert!(
+                opened
+                    .notice()
+                    .is_some_and(|notice| notice.contains("load deferred")),
+                "a loader must not admit snapshots during an exclusive publication lock"
+            );
+            assert_eq!(
+                opened.best(),
+                0,
+                "deferred load must not admit partial snapshots"
+            );
+            assert_eq!(
+                fs::read(paths.directory().join(PRIMARY_NAME)).unwrap(),
+                before.0
+            );
+            assert_eq!(
+                fs::read(paths.directory().join(BACKUP_NAME)).unwrap(),
+                before.1
+            );
+            reader = Some(opened);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let mut reader = reader.expect("publication checkpoint reached");
+    assert_eq!(
+        submit_after_transient_lock(&mut reader, 4).unwrap(),
+        CommitOutcome::DurablySaved
+    );
+    assert_eq!(reader.best(), 6);
+    assert!(reader.notice().is_none());
+}
+
+fn existing_directory_load_does_not_create_a_lock() {
+    let (_root, store) = sandbox();
+    fs::create_dir_all(store.paths.directory()).unwrap();
+    let empty = reopen(&store);
+    assert_eq!(empty.best(), 0);
+    assert_eq!(fs::read_dir(store.paths.directory()).unwrap().count(), 0);
+    put(&store, PRIMARY_NAME, &bytes(3));
+    let loaded = reopen(&store);
+    assert_eq!(loaded.best(), 3);
+    assert_eq!(fs::read_dir(store.paths.directory()).unwrap().count(), 1);
+    assert!(!store.paths.directory().join(LOCK_NAME).exists());
+}
+
+fn first_writer_lock_appearance_discards_unlocked_snapshot() {
+    let (_root, mut writer) = sandbox();
+    fs::create_dir_all(writer.paths.directory()).unwrap();
+    let paths = writer.paths.clone();
+    let loaded = load_after_transient_lock(&paths, &key(), || {
+        submit_after_transient_lock(&mut writer, 8).unwrap();
+    });
+    assert!(matches!(loaded.write_state, WriteState::Deferred));
+    assert_eq!(loaded.best, 0);
+    let mut reader = ProgressStore {
+        paths,
+        key: key(),
+        loaded,
+    };
+    submit_after_transient_lock(&mut reader, 3).unwrap();
+    assert_eq!(reader.best(), 8);
+}
+
+fn shared_load_lock_excludes_writer_until_snapshot_finishes() {
+    let (_root, mut writer) = sandbox();
+    submit_after_transient_lock(&mut writer, 2).unwrap();
+    let paths = writer.paths.clone();
+    let before = copies(&writer);
+    let loaded = load_after_transient_lock(&paths, &key(), || {
+        let mut reached_checkpoint = false;
+        let failure = writer
+            .submit_with_checkpoint(9, |_| {
+                reached_checkpoint = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(failure.contains("progress are locked"), "{failure}");
+        assert!(failure.contains("os error 11"), "{failure}");
+        assert!(!reached_checkpoint);
+        assert_eq!(copies(&writer), before);
+    });
+    assert!(matches!(loaded.write_state, WriteState::Ready));
+    assert_eq!(loaded.best, 2);
+    submit_after_transient_lock(&mut writer, 9).unwrap();
+    assert_eq!(writer.best(), 9);
+}
+
+fn replacement_of_read_lock_inode_is_terminal() {
+    let (_root, mut writer) = sandbox();
+    submit_after_transient_lock(&mut writer, 2).unwrap();
+    let paths = writer.paths.clone();
+    let loaded = load_after_transient_lock(&paths, &key(), || {
+        let replacement = paths.directory().join("replacement-lock");
+        fs::write(&replacement, []).unwrap();
+        fs::rename(replacement, paths.directory().join(LOCK_NAME)).unwrap();
+    });
+    assert!(matches!(loaded.write_state, WriteState::ReadOnly));
+    assert!(loaded
+        .notice
+        .as_deref()
+        .unwrap()
+        .contains("lock changed while loading"));
+    let mut reader = ProgressStore {
+        paths,
+        key: key(),
+        loaded,
+    };
+    let before = copies(&reader);
+    assert!(reader.submit_completed(9).is_err());
+    assert_eq!(copies(&reader), before);
+}
+
+fn deferred_load_still_rejects_unsafe_or_future_storage() {
+    for kind in [
+        "hardlink",
+        "symlink",
+        "fifo",
+        "readonly",
+        "other-writable",
+        "future",
+    ] {
+        let (root, mut writer) = sandbox();
+        submit_after_transient_lock(&mut writer, 2).unwrap();
+        let lock = fs::File::open(writer.paths.directory().join(LOCK_NAME)).unwrap();
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
+        let mut reader = ProgressStore::open(writer.paths.clone(), key()).unwrap();
+        assert!(matches!(reader.loaded.write_state, WriteState::Deferred));
+        drop(lock);
+        let primary = writer.paths.directory().join(PRIMARY_NAME);
+        let outside = root.path().join("outside");
+        fs::write(&outside, bytes(3)).unwrap();
+        match kind {
+            "hardlink" => fs::hard_link(&primary, root.path().join("alias")).unwrap(),
+            "symlink" => {
+                fs::remove_file(&primary).unwrap();
+                symlink(&outside, &primary).unwrap();
+            }
+            "fifo" => {
+                fs::remove_file(&primary).unwrap();
+                rustix::fs::mkfifoat(
+                    rustix::fs::CWD,
+                    &primary,
+                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+                )
+                .unwrap();
+            }
+            "readonly" => fs::set_permissions(&primary, fs::Permissions::from_mode(0o400)).unwrap(),
+            "other-writable" => {
+                fs::set_permissions(&primary, fs::Permissions::from_mode(0o620)).unwrap()
+            }
+            "future" => fs::write(&primary, br#"{"version":2}"#).unwrap(),
+            _ => unreachable!(),
+        }
+        let backup = fs::read(writer.paths.directory().join(BACKUP_NAME)).unwrap();
+        let mut reached_checkpoint = false;
+        let mut failure = None;
+        for attempt in 0..100 {
+            let result = reader.submit_with_checkpoint(9, |_| {
+                reached_checkpoint = true;
+                Ok(())
+            });
+            assert!(!reached_checkpoint, "{kind}");
+            match result {
+                Err(reason)
+                    if reason.contains("progress are locked or locking is unavailable")
+                        && reason.contains("os error 11")
+                        && attempt < 99 =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                result => {
+                    failure = Some(result.expect_err(kind));
+                    break;
+                }
+            }
+        }
+        let failure = failure.expect("last attempt returned its error");
+        let expected = match kind {
+            "readonly" => "highscore.json is read-only",
+            "future" => "unsupported progress version",
+            _ => "highscore.json must be a user-owned regular file",
+        };
+        assert!(failure.contains(expected), "{kind}: {failure}");
+        assert!(!reached_checkpoint, "{kind}");
+        assert_eq!(
+            fs::read(writer.paths.directory().join(BACKUP_NAME)).unwrap(),
+            backup,
+            "{kind}"
+        );
+        assert_eq!(fs::read(&outside).unwrap(), bytes(3), "{kind}");
+        assert_eq!(
+            fs::read_dir(writer.paths.directory()).unwrap().count(),
+            3,
+            "{kind}"
+        );
+    }
+}
+
+fn readonly_lock_preserves_saved_best_without_allowing_commit() {
+    let (_root, mut writer) = sandbox();
+    submit_after_transient_lock(&mut writer, 7).unwrap();
+    fs::set_permissions(
+        writer.paths.directory().join(LOCK_NAME),
+        fs::Permissions::from_mode(0o400),
+    )
+    .unwrap();
+    let mut reader = reopen(&writer);
+    assert_eq!(reader.best(), 7);
+    assert!(matches!(reader.loaded.write_state, WriteState::ReadOnly));
+    let before = copies(&reader);
+    assert!(reader.submit_completed(9).is_err());
+    assert_eq!(copies(&reader), before);
 }
