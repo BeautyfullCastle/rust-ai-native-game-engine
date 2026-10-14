@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
-        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT | inspect SOURCE>\nOffline content only. Runtime capabilities must be validated by the consuming host.");
+        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT | inspect SOURCE>\nOffline content only. Runtime capabilities must be validated by the consuming host.");
         return Ok(());
     }
     let engine = Runtime::content_only().engine_version;
@@ -55,6 +55,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "remove" if args.len() == 3 => project.remove(&args[2])?,
+            "restore" if args.len() == 5 && args[4] == "--dry-run" => {
+                println!("{}", serde_json::to_string_pretty(
+                    &project.preview_restore_cached(&args[2], &args[3])?
+                )?);
+                preview_limits();
+                return Ok(());
+            }
+            "restore" if args.len() == 4 => {
+                project.restore_cached(&args[2], &args[3])?
+            }
             "list" if args.len() == 2 => project.list()?,
             "verify" if args.len() == 2 => project.verify()?,
             _ => return Err("invalid command/arguments; use --help".into()),
