@@ -16,6 +16,85 @@ ROOT = Path(__file__).resolve().parents[1]
 INVENTORIES = json.loads(gate.INVENTORY.read_text())
 
 
+ROOM_CONTRACTS = 'RoomEscapeV1 contracts and optional feature combinations'
+ROOM_GPU = 'RoomEscapeV1 actual GPU and source-hidden production export'
+TEMPLATE_CONTRACTS = 'Required Room creator API CLI editor and joint inventories'
+TEMPLATE_GPU = 'Required generated Room GPU and source-hidden production export'
+ROOM_CONDITION = "runner.os == 'Linux' && runner.arch == 'X64'"
+
+
+def workflow_section(text, header, indent):
+    """Read one exact indentation-scoped section, not a whole-file substring."""
+    lines = text.splitlines()
+    assert lines.count(header) == 1, ('missing/duplicate workflow section', header)
+    start = lines.index(header)
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and not line.lstrip().startswith('#'):
+            if len(line) - len(line.lstrip()) <= indent:
+                break
+        end += 1
+    while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith('#')):
+        end -= 1
+    return '\n'.join(lines[start:end]) + '\n'
+
+
+def room_workflow_steps(workflow):
+    """The supported CI shape is deliberately strict; changed gates need review."""
+    trigger = workflow_section(workflow, 'on:', 0)
+    assert trigger == 'on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:\n', 'workflow triggers'
+    jobs = workflow_section(workflow, 'jobs:', 0)
+    job = workflow_section(jobs, '  sample-build:', 2)
+    assert job.count('    steps:\n') == 1, 'sample-build steps'
+    header, body = job.split('    steps:\n', 1)
+    assert all(len(line) - len(line.lstrip()) >= 6
+               for line in body.splitlines() if line.strip() and not line.lstrip().startswith('#')), 'trailing job fields'
+    header = '\n'.join(line for line in header.splitlines() if line.strip() and not line.lstrip().startswith('#'))
+    assert header == '\n'.join([
+        '  sample-build:', '    name: sample build (${{ matrix.os }})',
+        '    runs-on: ${{ matrix.os }}', '    strategy:', '      fail-fast: false',
+        '      matrix:', '        os: [ubuntu-22.04, windows-latest]',
+    ]), 'sample-build runner/trigger must remain mandatory'
+    names = (ROOM_CONTRACTS, ROOM_GPU, TEMPLATE_CONTRACTS, TEMPLATE_GPU)
+    return {name: workflow_section(job, '      - name: ' + name, 6) for name in names}
+
+
+def check_room_workflow(workflow):
+    steps = room_workflow_steps(workflow)
+    for name, script, mode, evidence in [
+        (ROOM_CONTRACTS, 'check-room-project', 'contracts', 'ORR_ROOM_EVIDENCE'),
+        (ROOM_GPU, 'check-room-project', 'gpu', 'ORR_ROOM_EVIDENCE'),
+        (TEMPLATE_CONTRACTS, 'check-room-template', 'contracts', 'ORR_ROOM_TEMPLATE_EVIDENCE'),
+        (TEMPLATE_GPU, 'check-room-template', 'gpu', 'ORR_ROOM_TEMPLATE_EVIDENCE'),
+    ]:
+        prefix = ('      - name: ' + name + '\n        if: ' + ROOM_CONDITION
+                  + '\n        shell: bash\n        timeout-minutes: ' + ('90' if mode == 'contracts' else '60') + '\n')
+        root = 'orr-room-project' if evidence == 'ORR_ROOM_EVIDENCE' else 'orr-room-template'
+        env = ('        env:\n' + ('' if mode == 'contracts' else
+               '          WGPU_BACKEND: vulkan\n          ORR_REQUIRE_GPU: "1"\n          ORR_REQUIRE_PROJECT_ISOLATION: "1"\n')
+               + '          ' + evidence + ': /tmp/' + root + '-${{ github.run_id }}-${{ github.run_attempt }}\n')
+        command = 'tools/' + script + '.sh ' + mode
+        step = steps[name]
+        if name != ROOM_CONTRACTS:
+            run = '        run: ' + command + '\n'
+            expected = prefix + (run + env if mode == 'contracts' else env + run)
+            assert step == expected, ('mandatory scalar step', name)
+            continue
+        assert step.startswith(prefix + '        run: |\n') and step.endswith(env), 'Room contracts step fields'
+        lines = step[len(prefix + '        run: |\n'):-len(env)].splitlines()
+        assert all(line.startswith('          ') for line in lines), 'Room run block indentation'
+        run = '\n'.join(line[10:] for line in lines) + '\n'
+        before = ('if ' + command + '; then\n  exit 0\nelse\n  room_status=$?\nfi\n'
+                  'if python3 - "$room_status" <<\'PY\'\n')
+        after = ('PY\nthen\n  :\nelse\n'
+                 "  printf '%s\\n' 'Room tracked-metadata collector failed; original gate exit retained' >&2\n"
+                 'fi\nexit "$room_status"\n')
+        assert run.startswith(before) and run.endswith(after), 'exact gate invocation and original-exit propagation'
+        diagnostic = run[len(before):-len(after)]
+        assert diagnostic and 'PY' not in diagnostic.splitlines(), 'one diagnostic heredoc; no intervening shell'
+
+
 def unified_log(mode):
     pieces = []
     expected = INVENTORIES['camera-schema-unified']
@@ -182,8 +261,72 @@ class RoomProjectGateTests(unittest.TestCase):
         self.assertNotIn('target/release/', script)
         self.assertNotIn('continue-on-error', script)
         workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
-        for name in ('check-room-project', 'check-room-template'):
-            for mode in ('contracts', 'gpu'): self.assertIn(f'run: tools/{name}.sh {mode}', workflow)
+        check_room_workflow(workflow)
+
+    def test_workflow_checks_reject_missing_disabled_or_nonpropagating_gates(self):
+        workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
+        check_room_workflow(workflow)
+        steps = room_workflow_steps(workflow)
+        contracts = steps[ROOM_CONTRACTS]
+        command = 'if tools/check-room-project.sh contracts; then'
+        mutations = {
+            'missing command': (command, 'if true; then'),
+            'wrong command': (command, 'if tools/check-room-template.sh contracts; then'),
+            'wrong argument': (command, 'if tools/check-room-project.sh gpu; then'),
+            'commented command': (command, '# ' + command),
+            'extra argument': (command, 'if tools/check-room-project.sh contracts extra; then'),
+            'swallowed command failure': (command, 'if tools/check-room-project.sh contracts || true; then'),
+            'skipped command': (command, 'if false; then\n          ' + command),
+            'late status capture': ('  room_status=$?', '  :\n            room_status=$?'),
+            'reassigned status': ('  room_status=$?', '  room_status=0'),
+            'swallowed final exit': ('exit "$room_status"', 'exit 0'),
+            'missing final exit': ('exit "$room_status"', ':'),
+            'shell after heredoc': ('          PY\n', '          PY\n          room_status=0\n'),
+            'premature heredoc end': ('          import base64\n', '          PY\n          room_status=0\n          import base64\n'),
+            'no step trigger': ('        if: ' + ROOM_CONDITION + '\n', ''),
+            'disabled step': ('        if: ' + ROOM_CONDITION, '        if: false'),
+            'wrong architecture': ("runner.arch == 'X64'", "runner.arch == 'ARM64'"),
+            'wrong shell': ('        shell: bash', '        shell: python'),
+            'continue on error': ('        shell: bash', '        continue-on-error: true\n        shell: bash'),
+            'missing environment': ('          ORR_ROOM_EVIDENCE:', '          UNUSED_ROOM_EVIDENCE:'),
+            'wrong evidence destination': ('/tmp/orr-room-project-', '/tmp/wrong-room-'),
+        }
+        for label, (old, new) in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertIn(old, contracts)
+                changed = contracts.replace(old, new, 1)
+                self.assertNotEqual(changed, contracts)
+                with self.assertRaises(AssertionError):
+                    check_room_workflow(workflow.replace(contracts, changed, 1))
+        for name, step in steps.items():
+            for label, replacement in [
+                ('removed step', ''), ('renamed step', step.replace(name, 'Unrelated step', 1)),
+                ('duplicate step', step + step),
+                ('comment-only command', step.replace('        run: tools/', '        # run: tools/', 1)
+                 if name != ROOM_CONTRACTS else contracts.replace(command, '# ' + command, 1)),
+            ]:
+                with self.subTest(step=name, mutation=label), self.assertRaises(AssertionError):
+                    check_room_workflow(workflow.replace(step, replacement, 1))
+        job = workflow_section(workflow, '  sample-build:', 2)
+        for field in ('if: false', 'continue-on-error: true', 'steps: []'):
+            with self.subTest(trailing_job_field=field), self.assertRaises(AssertionError):
+                check_room_workflow(workflow.replace(job, job + '    ' + field + '\n', 1))
+        relocated = workflow.replace(job, '', 1).replace('jobs:\n', 'unrelated:\n' + job + '\njobs:\n', 1)
+        with self.subTest(mutation='job outside jobs'), self.assertRaises(AssertionError):
+            check_room_workflow(relocated)
+        for label, old, new in [
+            ('missing jobs section', 'jobs:\n', 'unrelated:\n'),
+            ('missing PR trigger', '  pull_request:\n', ''),
+            ('conditional PR trigger', '  pull_request:\n', '  pull_request:\n    paths: [unrelated]\n'),
+            ('missing job', '  sample-build:\n', '  other-job:\n'),
+            ('disabled job', '  sample-build:\n', '  sample-build:\n    if: false\n'),
+            ('job allows failure', '  sample-build:\n', '  sample-build:\n    continue-on-error: true\n'),
+            ('no Linux runner', '        os: [ubuntu-22.04, windows-latest]', '        os: [windows-latest]'),
+        ]:
+            with self.subTest(mutation=label):
+                self.assertIn(old, workflow)
+                with self.assertRaises(AssertionError):
+                    check_room_workflow(workflow.replace(old, new, 1))
 
 
 if __name__ == '__main__':

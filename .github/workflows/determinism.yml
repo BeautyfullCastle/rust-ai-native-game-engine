@@ -179,6 +179,17 @@ jobs:
           cargo clippy --workspace --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu --all-targets
           cargo clippy -p orr_sim -p orr_session -p orr_testgame -p orr_physics -p orr_physics3d -p orr_proto -p orr_server -p orr_relay_net -p orr_reflect -p orr_reflect_derive -p orr_edit -p orr_remote -p orr_mcp -p orr_cli -p orr_viewstream -p orr_tui -p orr_net -p orr_web -p orr_games -p orr_wasm_bench --all-targets -- -D warnings
 
+      - name: Required RAW16 native inventories and strict feature boundary
+        run: python -B tools/raw16_import_gate.py native --evidence "${{ runner.temp }}/raw16-native-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain RAW16 native and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw16-native-${{ matrix.name }}
+          path: ${{ runner.temp }}/raw16-native-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: cargo build -p orr_sim --features hotpatch
         # Desktop-only, off-by-default hot-patch hook (design doc decision
         # #10 — see crates/orr_sim/src/hotpatch.rs): build-only check (not
@@ -251,6 +262,17 @@ jobs:
       # Particles are presentation-only and default-off. Separate steps keep
       # every configuration mandatory under both bash and Windows PowerShell.
       # sample-build already feeds the required cross-platform aggregate.
+      - name: Required RAW16 editor inventory and strict feature combinations
+        run: python -B tools/raw16_import_gate.py editor --evidence "${{ runner.temp }}/raw16-editor-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain RAW16 editor and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw16-editor-${{ matrix.os }}
+          path: ${{ runner.temp }}/raw16-editor-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: View CPU library default tests
         run: cargo test --locked --release -p orr_view --lib
       - name: View CPU library explicit feature-off tests
@@ -706,6 +728,22 @@ jobs:
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Required RAW16 explicit software-device readback
+        if: runner.os == 'Linux'
+        env:
+          ORR_REQUIRE_GPU: "1"
+          ORR_RAW16_REQUIRE_SOFTWARE: "1"
+          WGPU_BACKEND: vulkan
+        run: python -B tools/raw16_import_gate.py device --evidence "${{ runner.temp }}/raw16-device-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain RAW16 device and partial failure evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw16-device-${{ matrix.os }}
+          path: ${{ runner.temp }}/raw16-device-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - if: runner.os == 'Linux'
         run: cargo test -p orr_render --release --test gpu --test gpu3d
         env:
@@ -4368,7 +4406,227 @@ jobs:
         if: runner.os == 'Linux' && runner.arch == 'X64'
         shell: bash
         timeout-minutes: 90
-        run: tools/check-room-project.sh contracts
+        run: |
+          if tools/check-room-project.sh contracts; then
+            exit 0
+          else
+            room_status=$?
+          fi
+          if python3 - "$room_status" <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import selectors
+          import signal
+          import subprocess
+          import sys
+          import tempfile
+          import time
+          
+          
+          LIMIT_BYTES = 65536
+          LIMIT_RECORDS = 32
+          LIMIT_PATH_BYTES = 1024
+          LIMIT_SECONDS = 5.0
+          
+          
+          def collect(command, budget):
+              result = {
+                  "exit_code": None, "timed_out": False, "output_truncated": False,
+                  "start_failed": False, "read_failed": False, "child_reaped": False,
+                  "stdout_bytes": 0, "stderr_bytes": 0, "stderr_contents_omitted": True,
+              }
+              output = bytearray()
+              process = None
+              selector = selectors.DefaultSelector()
+              try:
+                  if time.monotonic() >= budget["deadline"] - 0.5:
+                      result["timed_out"] = True
+                      return bytes(output), result
+                  if budget["bytes_left"] == 0:
+                      result["output_truncated"] = True
+                      return bytes(output), result
+                  process = subprocess.Popen(
+                      command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE, start_new_session=True,
+                  )
+                  for stream, label in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+                      os.set_blocking(stream.fileno(), False)
+                      selector.register(stream, selectors.EVENT_READ, label)
+                  while selector.get_map():
+                      remaining = budget["deadline"] - 0.5 - time.monotonic()
+                      if remaining <= 0:
+                          result["timed_out"] = True
+                          break
+                      for key, _ in selector.select(min(remaining, 0.05)):
+                          chunk = os.read(key.fd, min(4096, budget["bytes_left"]))
+                          if not chunk:
+                              selector.unregister(key.fileobj)
+                              continue
+                          result[key.data + "_bytes"] += len(chunk)
+                          budget["bytes_left"] -= len(chunk)
+                          if key.data == "stdout":
+                              output.extend(chunk)
+                          # Treat exact budget exhaustion conservatively as incomplete;
+                          # never read a 65,537th byte merely to distinguish EOF.
+                          if budget["bytes_left"] == 0:
+                              result["output_truncated"] = True
+                              break
+                      if result["output_truncated"]:
+                          break
+                  if not result["timed_out"] and not result["output_truncated"]:
+                      try:
+                          process.wait(timeout=max(0.001, budget["deadline"] - 0.5 - time.monotonic()))
+                      except subprocess.TimeoutExpired:
+                          result["timed_out"] = True
+              except OSError:
+                  result["start_failed" if process is None else "read_failed"] = True
+              finally:
+                  if process is not None:
+                      # Signal only while the direct child is unreaped, so its PID cannot
+                      # have been reused for an unrelated process group.
+                      if process.returncode is None:
+                          try:
+                              os.killpg(process.pid, signal.SIGKILL)
+                          except ProcessLookupError:
+                              pass
+                      try:
+                          process.wait(timeout=max(0.001, budget["deadline"] - time.monotonic()))
+                          result["child_reaped"] = True
+                          result["exit_code"] = process.returncode
+                      except subprocess.TimeoutExpired:
+                          pass
+                      process.stdout.close()
+                      process.stderr.close()
+                  selector.close()
+              return bytes(output), result
+          
+          
+          def encode_path(path):
+              return {
+                  "bytes": len(path),
+                  "base64": base64.b64encode(path[:LIMIT_PATH_BYTES]).decode("ascii"),
+                  "truncated": len(path) > LIMIT_PATH_BYTES,
+              }
+          
+          
+          def parse_raw(data):
+              result = {
+                  "records": [], "records_parsed": 0, "records_omitted": 0,
+                  "parse_error": False, "paths_truncated": False, "records_truncated": False,
+              }
+              fields = data.split(b"\0")
+              if fields[-1] != b"":
+                  result["parse_error"] = True
+              else:
+                  fields.pop()
+              index = 0
+              while index < len(fields):
+                  match = re.fullmatch(
+                      rb":([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}|[0-9a-f]{64}) "
+                      rb"([0-9a-f]{40}|[0-9a-f]{64}) ([ACDMRTUXB])([0-9]{1,3})?",
+                      fields[index],
+                  )
+                  if match is None:
+                      result["parse_error"] = True
+                      break
+                  old_mode, new_mode, old_oid, new_oid, status, score = match.groups()
+                  path_count = 2 if status in (b"R", b"C") else 1
+                  if (len(old_oid) != len(new_oid) or
+                          (status in (b"R", b"C") and score is None) or
+                          (score is not None and status not in (b"M", b"R", b"C")) or
+                          (score is not None and int(score) > 100) or
+                          index + path_count >= len(fields)):
+                      result["parse_error"] = True
+                      break
+                  paths = fields[index + 1:index + path_count + 1]
+                  if any(not path or path.startswith(b"/") or b".." in path.split(b"/") for path in paths):
+                      result["parse_error"] = True
+                      break
+                  encoded = [encode_path(path) for path in paths]
+                  result["paths_truncated"] |= any(path["truncated"] for path in encoded)
+                  record = {
+                      "old_mode": old_mode.decode("ascii"), "new_mode": new_mode.decode("ascii"),
+                      "old_oid": old_oid.decode("ascii"), "new_oid": new_oid.decode("ascii"),
+                      "status": status.decode("ascii"),
+                      "score": int(score) if score is not None else None, "paths": encoded,
+                  }
+                  result["records_parsed"] += 1
+                  # Leave ample room for command status and provenance in the final 64 KiB file.
+                  if (len(result["records"]) < LIMIT_RECORDS and
+                          len(json.dumps(result["records"] + [record], separators=(",", ":"))) <= 49152):
+                      result["records"].append(record)
+                  else:
+                      result["records_omitted"] += 1
+                      result["records_truncated"] = True
+                  index += path_count + 1
+              return result
+          
+          
+          def successful(result):
+              return (result["exit_code"] == 0 and result["child_reaped"] and
+                      not any(result[key] for key in ("timed_out", "output_truncated", "start_failed", "read_failed")))
+          
+          
+          def main():
+              root = Path(os.environ["ORR_ROOM_EVIDENCE"])
+              checkout = Path.cwd().resolve()
+              if not root.is_absolute() or not root.is_dir():
+                  raise ValueError("external evidence root unavailable")
+              root = root.resolve()
+              if root == checkout or checkout in root.parents:
+                  raise ValueError("evidence root must be outside the checkout")
+              started = time.monotonic()
+              budget = {"deadline": started + LIMIT_SECONDS, "bytes_left": LIMIT_BYTES}
+              revision, revision_status = collect(["git", "rev-parse", "HEAD", "HEAD^{tree}"], budget)
+              raw, diff_status = collect([
+                  "git", "--no-optional-locks", "diff", "--raw", "-z", "--no-abbrev",
+                  "--no-ext-diff", "--no-textconv", "HEAD", "--", ".",
+              ], budget)
+              revisions = revision.splitlines()
+              revision_valid = (len(revisions) == 2 and all(
+                  re.fullmatch(rb"[0-9a-f]{40}|[0-9a-f]{64}", value) for value in revisions
+              ) and len(revisions[0]) == len(revisions[1]))
+              result = {
+                  "schema": 1, "original_gate_exit": int(sys.argv[1]),
+                  "head": revisions[0].decode("ascii") if revision_valid else None,
+                  "tree": revisions[1].decode("ascii") if revision_valid else None,
+                  "revision_valid": revision_valid, "revision_command": revision_status,
+                  "diff_command": diff_status, "limits": {
+                      "seconds": LIMIT_SECONDS, "combined_child_output_bytes": LIMIT_BYTES,
+                      "json_bytes": LIMIT_BYTES, "records": LIMIT_RECORDS, "path_bytes": LIMIT_PATH_BYTES,
+                  }, **parse_raw(raw),
+              }
+              result["inventory_complete"] = (
+                  revision_valid and successful(revision_status) and successful(diff_status) and
+                  not any(result[key] for key in ("parse_error", "paths_truncated", "records_truncated"))
+              )
+              result["records_total"] = result["records_parsed"] if successful(diff_status) and not result["parse_error"] else None
+              result["elapsed_seconds"] = round(time.monotonic() - started, 6)
+              payload = (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+              if len(payload) > LIMIT_BYTES:
+                  raise ValueError("diagnostic output bound exceeded")
+              descriptor, _ = tempfile.mkstemp(prefix="tracked-worktree-failure-", suffix=".json", dir=root)
+              with os.fdopen(descriptor, "wb") as output:
+                  output.write(payload)
+          
+          
+          if __name__ == "__main__":
+              try:
+                  main()
+              except Exception:
+                  # Never print arbitrary Git stderr, paths, environment values or tracebacks.
+                  print("Room tracked-metadata diagnostic unavailable; original gate exit retained", file=sys.stderr)
+                  sys.exit(1)
+          PY
+          then
+            :
+          else
+            printf '%s\n' 'Room tracked-metadata collector failed; original gate exit retained' >&2
+          fi
+          exit "$room_status"
         env:
           ORR_ROOM_EVIDENCE: /tmp/orr-room-project-${{ github.run_id }}-${{ github.run_attempt }}
       - name: RoomEscapeV1 actual GPU and source-hidden production export
