@@ -487,9 +487,16 @@ fn cli_unsafe_names_ancestry_and_package_store_outputs_reject() {
     }
     let long = temp.join(&("x".repeat(100) + ".model.json"));
     assert!(authoring::run(args(&input, &long)).is_err());
-    for dir in [".orr", ".ORR"] {
-        fs::create_dir(temp.join(dir)).unwrap();
-        assert!(authoring::run(args(&input, &temp.join(dir).join("prop.model.json"))).is_err());
+    // Distinct parents keep both spellings exercisable on case-insensitive filesystems.
+    for (case, dir) in [".orr", ".ORR"].into_iter().enumerate() {
+        let parent = temp.join(&format!("package-store-case-{case}"));
+        fs::create_dir(&parent).unwrap();
+        let store = parent.join(dir);
+        fs::create_dir(&store).unwrap();
+        let output = store.join("prop.model.json");
+        assert!(authoring::run(args(&input, &output)).is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(&store).unwrap().count(), 0);
     }
     assert!(authoring::run(args(&input, &temp.join("missing").join("prop.model.json"))).is_err());
     assert!(authoring::run(args(&input, &temp.join("..").join("prop.model.json"))).is_err());

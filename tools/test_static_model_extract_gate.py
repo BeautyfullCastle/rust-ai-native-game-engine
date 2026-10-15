@@ -29,6 +29,9 @@ EXPECTED_TESTS = [
     'test_exact_inventory',
     'test_inventory_rejects_wrong_count_duplicates_and_extras',
     'test_exact_result',
+    'test_result_accepts_hosted_linux_interleaved_cli_stdout',
+    'test_result_accepts_windows_crlf_interleaved_cli_stdout',
+    'test_result_rejects_ambiguous_interleaved_records',
     'test_result_rejects_skip_failure_missing_names_and_counts',
     'test_exact_producer',
     'test_producer_rejects_package_source_profile_features_and_path',
@@ -50,8 +53,44 @@ def listing(names):
     return ''.join(name + ': test\n' for name in names) + f'\n{len(names)} tests, 0 benchmarks\n'
 
 def passed(names):
-    return ''.join('test ' + name + ' ... ok\n' for name in names) + (
+    return f'running {len(names)} test' + ('' if len(names) == 1 else 's') + '\n' + ''.join('test ' + name + ' ... ok\n' for name in names) + (
         f'\ntest result: ok. {len(names)} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+
+# Exact retained Linux model-run.log, SHA-256 cf5407b915ad29e201679ad009cca137e266147b2ffe8fdf9fc62dc7e4bc184b.
+# Direct authoring::run stdout bypasses libtest's normal print capture.
+HOSTED_MODEL_LOG = '''
+running 20 tests
+test absent_out_of_scene_and_empty_subtree_selections_reject ... ok
+test cli_bad_arguments_fail_without_output_or_staging ... published 2418 bytes to /tmp/orr-static-prop-test-2973-0/prop.model.json
+ok
+test cli_invalid_missing_and_oversized_inputs_leave_no_output ... ok
+test cli_listing_and_help_do_not_publish_or_change_input ... Usage: static_model_extract --input FILE.glb --asset-id LOGICAL/SOURCE.glb --node N --output NEW.model.json
+List selectable source nodes: static_model_extract --input FILE.glb --asset-id LOGICAL/SOURCE.glb --list
+Requires import; embedded static GLB only. Subtrees keep source-world coordinates and all materials/images. Trusted stable link-free parents; no overwrite/install. Exit 0: help/list/published (check warnings); 2: error/not published.
+[{"index":0,"name":"assembly","primitive_count":6},{"index":1,"name":"prop","primitive_count":4},{"index":2,"name":"sibling","primitive_count":2},{"index":3,"name":"prop","primitive_count":2}]
+[{"index":0,"name":"assembly","primitive_count":6},{"index":1,"name":"prop","primitive_count":4},{"index":2,"name":"sibling","primitive_count":2},{"index":3,"name":"prop","primitive_count":2}]
+ok
+test cli_nonregular_socket_input_rejects_without_opening_or_publication ... ok
+test cli_publishes_reloaded_model_once_and_preserves_source_and_existing_targets ... published 2418 bytes to /tmp/orr-static-prop-test-2973-4/prop.model.json
+ok
+test cli_symlink_sources_destinations_and_ancestors_reject ... ok
+test cli_unsafe_names_ancestry_and_package_store_outputs_reject ... ok
+test explicit_and_implicit_default_scenes_control_selection ... ok
+test external_data_uri_and_unknown_container_resources_reject ... ok
+test full_source_admission_rejects_bad_siblings_before_selection ... ok
+test listing_uses_default_scene_nonempty_subtrees_and_unambiguous_indices ... ok
+test logical_identity_and_exact_input_digest_survive_extraction ... ok
+test malformed_envelopes_truncation_and_duplicate_fields_reject ... ok
+test nested_selection_keeps_ancestor_mirror_nonuniform_transform_without_recentering ... ok
+test root_selection_roundtrips_exact_full_import_and_is_deterministic ... ok
+test source_json_and_node_budgets_reject_before_output ... ok
+test subtree_preserves_geometry_uv_material_tables_and_source_slot_order ... ok
+test unsupported_animation_skin_extensions_and_attributes_are_never_dropped ... ok
+test unused_material_and_image_slots_are_retained_without_remapping ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+'''
 
 def workflow_job(text, name):
     peers = list(re.finditer(r'^  ([A-Za-z0-9_-]+):\n', text, re.M))
@@ -154,6 +193,61 @@ class StaticPropGateTests(unittest.TestCase):
 
     def test_exact_result(self):
         gate.result(passed(['alpha', 'module::beta']), ['module::beta', 'alpha'])
+        gate.result(passed([]), [])
+        with mock.patch.object(gate, 'run', side_effect=[listing(['alpha']), listing([]), passed(['alpha'])]) as run:
+            gate.test('serial', '/absolute/test-binary', ['alpha'])
+        self.assertEqual(run.call_args_list[-1], mock.call('serial-run', ['/absolute/test-binary', '--test-threads=1']))
+
+    def test_result_accepts_hosted_linux_interleaved_cli_stdout(self):
+        self.assertEqual(hashlib.sha256(HOSTED_MODEL_LOG.encode()).hexdigest(),
+                         'cf5407b915ad29e201679ad009cca137e266147b2ffe8fdf9fc62dc7e4bc184b')
+        gate.result(HOSTED_MODEL_LOG, gate.model_tests())
+
+    def test_result_accepts_windows_crlf_interleaved_cli_stdout(self):
+        # Synthetic Windows-shaped variant, not a claim of Windows execution.
+        output = HOSTED_MODEL_LOG
+        for name in ['cli_nonregular_socket_input_rejects_without_opening_or_publication',
+                     'cli_symlink_sources_destinations_and_ancestors_reject']:
+            output = output.replace('test ' + name + ' ... ok\n', '')
+        output = output.replace('running 20 tests', 'running 18 tests').replace('20 passed;', '18 passed;')
+        output = output.replace(' ... published', ' ... warning: published; directory sync unavailable on this platform\npublished')
+        output = output.replace('/tmp/', 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\').replace('\n', '\r\n')
+        gate.result(output, gate.model_tests(windows=True))
+
+    def test_result_rejects_ambiguous_interleaved_records(self):
+        good = passed(['alpha'])
+        split = good.replace('test alpha ... ok\n', 'test alpha ... published 2418 bytes to /tmp/prop.model.json\nok\n')
+        gate.result(split, ['alpha'])
+        cases = {
+            'nested-inline-start': split.replace('\nok\n', '\ntest alpha ... ok\nok\n'),
+            'nested-prefix-payload': split.replace('published 2418 bytes to /tmp/prop.model.json', 'test alpha ... ok'),
+            'orphan-extra-completion': good.replace('test alpha ... ok\n', 'test alpha ... ok\nok\n'),
+            'orphan-initial-completion': good.replace('test alpha ... ok\n', 'ok\ntest alpha ... ok\n'),
+            'duplicate-name': good.replace('test alpha ... ok\n', 'test alpha ... ok\ntest alpha ... ok\n'),
+            'unknown-name': split.replace('test alpha ...', 'test unknown ...'),
+            'malformed-name': split.replace('test alpha ...', 'test alpha-beta ...'),
+            'malformed-prefix': split.replace('test alpha ...', 'test alpha ..'),
+            'unfinished-before-summary': split.replace('\nok\n', '\n'),
+            'unfinished-without-summary': split.split('test result:', 1)[0].replace('\nok\n', '\n'),
+            'missing-summary': split.split('test result:', 1)[0],
+            'duplicate-summary': split + split.split('\n\n', 1)[1],
+            'malformed-summary': split.replace('finished in 0.01s', 'finished in 0..1s'),
+            'wrong-header-count': split.replace('running 1 test', 'running 2 tests'),
+            'duplicate-header': split.replace('running 1 test', 'running 1 test\nrunning 1 test'),
+            'missing-header': split.replace('running 1 test\n', ''),
+            'payload-outside-record': good.replace('test alpha ... ok\n', 'published 2418 bytes\ntest alpha ... ok\n'),
+            'payload-after-summary': split + 'published 2418 bytes\n',
+            'bare-carriage-return': split.replace('/tmp/prop.model.json', '/tmp/prop\r.model.json'),
+        }
+        for status in ['FAILED', 'ignored', 'ignored, reason', 'bench', 'ok extra', 'test result: ok. 1 passed', ' test alpha ... ok']:
+            cases['reserved-payload-' + status] = split.replace('published 2418 bytes to /tmp/prop.model.json', status)
+            cases['reserved-line-' + status] = split.replace('\nok\n', '\n' + status + '\nok\n')
+        for label, output in cases.items():
+            with self.subTest(label=label), self.assertRaises(AssertionError):
+                gate.result(output, ['alpha'])
+        for names in [['alpha', 'alpha'], ['alpha-beta'], ['alpha::'], ['0alpha']]:
+            with self.subTest(names=names), self.assertRaises(AssertionError):
+                gate.result(passed(names), names)
 
     def test_result_rejects_skip_failure_missing_names_and_counts(self):
         good = passed(['alpha'])
@@ -505,11 +599,11 @@ class StaticPropGateTests(unittest.TestCase):
 def main():
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(StaticPropGateTests)
     names = sorted(test.id().rsplit('.', 1)[-1] for test in suite)
-    assert names == sorted(EXPECTED_TESTS) and len(names) == 26, 'exact checker inventory'
+    assert names == sorted(EXPECTED_TESTS) and len(names) == 29, 'exact checker inventory'
     result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
-    if result.testsRun != 26 or result.skipped or result.expectedFailures or result.unexpectedSuccesses or not result.wasSuccessful():
+    if result.testsRun != 29 or result.skipped or result.expectedFailures or result.unexpectedSuccesses or not result.wasSuccessful():
         raise SystemExit(1)
-    print('STATIC_PROP_GATE_FIXTURES: 26 passed; 0 failed; 0 skipped', flush=True)
+    print('STATIC_PROP_GATE_FIXTURES: 29 passed; 0 failed; 0 skipped', flush=True)
 
 if __name__ == '__main__':
     main()

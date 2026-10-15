@@ -366,7 +366,7 @@ def begin():
     frozen = source_snapshot(paths)
     report['checkout'] = str(repo); report['source_sha256'] = frozen; record()
     checked = run('checker-fixtures', [sys.executable, '-B', str(repo / 'tools/test_static_model_extract_gate.py')])
-    assert checked.rstrip().endswith('STATIC_PROP_GATE_FIXTURES: 26 passed; 0 failed; 0 skipped'), 'gate fixture census'
+    assert checked.rstrip().endswith('STATIC_PROP_GATE_FIXTURES: 29 passed; 0 failed; 0 skipped'), 'gate fixture census'
     return frozen
 def pin(output, label, package, target_name, kind, features):
     artifacts = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
@@ -407,10 +407,49 @@ def inventory(output, names):
     assert re.findall(r'^(\d+) tests?, 0 benchmarks$', output, re.M) == [str(len(names))]
 def result(output, names):
     assert not re.search(r'SKIP:|\bskipping\b|adapter unavailable|source.hiding.*not requested|without source hiding|source_hiding=false', output, re.I)
-    assert sorted(re.findall(r'^test (.+) \.\.\. ok$', output, re.M)) == sorted(names)
-    assert re.findall(r'^test result: (.+)$', output, re.M) and len(re.findall(r'^test result:', output, re.M)) == 1
-    summary = re.findall(r'^test result: (.+)$', output, re.M)[0]
-    assert re.fullmatch(r'ok\. ' + str(len(names)) + r' passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [0-9.]+s', summary)
+    # test() always requests one libtest thread. Direct CLI stdout may appear
+    # between the harness's unterminated prefix and its final "ok".
+    name_pattern = r'[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*'
+    assert len(set(names)) == len(names) and all(re.fullmatch(name_pattern, name) for name in names)
+    output = output.replace('\r\n', '\n')
+    assert '\r' not in output, 'unsupported bare carriage return in test output'
+    completed = []
+    pending = None
+    phase = 'header'
+    def diagnostic(line):
+        assert not re.match(r'(?:test\b|running\b|failures:|ok\b|FAILED\b|ignored\b|bench\b)', line.lstrip()), 'malformed or nested harness record'
+    for line in output.split('\n'):
+        if not line.strip():
+            continue
+        if phase == 'header':
+            assert line == f'running {len(names)} test' + ('' if len(names) == 1 else 's'), 'exact test run header'
+            phase = 'records'
+            continue
+        assert phase == 'records', 'unexpected output after test summary'
+        if line.startswith('test result:'):
+            assert pending is None and sorted(completed) == sorted(names), 'unfinished or missing test records'
+            assert re.fullmatch(r'test result: ok\. ' + str(len(names)) + r' passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [0-9]+(?:\.[0-9]+)?s', line), 'single all-pass summary'
+            phase = 'finished'
+            continue
+        start = re.fullmatch(r'test (' + name_pattern + r') \.\.\. (.*)', line)
+        if start:
+            name, payload = start.groups()
+            assert pending is None, 'nested test record'
+            assert name in names and name not in completed, 'unexpected or duplicate test name'
+            if payload == 'ok':
+                completed.append(name)
+            else:
+                diagnostic(payload)
+                pending = name
+            continue
+        if line == 'ok':
+            assert pending is not None, 'orphan test completion'
+            completed.append(pending)
+            pending = None
+            continue
+        assert pending is not None, 'diagnostic output outside a test record'
+        diagnostic(line)
+    assert phase == 'finished' and pending is None, 'missing summary or unfinished test record'
 def test(label, binary, names, ignored=False):
     inventory(run(label + '-inventory', [binary, '--list']), names)
     inventory(run(label + '-ignored', [binary, '--ignored', '--list']), names if ignored else [])
