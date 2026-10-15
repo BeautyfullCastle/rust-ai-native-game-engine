@@ -120,8 +120,19 @@ def initialize(root, destination, phase):
     runner.record()
 
 
+def require_inherited_bytecode_prevention():
+    observed = {'PYTHONDONTWRITEBYTECODE': os.environ.get('PYTHONDONTWRITEBYTECODE'),
+                'sys_dont_write_bytecode': sys.dont_write_bytecode}
+    runner.report['python_bytecode_prevention'] = observed
+    # Record the inherited state before rejection. A local -B flag alone does
+    # not protect Python children launched by earlier workflow producers.
+    runner.record()
+    assert observed['PYTHONDONTWRITEBYTECODE'] == '1', 'inherited PYTHONDONTWRITEBYTECODE=1 required'
+
+
 def begin():
     global frozen
+    require_inherited_bytecode_prevention()
     assert run('clean-source-before', ['git', 'status', '--porcelain=v1', '--untracked-files=all']).strip() == ''
     for key, revision in [('head', 'HEAD'), ('tree', 'HEAD^{tree}')]:
         runner.report[key] = run('checkout-' + key, ['git', 'rev-parse', revision]).strip()

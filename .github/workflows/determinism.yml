@@ -247,10 +247,6 @@ jobs:
     # plus required Linux software-GPU/window tests; separate from the sim jobs.
     name: sample build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    env:
-      # Earlier Python child processes must not create ignored source artifacts
-      # before the later gates compare the complete checkout path inventory.
-      PYTHONDONTWRITEBYTECODE: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -260,6 +256,9 @@ jobs:
         # https://github.com/actions/runner-images/issues/14254
         os: [ubuntu-22.04, windows-latest]
     steps:
+      - name: Prevent Python bytecode in source checkout
+        shell: bash
+        run: printf '%s\n' 'PYTHONDONTWRITEBYTECODE=1' >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

@@ -14,6 +14,7 @@ from unittest import mock
 import zlib
 
 import static_model_retexture_gate as gate
+from test_room_project_gate import check_room_workflow
 from test_static_model_extract_gate import listing, passed, workflow_job
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -39,9 +40,16 @@ EXPECTED_TESTS = [
     'test_workflow_rejects_disabled_moved_or_unretained_modes',
     'test_workflow_preserves_required_room_and_aggregate',
 ]
+BYTECODE_SETUP = '''      - name: Prevent Python bytecode in source checkout
+        shell: bash
+        run: printf '%s\\n' 'PYTHONDONTWRITEBYTECODE=1' >> "$GITHUB_ENV"
+'''
 
 
 def workflow_contract(text):
+    # Reuse the protected checker unchanged: its exact sample header is part
+    # of the Room/RAW16 contract, even though this setup belongs to sample-build.
+    check_room_workflow(text)
     sample = workflow_job(text, 'sample-build')
     room = workflow_job(text, 'sample-room')
     aggregate = workflow_job(text, 'cross_platform_checksum_compare')
@@ -49,12 +57,11 @@ def workflow_contract(text):
     header = sample.split('    steps:', 1)[0]
     assert 'continue-on-error' not in header
     assert re.findall(r'^    if:[ \t]*(.*)$', header, re.M) == [], 'sample job is unconditional'
-    assert re.findall(r'^    env:$', header, re.M) == ['    env:'], 'job-wide Python environment'
-    environment = re.search(r'^    env:\n((?:^      [^\n]*\n|^\n)*)', header, re.M)
-    assert environment is not None
-    assert re.findall(r'^      PYTHONDONTWRITEBYTECODE:[ \t]*(.*)$', environment.group(1), re.M) == ['"1"'], 'inherited bytecode prevention'
-    declarations = re.findall(r'''^[ \t]*(?:PYTHONDONTWRITEBYTECODE|'PYTHONDONTWRITEBYTECODE'|"PYTHONDONTWRITEBYTECODE"):[^\n]*$''', sample, re.M)
-    assert declarations == ['      PYTHONDONTWRITEBYTECODE: "1"'], 'job setting must not be overridden by any step'
+    body = sample.split('    steps:\n', 1)[1]
+    steps = list(re.finditer(r'^      - ', body, re.M))
+    assert len(steps) > 1 and body[:steps[1].start()] == BYTECODE_SETUP, 'exact unconditional first setup step'
+    assert text.count(BYTECODE_SETUP) == 1, 'unique bytecode setup'
+    assert sample.count('PYTHONDONTWRITEBYTECODE') == 1, 'inherited setting must not be overridden later'
     assert 'os: [ubuntu-22.04, windows-latest]' in header
     assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room]' in aggregate
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate, re.M) == ['${{ always() }}'], 'one failure-aware aggregate condition'
@@ -579,6 +586,33 @@ class RetextureGateTests(unittest.TestCase):
 
     def test_workflow_required_modes_and_retention(self):
         workflow_contract((ROOT / '.github/workflows/determinism.yml').read_text())
+        for value, dont_write in ((None, False), (None, True), ('', True), ('0', True), ('true', True)):
+            with self.subTest(inherited=value, dont_write_bytecode=dont_write), mock.patch.dict(os.environ, {}, clear=False), \
+                    mock.patch.object(sys, 'dont_write_bytecode', dont_write), \
+                    mock.patch.object(gate, 'run') as run, mock.patch.object(gate, 'build_cli') as build:
+                if value is None:
+                    os.environ.pop('PYTHONDONTWRITEBYTECODE', None)
+                else:
+                    os.environ['PYTHONDONTWRITEBYTECODE'] = value
+                with self.assertRaisesRegex(AssertionError, 'inherited PYTHONDONTWRITEBYTECODE=1 required'):
+                    gate.begin()
+                run.assert_not_called()
+                build.assert_not_called()
+                self.assertEqual(os.environ.get('PYTHONDONTWRITEBYTECODE'), value, 'preflight must not self-set')
+                self.assertIs(sys.dont_write_bytecode, dont_write)
+                recorded = json.loads((gate.runner.evidence / 'gate-receipt.json').read_text())
+                self.assertEqual(recorded['python_bytecode_prevention'],
+                                 {'PYTHONDONTWRITEBYTECODE': value, 'sys_dont_write_bytecode': dont_write})
+                self.assertEqual(recorded['commands'], [])
+                self.assertEqual(recorded['producers'], {})
+        with mock.patch.dict(os.environ, {'PYTHONDONTWRITEBYTECODE': '1'}), \
+                mock.patch.object(sys, 'dont_write_bytecode', True), \
+                mock.patch.object(gate, 'run') as run:
+            gate.require_inherited_bytecode_prevention()
+            run.assert_not_called()
+            recorded = json.loads((gate.runner.evidence / 'gate-receipt.json').read_text())
+            self.assertEqual(recorded['python_bytecode_prevention'],
+                             {'PYTHONDONTWRITEBYTECODE': '1', 'sys_dont_write_bytecode': True})
 
     def test_workflow_rejects_disabled_moved_or_unretained_modes(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
@@ -586,25 +620,42 @@ class RetextureGateTests(unittest.TestCase):
                          ('run: python -B tools/static_model_retexture_gate.py gpu', 'run: echo skipped'),
                          ('run: python -B tools/static_model_retexture_gate.py export', 'run: echo skipped'),
                          ('Retain static texture variant CPU and partial failure evidence', 'missing retention'),
-                         ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]'),
-                         ('      PYTHONDONTWRITEBYTECODE: "1"\n', ''),
-                         ('      PYTHONDONTWRITEBYTECODE: "1"\n', '      PYTHONDONTWRITEBYTECODE: "0"\n'),
-                         ('      PYTHONDONTWRITEBYTECODE: "1"\n', '      PYTHONDONTWRITEBYTECODE: "1"\n      PYTHONDONTWRITEBYTECODE: "0"\n')]:
+                         ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]')]:
             with self.subTest(old=old), self.assertRaises(AssertionError):
                 workflow_contract(text.replace(old, new, 1))
+        setup_mutations = {
+            'missing': '',
+            'duplicate': BYTECODE_SETUP * 2,
+            'conditional': BYTECODE_SETUP.replace('        shell:', '        if: false\n        shell:'),
+            'continue on error': BYTECODE_SETUP.replace('        shell:', '        continue-on-error: true\n        shell:'),
+            'wrong shell': BYTECODE_SETUP.replace('shell: bash', 'shell: pwsh'),
+            'wrong value': BYTECODE_SETUP.replace('PYTHONDONTWRITEBYTECODE=1', 'PYTHONDONTWRITEBYTECODE=0'),
+            'wrong file': BYTECODE_SETUP.replace('$GITHUB_ENV', '$GITHUB_OUTPUT'),
+            'export only': BYTECODE_SETUP.split('        run:', 1)[0] + '        run: export PYTHONDONTWRITEBYTECODE=1\n',
+            'noop': BYTECODE_SETUP.split('        run:', 1)[0] + '        run: ":"\n',
+        }
+        for label, setup in setup_mutations.items():
+            with self.subTest(setup=label), self.assertRaises(AssertionError):
+                workflow_contract(text.replace(BYTECODE_SETUP, setup, 1))
+        sample = workflow_job(text, 'sample-build')
+        for action in ('actions/checkout@v4', 'dtolnay/rust-toolchain@stable', 'Swatinem/rust-cache@v2'):
+            anchor = '      - uses: ' + action + '\n'
+            moved = sample.replace(BYTECODE_SETUP, '', 1).replace(anchor, anchor + BYTECODE_SETUP, 1)
+            with self.subTest(moved_after=action), self.assertRaises(AssertionError):
+                workflow_contract(text.replace(sample, moved, 1))
+        job_environment = sample.replace('    strategy:\n',
+            '    env:\n      PYTHONDONTWRITEBYTECODE: "1"\n    strategy:\n', 1)
+        with self.assertRaises(AssertionError):
+            workflow_contract(text.replace(sample, job_environment, 1))
         old = '      - name: Required static texture variant CPU CLI and bindings acceptance\n'
         with self.assertRaises(AssertionError):
             workflow_contract(text.replace(old, old + '        if: false\n'))
-        step_only = text.replace('      PYTHONDONTWRITEBYTECODE: "1"\n', '', 1).replace(
-            '          ORR_STATIC_GATE_EVIDENCE:',
-            '          PYTHONDONTWRITEBYTECODE: "1"\n          ORR_STATIC_GATE_EVIDENCE:', 1)
-        with self.assertRaises(AssertionError):
-            workflow_contract(step_only)
-        for value in ('""', '"0"'):
-            overridden = text.replace('          ORR_STATIC_GATE_EVIDENCE:',
-                '          PYTHONDONTWRITEBYTECODE: ' + value + '\n          ORR_STATIC_GATE_EVIDENCE:', 1)
-            with self.subTest(step_override=value), self.assertRaises(AssertionError):
-                workflow_contract(overridden)
+        for key in ('PYTHONDONTWRITEBYTECODE', "'PYTHONDONTWRITEBYTECODE'", '"PYTHONDONTWRITEBYTECODE"'):
+            for value in ('""', '"0"', '"1"'):
+                overridden = text.replace('          ORR_STATIC_GATE_EVIDENCE:',
+                    '          ' + key + ': ' + value + '\n          ORR_STATIC_GATE_EVIDENCE:', 1)
+                with self.subTest(step_override_key=key, value=value), self.assertRaises(AssertionError):
+                    workflow_contract(overridden)
         for title, condition, middle in [
             ('Required static texture variant CPU CLI and bindings acceptance', None, '        shell: bash\n'),
             ('Required static texture variant actual software GPU acceptance', "runner.os == 'Linux'", '        shell: bash\n'),
