@@ -259,6 +259,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Required static prop CPU CLI and bindings acceptance
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_STATIC_GATE_EVIDENCE: ${{ runner.temp }}/static-prop-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_extract_gate.py cpu
+      - name: Retain static prop CPU and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-prop-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-prop-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Required animation clip extraction cpu acceptance
         shell: bash
         timeout-minutes: 45
@@ -908,6 +923,22 @@ jobs:
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Required static prop actual software GPU acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_STATIC_GATE_EVIDENCE: ${{ runner.temp }}/static-prop-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_extract_gate.py gpu
+      - name: Retain static prop GPU and partial failure evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-prop-gpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-prop-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Required animation clip extraction gpu acceptance
         if: runner.os == 'Linux'
         shell: bash
@@ -1906,6 +1937,23 @@ jobs:
       - name: Provision repository-hidden authored runtime proof
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+      - name: Required static prop source-hidden Room export acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          ORR_STATIC_GATE_EVIDENCE: /tmp/orr-static-prop-export-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_extract_gate.py export
+      - name: Retain static prop Room export and partial failure evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-prop-room-export-ubuntu-22.04
+          path: /tmp/orr-static-prop-export-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Mandatory authored runtime compositor readback
         if: runner.os == 'Linux'
         run: cargo test --locked --release -p orr_sample --features project,input-actions,game-ui --test project_compositor_gpu -- --test-threads=1 --nocapture
