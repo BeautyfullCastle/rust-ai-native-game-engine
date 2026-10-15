@@ -277,6 +277,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Required static UV variant CPU CLI and bindings acceptance
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_STATIC_UV_EVIDENCE: ${{ runner.temp }}/static-uv-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_uv_gate.py cpu
+      - name: Retain static UV variant CPU and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-uv-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-uv-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Required static texture variant CPU CLI and bindings acceptance
         shell: bash
         timeout-minutes: 45
@@ -954,6 +969,22 @@ jobs:
         with:
           name: static-prop-gpu-${{ matrix.os }}
           path: ${{ runner.temp }}/static-prop-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Required static UV variant actual software GPU acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_STATIC_UV_EVIDENCE: ${{ runner.temp }}/static-uv-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_uv_gate.py gpu
+      - name: Retain static UV variant GPU and partial failure evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-uv-gpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-uv-gpu-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
 
@@ -1984,6 +2015,23 @@ jobs:
         with:
           name: static-prop-room-export-ubuntu-22.04
           path: /tmp/orr-static-prop-export-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Required static UV variant source-hidden Room export acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          ORR_STATIC_UV_EVIDENCE: /tmp/orr-static-uv-export-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_uv_gate.py export
+      - name: Retain static UV variant Room export and partial failure evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-uv-room-export-ubuntu-22.04
+          path: /tmp/orr-static-uv-export-${{ github.run_id }}-${{ github.run_attempt }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
