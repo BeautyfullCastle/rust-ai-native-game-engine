@@ -317,7 +317,16 @@ static SERIAL: AtomicUsize = AtomicUsize::new(0);
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!(
+        // OS temporary paths may use aliases (for example /var on macOS).
+        // Positive fixtures use trusted physical ancestry; explicit symlink
+        // rejection cases below continue to pass their aliases unchanged.
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        assert!(root.is_absolute());
+        for ancestor in root.ancestors() {
+            let metadata = fs::symlink_metadata(ancestor).unwrap();
+            assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        }
+        let p = root.join(format!(
             "orr-static-prop-test-{}-{}",
             std::process::id(),
             SERIAL.fetch_add(1, Ordering::Relaxed)
