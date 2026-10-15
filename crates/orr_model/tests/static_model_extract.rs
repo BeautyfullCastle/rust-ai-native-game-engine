@@ -508,7 +508,23 @@ fn cli_unsafe_names_ancestry_and_package_store_outputs_reject() {
         assert_eq!(fs::read_dir(&store).unwrap().count(), 0);
     }
     assert!(authoring::run(args(&input, &temp.join("missing").join("prop.model.json"))).is_err());
-    assert!(authoring::run(args(&input, &temp.join("..").join("prop.model.json"))).is_err());
+    // PathBuf::join normalizes .. for Windows verbatim roots. Preserve the
+    // literal CLI spelling and keep its normalized destination inside our fixture.
+    let traversal_child = temp.join("traversal-child");
+    fs::create_dir(&traversal_child).unwrap();
+    let mut traversal = traversal_child.as_os_str().to_os_string();
+    traversal.push(std::path::MAIN_SEPARATOR_STR);
+    traversal.push("..");
+    traversal.push(std::path::MAIN_SEPARATOR_STR);
+    traversal.push("prop.model.json");
+    let arguments = args(&input, Path::new(&traversal));
+    assert!(Path::new(arguments.last().unwrap())
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir)));
+    let error = authoring::run(arguments).unwrap_err();
+    assert_eq!(error, "empty paths and parent traversal are unsupported");
+    assert!(!temp.join("prop.model.json").exists());
+    assert_eq!(fs::read_dir(&traversal_child).unwrap().count(), 0);
 }
 #[test]
 fn cli_invalid_missing_and_oversized_inputs_leave_no_output() {
