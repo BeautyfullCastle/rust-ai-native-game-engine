@@ -274,6 +274,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Required static texture variant CPU CLI and bindings acceptance
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_STATIC_RETEXTURE_EVIDENCE: ${{ runner.temp }}/static-retexture-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_retexture_gate.py cpu
+      - name: Retain static texture variant CPU and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-retexture-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-retexture-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Required animation clip extraction cpu acceptance
         shell: bash
         timeout-minutes: 45
@@ -936,6 +951,22 @@ jobs:
         with:
           name: static-prop-gpu-${{ matrix.os }}
           path: ${{ runner.temp }}/static-prop-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Required static texture variant actual software GPU acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_STATIC_RETEXTURE_EVIDENCE: ${{ runner.temp }}/static-retexture-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_retexture_gate.py gpu
+      - name: Retain static texture variant GPU and partial failure evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-retexture-gpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-retexture-gpu-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
 
@@ -1950,6 +1981,23 @@ jobs:
         with:
           name: static-prop-room-export-ubuntu-22.04
           path: /tmp/orr-static-prop-export-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Required static texture variant source-hidden Room export acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          ORR_STATIC_RETEXTURE_EVIDENCE: /tmp/orr-static-retexture-export-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_retexture_gate.py export
+      - name: Retain static texture variant Room export and partial failure evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-retexture-room-export-ubuntu-22.04
+          path: /tmp/orr-static-retexture-export-${{ github.run_id }}-${{ github.run_attempt }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
