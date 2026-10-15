@@ -34,10 +34,15 @@ pub struct ExtractOptions {
     pub start: f32,
     pub end: f32,
     pub name: String,
+    /// Fixed positive playback ratio; 2 means twice as fast in the authored clip.
+    pub speed: f32,
 }
 
 impl ExtractOptions {
     fn validate(&self) -> Result<(), String> {
+        if ![0.25, 0.5, 1.0, 2.0, 4.0].contains(&self.speed) {
+            return Err("clip speed must be one of 0.25, 0.5, 1, 2, 4".into());
+        }
         if !self.start.is_finite()
             || !self.end.is_finite()
             || self.start < 0.0
@@ -56,6 +61,18 @@ impl ExtractOptions {
         }
         Ok(())
     }
+}
+
+// Powers-of-two rates preserve binary time values except at overflow/underflow
+// edges. Reject even a still-positive rounded subnormal rather than silently
+// changing an authored key's relative timing. f64 represents every f32 / rate
+// exactly for these five rates, so this check does not introduce a tolerance.
+fn retime(time: f32, speed: f32) -> Result<f32, String> {
+    let result = time / speed;
+    if !result.is_finite() || f64::from(result) != f64::from(time) / f64::from(speed) {
+        return Err("clip speed cannot preserve finite, exact key timing".into());
+    }
+    Ok(result)
 }
 
 fn word(bytes: &[u8], offset: usize) -> Result<usize, String> {
@@ -194,6 +211,10 @@ fn values_at(values: &ChannelValues, sample: &Trs) -> Vec<f32> {
 /// sampler, channel and BIN byte is retained. Inputs are never modified.
 pub fn extract_glb(input: &[u8], options: &ExtractOptions) -> Result<Vec<u8>, String> {
     options.validate()?;
+    let duration = retime(options.end - options.start, options.speed)?;
+    if duration <= 0.0 {
+        return Err("retimed clip duration must be positive".into());
+    }
     let (mut document, original_binary) = unpack(input)?;
     let model = import(input)?;
     let source = model.source();
@@ -295,7 +316,6 @@ pub fn extract_glb(input: &[u8], options: &ExtractOptions) -> Result<Vec<u8>, St
     let end_pose = model
         .sample_clip(options.clip_index, options.end)
         .map_err(|e| e.to_string())?;
-    let duration = options.end - options.start;
     let mut binary = Vec::with_capacity(binary_size);
     binary.extend_from_slice(original_binary);
     let mut samplers = Vec::with_capacity(clip.channels.len());
@@ -307,7 +327,7 @@ pub fn extract_glb(input: &[u8], options: &ExtractOptions) -> Result<Vec<u8>, St
             if time <= options.start || time >= options.end {
                 continue;
             }
-            let rebased = time - options.start;
+            let rebased = retime(time - options.start, options.speed)?;
             if rebased <= *times.last().expect("initial key") || rebased >= duration {
                 return Err("rebased key precision cannot preserve strict time ordering".into());
             }
@@ -582,20 +602,22 @@ fn publish(output: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse exactly six required option/value pairs. No runtime or package writes.
+/// Parse six required pairs and one optional speed pair. No runtime/package writes.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
-    let args: Vec<_> = args.into_iter().take(14).collect();
+    let args: Vec<_> = args.into_iter().take(16).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
-        return writeln!(std::io::stdout(),"Usage: animation_clip_extract --input FILE.glb --output NEW.glb --clip N --start SECONDS --end SECONDS --name NAME\nRequires animation,import; embedded GLB STEP/LINEAR TRS only. Trusted, stable, link-free parents; output parent must exist. No overwrite/install. Exit 0: help/published (check warnings); 2: not published/error.").map_err(|e|e.to_string());
+        return writeln!(std::io::stdout(),"Usage: animation_clip_extract --input FILE.glb --output NEW.glb --clip N --start SECONDS --end SECONDS --name NAME [--speed 0.25|0.5|1|2|4]\nSpeed defaults to 1; 2 plays twice as fast. Requires animation,import; embedded GLB STEP/LINEAR TRS only. Trusted, stable, link-free parents; output parent must exist. No overwrite/install. Exit 0: help/published (check warnings); 2: not published/error.").map_err(|e|e.to_string());
     }
-    if args.len() != 12 {
-        return Err("exactly six option/value pairs required; use --help".into());
+    if args.len() != 12 && args.len() != 14 {
+        return Err(
+            "six required option/value pairs and optional --speed required; use --help".into(),
+        );
     }
     let mut values = BTreeMap::new();
     for pair in args.chunks_exact(2) {
         let key = pair[0].to_str().ok_or("option names must be UTF-8")?;
         if ![
-            "--input", "--output", "--clip", "--start", "--end", "--name",
+            "--input", "--output", "--clip", "--start", "--end", "--name", "--speed",
         ]
         .contains(&key)
         {
@@ -624,6 +646,17 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         start: text("--start")?.parse().map_err(|_| "invalid --start")?,
         end: text("--end")?.parse().map_err(|_| "invalid --end")?,
         name: text("--name")?.into(),
+        speed: match values.get("--speed") {
+            None => 1.0,
+            Some(_) => match text("--speed")? {
+                "0.25" => 0.25,
+                "0.5" => 0.5,
+                "1" => 1.0,
+                "2" => 2.0,
+                "4" => 4.0,
+                _ => return Err("--speed must be one of 0.25, 0.5, 1, 2, 4".into()),
+            },
+        },
     };
     options.validate()?;
     let destination = output_path(Path::new(get("--output")?))?;
