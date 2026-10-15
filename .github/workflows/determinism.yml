@@ -247,6 +247,10 @@ jobs:
     # plus required Linux software-GPU/window tests; separate from the sim jobs.
     name: sample build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # Earlier Python child processes must not create ignored source artifacts
+      # before the later gates compare the complete checkout path inventory.
+      PYTHONDONTWRITEBYTECODE: "1"
     strategy:
       fail-fast: false
       matrix:

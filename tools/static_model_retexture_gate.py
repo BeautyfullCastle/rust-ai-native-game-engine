@@ -58,6 +58,20 @@ def source_paths(root):
     return sorted(result)
 
 
+def check_source_inventory(tracked, phase):
+    observed = source_paths(source_root)
+    expected = sorted(tracked)
+    entry = {'tracked': expected, 'observed': observed,
+             'extra': sorted(set(observed) - set(expected)),
+             'missing': sorted(set(expected) - set(observed)),
+             'matches': expected == observed}
+    runner.report.setdefault('source_path_inventories', {})[phase] = entry
+    # Preserve the actual path difference even when Git ignores an unexpected
+    # file and therefore reports a clean worktree. Do not exempt or remove it.
+    runner.record()
+    assert expected == observed, 'untracked/ignored source cannot enter producers'
+
+
 def snapshot():
     result = {}
     for name in source_paths(source_root):
@@ -78,7 +92,10 @@ def require_sources(value):
 
 def source_fence():
     if frozen is not None:
-        assert snapshot() == frozen, 'source bytes, modes or paths changed'
+        current = snapshot()
+        if list(current) != list(frozen):
+            check_source_inventory(list(frozen), 'source-fence')
+        assert current == frozen, 'source bytes, modes or paths changed'
 
 
 def run(label, command, expected=0, seconds=1200):
@@ -113,7 +130,7 @@ def begin():
         assert os.environ['GITHUB_SHA'] == runner.report['head']
     tracked = run('tracked-source', ['git', 'ls-files', '-z']).split('\0')
     assert tracked.pop() == ''
-    assert sorted(tracked) == source_paths(source_root), 'untracked/ignored source cannot enter producers'
+    check_source_inventory(tracked, 'before')
     frozen = snapshot()
     require_sources(frozen)
     runner.report.update(checkout=str(source_root), source_sha256=frozen,
@@ -158,8 +175,9 @@ def build_cli():
     return binary
 
 
-def model_tests(windows=False):
+def model_tests(platform):
     # A fixed explicit census is compared with actual Rust source by fixtures.
+    assert platform in {'linux', 'darwin', 'win32'}, 'unsupported model test platform'
     names = '''recipe_accepts_exact_required_object_and_whitespace
 recipe_rejects_unknown_duplicate_missing_null_and_array_fields_before_resolution
 recipe_rejects_wrong_format_version_types_and_byte_budget_before_resolution
@@ -185,10 +203,15 @@ cli_portable_output_names_and_package_store_rejection
 cli_missing_nonregular_and_oversized_inputs_leave_no_output
 cli_resolver_is_anchored_to_recipe_parent
 cli_parent_traversal_preserves_raw_spelling_and_never_publishes'''.split()
-    names.extend(['cli_windows_nonlocal_prefixes_reject'] if windows else [
-        'cli_symlink_inputs_ancestors_and_destinations_reject',
-        'cli_non_utf8_filesystem_inputs_work_but_logical_ids_reject'])
-    assert len(names) == (26 if windows else 27) and len(names) == len(set(names))
+    if platform == 'win32':
+        names.append('cli_windows_nonlocal_prefixes_reject')
+    else:
+        names.extend(['cli_symlink_inputs_ancestors_and_destinations_reject',
+                      'cli_non_utf8_option_names_and_logical_ids_reject'])
+        if platform == 'linux':
+            names.append('cli_non_utf8_filesystem_inputs_work')
+    assert len(names) == {'linux': 28, 'darwin': 27, 'win32': 26}[platform]
+    assert len(names) == len(set(names))
     return names
 
 
@@ -203,7 +226,7 @@ def model():
     output = run('build-model-test', ['cargo', 'test', *flags, '--features', 'import',
                                     '--test', 'static_model_retexture', '--no-run', '--message-format=json'])
     binary = pin(output, 'model-test', 'orr_model', 'static_model_retexture', 'test', ['import'])
-    test('model', binary, model_tests(windows=os.name == 'nt'))
+    test('model', binary, model_tests(sys.platform))
     # Target only model library and the new source-bound fixture. Other workspace
     # acceptance (including existing socket fixtures) has its own required gates.
     run('model-library-regressions', ['cargo', 'test', *flags, '--features', 'import', '--lib'])
@@ -612,7 +635,9 @@ def finish(error):
         for key, revision in [('head', 'HEAD'), ('tree', 'HEAD^{tree}')]:
             assert run('checkout-' + key + '-after', ['git', 'rev-parse', revision]).strip() == runner.report[key]
         tracked = run('tracked-source-after', ['git', 'ls-files', '-z']).split('\0')
-        assert tracked.pop() == '' and sorted(tracked) == list(frozen)
+        assert tracked.pop() == ''
+        check_source_inventory(tracked, 'after')
+        assert sorted(tracked) == list(frozen)
         runner.report['source_unchanged'] = True
         if error is None:
             check_coverage()

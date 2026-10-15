@@ -49,6 +49,12 @@ def workflow_contract(text):
     header = sample.split('    steps:', 1)[0]
     assert 'continue-on-error' not in header
     assert re.findall(r'^    if:[ \t]*(.*)$', header, re.M) == [], 'sample job is unconditional'
+    assert re.findall(r'^    env:$', header, re.M) == ['    env:'], 'job-wide Python environment'
+    environment = re.search(r'^    env:\n((?:^      [^\n]*\n|^\n)*)', header, re.M)
+    assert environment is not None
+    assert re.findall(r'^      PYTHONDONTWRITEBYTECODE:[ \t]*(.*)$', environment.group(1), re.M) == ['"1"'], 'inherited bytecode prevention'
+    declarations = re.findall(r'''^[ \t]*(?:PYTHONDONTWRITEBYTECODE|'PYTHONDONTWRITEBYTECODE'|"PYTHONDONTWRITEBYTECODE"):[^\n]*$''', sample, re.M)
+    assert declarations == ['      PYTHONDONTWRITEBYTECODE: "1"'], 'job setting must not be overridden by any step'
     assert 'os: [ubuntu-22.04, windows-latest]' in header
     assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room]' in aggregate
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate, re.M) == ['${{ always() }}'], 'one failure-aware aggregate condition'
@@ -91,6 +97,32 @@ def workflow_contract(text):
         assert text.count('      - name: ' + title + '\n') == 1
 
 
+def model_census_contract(source):
+    # Inspect the complete test attribute block, so a narrowed/broadened cfg or
+    # an ignored test cannot be concealed by an otherwise correct name census.
+    declarations = re.findall(r'((?:^#\[[^\n]+\]\n)+)^fn ([A-Za-z0-9_]+)\(', source, re.M)
+    actual = {name: attributes.splitlines() for attributes, name in declarations
+              if '#[test]' in attributes.splitlines()}
+    names = re.findall(r'^#\[test\]\s+fn ([A-Za-z0-9_]+)\(', source, re.M)
+    assert len(names) == len(set(names)) == len(actual) == 29
+    censuses = {platform: set(gate.model_tests(platform)) for platform in ('linux', 'darwin', 'win32')}
+    assert set(actual) == set.union(*censuses.values())
+    conditional = {
+        'cli_symlink_inputs_ancestors_and_destinations_reject': '#[cfg(unix)]',
+        'cli_non_utf8_option_names_and_logical_ids_reject': '#[cfg(unix)]',
+        'cli_non_utf8_filesystem_inputs_work': '#[cfg(target_os = "linux")]',
+        'cli_windows_nonlocal_prefixes_reject': '#[cfg(windows)]',
+    }
+    for name, attributes in actual.items():
+        assert attributes == ([conditional[name], '#[test]'] if name in conditional else ['#[test]']), name
+    common = set(actual) - set(conditional)
+    assert len(common) == 25
+    unix = {'cli_symlink_inputs_ancestors_and_destinations_reject', 'cli_non_utf8_option_names_and_logical_ids_reject'}
+    assert censuses['linux'] == common | unix | {'cli_non_utf8_filesystem_inputs_work'}
+    assert censuses['darwin'] == common | unix
+    assert censuses['win32'] == common | {'cli_windows_nonlocal_prefixes_reject'}
+
+
 class RetextureGateTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -129,6 +161,23 @@ class RetextureGateTests(unittest.TestCase):
         added = self.repo / 'new-test.rs'; added.write_text('new')
         with self.assertRaises(AssertionError):
             gate.source_fence()
+        recorded = json.loads((gate.runner.evidence / 'gate-receipt.json').read_text())
+        self.assertEqual(recorded['source_path_inventories']['source-fence'],
+                         {'tracked': ['source.rs'], 'observed': ['new-test.rs', 'source.rs'],
+                          'extra': ['new-test.rs'], 'missing': [], 'matches': False})
+        # A Git-ignored bytecode artifact is still an extra source path, and its
+        # exact name must be retained before rejection without deleting it.
+        added.unlink()
+        ignored = self.repo / 'tools/__pycache__/fixture.cpython-312.pyc'
+        ignored.parent.mkdir(parents=True); ignored.write_bytes(b'ignored bytecode')
+        path.unlink()
+        with self.assertRaises(AssertionError):
+            gate.check_source_inventory(['source.rs'], 'ignored-extra')
+        self.assertTrue(ignored.is_file())
+        recorded = json.loads((gate.runner.evidence / 'gate-receipt.json').read_text())
+        self.assertEqual(recorded['source_path_inventories']['ignored-extra'],
+                         {'tracked': ['source.rs'], 'observed': ['tools/__pycache__/fixture.cpython-312.pyc'],
+                          'extra': ['tools/__pycache__/fixture.cpython-312.pyc'], 'missing': ['source.rs'], 'matches': False})
 
     def test_source_snapshot_rejects_symlinks(self):
         path = self.repo / 'regular'; path.write_text('source')
@@ -160,15 +209,25 @@ class RetextureGateTests(unittest.TestCase):
 
     def test_actual_model_census_matches_current_source(self):
         source = (ROOT / 'crates/orr_model/tests/static_model_retexture.rs').read_text()
-        actual = re.findall(r'#\[test\]\s+fn ([A-Za-z0-9_]+)\(', source)
-        self.assertEqual(set(actual), set(gate.model_tests()) | set(gate.model_tests(windows=True)))
-        self.assertEqual(len(actual), len(set(actual)))
-        self.assertEqual(len(actual), 28)
-        windows = gate.model_tests(windows=True)
-        self.assertEqual(len(windows), 26)
-        self.assertEqual(set(actual) - set(windows), {'cli_symlink_inputs_ancestors_and_destinations_reject',
-                        'cli_non_utf8_filesystem_inputs_work_but_logical_ids_reject'})
-        self.assertEqual(set(actual) - set(gate.model_tests()), {'cli_windows_nonlocal_prefixes_reject'})
+        model_census_contract(source)
+        for platform in (None, True, False, '', 'windows', 'macos', 'freebsd', 'linux2'):
+            with self.subTest(platform=platform), self.assertRaises(AssertionError):
+                gate.model_tests(platform)
+        for original, changed in [
+            ('#[cfg(target_os = "linux")]\n#[test]\nfn cli_non_utf8_filesystem_inputs_work(',
+             '#[cfg(unix)]\n#[test]\nfn cli_non_utf8_filesystem_inputs_work('),
+            ('#[cfg(target_os = "linux")]\n#[test]\nfn cli_non_utf8_filesystem_inputs_work(',
+             '#[test]\nfn cli_non_utf8_filesystem_inputs_work('),
+            ('#[cfg(unix)]\n#[test]\nfn cli_non_utf8_option_names_and_logical_ids_reject(',
+             '#[cfg(target_os = "linux")]\n#[test]\nfn cli_non_utf8_option_names_and_logical_ids_reject('),
+            ('#[cfg(windows)]\n#[test]\nfn cli_windows_nonlocal_prefixes_reject(',
+             '#[cfg(unix)]\n#[test]\nfn cli_windows_nonlocal_prefixes_reject('),
+            ('#[test]\nfn recipe_accepts_exact_required_object_and_whitespace(',
+             '#[test]\n#[ignore]\nfn recipe_accepts_exact_required_object_and_whitespace('),
+        ]:
+            self.assertIn(original, source)
+            with self.subTest(original=original, changed=changed), self.assertRaises(AssertionError):
+                model_census_contract(source.replace(original, changed, 1))
         self.assertNotIn('UnixListener', source, 'fixtures must not require local sockets')
 
     def test_actual_consumer_census_matches_current_source(self):
@@ -527,12 +586,25 @@ class RetextureGateTests(unittest.TestCase):
                          ('run: python -B tools/static_model_retexture_gate.py gpu', 'run: echo skipped'),
                          ('run: python -B tools/static_model_retexture_gate.py export', 'run: echo skipped'),
                          ('Retain static texture variant CPU and partial failure evidence', 'missing retention'),
-                         ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]')]:
+                         ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]'),
+                         ('      PYTHONDONTWRITEBYTECODE: "1"\n', ''),
+                         ('      PYTHONDONTWRITEBYTECODE: "1"\n', '      PYTHONDONTWRITEBYTECODE: "0"\n'),
+                         ('      PYTHONDONTWRITEBYTECODE: "1"\n', '      PYTHONDONTWRITEBYTECODE: "1"\n      PYTHONDONTWRITEBYTECODE: "0"\n')]:
             with self.subTest(old=old), self.assertRaises(AssertionError):
                 workflow_contract(text.replace(old, new, 1))
         old = '      - name: Required static texture variant CPU CLI and bindings acceptance\n'
         with self.assertRaises(AssertionError):
             workflow_contract(text.replace(old, old + '        if: false\n'))
+        step_only = text.replace('      PYTHONDONTWRITEBYTECODE: "1"\n', '', 1).replace(
+            '          ORR_STATIC_GATE_EVIDENCE:',
+            '          PYTHONDONTWRITEBYTECODE: "1"\n          ORR_STATIC_GATE_EVIDENCE:', 1)
+        with self.assertRaises(AssertionError):
+            workflow_contract(step_only)
+        for value in ('""', '"0"'):
+            overridden = text.replace('          ORR_STATIC_GATE_EVIDENCE:',
+                '          PYTHONDONTWRITEBYTECODE: ' + value + '\n          ORR_STATIC_GATE_EVIDENCE:', 1)
+            with self.subTest(step_override=value), self.assertRaises(AssertionError):
+                workflow_contract(overridden)
         for title, condition, middle in [
             ('Required static texture variant CPU CLI and bindings acceptance', None, '        shell: bash\n'),
             ('Required static texture variant actual software GPU acceptance', "runner.os == 'Linux'", '        shell: bash\n'),

@@ -110,6 +110,10 @@ than the source. Repeated authoring is not a texture-memory optimization.
 The recipe's admitted parent anchors both resource paths. Filesystem recipe and
 ancestor names may be non-UTF8 where the OS supports them; logical IDs and portable
 input references must be UTF8 ASCII. All inputs must be bounded regular files.
+The positive arbitrary-byte filename fixture is Linux-only. macOS filesystems can
+reject such names before the CLI runs, so that filesystem capability is not
+applicable there; rejection of non-UTF8 option names and logical IDs is separately
+tested on Unix using ordinary valid filesystem paths.
 Opened-file identity/length/modification checks and bounded reads reject observed
 changes. Empty paths, literal parent traversal, symlink paths/ancestry, non-directory
 ancestors, trailing-dot/space components and nonlocal Windows path prefixes reject.
@@ -146,6 +150,9 @@ cooked input or PNG; preserve those inputs separately for reproducible authoring
 
 Model tests cover closed recipes, resource admission/order, exact provenance,
 identity, preservation, PNG parity, budgets and CLI failure/publication behavior.
+The platform-active model inventories are 28 tests on Linux, 27 on macOS and 26 on
+Windows, from 29 declarations. A platform-inapplicable filesystem fixture is not
+counted as a pass or an ignored test.
 Bindings acceptance loads distinct variants from the existing immutable package
 route. Software-GPU acceptance checks changed selected material and unchanged
 unselected material against independent geometry/UV/transform/material controls.

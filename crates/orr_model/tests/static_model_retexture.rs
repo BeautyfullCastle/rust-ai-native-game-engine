@@ -1393,7 +1393,31 @@ fn cli_symlink_inputs_ancestors_and_destinations_reject() {
 
 #[cfg(unix)]
 #[test]
-fn cli_non_utf8_filesystem_inputs_work_but_logical_ids_reject() {
+fn cli_non_utf8_option_names_and_logical_ids_reject() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let fixture = CliFixture::new();
+    let before = tree(&fixture.temp.0);
+    for (index, expected) in [
+        (0, "option names must be UTF-8"),
+        (3, "--asset-id must be UTF-8"),
+    ] {
+        let mut bad = fixture.args();
+        bad[index] = OsString::from_vec(b"invalid-\xff.retexture.json".to_vec());
+        assert_eq!(bad[index].as_bytes(), b"invalid-\xff.retexture.json");
+        assert!(bad[index].to_str().is_none());
+        assert_eq!(authoring::run(bad).unwrap_err(), expected);
+        assert!(!fixture.output.exists());
+        assert_eq!(tree(&fixture.temp.0), before);
+    }
+    fixture.assert_unchanged();
+}
+
+// Arbitrary invalid-UTF8 filenames are supported by the Linux CI filesystem.
+// macOS filesystems can reject them before the CLI is invoked; that capability
+// is not assumed or reported as passing by the portable logical-ID test above.
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_non_utf8_filesystem_inputs_work() {
     use std::os::unix::ffi::OsStringExt;
     let temp = Temp::new();
     let root = temp.0.join(OsString::from_vec(b"parent-\xff".to_vec()));
@@ -1407,13 +1431,6 @@ fn cli_non_utf8_filesystem_inputs_work_but_logical_ids_reject() {
     assert!(input.to_str().is_none());
     assert!(output.to_str().is_none());
     let before = tree(&temp.0);
-    for index in [0, 3] {
-        let mut bad = cli_args(&input, &output);
-        bad[index] = OsString::from_vec(b"invalid-\xff.retexture.json".to_vec());
-        assert!(authoring::run(bad).is_err());
-        assert!(!output.exists());
-        assert_eq!(tree(&temp.0), before);
-    }
     authoring::run(cli_args(&input, &output)).unwrap();
     assert_eq!(
         fs::read(&output).unwrap(),
