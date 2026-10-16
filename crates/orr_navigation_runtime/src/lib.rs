@@ -2,6 +2,8 @@
 #![deny(clippy::float_arithmetic)]
 #![deny(clippy::disallowed_types)]
 
+pub mod mesh;
+
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame, FrameList};
 use orr_fp::FP;
