@@ -13,11 +13,14 @@ use orr_physics3d::{apply_impulse, Body, Scratch, BODY_DYNAMIC};
 
 /// Pinned checksums. Update only for an intended behavior change, and say
 /// why in the commit message.
-const STACK_GOLDEN: u64 = 0x21eb449802e96d0f;
-const PYRAMID_GOLDEN: u64 = 0x28f6e5ce7d1c811e;
-const RAIN_GOLDEN: u64 = 0xa509c0497431ac58;
-const RAMP_GOLDEN: u64 = 0x2a04b439faf52168;
-const MIXED_GOLDEN: u64 = 0x02692d01c7d15ab6;
+// ORRF v2 intentionally changes Frame checksums to cover the whole encoded
+// body, including schema, collection boundaries and list free order. These
+// scenes and physics state assertions are unchanged; see docs/frame-compatibility.md.
+const STACK_GOLDEN: u64 = 0x7c718107fec4b1ff;
+const PYRAMID_GOLDEN: u64 = 0x02793214c9f0ae66;
+const RAIN_GOLDEN: u64 = 0xfa1822974f1a99ac;
+const RAMP_GOLDEN: u64 = 0x83d39c10c1b1de40;
+const MIXED_GOLDEN: u64 = 0x5568188554839c82;
 
 fn sane(f: &mut Frame, limit: FP) {
     for (_, (b,)) in f.query::<(&Body,)>().filter(|(_, (b,))| b.kind == BODY_DYNAMIC) {

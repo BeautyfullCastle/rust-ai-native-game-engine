@@ -1,0 +1,71 @@
+   Compiling orr_terrain_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6.69s
+     Running unittests src/lib.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/orr_terrain_physics3d-adc239f98618d6a0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/frame_assets.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/frame_assets-3184b3de5fc308bb)
+
+running 12 tests
+test canonical_content_and_material_are_frame_owned ... ok
+test collision_profile_rejects_wider_asset_domain_atomically ... ok
+test empty_and_unregistered_frames_are_distinguished ... ok
+test admission_is_atomic_for_every_revision_byte ... ok
+test identity_is_part_of_the_pin_even_when_geometry_is_identical ... ok
+test every_authoritative_field_changes_frame_checksum ... ok
+test material_rejection_and_second_admission_are_atomic ... ok
+test snapshots_restore_every_asset_byte_without_external_assets ... ok
+test transformed_or_convex_terrain_proxy_is_rejected ... ok
+test runtime_rejects_corrupt_lists_revisions_and_metadata_without_mutation ... ok
+test malformed_canonical_inputs_never_allocate_or_publish ... ok
+test inclusive_collision_profile_edges_are_admitted ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/golden.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/golden-d39f94685ede5cf1)
+
+running 1 test
+test golden_frame_owned_solid_and_hole_spheres ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/terrain_physics.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/terrain_physics-001435367935b461)
+
+running 32 tests
+test actual_canonical_triangle_and_surface_apis_match_nonplanar_contacts ... ok
+test all_filter_permitted_unsupported_bodies_are_rejected_atomically ... ok
+test convex_ridge_keeps_a_single_finite_edge_normal ... ok
+test conservative_displacement_guard_blocks_high_speed_crossing ... ok
+test diagonal_and_cell_seam_features_deduplicate_without_internal_walls ... ok
+test empty_adapter_reports_missing_physics_and_invalid_timestep_instead_of_panicking ... ok
+test candidate_and_geometry_extremes_fail_deterministically ... ok
+test finite_triangle_face_edge_and_vertex_regions_are_distinct ... ok
+test actual_motion_crosses_diagonal_cell_seam_and_then_hole ... ok
+test fractional_sloped_shared_edge_keeps_its_true_nearest_feature ... ok
+test hole_removes_both_triangles_without_floor_or_vertical_wall ... ok
+test empty_optional_adapter_is_bit_exact_original_physics_with_default_config ... ok
+test restored_touching_sleeping_cluster_needs_a_static_anchor ... ok
+test actual_slope_accelerates_sphere_downhill ... ok
+test actual_friction_slows_a_rotation_locked_sphere ... ok
+test despawning_ordinary_support_preserves_orphan_wake_semantics ... ok
+test actual_ridge_and_outer_rim_contact_change_horizontal_velocity ... ok
+test actual_sphere_falls_rests_sleeps_and_wakes_from_impulse ... ok
+test concave_valley_has_two_real_face_normals_and_solves_both ... ok
+test rollback_and_fresh_scratch_replay_terrain_contacts_bit_exactly ... ok
+test transformed_terrain_and_excess_body_count_are_rejected_before_motion ... ok
+test unsafe_dt_substeps_speed_radius_and_state_reject_without_mutation ... ok
+test shallow_falling_sphere_cannot_cross_a_finite_triangle ... ok
+test unsupported_shapes_with_excluded_filters_can_use_ordinary_physics ... ok
+test zero_gravity_sleepers_revalidate_when_gravity_changes_after_restore ... ok
+test restored_sleepers_require_current_matching_grounded_support ... ok
+test sphere_falls_through_a_wide_hole_and_beyond_outer_boundary ... ok
+test stale_cache_handle_and_duplicate_feature_are_atomic_errors ... ok
+test small_sphere_requires_enough_substeps_and_then_has_real_contact ... ok
+test teleporting_a_sleeper_away_from_cached_terrain_support_is_explicitly_rejected ... ok
+test restored_grounded_stack_is_idle_but_shared_island_label_cannot_ground_free_body ... ok
+test sphere_spanning_multiple_cells_physically_bridges_a_narrow_hole ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

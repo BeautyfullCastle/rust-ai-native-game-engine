@@ -1,0 +1,35 @@
+[package]
+name = "orr_terrain_import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Optional bounded unsigned RAW16 terrain authoring CLI"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+editor-acceptance = ["dep:orr_editor"]
+gpu-acceptance = ["dep:orr_render", "orr_terrain_view/gpu"]
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_terrain = { path = "../orr_terrain" }
+orr_terrain_view = { path = "../orr_terrain_view", default-features = false }
+orr_editor = { path = "../orr_editor", features = ["terrain"], optional = true }
+orr_render = { path = "../orr_render", features = ["models"], optional = true }
+
+[dev-dependencies]
+orr_package = { path = "../orr_package" }
+serde_json = "1"
+tempfile = "3"
+
+[[test]]
+name = "editor"
+required-features = ["editor-acceptance"]
+
+[[test]]
+name = "render"
+required-features = ["gpu-acceptance"]

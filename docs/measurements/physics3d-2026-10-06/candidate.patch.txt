@@ -1,0 +1,95 @@
+diff --git a/crates/orr_physics3d/src/solver.rs b/crates/orr_physics3d/src/solver.rs
+index 81c7ca6..24f09d2 100644
+--- a/crates/orr_physics3d/src/solver.rs
++++ b/crates/orr_physics3d/src/solver.rs
+@@ -99,6 +99,10 @@ fn rel_vel(va: &Vw, vb: &Vw, d: FPVec3, row: &Row) -> FP {
+ /// inverse mass (static, kinematic) is skipped.
+ #[inline(always)]
+ fn apply(va: &mut Vw, vb: &mut Vw, d: FPVec3, ima: FP, imb: FP, row: &Row, lam: FP) {
++    // nmul(x, 0) is exactly zero, including at the raw i64 limits.
++    if lam == FP::ZERO {
++        return;
++    }
+     if ima != FP::ZERO {
+         let sa = nmul(ima, lam);
+         va.v.x -= nmul(d.x, sa);
+@@ -288,3 +292,79 @@ pub(crate) fn solve(cons: &mut [Constraint], pool: &mut [ContactPt], vw: &mut [V
+         }
+     }
+ }
++
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    // The unguarded update, kept as an oracle for the zero-impulse fast path.
++    fn apply_reference(va: &mut Vw, vb: &mut Vw, d: FPVec3, ima: FP, imb: FP, row: &Row, lam: FP) {
++        if ima != FP::ZERO {
++            let sa = nmul(ima, lam);
++            va.v.x -= nmul(d.x, sa);
++            va.v.y -= nmul(d.y, sa);
++            va.v.z -= nmul(d.z, sa);
++            va.w -= scale(row.wad, lam);
++        }
++        if imb != FP::ZERO {
++            let sb = nmul(imb, lam);
++            vb.v.x += nmul(d.x, sb);
++            vb.v.y += nmul(d.y, sb);
++            vb.v.z += nmul(d.z, sb);
++            vb.w += scale(row.wbd, lam);
++        }
++    }
++
++    fn assert_same_velocities(actual: &[Vw; 2], expected: &[Vw; 2]) {
++        for (actual, expected) in actual.iter().zip(expected) {
++            assert_eq!(actual.v, expected.v);
++            assert_eq!(actual.w, expected.w);
++        }
++    }
++
++    #[test]
++    fn zero_impulse_preserves_all_velocity_bits_at_raw_limits() {
++        let values = [i64::MIN, i64::MIN + 1, -65536, -1, 0, 1, 65536, i64::MAX - 1, i64::MAX];
++        for &raw in &values {
++            assert_eq!(nmul(FP::from_raw(raw), FP::ZERO).raw(), 0);
++        }
++        for index in 0..values.len() {
++            let vector = |offset: usize| FPVec3::new(
++                FP::from_raw(values[(index + offset) % values.len()]),
++                FP::from_raw(values[(index + offset + 1) % values.len()]),
++                FP::from_raw(values[(index + offset + 2) % values.len()]),
++            );
++            let before = [Vw { v: vector(0), w: vector(3) }, Vw { v: vector(6), w: vector(1) }];
++            let row = Row { wad: vector(2), wbd: vector(5), ..Row::default() };
++            for &ima in &values {
++                for &imb in &values {
++                    let [mut va, mut vb] = before;
++                    let [mut reference_a, mut reference_b] = before;
++                    apply(&mut va, &mut vb, vector(4), FP::from_raw(ima), FP::from_raw(imb), &row, FP::ZERO);
++                    apply_reference(&mut reference_a, &mut reference_b, vector(4), FP::from_raw(ima), FP::from_raw(imb), &row, FP::ZERO);
++                    assert_same_velocities(&[va, vb], &before);
++                    assert_same_velocities(&[va, vb], &[reference_a, reference_b]);
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn nonzero_impulses_match_unguarded_update() {
++        let v = |x, y, z| FPVec3::new(FP::from_raw(x), FP::from_raw(y), FP::from_raw(z));
++        let before = [Vw { v: v(-73121, 0, 348293), w: v(1234, -9876, 1) }, Vw { v: v(478299, -9433, -1), w: v(-3333, 8888, 0) }];
++        let row = Row { wad: v(-43921, 87432, 32768), wbd: v(88888, -22222, -65536), ..Row::default() };
++        for raw in [-65536, -32768, -1, 1, 32768, 65536] {
++            for ima in [FP::ZERO, FP::ONE] {
++                for imb in [FP::ZERO, FP::ONE] {
++                    let [mut va, mut vb] = before;
++                    let [mut reference_a, mut reference_b] = before;
++                    apply(&mut va, &mut vb, v(32768, -32768, 65536), ima, imb, &row, FP::from_raw(raw));
++                    apply_reference(&mut reference_a, &mut reference_b, v(32768, -32768, 65536), ima, imb, &row, FP::from_raw(raw));
++                    assert_same_velocities(&[va, vb], &[reference_a, reference_b]);
++                }
++            }
++        }
++    }
++}

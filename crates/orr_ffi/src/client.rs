@@ -11,7 +11,6 @@
 //! waiting: the connection runs on a thread and the handle reports `ORR_STATE_CONNECTING` until it
 //! is done (`orr_session_status`).
 
-use std::collections::VecDeque;
 use std::time::Duration;
 
 use orr_sample::net_client::NetArgs;
@@ -69,18 +68,11 @@ impl Client {
         self.view.poll_join().map(|r| Ready { schema_json: r.schema.to_json_string(), input_size: r.input_size, player_count: r.player_count })
     }
 
-    /// Moves what the bridge produced since the last call into the frame slot and the event queue.
-    pub fn pump(&mut self, latest: &mut Option<Vec<u8>>, events: &mut VecDeque<Vec<u8>>, max_batches: usize) {
-        let out = self.view.pump();
-        if let Some(frame) = out.frame {
-            *latest = Some(frame);
-        }
-        if let Some(batch) = out.events {
-            if events.len() >= max_batches {
-                events.pop_front();
-            }
-            events.push_back(batch);
-        }
+    /// Moves what the bridge produced since the last call to the FFI's shared mailbox.
+    /// The outer handle owns replacement, reset-baseline and event-queue policy so that it
+    /// applies identically to local-host and relay-client frames.
+    pub fn pump(&mut self) -> orr_sample::relay_view::Pumped {
+        self.view.pump()
     }
 
     pub fn set_input(&mut self, player: u8, bytes: &[u8]) -> Result<(), (i32, String)> {

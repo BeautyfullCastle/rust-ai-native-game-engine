@@ -22,12 +22,19 @@ ffi = ["dep:libloading"]
 # `default-features = false`: only `format` (the decoder), none of the producer side.
 orr_viewstream = { path = "../orr_viewstream", default-features = false }
 serde_json = "1"
-# A tiny blocking WebSocket client: no TLS, no async runtime.
+# Blocking WebSocket + rustls: no async runtime, native TLS, or simulation dependency.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 crossterm = "0.29"
 libloading = { version = "0.8", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# Readiness waits avoid cancelling ordinary receives with SO_RCVTIMEO.
+windows-sys = { version = "=0.61.2", features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # Test hosts only (an in-process ERP host with the physics demo, the Rust bridge for the reference result).
 orr_remote = { path = "../orr_remote" }
 orr_sample = { path = "../orr_sample" }
@@ -39,3 +46,10 @@ orr_server = { path = "../orr_server" }
 orr_relay_net = { path = "../orr_relay_net" }
 orr_edit = { path = "../orr_edit" }
 orr_sim = { path = "../orr_sim" }
+
+[[bin]]
+name = "orr_tui"
+path = "src/main.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false

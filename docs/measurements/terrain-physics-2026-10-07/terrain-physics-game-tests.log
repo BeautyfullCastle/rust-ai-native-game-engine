@@ -1,0 +1,11 @@
+   Compiling orr_physics v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics)
+   Compiling orr_games v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_games)
+    Finished `release` profile [optimized + debuginfo] target(s) in 8.01s
+     Running unittests src/lib.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/orr_games-535b8839dfbba9a5)
+
+running 2 tests
+test yard3d_game::tests::a_downward_ray_meets_the_floor ... ok
+test terrain_yard3d_game::tests::missing_admission_reports_failure_without_installing_a_fallback_floor ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

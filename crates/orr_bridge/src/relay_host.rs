@@ -282,13 +282,18 @@ impl<G: Game, L: Link> SimHost<G> for RelayHost<G, L> {
 
     fn advance(&mut self, input: G::Input, commands: Vec<G::Command>) -> AdvanceResult<G> {
         self.input = input;
-        self.pending.extend(commands);
+        let accepting_commands = self.accepts_commands();
+        if accepting_commands {
+            self.pending.extend(commands);
+        }
         let now = self.start.elapsed().as_micros() as u64;
         let (pending, derive, current, slot) = (&mut self.pending, &self.derive, self.input, self.slot);
         let up = self.client.update(now, &mut |_tick| {
             let mut cmds = std::mem::take(pending);
-            if let Some(d) = derive {
-                cmds.extend(d(slot, &current));
+            if accepting_commands {
+                if let Some(d) = derive {
+                    cmds.extend(d(slot, &current));
+                }
             }
             (current, cmds)
         });
@@ -340,7 +345,20 @@ impl<G: Game, L: Link> SimHost<G> for RelayHost<G, L> {
     fn last_rollback(&self) -> Option<RollbackInfo> {
         self.session().last_rollback()
     }
+    fn pending_command_count(&self) -> usize {
+        self.pending.len()
+    }
+    fn accepts_commands(&self) -> bool {
+        !matches!(
+            self.client.state(),
+            ClientState::Disconnected | ClientState::Failed(_) | ClientState::Rejected(_)
+        )
+    }
     fn take_lifecycle(&mut self) -> Vec<Lifecycle> {
         std::mem::take(&mut self.lifecycle)
     }
 }
+
+#[cfg(test)]
+#[path = "relay_host_tests.rs"]
+mod tests;

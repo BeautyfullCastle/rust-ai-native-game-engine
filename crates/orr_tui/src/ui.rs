@@ -13,6 +13,7 @@ use orr_viewstream::FLAG_PAUSED;
 
 use crate::input::{encode, Controls};
 use crate::render::{render, Camera};
+use crate::render3d::{self, Camera3};
 use crate::schema::ViewSchema;
 use crate::source::{Control, Source};
 use crate::state::ViewState;
@@ -77,14 +78,28 @@ fn clip(s: &str, w: usize) -> String {
     s.chars().take(w).collect()
 }
 
+/// The 2D keyboard layout cannot express Yard3D's ray input. Keep the 3D viewer
+/// observational, including the initial neutral input and held/repeated keys.
+pub(crate) fn send_game_controls(src: &mut dyn Source, schema: &ViewSchema, player: u8, controls: &Controls) -> Result<bool, String> {
+    if schema.dimensions != 2 {
+        return Ok(false);
+    }
+    src.set_input(player, &encode(schema, controls))?;
+    Ok(true)
+}
+
 fn draw(out: &mut BufWriter<Stdout>, state: &mut ViewState, help: &str, now: Instant) -> std::io::Result<()> {
     let (tw, th) = terminal::size().unwrap_or((80, 24));
     let (tw, th) = (tw as usize, th as usize);
     let events_h = if th >= 20 { 4 } else if th >= 12 { 2 } else { 0 };
     let grid_h = th.saturating_sub(2 + events_h).max(1);
     // The newest frame, with the correction of a rollback still fading out (about 0.1 s).
-    if let (Some(f), Some(cam)) = (state.display_frame(now), &state.camera) {
-        let grid = render(&f, &state.schema, cam, state.alpha(now), tw, grid_h, true);
+    let grid = if state.schema.dimensions == 3 {
+        state.display_frame3(now).zip(state.camera3.as_ref()).map(|(f, cam)| render3d::render(&f, &state.schema, cam, state.alpha(now), tw, grid_h, true))
+    } else {
+        state.display_frame(now).zip(state.camera.as_ref()).map(|(f, cam)| render(&f, &state.schema, cam, state.alpha(now), tw, grid_h, true))
+    };
+    if let Some(grid) = grid {
         let mut last = None;
         for y in 0..grid.h {
             queue!(out, MoveTo(0, y as u16))?;
@@ -142,11 +157,11 @@ pub fn run(src: &mut dyn Source, opts: &UiOpts) -> Result<(), String> {
     let _restore = Restore;
     execute!(std::io::stdout(), EnterAlternateScreen, Hide, Clear(ClearType::All)).map_err(|e| e.to_string())?;
     let mut out = BufWriter::new(std::io::stdout());
-    let help = format!(
-        "{} player {} | arrows/a/d move, z/c spin, f fire | space/p play-pause, s step, r refit, q quit",
-        src.describe(),
-        player
-    );
+    let help = if schema.dimensions == 3 {
+        format!("{} | 3D XZ projection; game input unsupported | space/p play-pause, s step, r refit, q quit", src.describe())
+    } else {
+        format!("{} player {} | arrows/a/d move, z/c spin, f fire | space/p play-pause, s step, r refit, q quit", src.describe(), player)
+    };
     let frame_dt = Duration::from_micros(1_000_000 / u64::from(opts.fps.clamp(1, 60)));
     let (mut held, mut last_sent) = (Held::default(), None::<Controls>);
     let mut last_status = Instant::now();
@@ -163,7 +178,11 @@ pub fn run(src: &mut dyn Source, opts: &UiOpts) -> Result<(), String> {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                     KeyCode::Char(' ' | 'p') => {
-                        let paused = state.frame.as_ref().is_some_and(|f| f.has(FLAG_PAUSED));
+                        let paused = if schema.dimensions == 3 {
+                            state.frame3.as_ref().is_some_and(|f| f.has(FLAG_PAUSED))
+                        } else {
+                            state.frame.as_ref().is_some_and(|f| f.has(FLAG_PAUSED))
+                        };
                         if let Err(e) = src.control(if paused { Control::Play } else { Control::Pause }) {
                             state.notice = Some(e);
                         }
@@ -173,16 +192,31 @@ pub fn run(src: &mut dyn Source, opts: &UiOpts) -> Result<(), String> {
                             state.notice = Some(e);
                         }
                     }
-                    KeyCode::Char('r') => state.camera = state.frame.as_ref().map(Camera::fit),
+                    KeyCode::Char('r') => {
+                        if schema.dimensions == 3 {
+                            state.camera3 = state.frame3.as_ref().map(Camera3::fit);
+                        } else {
+                            state.camera = state.frame.as_ref().map(Camera::fit);
+                        }
+                    }
                     other => {
-                        held.press(other, now);
+                        if schema.dimensions == 3 {
+                            state.notice = Some("3D game input is unsupported; this is an XZ observer".into());
+                        } else {
+                            held.press(other, now);
+                        }
                     }
                 }
             }
             let controls = held.controls(now);
             if last_sent != Some(controls) {
-                match src.set_input(player, &encode(&schema, &controls)) {
-                    Ok(()) => last_sent = Some(controls),
+                match send_game_controls(src, &schema, player, &controls) {
+                    Ok(sent) => {
+                        last_sent = Some(controls);
+                        if !sent {
+                            state.notice = Some("3D game input is unsupported; this is an XZ observer".into());
+                        }
+                    }
                     // A dropped connection must not close the viewer: say so and keep showing the game.
                     Err(e) if src.net_status().is_some() => state.notice = Some(e),
                     Err(e) => return Err(e),

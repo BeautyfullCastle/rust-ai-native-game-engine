@@ -300,7 +300,10 @@ fn checksum_determinism_across_independent_frames() {
 /// other platforms/architectures can compare against this exact value. If
 /// this ever needs to change (e.g. a deliberate format change), regenerate
 /// it by printing the new checksum and updating the constant deliberately.
-const GOLDEN_CHECKSUM: u64 = 14364510420768418636;
+// ORRF v2 intentionally hashes the full encoded body (schema, collection
+// boundaries and list free order). The operation sequence is unchanged;
+// the incomplete v1 checksum was 14364510420768418636.
+const GOLDEN_CHECKSUM: u64 = 2074994390429319065;
 
 #[test]
 fn golden_checksum_scripted_sequence() {

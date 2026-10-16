@@ -12,7 +12,8 @@
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
 use orr_fp::{fp, FPVec2, FP};
-use orr_sim::{decode_pod, encode_pod, Game, PlayerSlot, SimCommand, SimContext, System};
+use orr_sim::{decode_pod, encode_pod, Game, MetricValue, Metrics, PlayerSlot, SimCommand, SimContext, System};
+use orr_reflect::{Reflect, TypeRegistry};
 
 pub const MAX_PLAYERS: usize = 8;
 pub const ARENA_HALF: FP = FP(2_000 << 16); // +-2000 units
@@ -25,12 +26,17 @@ pub const BULLET_LIFETIME_TICKS: u32 = 90;
 // ---- input ----
 
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Pod, Zeroable, Reflect)]
 pub struct ArenaInput {
     /// -1, 0 or 1 on each axis, packed as raw FP for determinism/Pod.
+    #[reflect(range = "-1..=1")]
     pub axis_x: FP,
+    #[reflect(range = "-1..=1")]
     pub axis_y: FP,
+    /// Holding fire emits one bullet command per tick in the normal-input adapter.
+    #[reflect(flags = "fire=1")]
     pub buttons: u32,
+    #[reflect(skip)]
     pub _pad: u32,
 }
 pub const FIRE: u32 = 1 << 0;
@@ -69,26 +75,55 @@ pub struct Hit {
 // ---- components ----
 
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable, Reflect)]
 pub struct Position {
     pub pos: FPVec2,
 }
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable, Reflect)]
 pub struct PlayerTag {
+    #[reflect(range = "0..=7")]
     pub slot: u32,
 }
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable, Reflect)]
 pub struct Bullet {
     pub velocity: FPVec2,
     pub owner_slot: u32,
     pub ttl: u32,
 }
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable, Reflect)]
 pub struct Score {
     pub kills: [u32; MAX_PLAYERS],
+}
+
+/// Registers authoring reflection without changing the simulation registry or layout.
+pub fn register_reflect(types: &mut TypeRegistry) {
+    types.register_component::<Position>("Position");
+    types.register_component::<PlayerTag>("PlayerTag");
+    types.register_component::<Bullet>("Bullet");
+    types.register_singleton::<Score>("Score");
+}
+
+/// Frame metrics for the bounded Arena authoring workflow. Scores count hits;
+/// this test game does not have health, death, or a win state.
+pub struct ArenaMetrics;
+
+impl Metrics for ArenaMetrics {
+    fn sample(&self, frame: &Frame) -> Vec<(String, MetricValue)> {
+        let score = frame.singleton::<Score>();
+        let out_of_bounds = frame.dense::<Position>().1.iter()
+            .filter(|p| p.pos.x.abs() > ARENA_HALF || p.pos.y.abs() > ARENA_HALF)
+            .count();
+        vec![
+            ("players".into(), MetricValue::Int(frame.dense::<PlayerTag>().1.len() as i64)),
+            ("bullets".into(), MetricValue::Int(frame.dense::<Bullet>().1.len() as i64)),
+            ("score_0".into(), MetricValue::Int(i64::from(score.kills[0]))),
+            ("score_1".into(), MetricValue::Int(i64::from(score.kills[1]))),
+            ("out_of_bounds".into(), MetricValue::Int(out_of_bounds as i64)),
+        ]
+    }
 }
 
 pub struct Arena;

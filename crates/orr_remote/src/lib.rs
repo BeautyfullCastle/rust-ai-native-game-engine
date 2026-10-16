@@ -65,7 +65,9 @@ mod client_mode;
 pub mod codec;
 mod dispatch;
 mod error;
+pub mod frame_delta;
 mod host;
+mod input;
 pub mod json;
 pub mod link;
 mod local;
@@ -73,22 +75,54 @@ pub mod methods;
 mod net;
 mod proposals;
 mod remote;
+mod remote_view;
 #[cfg(feature = "sample-host")]
 pub mod sample;
+pub mod screenshot;
 mod server;
 mod viewstream;
 pub mod wire;
+#[cfg(feature = "sample-host")]
+pub mod yard3d;
 
-pub use activity::{ActivityEntry, ActivityKind, ClientInfo, ValueChange, VerifyDetail, DEFAULT_ACTIVITY_CAPACITY};
+pub use activity::{
+    ActivityEntry, ActivityKind, ClientInfo, ValueChange, VerifyDetail, DEFAULT_ACTIVITY_CAPACITY,
+};
 pub use caps::{origin_of_client, Auth, Cap, Caps, TokenEntry, USER_CLIENT};
 pub use client::{ClientError, ErpClient};
-pub use client_mode::{ClientPump, ClientSession, ClientSessionHook, SessionError, SessionErrorKind};
+pub use client_mode::{
+    ClientPump, ClientSession, ClientSessionHook, SessionError, SessionErrorKind,
+};
 pub use dispatch::{call_local, ErpTarget, HostLimits};
 pub use error::*;
 pub use host::{Host, Pacer};
-pub use link::{Incoming, LocalConnector, LocalFrame, LocalTransport, PumpedWs, Request, Transport, TxHandle, WsTransport};
+pub use link::{
+    Incoming, LocalConnector, LocalFrame, LocalTransport, PumpedWs, Request, Transport, TxHandle,
+    WsTransport,
+};
 pub use local::LocalHost;
 pub use proposals::{default_build_id, BotFn, GameHooks};
-pub use remote::{RemoteBridge, RemoteConfig, RemoteMetrics};
+pub use remote::{
+    FrameCodecMode, FrameCodecPolicy, RemoteBridge, RemoteConfig, RemoteIdentity, RemoteMetrics,
+    RemoteViewDelivery, ViewDeliveryMode,
+};
+pub use screenshot::{
+    CaptureError, CaptureRequest, CapturedImage, ScreenshotAdmissionError, ScreenshotOptions,
+    ScreenshotOwner, ScreenshotService, ViewMode, ViewState,
+};
+pub use server::{
+    ErpServer, PollReport, ServerConfig, ServerError, ServerStats, MAX_PENDING_BYTES,
+};
 pub use viewstream::ViewStreamHook;
-pub use server::{ErpServer, PollReport, ServerConfig, ServerError, ServerStats, MAX_PENDING_BYTES};
+
+#[cfg(feature = "terrain-physics")]
+pub mod terrain_yard3d;
+
+#[cfg(feature = "navigation")]
+pub mod navigation_yard3d;
+
+#[cfg(feature = "collect-dodge")]
+pub mod collect_dodge;
+
+#[cfg(feature = "room-project")]
+pub mod room_escape;

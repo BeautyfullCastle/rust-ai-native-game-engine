@@ -134,3 +134,17 @@ pub fn loopback_pair(net: Loopback) -> LoopbackPair<Arena> {
         bot(1234),
     )
 }
+
+/// Arena drawables for authoring tools, using the same styles as the game view.
+pub fn editor_drawables(frame: FrameView<'_>) -> Vec<crate::editor_view::Drawable> {
+    let mut extracted = Vec::new();
+    ArenaExtractor { remote_mode: InterpMode::None, local_slot: 0 }.extract(frame, &mut extracted);
+    extracted.into_iter().map(|item| crate::editor_view::Drawable {
+        entity: item.entity,
+        pos: [item.transform.pos.x, item.transform.pos.y],
+        angle: 0.0,
+        style: item.style,
+        turn: 0.0,
+        outline: crate::editor_view::Outline::Circle { radius: item.style.size },
+    }).collect()
+}

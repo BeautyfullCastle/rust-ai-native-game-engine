@@ -13,6 +13,7 @@ use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use orr_editor::app::{BottomTab, LBL_PAUSE, LBL_PLAY, LBL_STEP, LBL_STOP};
+use orr_editor::diagnostics::LATENCY_WINDOW;
 use orr_editor::editor::Mode;
 use orr_editor::{EditorApp, Target};
 use orr_reflect::{decimal, Value};
@@ -458,4 +459,156 @@ fn inspector_flags_enum_and_component_buttons() {
     // Every step was an undoable edit by the user.
     let hist = h.state().editor.history().entries.clone();
     assert!(hist.len() >= 5 && hist.iter().all(|e| e.origin == "user"), "{hist:?}");
+}
+
+#[test]
+fn escape_during_scrub_rolls_back_and_next_drag_is_a_fresh_undo_step() {
+    let mut h = harness();
+    h.run_steps(3);
+    h.get_by_label("body_05").click();
+    settle(&mut h);
+    let original = yaml(&mut h);
+    for cancel in [true, false] {
+        let handle = h.get_all_by_label("\u{2194}").next().unwrap().rect().center();
+        h.event(Event::PointerMoved(handle));
+        h.step();
+        h.event(Event::PointerButton { pos: handle, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        for i in 1..=3 {
+            h.event(Event::PointerMoved(handle + egui::vec2(i as f32 * 6.0, 0.0)));
+            h.step();
+        }
+        if cancel {
+            press(&h, Modifiers::NONE, Key::Escape);
+            h.step();
+            // Continuing the pointer after Escape must not issue an ordinary
+            // standalone field edit when the cancelled transaction drains.
+            h.event(Event::PointerMoved(handle + egui::vec2(30.0, 0.0)));
+            h.run_steps(3);
+        }
+        h.event(Event::PointerButton { pos: handle + egui::vec2(30.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(2);
+        settle(&mut h);
+        if cancel {
+            assert_eq!(yaml(&mut h), original);
+            assert!(h.state().editor.history().entries.is_empty());
+        } else {
+            assert_ne!(yaml(&mut h), original);
+            assert_eq!(h.state().editor.history().entries.len(), 1);
+        }
+        assert!(!h.state().editor.in_gesture());
+    }
+}
+
+#[test]
+fn focus_loss_without_pointer_release_cancels_and_rearms_the_next_drag() {
+    let mut h = harness();
+    h.run_steps(3);
+    h.get_by_label("body_05").click();
+    settle(&mut h);
+    let original = yaml(&mut h);
+    let handle = h.get_all_by_label("\u{2194}").next().unwrap().rect().center();
+    h.event(Event::PointerMoved(handle));
+    h.step();
+    h.event(Event::PointerButton { pos: handle, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::PointerMoved(handle + egui::vec2(18.0, 0.0)));
+    h.step();
+    h.input_mut().focused = false;
+    h.event(Event::WindowFocused(false));
+    h.step();
+    // The release happened outside the app; deliberately never send it.
+    h.input_mut().focused = true;
+    h.event(Event::WindowFocused(true));
+    h.event(Event::PointerMoved(handle + egui::vec2(24.0, 0.0)));
+    h.step();
+    settle(&mut h);
+    assert_eq!(yaml(&mut h), original);
+    assert!(!h.state().editor.in_gesture());
+    assert!(h.state().editor.history().entries.is_empty());
+
+    let handle = h.get_all_by_label("\u{2194}").next().unwrap().rect().center();
+    h.event(Event::PointerMoved(handle));
+    h.event(Event::PointerButton { pos: handle, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::PointerMoved(handle + egui::vec2(18.0, 0.0)));
+    h.step();
+    h.event(Event::PointerButton { pos: handle + egui::vec2(18.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    settle(&mut h);
+    assert_ne!(yaml(&mut h), original);
+    assert_eq!(h.state().editor.history().entries.len(), 1);
+    assert!(!h.state().editor.in_gesture());
+}
+
+// Real egui frames populate telemetry without contacting the host when queried.
+// Each test owns its editor and egui context; there are no machine-dependent time limits.
+#[test]
+fn ui_frames_record_bounded_wall_time_samples() {
+    let mut h = Harness::builder().with_size([1500.0, 900.0]).build_eframe(|_| EditorApp::new(common::demo_editor(), None));
+    let before_frames = h.state().frame_count();
+    let before = h.state().editor.diagnostics();
+    h.run_steps(LATENCY_WINDOW + 2);
+    let app = h.state();
+    let stats = app.editor.diagnostics();
+    assert_eq!(stats.ui_frame.total_samples - before.ui_frame.total_samples, app.frame_count() - before_frames);
+    assert_eq!(stats.ui_frame.samples, LATENCY_WINDOW);
+    assert!(stats.ui_frame.max >= stats.ui_frame.last);
+    assert!(stats.ui_frame.max >= stats.ui_frame.p95);
+    assert_eq!(app.editor.diagnostics(), stats);
+    assert!(app.editor.down().is_none());
+}
+
+#[test]
+fn arena_viewport_drag_undo_cancel_and_preview_inspector_gate() {
+    let host = arena::ArenaHost::start(false);
+    let mut agent = host.client();
+    let editor = orr_editor::Editor::attach(&host.url, None).unwrap();
+    let mut h = Harness::builder().with_size([1500.0,900.0]).build_eframe(move |_| EditorApp::new(editor, None));
+    settle(&mut h);
+    assert!(h.query_by_label("+ Body").is_none());
+    let before = yaml(&mut h);
+    let rect = h.state().ui.viewport_rect.unwrap();
+    let at = h.state().editor.camera.world_to_screen([-300.0,0.0], h.state().ui.viewport_px);
+    let at = Pos2::new(rect.min.x+at[0],rect.min.y+at[1]);
+    h.event(Event::PointerMoved(at)); h.step();
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }); h.step();
+    for i in 1..=6 { h.event(Event::PointerMoved(at+egui::vec2(i as f32*10.0, i as f32*3.0))); h.step(); }
+    h.event(Event::PointerButton { pos: at+egui::vec2(60.0,18.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    settle(&mut h);
+    assert_eq!(h.state().editor.history().entries.len(), 1);
+    let p = arena::position(&mut agent);
+    assert!(p[0].as_f64().unwrap() > -300.0 && p[1].as_f64().unwrap() < 0.0);
+    press(&h, Modifiers::COMMAND, Key::Z); settle(&mut h);
+    assert_eq!(yaml(&mut h), before);
+    h.event(Event::PointerMoved(at)); h.step();
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }); h.step();
+    h.event(Event::PointerMoved(at+egui::vec2(40.0,0.0))); h.step();
+    press(&h, Modifiers::NONE, Key::Escape); h.step();
+    h.event(Event::PointerButton { pos: at+egui::vec2(40.0,0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    settle(&mut h); assert_eq!(yaml(&mut h), before);
+    let id = arena::proposal(&mut agent,-100,100);
+    h.state_mut().editor.sync(); h.state_mut().editor.set_preview(Some(id)); settle(&mut h);
+    assert!(h.query_by_label_contains("Live document inspector").is_some());
+    h.get_by_label("Delete").click(); settle(&mut h);
+    assert_eq!(yaml(&mut h), before, "preview disables live-document mutation widgets");
+}
+
+#[test]
+fn arena_viewer_widgets_disable_mutation_but_keep_inspection_and_seek() {
+    let host = arena::ArenaHost::start(true);
+    let mut agent = host.client();
+    let editor = orr_editor::Editor::attach(&host.url,None).unwrap();
+    let mut h = Harness::builder().with_size([1500.0,900.0]).build_eframe(move |_| EditorApp::new(editor,None));
+    settle(&mut h); h.get_by_label("hero").click(); settle(&mut h);
+    assert!(h.state().editor.inspect().is_some());
+    assert!(h.query_by_label_contains("Replay Viewer").is_some());
+    h.get_by_label("Delete").click(); h.get_by_label("Branch").click();
+    press(&h,Modifiers::COMMAND,Key::S); settle(&mut h);
+    assert!(h.state().ui.dialog.is_none());
+    assert_eq!(h.state().editor.rows().len(),2);
+    let state=agent.call("sim.state",serde_json::Value::Null).unwrap();
+    assert_eq!(state["session_mode"],"viewer"); assert_eq!(state["branches"],0);
+    h.state_mut().editor.seek(10); settle(&mut h);
+    assert_eq!(h.state().editor.sim().head_tick,10);
 }

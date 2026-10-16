@@ -73,6 +73,9 @@ fn wait_frame(src: &mut dyn Source, state: &mut ViewState, tick: u64) -> Result<
 /// records, and appends the rendered grid to the dump.
 pub fn run(src: &mut dyn Source, opts: &HeadlessOpts) -> Result<Summary, String> {
     let schema = ViewSchema::parse(src.schema_text())?;
+    if schema.dimensions == 3 {
+        return Err("headless scripted game input is unsupported for 3D; use the interactive XZ observer".into());
+    }
     let mut state = ViewState::new(schema.clone(), Instant::now());
     let first = wait_frame(src, &mut state, 0)?;
     let base = ViewFrame::decode(&first).map_err(|e| e.to_string())?.tick;
@@ -168,6 +171,9 @@ impl ClientSummary {
 /// known (waits for progress, not for a fixed time: it fails when no frame arrives for 30 s).
 pub fn run_client(src: &mut dyn Source, opts: &ClientOpts) -> Result<ClientSummary, String> {
     let schema = ViewSchema::parse(src.schema_text())?;
+    if schema.dimensions == 3 {
+        return Err("headless scripted game input is unsupported for 3D; use the interactive XZ observer".into());
+    }
     let mut state = ViewState::new(schema.clone(), Instant::now());
     let mut status = src.net_status().ok_or("this source is not a network client")?;
     let mut last_input_tick = None;

@@ -3,10 +3,11 @@
 use orr_ecs::{ComponentId, Entity, SingletonId};
 use orr_fp::FP;
 use orr_session::{
-    replay_verify, ControlOp, DebugCommand, DebugError, PlayConfig, PlayMode, PlayNote, PlaySession, PlayerSlot, Speed,
+    replay_verify, ControlOp, DebugCommand, DebugError, PlayConfig, PlayError, PlayMode, PlayNote, PlaySession, PlayerSlot,
+    Speed,
 };
 use orr_sim::{Simulation, TickInputs};
-use orr_testgame::{Arena, ArenaConfig, ArenaInput, Bullet, PlayerTag, Position};
+use orr_testgame::{Arena, ArenaConfig, ArenaInput, Bullet, PlayerTag, Position, SpawnBulletCmd};
 
 const POSITION: ComponentId = ComponentId(0);
 const PLAYER_TAG: ComponentId = ComponentId(1);
@@ -380,6 +381,10 @@ fn viewer_is_read_only_and_branch_makes_a_new_recording() {
     let mut v = PlaySession::<Arena>::open_replay(&bytes, ArenaConfig { player_count: 2 }, 0).unwrap();
     assert_eq!(v.head_tick(), 0);
     assert!(!v.is_playing());
+    v.set_input(PlayerSlot(0), ArenaInput::new(FP::ONE, FP::ZERO, true));
+    assert_eq!(v.push_command(PlayerSlot(0), SpawnBulletCmd { owner: 0 }), Err(PlayError::ReadOnly));
+    assert_eq!(v.pending_command_count(), 0);
+    assert_eq!(v.save_replay(), bytes);
     let e = first_entity(&v);
     assert_eq!(
         v.debug(DebugCommand::Despawn { entity: e }),
@@ -405,7 +410,10 @@ fn viewer_is_read_only_and_branch_makes_a_new_recording() {
     assert_eq!(v.mode(), PlayMode::Record);
     assert_eq!(v.last_tick(), 25);
     v.set_input(PlayerSlot(0), input_for(0, 26, 9));
+    assert_eq!(v.push_command(PlayerSlot(0), SpawnBulletCmd { owner: 0 }), Ok(()));
+    assert_eq!(v.pending_command_count(), 1);
     v.control(ControlOp::Step(15));
+    assert_eq!(v.pending_command_count(), 0);
     let branched = v.save_replay();
     assert_ne!(branched, bytes);
     assert!(replay_verify::<Arena>(&branched, ArenaConfig { player_count: 2 }).unwrap().ok());
@@ -417,6 +425,34 @@ fn viewer_is_read_only_and_branch_makes_a_new_recording() {
     v.debug(DebugCommand::Despawn { entity: e }).unwrap();
     v.control(ControlOp::Step(5));
     assert!(replay_verify::<Arena>(&v.save_replay(), ArenaConfig { player_count: 2 }).unwrap().ok());
+}
+
+#[test]
+fn viewer_input_does_not_leak_into_branch() {
+    let mut recorded = new_session();
+    play(&mut recorded, 12, 1);
+    let bytes = recorded.save_replay();
+    let input = ArenaInput::new(FP::ONE, FP::ZERO, false);
+
+    let mut viewer = PlaySession::<Arena>::open_replay(&bytes, ArenaConfig { player_count: 2 }, 0).unwrap();
+    viewer.set_input(PlayerSlot(0), input);
+    viewer.control(ControlOp::Seek(6));
+    viewer.control(ControlOp::Branch);
+    viewer.control(ControlOp::Step(1));
+    let actual = viewer.frame().checksum();
+
+    let mut clean = PlaySession::<Arena>::open_replay(&bytes, ArenaConfig { player_count: 2 }, 0).unwrap();
+    clean.control(ControlOp::Seek(6));
+    clean.control(ControlOp::Branch);
+    clean.control(ControlOp::Step(1));
+    assert_eq!(actual, clean.frame().checksum(), "viewer input must not be retained by Branch");
+
+    let mut writable_input = PlaySession::<Arena>::open_replay(&bytes, ArenaConfig { player_count: 2 }, 0).unwrap();
+    writable_input.control(ControlOp::Seek(6));
+    writable_input.control(ControlOp::Branch);
+    writable_input.set_input(PlayerSlot(0), input);
+    writable_input.control(ControlOp::Step(1));
+    assert_ne!(actual, writable_input.frame().checksum(), "the chosen input must affect a writable branch");
 }
 
 #[test]

@@ -134,3 +134,73 @@ fn the_app_shows_the_offscreen_viewport_as_an_egui_texture() {
     let after = h.render().expect("render");
     assert_ne!(before.as_raw(), after.as_raw(), "the picture changed after 60 ticks");
 }
+
+#[test]
+fn arena_pixels_keep_player_colors_selection_and_proposal_ghosts() {
+    let Some((_guard, rhi)) = gpu() else { return };
+    let host = arena::ArenaHost::start(false);
+    let mut agent = host.client();
+    let mut ed = orr_editor::Editor::attach(&host.url, None).unwrap(); ed.sync();
+    let size = (800, 600);
+    let camera = ed.camera;
+    let mut vp = ViewportGpu::new(&rhi, size);
+    vp.render(size, &ed.viewport_list(size, &[]), &camera);
+    let img = vp.read_rgba8();
+    for (world, color) in [([-305.0,8.0], PADDLE_0_COLOR), ([295.0,8.0], [1.0,0.55,0.2])] {
+        let at = camera.world_to_screen(world, size);
+        assert!(near(px(&img,size.0,at[0] as u32,at[1] as u32), enc3(color), 5), "Arena player center color");
+    }
+    ed.select_named("hero"); ed.sync();
+    vp.render(size, &ed.viewport_list(size, &[]), &camera);
+    let highlighted = vp.read_rgba8();
+    let highlight = enc3([HIGHLIGHT[0],HIGHLIGHT[1],HIGHLIGHT[2]]);
+    assert!(highlighted.as_chunks::<4>().0.iter().filter(|p| near([p[0],p[1],p[2]],highlight,6)).count() > 30);
+    let id = arena::proposal(&mut agent, -100, 100); ed.sync();
+    assert!(ed.set_preview(Some(id))); ed.sync();
+    vp.render(size, &ed.viewport_list(size, &[]), &camera);
+    let preview = vp.read_rgba8();
+    let cyan = orr_editor::viewport::PREVIEW_CHANGED;
+    let cyan = enc3([cyan[0],cyan[1],cyan[2]]);
+    assert!(preview.as_chunks::<4>().0.iter().any(|p| near([p[0],p[1],p[2]],cyan,6)), "proposal cyan outline");
+    // Compare against exactly the same staged render with ghost lines removed;
+    // grid/axis pixels cannot make this assertion pass.
+    let mut no_ghost = ed.viewport_list(size, &[]);
+    no_ghost.lines.retain(|line| line.color != orr_editor::viewport::PREVIEW_GHOST);
+    vp.render(size, &no_ghost, &camera);
+    let without_ghost = vp.read_rgba8();
+    let old = camera.world_to_screen([-300.0,0.0], size);
+    let mut changed = 0;
+    for y in (old[1] as u32-20)..(old[1] as u32+20) {
+        for x in (old[0] as u32-20)..(old[0] as u32+20) {
+            if px(&preview,size.0,x,y) != px(&without_ghost,size.0,x,y) { changed += 1; }
+        }
+    }
+    assert!(changed > 25, "ghost visibly occupies the previous player position");
+}
+
+#[test]
+fn arena_app_composes_players_and_reflected_inspector() {
+    use egui_kittest::kittest::Queryable;
+    let Some((_guard, _probe)) = gpu() else { return };
+    let host = arena::ArenaHost::start(false);
+    let mut editor = orr_editor::Editor::attach(&host.url,None).unwrap();
+    editor.sync(); editor.select_named("hero"); editor.sync();
+    let mut h = Harness::builder().with_size([1400.0,850.0]).wgpu()
+        .build_eframe(move |cc| EditorApp::new(editor, cc.wgpu_render_state.clone()));
+    settle(&mut h);
+    assert!(h.query_by_label("Arena").is_some());
+    assert!(h.query_by_label_contains("Position").is_some());
+    assert!(h.query_by_label_contains("PlayerTag").is_some());
+    assert!(h.query_by_label_contains("Score").is_some());
+    assert!(h.query_by_label("+ Body").is_none());
+    let image = h.render().expect("Arena app framebuffer");
+    let rect = h.state().ui.viewport_rect.unwrap();
+    let at = h.state().editor.camera.world_to_screen([295.0,8.0],h.state().ui.viewport_px);
+    let p = image.get_pixel((rect.min.x+at[0]).round() as u32,(rect.min.y+at[1]).round() as u32).0;
+    assert!(near([p[0],p[1],p[2]],enc3([1.0,0.55,0.2]),6), "Arena player in composed UI: {p:?}");
+    if let Some(dir) = std::env::var_os("ORR_EDITOR_SCREENSHOT_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        image.save(dir.join("arena-egui-headless.png")).unwrap();
+    }
+}

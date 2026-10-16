@@ -1,0 +1,40 @@
+{
+  "utc": "2026-10-06T00:31:02.401103+00:00",
+  "free_bytes": 1327509504,
+  "loadavg": "0.24 0.09 0.10 1/664 193",
+  "allowed_cpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "source": {
+    "command": [
+      "git",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit_code": 0,
+    "output": "7282ca7c09e7c6895fb5a49a4ceafb0e81f056c1\n"
+  },
+  "source_status": {
+    "command": [
+      "git",
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all"
+    ],
+    "exit_code": 0,
+    "output": ""
+  },
+  "workload_process_counts": {
+    "counts": {},
+    "selection": "Only listed build/diagnostic process names; all process arguments, identities and unrelated processes omitted",
+    "read_exit_code": 0
+  }
+}

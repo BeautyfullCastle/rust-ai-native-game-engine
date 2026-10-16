@@ -1,0 +1,19 @@
+[package]
+name = "orr_audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Kira's triple_buffer 9 dependency requires Rust 1.86.
+rust-version = "1.86"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Device output is explicit. No codecs, realtime scheduling or D-Bus extras.
+native = ["kira/cpal"]
+
+[dependencies]
+orr_bridge = { path = "../orr_bridge" }
+kira = { version = "=0.12.5", default-features = false }

@@ -40,6 +40,10 @@ pub const FLAG_ROLLED_BACK: u8 = 1;
 pub const FLAG_DISCONTINUITY: u8 = 2;
 /// Frame flag: the simulation is paused (the tick does not advance by itself).
 pub const FLAG_PAUSED: u8 = 4;
+/// Frame flag: the bounded event stream lost notifications; clear speculative
+/// effects and history before processing later event batches. The frame is a
+/// self-contained discontinuity baseline; the lost count is not on the wire.
+pub const FLAG_EVENTS_RESET: u8 = 8;
 
 /// Entity shape code: a circle, `size` is the radius.
 pub const SHAPE_CIRCLE: u8 = 0;
@@ -99,6 +103,68 @@ impl core::fmt::Display for DecodeError {
     }
 }
 impl std::error::Error for DecodeError {}
+
+#[cfg(test)]
+mod reset_frame_tests {
+    use super::*;
+
+    #[test]
+    fn reset_frame_events_marks_2d_baseline_and_collapses_interpolation() {
+        let input = ViewFrame {
+            flags: FLAG_PAUSED,
+            tick: 10,
+            verified_tick: 9,
+            seq: 42,
+            rollback: None,
+            entities: vec![EntityRecord {
+                id: 3,
+                kind: 0,
+                shape: SHAPE_CIRCLE,
+                mode: MODE_PREDICTION,
+                size: 1.0,
+                half_y: 0.0,
+                rgba: [255; 4],
+                prev: [1.0, 2.0, 0.0],
+                cur: [4.0, 5.0, 0.5],
+            }],
+            props: vec![1, 2, 3, 4],
+        };
+        let reset = ViewFrame::decode(&reset_frame_events(&input.encode()).unwrap()).unwrap();
+        assert!(reset.has(FLAG_DISCONTINUITY | FLAG_EVENTS_RESET | FLAG_PAUSED));
+        assert_eq!(reset.entities[0].prev, reset.entities[0].cur);
+        assert_eq!(reset.props, input.props);
+    }
+
+    #[test]
+    fn reset_frame_events_handles_3d_and_rejects_nonframes() {
+        let input = ViewFrame3 {
+            flags: 0,
+            tick: 10,
+            verified_tick: 9,
+            seq: 42,
+            rollback: None,
+            entities: vec![EntityRecord3 {
+                id: 3,
+                kind: 0,
+                shape: SHAPE3_SPHERE,
+                mode: MODE_PREDICTION,
+                size: [1.0, 0.0, 0.0],
+                rgba: [255; 4],
+                roughness: 160,
+                metallic: 0,
+                style_flags: 0,
+                prev: Pose3 { pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 0.0, 1.0] },
+                cur: Pose3 { pos: [4.0, 5.0, 6.0], rot: [0.0, 0.0, 1.0, 0.0] },
+            }],
+            props: Vec::new(),
+        };
+        let reset = ViewFrame3::decode(&reset_frame_events(&input.encode()).unwrap()).unwrap();
+        assert!(reset.has(FLAG_DISCONTINUITY | FLAG_EVENTS_RESET));
+        assert_eq!(reset.entities[0].prev, reset.entities[0].cur);
+        assert_eq!(reset.seq, input.seq);
+        assert_eq!(reset_frame_events(&EventBatch::default().encode()), Err(DecodeError::WrongType(MSG_EVENTS)));
+    }
+}
 
 /// One entity as a view draws it: identity, look, and its transform at the
 /// previous and the current tick. The consumer interpolates
@@ -234,6 +300,31 @@ impl ViewFrame {
         let props = r.take(props_len)?.to_vec();
         let rollback = (flags & FLAG_ROLLED_BACK != 0).then_some((from, to));
         Ok(ViewFrame { flags, tick, verified_tick, seq, rollback, entities, props })
+    }
+}
+
+/// Makes an already-encoded frame a sticky event-reset baseline for transports
+/// that retain or overwrite only the latest frame. Sets both recovery flags
+/// and collapses interpolation endpoints. The discarded count is not on wire.
+pub fn reset_frame_events(bytes: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    match message_type(bytes)? {
+        MSG_FRAME => {
+            let mut frame = ViewFrame::decode(bytes)?;
+            frame.flags |= FLAG_DISCONTINUITY | FLAG_EVENTS_RESET;
+            for entity in &mut frame.entities {
+                entity.prev = entity.cur;
+            }
+            Ok(frame.encode())
+        }
+        MSG_FRAME3D => {
+            let mut frame = ViewFrame3::decode(bytes)?;
+            frame.flags |= FLAG_DISCONTINUITY | FLAG_EVENTS_RESET;
+            for entity in &mut frame.entities {
+                entity.prev = entity.cur;
+            }
+            Ok(frame.encode())
+        }
+        t => Err(DecodeError::WrongType(t)),
     }
 }
 

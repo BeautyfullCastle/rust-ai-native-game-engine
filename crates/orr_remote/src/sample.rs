@@ -23,10 +23,18 @@ use crate::viewstream::ViewStreamHook;
 use crate::server::ServerConfig;
 use crate::wire::checksum_text;
 
+use orr_testgame::{Arena, ArenaMetrics};
+
 /// Seed of the preview frame and of the play sessions.
 pub const SEED: u64 = 7;
 /// Players of a play session (`PhysGame` has one paddle per player).
 pub const PLAYERS: u8 = 2;
+/// Stable seed used by the editor's local Arena authoring host.
+pub const ARENA_SEED: u64 = 42;
+/// Default number of Arena player slots exposed by the local authoring host.
+pub const ARENA_PLAYERS: u8 = 2;
+/// Fixed update rate for the local Arena authoring host.
+pub const ARENA_TICK_RATE: u32 = 60;
 
 /// The type registry of `PhysGame` (physics types, `PaddleTag`, `Scene`).
 pub fn phys_types() -> TypeRegistry {
@@ -65,6 +73,46 @@ pub fn spawn_phys_host(text: String, scene_path: Option<PathBuf>, mut cfg: Serve
         configure_phys(&mut cfg.limits, scene_path);
         Ok((doc, cfg))
     })
+}
+
+/// A document of the deterministic Arena sample game from scene text.
+pub fn arena_doc(text: &str) -> Result<EditorDoc, EditError> {
+    let mut types = TypeRegistry::new();
+    orr_testgame::register_reflect(&mut types);
+    EditorDoc::from_yaml(text, types, Simulation::<Arena>::build_registry(), ARENA_SEED)
+}
+
+/// The game-specific host configuration for the editor's local Arena.
+pub fn configure_arena(limits: &mut HostLimits, scene_path: Option<PathBuf>) {
+    limits.player_count = ARENA_PLAYERS;
+    limits.tick_rate = ARENA_TICK_RATE;
+    limits.scene_path = scene_path;
+    limits.build_id = default_build_id("Arena");
+    // Live input is installed on the ERP server after it starts below.
+    limits.game = GameHooks::new("Arena").with_metrics(ArenaMetrics);
+    limits.view_stream = None;
+}
+
+/// Starts a local Arena host with the same structured held-input contract as
+/// the headless Arena host. Input derivation is installed after ERP startup
+/// and before the host is made ready to clients.
+pub fn spawn_arena_host(text: String, scene_path: Option<PathBuf>, mut cfg: ServerConfig) -> Result<LocalHost, String> {
+    LocalHost::spawn_configured::<Arena>(
+        move || {
+            let doc = arena_doc(&text).map_err(|e| match &scene_path {
+                Some(p) => format!("{}: {e}", p.display()),
+                None => e.to_string(),
+            })?;
+            configure_arena(&mut cfg.limits, scene_path);
+            Ok((doc, cfg))
+        },
+        |server| {
+            server.set_structured_input::<Arena>("ArenaInput", 8, |slot, input| {
+                orr_sample::arena_view::arena_fire_commands(u32::from(slot.0), input)
+            });
+            server.enable_managed_input();
+        },
+    )
 }
 
 /// The relay client session of `orr_sample` as an ERP client-mode session (`orr_remote_host --join`):

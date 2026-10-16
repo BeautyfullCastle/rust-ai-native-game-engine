@@ -1,0 +1,37 @@
+[
+  {
+    "case": "idle_tick_only",
+    "legacy_encode_ns": 347020,
+    "legacy_decode_ns": 301023,
+    "negotiated_encode_ns": 558246,
+    "negotiated_decode_ns": 114481
+  },
+  {
+    "case": "changing_physics",
+    "legacy_encode_ns": 374453,
+    "legacy_decode_ns": 297373,
+    "negotiated_encode_ns": 748905,
+    "negotiated_decode_ns": 312753
+  },
+  {
+    "case": "rollback_resimulation",
+    "legacy_encode_ns": 370202,
+    "legacy_decode_ns": 299790,
+    "negotiated_encode_ns": 698568,
+    "negotiated_decode_ns": 293611
+  },
+  {
+    "case": "backward_seek",
+    "legacy_encode_ns": 358711,
+    "legacy_decode_ns": 322303,
+    "negotiated_encode_ns": 517236,
+    "negotiated_decode_ns": 264955
+  },
+  {
+    "case": "reconnect",
+    "legacy_encode_ns": 356297,
+    "legacy_decode_ns": 295017,
+    "negotiated_encode_ns": 512686,
+    "negotiated_decode_ns": 326230
+  }
+]

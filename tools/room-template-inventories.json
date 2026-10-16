@@ -1,0 +1,213 @@
+{
+  "creator-default": {
+    "names": [
+      "project_create::tests::concurrent_destination_wins_atomic_publication_without_overwrite",
+      "project_create::tests::different_seed_changes_only_authored_namespace_and_provenance",
+      "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
+      "project_create::tests::existing_destinations_are_preserved_including_empty_and_special",
+      "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+      "project_create::tests::invalid_template_seed_and_paths_do_not_create_anything",
+      "project_create::tests::package_install_failure_is_not_published_or_replaced_with_fixture_lock",
+      "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
+      "project_create::tests::reproducible_creation_uses_real_install_and_admission",
+      "project_create::tests::room_template_requires_feature_before_staging",
+      "project_create::tests::stage_file_closure_and_bytes_are_rechecked_before_publish",
+      "project_create::tests::typed_remap_covers_nested_references_comments_bindings_and_follow",
+      "project_create::tests::unsupported_publication_fails_closed_and_cleans_owned_stage",
+      "project_create::tests::whole_lock_verification_precedes_runtime_validation"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        14,
+        0,
+        0
+      ]
+    ]
+  },
+  "creator-room": {
+    "names": [
+      "project_create::tests::concurrent_destination_wins_atomic_publication_without_overwrite",
+      "project_create::tests::different_seed_changes_only_authored_namespace_and_provenance",
+      "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
+      "project_create::tests::existing_destinations_are_preserved_including_empty_and_special",
+      "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+      "project_create::tests::invalid_template_seed_and_paths_do_not_create_anything",
+      "project_create::tests::package_install_failure_is_not_published_or_replaced_with_fixture_lock",
+      "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
+      "project_create::tests::reproducible_creation_uses_real_install_and_admission",
+      "project_create::tests::room_template_tests::closed_room_installs_exact_allowlist_and_namespaces_only_guids",
+      "project_create::tests::room_template_tests::room_errors_clean_only_owned_stage_and_never_replace_destination",
+      "project_create::tests::room_template_tests::room_extra_or_changed_bytes_fail_before_publication",
+      "project_create::tests::stage_file_closure_and_bytes_are_rechecked_before_publish",
+      "project_create::tests::typed_remap_covers_nested_references_comments_bindings_and_follow",
+      "project_create::tests::unsupported_publication_fails_closed_and_cleans_owned_stage",
+      "project_create::tests::whole_lock_verification_precedes_runtime_validation"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        16,
+        0,
+        0
+      ]
+    ]
+  },
+  "creator-joint": {
+    "names": [
+      "project_create::tests::collect::collect_corrupted_package_aborts_owned_transaction",
+      "project_create::tests::collect::collect_creation_identity_is_explicit_reproducible_and_copy_stable",
+      "project_create::tests::collect::collect_existing_output_and_special_parents_are_preserved",
+      "project_create::tests::collect::collect_invalid_uuid_or_template_never_creates_output",
+      "project_create::tests::collect_ui_template_tests::only_exact_bundled_font_gets_profile_size_exception",
+      "project_create::tests::collect_ui_template_tests::ui_profile_installs_exact_font_license_and_document_closure",
+      "project_create::tests::collect_ui_template_tests::ui_stage_corruption_and_invalid_identity_leave_no_output",
+      "project_create::tests::concurrent_destination_wins_atomic_publication_without_overwrite",
+      "project_create::tests::different_seed_changes_only_authored_namespace_and_provenance",
+      "project_create::tests::every_transaction_checkpoint_cleans_only_its_owned_stage",
+      "project_create::tests::existing_destinations_are_preserved_including_empty_and_special",
+      "project_create::tests::generated_closure_preserves_licenses_and_excludes_user_data",
+      "project_create::tests::invalid_template_seed_and_paths_do_not_create_anything",
+      "project_create::tests::package_install_failure_is_not_published_or_replaced_with_fixture_lock",
+      "project_create::tests::parent_permission_failure_preserves_parent_and_prior_content",
+      "project_create::tests::reproducible_creation_uses_real_install_and_admission",
+      "project_create::tests::room_template_tests::closed_room_installs_exact_allowlist_and_namespaces_only_guids",
+      "project_create::tests::room_template_tests::room_errors_clean_only_owned_stage_and_never_replace_destination",
+      "project_create::tests::room_template_tests::room_extra_or_changed_bytes_fail_before_publication",
+      "project_create::tests::stage_file_closure_and_bytes_are_rechecked_before_publish",
+      "project_create::tests::typed_remap_covers_nested_references_comments_bindings_and_follow",
+      "project_create::tests::unsupported_publication_fails_closed_and_cleans_owned_stage",
+      "project_create::tests::whole_lock_verification_precedes_runtime_validation"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        23,
+        0,
+        0
+      ]
+    ]
+  },
+  "sample-disabled": {
+    "names": [
+      "room_template_requires_explicit_feature"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ]
+  },
+  "sample-room": {
+    "names": [
+      "room::generated_room_cli_api_determinism_complete_package_and_no_overwrite",
+      "room::generated_room_real_export_source_hidden_gpu_workflow",
+      "room::room_cli_rejects_progress_game_identity_without_publishing"
+    ],
+    "ignored_names": [
+      "room::generated_room_real_export_source_hidden_gpu_workflow"
+    ],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        2,
+        0,
+        1
+      ]
+    ]
+  },
+  "arena-room": {
+    "names": [
+      "actual_cli_and_public_api_generate_identical_loadable_projects",
+      "arena_rejects_collect_identity_option",
+      "collect_ui_profile_has_explicit_capability_and_identity_boundary",
+      "generator_without_collect_feature_rejects_collect_template",
+      "invalid_seed_template_and_relative_destination_are_rejected_without_files",
+      "missing_duplicate_unknown_and_malformed_cli_arguments_do_not_publish"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        6,
+        0,
+        0
+      ]
+    ]
+  },
+  "arena-joint": {
+    "names": [
+      "actual_cli_and_public_api_generate_identical_loadable_projects",
+      "arena_rejects_collect_identity_option",
+      "collect_cli_requires_identity_and_matches_library",
+      "collect_ui_profile_has_explicit_capability_and_identity_boundary",
+      "invalid_seed_template_and_relative_destination_are_rejected_without_files",
+      "missing_duplicate_unknown_and_malformed_cli_arguments_do_not_publish"
+    ],
+    "ignored_names": [],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        6,
+        0,
+        0
+      ]
+    ]
+  },
+  "editor-room": {
+    "names": [
+      "generated_room_editor_save_reopen_keyboard_win_restart",
+      "generated_room_gpu_uv_models"
+    ],
+    "ignored_names": [
+      "generated_room_gpu_uv_models"
+    ],
+    "run_ignored": false,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        1
+      ]
+    ]
+  },
+  "source-hidden-gpu": {
+    "names": [
+      "room::generated_room_real_export_source_hidden_gpu_workflow"
+    ],
+    "ignored_names": [
+      "room::generated_room_real_export_source_hidden_gpu_workflow"
+    ],
+    "run_ignored": true,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ]
+  },
+  "editor-gpu": {
+    "names": [
+      "generated_room_gpu_uv_models"
+    ],
+    "ignored_names": [
+      "generated_room_gpu_uv_models"
+    ],
+    "run_ignored": true,
+    "expected_summary_rows": [
+      [
+        1,
+        0,
+        0
+      ]
+    ]
+  }
+}

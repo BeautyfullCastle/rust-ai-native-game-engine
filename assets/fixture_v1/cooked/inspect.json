@@ -1,0 +1,21 @@
+{
+  "format": "orr.asset-inspect/1",
+  "sim_manifest_sha256": "1679621b8296cea373c127f397f519dcbfae2d3e7602550f064909b614a31a3a",
+  "view_manifest_sha256": "5a49a3ca4283543fa090a44c7c817c8910d1a6ea0ab3128697f674e2894cafe0",
+  "assets": [
+    {
+      "id": "a_0000000000001001",
+      "type": "sim.motion_profile",
+      "schema_version": 1,
+      "payload_len": 8,
+      "payload_sha256": "a02ae51509464de11084e34346a86574191b861de2cb5cf064661b459c9bc9e4"
+    },
+    {
+      "id": "a_0000000000002001",
+      "type": "view.impact_pcm16",
+      "schema_version": 1,
+      "payload_len": 14408,
+      "payload_sha256": "c26b398cc6814862c7c402b314608699121814f35ead849f8a7ac8fc6bc61c2f"
+    }
+  ]
+}

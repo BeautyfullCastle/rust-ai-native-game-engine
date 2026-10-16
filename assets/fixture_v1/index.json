@@ -1,0 +1,7 @@
+{
+  "format": "orr.asset-index/1",
+  "entries": [
+    {"id":"a_0000000000001001","type":"sim.motion_profile","schema_version":1,"source":"source/motion.json"},
+    {"id":"a_0000000000002001","type":"view.impact_pcm16","schema_version":1,"source":"source/impact.json"}
+  ]
+}

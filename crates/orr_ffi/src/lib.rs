@@ -6,10 +6,12 @@
 //! The header is `include/orrery.h` (hand-written; keep it in step with this
 //! file). The byte formats are in `docs/view-stream.md`.
 //!
-//! # The game is chosen at compile time
+//! # Explicit built-in games
 //!
-//! A Rust game is generic code, so one build of this library hosts one game.
-//! This crate ships the physics demo (`PhysGame` of `orr_sample`). To host
+//! A Rust game is generic code. This build provides the physics demo through
+//! [`orr_host_open`] and a built-in Yard3D scene through
+//! [`orr_yard3d_host_open_v1`]. Existing PhysGame and relay-client calls keep
+//! their meaning. To host
 //! another game, copy this crate, and in [`open_host`] replace
 //! `orr_remote::sample::spawn_phys_host` by a `LocalHost::spawn::<YourGame>`
 //! with your scene loader, `HostLimits` (including `view_stream`) and
@@ -71,7 +73,10 @@ use std::time::Duration;
 mod client;
 
 use orr_remote::{Auth, Caps, ClientError, ErpClient, LocalHost, ServerConfig};
-use orr_viewstream::{message_type, MSG_EVENTS, MSG_FRAME};
+use orr_viewstream::{
+    message_type, reset_frame_events, EventBatch, FLAG_DISCONTINUITY, FLAG_EVENTS_RESET,
+    MSG_EVENTS, MSG_FRAME, MSG_FRAME3D, VERSION_3D,
+};
 use serde_json::{json, Value as J};
 
 /// Success.
@@ -123,7 +128,7 @@ pub const ORR_TRANSPORT_QUIC: u32 = 0;
 /// `OrrClientConfig::transport`: WebSocket (plain; `fingerprint` is unused).
 pub const ORR_TRANSPORT_WS: u32 = 1;
 
-/// `OrrSessionStatus::mode`: a local host (`orr_host_open`).
+/// `OrrSessionStatus::mode`: a local host (`orr_host_open` or `orr_yard3d_host_open_v1`).
 pub const ORR_MODE_LOCAL: u32 = 0;
 /// `OrrSessionStatus::mode`: a client of a relay server (`orr_client_open`).
 pub const ORR_MODE_CLIENT: u32 = 1;
@@ -144,7 +149,7 @@ pub const ORR_STATUS_DESYNC: u32 = 1;
 /// 2: client sessions (`orr_client_open`, `orr_session_status`, `ORR_ERR_NOT_READY`).
 pub const ORR_ABI_VERSION: u32 = 2;
 
-/// Settings of [`orr_host_open`]. Zero the struct, then set `struct_size`.
+/// Settings of [`orr_host_open`] and [`orr_yard3d_host_open_v1`]. Zero the struct, then set `struct_size`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct OrrHostConfig {
@@ -233,8 +238,12 @@ const DEMO_SCENE: &str = include_str!("../../../scenes/physics_demo.scene.yaml")
 const CLIENT_NAME: &str = "ffi";
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// Event batches kept for a caller that does not poll; the oldest are dropped above this.
+/// This FFI-side cap does not synthesize `FLAG_EVENTS_RESET`; only a reset delivered by the
+/// upstream view producer can establish a fresh baseline. In particular, the local-host ERP path
+/// does not gain a new bounded-queue recovery guarantee from this FFI mailbox change.
 const MAX_QUEUED_EVENT_BATCHES: usize = 4096;
 
+#[derive(Debug)]
 struct Fail {
     code: c_int,
     msg: String,
@@ -297,11 +306,98 @@ struct Inner {
     schema_json: String,
     input_size: usize,
     player_count: u8,
-    /// The newest frame not read yet (a newer one replaces it).
-    latest: Option<Vec<u8>>,
+    /// The newest frame not read yet, with event-reset baselines latched until acknowledged.
+    view: FrameMailbox,
     /// The frame handed out by `orr_view_poll_ptr`.
     held: Vec<u8>,
     events: VecDeque<Vec<u8>>,
+}
+
+/// The newest unread view frame. An event reset remains sticky until the caller
+/// successfully takes this baseline; a too-small copy buffer does not acknowledge it.
+#[derive(Default)]
+struct FrameMailbox {
+    latest: Option<Vec<u8>>,
+    reset_pending: bool,
+    /// After a reset baseline is acknowledged, ignore late old-timeline event records.
+    reset_floor_tick: Option<u64>,
+}
+
+impl FrameMailbox {
+    fn push(&mut self, mut frame: Vec<u8>, events: &mut VecDeque<Vec<u8>>) -> Result<(), Fail> {
+        // Both 2D and 3D view-frame headers put the flags byte at offset 7. The
+        // producer's helper handles the versioned body layout when we need to
+        // coalesce a newer snapshot into the still-unread baseline.
+        let flags = frame.get(7).copied().unwrap_or_default();
+        let reset = flags & FLAG_EVENTS_RESET != 0;
+        if reset {
+            self.reset_pending = true;
+            events.clear();
+        } else if !self.reset_pending && flags & FLAG_DISCONTINUITY != 0 {
+            // A seek/branch starts a new timeline; an older reset's tick cutoff
+            // must not hide valid events in that new timeline.
+            self.reset_floor_tick = None;
+        }
+        if self.reset_pending {
+            frame = reset_frame_events(&frame).map_err(|e| Fail {
+                code: ORR_ERR_HOST,
+                msg: format!("cannot preserve the view event-reset baseline: {e}"),
+            })?;
+        }
+        self.latest = Some(frame);
+        Ok(())
+    }
+
+    fn take(&mut self) -> Option<Vec<u8>> {
+        let frame = self.latest.take()?;
+        if self.reset_pending {
+            self.reset_floor_tick = frame_tick(&frame);
+        }
+        self.reset_pending = false;
+        Some(frame)
+    }
+
+    fn acknowledge_copy(&mut self) {
+        if self.reset_pending {
+            self.reset_floor_tick = self.latest.as_deref().and_then(frame_tick);
+        }
+        self.latest = None;
+        self.reset_pending = false;
+    }
+
+    fn clear(&mut self) {
+        self.latest = None;
+        self.reset_pending = false;
+        self.reset_floor_tick = None;
+    }
+}
+
+fn frame_tick(frame: &[u8]) -> Option<u64> {
+    Some(u64::from_le_bytes(frame.get(8..16)?.try_into().ok()?))
+}
+
+fn queue_event_batch(view: &FrameMailbox, events: &mut VecDeque<Vec<u8>>, mut bytes: Vec<u8>) -> Result<(), Fail> {
+    // Do not let events from beyond the reset cut race ahead of the baseline.
+    // Once the consumer has acknowledged that baseline, newly pumped batches resume.
+    if view.reset_pending {
+        return Ok(());
+    }
+    if let Some(floor) = view.reset_floor_tick {
+        let mut batch = EventBatch::decode(&bytes).map_err(|e| Fail {
+            code: ORR_ERR_HOST,
+            msg: format!("cannot filter events against the view reset baseline: {e}"),
+        })?;
+        batch.events.retain(|event| event.tick > floor);
+        if batch.events.is_empty() {
+            return Ok(());
+        }
+        bytes = batch.encode();
+    }
+    if events.len() >= MAX_QUEUED_EVENT_BATCHES {
+        events.pop_front();
+    }
+    events.push_back(bytes);
+    Ok(())
 }
 
 /// An opaque host handle (see the header).
@@ -321,13 +417,8 @@ impl Inner {
                 let alive = l.client.poll();
                 while let Some(bytes) = l.client.frames.pop_front() {
                     match message_type(&bytes) {
-                        Ok(MSG_FRAME) => self.latest = Some(bytes),
-                        Ok(MSG_EVENTS) => {
-                            if self.events.len() >= MAX_QUEUED_EVENT_BATCHES {
-                                self.events.pop_front();
-                            }
-                            self.events.push_back(bytes);
-                        }
+                        Ok(MSG_FRAME | MSG_FRAME3D) => self.view.push(bytes, &mut self.events)?,
+                        Ok(MSG_EVENTS) => queue_event_batch(&self.view, &mut self.events, bytes)?,
                         _ => {}
                     }
                 }
@@ -348,7 +439,16 @@ impl Inner {
                 if let Some(why) = c.failure() {
                     return fail(ORR_ERR_HOST, format!("joining the server failed: {why}"));
                 }
-                c.pump(&mut self.latest, &mut self.events, MAX_QUEUED_EVENT_BATCHES);
+                let out = c.pump();
+                // RelayView returns a frame and its events separately, so process
+                // the frame first: a reset frame must clear/suppress any batches
+                // associated with the same pump before they reach the FFI queue.
+                if let Some(frame) = out.frame {
+                    self.view.push(frame, &mut self.events)?;
+                }
+                if let Some(batch) = out.events {
+                    queue_event_batch(&self.view, &mut self.events, batch)?;
+                }
                 Ok(())
             }
         }
@@ -417,12 +517,15 @@ unsafe fn write_text(buf: *mut c_char, cap: usize, text: &str) -> Result<usize, 
     Ok(needed)
 }
 
-fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<OrrHost, Fail> {
+fn host_settings(cfg: *const OrrHostConfig) -> Result<(u32, u16), Fail> {
     let (flags, port) = match unsafe { cfg.as_ref() } {
         None => (0, 0),
         Some(c) => {
             if (c.struct_size as usize) < 3 * std::mem::size_of::<u32>() {
-                return fail(ORR_ERR_ARG, "OrrHostConfig.struct_size is too small (set it to sizeof(OrrHostConfig))");
+                return fail(
+                    ORR_ERR_ARG,
+                    "OrrHostConfig.struct_size is too small (set it to sizeof(OrrHostConfig))",
+                );
             }
             (c.flags, c.listen_port)
         }
@@ -430,28 +533,86 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     if port > u32::from(u16::MAX) {
         return fail(ORR_ERR_ARG, "listen_port must be 0..=65535");
     }
+    Ok((flags, port as u16))
+}
+
+fn host_server(flags: u32, port: u16) -> ServerConfig {
+    let mut server = ServerConfig::new(Auth::DevNoAuth);
+    server.listen = flags & ORR_HOST_LISTEN != 0;
+    server.bind = SocketAddr::from(([127, 0, 0, 1], port));
+    server
+}
+
+fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<OrrHost, Fail> {
+    let (flags, port) = host_settings(cfg)?;
     let (text, path) = if scene_path.is_null() {
         (DEMO_SCENE.to_string(), None)
     } else {
-        let p = unsafe { CStr::from_ptr(scene_path) }.to_str().map_err(|_| Fail { code: ORR_ERR_ARG, msg: "scene path is not UTF-8".into() })?;
-        let text = std::fs::read_to_string(p).map_err(|e| Fail { code: ORR_ERR_ARG, msg: format!("cannot read scene {p}: {e}") })?;
+        let p = unsafe { CStr::from_ptr(scene_path) }
+            .to_str()
+            .map_err(|_| Fail {
+                code: ORR_ERR_ARG,
+                msg: "scene path is not UTF-8".into(),
+            })?;
+        let text = std::fs::read_to_string(p).map_err(|e| Fail {
+            code: ORR_ERR_ARG,
+            msg: format!("cannot read scene {p}: {e}"),
+        })?;
         (text, Some(PathBuf::from(p)))
     };
-    let mut server = ServerConfig::new(Auth::DevNoAuth);
-    server.listen = flags & ORR_HOST_LISTEN != 0;
-    server.bind = SocketAddr::from(([127, 0, 0, 1], port as u16));
-    // The game is chosen here, at compile time (see the crate docs).
-    let host = orr_remote::sample::spawn_phys_host(text, path, server).map_err(|e| Fail { code: ORR_ERR_ARG, msg: e })?;
+    let host =
+        orr_remote::sample::spawn_phys_host(text, path, host_server(flags, port)).map_err(|e| {
+            Fail {
+                code: ORR_ERR_ARG,
+                msg: e,
+            }
+        })?;
+    connect_local(host, flags)
+}
+
+fn open_yard3d_host(max_view_version: u32, cfg: *const OrrHostConfig) -> Result<OrrHost, Fail> {
+    // Refuse before starting a thread or binding a socket. The API suffix is
+    // this entry's contract version; the negotiated view format is version 2.
+    if max_view_version < u32::from(VERSION_3D) {
+        return fail(
+            ORR_ERR_ARG,
+            "Yard3D requires view-stream version 2 (max_view_version is too low)",
+        );
+    }
+    let (flags, port) = host_settings(cfg)?;
+    let host = orr_remote::yard3d::spawn_yard3d_host(
+        orr_sample::yard3d_game::YardConfig::new(24),
+        host_server(flags, port),
+    )
+    .map_err(|e| Fail {
+        code: ORR_ERR_ARG,
+        msg: e,
+    })?;
+    connect_local(host, flags)
+}
+
+fn connect_local(host: LocalHost, flags: u32) -> Result<OrrHost, Fail> {
     let url = host.url().map(str::to_string);
-    let transport = host.connector().connect(CLIENT_NAME, Caps::ALL).map_err(|e| Fail { code: ORR_ERR_HOST, msg: e.to_string() })?;
+    let transport = host
+        .connector()
+        .connect(CLIENT_NAME, Caps::ALL)
+        .map_err(|e| Fail {
+            code: ORR_ERR_HOST,
+            msg: e.to_string(),
+        })?;
     let mut client = ErpClient::with_transport(Box::new(transport));
     client.call_timeout = CALL_TIMEOUT;
     let mut inner = Inner {
-        backend: Backend::Local(Box::new(Local { client, host, url, run_on_start: flags & ORR_HOST_RUN != 0 })),
+        backend: Backend::Local(Box::new(Local {
+            client,
+            host,
+            url,
+            run_on_start: flags & ORR_HOST_RUN != 0,
+        })),
         schema_json: String::new(),
         input_size: 0,
         player_count: 0,
-        latest: None,
+        view: FrameMailbox::default(),
         held: Vec::new(),
         events: VecDeque::new(),
     };
@@ -459,7 +620,10 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     // Up to 1000 frames a second: the caller paces itself by polling.
     // (Not through `Inner::call`: it would discard the schema notification that comes with the response.)
     let local = inner.local()?;
-    match local.client.call("watch.subscribe", json!({"topics": ["viewstream"], "max_fps": 1000, "source": "sim"})) {
+    match local.client.call(
+        "watch.subscribe",
+        json!({"topics": ["viewstream"], "max_fps": 1000, "source": "sim"}),
+    ) {
         Ok(_) => {}
         Err(ClientError::Rpc(e)) => return fail(ORR_ERR_RPC, format!("watch.subscribe: {e}")),
         Err(e) => return fail(ORR_ERR_HOST, format!("watch.subscribe: {e}")),
@@ -467,14 +631,25 @@ fn open_host(scene_path: *const c_char, cfg: *const OrrHostConfig) -> Result<Orr
     let schema = local
         .client
         .wait_notification("watch.viewstream.schema", Duration::from_secs(10))
-        .map_err(|e| Fail { code: ORR_ERR_HOST, msg: e.to_string() })?
-        .ok_or_else(|| Fail { code: ORR_ERR_HOST, msg: "the host sent no schema".into() })?;
+        .map_err(|e| Fail {
+            code: ORR_ERR_HOST,
+            msg: e.to_string(),
+        })?
+        .ok_or_else(|| Fail {
+            code: ORR_ERR_HOST,
+            msg: "the host sent no schema".into(),
+        })?;
     let schema = schema.get("params").cloned().unwrap_or(J::Null);
-    inner.input_size = schema.pointer("/input/size").and_then(J::as_u64).unwrap_or(0) as usize;
+    inner.input_size = schema
+        .pointer("/input/size")
+        .and_then(J::as_u64)
+        .unwrap_or(0) as usize;
     inner.player_count = schema.get("player_count").and_then(J::as_u64).unwrap_or(0) as u8;
     inner.schema_json = schema.to_string();
     inner.pump()?;
-    Ok(OrrHost { inner: Mutex::new(inner) })
+    Ok(OrrHost {
+        inner: Mutex::new(inner),
+    })
 }
 
 fn text_arg(p: *const c_char, what: &str) -> Result<Option<String>, Fail> {
@@ -537,7 +712,7 @@ fn open_client(cfg: *const OrrClientConfig) -> Result<OrrHost, Fail> {
         schema_json: String::new(),
         input_size: 0,
         player_count: 0,
-        latest: None,
+        view: FrameMailbox::default(),
         held: Vec::new(),
         events: VecDeque::new(),
     };
@@ -573,7 +748,7 @@ pub extern "C" fn orr_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
-/// Opens a host of the compiled-in game on the scene at `scene_path` (a UTF-8
+/// Opens the PhysGame host on the scene at `scene_path` (a UTF-8
 /// path to a scene YAML; null = the built-in demo scene) and starts its
 /// thread. `cfg` may be null. Returns null on failure (see `orr_last_error`).
 #[no_mangle]
@@ -581,6 +756,28 @@ pub unsafe extern "C" fn orr_host_open(scene_path: *const c_char, cfg: *const Or
     let mut out: *mut OrrHost = std::ptr::null_mut();
     guard(|| {
         out = Box::into_raw(Box::new(open_host(scene_path, cfg)?));
+        Ok(ORR_OK)
+    });
+    out
+}
+
+/// Opens the deterministic built-in Yard3D scene, paused unless `ORR_HOST_RUN` is set.
+/// `max_view_version` is the highest view-stream format the caller understands:
+/// values below 2 are refused before host startup, with a null result and an
+/// explanation in [`orr_last_error`]. A higher maximum still receives version 2.
+/// `cfg` may be null and has the same meaning as for [`orr_host_open`].
+///
+/// This additive entry's `_v1` suffix versions its C contract, independently of
+/// view-stream version 2. Existing ABI 2 symbols/layouts and the PhysGame entry
+/// are unchanged. There is no scene-path or relay-client variant of this entry.
+#[no_mangle]
+pub unsafe extern "C" fn orr_yard3d_host_open_v1(
+    max_view_version: u32,
+    cfg: *const OrrHostConfig,
+) -> *mut OrrHost {
+    let mut out: *mut OrrHost = std::ptr::null_mut();
+    guard(|| {
+        out = Box::into_raw(Box::new(open_yard3d_host(max_view_version, cfg)?));
         Ok(ORR_OK)
     });
     out
@@ -732,20 +929,27 @@ pub unsafe extern "C" fn orr_host_url(host: *mut OrrHost, buf: *mut c_char, cap:
 /// `*written` to its size. Returns `ORR_OK`; `ORR_NO_FRAME` if nothing new
 /// (`*written` = 0); `ORR_ERR_BUFFER` if `cap` is too small (`*written` = the
 /// size needed, the frame stays for the next poll).
+/// A null `buf` with nonzero `cap` returns `ORR_ERR_NULL` before polling,
+/// even when there is no new frame. Null with zero capacity remains a size probe.
 #[no_mangle]
 pub unsafe extern "C" fn orr_view_poll(host: *mut OrrHost, buf: *mut u8, cap: usize, written: *mut usize) -> c_int {
     guard(|| {
         let h = host_ref(host)?;
         let written = written.as_mut().ok_or(Fail { code: ORR_ERR_NULL, msg: "written is null".into() })?;
         *written = 0;
+        if buf.is_null() && cap != 0 {
+            return fail(ORR_ERR_NULL, "output buffer is null but its capacity is not 0");
+        }
         let mut inner = lock(h);
         inner.pump()?;
-        let Some(frame) = inner.latest.as_ref() else { return Ok(ORR_NO_FRAME) };
+        let Some(frame) = inner.view.latest.as_ref() else { return Ok(ORR_NO_FRAME) };
         *written = frame.len();
         if !write_out(buf, cap, frame)? {
             return fail(ORR_ERR_BUFFER, format!("buffer too small: {} bytes needed, {cap} given", frame.len()));
         }
-        inner.latest = None;
+        // Only a complete copy acknowledges a reset baseline. ORR_ERR_BUFFER
+        // above deliberately leaves both the frame and reset latch untouched.
+        inner.view.acknowledge_copy();
         Ok(ORR_OK)
     })
 }
@@ -763,7 +967,7 @@ pub unsafe extern "C" fn orr_view_poll_ptr(host: *mut OrrHost, data: *mut *const
         *len = 0;
         let mut inner = lock(h);
         inner.pump()?;
-        let Some(frame) = inner.latest.take() else { return Ok(ORR_NO_FRAME) };
+        let Some(frame) = inner.view.take() else { return Ok(ORR_NO_FRAME) };
         inner.held = frame;
         *data = inner.held.as_ptr();
         *len = inner.held.len();
@@ -780,6 +984,9 @@ pub unsafe extern "C" fn orr_events_poll(host: *mut OrrHost, buf: *mut u8, cap: 
         let h = host_ref(host)?;
         let written = written.as_mut().ok_or(Fail { code: ORR_ERR_NULL, msg: "written is null".into() })?;
         *written = 0;
+        if buf.is_null() && cap != 0 {
+            return fail(ORR_ERR_NULL, "output buffer is null but its capacity is not 0");
+        }
         let mut inner = lock(h);
         inner.pump()?;
         let Some(batch) = inner.events.front() else { return Ok(ORR_NO_FRAME) };
@@ -878,7 +1085,7 @@ pub unsafe extern "C" fn orr_control(host: *mut OrrHost, op: c_int, arg: i64) ->
             ORR_CTL_BRANCH => inner.call("sim.branch", J::Null)?,
             ORR_CTL_RESTART => {
                 inner.call("sim.stop", J::Null)?;
-                inner.latest = None;
+                inner.view.clear();
                 inner.start_session()?;
                 J::Null
             }
@@ -938,4 +1145,275 @@ pub unsafe extern "C" fn orr_erp_call(host: *mut OrrHost, request_json: *const c
         }
         Ok(code)
     })
+}
+
+#[cfg(test)]
+mod frame_mailbox_tests {
+    use super::*;
+    use orr_viewstream::{
+        EntityRecord, EntityRecord3, EventRecord, Pose3, ViewFrame, ViewFrame3, STATE_CANCELED,
+        STATE_PREDICTED, STATE_VERIFIED,
+    };
+
+    /// Keep the real host alive, but make incoming presentation data entirely
+    /// fixture-owned: empty polls cannot race the host's initial publication.
+    struct EmptyTransport;
+
+    #[test]
+    fn frame3_reset_survives_replacement_and_copy_probes_until_pointer_take() {
+        let frame3 = |tick, flags| {
+            ViewFrame3 {
+                tick,
+                flags,
+                verified_tick: tick,
+                seq: tick,
+                rollback: None,
+                entities: vec![EntityRecord3 {
+                    id: 7,
+                    kind: 1,
+                    shape: orr_viewstream::SHAPE3_SPHERE,
+                    mode: orr_viewstream::MODE_PREDICTION,
+                    size: [1.0, 0.0, 0.0],
+                    rgba: [1, 2, 3, 255],
+                    roughness: 200,
+                    metallic: 0,
+                    style_flags: 0,
+                    prev: Pose3::IDENTITY,
+                    cur: Pose3 {
+                        pos: [1.0, 2.0, 3.0],
+                        rot: [0.0, 0.0, 0.0, 1.0],
+                    },
+                }],
+                props: vec![0; 4],
+            }
+            .encode()
+        };
+        let mut host = open_yard3d_host(2, std::ptr::null()).unwrap();
+        {
+            let mut inner = lock(&host);
+            inner.local().unwrap().client = ErpClient::with_transport(Box::new(EmptyTransport));
+            inner.view = FrameMailbox::default();
+            inner.events.clear();
+            inner.events.push_back(
+                EventBatch {
+                    events: vec![event(1, STATE_PREDICTED)],
+                }
+                .encode(),
+            );
+            let Inner { view, events, .. } = &mut *inner;
+            view.push(frame3(2, FLAG_EVENTS_RESET), events).unwrap();
+            assert!(events.is_empty());
+            view.push(frame3(3, 0), events).unwrap();
+        }
+        let mut written = 0;
+        assert_eq!(
+            unsafe { orr_view_poll(&mut host, std::ptr::null_mut(), 0, &mut written) },
+            ORR_ERR_BUFFER
+        );
+        let mut short = [99u8; 1];
+        assert_eq!(
+            unsafe { orr_view_poll(&mut host, short.as_mut_ptr(), short.len(), &mut written) },
+            ORR_ERR_BUFFER
+        );
+        assert_eq!(short, [99]);
+        assert!(lock(&host).view.reset_pending);
+        let mut data = std::ptr::null();
+        let mut len = 0;
+        assert_eq!(
+            unsafe { orr_view_poll_ptr(&mut host, &mut data, &mut len) },
+            ORR_OK
+        );
+        let decoded = ViewFrame3::decode(unsafe { std::slice::from_raw_parts(data, len) }).unwrap();
+        assert_eq!(decoded.tick, 3);
+        assert!(decoded.has(FLAG_EVENTS_RESET));
+        assert!(decoded.has(FLAG_DISCONTINUITY));
+        assert_eq!(decoded.entities[0].prev, decoded.entities[0].cur);
+        let inner = lock(&host);
+        assert!(!inner.view.reset_pending);
+        assert_eq!(inner.view.reset_floor_tick, Some(3));
+    }
+
+    impl orr_remote::Transport for EmptyTransport {
+        fn send(&mut self, _req: orr_remote::Request) -> Result<(), ClientError> {
+            panic!("the polling fixture does not send requests");
+        }
+
+        fn recv(&mut self, _timeout: Duration) -> Result<Option<orr_remote::Incoming>, ClientError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn poll_buffer_validation_precedes_data_availability() {
+        let mut host = open_host(std::ptr::null(), std::ptr::null()).unwrap();
+        {
+            let mut inner = lock(&host);
+            inner.local().unwrap().client = ErpClient::with_transport(Box::new(EmptyTransport));
+            inner.view = FrameMailbox::default();
+            inner.events.clear();
+        }
+        type Poll = unsafe extern "C" fn(*mut OrrHost, *mut u8, usize, *mut usize) -> c_int;
+        let polls: [Poll; 2] = [orr_view_poll, orr_events_poll];
+        for poll in polls {
+            let mut written = 99;
+            assert_eq!(unsafe { poll(&mut host, std::ptr::null_mut(), 5, &mut written) }, ORR_ERR_NULL);
+            assert_eq!(written, 0);
+            assert_eq!(unsafe { poll(&mut host, std::ptr::null_mut(), 0, &mut written) }, ORR_NO_FRAME);
+            assert_eq!(written, 0);
+            let mut untouched = [17u8; 1];
+            assert_eq!(unsafe { poll(&mut host, untouched.as_mut_ptr(), 1, &mut written) }, ORR_NO_FRAME);
+            assert_eq!(untouched, [17]);
+        }
+
+        let frame = frame(10, FLAG_EVENTS_RESET | FLAG_DISCONTINUITY, [1.0; 3], [1.0; 3]);
+        {
+            let mut inner = lock(&host);
+            let Inner { view, events, .. } = &mut *inner;
+            view.push(frame.clone(), events).unwrap();
+        }
+        let mut written = 99;
+        assert_eq!(unsafe { orr_view_poll(&mut host, std::ptr::null_mut(), 5, &mut written) }, ORR_ERR_NULL);
+        assert_eq!(written, 0);
+        assert_eq!(unsafe { orr_view_poll(&mut host, std::ptr::null_mut(), 0, &mut written) }, ORR_ERR_BUFFER);
+        assert_eq!(written, frame.len());
+        assert!(lock(&host).view.reset_pending, "invalid buffers and size probes must retain the reset");
+        let mut copied = vec![0; written];
+        assert_eq!(unsafe { orr_view_poll(&mut host, copied.as_mut_ptr(), copied.len(), &mut written) }, ORR_OK);
+        assert_eq!(copied, frame);
+        assert!(!lock(&host).view.reset_pending);
+
+        let batch = EventBatch { events: vec![event(11, STATE_VERIFIED)] }.encode();
+        lock(&host).events.push_back(batch.clone());
+        assert_eq!(unsafe { orr_events_poll(&mut host, std::ptr::null_mut(), 5, &mut written) }, ORR_ERR_NULL);
+        assert_eq!(written, 0);
+        assert_eq!(unsafe { orr_events_poll(&mut host, std::ptr::null_mut(), 0, &mut written) }, ORR_ERR_BUFFER);
+        assert_eq!(written, batch.len());
+        assert_eq!(lock(&host).events.front(), Some(&batch));
+        copied.resize(written, 0);
+        assert_eq!(unsafe { orr_events_poll(&mut host, copied.as_mut_ptr(), copied.len(), &mut written) }, ORR_OK);
+        assert_eq!(copied, batch);
+        assert!(lock(&host).events.is_empty());
+    }
+
+    fn frame(tick: u64, flags: u8, prev: [f32; 3], cur: [f32; 3]) -> Vec<u8> {
+        ViewFrame {
+            flags,
+            tick,
+            verified_tick: tick,
+            seq: tick,
+            rollback: None,
+            entities: vec![EntityRecord {
+                id: 7,
+                kind: 1,
+                shape: 0,
+                mode: 0,
+                size: 1.0,
+                half_y: 0.0,
+                rgba: [255; 4],
+                prev,
+                cur,
+            }],
+            props: Vec::new(),
+        }
+        .encode()
+    }
+
+    fn event(tick: u64, state: u8) -> EventRecord {
+        EventRecord { tick, system: 1, seq: 1, state, event_type: 1, payload: vec![1, 2, 3] }
+    }
+
+    #[test]
+    fn unread_reset_survives_newer_frames_and_small_copy_buffers() {
+        let mut mailbox = FrameMailbox::default();
+        let mut events = VecDeque::new();
+        queue_event_batch(&mailbox, &mut events, vec![1]).unwrap();
+        assert_eq!(events.len(), 1);
+
+        // A reset clears pre-cut batches. A subsequent status/events poll pumps a
+        // newer frame before the caller takes the baseline; that frame must still
+        // be an events-reset discontinuity with prev == cur.
+        mailbox
+            .push(frame(10, FLAG_EVENTS_RESET, [0.0, 0.0, 0.0], [10.0, 0.0, 1.0]), &mut events)
+            .unwrap();
+        assert!(events.is_empty());
+        assert!(mailbox.reset_pending);
+        assert_eq!(mailbox.reset_floor_tick, None, "the late-event cutoff starts only after acknowledgement");
+        queue_event_batch(&mailbox, &mut events, vec![2]).unwrap();
+        assert!(events.is_empty(), "post-cut events wait until the baseline is acknowledged");
+
+        mailbox.push(frame(11, 0, [10.0, 0.0, 1.0], [11.0, 0.0, 2.0]), &mut events).unwrap();
+        let mut too_small = [0u8; 1];
+        let latest = mailbox.latest.as_ref().unwrap();
+        assert!(!unsafe { write_out(too_small.as_mut_ptr(), too_small.len(), latest) }.unwrap());
+        assert!(mailbox.reset_pending, "a short-buffer poll must not acknowledge the baseline");
+        assert_eq!(mailbox.reset_floor_tick, None);
+        queue_event_batch(&mailbox, &mut events, vec![3]).unwrap();
+        assert!(events.is_empty());
+
+        mailbox.push(frame(12, 0, [11.0, 0.0, 2.0], [12.0, 0.0, 3.0]), &mut events).unwrap();
+        let coalesced = ViewFrame::decode(mailbox.latest.as_ref().unwrap()).unwrap();
+        assert_eq!(coalesced.tick, 12);
+        assert!(coalesced.has(FLAG_EVENTS_RESET));
+        assert!(coalesced.has(FLAG_DISCONTINUITY));
+        assert_eq!(coalesced.entities[0].prev, coalesced.entities[0].cur);
+
+        let mut exact = vec![0u8; mailbox.latest.as_ref().unwrap().len()];
+        assert!(unsafe { write_out(exact.as_mut_ptr(), exact.len(), mailbox.latest.as_ref().unwrap()) }.unwrap());
+        mailbox.acknowledge_copy();
+        assert!(!mailbox.reset_pending);
+        assert_eq!(mailbox.reset_floor_tick, Some(12));
+        mailbox.push(frame(13, 0, [12.0, 0.0, 3.0], [13.0, 0.0, 4.0]), &mut events).unwrap();
+        let following = ViewFrame::decode(mailbox.latest.as_ref().unwrap()).unwrap();
+        assert!(!following.has(FLAG_EVENTS_RESET | FLAG_DISCONTINUITY));
+        let post_reset = EventBatch { events: vec![event(13, 1)] }.encode();
+        queue_event_batch(&mailbox, &mut events, post_reset).unwrap();
+        assert_eq!(EventBatch::decode(events.front().unwrap()).unwrap().events[0].tick, 13);
+    }
+
+    #[test]
+    fn pointer_take_acknowledges_the_reset_baseline() {
+        let mut mailbox = FrameMailbox::default();
+        let mut events = VecDeque::new();
+        mailbox
+            .push(frame(2, FLAG_EVENTS_RESET, [0.0; 3], [2.0, 0.0, 0.0]), &mut events)
+            .unwrap();
+        let taken = mailbox.take().expect("reset baseline");
+        assert!(ViewFrame::decode(&taken).unwrap().has(FLAG_EVENTS_RESET));
+        assert!(!mailbox.reset_pending);
+        assert_eq!(mailbox.reset_floor_tick, Some(2));
+    }
+
+    #[test]
+    fn late_old_tick_events_are_filtered_until_a_new_discontinuity() {
+        let mut mailbox = FrameMailbox::default();
+        let mut events = VecDeque::new();
+        mailbox
+            .push(frame(10, FLAG_EVENTS_RESET, [0.0; 3], [10.0, 0.0, 0.0]), &mut events)
+            .unwrap();
+        mailbox.acknowledge_copy();
+        assert_eq!(mailbox.reset_floor_tick, Some(10));
+
+        let batch = EventBatch {
+            events: vec![
+                event(9, STATE_PREDICTED),
+                event(10, STATE_PREDICTED),
+                event(10, STATE_CANCELED),
+                event(11, STATE_VERIFIED),
+            ],
+        }
+        .encode();
+        queue_event_batch(&mailbox, &mut events, batch).unwrap();
+        let accepted = EventBatch::decode(events.front().unwrap()).unwrap();
+        assert_eq!(accepted.events.len(), 1);
+        assert_eq!(accepted.events[0].tick, 11);
+
+        mailbox
+            .push(frame(3, FLAG_DISCONTINUITY, [10.0, 0.0, 0.0], [3.0, 0.0, 0.0]), &mut events)
+            .unwrap();
+        assert_eq!(mailbox.reset_floor_tick, None);
+        let new_timeline = EventBatch { events: vec![event(1, STATE_PREDICTED)] }.encode();
+        queue_event_batch(&mailbox, &mut events, new_timeline).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(EventBatch::decode(events.back().unwrap()).unwrap().events[0].tick, 1);
+    }
 }

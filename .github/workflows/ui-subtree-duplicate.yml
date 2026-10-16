@@ -1,0 +1,41 @@
+name: Collect HUD subtree duplication
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+permissions:
+  contents: read
+jobs:
+  collect-ui-subtree-duplicate:
+    # Match the existing namespace-compatible acceptance runner. Migrate before
+    # 2027-04-17; no security setting or namespace assertion is weakened.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install software GPU and mount namespace dependencies
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers bubblewrap
+      - name: Actual widgets, exact inventory, boundaries and strict lint
+        run: tools/check-ui-subtree-duplicate.sh contracts
+      - name: Duplicated HUD pixels and source-hidden read-only export
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: "1"
+        run: |
+          mkdir -p /tmp/orr-ui-subtree-runtime
+          chmod 700 /tmp/orr-ui-subtree-runtime
+          export XDG_RUNTIME_DIR=/tmp/orr-ui-subtree-runtime
+          tools/check-ui-subtree-duplicate.sh gpu
+      - name: Preserve focused evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-subtree-duplicate-evidence
+          path: |
+            target/ui-subtree-duplicate-evidence/*.log
+            target/ui-subtree-duplicate-evidence/*.txt
+            target/ui-subtree-duplicate-evidence/*.sha256
+            target/ui-subtree-duplicate-evidence/captures/*
+          if-no-files-found: error
+          retention-days: 7

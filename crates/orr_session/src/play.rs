@@ -104,14 +104,16 @@ pub enum PlayNote {
     SeekRejected { target: u64 },
 }
 
-/// Why a seek failed. The session is still consistent (head is where the
-/// simulation is).
+/// Why a play-session operation was refused. The session is still
+/// consistent (head is where the simulation is).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayError {
     OutOfRange { target: u64, first: u64, last: u64 },
     /// A recorded tick is missing (only in a damaged foreign recording).
     MissingTick(u64),
     BadKeyframe(u64),
+    /// A read-only replay viewer cannot accept new inputs or commands.
+    ReadOnly,
 }
 
 impl core::fmt::Display for PlayError {
@@ -122,6 +124,7 @@ impl core::fmt::Display for PlayError {
             }
             PlayError::MissingTick(t) => write!(f, "recorded tick {t} is missing"),
             PlayError::BadKeyframe(t) => write!(f, "keyframe of tick {t} does not decode"),
+            PlayError::ReadOnly => f.write_str("replay viewer is read-only; branch before adding inputs or commands"),
         }
     }
 }
@@ -193,6 +196,8 @@ impl PlayConfig {
     }
 }
 
+type InputCommands<G> = dyn Fn(PlayerSlot, &<G as Game>::Input) -> Vec<<G as Game>::Command> + Send + Sync;
+
 /// See the module docs.
 pub struct PlaySession<G: Game> {
     sim: Simulation<G>,
@@ -206,6 +211,8 @@ pub struct PlaySession<G: Game> {
     /// Held input per slot, used by every tick until changed.
     held: Vec<G::Input>,
     pending_commands: Vec<(PlayerSlot, G::Command)>,
+    commands_from_input: Option<Arc<InputCommands<G>>>,
+    derive_held: Vec<bool>,
     /// How many debug commands of tick `head + 1` are already applied to
     /// the frame on screen (they are applied at once so an edit shows while
     /// paused). A tick applies only the rest.
@@ -220,6 +227,18 @@ pub struct PlaySession<G: Game> {
 }
 
 impl<G: Game> PlaySession<G> {
+    /// Installs an opt-in normal-input adapter for NEW live recording ticks.
+    /// Explicit commands keep their order; derived commands follow them in
+    /// ascending player-slot order. Recorded playback and seeking never call
+    /// this adapter, because their commands are already in the recording.
+    /// Do not install it when an upstream bridge already derives commands.
+    pub fn set_commands_from_input(
+        &mut self,
+        derive: impl Fn(PlayerSlot, &G::Input) -> Vec<G::Command> + Send + Sync + 'static,
+    ) {
+        self.commands_from_input = Some(Arc::new(derive));
+    }
+
     /// Starts from `G::setup(config)`.
     pub fn new(cfg: PlayConfig, config: G::Config) -> Self {
         let sim = Simulation::<G>::with_build_id(config, cfg.tick_rate, cfg.seed, cfg.build_id);
@@ -256,6 +275,7 @@ impl<G: Game> PlaySession<G> {
         ring.store(sim.frame());
         let mut s = Self {
             held: vec![G::Input::default(); cfg.player_count as usize],
+            derive_held: vec![true; cfg.player_count as usize],
             playing: !cfg.start_paused,
             sim,
             cfg,
@@ -265,6 +285,7 @@ impl<G: Game> PlaySession<G> {
             mode: PlayMode::Record,
             speed: Speed::NORMAL,
             pending_commands: Vec::new(),
+            commands_from_input: None,
             preview_applied: 0,
             epoch: 0,
             branches: 0,
@@ -317,6 +338,7 @@ impl<G: Game> PlaySession<G> {
         ring.store(sim.frame());
         let mut s = Self {
             held: vec![G::Input::default(); cfg.player_count as usize],
+            derive_held: vec![true; cfg.player_count as usize],
             playing: false,
             sim,
             cfg,
@@ -326,6 +348,7 @@ impl<G: Game> PlaySession<G> {
             mode: PlayMode::Viewer,
             speed: Speed::NORMAL,
             pending_commands: Vec::new(),
+            commands_from_input: None,
             preview_applied: 0,
             epoch: 0,
             branches: 0,
@@ -363,6 +386,12 @@ impl<G: Game> PlaySession<G> {
     }
     pub fn player_count(&self) -> u8 {
         self.cfg.player_count
+    }
+    /// Number of gameplay commands waiting for a newly recorded tick.
+    /// Commands are consumed when their tick is recorded; commands in the
+    /// replay history are not pending.
+    pub fn pending_command_count(&self) -> usize {
+        self.pending_commands.len()
     }
     pub fn simulation(&self) -> &Simulation<G> {
         &self.sim
@@ -430,17 +459,39 @@ impl<G: Game> PlaySession<G> {
 
     // ---- writes ----
 
-    /// Sets the input `slot` uses at every following tick, until changed.
-    /// Out-of-range slots are ignored.
+    /// Sets the input `slot` uses at every following recorded tick, until
+    /// changed. Out-of-range slots and writes in a read-only replay viewer
+    /// are ignored. Viewer inputs are not retained across a later branch.
     pub fn set_input(&mut self, slot: PlayerSlot, input: G::Input) {
+        if self.mode == PlayMode::Viewer {
+            return;
+        }
         if let Some(held) = self.held.get_mut(slot.0 as usize) {
             *held = input;
+            self.derive_held[slot.0 as usize] = true;
+        }
+    }
+
+    /// Replaces held input from a caller that already submits its commands.
+    /// This slot bypasses the optional input adapter until `set_input` is used
+    /// again, so a raw/bridge input plus its explicit command cannot double-fire.
+    pub fn set_input_without_commands(&mut self, slot: PlayerSlot, input: G::Input) {
+        self.set_input(slot, input);
+        if self.mode != PlayMode::Viewer {
+            if let Some(derive) = self.derive_held.get_mut(slot.0 as usize) {
+                *derive = false;
+            }
         }
     }
 
     /// Queues a game command for the next tick that is run.
-    pub fn push_command(&mut self, slot: PlayerSlot, command: G::Command) {
+    /// Returns [`PlayError::ReadOnly`] if this session is viewing a replay.
+    pub fn push_command(&mut self, slot: PlayerSlot, command: G::Command) -> Result<(), PlayError> {
+        if self.mode == PlayMode::Viewer {
+            return Err(PlayError::ReadOnly);
+        }
         self.pending_commands.push((slot, command));
+        Ok(())
     }
 
     /// One clock tick: runs a tick when [`wants_tick`](Self::wants_tick),
@@ -584,7 +635,16 @@ impl<G: Game> PlaySession<G> {
         for (i, input) in self.held.iter().enumerate() {
             inputs.set_input(PlayerSlot(i as u8), *input);
         }
-        let commands = std::mem::take(&mut self.pending_commands);
+        let mut commands = std::mem::take(&mut self.pending_commands);
+        if let Some(derive) = &self.commands_from_input {
+            for (i, input) in self.held.iter().enumerate() {
+                if !self.derive_held[i] {
+                    continue;
+                }
+                let slot = PlayerSlot(i as u8);
+                commands.extend(derive(slot, input).into_iter().map(|command| (slot, command)));
+            }
+        }
         self.writer.record_tick(next, &self.held, &commands);
         inputs.set_commands(commands);
         let debug = self.writer.debug_at(next);

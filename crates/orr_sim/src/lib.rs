@@ -34,7 +34,7 @@ pub use game::Game;
 pub use hotpatch::{DirectCall, HotPatchHook};
 pub use metrics::{MetricValue, Metrics, NoMetrics};
 pub use input::{PlayerFlags, PlayerSlot, SimInput, TickInputs};
-pub use simulation::{build_hash_of, Simulation};
+pub use simulation::{build_hash_of, frame_build_id, Simulation};
 pub use system::System;
 
 // Re-exported so games don't need a direct `orr_ecs`/`orr_fp` dependency

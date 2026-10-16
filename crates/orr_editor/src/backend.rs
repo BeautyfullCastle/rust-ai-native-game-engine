@@ -8,18 +8,18 @@
 //!
 //! - an [`ErpClient`] for everything a person can do (edits, transactions,
 //!   undo, history, proposals, sim control, schema, queries, activity);
-//! - a [`RemoteBridge`] (`Bridge` + `SimControl` + `Snapshot`) for the
+//! - a [`orr_remote::RemoteBridge`] (`Bridge` + `SimControl` + `Snapshot`) for the
 //!   frames the viewport draws.
 //!
 //! For a local host both channels are in-process links (no sockets, frames
 //! as shared copies); for a remote one they are two WebSocket connections.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use orr_remote::sample::spawn_phys_host;
-use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteBridge, RemoteConfig, ServerConfig, USER_CLIENT};
-use orr_sample::physics_game::PhysGame;
+use orr_remote::sample::{spawn_arena_host, spawn_phys_host};
+use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteConfig, RemoteIdentity, ScreenshotOwner, ScreenshotService, ServerConfig, ViewDeliveryMode, USER_CLIENT};
+use crate::game::{EditorGame, EditorStream};
 use serde_json::{json, Value as J};
 
 /// Where the simulation runs.
@@ -36,6 +36,37 @@ pub enum HostSpec {
         /// Enable the `debug.panic` test hook (tests of crash isolation).
         debug_hooks: bool,
     },
+    /// A local host of the selected editor game, preserving `Local`'s legacy
+    /// PhysGame behavior and public struct-literal shape.
+    LocalGame {
+        /// The scene file the host loads and saves.
+        scene: PathBuf,
+        /// The compiled game hosted on this thread.
+        game: EditorGame,
+        /// Optional ERP listener configuration.
+        listen: Option<ServerConfig>,
+        /// Enable the `debug.panic` test hook.
+        debug_hooks: bool,
+    },
+    /// An Arena host admitted from a completely validated saved project.
+    /// The first connection consumes the already checked scene bytes, not disk.
+    #[cfg(feature = "sprites")]
+    PreparedArena {
+        scene: crate::project::PreparedArenaScene,
+        listen: Option<ServerConfig>,
+        debug_hooks: bool,
+    },
+    /// Initial CollectDodge project bytes already admitted before host startup.
+    #[cfg(feature = "collect-dodge")]
+    PreparedCollect {
+        scene: PathBuf,
+        text: String,
+        listen: Option<ServerConfig>,
+        debug_hooks: bool,
+    },
+    /// Initial RoomEscape project bytes admitted before host startup.
+    #[cfg(feature = "room-project")]
+    PreparedRoom { scene: PathBuf, text: String, listen: Option<ServerConfig>, debug_hooks: bool },
     /// A host in another process.
     Remote {
         /// `ws://host:port` of its ERP server.
@@ -51,6 +82,57 @@ impl HostSpec {
         HostSpec::Local { scene: scene.into(), listen: None, debug_hooks: false }
     }
 
+    /// A local host using a particular compiled game and scene.
+    pub fn local_game(scene: impl Into<PathBuf>, game: EditorGame) -> HostSpec {
+        HostSpec::LocalGame { scene: scene.into(), game, listen: None, debug_hooks: false }
+    }
+
+    /// Adds an ERP listener to an editor-owned local host.
+    pub fn with_listener(mut self, listen: ServerConfig) -> HostSpec {
+        match &mut self {
+            HostSpec::Local { listen: current, .. } | HostSpec::LocalGame { listen: current, .. } => *current = Some(listen),
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { listen: current, .. } => *current = Some(listen),
+            #[cfg(feature = "collect-dodge")]
+            HostSpec::PreparedCollect { listen: current, .. } => *current = Some(listen),
+            #[cfg(feature = "room-project")]
+            HostSpec::PreparedRoom { listen: current, .. } => *current = Some(listen),
+            HostSpec::Remote { .. } => {}
+        }
+        self
+    }
+
+    /// Updates the persisted scene path of a local host spec after open/save.
+    pub fn set_local_scene_path(&mut self, path: PathBuf) -> bool {
+        match self {
+            HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => {
+                *scene = path;
+                true
+            }
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { listen, debug_hooks, .. } => {
+                // A successful explicit scene open/save returns to the ordinary
+                // local lifecycle; stale admission bytes must not replace it.
+                *self = HostSpec::LocalGame {
+                    scene: path,
+                    game: EditorGame::Arena,
+                    listen: listen.clone(),
+                    debug_hooks: *debug_hooks,
+                };
+                true
+            }
+            #[cfg(feature = "collect-dodge")]
+            HostSpec::PreparedCollect { listen, debug_hooks, .. } => {
+                *self = HostSpec::LocalGame { scene:path,game:EditorGame::CollectDodge,listen:listen.clone(),debug_hooks:*debug_hooks }; true
+            }
+            #[cfg(feature = "room-project")]
+            HostSpec::PreparedRoom { listen, debug_hooks, .. } => {
+                *self = HostSpec::LocalGame { scene:path,game:EditorGame::RoomEscape,listen:listen.clone(),debug_hooks:*debug_hooks }; true
+            }
+            HostSpec::Remote { .. } => false,
+        }
+    }
+
     /// Attach to `url`.
     pub fn remote(url: &str, token: Option<&str>) -> HostSpec {
         HostSpec::Remote { url: url.to_string(), token: token.map(str::to_string) }
@@ -58,7 +140,7 @@ impl HostSpec {
 
     /// True for a host thread of this process.
     pub fn is_local(&self) -> bool {
-        matches!(self, HostSpec::Local { .. })
+        !matches!(self, HostSpec::Remote { .. })
     }
 }
 
@@ -72,7 +154,7 @@ pub struct Backend {
     /// The ERP channel.
     pub erp: ErpClient,
     /// The frame channel of the scene (play frame, else the scene's preview frame).
-    pub bridge: RemoteBridge<PhysGame>,
+    pub bridge: EditorStream,
     /// The host thread, for a local host.
     pub host: Option<LocalHost>,
     /// The name this editor's connections have on the host.
@@ -81,7 +163,12 @@ pub struct Backend {
     /// of a local host started with `--erp`, or the remote host's address.
     pub url: Option<String>,
     /// The game the host runs (`rpc.discover`).
-    pub game: String,
+    pub game: EditorGame,
+    /// Checked descriptor identity shared by control and frame connections.
+    identity: RemoteIdentity,
+    pub(crate) managed_input: bool,
+    /// The app-framebuffer capture endpoint, present only for an editor-owned local host.
+    pub(crate) screenshot_owner: Option<ScreenshotOwner>,
 }
 
 /// `ws://host:port` plus the path and query a dev-mode host needs to know
@@ -102,33 +189,31 @@ impl Backend {
         match spec {
             HostSpec::Local { scene, listen, debug_hooks } => {
                 let text = std::fs::read_to_string(scene).map_err(|e| format!("cannot read {}: {e}", scene.display()))?;
-                let mut cfg = match listen {
-                    Some(c) => c.clone(),
-                    None => {
-                        let mut c = ServerConfig::new(Auth::DevNoAuth);
-                        c.listen = false;
-                        c
-                    }
+                Self::connect_local(spec, scene, text, EditorGame::PhysGame, listen, *debug_hooks)
+            }
+            HostSpec::LocalGame { scene, game, listen, debug_hooks } => {
+                let text = std::fs::read_to_string(scene).map_err(|e| format!("cannot read {}: {e}", scene.display()))?;
+                Self::connect_local(spec, scene, text, *game, listen, *debug_hooks)
+            }
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { scene, listen, debug_hooks } => {
+                // Admission uses the captured bytes once. After successful startup,
+                // restart keeps the established saved-on-disk local-host semantics
+                // (including saves made by agents through ERP).
+                let restart = HostSpec::LocalGame {
+                    scene: scene.path().to_path_buf(), game: EditorGame::Arena,
+                    listen: listen.clone(), debug_hooks: *debug_hooks,
                 };
-                cfg.listen = listen.is_some();
-                cfg.limits.allow_scene_paths = true;
-                cfg.limits.debug_hooks = *debug_hooks;
-                cfg.limits.max_step_per_call = 20_000;
-                let host = spawn_phys_host(text, Some(scene.clone()), cfg)?;
-                let connector = host.connector();
-                let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
-                let mut erp = ErpClient::with_transport(Box::new(link("ERP")?));
-                erp.call_timeout = CALL_TIMEOUT;
-                let mut rc = RemoteConfig::new("");
-                rc.source = "view".to_string();
-                // In process a frame is a copy, not a message: let an edit show at once instead of
-                // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
-                rc.max_fps = 240;
-                let bridge = RemoteBridge::<PhysGame>::connect_transport(Box::new(link("frames")?), rc)?;
-                let url = host.url().map(str::to_string);
-                let mut b = Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client: USER_CLIENT.to_string(), url, game: String::new() };
-                b.handshake()?;
-                Ok(b)
+                Self::connect_local(&restart, scene.path(), scene.text().to_string(), EditorGame::Arena, listen, *debug_hooks)
+            }
+            #[cfg(feature = "collect-dodge")]
+            HostSpec::PreparedCollect { scene, text, listen, debug_hooks } => {
+                let restart = HostSpec::LocalGame { scene:scene.clone(),game:EditorGame::CollectDodge,listen:listen.clone(),debug_hooks:*debug_hooks };
+                Self::connect_local(&restart,scene,text.clone(),EditorGame::CollectDodge,listen,*debug_hooks)
+            }
+            #[cfg(feature = "room-project")]
+            HostSpec::PreparedRoom { scene, text, listen, debug_hooks } => {
+                Self::connect_local(spec,scene,text.clone(),EditorGame::RoomEscape,listen,*debug_hooks)
             }
             HostSpec::Remote { url, token } => {
                 let full = ws_url(url, token.as_deref());
@@ -138,34 +223,80 @@ impl Backend {
                 }
                 .map_err(|e| format!("cannot connect to {url}: {e}"))?;
                 erp.call_timeout = CALL_TIMEOUT;
+                let (game, identity, own_client, managed_input) = discover(&mut erp)?;
                 let mut rc = RemoteConfig::new(if token.is_some() { url } else { &full });
                 rc.token.clone_from(token);
                 rc.source = "view".to_string();
-                let bridge = RemoteBridge::<PhysGame>::connect(rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
-                let mut b = Backend { spec: spec.clone(), erp, bridge, host: None, own_client: USER_CLIENT.to_string(), url: Some(url.clone()), game: String::new() };
-                b.handshake()?;
-                Ok(b)
+                rc.view_delivery = delivery(game, false);
+                rc.expected_identity = Some(identity.clone());
+                let bridge = EditorStream::connect(game, rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None })
             }
         }
     }
 
-    /// Learns who this connection is and what the host runs.
-    fn handshake(&mut self) -> Result<(), String> {
-        let d = self.erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
-        if let Some(c) = d.pointer("/you/client").and_then(J::as_str) {
-            self.own_client = c.to_string();
-        }
-        self.game = d.pointer("/engine/game").and_then(J::as_str).unwrap_or_default().to_string();
-        if !self.game.is_empty() && self.game != "PhysGame" {
-            return Err(format!("the host runs '{}'; this editor draws PhysGame scenes", self.game));
-        }
-        Ok(())
+    fn connect_local(
+        spec: &HostSpec,
+        scene: &Path,
+        text: String,
+        selected_game: EditorGame,
+        listen: &Option<ServerConfig>,
+        debug_hooks: bool,
+    ) -> Result<Backend, String> {
+        let mut cfg = match listen {
+            Some(c) => c.clone(),
+            None => {
+                let mut c = ServerConfig::new(Auth::DevNoAuth);
+                c.listen = false;
+                c
+            }
+        };
+        cfg.listen = listen.is_some();
+        cfg.limits.allow_scene_paths = true;
+        cfg.limits.debug_hooks = debug_hooks;
+        cfg.limits.max_step_per_call = 20_000;
+        let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
+        cfg.screenshot = Some(screenshot_service);
+        let host = match selected_game {
+            EditorGame::PhysGame => spawn_phys_host(text, Some(scene.to_path_buf()), cfg)?,
+            EditorGame::Arena => spawn_arena_host(text, Some(scene.to_path_buf()), cfg)?,
+            #[cfg(feature = "collect-dodge")]
+            EditorGame::CollectDodge => orr_remote::collect_dodge::spawn_host(text, Some(scene.to_path_buf()), cfg)?,
+            #[cfg(feature = "room-project")]
+            EditorGame::RoomEscape => orr_remote::room_escape::spawn_host(text,Some(scene.to_path_buf()),cfg)?,
+            EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+            #[cfg(feature = "terrain-physics")]
+            EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+            #[cfg(feature = "navigation")]
+            EditorGame::NavigationYard3D => orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+        };
+        let connector = host.connector();
+        let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
+        let mut erp = ErpClient::with_transport(Box::new(link("ERP")?));
+        erp.call_timeout = CALL_TIMEOUT;
+        let mut rc = RemoteConfig::new("");
+        rc.source = "view".to_string();
+        rc.view_delivery = ViewDeliveryMode::RequireFenced;
+        // In process a frame is a copy, not a message: let an edit show at once instead of
+        // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
+        rc.max_fps = 240;
+        let (game, identity, own_client, managed_input) = discover(&mut erp)?;
+        rc.expected_identity = Some(identity.clone());
+        let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
+        let url = host.url().map(str::to_string);
+        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner) })
     }
 
     /// Another frame stream, for what the viewport previews (`proposal:p3`).
-    pub fn frame_stream(&self, source: &str) -> Result<RemoteBridge<PhysGame>, String> {
+    pub fn frame_stream(&self, source: &str) -> Result<EditorStream, String> {
         let mut rc = match &self.spec {
-            HostSpec::Local { .. } => RemoteConfig::new(""),
+            HostSpec::Local { .. } | HostSpec::LocalGame { .. } => RemoteConfig::new(""),
+            #[cfg(feature = "room-project")]
+            HostSpec::PreparedRoom { .. } => RemoteConfig::new(""),
+            #[cfg(feature = "collect-dodge")]
+            HostSpec::PreparedCollect { .. } => RemoteConfig::new(""),
+            #[cfg(feature = "sprites")]
+            HostSpec::PreparedArena { .. } => RemoteConfig::new(""),
             HostSpec::Remote { url, token } => {
                 let mut c = RemoteConfig::new(&if token.is_some() { url.clone() } else { ws_url(url, None) });
                 c.token.clone_from(token);
@@ -173,12 +304,14 @@ impl Backend {
             }
         };
         rc.source = source.to_string();
+        rc.view_delivery = delivery(self.game, self.spec.is_local());
+        rc.expected_identity = Some(self.identity.clone());
         match &self.host {
             Some(h) => {
                 let t = h.connector().connect(USER_CLIENT, Caps::ALL).map_err(|e| e.to_string())?;
-                RemoteBridge::<PhysGame>::connect_transport(Box::new(t), rc)
+                EditorStream::connect_transport(self.game, Box::new(t), rc)
             }
-            None => RemoteBridge::<PhysGame>::connect(rc),
+            None => EditorStream::connect(self.game, rc),
         }
     }
 
@@ -199,5 +332,73 @@ impl Backend {
             .call("watch.subscribe", json!({"topics": ["tick", "history", "proposals", "activity"], "include_reads": true}))
             .map(|_| ())
             .map_err(|e| format!("watch.subscribe: {e}"))
+    }
+}
+
+// Discover before choosing a native frame decoder. Schema comparison includes
+// fields, ranges and descriptors, not just type names. The stream repeats the
+// identity check on its own connection before subscribing. This checks game and
+// build/schema compatibility, not a unique host instance or source-content hash.
+fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, bool), String> {
+    let d = erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
+    if d["erp_version"].as_u64() != Some(1) {
+        return Err("editor requires ERP version 1".into());
+    }
+    let name = d.pointer("/engine/game").and_then(J::as_str).ok_or("host discovery is missing explicit engine.game")?;
+    let game = EditorGame::from_name(name)?;
+    let build_id = d.pointer("/engine/build_id").and_then(J::as_str).filter(|s| !s.is_empty()).ok_or("host discovery is missing engine.build_id")?.to_string();
+    let types = game.types();
+    let schema_text = if cfg!(feature = "linked-prefabs") { types.json_schema() } else { types.legacy_json_schema() };
+    let schema: J = serde_json::from_str(&schema_text).map_err(|e| format!("compiled schema: {e}"))?;
+    let actual = erp.call("registry.schema", J::Null).map_err(|e| format!("registry.schema: {e}"))?;
+    if actual.get("schema") != Some(&schema) {
+        return Err(format!("{name} reflected schema mismatch: host descriptors differ from this editor"));
+    }
+    let own_client = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
+    let input = if game.has_keyboard() { erp.call("registry.input", J::Null).ok() } else { None };
+    let mut input_types = orr_reflect::TypeRegistry::new();
+    input_types.register_component::<orr_sample::arena_game::ArenaInput>("ArenaInput");
+    let expected_input: J = serde_json::from_str(&input_types.type_json_schema("ArenaInput").expect("registered input")).expect("valid reflected schema");
+    #[cfg(feature = "collect-dodge")]
+    let expected_input = if game.is_collect() {
+        let mut types = orr_reflect::TypeRegistry::new();
+        types.register_component::<orr_sample::collect_game::CollectInput>("CollectInput");
+        serde_json::from_str(&types.type_json_schema("CollectInput").expect("registered input")).expect("reflected JSON schema")
+    } else { expected_input };
+    #[cfg(feature = "room-project")]
+    let expected_input = if game.is_room() {
+        let mut types = orr_reflect::TypeRegistry::new();
+        types.register_component::<orr_sample::room_game::RoomInput>("RoomInput");
+        serde_json::from_str(&types.type_json_schema("RoomInput").expect("registered room input")).expect("reflected room JSON schema")
+    } else { expected_input };
+    let managed_input = game.has_keyboard() && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
+    Ok((game, RemoteIdentity { game: name.to_string(), build_id, schema }, own_client, managed_input))
+}
+
+fn delivery(game: EditorGame, local: bool) -> ViewDeliveryMode {
+    if local || (game.has_keyboard() || game.is_3d()) { ViewDeliveryMode::RequireFenced } else { ViewDeliveryMode::PreferFenced }
+}
+
+#[cfg(all(test, feature = "collect-dodge", not(feature = "linked-prefabs")))]
+mod linked_unified_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_consumer_discovery_stays_legacy() {
+        if std::env::var_os("ORR_REQUIRE_LINKED_PARSER").is_some() {
+            let linked = include_str!("../../orr_remote/tests/linked_prefab_boundary.scene.yaml");
+            assert!(orr_reflect::Scene::parse(linked, &orr_sample::collect_project::types()).is_ok());
+        }
+        let spec = HostSpec::PreparedCollect {
+            scene: PathBuf::from("inert-discovery-fixture.scene.yaml"),
+            text: include_str!("../../../scenes/collect_dodge_v1.scene.yaml").into(),
+            listen: None,
+            debug_hooks: false,
+        };
+        // This invokes actual local host discovery and exact schema comparison.
+        let mut backend = Backend::connect(&spec).unwrap();
+        let result = backend.erp.call("registry.schema", J::Null).unwrap();
+        assert_eq!(result["schema"]["properties"]["schema"]["const"], "orr.scene/1");
+        assert!(result["schema"]["properties"].get("prefabs").is_none());
     }
 }

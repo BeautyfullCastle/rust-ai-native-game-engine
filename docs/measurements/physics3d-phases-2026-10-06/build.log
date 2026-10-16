@@ -1,0 +1,9 @@
+   Compiling orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs/crates/orr_ecs)
+   Compiling orr_fp v0.0.1 (/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs/crates/orr_fp)
+   Compiling orr_sim v0.0.1 (/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs/crates/orr_sim)
+   Compiling orr_reflect_derive v0.0.1 (/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs/crates/orr_reflect_derive)
+   Compiling orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs/crates/orr_reflect)
+   Compiling orr_proto v0.0.1 (/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs/crates/orr_proto)
+   Compiling orr_session v0.0.1 (/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs/crates/orr_session)
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/su-physics-phase-costs/crates/orr_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 17.34s

@@ -6,8 +6,8 @@
  * as a stream of bytes and feed it inputs. No Rust type crosses this
  * boundary. Byte formats: docs/view-stream.md in the Orrery repository.
  *
- * The game is chosen when the library is built (this build hosts the physics
- * demo, "PhysGame"); the header is the same for every game.
+ * This build has explicit entries for the physics demo ("PhysGame") and a
+ * built-in local Yard3D scene. Read the selected handle's schema before decoding.
  *
  * Conventions
  *  - Functions return int codes: ORR_OK (0), ORR_NO_FRAME (1, nothing new,
@@ -141,10 +141,22 @@ ORR_API const char* orr_last_error(void);
 
 /* ---- host ---- */
 
-/* Starts a host thread of the compiled-in game on the scene YAML at
+/* Starts a PhysGame host thread on the scene YAML at
  * scene_path (UTF-8; NULL = the built-in demo scene) and opens a paused play
  * session. cfg may be NULL. Returns NULL on failure (see orr_last_error). */
 ORR_API OrrHost* orr_host_open(const char* scene_path, const OrrHostConfig* cfg);
+
+/* Starts the deterministic built-in Yard3D scene (24 initial raining bodies
+ * plus yard fixtures, 2 players, 60 Hz, paused unless ORR_HOST_RUN is set).
+ * max_view_version is the highest view-stream version the caller understands:
+ * values below 2 return NULL before starting a host (see orr_last_error); higher
+ * maxima still receive v2/type3/88-byte entity records. cfg may be NULL and has
+ * the same meaning as in orr_host_open. The _v1 suffix versions this entry's C
+ * contract, independently of the view format; existing ABI2 layouts/symbols and
+ * the PhysGame/relay entries are unchanged. No scene path or Yard relay support.
+ * Dynamic loaders must report unsupported if this symbol is absent in an older
+ * library: ABI2 alone does not promise this optional additive entry. */
+ORR_API OrrHost* orr_yard3d_host_open_v1(uint32_t max_view_version, const OrrHostConfig* cfg);
 
 /* Opens a handle that PLAYS on a relay server (orr_server --game physics) as a client:
  * it joins a room, predicts, rolls back, and publishes the same view stream and events as a
@@ -187,7 +199,20 @@ ORR_API size_t orr_host_url(OrrHost* host, char* buf, size_t cap);
  *   ORR_OK          copied
  *   ORR_NO_FRAME    nothing new (*written = 0)
  *   ORR_ERR_BUFFER  cap too small: *written = size needed, the frame stays
- * Newer frames replace older unread ones: poll as often as you draw. */
+ *   ORR_ERR_NULL    buf is NULL with nonzero cap, even if nothing is ready;
+ *                   *written = 0, no frame/event is consumed
+ * NULL with cap 0 is a size probe: ORR_ERR_BUFFER if data exists, otherwise
+ * ORR_NO_FRAME. Neither case consumes data.
+ * Newer frames normally replace older unread ones: poll as often as you draw.
+ * A frame carrying view-stream FLAG_EVENTS_RESET (bit 3; see docs/view-stream.md)
+ * is a recovery baseline: pending event batches are discarded and later batches
+ * are suppressed until this frame is successfully copied or taken with
+ * orr_view_poll_ptr. If newer snapshots replace an unread baseline, the returned
+ * frame retains FLAG_EVENTS_RESET | FLAG_DISCONTINUITY and prev == cur. A
+ * too-small buffer does not acknowledge the baseline. After acknowledgement,
+ * event records at or before the baseline tick are ignored to prevent late old
+ * timeline events from resurfacing; a later ordinary discontinuity clears that
+ * cutoff. */
 ORR_API int orr_view_poll(OrrHost* host, uint8_t* buf, size_t cap, size_t* written);
 
 /* Zero-copy variant: *data / *len point at the newest unread frame, valid
@@ -196,7 +221,13 @@ ORR_API int orr_view_poll(OrrHost* host, uint8_t* buf, size_t cap, size_t* writt
 ORR_API int orr_view_poll_ptr(OrrHost* host, const uint8_t** data, size_t* len);
 
 /* Takes the oldest queued event batch message. Same buffer rules as
- * orr_view_poll. Events are queued, never replaced. */
+ * orr_view_poll. Events are queued, never replaced, except that a received
+ * FLAG_EVENTS_RESET baseline discards queued batches and suppresses new batches
+ * until the baseline is acknowledged; afterward records at or before the
+ * baseline tick are ignored until an ordinary discontinuity. The FFI's own
+ * 4096-batch safety cap still drops its oldest batch without synthesizing a
+ * reset. The local-host ERP path does not gain a new upstream bounded-queue
+ * recovery guarantee here. */
 ORR_API int orr_events_poll(OrrHost* host, uint8_t* buf, size_t cap, size_t* written);
 
 /* ---- driving the simulation ---- */

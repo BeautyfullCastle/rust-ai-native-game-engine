@@ -6,6 +6,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use common::{host, rust_result};
@@ -15,6 +16,11 @@ use orr_tui::schema::ViewSchema;
 use orr_tui::source::{Control, Incoming, Session, SocketSource, Source};
 use orr_tui::state::ViewState;
 use orr_viewstream::ViewFrame;
+use orr_remote::yard3d::spawn_yard3d_host;
+use orr_remote::{Auth, ServerConfig};
+use orr_sample::yard3d_game::YardConfig;
+use orr_tui::render3d::{self, Camera3};
+use orr_viewstream::ViewFrame3;
 
 fn temp_file(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("orr_tui_{}_{name}", std::process::id()))
@@ -47,6 +53,66 @@ fn plain_tcp_headless_result_equals_the_rust_bridge() {
     let dump = temp_file("tcp_dump.txt");
     assert_eq!(headless_result(&url, 120, &dump), rust_result(120));
     let _ = std::fs::remove_file(dump);
+}
+
+fn yard3d_config() -> YardConfig {
+    YardConfig { rain_per_second: 0, max_entities: 256, ..YardConfig::new(4) }
+}
+
+fn first_yard3d_frame(url: &str) -> (ViewSchema, ViewFrame3) {
+    let mut src = SocketSource::connect(url, None, 1000, Session::Ensure { run: false }).expect("connect to Yard3D");
+    let schema = ViewSchema::parse(src.schema_text()).expect("parse Yard3D schema");
+    assert_eq!(schema.game, "Yard3D");
+    assert_eq!(schema.dimensions, 3);
+    let mut state = ViewState::new(schema.clone(), Instant::now());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Some(message) = src.recv(Duration::from_millis(100)).expect("read Yard3D frame") {
+            assert!(!matches!(message, Incoming::Error(_)), "{message:?}");
+            state.ingest(&message, Instant::now());
+            if let Some(frame) = state.frame3.take() {
+                assert!(frame.entities.len() > 4, "setup must publish the yard fixtures");
+                return (schema, frame);
+            }
+        }
+    }
+    panic!("Yard3D host did not publish a frame");
+}
+
+#[test]
+fn yard3d_frames_reach_the_tui_over_websocket_and_tcp_and_render() {
+    let host = spawn_yard3d_host(yard3d_config(), ServerConfig::new(Auth::DevNoAuth)).expect("Yard3D host");
+    let ws_url = host.url().expect("host URL").to_string();
+    let (schema, ws_frame) = first_yard3d_frame(&ws_url);
+    let tcp_url = ws_url.replacen("ws://", "tcp://", 1);
+    let (tcp_schema, tcp_frame) = first_yard3d_frame(&tcp_url);
+    assert_eq!(tcp_schema.dimensions, 3);
+    assert!(!tcp_frame.entities.is_empty());
+
+    let camera = Camera3::fit(&ws_frame);
+    let grid = render3d::render(&ws_frame, &schema, &camera, 1.0, 80, 30, false);
+    assert_eq!((grid.w, grid.h), (80, 30));
+    assert!(grid.cells.iter().any(|cell| cell.ch != ' '), "the authoritative nonempty Yard3D frame should draw");
+}
+
+/// Opt-in loopback host for an actual TUI terminal smoke. Set both environment variables in the
+/// test process; the URL is printed and flushed before this test waits for its stop file.
+#[test]
+#[ignore = "opt-in interactive Yard3D host fixture"]
+fn yard3d_terminal_host_fixture() {
+    assert_eq!(std::env::var("ORR_TUI_YARD3D_FIXTURE").as_deref(), Ok("1"));
+    let stop_path = std::env::var_os("ORR_TUI_YARD3D_FIXTURE_STOP").map(PathBuf::from).expect("stop-file path");
+    assert!(stop_path.is_absolute(), "stop-file path must be absolute");
+    assert!(!stop_path.exists(), "stop file must be fresh for this fixture");
+    let host = spawn_yard3d_host(yard3d_config(), ServerConfig::new(Auth::DevNoAuth)).expect("Yard3D host");
+    println!("YARD3D_FIXTURE_URL={}", host.url().expect("host URL"));
+    std::io::stdout().flush().expect("flush fixture endpoint");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline && !stop_path.exists() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(stop_path.exists(), "fixture stop file was not observed before the 120-second deadline");
+    drop(host);
 }
 
 /// The x of the paddle of `slot` in a frame, found through the schema (kind name, `slot` property).

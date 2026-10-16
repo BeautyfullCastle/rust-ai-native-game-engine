@@ -1,0 +1,44 @@
+name: arena-agent-trials
+
+on:
+  push:
+    branches: [main, su/engine-correctness-hardening]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trial:
+    name: Arena trial harness (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: arena-agent-trial-release
+      - name: Existing scripted-control oracle regressions
+        run: python tools/arena_agent_benchmark.py --self-test
+      - name: Trial protocol and accounting regressions
+        run: python tools/arena_agent_trial.py --self-test
+      - name: Build the actual headless Arena host and CLI
+        run: cargo build --locked --release -p orr_remote --bin orr_remote_host -p orr_cli --bin orr
+      - name: Actual mock-driven host success, failure, interruption and resume
+        run: python tools/arena_agent_trial.py --integration-test --output "${{ runner.temp }}/arena-agent-trial-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain raw mock trial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-agent-trial-${{ matrix.os }}
+          path: ${{ runner.temp }}/arena-agent-trial-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error

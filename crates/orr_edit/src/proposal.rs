@@ -31,6 +31,22 @@ impl fmt::Display for ProposalId {
     }
 }
 
+/// A document-local concurrency guard for a proposal's verification inputs.
+/// Capture it while holding the same shared document borrow as verification,
+/// then pass it to [`EditorDoc::accept_if_unchanged`]. This is not proof that
+/// verification ran or that its checks passed; the caller must judge the report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProposalState {
+    /// Opaque document-instance identity; a new host/document cannot reuse it.
+    pub document_id: u128,
+    /// The proposal whose ops were captured.
+    pub id: ProposalId,
+    /// Revision of the base document.
+    pub document_revision: u64,
+    /// Revision of the proposal's staged document.
+    pub proposal_revision: u64,
+}
+
 /// One line of [`EditorDoc::list_proposals`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposalInfo {
@@ -92,16 +108,27 @@ impl Proposals {
 
 /// The scene without comments, the form used for diffs.
 fn plain(scene: &Scene) -> Scene {
-    Scene { singletons: scene.singletons.clone(), entities: scene.entities.clone(), ..Scene::default() }
+    Scene {
+        singletons: scene.singletons.clone(),
+        entities: scene.entities.clone(),
+        #[cfg(feature = "linked-prefabs")]
+        prefab_links: scene.prefab_links.clone(),
+        ..Scene::default()
+    }
 }
 
 fn same_content(a: &Scene, b: &Scene) -> bool {
+    #[cfg(feature = "linked-prefabs")]
+    if a.prefab_links != b.prefab_links { return false; }
     a.singletons == b.singletons && a.entities == b.entities
 }
 
 impl EditorDoc {
     fn proposal(&self, id: ProposalId) -> Result<&Proposal, EditError> {
-        self.proposals.map.get(&id.0).ok_or(EditError::UnknownProposal(id.0))
+        self.proposals
+            .map
+            .get(&id.0)
+            .ok_or(EditError::UnknownProposal(id.0))
     }
 
     /// Starts an empty proposal: a private copy of the document to stage
@@ -111,7 +138,16 @@ impl EditorDoc {
         self.proposals.last_id += 1;
         let id = self.proposals.last_id;
         let base = plain(&self.scene);
-        self.proposals.map.insert(id, Proposal { label: label.to_string(), origin, ops: Vec::new(), staged, base });
+        self.proposals.map.insert(
+            id,
+            Proposal {
+                label: label.to_string(),
+                origin,
+                ops: Vec::new(),
+                staged,
+                base,
+            },
+        );
         Ok(ProposalId(id))
     }
 
@@ -122,14 +158,31 @@ impl EditorDoc {
     /// `accept` creates the entity under the GUID the preview showed.
     pub fn proposal_apply(&mut self, id: ProposalId, op: Op) -> Result<Applied, EditError> {
         self.proposal(id)?;
+        let old_guid = self.next_guid;
         let op = match op {
-            Op::SpawnEntity { guid: None, name, components } => {
-                Op::SpawnEntity { guid: Some(self.fresh_guid()), name, components }
-            }
+            Op::SpawnEntity {
+                guid: None,
+                name,
+                components,
+            } => Op::SpawnEntity {
+                guid: Some(self.fresh_guid()),
+                name,
+                components,
+            },
             other => other,
         };
-        let p = self.proposals.map.get_mut(&id.0).ok_or(EditError::UnknownProposal(id.0))?;
-        let applied = p.staged.apply(op.clone(), p.origin.clone())?;
+        let p = self
+            .proposals
+            .map
+            .get_mut(&id.0)
+            .ok_or(EditError::UnknownProposal(id.0))?;
+        let applied = match p.staged.apply(op.clone(), p.origin.clone()) {
+            Ok(applied) => applied,
+            Err(error) => {
+                self.next_guid = old_guid;
+                return Err(error);
+            }
+        };
         if applied.changed {
             p.ops.push(op);
         }
@@ -139,17 +192,43 @@ impl EditorDoc {
     /// Stages several ops as one step: all or nothing. If any op is invalid,
     /// none is staged and the proposal is unchanged. Otherwise like
     /// [`proposal_apply`](Self::proposal_apply) for each op, in order.
-    pub fn proposal_apply_all(&mut self, id: ProposalId, ops: Vec<Op>) -> Result<Vec<Applied>, EditError> {
+    pub fn proposal_apply_all(
+        &mut self,
+        id: ProposalId,
+        ops: Vec<Op>,
+    ) -> Result<Vec<Applied>, EditError> {
         self.proposal(id)?;
+        let old_guid = self.next_guid;
         let mut filled = Vec::with_capacity(ops.len());
         for op in ops {
             filled.push(match op {
-                Op::SpawnEntity { guid: None, name, components } => Op::SpawnEntity { guid: Some(self.fresh_guid()), name, components },
+                Op::SpawnEntity {
+                    guid: None,
+                    name,
+                    components,
+                } => Op::SpawnEntity {
+                    guid: Some(self.fresh_guid()),
+                    name,
+                    components,
+                },
                 other => other,
             });
         }
-        let p = self.proposals.map.get_mut(&id.0).ok_or(EditError::UnknownProposal(id.0))?;
-        let applied = p.staged.apply_batch(&p.label, filled.clone(), p.origin.clone())?;
+        let p = self
+            .proposals
+            .map
+            .get_mut(&id.0)
+            .ok_or(EditError::UnknownProposal(id.0))?;
+        let applied = match p
+            .staged
+            .apply_batch(&p.label, filled.clone(), p.origin.clone())
+        {
+            Ok(applied) => applied,
+            Err(error) => {
+                self.next_guid = old_guid;
+                return Err(error);
+            }
+        };
         for (op, a) in filled.into_iter().zip(&applied) {
             if a.changed {
                 p.ops.push(op);
@@ -164,7 +243,11 @@ impl EditorDoc {
             let g = Guid::from_u32(self.next_guid);
             self.next_guid = self.next_guid.wrapping_add(1);
             let used = self.scene.entities.contains_key(&g)
-                || self.proposals.map.values().any(|p| p.staged.scene.entities.contains_key(&g));
+                || self
+                    .proposals
+                    .map
+                    .values()
+                    .any(|p| p.staged.scene.entities.contains_key(&g));
             if !used {
                 return g;
             }
@@ -174,6 +257,18 @@ impl EditorDoc {
     /// The ops staged so far, in order (GUIDs filled in).
     pub fn proposal_ops(&self, id: ProposalId) -> Result<&[Op], EditError> {
         Ok(&self.proposal(id)?.ops)
+    }
+
+    /// Captures the current base and proposal revisions. Edits, undo, redo
+    /// and rollback invalidate this state even if they restore old values.
+    /// Reading or successfully staging no-op edits does not invalidate it.
+    pub fn proposal_state(&self, id: ProposalId) -> Result<ProposalState, EditError> {
+        Ok(ProposalState {
+            document_id: self.instance_id,
+            id,
+            document_revision: self.revision(),
+            proposal_revision: self.proposal(id)?.staged.revision(),
+        })
     }
 
     /// Name, origin and size of one proposal.
@@ -193,7 +288,11 @@ impl EditorDoc {
 
     /// All open proposals, oldest first.
     pub fn list_proposals(&self) -> Vec<ProposalInfo> {
-        self.proposals.map.iter().map(|(&id, p)| self.info_of(id, p)).collect()
+        self.proposals
+            .map
+            .iter()
+            .map(|(&id, p)| self.info_of(id, p))
+            .collect()
     }
 
     /// Read-only queries on the proposal's preview frame (its entities,
@@ -213,8 +312,17 @@ impl EditorDoc {
     /// edits made to the document since the proposal was made.
     pub fn proposal_diff(&self, id: ProposalId) -> Result<ProposalDiff, EditError> {
         let p = self.proposal(id)?;
-        let text = diff::unified_diff(&p.base.to_yaml(), &plain(&p.staged.scene).to_yaml(), "base", "proposal", 3);
-        Ok(ProposalDiff { text, summary: diff::summarize(&p.base, &p.staged.scene) })
+        let text = diff::unified_diff(
+            &p.base.to_yaml(),
+            &plain(&p.staged.scene).to_yaml(),
+            "base",
+            "proposal",
+            3,
+        );
+        Ok(ProposalDiff {
+            text,
+            summary: diff::summarize(&p.base, &p.staged.scene),
+        })
     }
 
     /// Would `accept` succeed now? Runs the ops on a copy of the current
@@ -223,6 +331,25 @@ impl EditorDoc {
         let p = self.proposal(id)?;
         let mut copy = self.fork()?;
         run_ops(&mut copy, id, &p.ops, &p.origin).map(|_| ())
+    }
+
+    /// Accepts only if neither the base document nor the proposal has changed
+    /// since `expected` was captured. The comparison and acceptance happen
+    /// under one exclusive borrow. A stale state leaves both untouched;
+    /// verify again before retrying. Like [`accept`](Self::accept), this does
+    /// not decide whether the caller's verification checks passed.
+    pub fn accept_if_unchanged(
+        &mut self,
+        id: ProposalId,
+        expected: ProposalState,
+    ) -> Result<Accepted, EditError> {
+        if self.in_tx() {
+            return Err(EditError::TxOpen);
+        }
+        if self.proposal_state(id)? != expected {
+            return Err(EditError::StaleVerification { proposal: id.0 });
+        }
+        self.accept(id)
     }
 
     /// Applies the proposal to the document as one history entry (label of
@@ -240,40 +367,75 @@ impl EditorDoc {
         let p = self.proposal(id)?;
         let (label, origin, ops) = (p.label.clone(), p.origin.clone(), p.ops.clone());
         let before = self.top_entry_id();
-        self.begin_tx(&label, origin.clone())?;
-        let applied = match run_ops(self, id, &ops, &origin) {
-            Ok(a) => a,
-            Err(e) => {
-                self.rollback_tx()?;
-                return Err(e);
-            }
+        let applied = if self.admission.is_some() {
+            // Asset resolution may fail after an earlier op was accepted, and
+            // even the old asset may then be unavailable. Discard a private
+            // candidate on failure instead of trying to undo through admission.
+            self.stage_atomically(|staged| {
+                staged.begin_tx(&label, origin.clone())?;
+                let applied = run_ops(staged, id, &ops, &origin)?;
+                staged.commit_tx()?;
+                Ok(applied)
+            })?
+        } else {
+            self.begin_tx(&label, origin.clone())?;
+            let applied = match run_ops(self, id, &ops, &origin) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.rollback_tx()?;
+                    return Err(e);
+                }
+            };
+            self.commit_tx()?;
+            applied
         };
-        self.commit_tx()?;
         self.proposals.map.remove(&id.0);
         let now = self.top_entry_id();
         let history_id = if now != before { now } else { None };
-        Ok(Accepted { history_id, applied })
+        Ok(Accepted {
+            history_id,
+            applied,
+        })
     }
 
     /// The id of the newest history entry in effect.
     fn top_entry_id(&self) -> Option<u64> {
-        self.history().iter().rev().find(|h| !h.undone).map(|h| h.id)
+        self.history()
+            .iter()
+            .rev()
+            .find(|h| !h.undone)
+            .map(|h| h.id)
     }
 
     /// Discards a proposal.
     pub fn reject(&mut self, id: ProposalId) -> Result<(), EditError> {
-        self.proposals.map.remove(&id.0).map(|_| ()).ok_or(EditError::UnknownProposal(id.0))
+        self.proposals
+            .map
+            .remove(&id.0)
+            .map(|_| ())
+            .ok_or(EditError::UnknownProposal(id.0))
     }
 }
 
 /// Applies `ops` in order to `doc` (which must be in a transaction of
 /// `origin`, or a scratch copy), mapping a failure to a conflict.
-fn run_ops(doc: &mut EditorDoc, id: ProposalId, ops: &[Op], origin: &Origin) -> Result<Vec<Applied>, EditError> {
+fn run_ops(
+    doc: &mut EditorDoc,
+    id: ProposalId,
+    ops: &[Op],
+    origin: &Origin,
+) -> Result<Vec<Applied>, EditError> {
     let mut out = Vec::with_capacity(ops.len());
     for (i, op) in ops.iter().enumerate() {
         match doc.apply(op.clone(), origin.clone()) {
             Ok(a) => out.push(a),
-            Err(cause) => return Err(EditError::ProposalConflict { proposal: id.0, op_index: i, cause: Box::new(cause) }),
+            Err(cause) => {
+                return Err(EditError::ProposalConflict {
+                    proposal: id.0,
+                    op_index: i,
+                    cause: Box::new(cause),
+                })
+            }
         }
     }
     Ok(out)

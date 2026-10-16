@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "sample-imported-scene",
+  "version": "1.0.0",
+  "engine": "^0.0.1",
+  "capabilities": ["models"],
+  "dependencies": {},
+  "files": ["background.glb", "foreground.glb", "LICENSE.txt", "generate.py"]
+}

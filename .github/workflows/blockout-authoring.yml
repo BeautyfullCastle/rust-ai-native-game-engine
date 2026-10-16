@@ -1,0 +1,44 @@
+name: blockout-authoring
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  blockout-contracts:
+    # Same temporary bubblewrap-compatible x64 pin as existing Room acceptance.
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      ORR_BLOCKOUT_EVIDENCE: /tmp/orr-blockout-evidence
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install required software GPU and mount isolation
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers bubblewrap
+      - name: Exact CPU inventory, default isolation and strict feature checks
+        run: tools/check-blockout.sh contracts
+      - name: Actual widget, independent GPU and source-hidden Room export acceptance
+        run: tools/check-blockout.sh gpu
+      - name: Preserve source, inventories and CPU/GPU/export evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blockout-authoring-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            /tmp/orr-blockout-evidence/**/*.log
+            /tmp/orr-blockout-evidence/**/*.stderr
+            /tmp/orr-blockout-evidence/**/*.txt
+            /tmp/orr-blockout-evidence/**/*.json
+            /tmp/orr-blockout-evidence/**/*.jsonl
+            /tmp/orr-blockout-evidence/**/*.png
+            /tmp/orr-blockout-evidence/**/*.frame

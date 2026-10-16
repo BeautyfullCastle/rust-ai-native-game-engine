@@ -23,7 +23,7 @@ Four ways to get the same bytes:
 
 | Way | For | Entry point |
 | --- | --- | --- |
-| C ABI | a view in the same process (Unity plugin, Unreal module, GDExtension, console title) | `orr_host_open` (local), `orr_client_open` (multiplayer), `orr_view_poll` |
+| C ABI | a view in the same process (Unity plugin, Unreal module, GDExtension, console title) | `orr_host_open` (local PhysGame), `orr_yard3d_host_open_v1` (local Yard3D), `orr_client_open` (PhysGame multiplayer), `orr_view_poll` |
 | WebSocket | a view in another process, machine or devkit | `watch.subscribe {"topics":["viewstream"]}` |
 | Plain TCP | scripts, tools, anything without a WebSocket library | same call, frames arrive as hex in JSON |
 | Rust | `orr_bridge` users | `ViewStreamSource::pump(&mut bridge)` |
@@ -33,6 +33,14 @@ that predicts and rolls back: see "Multiplayer (client sessions)" below. The C A
 (`orr_client_open`) and a headless ERP host in client mode (`orr_remote_host --join`) open client
 sessions; the ERP `viewstream` topic of a normal `orr_remote` host serves its single-peer play
 session (no rollback, every event verified).
+
+## Snapshot/checksum compatibility
+
+The ORRF simulation snapshot version is independent of this view-stream format. The
+ORRF v2 checksum change does not alter OVS1 record layouts or the C ABI version, but
+simulation checksums returned by client sessions change and old/new simulation builds
+must not share a room. See [Frame and replay compatibility](frame-compatibility.md) for
+old snapshots, replay keyframes, build IDs, and upgrade requirements.
 
 ## Messages
 
@@ -77,6 +85,7 @@ Frame flags (byte 7):
 | 0 | `rolled_back` | a rollback corrected the past since the previous frame sent; `rollback_from..rollback_to` is the range resimulated. Positions of those ticks changed: an interpolating view should smooth the correction (`orr_view` does this with an error offset that decays). |
 | 1 | `discontinuity` | the timeline jumped (seek, branch, new session): show this frame as it is, reset interpolation and smoothing. `prev` equals `cur` in every record. |
 | 2 | `paused` | the simulation is paused: the tick does not advance by itself. |
+| 3 | `events_reset` | presentation event history has a gap. Clear all pending predicted sound/VFX handles and event-key tables before ingesting this full baseline. Also carries `discontinuity`, with `prev == cur`. |
 
 #### Entity record (48 bytes)
 
@@ -208,7 +217,7 @@ the order below, so even a `strstr` reader can find them. Example (shortened):
  "endian":"little",
  "fixed_point":{"type":"q48.16","raw":"i64","frac_bits":16,"note":"..."},
  "frame":{"magic":"OVS1","header_len":56,"record_len":48,"shapes":["circle","quad","capsule"],
-          "interp_modes":["prediction","snapshot","none"],"flags":{"rolled_back":1,"discontinuity":2,"paused":4}},
+          "interp_modes":["prediction","snapshot","none"],"flags":{"rolled_back":1,"discontinuity":2,"paused":4,"events_reset":8}},
  "kinds":[{"id":0,"name":"static","props":[]},
           {"id":1,"name":"dynamic","props":[{"name":"speed","type":"f32"}]},
           {"id":2,"name":"bar","props":[]},
@@ -251,7 +260,10 @@ from a local host:
   the same `(tick, system, seq)` key, `verified` (the confirmed inputs produced them) or
   `canceled` (a rollback found they do not happen). A view starts a sound or particle on
   `predicted` and takes it back on `canceled`. Events that only exist after a rollback arrive as
-  new `predicted` records. Every `verified` and `canceled` record is preceded by its `predicted`.
+  new `predicted` records. In an uninterrupted stream, each settlement follows its `predicted`.
+  A presentation overflow instead emits `events_reset`: clear all speculative handles and rebuild
+  from that full frame. Missed transient effects are not replayed; late settlements belonging to
+  the discarded baseline are suppressed. `verified` is final simulation state, not durable delivery.
 - **Inputs**: `orr_set_input` works for the joined slot only (the server chose it; see the
   status). Commands go with the next submitted tick. Timeline controls (play, pause, step, seek,
   speed), `orr_erp_call` and listening sockets belong to a local host and return `ORR_ERR_ARG`.
@@ -363,15 +375,28 @@ verified=.. canceled=.. checkpoint=300 checksum=0x..`; every player of a room pr
 --dump file` prints `RESULT entities=.. frames=.. fnv=0x..`, the same line the
 C client and the Rust bridge produce for the same scenario.
 
+The Yard3D socket TUI is a separate #13 follow-up; this C ABI change does not
+add that consumer. Its scope is an XZ observer through
+`orr_tui --connect ws://HOST:PORT`: `p`/space play or pause the timeline, `s`
+steps once, `r` refits the view, and `q` quits. Gameplay input is unsupported,
+including initial neutral input, held movement and fire; the 2D input encoder
+must not produce YardInput. Interactive terminal validation remains pending
+for that follow-up. 3D headless operation is unsupported, and rejection can
+occur after a socket or session handshake. A dynamically loaded Yard3D FFI
+TUI, Yard3D relay multiplayer, arbitrary scene loading and a new GPU renderer
+remain separate work.
+
 The hosts of the same tick share one encoded message, so two subscribers get
 byte-identical frames (including `seq`).
 
 ## C ABI (`orr_ffi`)
 
 Header: `crates/orr_ffi/include/orrery.h`. The library (`cdylib`: `.so`,
-`.dylib`, `.dll`; `staticlib` for consoles) hosts **one game, chosen when it is
-built**; `orr_ffi` ships the physics demo (`PhysGame`). To host another game,
-copy the crate and replace the `spawn_phys_host` call in `open_host` with a
+`.dylib`, `.dll`; `staticlib` for consoles) provides explicit built-in game
+entries. `orr_host_open(scene_path, cfg)` remains the physics demo (`PhysGame`),
+and `orr_client_open` remains its relay client. The additive
+`orr_yard3d_host_open_v1(max_view_version, cfg)` opens a local Yard3D scene.
+To compile in another game, copy the crate and replace a game factory with a
 `LocalHost::spawn::<YourGame>` whose settings include its `view_stream` producer
 (the extractor, the kinds, the schema). The header, the schema and the stream
 are the same for every game.
@@ -392,6 +417,7 @@ orr_host_close(h);
 | --- | --- |
 | `orr_abi_version`, `orr_last_error` | version check; text of the last error on this thread |
 | `orr_host_open(scene_yaml_or_NULL, cfg)` / `orr_host_close` | start / stop a host thread with a paused play session |
+| `orr_yard3d_host_open_v1(max_view_version, cfg)` | deterministic built-in Yard3D local host; requires a reader supporting view format 2 |
 | `orr_schema_json(h, buf, cap)` | the schema, NUL-terminated; returns size needed |
 | `orr_host_url(h, buf, cap)` | `ws://` URL if opened with `ORR_HOST_LISTEN` (for out-of-process views) |
 | `orr_view_poll(h, buf, cap, &written)` / `orr_view_poll_ptr(h, &data, &len)` | newest unread frame (copy / zero-copy); `ORR_NO_FRAME` if nothing new |
@@ -402,6 +428,44 @@ orr_host_close(h);
 | `orr_client_open(cfg)` | play on an `orr_server` room (ABI 2): `OrrClientConfig` has the server address, transport, certificate fingerprint, room, slot, simulated latency/jitter/loss, timeout |
 | `orr_session_status(h, &status)` | `OrrSessionStatus` of either kind of handle (state, slot, RTT, input delay, rollbacks, desyncs, ...) |
 | `orr_confirmed_checksum(h, tick, &found, &sum)` | checksum of the confirmed state at a checkpoint tick (client sessions) |
+
+### Built-in Yard3D through the C ABI
+
+`orr_yard3d_host_open_v1(2, cfg)` creates the existing nonempty deterministic
+Yard3D scene (24 initial raining bodies plus yard fixtures, default rain of
+6 bodies/second, max 2500 entities, layout seed `0x5EED_CAFE`, session seed 42,
+two players, 60 Hz, local build ID zero) and starts a
+play session, paused unless `ORR_HOST_RUN` is set. `cfg` has the same optional listen/run settings as
+`orr_host_open`; there is no scene-path argument. The handle's schema is
+`game: "Yard3D"`, `version: 2`, with `frame3d` describing
+message type 3 and 88-byte entity records. Existing copy and pointer polling
+calls return those opaque bytes, including the usual flags and properties.
+
+`max_view_version` is the highest view format the caller can decode. A value
+below 2 returns NULL with an explanation from `orr_last_error` before a host
+thread or listening socket starts. A higher maximum still selects this
+entry's version 2 stream. The `_v1` suffix versions this entry's C contract;
+it does not mean view format 1. Existing ABI version 2, structure layouts,
+symbols and PhysGame behavior are preserved. When loading a library at run
+time, resolve the new symbol explicitly: an older ABI2 library may lack it,
+which is an unsupported feature, never a reason to call the PhysGame entry
+and interpret its records as 3D.
+
+Build the held input from the returned schema: YardInput is exactly 32 bytes,
+with buttons at offset 0, zero padding at 4, three signed 32-bit origin
+coordinates in centimetres at 8, and three signed 32-bit ray-direction
+components scaled by 1000 at 20. Button bits are shoot/spawn box/spawn ball/
+spawn capsule (1/2/4/8). `orr_set_input` uses that raw layout for slots 0 and 1;
+the generic 24-byte PhysInput layout does not apply. The no-op command is
+4 bytes. Timeline controls and ERP calls operate on the same local play
+session. Seek replays its recorded history; this entry does not add a Yard3D
+relay client or genuine late-input network rollback.
+
+The dedicated external C consumer is `tests/c/yard3d_view_client.c`, run by
+`cargo test -p orr_ffi --release --test yard3d_c_client` with
+`ORR_REQUIRE_C_COMPILER=1` to require a real C compiler and shared library.
+Header parity, existing `c_client` and `client_session` tests continue to
+cover the original ABI and 2D consumers.
 
 A host opened with `ORR_HOST_LISTEN` also serves ERP on a loopback port (for out-of-process
 views and tools) **without authentication**: any local process can drive it. Use it for
@@ -446,8 +510,64 @@ What a Unity, Unreal or Godot view has to do, in order:
 4. Each input sample (once per sim tick is enough): write the input bytes and
    `orr_set_input`.
 5. Drain `orr_events_poll` for sounds and effects; treat `predicted` as
-   reversible and `verified` as final.
+   reversible and `verified` as final. On frame flag `events_reset` (8), clear
+   pending speculative effects and event-key history before accepting new events.
+   Older clients that ignore unknown flags must be upgraded to support recovery;
+   this flag does not alter the binary header or format version.
 6. 2D shapes are circle, quad and capsule. A 3D game streams `ViewFrame3` (sphere, box, capsule,
    plane with position and quaternion): map them to the engine's meshes (or use `kind` to pick a
    prefab), draw with the engine's own lighting and slerp the rotation. Games with richer
    visuals add properties to their kinds.
+
+
+## Presentation delivery recovery
+
+For `InProc`/`Threaded`, view notifications now have a configurable bounded
+mailbox and an explicit snapshot-based reset. See [bounded view recovery](view-recovery.md)
+for the exact cursor, lifecycle-diagnostic, and durability contract. Recovery is
+presentation-only; the authoritative simulation continues ticking. `RemoteBridge`
+and the editor's ERP `LocalHost` path are not covered by the bounded mailbox.
+The flag above signals a bridge-level reset, not network packet-loss recovery.
+The binary frame carries no diagnostic count; Rust `ViewResync` exposes counts.
+
+### Yard3D snapshot consumers
+
+`Yard3dStreamProducer::pump` accepts a `Bridge<Yard3D>` and delegates to
+`ViewStreamSource3::pump`. It consumes one coherent `poll_view` update, including
+the actual snapshot and any bounded-mailbox resync. An increased snapshot
+rollback count makes the source emit that snapshot's rollback range; the
+numeric count itself is not encoded in the frame.
+Consumers must pass that update through the pump once; draining the bridge first
+would consume the recovery marker before the producer can emit its baseline.
+`StreamProducer::encode_frame` remains available for direct-frame local ERP
+hosts, whose metadata is supplied by that host.
+
+The existing generic ERP `ClientSessionHook` can publish the pump's type-3
+frames over WebSocket and TCP. Yard3D has `NoEvent` and an empty event schema;
+its lifecycle-mailbox recovery still emits `events_reset` and `discontinuity`
+with a complete frame whose previous transforms equal the current transforms.
+This reset does not create game events or change simulation state. Relay
+rollback uses delayed confirmed input bundles to correct client prediction;
+local play-session seek replays recorded history. The built-in Yard3D C ABI
+entry above remains a local play session.
+
+`cargo test -p orr_remote --release --locked --test yard3d_recovery` covers
+these two paths through a test-only generic client-session adapter and actual
+ERP sockets. The relay case holds a bounded downstream WebSocket FIFO after
+the handshake (128 messages, 128 KiB, at most 500 ms), then releases the same
+bytes in order while the uplink and other player remain live. A peer input
+accepted in the server's finalized log must correct the client's prediction;
+the resulting rollback range, complete entities and properties are checked
+against that actual snapshot and independent simulation replay of the server's
+finalized inputs. Both clients' confirmed checkpoint checksums must agree with
+the replay, and WS binary and TCP hex must carry identical corrected frames.
+This is a bounded delay test, without packet loss, jitter or retroactive edits
+to server-finalized inputs.
+
+The overrun case holds the consumer while a capacity-one `Threaded` mailbox
+receives real rejected-seek lifecycle notifications. Its actual resync must
+produce a complete reset baseline without changing the paused simulation's
+tick, checksum or timeline. A subsequent processed step must produce a normal
+frame with the reset flag clear, over both ERP transports. The tests add no
+production Yard3D relay factory or command-line mode; C ABI and TUI entry-point
+support remains as described above.

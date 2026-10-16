@@ -5,6 +5,7 @@ use orr_sim::{DebugCommand, Game, PlayerSlot};
 
 use crate::event::BridgeEvent;
 use crate::snapshot::Snapshot;
+use crate::{ViewUpdate, DEFAULT_VIEW_EVENT_CAPACITY};
 
 /// Why a view-to-sim call was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +14,10 @@ pub enum BridgeError {
     NotLocalPlayer { player: PlayerSlot, local: PlayerSlot },
     /// The sim thread is gone (it panicked or was shut down).
     Disconnected,
+    /// The reliable admission budget is full; nothing was queued.
+    Backpressure,
+    /// Replay viewers refuse live input and gameplay commands until Branch.
+    ReplayReadOnly,
 }
 
 impl core::fmt::Display for BridgeError {
@@ -22,6 +27,8 @@ impl core::fmt::Display for BridgeError {
                 write!(f, "input for player {} refused: this bridge only carries slot {}", player.0, local.0)
             }
             BridgeError::Disconnected => write!(f, "the sim side of the bridge is gone"),
+            BridgeError::Backpressure => write!(f, "the bridge command/control queue is full; retry after it drains"),
+            BridgeError::ReplayReadOnly => write!(f, "replay is read-only; branch before sending gameplay input or commands"),
         }
     }
 }
@@ -47,6 +54,20 @@ pub type StepObserver = Box<dyn FnMut(StepTiming) + Send>;
 
 /// Settings shared by all adapters.
 pub struct BridgeConfig<G: Game> {
+    /// Maximum queued presentation notifications; overflow resets the view.
+    /// Independent of the reliable command budget and durable event consumers.
+    pub view_event_capacity: usize,
+    /// Maximum accepted explicit gameplay commands not yet submitted by the
+    /// standard hosts, including the mailbox, paused core and host staging.
+    /// Also caps queued command/debug messages. Minimum 1; default 1024.
+    /// This counts commands, not bytes: commands may own heap allocations.
+    /// Derived commands, submitted history/network copies and recorded debug
+    /// edits are excluded. Preloaded host staging is charged too; an already
+    /// oversized queue is grandfathered and blocks new commands until drained.
+    pub command_capacity: usize,
+    /// Independent quota for queued reliable timeline/step controls. Minimum
+    /// 1; default 64. All reliable messages still share one ordered FIFO.
+    pub control_capacity: usize,
     /// Called with the timing of every sim step (for benchmarks and debug
     /// overlays). Costs two clock reads per step; `None` costs nothing.
     pub step_observer: Option<StepObserver>,
@@ -54,17 +75,38 @@ pub struct BridgeConfig<G: Game> {
     /// side. `orr_testgame`'s arena, for one, spawns a bullet command when the
     /// fire bit is set. Called once per simulated tick, in the sim's order,
     /// so replays stay exact. `None` means only [`Bridge::send_command`]
-    /// commands are sent.
+    /// commands are sent. Not invoked in read-only replay Viewer mode.
     pub commands_from_input: Option<CommandsFromInput<G>>,
 }
 
 impl<G: Game> Default for BridgeConfig<G> {
     fn default() -> Self {
-        Self { commands_from_input: None, step_observer: None }
+        Self {
+            commands_from_input: None,
+            step_observer: None,
+            view_event_capacity: DEFAULT_VIEW_EVENT_CAPACITY,
+            command_capacity: 1024,
+            control_capacity: 64,
+        }
     }
 }
 
 impl<G: Game> BridgeConfig<G> {
+    pub fn with_view_event_capacity(mut self, capacity: usize) -> Self {
+        self.view_event_capacity = capacity.max(1);
+        self
+    }
+
+    pub fn with_command_capacity(mut self, capacity: usize) -> Self {
+        self.command_capacity = capacity.max(1);
+        self
+    }
+
+    pub fn with_control_capacity(mut self, capacity: usize) -> Self {
+        self.control_capacity = capacity.max(1);
+        self
+    }
+
     /// Sets the step observer (see [`StepTiming`]).
     pub fn with_step_observer(mut self, f: impl FnMut(StepTiming) + Send + 'static) -> Self {
         self.step_observer = Some(Box::new(f));
@@ -90,10 +132,16 @@ pub trait Bridge<G: Game> {
     fn player_count(&self) -> u8;
 
     /// Sets the input of `player` that the sim samples at its next ticks
-    /// (held until changed). Only the local slot is accepted.
+    /// (held until changed). Only the local slot is accepted. InProc/Threaded
+    /// updates coalesce and replay viewers return `ReplayReadOnly` without
+    /// retaining the input. Remote adapters may report server errors asynchronously.
     fn set_input(&mut self, player: PlayerSlot, input: G::Input) -> Result<(), BridgeError>;
 
-    /// Queues a one-off command for the next tick.
+    /// Queues a one-off command for the next tick. With InProc/Threaded, `Backpressure` and
+    /// `ReplayReadOnly` mean nothing was accepted; retain a source/clone if a
+    /// retry is needed (the argument is consumed even on error). Acceptance
+    /// guarantees ordered staging, not delivery after terminal disconnection.
+    /// InProc/Threaded bound accepted unsubmitted explicit commands.
     fn send_command(&mut self, command: G::Command) -> Result<(), BridgeError>;
 
     /// Call once per render frame with the real time since the last call.
@@ -106,9 +154,18 @@ pub trait Bridge<G: Game> {
     /// `None` until the sim has published its first one.
     fn snapshot(&self) -> Option<Snapshot>;
 
-    /// Takes every event that arrived since the last call, in sim order.
-    /// Never blocks. Call it regularly: events queue up until taken.
+    /// Takes presentation events in sim order. On overflow returns an explicit
+    /// `BridgeEvent::ViewResynced`; reset effects and read a fresh snapshot.
+    /// This best-effort channel is not a durable verified-event consumer.
     fn drain_events(&mut self) -> Vec<BridgeEvent<G::Event>>;
+
+    /// Reads presentation output. InProc/Threaded provide bounded, coherent
+    /// recovery; adapters must document their guarantees. The default keeps
+    /// legacy split-read behavior and does not itself add overflow recovery.
+    fn poll_view(&mut self) -> ViewUpdate<G::Event> {
+        let events = self.drain_events();
+        ViewUpdate { snapshot: self.snapshot(), events, resync: None }
+    }
 
     /// `false` once the sim side has stopped (Threaded: the thread ended).
     fn is_alive(&self) -> bool;

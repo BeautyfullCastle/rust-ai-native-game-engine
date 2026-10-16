@@ -1,0 +1,83 @@
+{
+  "purpose": "Remove unrelated execution-environment details from archived observations without changing measurements",
+  "originals_preserved": "Untouched local evidence directory; original hashes below identify them without distributing unrelated command lines",
+  "allowed_process_names": [
+    "cargo",
+    "cc",
+    "collect2",
+    "gcc",
+    "ld",
+    "ld.lld",
+    "phase_costs",
+    "rust-lld",
+    "rustc",
+    "taskset"
+  ],
+  "files": [
+    {
+      "file": "build.after.environment.json",
+      "original_local_sha256": "2da80fd7f57171bd0aa613d2e2c46f1972ecd979fd18d97e82a19d54c0f02ec3",
+      "original_local_bytes": 4557,
+      "archived_sha256": "dcfd4b8595634c6600a2403927eac2571cd1fe9edb3543d2786d71f68b60be6a",
+      "archived_bytes": 749,
+      "transformation": "Replace full process listing with allowlisted workload process-name counts; remove all process command arguments, identities and unrelated process rows"
+    },
+    {
+      "file": "build.before.environment.json",
+      "original_local_sha256": "e743ec145ab695e0add47176e57c70116065b44024c9ca3c16af73962f1d1f3c",
+      "original_local_bytes": 4556,
+      "archived_sha256": "0982615f132e85a76470aaf1f7713ef922ce49d4d77d08405629c220b58659ba",
+      "archived_bytes": 748,
+      "transformation": "Replace full process listing with allowlisted workload process-name counts; remove all process command arguments, identities and unrelated process rows"
+    },
+    {
+      "file": "build.monitor.jsonl",
+      "original_local_sha256": "b6b0d744d0191b1cf30b0d724573a8d5b26bd214909257e06c99b0aa9d28c13f",
+      "original_local_bytes": 21847,
+      "archived_sha256": "3de0818b22cff7aa1ec529e0024f28de2fcbe049aff7adda2fdd9c66d6276a59",
+      "archived_bytes": 1617,
+      "transformation": "Replace full process listing with allowlisted workload process-name counts; remove all process command arguments, identities and unrelated process rows"
+    },
+    {
+      "file": "diagnostic.after.environment.json",
+      "original_local_sha256": "e27c87c5dab99b4f8e384274b550845ecad3db2d6e41393167ca6b275157e452",
+      "original_local_bytes": 4557,
+      "archived_sha256": "01c44dde1a8802e073df8d3cb9c3f0170e89ffb81deba206f7884749b5a06787",
+      "archived_bytes": 749,
+      "transformation": "Replace full process listing with allowlisted workload process-name counts; remove all process command arguments, identities and unrelated process rows"
+    },
+    {
+      "file": "diagnostic.before.environment.json",
+      "original_local_sha256": "946eb1c8f3148856b59afb1774864c7aa89f1f31100425de969fd41a2f889deb",
+      "original_local_bytes": 4557,
+      "archived_sha256": "c903bc1b752d0d553a967c868178b0bdf1e2852adfcfa8c5b8352fe9b688e523",
+      "archived_bytes": 749,
+      "transformation": "Replace full process listing with allowlisted workload process-name counts; remove all process command arguments, identities and unrelated process rows"
+    },
+    {
+      "file": "diagnostic.monitor.jsonl",
+      "original_local_sha256": "b5ad6095f195d9d2f7b18f38a5cfd3af560d3e8dfff37bca0b11006c04d3cb7e",
+      "original_local_bytes": 8529,
+      "archived_sha256": "8847e53294e86e5ad09caac82b22d377f86ebc14c20cc22b583cd96206a8a0c1",
+      "archived_bytes": 752,
+      "transformation": "Replace full process listing with allowlisted workload process-name counts; remove all process command arguments, identities and unrelated process rows"
+    },
+    {
+      "file": "final.environment.json",
+      "original_local_sha256": "4329281b5e166a6f10b7e00faba6abd4642ed322649c866f07adf999fe722353",
+      "original_local_bytes": 4557,
+      "archived_sha256": "12c9c6eafb94300f13d3fafdd341d36e1453c8c6fee094a8ced1b577a268aaa3",
+      "archived_bytes": 749,
+      "transformation": "Replace full process listing with allowlisted workload process-name counts; remove all process command arguments, identities and unrelated process rows"
+    },
+    {
+      "file": "proc-cpuinfo.txt",
+      "original_local_sha256": "f3ffb6a80ce9fad64175ce449a9c18693d4c5f24f0b73a61bf38c2e6b8c888cc",
+      "original_local_bytes": 13077,
+      "archived_sha256": "2992663a96790c1c42ba6285127bb7b39c43fb6610508bfd1068417e98b24fa8",
+      "archived_bytes": 13076,
+      "transformation": "Normalize trailing newlines to one newline; no CPU field changed"
+    }
+  ],
+  "unmodified": "Raw diagnostic timing JSONL, summary, source patch and hashes, build log, tool versions, build/run result objects, executable identity, runner and summarizer"
+}

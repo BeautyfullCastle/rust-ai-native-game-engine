@@ -1,0 +1,25 @@
+[package]
+name = "orr_terrain_physics3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Optional frame-owned bounded sphere versus static heightfield physics"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_physics3d = { path = "../orr_physics3d" }
+orr_terrain = { path = "../orr_terrain" }
+bytemuck = { version = "1", features = ["derive"] }
+sha2 = "0.11"
+
+[dev-dependencies]
+orr_sim = { path = "../orr_sim" }
+orr_session = { path = "../orr_session" }

@@ -278,6 +278,50 @@ fn verify_baseline() {
 }
 
 #[test]
+fn sampling_option_routes_for_verify_and_apply_and_explains_coverage() {
+    let host = TestHost::start();
+    for (option, interval, count, every_tick) in [
+        (vec![], 60, 2, false),
+        (vec!["--sample-every", "0"], 0, 2, false),
+        (vec!["--sample-every=1"], 1, 5, true),
+        (vec!["--sample-every", "3"], 3, 3, false),
+    ] {
+        let mut args = vec!["verify", "--idle", "4", "--json"];
+        args.extend(option);
+        let result = host.orr(&args);
+        assert_eq!(result.code, 0, "{}", result.err);
+        let report = result.json();
+        assert_eq!(report["metric_sampling"], json!({
+            "requested_interval": interval, "sample_count": count,
+            "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": every_tick
+        }));
+    }
+    for invalid in ["-1", "1.5", "many", "4294967296"] {
+        assert_eq!(host.orr(&["verify", "--idle", "4", "--sample-every", invalid]).code, 2);
+    }
+    assert_eq!(host.orr(&["verify", "--idle", "4", "--sample-every"]).code, 2);
+    let sparse = host.orr(&["verify", "--idle", "4", "--check", "lost_bodies.max == 0"]);
+    assert_eq!(sparse.code, 0, "{}", sparse.err);
+    assert!(sparse.out.contains("sampled min/max; between samples not checked"), "{}", sparse.out);
+    let dense = host.orr(&["verify", "--idle", "4", "--sample-every", "1"]);
+    assert_eq!(dense.code, 0, "{}", dense.err);
+    assert!(dense.out.contains("events entirely within a tick are not covered"), "{}", dense.out);
+    assert!(!dense.out.contains("between samples not checked"));
+    let short = host.orr(&["verify", "--idle", "1", "--sample-every", "0", "--json"]).json();
+    assert_eq!(short["metric_sampling"]["every_tick_boundary_observed"], true);
+    let applied = host.orr(&["apply", "sample every tick", "rename", "body_05", "hero", "--idle", "4", "--sample-every", "1", "--json"]);
+    assert_eq!(applied.code, 0, "{}", applied.err);
+    let applied = applied.json();
+    assert_eq!(applied["accepted"], true);
+    assert_eq!(applied["verify"]["metric_sampling"]["requested_interval"], 1);
+    assert_eq!(applied["verify"]["metric_sampling"]["sample_count"], 5);
+    assert!(host.yaml().contains("name: hero"));
+    for command in ["verify", "apply"] {
+        assert!(host.orr(&["help", command]).out.contains("--sample-every"));
+    }
+}
+
+#[test]
 fn sim_step_seek_state_stop_and_last_play() {
     let host = TestHost::start();
     assert_eq!(host.orr(&["sim", "state"]).out.trim_start().chars().next(), Some('E'), "edit mode first");
@@ -313,7 +357,7 @@ fn activity_shows_the_previous_commands() {
     host.orr(&["apply", "nudge", "set", "body_06", "Body.angle=1", "--idle", "30"]);
     let a = host.orr(&["activity"]);
     assert_eq!(a.code, 0, "{}", a.err);
-    for want in ["claude", "world.patch e_0000000e", "(was [-12.90433,19.97954])", "proposal.begin", "proposal.verify p1", "proposal.accept p1"] {
+    for want in ["claude", "world.patch e_0000000e", "(was [-12.90433,19.97954])", "proposal.begin", "proposal.verify p1", "proposal.accept_verified p1"] {
         assert!(a.out.contains(want), "activity has {want}: {}", a.out);
     }
     assert!(!a.out.contains("session"), "connect lines are hidden by default: {}", a.out);
@@ -443,6 +487,12 @@ fn bad_usage_is_exit_2() {
         vec!["verify", "--bot"],
         vec!["sim"],
         vec!["sim", "warp"],
+        vec!["sim", "input", "{}"],
+        vec!["sim", "input", "--player", "0", "[]"],
+        vec!["sim", "input", "--player", "-1", "{}"],
+        vec!["sim", "stop", "--replay-out"],
+        vec!["schema", "--input", "--types"],
+        vec!["schema", "--input", "Body"],
         vec!["history", "-n", "x"],
         vec!["--timeout", "soon", "status"],
     ] {
@@ -553,4 +603,82 @@ fn sim_step_starts_a_session_when_none_runs() {
     let state = host.orr(&["sim", "state", "--json"]).json();
     assert_eq!(state["mode"], "play");
     assert_eq!(state["head_tick"], 45);
+}
+
+#[test]
+fn sim_stop_exports_a_local_replay_that_verifies_and_preserves_the_document() {
+    let host = TestHost::start();
+    let before = host.yaml();
+    let dir = std::env::temp_dir().join(format!("orr-cli-export-integration-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Relative paths resolve against the CLI's working directory, not the host's.
+    let filename = "chosen recording.orrp";
+    assert_eq!(host.orr(&["sim", "start"]).code, 0);
+    assert_eq!(host.orr(&["sim", "step", "12"]).code, 0);
+    let stopped = finish(command(&host.url, Some("claude-tok"), &["sim", "stop", "--replay-out", filename, "--json"]).current_dir(&dir).output().unwrap());
+    assert_eq!(stopped.code, 0, "{}", stopped.err);
+    let result = stopped.json();
+    assert_eq!(result["local_replay_path"], filename);
+    assert!(result.get("replay").is_none(), "export does not print a second copy of the recording");
+    let path = dir.join(filename);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes.len() as u64, result["replay_bytes"].as_u64().unwrap());
+    let verified = host.orr(&["verify", "--replay", path.to_str().unwrap(), "--check", "recording_matches", "--json"]);
+    assert_eq!(verified.code, 0, "{}", verified.err);
+    assert_eq!(verified.json()["checks"]["passed"], true);
+    assert_eq!(host.yaml(), before);
+    assert!(host.history().is_empty());
+
+    assert_eq!(host.orr(&["sim", "start"]).code, 0);
+    assert_eq!(host.orr(&["sim", "step", "1"]).code, 0);
+    let refused = host.orr(&["sim", "stop", "--replay-out", path.to_str().unwrap(), "--json"]);
+    assert_eq!(refused.code, 1);
+    assert!(refused.out.is_empty(), "no success result on a refused export");
+    assert!(refused.err.contains("already exists") && refused.err.contains("--force") && refused.err.contains("play was not stopped"), "{}", refused.err);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes, "a name collision preserves the original recording");
+    let state = host.orr(&["sim", "state", "--json"]).json();
+    assert_eq!(state["mode"], "play");
+    assert_eq!(state["head_tick"], 1);
+
+    let text = host.orr(&["sim", "stop", "--replay-out", path.to_str().unwrap(), "--force"]);
+    assert_eq!(text.code, 0, "{}", text.err);
+    assert!(text.out.contains(&format!("Replay written locally to {}", path.display())), "{}", text.out);
+    assert_ne!(std::fs::read(&path).unwrap(), bytes, "explicit force replaces the recording");
+    let verified = host.orr(&["verify", "--replay", path.to_str().unwrap(), "--check", "recording_matches", "--json"]);
+    assert_eq!(verified.code, 0, "{}", verified.err);
+    assert_eq!(verified.json()["checks"]["passed"], true);
+    assert_eq!(host.yaml(), before);
+    assert!(host.history().is_empty());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no staging files remain");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_local_replay_write_failure_reports_that_play_has_already_stopped() {
+    let host = TestHost::start();
+    let dir = std::env::temp_dir().join(format!("orr-cli-missing-parent-{}", std::process::id()));
+    assert!(!dir.exists());
+    assert_eq!(host.orr(&["sim", "step", "2"]).code, 0);
+    let result = host.orr(&["sim", "stop", "--replay-out", dir.join("file.orrp").to_str().unwrap()]);
+    assert_eq!(result.code, 1);
+    assert!(result.err.contains("play stopped") && result.err.contains("could not write local replay") && result.err.contains("--last-play"), "{}", result.err);
+    assert_eq!(host.orr(&["sim", "state", "--json"]).json()["mode"], "edit");
+    assert_eq!(host.orr(&["verify", "--last-play", "--check", "recording_matches"]).code, 0);
+}
+
+#[test]
+fn physics_host_reports_structured_input_unavailable_without_mutating_the_scene() {
+    let host = TestHost::start();
+    let before = host.yaml();
+    let schema = host.orr(&["schema", "--input"]);
+    assert_eq!(schema.code, 1);
+    assert!(schema.err.contains("input"), "{}", schema.err);
+    assert_eq!(host.orr(&["sim", "start"]).code, 0);
+    let input = host.orr(&["sim", "input", "--player", "0", "{\"throttle\":1}"]);
+    assert_eq!(input.code, 1);
+    assert!(input.err.contains("input"), "{}", input.err);
+    assert_eq!(host.orr(&["sim", "state", "--json"]).json()["head_tick"], 0);
+    assert_eq!(host.orr(&["sim", "stop"]).code, 0);
+    assert_eq!(host.yaml(), before);
+    assert!(host.history().is_empty());
 }

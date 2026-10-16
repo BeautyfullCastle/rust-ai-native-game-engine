@@ -1,0 +1,5 @@
+Command: cargo metadata --offline --format-version 1
+Exit: 101
+error: failed to download `accesskit_consumer v0.38.0`
+Caused by: attempting to make an HTTP request, but --offline was specified
+Cargo updated only the orr_remote -> rustix 1.1.5 lock edge before this unrelated workspace-wide metadata materialization error. Focused --locked --offline validation follows; no network fetch or version update attempted.

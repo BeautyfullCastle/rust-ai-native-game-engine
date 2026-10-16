@@ -7,6 +7,8 @@
 //!   `u32` ones.
 //! - [`connect`] / [`listen`]: build them from plain options (address,
 //!   transport, certificate trust or PEM files, simulated latency and loss).
+//! - [`p2p_input`]: bounded two-peer reliable input codec/source/driver, separate
+//!   from relay messages and checked join controls.
 //! - [`driver`]: a real-time loop for a headless `RelayClient` (bots, tests)
 //!   and the file sink for desync dumps.
 //!
@@ -20,6 +22,8 @@
 mod connect;
 pub mod driver;
 mod link;
+pub mod p2p_input;
+pub mod p2p_mesh_input;
 mod server_ep;
 
 pub use connect::{
@@ -31,3 +35,8 @@ pub use link::NetLink;
 pub use server_ep::NetEndpoint;
 
 pub use orr_net::{DisconnectReason, NetConfig};
+
+pub use p2p_input::{
+    encode_p2p_input, P2pInputAccepted, P2pInputCodec, P2pInputDriver, P2pInputError,
+    P2pInputFlush, P2pInputLimits, P2pInputSource, P2P_INPUT_VERSION,
+};

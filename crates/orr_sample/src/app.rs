@@ -11,9 +11,12 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+#[cfg(not(feature = "input-actions"))]
+use winit::keyboard::KeyCode;
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
+use crate::arena_audio::{ArenaAudio, AudioMode};
 use crate::arena_view::{arena_floor, ArenaExtractor, Keys};
 use crate::net_client::{log_lifecycle, relay_title};
 use orr_render::orr_rhi::Wgpu;
@@ -23,7 +26,13 @@ use orr_render::{extract_items, Camera, RenderList, WindowRenderer};
 pub struct Options {
     /// Which adapter runs the sim, for the window title and the log.
     pub label: String,
+    #[cfg(feature = "input-actions")]
+    pub input_map: Option<orr_input::ActionMap>,
+    #[cfg(feature = "game-ui")]
+    pub game_ui_project: Option<std::path::PathBuf>,
     pub vsync: bool,
+    /// Arena-only audio policy; the physics sample ignores it.
+    pub audio: AudioMode,
     /// Close the window after this many seconds and print a summary.
     pub seconds: Option<f32>,
     pub remote_mode: InterpMode,
@@ -36,6 +45,8 @@ pub struct Options {
 #[derive(Clone, Debug, Default)]
 pub struct Summary {
     pub adapter: String,
+    pub audio_status: String,
+    pub audio_started: u64,
     pub frames: u64,
     pub seconds: f32,
     pub fps: f32,
@@ -52,15 +63,96 @@ pub struct Summary {
 
 struct Gfx {
     window: Arc<Window>,
-    renderer: WindowRenderer<Wgpu>,
+    renderer: ArenaRenderer,
+    #[cfg(feature = "game-ui")]
+    ui: Option<WindowUi>,
+}
+
+#[cfg(feature = "game-ui")]
+struct WindowUi {
+    state: egui_winit::State,
+    gpu: crate::game_ui_gpu::GpuOverlay,
+    pending: crate::game_ui_gpu::PendingOverlay,
+}
+
+enum ArenaRenderer {
+    Shapes(Box<WindowRenderer<Wgpu>>),
+    #[cfg(feature = "project")]
+    Project(Box<crate::project_compositor::ProjectWindow>),
+    #[cfg(feature = "sprites")]
+    Sprites(Box<crate::sprite_scene::SpriteWindow>),
+}
+impl ArenaRenderer {
+    #[cfg(feature = "game-ui")]
+    fn ui_gpu(&self) -> crate::game_ui_gpu::GpuOverlay {
+        match self {
+            #[cfg(feature = "project")]
+            Self::Project(r) => crate::game_ui_gpu::GpuOverlay::new(r.rhi(), r.format()),
+            Self::Shapes(r) => {
+                crate::game_ui_gpu::GpuOverlay::new(r.renderer.rhi(), r.renderer.format())
+            }
+            #[cfg(feature = "sprites")]
+            Self::Sprites(r) => crate::game_ui_gpu::GpuOverlay::new(r.rhi(), r.format()),
+        }
+    }
+    fn adapter_name(&self) -> String {
+        match self {
+            Self::Shapes(renderer) => renderer.adapter_name(),
+            #[cfg(feature = "project")]
+            Self::Project(renderer) => renderer.adapter_name(),
+            #[cfg(feature = "sprites")]
+            Self::Sprites(renderer) => renderer.adapter_name(),
+        }
+    }
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            Self::Shapes(renderer) => renderer.resize(width, height),
+            #[cfg(feature = "project")]
+            Self::Project(renderer) => renderer.resize(width, height),
+            #[cfg(feature = "sprites")]
+            Self::Sprites(renderer) => renderer.resize(width, height),
+        }
+    }
+}
+
+#[cfg(feature = "game-ui")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UiActionOutcome {
+    Continue,
+    Restarted,
+    Quit,
+}
+
+#[cfg(feature = "game-ui")]
+fn ui_captures_event(
+    ui: &crate::game_ui::GameUi,
+    pending: &egui::RawInput,
+    consumed: bool,
+) -> bool {
+    ui.blocks_controls()
+        || ui.pending_pointer_over_ui(pending)
+        || consumed
+        || ui.context.egui_wants_keyboard_input()
+        || ui.context.egui_wants_pointer_input()
 }
 
 struct App<B: Bridge<Arena>> {
     bridge: B,
+    #[cfg(feature = "game-ui")]
+    restart: Option<Box<dyn FnMut() -> Result<B, String>>>,
+    #[cfg(feature = "game-ui")]
+    ui: Option<crate::game_ui::GameUi>,
+    #[cfg(feature = "sprites")]
+    sprites: Option<crate::sprite_scene::SpriteScene>,
+    #[cfg(feature = "project")]
+    project: Option<crate::project_runtime::ProjectPresentation>,
+    audio: ArenaAudio,
     view: ViewWorld<ArenaExtractor>,
     opts: Options,
     gfx: Option<Gfx>,
     keys: Keys,
+    #[cfg(feature = "input-actions")]
+    controls: crate::arena_input::ArenaControls,
     sent_keys: Option<Keys>,
     items: Vec<RenderItem>,
     list: RenderList,
@@ -75,6 +167,126 @@ struct App<B: Bridge<Arena>> {
 }
 
 impl<B: Bridge<Arena>> App<B> {
+    fn publish_input_result(&mut self) -> Result<(), String> {
+        #[cfg(feature = "input-actions")]
+        {
+            self.keys = self.controls.keys();
+        }
+        if self.sent_keys != Some(self.keys) {
+            #[cfg(feature = "input-actions")]
+            let result = self.controls.publish(&mut self.bridge);
+            #[cfg(not(feature = "input-actions"))]
+            let result = self
+                .bridge
+                .set_input(self.bridge.local_slot(), self.keys.to_input());
+            match result {
+                Ok(()) => self.sent_keys = Some(self.keys),
+                Err(error) => return Err(format!("set input: {error:?}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn publish_input(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if let Err(error) = self.publish_input_result() {
+            self.error = Some(error);
+            event_loop.exit();
+            return false;
+        }
+        true
+    }
+
+    #[cfg(feature = "game-ui")]
+    fn ui_action(
+        &mut self,
+        action: crate::game_ui::Action,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<UiActionOutcome, String> {
+        let outcome = self.dispatch_ui_action(action)?;
+        if outcome == UiActionOutcome::Quit {
+            event_loop.exit();
+        }
+        Ok(outcome)
+    }
+
+    /// Shared actual widget action dispatch, testable without a native window.
+    #[cfg(feature = "game-ui")]
+    fn dispatch_ui_action(
+        &mut self,
+        action: crate::game_ui::Action,
+    ) -> Result<UiActionOutcome, String> {
+        use crate::game_ui::Action;
+        if !self.ui.as_mut().is_some_and(|ui| ui.apply(action)) {
+            return Ok(UiActionOutcome::Continue);
+        }
+        #[cfg(feature = "player-settings")]
+        if action == Action::SettingsApply {
+            if let Some(ui) = &mut self.ui {
+                ui.apply_player_settings(&mut self.controls);
+            }
+            // Both successful replacement and rejected Apply stay in the menu.
+            // Publish neutral even if the threaded host advances before redraw.
+            self.sent_keys = None;
+        }
+        if action == Action::Restart {
+            self.restart_local()?;
+        }
+        let blocked = self.ui.as_ref().is_some_and(|ui| ui.blocks_controls());
+        self.controls.set_paused(blocked);
+        // Clearing capture clears held presses, including the menu/resume click.
+        self.controls.set_ui_capture(true);
+        self.controls.set_ui_capture(blocked);
+        self.publish_input_result()?;
+        Ok(match action {
+            Action::Restart => UiActionOutcome::Restarted,
+            Action::Quit => UiActionOutcome::Quit,
+            _ => UiActionOutcome::Continue,
+        })
+    }
+
+    #[cfg(feature = "game-ui")]
+    fn restart_local(&mut self) -> Result<(), String> {
+        let factory = self
+            .restart
+            .as_mut()
+            .ok_or("restart is unavailable for this bridge")?;
+        self.bridge = factory()?;
+        // Close old native voices/device before reopening an exclusive device.
+        self.audio = ArenaAudio::open(AudioMode::Off)?;
+        self.audio = ArenaAudio::open(self.opts.audio)?;
+        self.view = ViewWorld::new(
+            ArenaExtractor {
+                remote_mode: self.opts.remote_mode,
+                local_slot: self.bridge.local_slot().0,
+            },
+            self.opts.view,
+        );
+        #[cfg(feature = "sprites")]
+        if let Some(scene) = &mut self.sprites {
+            scene.reset();
+        }
+        #[cfg(feature = "project")]
+        if let Some(project) = &mut self.project {
+            project.reset();
+        }
+        // Keep the installed input map and actual focus state. Toggling capture
+        // clears both held-input sets without turning an unfocused window active.
+        self.controls.set_paused(false);
+        self.controls.set_ui_capture(true);
+        self.controls.set_ui_capture(false);
+        self.keys = Keys::default();
+        self.sent_keys = None;
+        self.items.clear();
+        self.list.clear();
+        self.summary.predicted_hits = 0;
+        self.summary.verified_hits = 0;
+        self.summary.canceled_events = 0;
+        self.last_frame = Instant::now();
+        // A threaded host can run before the next redraw: neutralize immediately.
+        self.publish_input_result()?;
+        Ok(())
+    }
+
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let dt = now - self.last_frame;
@@ -83,30 +295,203 @@ impl<B: Bridge<Arena>> App<B> {
             self.worst_frame = self.worst_frame.max(dt);
         }
 
-        if self.sent_keys != Some(self.keys) {
-            self.sent_keys = Some(self.keys);
-            let _ = self.bridge.set_input(self.bridge.local_slot(), self.keys.to_input());
+        if !self.publish_input(event_loop) {
+            return;
         }
         self.bridge.update(dt);
-        let snapshot = self.bridge.snapshot();
-        self.view.update(dt.as_secs_f32().min(0.1), snapshot.as_ref());
-        for event in self.bridge.drain_events() {
+        let update = self.bridge.poll_view();
+        let snapshot = update.snapshot.clone();
+        if let Err(error) = self.audio.update(&update) {
+            self.error = Some(error);
+            event_loop.exit();
+            return;
+        }
+        if let Some(reset) = &update.resync {
+            crate::net_client::log_view_resync(reset);
+        }
+        self.view
+            .update_from_bridge(dt.as_secs_f32().min(0.1), &update);
+        #[cfg(feature = "sprites")]
+        let sprite_reset = update.resync.is_some();
+        for event in update.events {
             match event {
-                BridgeEvent::Sim { status: EventStatus::Predicted(_), .. } => self.summary.predicted_hits += 1,
-                BridgeEvent::Sim { status: EventStatus::Verified(_), .. } => self.summary.verified_hits += 1,
-                BridgeEvent::Sim { status: EventStatus::Canceled, .. } => self.summary.canceled_events += 1,
+                BridgeEvent::Sim {
+                    status: EventStatus::Predicted(_),
+                    ..
+                } => self.summary.predicted_hits += 1,
+                BridgeEvent::Sim {
+                    status: EventStatus::Verified(_),
+                    ..
+                } => self.summary.verified_hits += 1,
+                BridgeEvent::Sim {
+                    status: EventStatus::Canceled,
+                    ..
+                } => self.summary.canceled_events += 1,
                 BridgeEvent::Lifecycle(note) => log_lifecycle(&note),
+                BridgeEvent::ViewResynced(reset) => crate::net_client::log_view_resync(&reset),
             }
         }
 
         self.items.clear();
         self.items.push(arena_floor());
         self.view.render_items(&mut self.items);
+        #[cfg(feature = "sprites")]
+        if let Some(scene) = &mut self.sprites {
+            scene.update(
+                dt,
+                snapshot.as_ref(),
+                self.bridge.local_slot().0,
+                sprite_reset,
+                &mut self.items,
+            );
+        }
         self.list.clear();
         extract_items(&self.items, &mut self.list);
+        #[cfg(feature = "project")]
+        if let Some(project) = &mut self.project {
+            if let Err(error) = project.update(snapshot.as_ref()) {
+                self.error = Some(error);
+                event_loop.exit();
+                return;
+            }
+        }
+        #[cfg(feature = "game-ui")]
+        if let (Some(ui), Some(gfx)) = (&mut self.ui, &mut self.gfx) {
+            if let Some(window_ui) = &mut gfx.ui {
+                let input = window_ui.state.take_egui_input(&gfx.window);
+                let hud = snapshot
+                    .as_ref()
+                    .map(|s| crate::game_ui::Hud {
+                        tick: s.tick(),
+                        verified_tick: s.verified_tick(),
+                        rollbacks: s.stats().rollbacks,
+                    })
+                    .unwrap_or_default();
+                let (mut output, action) = ui.show(input, hud);
+                window_ui.state.handle_platform_output(
+                    &gfx.window,
+                    std::mem::take(&mut output.platform_output),
+                );
+                if let Err(error) = window_ui.pending.push(output) {
+                    self.error = Some(error);
+                    event_loop.exit();
+                    return;
+                }
+                let capture = ui.blocks_controls()
+                    || ui.context.egui_wants_keyboard_input()
+                    || ui.context.egui_wants_pointer_input();
+                self.controls.set_ui_capture(capture);
+                if let Some(action) = action {
+                    match self.ui_action(action, event_loop) {
+                        Ok(UiActionOutcome::Restarted) => {
+                            // Scene/HUD were sampled before dispatch replaced the bridge.
+                            // Retain texture epochs, but never present old geometry.
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            self.error = Some(error);
+                            event_loop.exit();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // Capturing a held input must neutralize even a threaded bridge now.
+        if !self.publish_input(event_loop) {
+            return;
+        }
         if let Some(gfx) = &mut self.gfx {
             let camera = Camera::new([0.0, 0.0], 2100.0);
-            gfx.renderer.render(&self.list, &camera);
+            match &mut gfx.renderer {
+                #[cfg(feature = "project")]
+                ArenaRenderer::Project(renderer) => {
+                    let project = self.project.as_ref().expect("project renderer");
+                    #[cfg(feature = "game-ui")]
+                    let result = if let (Some(window_ui), Some(ui)) = (&mut gfx.ui, &self.ui) {
+                        renderer.render_with_overlay(
+                            project.shapes(),
+                            project.sprites(),
+                            &project.camera,
+                            |rhi, view, size| {
+                                window_ui.pending.paint(
+                                    &mut window_ui.gpu,
+                                    rhi,
+                                    view,
+                                    size,
+                                    &ui.context,
+                                )
+                            },
+                        )
+                    } else {
+                        renderer.render(project.shapes(), project.sprites(), &project.camera)
+                    };
+                    #[cfg(not(feature = "game-ui"))]
+                    let result =
+                        renderer.render(project.shapes(), project.sprites(), &project.camera);
+                    if let Err(error) = result {
+                        self.error = Some(error);
+                        event_loop.exit();
+                        return;
+                    }
+                }
+                ArenaRenderer::Shapes(renderer) => {
+                    #[cfg(feature = "game-ui")]
+                    if let (Some(window_ui), Some(ui)) = (&mut gfx.ui, &self.ui) {
+                        let mut error = None;
+                        renderer.render_with_overlay(&self.list, &camera, |rhi, view, size| {
+                            if let Err(e) = window_ui.pending.paint(
+                                &mut window_ui.gpu,
+                                rhi,
+                                view,
+                                size,
+                                &ui.context,
+                            ) {
+                                error = Some(e);
+                            }
+                        });
+                        if let Some(error) = error {
+                            self.error = Some(error);
+                            event_loop.exit();
+                            return;
+                        }
+                    } else {
+                        renderer.render(&self.list, &camera);
+                    }
+                    #[cfg(not(feature = "game-ui"))]
+                    renderer.render(&self.list, &camera);
+                }
+                #[cfg(feature = "sprites")]
+                ArenaRenderer::Sprites(renderer) => {
+                    #[cfg(feature = "game-ui")]
+                    let result = if let (Some(window_ui), Some(ui)) = (&mut gfx.ui, &self.ui) {
+                        renderer.render_with_overlay(
+                            &self.list,
+                            self.sprites.as_ref().expect("sprite mode"),
+                            |rhi, view, size| {
+                                window_ui.pending.paint(
+                                    &mut window_ui.gpu,
+                                    rhi,
+                                    view,
+                                    size,
+                                    &ui.context,
+                                )
+                            },
+                        )
+                    } else {
+                        renderer.render(&self.list, self.sprites.as_ref().expect("sprite mode"))
+                    };
+                    #[cfg(not(feature = "game-ui"))]
+                    let result =
+                        renderer.render(&self.list, self.sprites.as_ref().expect("sprite mode"));
+                    if let Err(error) = result {
+                        self.error = Some(error);
+                        event_loop.exit();
+                        return;
+                    }
+                }
+            }
         }
 
         self.frames += 1;
@@ -114,11 +499,26 @@ impl<B: Bridge<Arena>> App<B> {
         let window_secs = self.window_start.elapsed().as_secs_f32();
         if window_secs >= 0.5 {
             let fps = self.window_frames as f32 / window_secs;
-            let stats = snapshot.as_ref().map(|s| (s.tick(), s.verified_tick(), s.stats()));
+            let stats = snapshot
+                .as_ref()
+                .map(|s| (s.tick(), s.verified_tick(), s.stats()));
             if let (Some(gfx), Some((tick, verified, stats))) = (&self.gfx, stats) {
-                let net = self.opts.relay.as_ref().map(|m| relay_title(&m.status())).unwrap_or_default();
+                #[cfg(feature = "input-actions")]
+                let input_status = if self.controls.paused() {
+                    " | LOCAL INPUT PAUSED (simulation continues)"
+                } else {
+                    ""
+                };
+                #[cfg(not(feature = "input-actions"))]
+                let input_status = "";
+                let net = self
+                    .opts
+                    .relay
+                    .as_ref()
+                    .map(|m| relay_title(&m.status()))
+                    .unwrap_or_default();
                 gfx.window.set_title(&format!(
-                    "Orrery arena [{}] fps {:.0} | tick {} (verified {}) | rollbacks {} (deepest {}){net}",
+                    "Orrery arena [{}] fps {:.0} | tick {} (verified {}) | rollbacks {} (deepest {}){net}{input_status}",
                     self.opts.label, fps, tick, verified, stats.rollbacks, stats.max_rollback_depth
                 ));
             }
@@ -144,7 +544,25 @@ impl<B: Bridge<Arena>> App<B> {
 
 impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.gfx.is_some() {
+        #[cfg(feature = "game-ui")]
+        if let Some(ui) = &mut self.ui {
+            ui.invalidate_pointer_layout();
+        }
+        if let Some(gfx) = &mut self.gfx {
+            let focused = gfx.window.has_focus();
+            #[cfg(feature = "input-actions")]
+            self.controls.set_focused(focused);
+            #[cfg(feature = "game-ui")]
+            if let Some(ui) = &mut gfx.ui {
+                let _ = ui
+                    .state
+                    .on_window_event(&gfx.window, &WindowEvent::Focused(focused));
+            }
+            let size = gfx.window.inner_size();
+            gfx.renderer.resize(size.width, size.height);
+            #[cfg(not(feature = "input-actions"))]
+            let _ = focused;
+            self.publish_input(event_loop);
             return;
         }
         let attributes = Window::default_attributes()
@@ -158,11 +576,60 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
                 return;
             }
         };
-        match WindowRenderer::new(window.clone(), (window.inner_size().width, window.inner_size().height), self.opts.vsync) {
+        let create_renderer = || {
+            #[cfg(feature = "project")]
+            if let Some(project) = &self.project {
+                return crate::project_compositor::ProjectWindow::new(
+                    window.clone(),
+                    self.opts.vsync,
+                    project.assets(),
+                )
+                .map(Box::new)
+                .map(ArenaRenderer::Project);
+            }
+            #[cfg(feature = "sprites")]
+            if let Some(scene) = &self.sprites {
+                return crate::sprite_scene::SpriteWindow::new(
+                    window.clone(),
+                    self.opts.vsync,
+                    scene,
+                )
+                .map(Box::new)
+                .map(ArenaRenderer::Sprites);
+            }
+            WindowRenderer::new(
+                window.clone(),
+                (window.inner_size().width, window.inner_size().height),
+                self.opts.vsync,
+            )
+            .map(Box::new)
+            .map(ArenaRenderer::Shapes)
+        };
+        match create_renderer() {
             Ok(renderer) => {
                 self.summary.adapter = renderer.adapter_name();
                 println!("adapter: {}", self.summary.adapter);
-                self.gfx = Some(Gfx { window, renderer });
+                #[cfg(feature = "game-ui")]
+                let ui = self.ui.as_ref().map(|ui| WindowUi {
+                    state: egui_winit::State::new(
+                        ui.context.clone(),
+                        egui::ViewportId::ROOT,
+                        window.as_ref(),
+                        Some(window.scale_factor() as f32),
+                        window.theme(),
+                        None,
+                    ),
+                    gpu: renderer.ui_gpu(),
+                    pending: crate::game_ui_gpu::PendingOverlay::default(),
+                });
+                #[cfg(feature = "input-actions")]
+                self.controls.set_focused(window.has_focus());
+                self.gfx = Some(Gfx {
+                    window,
+                    renderer,
+                    #[cfg(feature = "game-ui")]
+                    ui,
+                });
                 self.started = Instant::now();
                 self.last_frame = self.started;
                 self.window_start = self.started;
@@ -175,6 +642,23 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        #[cfg(feature = "game-ui")]
+        let captured = if let (Some(ui), Some(gfx)) = (&mut self.ui, &mut self.gfx) {
+            if matches!(
+                &event,
+                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                ui.invalidate_pointer_layout();
+            }
+            let captured = gfx.ui.as_mut().is_some_and(|window_ui| {
+                let response = window_ui.state.on_window_event(&gfx.window, &event);
+                ui_captures_event(ui, window_ui.state.egui_input(), response.consumed)
+            });
+            self.controls.set_ui_capture(captured);
+            captured
+        } else {
+            false
+        };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -182,9 +666,39 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
                     gfx.renderer.resize(size.width, size.height);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                #[cfg(not(feature = "input-actions"))]
+                let _ = is_synthetic;
                 let down = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    #[cfg(feature = "input-actions")]
+                    if let Some(button) = crate::arena_input::keyboard(code) {
+                        #[cfg(feature = "game-ui")]
+                        let consumed = captured || (is_synthetic && down);
+                        #[cfg(not(feature = "game-ui"))]
+                        let consumed = is_synthetic && down;
+                        let control = self.controls.button(button, down, event.repeat, consumed);
+                        if control.quit {
+                            event_loop.exit();
+                        }
+                        #[cfg(feature = "game-ui")]
+                        if control.pause_changed && self.ui.is_some() {
+                            let action = if self.controls.paused() {
+                                crate::game_ui::Action::Menu
+                            } else {
+                                crate::game_ui::Action::Continue
+                            };
+                            if let Err(error) = self.ui_action(action, event_loop) {
+                                self.error = Some(error);
+                                event_loop.exit();
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "input-actions"))]
                     match code {
                         KeyCode::KeyA | KeyCode::ArrowLeft => self.keys.left = down,
                         KeyCode::KeyD | KeyCode::ArrowRight => self.keys.right = down,
@@ -196,9 +710,56 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
                     }
                 }
             }
+            WindowEvent::Focused(focused) => {
+                #[cfg(feature = "input-actions")]
+                self.controls.set_focused(focused);
+                if !focused {
+                    self.keys = Keys::default();
+                }
+            }
+            #[cfg(feature = "input-actions")]
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(button) = crate::arena_input::mouse(button) {
+                    #[cfg(feature = "game-ui")]
+                    let consumed = captured;
+                    #[cfg(not(feature = "game-ui"))]
+                    let consumed = false;
+                    let control = self.controls.button(
+                        button,
+                        state == ElementState::Pressed,
+                        false,
+                        consumed,
+                    );
+                    if control.quit {
+                        event_loop.exit();
+                    }
+                    #[cfg(feature = "game-ui")]
+                    if control.pause_changed && self.ui.is_some() {
+                        let action = if self.controls.paused() {
+                            crate::game_ui::Action::Menu
+                        } else {
+                            crate::game_ui::Action::Continue
+                        };
+                        if let Err(error) = self.ui_action(action, event_loop) {
+                            self.error = Some(error);
+                            event_loop.exit();
+                        }
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}
         }
+        // Threaded bridges advance even when redraws are throttled/minimized.
+        // Publish releases/focus loss/pause immediately at the event boundary.
+        self.publish_input(event_loop);
+    }
+
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(feature = "input-actions")]
+        self.controls.set_focused(false);
+        self.keys = Keys::default();
+        self.publish_input(event_loop);
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
@@ -210,17 +771,100 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
 
 /// Opens the window and runs until it closes (or `opts.seconds` pass).
 pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String> {
+    run_inner(
+        bridge,
+        opts,
+        #[cfg(feature = "sprites")]
+        None,
+        #[cfg(feature = "game-ui")]
+        None,
+        #[cfg(feature = "project")]
+        None,
+        #[cfg(feature = "game-ui")]
+        None,
+    )
+}
+
+/// Runs the same Arena simulation with installed sprite assets and local-player camera follow.
+#[cfg(feature = "sprites")]
+pub fn run_sprites<B: Bridge<Arena>>(
+    bridge: B,
+    opts: Options,
+    root: &std::path::Path,
+) -> Result<Summary, String> {
+    let scene = crate::sprite_scene::SpriteScene::open(root)?;
+    run_inner(
+        bridge,
+        opts,
+        Some(scene),
+        #[cfg(feature = "game-ui")]
+        None,
+        #[cfg(feature = "project")]
+        None,
+        #[cfg(feature = "game-ui")]
+        None,
+    )
+}
+
+fn run_inner<B: Bridge<Arena>>(
+    bridge: B,
+    opts: Options,
+    #[cfg(feature = "sprites")] sprites: Option<crate::sprite_scene::SpriteScene>,
+    #[cfg(feature = "game-ui")] restart: Option<Box<dyn FnMut() -> Result<B, String>>>,
+    #[cfg(feature = "project")] project: Option<crate::project_runtime::ProjectPresentation>,
+    #[cfg(feature = "game-ui")] prepared_ui: Option<crate::game_ui::GameUi>,
+) -> Result<Summary, String> {
+    #[cfg(feature = "game-ui")]
+    let ui = match prepared_ui {
+        Some(ui) if opts.game_ui_project.is_none() => Some(ui),
+        Some(_) => return Err("authored UI cannot use an external UI project root".into()),
+        None => opts
+            .game_ui_project
+            .as_ref()
+            .map(|root| {
+                crate::game_ui::GameUi::open(root, restart.is_some() && opts.relay.is_none())
+            })
+            .transpose()?,
+    };
+    let audio = ArenaAudio::open(opts.audio)?;
+    eprintln!("audio: {}", audio.status());
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let now = Instant::now();
     let local_slot = bridge.local_slot().0;
-    let extractor = ArenaExtractor { remote_mode: opts.remote_mode, local_slot };
+    let extractor = ArenaExtractor {
+        remote_mode: opts.remote_mode,
+        local_slot,
+    };
+    #[cfg(feature = "input-actions")]
+    #[allow(unused_mut)]
+    let mut controls = crate::arena_input::ArenaControls::new(
+        opts.input_map
+            .clone()
+            .unwrap_or_else(crate::arena_input::default_map),
+    )?;
+    #[cfg(feature = "game-ui")]
+    if ui.is_some() {
+        controls.set_paused(true);
+        controls.set_ui_capture(true);
+    }
     let mut app = App {
         bridge,
+        #[cfg(feature = "game-ui")]
+        restart,
+        #[cfg(feature = "game-ui")]
+        ui,
+        #[cfg(feature = "sprites")]
+        sprites,
+        #[cfg(feature = "project")]
+        project,
+        audio,
         view: ViewWorld::new(extractor, opts.view),
         opts,
         gfx: None,
         keys: Keys::default(),
+        #[cfg(feature = "input-actions")]
+        controls,
         sent_keys: None,
         items: Vec::new(),
         list: RenderList::new(),
@@ -233,14 +877,200 @@ pub fn run<B: Bridge<Arena>>(bridge: B, opts: Options) -> Result<Summary, String
         summary: Summary::default(),
         error: None,
     };
-    event_loop.run_app(&mut app).map_err(|e| format!("run: {e}"))?;
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| format!("run: {e}"))?;
     if let Some(e) = app.error {
         return Err(e);
     }
     let seconds = app.started.elapsed().as_secs_f32();
+    app.summary.audio_status = app.audio.status().to_string();
+    app.summary.audio_started = app.audio.started();
     app.summary.frames = app.frames;
     app.summary.seconds = seconds;
     app.summary.fps = app.frames as f32 / seconds.max(0.001);
     app.summary.worst_frame_ms = app.worst_frame.as_secs_f32() * 1000.0;
     Ok(app.summary)
 }
+
+/// Local-only restart factory. Relay callers use `run` and never receive this capability.
+#[cfg(feature = "game-ui")]
+pub fn run_restartable<B: Bridge<Arena> + 'static>(
+    mut factory: impl FnMut() -> Result<B, String> + 'static,
+    opts: Options,
+    sprite_root: Option<&std::path::Path>,
+) -> Result<Summary, String> {
+    if opts.relay.is_some() {
+        return Err("relay restart is not supported".into());
+    }
+    let bridge = factory()?;
+    #[cfg(feature = "sprites")]
+    let sprites = sprite_root
+        .map(crate::sprite_scene::SpriteScene::open)
+        .transpose()?;
+    #[cfg(not(feature = "sprites"))]
+    if sprite_root.is_some() {
+        return Err("sprite mode requires sprites feature".into());
+    }
+    run_inner(
+        bridge,
+        opts,
+        #[cfg(feature = "sprites")]
+        sprites,
+        Some(Box::new(factory)),
+        #[cfg(feature = "project")]
+        None,
+        #[cfg(feature = "game-ui")]
+        None,
+    )
+}
+
+#[cfg(all(test, feature = "game-ui"))]
+mod game_ui_tests {
+    use super::*;
+    use crate::arena_view::{arena_bridge_config, loopback_pair, Loopback};
+    use orr_bridge::InProc;
+    fn local() -> InProc<Arena, orr_bridge::LoopbackPair<Arena>> {
+        InProc::new(loopback_pair(Loopback::default()), arena_bridge_config())
+    }
+    #[test]
+    fn repeated_local_restart_discards_bridge_view_audio_and_input_history() {
+        let now = Instant::now();
+        let opts = Options {
+            label: "test".into(),
+            input_map: None,
+            game_ui_project: None,
+            vsync: false,
+            audio: AudioMode::Off,
+            seconds: None,
+            remote_mode: InterpMode::Snapshot,
+            view: ViewConfig::default(),
+            relay: None,
+        };
+        let mut app = App {
+            bridge: local(),
+            restart: Some(Box::new(|| Ok(local()))),
+            ui: None,
+            #[cfg(feature = "sprites")]
+            sprites: None,
+            #[cfg(feature = "project")]
+            project: None,
+            audio: ArenaAudio::open(AudioMode::Off).unwrap(),
+            view: ViewWorld::new(
+                ArenaExtractor {
+                    remote_mode: opts.remote_mode,
+                    local_slot: 0,
+                },
+                opts.view,
+            ),
+            opts,
+            gfx: None,
+            keys: Keys::default(),
+            controls: crate::arena_input::ArenaControls::new(crate::arena_input::default_map())
+                .unwrap(),
+            sent_keys: None,
+            items: Vec::new(),
+            list: RenderList::new(),
+            started: now,
+            last_frame: now,
+            window_frames: 0,
+            window_start: now,
+            frames: 0,
+            worst_frame: Duration::ZERO,
+            summary: Summary::default(),
+            error: None,
+        };
+        for _ in 0..3 {
+            app.controls.button(
+                orr_input::Button::Keyboard {
+                    key: orr_input::Key::D,
+                },
+                true,
+                false,
+                false,
+            );
+            app.controls.publish(&mut app.bridge).unwrap();
+            app.bridge.update(Duration::from_millis(200));
+            assert!(app.bridge.snapshot().unwrap().tick() > 0);
+            let update = app.bridge.poll_view();
+            app.view.update_from_bridge(0.1, &update);
+            app.view.render_items(&mut app.items);
+            app.summary.predicted_hits = 10;
+            app.sent_keys = Some(app.controls.keys());
+            app.restart_local().unwrap();
+            assert_eq!(app.controls.keys(), Keys::default());
+            assert_eq!(app.sent_keys, Some(Keys::default()));
+            assert!(app.items.is_empty());
+            assert_eq!(app.audio.started(), 0);
+            assert_eq!(app.summary.predicted_hits, 0);
+            app.view.render_items(&mut app.items);
+            assert!(app.items.is_empty());
+            let fresh = local();
+            assert_eq!(
+                app.bridge.snapshot().map(|s| s.tick()),
+                fresh.snapshot().map(|s| s.tick())
+            );
+            app.controls.publish(&mut app.bridge).unwrap();
+            app.bridge.update(Duration::from_millis(50));
+            assert!(app.bridge.snapshot().is_some());
+        }
+        app.restart = None;
+        assert!(app.restart_local().unwrap_err().contains("unavailable"));
+    }
+}
+
+/// Runs an admitted authored scene through the same input/window loop.
+#[cfg(feature = "project")]
+pub fn run_project<B: Bridge<Arena>>(
+    bridge: B,
+    opts: Options,
+    project: crate::project_runtime::ProjectPresentation,
+) -> Result<Summary, String> {
+    #[cfg(feature = "game-ui")]
+    if opts.game_ui_project.is_some() {
+        return Err("--project cannot be combined with --game-ui-project in this slice".into());
+    }
+    if opts.relay.is_some() {
+        return Err("--project cannot use a relay".into());
+    }
+    run_inner(
+        bridge,
+        opts,
+        None,
+        #[cfg(feature = "game-ui")]
+        None,
+        Some(project),
+        #[cfg(feature = "game-ui")]
+        None,
+    )
+}
+
+/// Authored-session factory and UI are admitted before starting any host thread.
+#[cfg(all(feature = "project", feature = "game-ui"))]
+pub fn run_project_restartable<B: Bridge<Arena> + 'static>(
+    mut factory: impl FnMut() -> Result<B, String> + 'static,
+    opts: Options,
+    project: crate::project_runtime::ProjectPresentation,
+    ui: Option<crate::game_ui::GameUi>,
+) -> Result<Summary, String> {
+    if opts.relay.is_some() || opts.game_ui_project.is_some() {
+        return Err("authored project cannot use relay or an external UI project root".into());
+    }
+    let bridge = factory()?;
+    run_inner(
+        bridge,
+        opts,
+        None,
+        Some(Box::new(factory)),
+        Some(project),
+        ui,
+    )
+}
+
+#[cfg(all(test, feature = "project", feature = "game-ui"))]
+#[path = "app_project_ui_tests.rs"]
+mod project_ui_tests;
+
+#[cfg(all(test, feature = "player-settings", target_os = "linux"))]
+#[path = "app_player_settings_tests.rs"]
+mod player_settings_tests;

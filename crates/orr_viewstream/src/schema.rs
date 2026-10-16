@@ -198,7 +198,8 @@ impl Schema {
                 "record_len": RECORD_LEN,
                 "shapes": ["circle", "quad", "capsule"],
                 "interp_modes": ["prediction", "snapshot", "none"],
-                "flags": {"rolled_back": 1, "discontinuity": 2, "paused": 4},
+                "flags": {"rolled_back": 1, "discontinuity": 2, "paused": 4, "events_reset": 8},
+                "events_reset": "Clear speculative event effects/history before processing later event batches; this self-contained frame is the recovery baseline. The discarded-event count is unavailable in the frame protocol.",
             },
             "kinds": self.kinds.iter().map(|k| json!({
                 "id": k.id,
@@ -231,7 +232,8 @@ impl Schema {
                 "shapes": ["sphere", "box", "capsule", "plane"],
                 "interp_modes": ["prediction", "snapshot", "none"],
                 "style_flags": {"checker": 1},
-                "flags": {"rolled_back": 1, "discontinuity": 2, "paused": 4},
+                "flags": {"rolled_back": 1, "discontinuity": 2, "paused": 4, "events_reset": 8},
+                "events_reset": "Clear speculative event effects/history before processing later event batches; this self-contained frame is the recovery baseline. The discarded-event count is unavailable in the frame protocol.",
             },
             "kinds": self.kinds.iter().map(|k| json!({
                 "id": k.id,
@@ -247,5 +249,45 @@ impl Schema {
     /// The schema as compact JSON text.
     pub fn to_json_string(&self) -> String {
         self.to_json().to_string()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema(dimensions: u8) -> Schema {
+        Schema {
+            game: "test".into(),
+            dimensions,
+            build_id: 0,
+            tick_rate: 60,
+            player_count: 1,
+            kinds: Vec::new(),
+            input: InputLayout {
+                size: 0,
+                fields: Vec::new(),
+            },
+            command_size: 0,
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn both_schema_flavors_document_event_reset_without_changing_the_format_version() {
+        let two_d = schema(2).to_json();
+        let three_d = schema(3).to_json();
+        for (schema, frame_key) in [(&two_d, "frame"), (&three_d, "frame3d")] {
+            let version = if frame_key == "frame" {
+                VERSION
+            } else {
+                VERSION_3D
+            };
+            assert_eq!(schema["version"].as_u64(), Some(u64::from(version)));
+            assert_eq!(schema[frame_key]["flags"]["events_reset"].as_u64(), Some(8));
+            assert!(schema[frame_key]["events_reset"]
+                .as_str()
+                .unwrap()
+                .contains("count is unavailable"));
+        }
     }
 }

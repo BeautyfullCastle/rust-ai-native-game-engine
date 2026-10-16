@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "sample-sprites",
+  "version": "1.0.0",
+  "engine": "^0.0.1",
+  "capabilities": [
+    "sprite"
+  ],
+  "dependencies": {},
+  "files": [
+    "LICENSE.txt",
+    "lantern_keeper.png",
+    "lantern_keeper.rgba",
+    "sprites.json"
+  ]
+}

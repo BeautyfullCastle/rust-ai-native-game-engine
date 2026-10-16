@@ -64,3 +64,6 @@ pub use value::{parse_path, PathSeg, ReflectError, Value};
 
 #[cfg(feature = "scene")]
 pub use scene::{BakeError, Guid, Scene, SceneDiagnostic, SceneEntity, SceneError, SceneIndex, ScenePos, SCENE_SCHEMA};
+
+#[cfg(feature = "linked-prefabs")]
+pub use scene::PrefabLink;

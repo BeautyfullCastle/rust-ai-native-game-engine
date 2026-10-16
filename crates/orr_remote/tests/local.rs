@@ -228,3 +228,86 @@ fn pause_and_speed_reach_the_view_even_though_the_tick_does_not_change() {
     let s = wait_snapshot(&b, |s| s.timeline().is_some_and(|t| t.speed.permille() == 2000));
     assert_eq!(s.tick(), tick, "nothing ticked");
 }
+
+
+#[test]
+fn admitted_edits_and_responses_survive_queue_saturation_in_order() {
+    admitted_edits_survive_saturation(false);
+}
+
+#[test]
+fn admitted_edits_and_responses_survive_byte_saturation_in_order() {
+    admitted_edits_survive_saturation(true);
+}
+
+fn admitted_edits_survive_saturation(byte_limited: bool) {
+    use orr_remote::{ErpServer, ErpTarget, Incoming, Request};
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    cfg.max_queued_requests = if byte_limited { 20 } else { 2 };
+    cfg.max_queued_request_bytes = if byte_limited { 384 } else { usize::MAX };
+    cfg.max_requests_per_poll = 1;
+    let mut server = ErpServer::start(cfg).unwrap();
+    let mut doc = demo_doc();
+    let mut play = None::<orr_edit::PlayController<PhysGame>>;
+    let mut target = ErpTarget { doc: &mut doc, play: &mut play };
+    let mut client = server.connector().connect("user", Caps::ALL).unwrap();
+    client.send(Request {
+        id: Some(0), method: "world.query".into(), params: json!({"name":"body_05"}),
+    }).unwrap();
+    server.poll(&mut target);
+    let Some(Incoming::Text(text)) = client.recv(Duration::ZERO).unwrap() else { panic!("query response") };
+    let query: J = serde_json::from_str(&text).unwrap();
+    let guid = query["result"]["entities"][0]["guid"].as_str().unwrap().to_string();
+    let edit = |id, value| Request {
+        id: Some(id),
+        method: "world.patch".into(),
+        params: json!({"entity":guid, "component":BODY, "path":"pos.x", "value":value}),
+    };
+    if byte_limited {
+        let cost = edit(1, 1).to_text().len();
+        assert!(cost * 2 <= 384 && cost * 3 > 384, "byte limit admits two edits");
+    }
+    client.send(edit(1, 1)).unwrap();
+    client.send(edit(2, 2)).unwrap();
+    assert!(client.send(edit(3, 99)).is_err(), "rejected before admission");
+    assert_eq!(server.poll(&mut target).requests, 1);
+    // The first response is still unread. Only waiting requests consume slots.
+    client.send(edit(4, 3)).unwrap();
+    assert_eq!(server.poll(&mut target).requests, 1);
+    assert_eq!(server.poll(&mut target).requests, 1);
+    assert_eq!(server.poll(&mut target).requests, 0);
+
+    let mut responses = Vec::new();
+    while let Some(incoming) = client.recv(Duration::ZERO).unwrap() {
+        if let Incoming::Text(text) = incoming {
+            let reply: J = serde_json::from_str(&text).unwrap();
+            if reply.get("id").is_some() {
+                assert!(reply.get("error").is_none(), "{reply}");
+                responses.push(reply["id"].as_u64().unwrap());
+            }
+        }
+    }
+    assert_eq!(responses, [1, 2, 4], "no admitted response was replaced or dropped");
+    assert_eq!(target.doc.history().len(), 3, "each admitted edit ran once");
+    client.send(Request {
+        id: Some(5), method: "world.get".into(),
+        params: json!({"entity":guid, "component":BODY, "path":"pos.x"}),
+    }).unwrap();
+    server.poll(&mut target);
+    let Some(Incoming::Text(text)) = client.recv(Duration::ZERO).unwrap() else { panic!("read response") };
+    let reply: J = serde_json::from_str(&text).unwrap();
+    assert_eq!(reply["id"], 5);
+    assert_eq!(reply["result"]["value"].to_string(), "3");
+
+    // Timing out while the host is paused does not retract an admitted edit.
+    let mut client = ErpClient::with_transport(Box::new(client));
+    client.call_timeout = Duration::ZERO;
+    let error = client.call("world.patch", json!({
+        "entity":guid, "component":BODY, "path":"pos.x", "value":4,
+    })).unwrap_err();
+    assert!(error.to_string().contains("timed out"));
+    assert_eq!(server.poll(&mut target).requests, 1);
+    assert_eq!(target.doc.history().len(), 4);
+    assert_eq!(client.poll().unwrap(), 1, "the late response still arrives");
+}

@@ -216,8 +216,13 @@ fn get(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
 }
 
 fn schema(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
-    let p = parse(args, &[("--types", false)], false)?;
-    let o = if p.has("--types") {
+    let p = parse(args, &[("--types", false), ("--input", false)], false)?;
+    if p.pos.len() > 1 || (!p.pos.is_empty() && (p.has("--types") || p.has("--input"))) || (p.has("--types") && p.has("--input")) {
+        return Err(CliErr::Usage("schema accepts one type, --types, or --input (choose one)".into()));
+    }
+    let o = if p.has("--input") {
+        ctx.tool("get_schema", json!({"input": true}))?
+    } else if p.has("--types") {
         ctx.tool("get_schema", json!({"list_types": true}))?
     } else {
         let mut a = json!({});
@@ -433,6 +438,7 @@ const OPS_FLAGS: &[(&str, bool)] = &[
     ("--players", true),
     ("--replay", true),
     ("--ticks", true),
+    ("--sample-every", true),
     ("--last-play", false),
     ("--keep", false),
 ];
@@ -554,7 +560,7 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 const VERIFY_FLAGS: &[(&str, bool)] =
-    &[("--check", true), ("--bot", true), ("--idle", true), ("--seed", true), ("--players", true), ("--replay", true), ("--ticks", true), ("--last-play", false)];
+    &[("--check", true), ("--bot", true), ("--idle", true), ("--seed", true), ("--players", true), ("--replay", true), ("--ticks", true), ("--sample-every", true), ("--last-play", false)];
 
 fn verify_args(ctx: &mut Ctx, p: &Parsed, proposal: Option<&str>, checks: &[String]) -> Result<J, CliErr> {
     let mut a = json!({"inputs": inputs_of(ctx, p)?});
@@ -563,6 +569,10 @@ fn verify_args(ctx: &mut Ctx, p: &Parsed, proposal: Option<&str>, checks: &[Stri
     }
     if !checks.is_empty() {
         a["checks"] = json!(checks);
+    }
+    if let Some(n) = p.num("--sample-every")? {
+        let n = u32::try_from(n).map_err(|_| CliErr::Usage("--sample-every is too large (maximum 4294967295)".into()))?;
+        a["sample_every"] = json!(n);
     }
     if let Some(t) = p.num("--ticks")? {
         a["ticks"] = json!(t);
@@ -648,7 +658,21 @@ fn apply(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
         ctx.emit(&text, &result);
         return Err(CliErr::Checks);
     }
-    match ctx.call("proposal.accept", json!({"id": id})) {
+    if !checks.is_empty() && result["verify"]["checks"]["passed"] != true {
+        out(text.trim_end());
+        return Err(CliErr::Erp(format!(
+            "The host did not confirm that the requested checks passed; cannot safely auto-accept. Proposal {id} is still open."
+        )));
+    }
+    // Never fall back to manual accept: an older host may ignore new params
+    // on an existing method, so guarded acceptance has its own RPC method.
+    let Some(verified_state) = result["verify"].get("verified_state").filter(|s| s.is_object()) else {
+        out(text.trim_end());
+        return Err(CliErr::Erp(format!(
+            "The host did not return a verification state; cannot safely auto-accept. Proposal {id} is still open. Update the host and verify again."
+        )));
+    };
+    match ctx.call("proposal.accept_verified", json!({"id": id, "verified_state": verified_state})) {
         Ok(r) => {
             result["accepted"] = json!(true);
             result["outcome"] = json!("accepted");
@@ -730,13 +754,24 @@ fn permille(t: &str) -> Result<u64, CliErr> {
 }
 
 fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
-    let p = parse(args, &[("--players", true)], false)?;
+    let p = parse(args, &[("--players", true), ("--player", true), ("--replay-out", true), ("--force", false)], false)?;
     let Some(action) = p.pos.first().map(String::as_str) else {
-        return Err(CliErr::Usage("sim needs an action: start, stop, play, pause, step, seek, speed, state".into()));
+        return Err(CliErr::Usage("sim needs an action: start, stop, input, play, pause, step, seek, speed, state".into()));
     };
+    for (flag, allowed) in [("--players", "start"), ("--player", "input"), ("--replay-out", "stop")] {
+        if p.get(flag).is_some() && action != allowed {
+            return Err(CliErr::Usage(format!("{flag} is only valid with sim {allowed}")));
+        }
+    }
+    if p.has("--force") && (action != "stop" || p.get("--replay-out").is_none()) {
+        return Err(CliErr::Usage("--force is only valid with sim stop --replay-out <path>".into()));
+    }
     let arg = p.pos.get(1).map(String::as_str);
     if p.pos.len() > 2 {
         return Err(CliErr::Usage(format!("unexpected argument '{}'", p.pos[2])));
+    }
+    if arg.is_some() && matches!(action, "state" | "play" | "pause" | "start" | "stop") {
+        return Err(CliErr::Usage(format!("sim {action} takes no positional argument")));
     }
     let num = |what: &str| -> Result<u64, CliErr> {
         arg.ok_or_else(|| CliErr::Usage(format!("sim {action} needs {what}")))?.parse().map_err(|_| CliErr::Usage(format!("sim {action}: {what} must be a non-negative integer")))
@@ -760,6 +795,15 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
             ctx.tool("sim_run", json!({"action": "step", "n": n}))?
         }
         "seek" => ctx.tool("sim_run", json!({"action": "seek", "tick": num("a tick")?}))?,
+        "input" => {
+            let player = p.num("--player")?.ok_or_else(|| CliErr::Usage("sim input needs --player <slot>".into()))?;
+            let value: J = serde_json::from_str(arg.ok_or_else(|| CliErr::Usage("sim input needs a JSON input object".into()))?)
+                .map_err(|e| CliErr::Usage(format!("sim input needs a valid JSON input object: {e}")))?;
+            if !value.is_object() {
+                return Err(CliErr::Usage("sim input needs a JSON input object; discover it with `orr schema --input`".into()));
+            }
+            ctx.tool("sim_input", json!({"player": player, "value": value}))?
+        }
         "speed" => {
             let x = arg.ok_or_else(|| CliErr::Usage("sim speed needs a factor like 0.5 or 2".into()))?;
             let pm = permille(x)?;
@@ -768,18 +812,66 @@ fn sim(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
             tools::Out { text: format!("{}Speed {}.{:03}x.\n", report::state_text(&r), shown / 1000, shown % 1000), structured: r }
         }
         "stop" => {
-            let r = ctx.call("sim.stop", json!({}))?;
-            let text = format!(
+            let replay_out = p.get("--replay-out");
+            if replay_out == Some("") {
+                return Err(CliErr::Usage("--replay-out needs a non-empty local path".into()));
+            }
+            if let Some(path) = replay_out.filter(|_| !p.has("--force")) {
+                // Refuse a known collision before stopping play. The final
+                // no-clobber commit below also protects against a later race.
+                match std::fs::symlink_metadata(path) {
+                    Ok(_) => return Err(CliErr::Erp(format!("local replay '{path}' already exists; play was not stopped. Choose another path or use --force to replace it"))),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(CliErr::Erp(format!("could not inspect local replay '{path}': {e}; play was not stopped"))),
+                }
+            }
+            let mut r = ctx.call("sim.stop", if replay_out.is_some() { json!({"include_replay": true}) } else { json!({}) })?;
+            let mut text = format!(
                 "Play stopped at tick {}, checksum {}. The recording ({} bytes) is kept: `orr verify --last-play` replays it.\n",
                 r["tick"],
                 s(&r["checksum"]),
                 r["replay_bytes"]
             );
+            if let Some(path) = replay_out {
+                save_replay(&mut r, path, p.has("--force"))?;
+                text.push_str(&format!("Replay written locally to {path}.\n"));
+            }
             tools::Out { text, structured: r }
         }
-        other => return Err(CliErr::Usage(format!("unknown sim action '{other}' (start, stop, play, pause, step, seek, speed, state)"))),
+        other => return Err(CliErr::Usage(format!("unknown sim action '{other}' (start, stop, input, play, pause, step, seek, speed, state)"))),
     };
     ctx.emit(&o.text, &o.structured);
+    Ok(())
+}
+
+/// The destination belongs to this CLI process, never to the remote host.
+fn save_replay(result: &mut J, path: &str, force: bool) -> Result<(), CliErr> {
+    let bytes = result["replay"].as_str().and_then(orr_remote::codec::b64_decode)
+        .ok_or_else(|| CliErr::Erp("play stopped, but the host returned no valid base64 replay; no local file was written".into()))?;
+    write_replay_file(std::path::Path::new(path), &bytes, force).map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::AlreadyExists { "; destination already exists (replacement requires --force)" } else { "" };
+        CliErr::Erp(format!("play stopped, but could not write local replay '{path}': {e}{hint}; the host recording is still available with `orr verify --last-play`"))
+    })?;
+    if let Some(object) = result.as_object_mut() {
+        object.remove("replay");
+        object.insert("local_replay_path".into(), json!(path));
+    }
+    Ok(())
+}
+
+/// Publish only complete bytes. Staging on the same filesystem permits an
+/// atomic replacement with --force; no-clobber never replaces an existing path.
+/// Ordinary failures drop and remove the temporary file. This is not a promise
+/// of crash durability: the containing directory is not synchronized.
+fn write_replay_file(path: &std::path::Path, bytes: &[u8], force: bool) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+    let mut staged = tempfile::Builder::new().prefix(".orr-replay-").tempfile_in(parent)?;
+    staged.write_all(bytes)?;
+    staged.as_file().sync_all()?;
+    let committed = if force { staged.persist(path) } else { staged.persist_noclobber(path) };
+    committed.map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -899,4 +991,344 @@ fn agents_md(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
         out_raw(&text);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use orr_mcp::{Bridge, ErpCall};
+    use orr_remote::{ClientError, RpcError, CONFLICT, METHOD_NOT_FOUND};
+
+    struct ApplyHost {
+        report: J,
+        accept_error: Option<RpcError>,
+        calls: Rc<RefCell<Vec<(String, J)>>>,
+    }
+
+    impl ErpCall for ApplyHost {
+        fn call(&mut self, method: &str, params: J) -> Result<J, ClientError> {
+            self.calls.borrow_mut().push((method.to_string(), params.clone()));
+            match method {
+                "rpc.discover" => Ok(json!({"engine": {"metrics": []}})),
+                "proposal.begin" => Ok(json!({"id": "p1"})),
+                "proposal.apply" => Ok(json!({"spawned": []})),
+                "proposal.get" => Ok(json!({"label": "test", "op_count": 1, "summary": {"lines": []}})),
+                "proposal.verify" => Ok(self.report.clone()),
+                "proposal.accept_verified" => {
+                    assert_eq!(params, json!({"id": "p1", "verified_state": self.report["verified_state"]}));
+                    match self.accept_error.clone() {
+                        Some(e) => Err(ClientError::Rpc(e)),
+                        None => Ok(json!({"history_id": 1, "applied": 1, "checksum": "0x0000000000000001"})),
+                    }
+                }
+                "proposal.reject" => Ok(json!({"ok": true})),
+                _ => panic!("unexpected request {method}: must never fall back to manual accept"),
+            }
+        }
+    }
+
+    fn run_apply(report: J, accept_error: Option<RpcError>) -> (Result<(), CliErr>, Vec<(String, J)>) {
+        run_apply_command(report, accept_error, &["test", "spawn", "--check", "entities >= 0", "--idle", "1"])
+    }
+
+    fn run_apply_command(report: J, accept_error: Option<RpcError>, args: &[&str]) -> (Result<(), CliErr>, Vec<(String, J)>) {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut host = Some(ApplyHost { report, accept_error, calls: calls.clone() });
+        let bridge = Bridge::new("test", Box::new(move || Ok(Box::new(host.take().unwrap()) as Box<dyn ErpCall>)));
+        let mut ctx = Ctx { bridge, json: false, url: "test".into(), token: None };
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let result = apply(&mut ctx, &args);
+        let calls = calls.borrow().clone();
+        (result, calls)
+    }
+
+    fn passing_report() -> J {
+        json!({"checks": {"passed": true, "results": []}, "verified_state": {"document_id": "1234567890abcdef1234567890abcdef", "id": "p1", "document_revision": 3, "proposal_revision": 2}})
+    }
+
+    #[test]
+    fn apply_validates_sampling_before_staging() {
+        for invalid in ["-1", "1.5", "many", "4294967296"] {
+            let (result, calls) = run_apply_command(passing_report(), None, &[
+                "test", "spawn", "--check", "entities >= 0", "--idle", "1", "--sample-every", invalid,
+            ]);
+            assert!(matches!(result, Err(CliErr::Usage(_))), "{invalid}: {result:?}");
+            assert!(!calls.iter().any(|(method, _)| method.starts_with("proposal.")));
+        }
+        let (result, calls) = run_apply_command(passing_report(), None, &[
+            "test", "spawn", "--check", "entities >= 0", "--idle", "1", "--sample-every",
+        ]);
+        assert!(matches!(result, Err(CliErr::Usage(_))));
+        assert!(calls.is_empty());
+        for interval in ["0", "1", "4294967295"] {
+            let (result, calls) = run_apply_command(passing_report(), None, &[
+                "test", "spawn", "--check", "entities >= 0", "--idle", "1", "--sample-every", interval,
+            ]);
+            assert!(result.is_ok(), "{result:?}");
+            let verify = calls.iter().find(|(method, _)| method == "proposal.verify").unwrap();
+            assert_eq!(verify.1["sample_every"], interval.parse::<u32>().unwrap());
+        }
+    }
+
+    #[test]
+    fn apply_sends_the_exact_verification_state_to_guarded_accept() {
+        let (result, calls) = run_apply(passing_report(), None);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.last().unwrap().0, "proposal.accept_verified");
+    }
+
+    #[test]
+    fn apply_preserves_explicit_no_checks_behavior_when_game_has_no_default_metric() {
+        let mut report = passing_report();
+        report["checks"] = J::Null;
+        let (result, calls) = run_apply_command(report, None, &["test", "spawn", "--idle", "1"]);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.last().unwrap().0, "proposal.accept_verified");
+    }
+
+    #[test]
+    fn apply_never_accepts_failed_checks_even_with_a_verification_state() {
+        let mut report = passing_report();
+        report["checks"]["passed"] = json!(false);
+        let (result, calls) = run_apply(report, None);
+        assert!(matches!(result, Err(CliErr::Checks)));
+        assert_eq!(calls.last().unwrap().0, "proposal.reject");
+        assert!(!calls.iter().any(|(method, _)| method.starts_with("proposal.accept")));
+    }
+
+    #[test]
+    fn apply_fails_closed_if_an_older_host_omits_the_verification_state() {
+        let mut report = passing_report();
+        report.as_object_mut().unwrap().remove("verified_state");
+        let (result, calls) = run_apply(report, None);
+        assert!(matches!(result, Err(CliErr::Erp(ref e)) if e.contains("cannot safely auto-accept")));
+        assert_eq!(calls.last().unwrap().0, "proposal.verify");
+    }
+
+    #[test]
+    fn apply_requires_an_explicit_passing_verdict_for_requested_checks() {
+        for verdict in [None, Some(J::Null), Some(json!("true"))] {
+            let mut report = passing_report();
+            if let Some(verdict) = verdict {
+                report["checks"]["passed"] = verdict;
+            } else {
+                report.as_object_mut().unwrap().remove("checks");
+            }
+            let (result, calls) = run_apply(report, None);
+            assert!(matches!(result, Err(CliErr::Erp(ref e)) if e.contains("did not confirm") && e.contains("still open")));
+            assert_eq!(calls.last().unwrap().0, "proposal.verify");
+        }
+    }
+
+    #[test]
+    fn apply_does_not_retry_manual_accept_after_stale_state_or_unsupported_method() {
+        for error in [
+            RpcError::new(CONFLICT, "stale_verification", "scene or proposal changed"),
+            RpcError::new(METHOD_NOT_FOUND, "method_not_found", "unsupported guarded acceptance"),
+        ] {
+            let (result, calls) = run_apply(passing_report(), Some(error));
+            assert!(matches!(result, Err(CliErr::Erp(ref e)) if e.contains("not accepted") && e.contains("still open")));
+            assert_eq!(calls.last().unwrap().0, "proposal.accept_verified");
+            assert_eq!(calls.iter().filter(|(method, _)| method.starts_with("proposal.accept")).count(), 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use orr_mcp::{Bridge, ErpCall};
+    use orr_remote::ClientError;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Calls = Rc<RefCell<Vec<(String, J)>>>;
+
+    struct Fake {
+        calls: Calls,
+        result: J,
+    }
+
+    impl ErpCall for Fake {
+        fn call(&mut self, method: &str, params: J) -> Result<J, ClientError> {
+            self.calls.borrow_mut().push((method.to_string(), params));
+            Ok(self.result.clone())
+        }
+    }
+
+    fn context(result: J) -> (Ctx, Calls) {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let log = calls.clone();
+        let bridge = Bridge::new("fake", Box::new(move || Ok(Box::new(Fake { calls: log.clone(), result: result.clone() }))));
+        (Ctx { bridge, json: true, url: "fake".into(), token: None }, calls)
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn input_forwards_game_generic_exact_decimal_json() {
+        let (mut ctx, calls) = context(json!({"ok": true}));
+        let value = r#"{"throttle":0.1234567890123456789012345,"actions":["jump"]}"#;
+        sim(&mut ctx, &args(&["input", "--player", "3", value])).unwrap();
+        let log = calls.borrow();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].0, "sim.input_value");
+        assert_eq!(log[0].1["player"], 3);
+        assert_eq!(log[0].1["value"].to_string(), value, "no rounding through f64");
+    }
+
+    #[test]
+    fn input_schema_is_discovered_without_type_resolution() {
+        let descriptor = json!({"schema": {"type": "object", "properties": {"throttle": {"type": "number"}}}, "value_format": "exact decimals"});
+        let (mut ctx, calls) = context(descriptor);
+        schema(&mut ctx, &args(&["--input"])).unwrap();
+        assert_eq!(calls.borrow().as_slice(), &[("registry.input".into(), J::Null)]);
+    }
+
+    #[test]
+    fn malformed_input_and_mixed_options_fail_before_connecting() {
+        for values in [
+            vec!["input", "{}"],
+            vec!["input", "--player", "0"],
+            vec!["input", "--player", "-1", "{}"],
+            vec!["input", "--player", "0.5", "{}"],
+            vec!["input", "--player", "18446744073709551616", "{}"],
+            vec!["input", "--player", "0", "not-json"],
+            vec!["input", "--player", "0", "[]"],
+            vec!["input", "--player", "0", "null"],
+            vec!["input", "--player", "0", "{}", "extra"],
+            vec!["step", "--player", "0"],
+            vec!["input", "--players", "2", "--player", "0", "{}"],
+            vec!["input", "--player", "0", "{}", "--replay-out", "out.orrp"],
+            vec!["stop", "--replay-out", ""],
+            vec!["stop", "--force"],
+            vec!["start", "--force"],
+            vec!["stop", "--replay-out", "out.orrp", "--force=true"],
+        ] {
+            let (mut ctx, calls) = context(J::Null);
+            assert!(matches!(sim(&mut ctx, &args(&values)), Err(CliErr::Usage(_))), "{values:?}");
+            assert!(calls.borrow().is_empty(), "bad syntax cannot contact or mutate the host");
+        }
+        for values in [vec!["--input", "--types"], vec!["--input", "Body"], vec!["Body", "Collider"]] {
+            let (mut ctx, calls) = context(J::Null);
+            assert!(matches!(schema(&mut ctx, &args(&values)), Err(CliErr::Usage(_))), "{values:?}");
+            assert!(calls.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn stop_requests_replay_bytes_and_writes_the_exact_local_path() {
+        let dir = std::env::temp_dir().join(format!("orr-cli-export-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chosen name.orrp");
+        let bytes = [0, 255, 1, 128, 12];
+        let (mut ctx, calls) = context(json!({"tick": 2, "checksum": "0x0000000000000001", "replay_bytes": bytes.len(), "replay": orr_remote::codec::b64_encode(&bytes)}));
+        sim(&mut ctx, &args(&["stop", "--replay-out", path.to_str().unwrap()])).unwrap();
+        assert_eq!(calls.borrow().as_slice(), &[("sim.stop".into(), json!({"include_replay": true}))]);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "successful export leaves no temporary file");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_existing_replay_is_refused_before_contacting_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("original.orrp");
+        std::fs::write(&path, b"original recording").unwrap();
+        let (mut ctx, calls) = context(J::Null);
+        let error = sim(&mut ctx, &args(&["stop", "--replay-out", path.to_str().unwrap()]));
+        assert!(matches!(error, Err(CliErr::Erp(ref e)) if e.contains("already exists") && e.contains("play was not stopped") && e.contains("--force")));
+        assert!(calls.borrow().is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original recording");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn replay_commit_refuses_a_late_collision_and_force_replaces_complete_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recording.orrp");
+        // Test the final commit independently of the preflight check: another
+        // process can create this path while the host is returning its replay.
+        std::fs::write(&path, b"original recording").unwrap();
+        let mut result = json!({"replay": orr_remote::codec::b64_encode(b"new recording")});
+        let original_result = result.clone();
+        let error = save_replay(&mut result, path.to_str().unwrap(), false);
+        assert!(matches!(error, Err(CliErr::Erp(ref e)) if e.contains("play stopped") && e.contains("already exists") && e.contains("--force") && e.contains("--last-play")));
+        assert_eq!(std::fs::read(&path).unwrap(), b"original recording");
+        assert_eq!(result, original_result, "failed export cannot claim success");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "collision cleans up staging");
+
+        save_replay(&mut result, path.to_str().unwrap(), true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new recording");
+        assert_eq!(result["local_replay_path"], path.to_str().unwrap());
+        assert!(result.get("replay").is_none());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        let fresh = dir.path().join("fresh.orrp");
+        write_replay_file(&fresh, b"fresh recording", true).unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"fresh recording");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn replay_io_failures_preserve_the_destination_and_clean_up_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("occupied-directory");
+        std::fs::create_dir(&destination).unwrap();
+        let original = destination.join("original.orrp");
+        std::fs::write(&original, b"original recording").unwrap();
+        for force in [false, true] {
+            // Creating and writing the staging file succeeds; publishing over
+            // a directory fails. In either mode no staged file may remain.
+            assert!(write_replay_file(&destination, b"new recording", force).is_err());
+            assert_eq!(std::fs::read(&original).unwrap(), b"original recording");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+            assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 1);
+            // Failure to create a staging file must not create parent folders.
+            assert!(write_replay_file(&dir.path().join("missing/replay.orrp"), b"new recording", force).is_err());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_export_protects_symlinks_and_force_replaces_only_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.orrp");
+        let link = dir.path().join("link.orrp");
+        std::fs::write(&original, b"original recording").unwrap();
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        let (mut ctx, calls) = context(J::Null);
+        assert!(matches!(sim(&mut ctx, &args(&["stop", "--replay-out", link.to_str().unwrap()])), Err(CliErr::Erp(_))));
+        assert!(calls.borrow().is_empty());
+        assert!(write_replay_file(&link, b"new recording", false).is_err());
+        write_replay_file(&link, b"new recording", true).unwrap();
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), b"new recording");
+        assert_eq!(std::fs::read(&original).unwrap(), b"original recording");
+
+        let dangling = dir.path().join("dangling.orrp");
+        std::os::unix::fs::symlink(dir.path().join("missing.orrp"), &dangling).unwrap();
+        assert!(matches!(sim(&mut ctx, &args(&["stop", "--replay-out", dangling.to_str().unwrap()])), Err(CliErr::Erp(_))));
+        assert!(calls.borrow().is_empty());
+        assert!(write_replay_file(&dangling, b"new recording", false).is_err());
+        assert!(std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn invalid_replay_data_never_truncates_the_destination() {
+        let path = std::env::temp_dir().join(format!("orr-cli-invalid-export-{}.orrp", std::process::id()));
+        std::fs::write(&path, b"keep").unwrap();
+        for result in [json!({}), json!({"replay": "not base64"}), json!({"replay": 42})] {
+            let mut result = result;
+            assert!(matches!(save_replay(&mut result, path.to_str().unwrap(), false), Err(CliErr::Erp(_))));
+            assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }

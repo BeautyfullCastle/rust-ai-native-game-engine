@@ -15,6 +15,7 @@ use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
 use orr_fp::{fp, FPQuat, FPVec3, FrameRng, FP};
 use orr_physics3d::{init, register, spawn_body, Body, Collider, PhysicsConfig, PhysicsSystem, Shape, BODY_DYNAMIC};
+use orr_reflect::{Reflect, TypeRegistry};
 use orr_sim::{decode_pod, encode_pod, Game, PlayerSlot, SimCommand, SimContext, System};
 
 /// Fixed sim rate of the sample.
@@ -91,12 +92,13 @@ impl YardConfig {
 
 /// Scene constants, set once in `setup`.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable, Reflect)]
 pub struct Scene {
     pub rain_batch: u32,
     /// Ticks between rain drops; 0 = never.
     pub rain_interval: u32,
     pub max_entities: u32,
+    #[reflect(skip)]
     pub _pad: u32,
     /// Seed of the rain: each drop is a pure function of `(rain_seed, tick, index)`, so a
     /// player's spawn never moves the rain of other ticks.
@@ -104,6 +106,12 @@ pub struct Scene {
 }
 
 pub struct Yard3D;
+
+/// Registers the types used by Yard3D scene documents.
+pub fn register_reflect(types: &mut TypeRegistry) {
+    orr_physics3d::register_reflect(types);
+    types.register_singleton::<Scene>("Yard3dScene");
+}
 
 impl Game for Yard3D {
     type Input = YardInput;

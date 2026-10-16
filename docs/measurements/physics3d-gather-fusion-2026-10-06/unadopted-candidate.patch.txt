@@ -1,0 +1,278 @@
+diff --git a/crates/orr_physics3d/src/step.rs b/crates/orr_physics3d/src/step.rs
+index ba8c466..436e668 100644
+--- a/crates/orr_physics3d/src/step.rs
++++ b/crates/orr_physics3d/src/step.rs
+@@ -204,6 +204,7 @@ impl Scratch {
+         let n = self.ents.len();
+         let enabled = cfg.sleep_ticks != 0;
+         self.flags.clear();
++        self.movers.clear();
+         self.wake_ids.clear();
+         let mut any_asleep = false;
+         for i in 0..n {
+@@ -217,12 +218,14 @@ impl Scratch {
+                     any_asleep = true;
+                 } else {
+                     f |= F_ACTIVE;
++                    self.movers.push(i as u32);
+                     if b.island != 0 {
+                         self.wake_ids.push(b.island);
+                     }
+                 }
+             } else if b.kind != BODY_STATIC && moving {
+                 f |= F_ACTIVE;
++                self.movers.push(i as u32);
+             }
+             self.flags.push(f);
+         }
+@@ -236,9 +239,9 @@ impl Scratch {
+             if !self.wake_ids.is_empty() {
+                 self.wake_single.clear();
+                 self.apply_wakes(bd);
++                self.rebuild_movers();
+             }
+         }
+-        self.rebuild_movers();
+     }
+ 
+     fn rebuild_movers(&mut self) {
+@@ -832,3 +835,239 @@ fn store_list<T: Component>(frame: &mut Frame, h: FrameList<T>, new: &[T]) {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod gather_tests {
++    use super::*;
++
++    fn entity(index: u32) -> Entity {
++        Entity { index, version: 0 }
++    }
++
++    fn dynamic() -> Body {
++        Body {
++            kind: BODY_DYNAMIC,
++            inv_mass: FP::ONE,
++            ..Body::new_static(FPVec3::ZERO)
++        }
++    }
++
++    fn sleeping(island: u32) -> Body {
++        Body {
++            sleep: SLEEP_FLAG,
++            island,
++            ..dynamic()
++        }
++    }
++
++    fn motion() -> FPVec3 {
++        FPVec3::new(FP::ONE, FP::ZERO, FP::ZERO)
++    }
++
++    #[test]
++    fn mixed_classifications_keep_exact_mover_indices() {
++        let bodies = [
++            Body::new_static(FPVec3::ZERO),
++            dynamic(),
++            sleeping(3),
++            Body::new_kinematic(FPVec3::ZERO),
++            Body {
++                vel: motion(),
++                ..Body::new_kinematic(FPVec3::ZERO)
++            },
++            Body {
++                omega: motion(),
++                ..Body::new_kinematic(FPVec3::ZERO)
++            },
++            Body {
++                inv_mass: FP::ZERO,
++                ..dynamic()
++            },
++            Body {
++                inv_mass: FP::ZERO,
++                vel: motion(),
++                ..dynamic()
++            },
++            Body {
++                vel: motion(),
++                omega: motion(),
++                ..Body::new_static(FPVec3::ZERO)
++            },
++            Body {
++                inv_mass: FP::ZERO,
++                omega: motion(),
++                ..dynamic()
++            },
++        ];
++        let entities: Vec<_> = (0..bodies.len() as u32).map(entity).collect();
++        let mut sc = Scratch::new();
++        sc.gather(&entities, &bodies, &entities, &PhysicsConfig::default());
++        assert_eq!(sc.movers, [1, 4, 5, 7, 9]);
++        assert_eq!(
++            sc.flags,
++            [
++                0,
++                F_DYN | F_ACTIVE,
++                F_DYN | F_ASLEEP,
++                0,
++                F_ACTIVE,
++                F_ACTIVE,
++                0,
++                F_ACTIVE,
++                0,
++                F_ACTIVE
++            ]
++        );
++    }
++
++    #[test]
++    fn island_wake_rebuilds_complete_sorted_movers() {
++        let entities: Vec<_> = (0..6).map(entity).collect();
++        let bodies = [
++            sleeping(1),
++            Body {
++                vel: motion(),
++                ..Body::new_kinematic(FPVec3::ZERO)
++            },
++            sleeping(3),
++            sleeping(1),
++            Body {
++                island: 1,
++                ..dynamic()
++            },
++            dynamic(),
++        ];
++        let mut sc = Scratch::new();
++        // A previous contact wake must not leak into this gather's island wake.
++        sc.wake_single.push(2);
++        sc.gather(&entities, &bodies, &entities, &PhysicsConfig::default());
++        assert_eq!(sc.movers, [0, 1, 3, 4, 5]);
++        assert_eq!(
++            sc.flags,
++            [
++                F_DYN | F_ACTIVE,
++                F_ACTIVE,
++                F_DYN | F_ASLEEP,
++                F_DYN | F_ACTIVE,
++                F_DYN | F_ACTIVE,
++                F_DYN | F_ACTIVE
++            ]
++        );
++        assert!(sc.wake_single.is_empty());
++    }
++
++    #[test]
++    fn velocity_wakes_sleeping_islands_and_zero_sleep_ticks_activates_all_dynamics() {
++        let entities: Vec<_> = (0..5).map(entity).collect();
++        let bodies = [
++            sleeping(1),
++            Body {
++                vel: motion(),
++                ..sleeping(1)
++            },
++            sleeping(3),
++            Body {
++                omega: motion(),
++                ..sleeping(3)
++            },
++            sleeping(5),
++        ];
++        let mut sc = Scratch::new();
++        sc.gather(&entities, &bodies, &entities, &PhysicsConfig::default());
++        assert_eq!(sc.movers, [0, 1, 2, 3]);
++        assert_eq!(
++            sc.flags,
++            [
++                F_DYN | F_ACTIVE,
++                F_DYN | F_ACTIVE,
++                F_DYN | F_ACTIVE,
++                F_DYN | F_ACTIVE,
++                F_DYN | F_ASLEEP
++            ]
++        );
++        sc.gather(
++            &entities,
++            &bodies,
++            &entities,
++            &PhysicsConfig {
++                sleep_ticks: 0,
++                ..PhysicsConfig::default()
++            },
++        );
++        assert_eq!(sc.movers, [0, 1, 2, 3, 4]);
++        assert_eq!(sc.flags, [F_DYN | F_ACTIVE; 5]);
++    }
++
++    #[test]
++    fn reuse_clears_movers_for_all_sleeping_and_empty_inputs() {
++        let entities = [entity(0), entity(1)];
++        let mut sc = Scratch::new();
++        let cfg = PhysicsConfig::default();
++        sc.gather(&entities, &[dynamic(), dynamic()], &entities, &cfg);
++        assert_eq!(sc.movers, [0, 1]);
++        sc.gather(&entities, &[sleeping(1), sleeping(1)], &entities, &cfg);
++        assert!(sc.movers.is_empty());
++        assert_eq!(sc.flags, [F_DYN | F_ASLEEP; 2]);
++        sc.gather(&entities, &[dynamic(), dynamic()], &entities, &cfg);
++        assert_eq!(sc.movers, [0, 1]);
++        sc.gather(&[], &[], &[], &cfg);
++        assert!(sc.movers.is_empty());
++        assert!(sc.flags.is_empty());
++        assert!(sc.ents.is_empty());
++        assert!(sc.bslot.is_empty());
++        assert!(sc.cslot.is_empty());
++    }
++
++    #[test]
++    fn unsorted_intersection_uses_gather_indices_and_preserves_dense_slots() {
++        let be = [
++            entity(9),
++            entity(2),
++            entity(7),
++            entity(4),
++            entity(6),
++            entity(1),
++        ];
++        let ce = [
++            entity(4),
++            entity(8),
++            entity(9),
++            Entity {
++                index: 6,
++                version: 1,
++            },
++            entity(2),
++        ];
++        let bodies = [
++            dynamic(),
++            Body::new_static(FPVec3::ZERO),
++            dynamic(),
++            dynamic(),
++            dynamic(),
++            dynamic(),
++        ];
++        let mut sc = Scratch::new();
++        sc.gather(&be, &bodies, &ce, &PhysicsConfig::default());
++        assert_eq!(sc.ents, [entity(2), entity(4), entity(9)]);
++        assert_eq!(sc.bslot, [1, 3, 0]);
++        assert_eq!(sc.cslot, [4, 0, 2]);
++        assert_eq!(sc.flags, [0, F_DYN | F_ACTIVE, F_DYN | F_ACTIVE]);
++        assert_eq!(sc.movers, [1, 2]);
++
++        sc.gather(&be, &bodies, &be, &PhysicsConfig::default());
++        assert_eq!(
++            sc.ents,
++            [
++                entity(1),
++                entity(2),
++                entity(4),
++                entity(6),
++                entity(7),
++                entity(9)
++            ]
++        );
++        assert_eq!(sc.bslot, [5, 1, 3, 4, 2, 0]);
++        assert_eq!(sc.cslot, sc.bslot);
++        assert_eq!(sc.movers, [0, 2, 3, 4, 5]);
++    }
++}

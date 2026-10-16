@@ -40,4 +40,7 @@ png = "0.18"
 [[bin]]
 name = "orr_server"
 path = "src/main.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false
 required-features = ["net"]

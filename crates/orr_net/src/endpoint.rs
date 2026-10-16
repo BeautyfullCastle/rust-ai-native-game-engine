@@ -7,7 +7,7 @@ use crate::{
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
@@ -272,6 +272,25 @@ impl Endpoint {
         Ok(ep)
     }
 
+    /// Starts verified native WebTransport to an `https://` URL. The URL host
+    /// is checked against WebPki or explicit CA trust; bypass/pin-only trust
+    /// is unsupported. DNS, QUIC, HTTP/3, stream opening and hello share one
+    /// `connect_timeout`. Diagnostic errors never contain URL or peer text.
+    pub fn connect_wt(url: &str, trust: QuicTrust, cfg: NetConfig) -> Result<Endpoint, NetError> {
+        let target = crate::wt_client::target(url)?;
+        let config = crate::wt_client::config(&trust, &cfg)?;
+        let (mut ep, _) = Endpoint::new(cfg, false)?;
+        let handle = ep.handle();
+        let _guard = handle.enter();
+        let wt = wtransport::Endpoint::client(config)
+            .map_err(|_| NetError("WT endpoint initialization failed".into()))?;
+        ep.local_addr = wt.local_addr().map_err(|_| NetError("WT local address unavailable".into()))?;
+        let id = ep.shared.alloc_id();
+        ep.client_conn = Some(id);
+        handle.spawn(crate::wt_client::client_conn(wt, ep.shared.clone(), id, target));
+        Ok(ep)
+    }
+
     /// Starts connecting over WebSocket to `ws://host:port/path`. Returns at once.
     pub fn connect_ws(url: &str, cfg: NetConfig) -> Result<Endpoint, NetError> {
         let (mut ep, _shutdown) = Endpoint::new(cfg, false)?;
@@ -279,6 +298,22 @@ impl Endpoint {
         let id = ep.shared.alloc_id();
         ep.client_conn = Some(id);
         ep.handle().spawn(crate::ws::client_conn(ep.shared.clone(), id, target));
+        Ok(ep)
+    }
+
+    /// Starts a verified TLS WebSocket connection. By default the URL DNS/IP
+    /// host is checked; `server_name` explicitly overrides that certificate name.
+    /// Only WebPki, CertDer and PemFile trust are supported. DNS, TCP, TLS and
+    /// HTTP upgrade share `connect_timeout`. Errors omit URL and peer content.
+    pub fn connect_wss(url: &str, server_name: Option<&str>, trust: QuicTrust, cfg: NetConfig) -> Result<Endpoint, NetError> {
+        let target = crate::ws::parse_wss_target(url)?;
+        let name = crate::ws::wss_server_name(&target, server_name)?;
+        let tls = tls::build_client_rustls(&trust, true)
+            .map_err(|_| NetError("WSS TLS configuration failed (use WebPki or a valid certificate CA)".into()))?;
+        let (mut ep, _shutdown) = Endpoint::new(cfg, false)?;
+        let id = ep.shared.alloc_id();
+        ep.client_conn = Some(id);
+        ep.handle().spawn(crate::ws::wss_client_conn(ep.shared.clone(), id, target, name, tls));
         Ok(ep)
     }
 
@@ -343,6 +378,9 @@ impl Endpoint {
             .get(&conn)
             .cloned()
             .ok_or(SendError::UnknownConnection)?;
+        if cs.link == Link::Wt && cs.closing.load(Relaxed) {
+            return Err(SendError::UnknownConnection);
+        }
         if bytes.len() > cfg.max_message_size {
             return Err(SendError::TooLarge { max: cfg.max_message_size });
         }
@@ -354,7 +392,18 @@ impl Endpoint {
                 if cs.link.datagram_capable() && st.native_datagrams.load(Relaxed) {
                     let max = st.max_unreliable.load(Relaxed);
                     if bytes.len() > max {
+                        if cs.link == Link::Wt && cfg.datagram_fallback {
+                            return self.push_stream(&cs, TAG_UNRELIABLE, bytes);
+                        }
                         return Err(SendError::TooLarge { max });
+                    }
+                    if cs.link == Link::Wt {
+                        let n = bytes.len().max(1);
+                        reserve_queued(&st.queued, n, cfg.max_queued_send_bytes)?;
+                        return cs.tx.send(Out::Datagram(Bytes::copy_from_slice(bytes))).map_err(|_| {
+                            st.queued.fetch_sub(n, Relaxed);
+                            SendError::UnknownConnection
+                        });
                     }
                     cs.tx
                         .send(Out::Datagram(Bytes::copy_from_slice(bytes)))
@@ -373,14 +422,12 @@ impl Endpoint {
 
     fn push_stream(&self, cs: &ConnShared, tag: u8, bytes: &[u8]) -> Result<(), SendError> {
         let st = &cs.stats;
-        if st.queued.load(Relaxed) + bytes.len() > self.shared.cfg.max_queued_send_bytes {
-            return Err(SendError::Backpressure);
-        }
-        st.queued.fetch_add(bytes.len(), Relaxed);
+        let n = if cs.link == Link::Wt { bytes.len().max(1) } else { bytes.len() };
+        reserve_queued(&st.queued, n, self.shared.cfg.max_queued_send_bytes)?;
         cs.tx
             .send(Out::Stream { tag, data: Bytes::copy_from_slice(bytes) })
             .map_err(|_| {
-                st.queued.fetch_sub(bytes.len(), Relaxed);
+                st.queued.fetch_sub(n, Relaxed);
                 SendError::UnknownConnection
             })
     }
@@ -388,6 +435,7 @@ impl Endpoint {
     /// Starts a graceful close of one connection.
     pub fn close(&self, conn: ConnId) {
         if let Some(cs) = self.shared.conns.read().unwrap().get(&conn) {
+            if cs.link == Link::Wt && cs.closing.swap(true, Relaxed) { return; }
             cs.closing.store(true, Relaxed);
             let _ = cs.tx.send(Out::Close);
         }
@@ -430,6 +478,21 @@ impl Endpoint {
     }
 }
 
+/// Atomically reserves queue bytes without exceeding the budget or wrapping.
+/// Relaxed ordering is sufficient: the channel publishes the actual message.
+/// Keep this CAS loop compatible with Rust 1.85 (fetch_update is deprecated on
+/// newer Rust, while its replacement is newer than our MSRV).
+fn reserve_queued(queued: &AtomicUsize, bytes: usize, budget: usize) -> Result<(), SendError> {
+    let mut current = queued.load(Relaxed);
+    loop {
+        let next = current.checked_add(bytes).filter(|&n| n <= budget).ok_or(SendError::Backpressure)?;
+        match queued.compare_exchange_weak(current, next, Relaxed, Relaxed) {
+            Ok(_) => return Ok(()),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 impl Drop for Endpoint {
     fn drop(&mut self) {
         self.shutdown_inner();
@@ -448,5 +511,68 @@ impl Transport for Endpoint {
     }
     fn stats(&self, conn: ConnId) -> Option<ConnStats> {
         Endpoint::stats(self, conn)
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+
+    #[test]
+    fn exact_capacity_and_rejection_leave_counter_correct() {
+        let queued = AtomicUsize::new(6);
+        assert_eq!(reserve_queued(&queued, 4, 10), Ok(()));
+        assert_eq!(queued.load(Relaxed), 10);
+        assert_eq!(reserve_queued(&queued, 1, 10), Err(SendError::Backpressure));
+        assert_eq!(queued.load(Relaxed), 10);
+        assert_eq!(reserve_queued(&queued, 0, 10), Ok(()));
+        assert_eq!(queued.load(Relaxed), 10);
+    }
+
+    #[test]
+    fn overflow_and_reduced_budget_do_not_mutate_counter() {
+        let queued = AtomicUsize::new(usize::MAX - 1);
+        assert_eq!(reserve_queued(&queued, 2, usize::MAX), Err(SendError::Backpressure));
+        assert_eq!(queued.load(Relaxed), usize::MAX - 1);
+        assert_eq!(reserve_queued(&queued, 0, 0), Err(SendError::Backpressure));
+        assert_eq!(queued.load(Relaxed), usize::MAX - 1);
+        assert_eq!(reserve_queued(&queued, 1, usize::MAX), Ok(()));
+        assert_eq!(queued.load(Relaxed), usize::MAX);
+    }
+
+    #[test]
+    fn concurrent_reservations_never_overbook() {
+        let queued = AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(8);
+        let successes: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8).map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    let mut successes = 0;
+                    for _ in 0..100 {
+                        successes += usize::from(reserve_queued(&queued, 1, 257).is_ok());
+                        assert!(queued.load(Relaxed) <= 257);
+                    }
+                    successes
+                })
+            }).collect();
+            handles.into_iter().map(|handle| handle.join().unwrap()).sum()
+        });
+        assert_eq!(successes, 257);
+        assert_eq!(queued.load(Relaxed), successes);
+    }
+
+    #[test]
+    fn failed_channel_send_rolls_back_wt_stream_and_datagram_reservations() {
+        let (ep, _) = Endpoint::new(NetConfig::default(), false).unwrap();
+        let (cs, rx) = ep.shared.register(1, Link::Wt, 1200, true);
+        drop(rx);
+        for channel in [Channel::Reliable, Channel::Unreliable] {
+            for payload in [b"".as_slice(), b"message".as_slice()] {
+                assert_eq!(ep.send(1, channel, payload), Err(SendError::UnknownConnection));
+                assert_eq!(cs.stats.queued.load(Relaxed), 0);
+            }
+        }
+        ep.shared.conns.write().unwrap().clear();
     }
 }

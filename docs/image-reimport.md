@@ -1,0 +1,33 @@
+# Explicit image reimport: bounded proposal
+
+Source: PR145 61eb6e682d414526e13c9765adcfc6768d827918; local fcd37d8c4e79db3ee66882c8e7ebb8fc765922ac. 2026-10-08.
+
+## Findings and primary sources
+Sprite PNG files currently belong to immutable orr_package objects; orr_sample::project_sprites validates and decodes them. The ORAM cooker supports Motion/Impact only. Do not invent image ORAM support or move filesystem/hash dependencies into orr_asset/simulation.
+Unity 6 asset metadata separates stable identity/import configuration from changed asset bytes: https://docs.unity3d.com/6000.0/Documentation/Manual/AssetMetadata.html . Godot stable documents retained import configuration and export consumption of imported resources rather than source filesystem paths: https://docs.godotengine.org/en/stable/tutorials/assets_pipeline/import_process.html . These inform identity/lifetime tests, not compatibility claims.
+
+## Scope and non-goals
+Explicit user-selected replacement of one same-dimension PNG atlas. Closed sprite-only package: unchanged sprite JSON, PNG path, optional same-stem declared RGBA derivative, LICENSE.txt; no package dependencies. Same package name, sprite document path, numeric region IDs, clip IDs/timing and GUID bindings; strictly greater explicit package version. Reject mixed/font/model packages, dimension/layout/region changes, automatic watching, generic dependency updates and same-version mutations. No asset-version Undo/restore in this slice; existing scene and sprite-binding Undo remain untouched.
+
+## Ownership and dependencies
+Single implementation owner: orr_package guarded install API; optional orr_sample image-reimport orchestration and shared export snapshot visibility; orr_editor SpritePanel optional explicit controls and settled-host guard; Cargo wiring/docs/tests. Separate read-only design/source reviewer. No simulation/orr_asset changes. Reuse existing PNG decoder and full bounded project snapshot/admission; image-reimport requires project-export and Collect sprite support on Linux x86_64, with no child process execution in reimport. Existing exact consuming capability routes remain authoritative.
+
+## Transaction API and atomicity
+Prepare an owned snapshot of project manifest, scene, sidecar/UI, complete active lock/package closure with existing limits, no links/special files, and exact file rechecks. Decode selected PNG with existing positive bounds, regenerate declared RGBA, preserve all other bytes, produce new package version in private stage. Build a private complete staged project, install through existing package authority, admit actual Arena/Collect route including all sprite references/fonts, compare initial frame checksum and unchanged scene/progress identity.
+Package API install_checked takes expected old Lock and expected candidate Lock and a prepublication callback. Acquire existing writer guard; verify exact old Lock, snapshot source bytes and resolve exactly the approved candidate, write immutable candidate objects, invoke final pinned-document recheck, then publish lock via existing atomic rename. No fallible operations after rename; preserve existing explicit process-atomic/not-powerloss durability boundary. Stale guard fails closed, no force unlock. Inactive orphan objects on prepublication failure are allowed; old active lock/object bytes remain intact.
+Editor rejects Play, pending edits/transactions, dirty scene or sidecar, mismatched saved sidecar path/document and mismatched original prepared vs current Edit frame checksum. Prepare all decoded assets/texture handles from owned candidate bytes before commit; commit then swap loaded map only. Keep Bindings object/history, frame, selected GUIDs, scene bytes and playback state unchanged; no source reread after activation.
+
+## Acceptance
+Positive same-dimension changed pixels visible in actual editor and restarted runtime; sim checksum, GUID/region refs, game/progress identity, scene and sidecar bytes unchanged. Regenerated RGBA equals decoder output; candidate lock hash closure exact; original immutable package untouched. Malformed/truncated/APNG/dimension mismatch, unknown files/dependencies, stale expected lock, changed staged package/project, injected stage/lock failure preserve old active lock and visible assets/frame/history. Existing scene/binding undo/save/reopen still works. Relocated read-only export with original project/source/workspace hidden shows changed pixels and identical sim checksum. Focused package/sample/editor tests, strict feature/default Clippy, independent review, then publication/exact-head mandatory CI separately. No #105/#94 closure or engine-completeness percentage.
+
+## Build and verify
+
+The `orr_editor/image-reimport` opt-in exposes the explicit replacement controls in the Sprite bindings inspector on Linux x86_64. Select the package and sprite document, choose a replacement PNG path and greater package version, then use **Replace atlas with new package version**. Save the current scene and sidecar first. The operation retains their bytes and histories; it does not save, undo or overwrite them.
+
+`orr_sample/image-reimport` reuses the existing project-export read-only snapshot implementation and compiles Collect sprite support. It does not execute a runtime/exporter, create player-progress files or enable a consuming editor game's/UI route. The caller's explicit game/UI route remains authoritative. These optional tool dependencies are absent from default builds and simulation/orr_asset.
+
+CPU contracts: `cargo test -p orr_package --lib`; `cargo test -p orr_sample --lib --features image-reimport,collect-ui,collect-progress,linked-prefabs`; `cargo test -p orr_editor --test image_reimport --features image-reimport,collect-ui,linked-prefabs`.
+
+Positive GPU gate: set `ORR_REQUIRE_GPU=1` and explicitly run `composed_reimport_keeps_old_pixels_on_failure_then_swaps_and_reopens` with `--ignored --exact`; a default ignored result is not acceptance. Optional `ORR_PROJECT_CAPTURE_DIR` preserves four real composed-editor captures.
+
+Positive relocated export gate: build the actual `collect_dodge` and `orr_export_collect` tools with `collect-sprites,collect-ui,collect-progress,linked-prefabs,project-export`, set their verified paths as `ORR_COLLECT_RUNTIME` and `ORR_COLLECT_EXPORTER`, then explicitly run `image_reimport::tests::reimport_real_pixels_export_relocates_with_sources_hidden_and_read_only` with `--ignored --exact`. Functional bubblewrap and software GPU are mandatory. `ORR_COLLECT_CAPTURES` preserves before/after/relocated captures. No namespace, GPU, readonly or source-hiding fallback is a pass.

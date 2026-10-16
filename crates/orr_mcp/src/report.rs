@@ -31,6 +31,18 @@ pub fn verify_text(r: &J) -> String {
     };
     let mut out = format!("{subject}: replayed {} ticks ({}..{}; inputs: {how}).\n", r["ticks"], r["start_tick"], r["end_tick"]);
 
+    if let Some(sampling) = r["metric_sampling"].as_object() {
+        out.push_str(&format!(
+            "Metrics: {} sampled tick boundaries (sample_every {}, start/end included).\n",
+            num(&sampling["sample_count"]), num(&sampling["requested_interval"])
+        ));
+        if sampling["every_tick_boundary_observed"] == false {
+            out.push_str("WARNING: sampled min/max; between samples not checked. Use --sample-every 1 (MCP sample_every: 1) for every tick boundary.\n");
+        } else if sampling["every_tick_boundary_observed"] == true {
+            out.push_str("Metrics observed at every tick boundary; events entirely within a tick are not covered.\n");
+        }
+    }
+
     match r["checks"]["passed"].as_bool() {
         Some(ok) => {
             let results = r["checks"]["results"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -70,7 +82,7 @@ pub fn verify_text(r: &J) -> String {
     let metrics = r["metrics"].as_array().map(Vec::as_slice).unwrap_or_default();
     let mut same: Vec<&str> = Vec::new();
     if is_baseline {
-        out.push_str("Metrics (start -> final, min..max):\n");
+        out.push_str("Metrics (start -> final, sampled min..max):\n");
         for m in metrics {
             let b = &m["base"];
             out.push_str(&format!("  {}: {} -> {}  ({}..{})\n", s(&m["name"]), num(&b["start"]), num(&b["end"]), num(&b["min"]), num(&b["max"])));
@@ -174,4 +186,35 @@ pub fn spawned_text(spawned: &J) -> String {
         text.push_str(&format!("Spawned: op {} creates entity {}\n", e["index"], s(&e["guid"])));
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn verification_text_distinguishes_sparse_dense_and_older_reports() {
+        let mut report = json!({
+            "ticks": 4, "start_tick": 0, "end_tick": 4, "inputs": {"kind": "idle"},
+            "metrics": [], "checks": {"passed": true, "results": []}
+        });
+        // Older hosts remain usable without making up a coverage claim.
+        let old = verify_text(&report);
+        assert!(!old.contains("every tick boundary") && !old.contains("between samples not checked"));
+        report["metric_sampling"] = json!({
+            "requested_interval": 60, "sample_count": 2,
+            "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": false
+        });
+        let sparse = verify_text(&report);
+        assert!(sparse.contains("2 sampled tick boundaries (sample_every 60, start/end included)"));
+        assert!(sparse.find("sampled min/max; between samples not checked").unwrap() < sparse.find("CHECKS PASSED").unwrap());
+        report["metric_sampling"] = json!({
+            "requested_interval": 1, "sample_count": 5,
+            "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": true
+        });
+        let dense = verify_text(&report);
+        assert!(dense.contains("every tick boundary; events entirely within a tick are not covered"));
+        assert!(!dense.contains("between samples not checked"));
+    }
 }

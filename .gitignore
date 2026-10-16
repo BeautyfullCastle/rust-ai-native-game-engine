@@ -5,3 +5,4 @@
 /crates/orr_wasm_bench/web/pkg
 __pycache__/
 /crates/orr_web/web/pkg_gpu
+/tools/webtransport/node_modules/

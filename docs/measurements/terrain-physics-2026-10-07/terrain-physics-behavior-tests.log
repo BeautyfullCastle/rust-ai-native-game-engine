@@ -1,0 +1,50 @@
+   Compiling orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs)
+   Compiling orr_sim v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sim)
+   Compiling orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect)
+   Compiling orr_session v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_session)
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+   Compiling orr_terrain_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 9.80s
+     Running tests/terrain_physics.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/terrain_physics-001435367935b461)
+
+running 18 tests
+test actual_canonical_triangle_and_surface_apis_match_nonplanar_contacts ... ok
+test conservative_displacement_guard_blocks_high_speed_crossing ... ok
+test diagonal_and_cell_seam_features_deduplicate_without_internal_walls ... ok
+test convex_ridge_keeps_a_single_finite_edge_normal ... ok
+test finite_triangle_face_edge_and_vertex_regions_are_distinct ... ok
+test hole_removes_both_triangles_without_floor_or_vertical_wall ... ok
+test candidate_and_geometry_extremes_fail_deterministically ... ok
+test shallow_falling_sphere_cannot_cross_a_finite_triangle ... ok
+test unsafe_dt_substeps_speed_radius_and_state_reject_without_mutation ... ok
+test actual_motion_crosses_diagonal_cell_seam_and_then_hole ... ok
+test unsupported_shapes_with_excluded_filters_can_use_ordinary_physics ... ok
+test all_filter_permitted_unsupported_bodies_are_rejected_atomically ... ok
+test sphere_falls_through_a_wide_hole_and_beyond_outer_boundary ... ok
+test actual_slope_accelerates_sphere_downhill ... ok
+test actual_ridge_and_outer_rim_contact_change_horizontal_velocity ... FAILED
+test actual_friction_slows_a_rotation_locked_sphere ... ok
+test actual_sphere_falls_rests_sleeps_and_wakes_from_impulse ... FAILED
+test rollback_and_fresh_scratch_replay_terrain_contacts_bit_exactly ... ok
+
+failures:
+
+---- actual_ridge_and_outer_rim_contact_change_horizontal_velocity stdout ----
+
+thread 'actual_ridge_and_outer_rim_contact_change_horizontal_velocity' (131) panicked at crates/orr_terrain_physics3d/tests/terrain_physics.rs:68:5:
+1.59589 != 1.5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- actual_sphere_falls_rests_sleeps_and_wakes_from_impulse stdout ----
+
+thread 'actual_sphere_falls_rests_sleeps_and_wakes_from_impulse' (133) panicked at crates/orr_terrain_physics3d/tests/terrain_physics.rs:68:5:
+0.58977 != 0.5
+
+
+failures:
+    actual_ridge_and_outer_rim_contact_change_horizontal_velocity
+    actual_sphere_falls_rests_sleeps_and_wakes_from_impulse
+
+test result: FAILED. 16 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p orr_terrain_physics3d --test terrain_physics`

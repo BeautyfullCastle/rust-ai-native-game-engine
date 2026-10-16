@@ -1,0 +1,59 @@
+    Checking orr_ecs v0.0.1 ($REPO/crates/orr_ecs)
+    Checking orr_fp v0.0.1 ($REPO/crates/orr_fp)
+    Checking tokio v1.53.1
+    Checking orr_sim v0.0.1 ($REPO/crates/orr_sim)
+    Checking getrandom v0.2.17
+    Checking ring v0.17.14
+    Checking getrandom v0.4.3
+    Checking rand v0.10.3
+    Checking rustls-webpki v0.103.15
+    Checking rustls v0.23.45
+    Checking orr_proto v0.0.1 ($REPO/crates/orr_proto)
+   Compiling orr_reflect_derive v0.0.1 ($REPO/crates/orr_reflect_derive)
+    Checking orr_session v0.0.1 ($REPO/crates/orr_session)
+    Checking orr_reflect v0.0.1 ($REPO/crates/orr_reflect)
+    Checking parking_lot_core v0.9.12
+    Checking quinn-proto v0.11.18
+    Checking h3 v0.0.8
+    Checking parking_lot v0.12.5
+    Checking quinn-udp v0.5.15
+    Checking khronos-egl v6.0.0
+    Checking wgpu-hal v30.0.1
+    Checking quinn v0.11.12
+    Checking h3-datagram v0.0.2
+    Checking tungstenite v0.30.0
+    Checking tokio-util v0.7.19
+    Checking rcgen v0.14.10
+    Checking h3-quinn v0.0.10
+    Checking wtransport v0.7.2
+    Checking orr_bridge v0.0.1 ($REPO/crates/orr_bridge)
+    Checking wgpu-core-deps-windows-linux-android v30.0.1
+    Checking wgpu-core v30.0.1
+    Checking tokio-tungstenite v0.30.0
+    Checking h3-webtransport v0.1.2
+    Checking tokio-rustls v0.26.6
+    Checking smithay-client-toolkit v0.19.2
+    Checking orr_net v0.0.1 ($REPO/crates/orr_net)
+    Checking orr_view v0.0.1 ($REPO/crates/orr_view)
+    Checking getrandom v0.3.4
+    Checking x11rb v0.13.2
+    Checking sctk-adwaita v0.10.1
+    Checking ahash v0.8.12
+    Checking orr_relay_net v0.0.1 ($REPO/crates/orr_relay_net)
+    Checking x11-dl v2.21.0
+    Checking wgpu v30.0.1
+    Checking orr_physics v0.0.1 ($REPO/crates/orr_physics)
+    Checking orr_rhi v0.0.1 ($REPO/crates/orr_rhi)
+    Checking orr_physics3d v0.0.1 ($REPO/crates/orr_physics3d)
+    Checking orr_testgame v0.0.1 ($REPO/crates/orr_testgame)
+    Checking winit v0.30.13
+    Checking orr_games v0.0.1 ($REPO/crates/orr_games)
+    Checking orr_render v0.0.1 ($REPO/crates/orr_render)
+    Checking orr_viewstream v0.0.1 ($REPO/crates/orr_viewstream)
+    Checking nix v0.31.3
+    Checking ctrlc v3.5.2
+    Checking orr_edit v0.0.1 ($REPO/crates/orr_edit)
+    Checking orr_sample v0.0.1 ($REPO/crates/orr_sample)
+    Checking orr_server v0.0.1 ($REPO/crates/orr_server)
+    Checking orr_remote v0.0.1 ($REPO/crates/orr_remote)
+    Finished `release` profile [optimized + debuginfo] target(s) in 19.56s

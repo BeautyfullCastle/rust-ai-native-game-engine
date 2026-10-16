@@ -1,0 +1,108 @@
+   Compiling thiserror v2.0.21
+   Compiling log v0.4.34
+   Compiling bytemuck v1.25.2
+   Compiling zerofrom v0.1.8
+   Compiling wayland-sys v0.31.11
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling orr_ecs v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_ecs)
+   Compiling orr_fp v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_fp)
+   Compiling tokio v1.53.1
+   Compiling orr_sim v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sim)
+   Compiling tinystr v0.8.4
+   Compiling icu_locale_core v2.3.0
+   Compiling wayland-backend v0.3.17
+   Compiling potential_utf v0.1.6
+   Compiling zerotrie v0.2.5
+   Compiling icu_collections v2.3.0
+   Compiling futures-util v0.3.34
+   Compiling naga-types v30.0.1
+   Compiling tracing v0.1.44
+   Compiling icu_provider v2.3.1
+   Compiling wayland-client v0.31.15
+   Compiling wgpu-types v30.0.1
+   Compiling naga v30.0.1
+   Compiling saphyr-parser v0.1.0
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling orr_proto v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_proto)
+   Compiling wgpu-hal v30.0.1
+   Compiling orr_reflect_derive v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect_derive)
+   Compiling gpu-allocator v0.28.0
+   Compiling orr_session v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_session)
+   Compiling orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect)
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling asn1-rs v0.7.2
+   Compiling idna_adapter v1.2.2
+   Compiling quinn-proto v0.11.18
+   Compiling h3 v0.0.8
+   Compiling idna v1.1.0
+   Compiling quinn-udp v0.5.15
+   Compiling wayland-protocols v0.32.13
+   Compiling wgpu-core v30.0.1
+   Compiling calloop v0.13.0
+   Compiling url v2.5.8
+   Compiling quinn v0.11.12
+   Compiling der-parser v10.0.0
+   Compiling h3-datagram v0.0.2
+   Compiling wgpu-core-deps-windows-linux-android v30.0.1
+   Compiling oid-registry v0.8.1
+   Compiling futures-executor v0.3.34
+   Compiling wgpu v30.0.1
+   Compiling serde_core v1.0.229
+   Compiling wayland-cursor v0.31.14
+   Compiling wtransport-proto v0.7.2
+   Compiling wayland-csd-frame v0.3.0
+   Compiling x509-parser v0.18.1
+   Compiling tiny-skia-path v0.11.4
+   Compiling futures v0.3.34
+   Compiling tungstenite v0.30.0
+   Compiling wayland-protocols-wlr v0.3.12
+   Compiling orr_bridge v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_bridge)
+   Compiling calloop-wayland-source v0.3.0
+   Compiling tokio-util v0.7.19
+   Compiling serde_json v1.0.151
+   Compiling smithay-client-toolkit v0.19.2
+   Compiling h3-quinn v0.0.10
+   Compiling wtransport v0.7.2
+   Compiling orr_view v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_view)
+   Compiling tokio-tungstenite v0.30.0
+   Compiling tiny-skia v0.11.4
+   Compiling h3-webtransport v0.1.2
+   Compiling tokio-rustls v0.26.6
+   Compiling orr_rhi v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_rhi)
+   Compiling orr_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_net)
+   Compiling sctk-adwaita v0.10.1
+   Compiling xkbcommon-dl v0.4.2
+   Compiling wayland-protocols-plasma v0.3.12
+   Compiling orr_physics v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics)
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+   Compiling winit v0.30.13
+   Compiling orr_games v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_games)
+warning: unexpected `cfg` condition value: `terrain-physics`
+  --> crates/orr_games/src/lib.rs:16:7
+   |
+16 | #[cfg(feature = "terrain-physics")]
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+   |
+   = note: no expected values for `feature`
+   = help: consider adding `terrain-physics` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: `orr_games` (lib) generated 1 warning
+   Compiling orr_viewstream v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_viewstream)
+   Compiling orr_relay_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_relay_net)
+   Compiling orr_render v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_render)
+   Compiling orr_testgame v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_testgame)
+   Compiling orr_sample v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sample)
+   Compiling orr_edit v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_edit)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 46s
+     Running tests/bake_admission.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/bake_admission-8513b98bfe1d5cfd)
+
+running 2 tests
+test staged_batch_retains_admission_and_preserves_metadata_on_rejection ... ok
+test every_admitted_path_uses_common_bake_and_failure_is_atomic ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

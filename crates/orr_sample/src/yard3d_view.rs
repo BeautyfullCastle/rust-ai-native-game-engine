@@ -34,6 +34,69 @@ impl Extractor3 for YardExtractor {
     }
 }
 
+/// Authoritative body poses for presentation bindings. Unlike the decorative
+/// ground plane mapping, these retain the exact body's center. No write-back.
+pub fn editor_body_poses(frame: FrameView<'_>) -> Vec<(Entity, orr_view::Transform3)> {
+    frame.iter::<Body>().map(|(entity, body)| (entity, fp_to_transform3(body.pos, body.rot))).collect()
+}
+
+/// Read-only classification for static presentation baking. Classification,
+/// exact body placement, and the rendered procedural style all come from the
+/// same immutable frame; interpolation policy is deliberately not a body kind.
+#[derive(Clone, Copy, Debug)]
+pub struct EditorBakeBody {
+    pub entity: Entity,
+    pub is_static: bool,
+    pub pose: orr_view::Transform3,
+    pub item: Option<RenderItem3>,
+    pub supported_shape: bool,
+}
+
+pub fn editor_bake_bodies(frame: FrameView<'_>) -> Result<Vec<EditorBakeBody>, String> {
+    if frame.count::<Body>() > 65536 {
+        return Err("Static diffuse bake exceeds 65536 classified bodies".into());
+    }
+    Ok(frame.iter::<Body>().map(|(entity, body)| {
+        let collider = frame.get::<Collider>(entity);
+        let item = collider.map(|collider| {
+            let extracted = extract_body(entity, body, collider);
+            RenderItem3 { entity, transform: extracted.transform, style: extracted.style }
+        });
+        EditorBakeBody {
+            entity,
+            is_static: body.kind == orr_physics3d::BODY_STATIC,
+            pose: fp_to_transform3(body.pos, body.rot),
+            item,
+            supported_shape: collider.is_none_or(|collider| matches!(collider.shape.kind,
+                orr_physics3d::SHAPE_BOX | orr_physics3d::SHAPE_SPHERE | orr_physics3d::SHAPE_CAPSULE)),
+        }
+    }).collect())
+}
+
+/// Allocation-free view of just the explicitly static bodies. Used by the
+/// editor's bake cache key so Play ticks never copy excluded dynamic render
+/// items or construct procedural meshes and texture buffers.
+pub fn editor_static_bake_bodies<'a>(frame: FrameView<'a>) -> Result<impl Iterator<Item = EditorBakeBody> + 'a, String> {
+    if frame.count::<Body>() > 65536 {
+        return Err("Static diffuse bake exceeds 65536 classified bodies".into());
+    }
+    let (entities, bodies) = frame.dense::<Body>();
+    Ok(entities.iter().copied().zip(bodies).filter(|(_, body)| body.kind == orr_physics3d::BODY_STATIC).map(move |(entity, body)| {
+        let collider = frame.get::<Collider>(entity);
+        EditorBakeBody {
+            entity,
+            is_static: true,
+            pose: fp_to_transform3(body.pos, body.rot),
+            item: collider.map(|collider| {
+                let extracted = extract_body(entity, body, collider);
+                RenderItem3 { entity, transform: extracted.transform, style: extracted.style }
+            }),
+            supported_shape: collider.is_none_or(|collider| matches!(collider.shape.kind,
+                orr_physics3d::SHAPE_BOX | orr_physics3d::SHAPE_SPHERE | orr_physics3d::SHAPE_CAPSULE)),
+        }
+    }))
+}
+
 fn extract_body(entity: Entity, body: &Body, collider: &Collider) -> Extracted3 {
     let shape = &collider.shape;
     let mut transform = fp_to_transform3(body.pos, body.rot);
@@ -197,6 +260,39 @@ pub fn input_for(keys: YardKeys, camera: &Camera3D, cursor: [f32; 2], viewport: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bake_classification_uses_body_kind_and_exact_same_frame_mesh() {
+        use orr_ecs::{ComponentRegistryBuilder, Frame};
+        use orr_fp::{fp, FPVec3};
+        use orr_physics3d::Shape;
+        let mut registry = ComponentRegistryBuilder::new();
+        orr_physics3d::register(&mut registry);
+        let mut frame = Frame::new(registry.build());
+        let shape = Shape::cuboid(fp!(24), fp!(0.5), fp!(24));
+        let position = FPVec3::new(fp!(0), fp!(-0.5), fp!(0));
+        for body in [Body::new_static(position), Body::new_kinematic(position),
+            Body::new_dynamic(position, &shape, fp!(1))] {
+            let entity = frame.spawn();
+            frame.add(entity, body);
+            frame.add(entity, Collider::new(shape));
+        }
+        let view = FrameView::of(&frame);
+        let classified = editor_bake_bodies(view).unwrap();
+        assert_eq!(classified.iter().filter(|body| body.is_static).count(), 1);
+        let ground = classified.iter().find(|body| body.is_static).unwrap();
+        assert_eq!(ground.pose.pos.y, -0.5);
+        assert_eq!(ground.item.unwrap().transform.pos.y, 0.0);
+        assert!(ground.item.unwrap().style.checker);
+        let mut rendered = Vec::new();
+        YardExtractor.extract(view, &mut rendered);
+        for body in classified {
+            let item = body.item.unwrap();
+            let visible = rendered.iter().find(|item| item.entity == body.entity).unwrap();
+            assert_eq!(item.transform, visible.transform);
+            assert_eq!(item.style, visible.style);
+        }
+    }
 
     #[test]
     fn input_ray_round_trips_through_the_integer_encoding() {

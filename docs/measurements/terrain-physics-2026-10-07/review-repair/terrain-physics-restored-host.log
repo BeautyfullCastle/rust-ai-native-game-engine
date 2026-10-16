@@ -1,0 +1,17 @@
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+   Compiling orr_terrain_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_terrain_physics3d)
+   Compiling orr_games v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_games)
+   Compiling orr_sample v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sample)
+   Compiling orr_remote v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_remote)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 35s
+     Running tests/terrain_yard3d.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/terrain_yard3d-7fa24f059b73597b)
+
+running 5 tests
+test source_symlinks_and_traversal_are_rejected_before_publication ... ok
+test invalid_revision_identity_shapes_and_numeric_profiles_leave_doc_atomic ... ok
+test raw_erp_debug_and_path_changes_cannot_bypass_terrain_admission ... ok
+test saved_scene_pins_full_asset_and_every_edit_undo_redo_proposal_readmits ... ok
+test play_restore_replay_seek_and_branch_use_frame_owned_content_after_source_deletion ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

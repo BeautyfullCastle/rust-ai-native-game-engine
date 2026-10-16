@@ -1,7 +1,9 @@
 # WebTransport trial and the browser client
 
-Status: implemented and verified in headless Chromium 141 (Linux). Firefox and
-Safari are **not** verified, see section 7 for the exact checklist.
+Status: browser support and native TUI WSS / relay WSS / WebTransport clients
+are implemented. The original browser trial used headless Chromium 141 (Linux);
+section 12 consolidates subsequent native and integrated CI evidence. Firefox
+and Safari are **not** verified, see section 7 and [#23](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/23).
 This is the result of the trial that `docs/design-v1.md` §11 asks for ("do a
 trial implementation before the real one") and of the real browser path of §6.1.
 `docs/progress.md` and `docs/design-v1.md` are not edited here; fold the
@@ -11,7 +13,7 @@ conclusions in when you review.
 
 | Question | Answer |
 |---|---|
-| Crate | `h3` 0.0.8 + `h3-webtransport` 0.1.2 + `h3-quinn` 0.0.10 (all on the workspace's `quinn` 0.11.12), not `wtransport` |
+| Crate | Server: `h3` 0.0.8 + `h3-webtransport` 0.1.2 + `h3-quinn` 0.0.10; native WT client: `wtransport` 0.7.2 (all on the workspace's `quinn` 0.11.12) |
 | Can QUIC `orrery/1` and WebTransport `h3` share one UDP port? | **Yes.** One `quinn::Endpoint`, ALPN list `[orrery/1, h3]`, dispatch after the handshake on the negotiated ALPN. Tested. |
 | Certificates | Dev: self-signed ECDSA P-256, valid 13 days (`QuicServerTls::SelfSignedWebTransport`), SHA-256 printed for `serverCertificateHashes`. Production / Safari: PEM files (`--tls-cert/--tls-key`) with a CA-signed certificate. |
 | Chromium needs flags? | **None.** Playwright's Chromium 141, headless, page on `http://localhost`, `serverCertificateHashes`. |
@@ -21,22 +23,26 @@ conclusions in when you review.
 
 ## 2. Crate choice
 
-* `wtransport` 0.7 is the more polished API and speaks the newest settings ids,
-  but it owns its `quinn::Endpoint` (it builds one from its own config with
+* `wtransport` 0.7.2 owns its `quinn::Endpoint` (it builds one from its own config with
   ALPN `h3`) and has no hook to hand it a connection that arrived on a shared
-  endpoint. With it, sharing a port with `orrery/1` is impossible, so the
-  native QUIC clients would need a second port. It is kept as a **dev
-  dependency**: the tests in `crates/orr_net/tests/webtransport.rs` use the
-  `wtransport` *client* against our server, which is also an interop check
-  between two independent implementations.
+  endpoint. The server therefore retains `h3` to share a port with `orrery/1`.
+  `wtransport` is now an exact-pinned **runtime dependency** for the native WT
+  client (`ring` and `quinn` features, defaults disabled), as well as the client
+  in `crates/orr_net/tests/webtransport.rs`. Both exercise interop between two
+  independent implementations; no second server port is needed for native WT.
 * `h3` + `h3-webtransport` + `h3-quinn` work on any `quinn::Connection`. Our
   `quic::accept_loop` already owns the endpoint, so after the handshake we look
   at the ALPN and give `h3` connections to `crates/orr_net/src/wt.rs`. The
-  crates are 0.0.x / 0.1.x (hyperium says "not stable"), so the three versions
-  are pinned in `crates/orr_net/Cargo.toml`.
+  crates are 0.0.x / 0.1.x (hyperium says "not stable"); the versions above are
+  recorded in `Cargo.lock`.
 * `h3-webtransport` speaks the draft-02 style (setting `0x2b603742`,
   `sec-webtransport-http3-draft: draft02`). Chromium 141 and the `wtransport`
   client accept it. Whether current Firefox and Safari accept it is open.
+  This is evidence for these locked versions, not arbitrary draft compatibility.
+  In particular, the installed `h3` source uses max-sessions id `0x2b603743`
+  whereas `wtransport-proto` 0.7.2 uses `0xc671706a`; both use enable id
+  `0x2b603742`. The native library still leaves peer-settings validation as a
+  TODO (section 12), so positive interop does not prove strict draft negotiation.
   **Fallback if they do not:** write the WebTransport CONNECT handshake and
   session framing ourselves on `h3`'s lower layers, or move the browser path to
   `wtransport` on a second UDP port (the `Link` code above it does not change).
@@ -141,7 +147,7 @@ Needed flags: none. If a Chromium refuses localhost QUIC, try
 `crates/orr_server/tests/browser_e2e.rs`: an in-process relay server (QUIC +
 WebTransport on one port, plus WebSocket, 35 ms +-8 ms injected delay each way),
 a native Rust bot client and the wasm client in Chromium share a 2-player
-arena room (build id 1) and play with scripted bot inputs until the browser has
+arena room (test build id `9007199254740993`, above JavaScript's safe-integer range) and play with scripted bot inputs until the browser has
 600 verified ticks. Output of one run:
 
 ```
@@ -163,15 +169,28 @@ Run it:
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.129 --locked   # the wasm-bindgen version in Cargo.lock
-tools/build_web.sh                                           # crates/orr_web/web/pkg
-cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1
+npm ci --prefix tools/webtransport                          # pinned Playwright
+# Installs the matching Chromium and Linux shared libraries (may need sudo).
+tools/webtransport/node_modules/.bin/playwright install --with-deps chromium
+tools/build_web.sh                                           # web/pkg and web/pkg_gpu
+npm test --prefix tools/webtransport                         # Node + generated WASM boundary tests
+ORR_REQUIRE_BROWSER=1 ORR_REQUIRE_WEBGPU=1 cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1
 ```
 
-Needs Node.js and Playwright (`npm i -g playwright`, a Chromium in
-`PLAYWRIGHT_BROWSERS_PATH`, or `CHROMIUM=/path/to/chrome`). Without the pieces
-each test prints `SKIP` and passes; with `ORR_REQUIRE_BROWSER=1` a missing
-piece fails the test. The test is **not** in CI (browser, Node and
-wasm-bindgen-cli are heavy); CI builds the wasm crate (section 8).
+Needs Node.js 22+ and Playwright (the pinned local install above, `NODE_PATH`, or
+an existing global install), plus its Chromium in `PLAYWRIGHT_BROWSERS_PATH` or
+`CHROMIUM=/path/to/chrome`. Ordinary local `cargo test` still prints `SKIP` and
+passes when browser prerequisites are absent. `ORR_REQUIRE_BROWSER=1` makes
+missing prerequisites fail; `ORR_REQUIRE_WEBGPU=1` additionally requires the
+WebGPU adapter/view and implies browser prerequisites are mandatory. Only the
+exact value `1` enables either requirement (`0` keeps optional local behavior).
+
+CI's `wasm32-browser` job now installs the pinned tools, derives the exact
+wasm-bindgen CLI version from `Cargo.lock`, generates both packages, executes the
+Node/WASM assertions, and runs all six browser tests with both requirements set.
+The final `cross_platform_checksum_compare` gate also depends on this job and
+rejects failure, cancellation, skip, unknown, or missing results. The browser
+transport and renderer assertions have not been relaxed.
 
 ## 7. Firefox and Safari: what must be checked by hand
 
@@ -204,8 +223,9 @@ section 5; the printed hash is then `null`). For the real game:
    failed: API missing, certificate refused, or session handshake refused.
 6. Then run the real client: build `tools/build_web.sh`, serve
    `crates\orr_web\web`, start `orr_server --webtransport --ws-bind ...`, open
-   `index.html?auto=1&bot=1&wt=127.0.0.1:4433&hash=<hash>&ws=127.0.0.1:4434&mode=webtransport&build=<id>`
-   (build id: `--game arena` rooms use `0x0A2E4A000001`, the default of the page),
+   `index.html?auto=1&bot=1&wt=127.0.0.1:4433&hash=<hash>&ws=127.0.0.1:4434&mode=webtransport`
+   (omit `build` to use the arena default shared with `--game arena`; built-in IDs now
+   include the ORRF format via `orr_sim::frame_build_id`, see [compatibility](frame-compatibility.md)),
    watch `desyncs 0` and the checksum line against a native `orr_sample --headless --bot --connect`.
 
 **Safari (Mac, then iPhone/iPad):** Safari has no `serverCertificateHashes`, so
@@ -238,8 +258,8 @@ a trusted certificate is mandatory.
 | Relay glue | `crates/orr_relay_net/src/connect.rs` (`ListenOptions::{webtransport, ws_bind, wss_bind}`), `orr_server` flags `--webtransport --ws-bind --wss-bind` |
 | Browser client | `crates/orr_web` (`WebLink`, the bots, the report, the draw lists, `js/transport.js`, `web/worker.js`, `web/index.html`), `crates/orr_web_gpu` (the GPU view), `tools/build_web.sh` |
 | Trial tools | `crates/orr_net/examples/wt_echo.rs`, `tools/webtransport/{trial.html,trial.cjs,lib.cjs,browser_e2e.cjs}` |
-| Tests | `crates/orr_net/tests/webtransport.rs`, `ws_malformed.rs`, `crates/orr_server/tests/browser_e2e.rs`, unit tests in `orr_web` |
-| CI | `.github/workflows/determinism.yml`: job `wasm32-browser` builds the sim crates and `orr_web` for `wasm32-unknown-unknown` and runs clippy `-D warnings` on `orr_web`; `orr_net` and `orr_web` join the `-D warnings` clippy line |
+| Tests | `crates/orr_net/tests/webtransport.rs`, `ws_malformed.rs`, `crates/orr_server/tests/browser_e2e.rs`, unit tests in `orr_web`, `tools/webtransport/test_*.cjs` |
+| CI | `.github/workflows/determinism.yml`: job `wasm32-browser` builds and lints wasm, generates both JS/WASM packages, runs Node boundary tests and all six Chromium transport/GPU tests; the required aggregate gate includes its result |
 
 The sim crates (`orr_fp`, `orr_ecs`, `orr_sim`, `orr_session`, `orr_proto`,
 `orr_testgame`, `orr_physics`) build unchanged for `wasm32-unknown-unknown`.
@@ -256,8 +276,9 @@ format, and the Rust side only sees `LinkPort` events.
 
 ## 9. Gaps and next steps
 
-* Firefox and Safari are untested (section 7). The biggest unknown is the draft
-  that `h3-webtransport` speaks versus Safari 26.4 and Firefox.
+* Firefox and Safari remain untested (section 7, tracked separately in
+  [#23](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/23)).
+  No Chromium or native result establishes their API, trust or draft support.
 * ~~The sim loop runs on `setInterval(…, 2)` in the page~~ Done (M6 step 4): see section 10. The relay client,
   the simulation and the transport run in a module Web Worker (`web/worker.js`).
 * The page needs the certificate hash and server address from the URL. A small
@@ -269,8 +290,11 @@ format, and the Rust side only sees `LinkPort` events.
   browser view; the 3D shader has not been run through a browser's WGSL validator).
 * `h3`/`h3-webtransport` are 0.x. Watch hyperium/h3 for the newer WebTransport
   draft, and keep the `wtransport` interop test as the early warning.
-* Native WebTransport and `wss://` *clients* are not implemented (only servers and
-  the browser); native clients keep using QUIC `orrery/1`.
+* Native WebTransport and `wss://` clients, including TUI WSS, are implemented
+  and integrated. See section 12 for their trust contracts and measured coverage.
+  The remaining #16 gap is native WT rejection of incompatible peer settings;
+  the new negative test covers the server's rejection of a client without WT
+  support, not that inverse direction or every future protocol draft.
 
 ## 10. M6 step 4: Web Worker, PhysGame and the GPU view
 
@@ -297,7 +321,9 @@ format, and the Rust side only sees `LinkPort` events.
   validators accept that, Chrome's WGSL validator (Tint) rejects it ("must only be called from uniform control
   flow"). The derivatives moved to the top of the function (`crates/orr_render/src/shader2d.wgsl`); the native GPU
   readback tests are unchanged.
-* **Headless Chromium flags.** WebGL2 works without flags (SwiftShader). WebGPU needs
+* **Headless Chromium flags.** The trusted local WebGL2 fixture explicitly selects SwiftShader with
+  `--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader`, including on Linux; it no longer
+  depends on Chromium's deprecated implicit software fallback. WebGPU needs
   `--enable-unsafe-webgpu --enable-unsafe-swiftshader --use-webgpu-adapter=swiftshader --enable-features=Vulkan --use-vulkan=swiftshader --use-angle=swiftshader`
   (the e2e test passes them). Without a WebGPU adapter the page falls back to WebGL2 by itself (`auto`).
 * **Build.** `tools/build_web.sh` (profile `web`, optional `wasm-opt`, optional `WEB_SIMD=1`, `WEB_GPU=0` to skip
@@ -305,3 +331,97 @@ format, and the Rust side only sees `LinkPort` events.
 * **Run the end-to-end test** (all views, both games):
   `ORR_REQUIRE_BROWSER=1 cargo test -p orr_server --release --test browser_e2e -- --nocapture --test-threads=1`.
   `ORR_REQUIRE_WEBGPU=1` makes a Chromium without WebGPU a failure instead of a skipped view check.
+
+## 11. Browser gate regression coverage and current validation
+
+`tools/webtransport/build_id_boundary.cjs` executes the actual generated JS/WASM
+constructors (`WebClient` and `PhysClient`) in Node and, during each browser run,
+in Chromium. A fake WebSocket captures the real client's encoded Hello; an
+independent BigInt reference verifies the exact build hash, including each game's
+specific default (derived from one expected ORRF-version input). Across both clients,
+30 valid/default inputs and 54 invalid inputs cover decimal/hex full-u64 strings,
+unsafe/rounded Numbers, infinities, fractions, malformed text, overflow, and
+wrong JS types. Rejected inputs must fail before creating a transport. The real
+arena E2E additionally joins with a nonrepresentable Number value supplied as
+text, including hexadecimal text over WSS.
+
+`npm test --prefix tools/webtransport` has four test groups, including executable
+runner checks for absent Playwright, WASM packages, and Chromium in optional and
+required modes. `python3 tools/test_determinism_workflow.py` checks mandatory CI
+steps and the aggregate gate across all 1,296 combinations of four job results.
+
+Historical local validation (2026-10-02): both JS/WASM packages generated with
+wasm-bindgen 0.2.129, all four Node test groups passed with zero skips, the seven
+workflow regression groups passed, and the Rust browser harness compiled and
+passed strict Clippy. Full browser execution remains **unverified in this
+sandbox**: Chromium launch fails at `socket()` with `Operation not permitted`,
+the official headless-shell download was truncated/rejected, and the supported
+cloud browser blocks the loopback fixture (`ERR_BLOCKED_BY_CLIENT`). Mandatory
+mode correctly fails instead of turning this into a pass. A real CI run on the
+final commit is still needed to establish WebTransport, WS/WSS, WebGL2 and WebGPU
+runtime success; compilation and Node boundary results do not establish it.
+The later integrated CI evidence in section 12 supersedes that pending-CI
+status; it does not erase this local execution limitation.
+
+## 12. Consolidated transport and trust evidence (2026-10-06)
+
+The implementation is present on shared development `f0162b9`, including the
+reviewed TUI WSS [PR62](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/62),
+native relay WSS [PR63](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/63)
+and native WT [PR65](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/65).
+Their final integration candidate [PR64](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/64),
+head `6aa396dc`, passed both
+[determinism](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37385288609)
+and [arena](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/37385288663)
+CI. These are prior positive results, not new executions for this evidence-only
+change. Earlier source-PR failures/pending runs are not reclassified as passes.
+
+| Client → server | Trust contract | Executed evidence and limit |
+|---|---|---|
+| TUI WSS → ERP over TLS | Public WebPKI roots by default; explicit PEM CA replaces roots; chain, validity and DNS/IP name checked; no insecure mode | PR62: 13 focused WSS tests, including real-loopback authenticated 2D checksum and Yard3D frame/schema parity, untrusted CA / wrong-name refusal, redaction, deadlines and close; view-only dependency test retained. [Contract and commands](tui-wss.md) |
+| Native relay WSS → existing secure WS listener | Public WebPKI roots; explicit DER/PEM CA; URL name checked, optional explicit server-name override; fingerprint-only and insecure modes rejected | PR63/65 combined verification: WSS 6 tests plus actual two-client relay play with 179 verified ticks, matching checksums and zero desyncs. TLS/upgrade, close/deadline, trust and secret-redaction coverage; both channels remain TCP-ordered. [Contract](native-relay-wss.md) |
+| Native WT (`wtransport` 0.7.2) → shared-port `h3` server | Public WebPKI roots; explicit DER/PEM CA; chain, validity and URL name checked; no server-name override, fingerprint-only or insecure trust | PR65: WT 8 tests plus actual two-client relay play with 179 verified ticks, matching checksums and zero desyncs. Real streams/datagrams, oversize fallback, queue limits, close/drop, deadline, wrong-name/untrusted/expired/future certificates and secret-redaction checks. [Contract](native-webtransport-client.md) |
+| Native `orrery/1` QUIC and WT → one UDP port | Explicit trusted development certificate; test WT peer uses the development certificate hash | `webtransport_and_quic_share_one_port` executes both protocols on one server, reliable messages and WT datagrams; existing WS/QUIC suites remain in integrated CI |
+| Chromium → browser WT / WS fallback / WSS | WT development certificate hash (short-lived ECDSA P-256); WSS browser fixture explicitly accepts its self-signed certificate | Original Linux Chromium 141 trial and checksum evidence in section 6; later PR64 mandatory `wasm32-browser` CI succeeded. Browser WSS fixture success is not proof of public-CA trust. No browser rerun is claimed here |
+| Firefox / Safari → WT / WSS | Must verify actual browser/version policy; Safari checklist uses a trusted CA | **Unverified**, separate #23. Native/Chromium results do not establish support |
+
+### Executed negative: incompatible WebTransport settings at the server
+
+`crates/orr_net/tests/webtransport.rs::h3_peer_with_webtransport_disabled_is_explicitly_refused`
+uses a real loopback QUIC connection with a trusted certificate, checked
+`localhost` name and confirmed `h3` ALPN. The existing `h3` 0.0.8 client builder
+advertises extended CONNECT and HTTP/3 datagrams but emits
+`SETTINGS_ENABLE_WEBTRANSPORT` (`0x2b603742`) = **0**. It then sends a valid
+WebTransport extended CONNECT. The assertion requires an explicit remote
+`H3_SETTINGS_ERROR` (`0x109`) with reason `webtransport is not supported by client`,
+and no Orrery event admission. A timeout, TLS/ALPN failure or generic close fails
+the test. This tests disabled WT support in HTTP/3 settings, not an arbitrary
+future-draft identifier, malformed CONNECT, bad certificate or disabled server.
+
+The checked behavior comes from the locked sources: `h3` 0.0.8
+[`src/config.rs`](https://docs.rs/crate/h3/0.0.8/source/src/config.rs) and
+`src/proto/frame.rs`, and `h3-webtransport` 0.1.2 `src/server.rs::WebTransportSession::accept`.
+No dependency, protocol, production code, golden checksum or numeric budget was
+changed. New execution on Linux / Rust 1.97.1:
+
+```sh
+cargo test --locked --offline --release -p orr_net --test webtransport h3_peer_with_webtransport_disabled_is_explicitly_refused -- --exact --nocapture
+cargo test --locked --offline --release -p orr_net --test webtransport -- --nocapture --test-threads=1
+cargo clippy --locked --offline --release -p orr_net --test webtransport -- -D warnings
+```
+
+Results: the isolated negative passed, the full focused `webtransport` target
+passed **5/5** with zero skips, and strict Clippy passed. The negative is included
+in those five tests; these counts are not additive. These local results are
+separate from the historical positive suite counts above and have not established
+another-platform or browser result for this patch.
+
+### Remaining native-client acceptance limit
+
+In the installed `wtransport` 0.7.2 source, `src/endpoint.rs::Endpoint::connect`
+reads peer settings into `_settings` and leaves `validate settings` as a TODO
+before opening the session. Our native wrapper does not add that validation.
+Consequently, the server-side negative above cannot establish that the native
+WT client rejects an incompatible server's settings. No universal supported-draft
+range or inverse rejection result is claimed. **#16 should remain open** until
+that client-side requirement is exercised and, if necessary, fixed and reviewed.

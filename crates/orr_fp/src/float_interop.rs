@@ -11,6 +11,8 @@
 //! non-determinism.
 
 #![allow(clippy::float_arithmetic)]
+// The dedicated simulation type guard permits floats only at this view boundary.
+#![allow(clippy::disallowed_types)]
 
 use crate::fp::{FP, SCALE};
 

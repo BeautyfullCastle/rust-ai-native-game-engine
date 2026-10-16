@@ -20,6 +20,10 @@ use bytemuck::Pod;
 /// `Pod` is the load-bearing bound: it guarantees no padding bytes and no
 /// heap pointers, which is what makes byte-for-byte checksums deterministic
 /// and `memcpy`-style snapshot/restore sound.
+/// It does not forbid floating-point fields: `f32` and `f64` are also `Pod`.
+/// Repository-owned simulation libraries enforce that separate type policy
+/// with `tools/check_sim_float_types.py`; downstream authors must uphold the
+/// same fixed-point-only state contract themselves.
 pub trait Component: Pod + Send + Sync + 'static {}
 impl<T: Pod + Send + Sync + 'static> Component for T {}
 

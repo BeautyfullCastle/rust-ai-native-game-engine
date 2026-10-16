@@ -1,0 +1,2 @@
+This authored demonstration and generator are provided under the repository's
+MIT OR Apache-2.0 license. No external captures, textures, or baked data are used.

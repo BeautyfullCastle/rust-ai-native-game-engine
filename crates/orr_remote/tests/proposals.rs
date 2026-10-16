@@ -97,6 +97,9 @@ fn propose_diff_verify_accept_and_undo_over_a_socket() {
     }
     assert_ne!(report["checksums"]["base_final"], report["checksums"]["candidate_final"]);
     assert_eq!(report["samples"].as_array().unwrap().len(), 5);
+    assert_eq!(report["metric_sampling"], json!({
+        "requested_interval": 30, "sample_count": 5, "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": false
+    }));
     let lost = metric(&report, "lost_bodies");
     assert_eq!(lost["kind"], "int");
     assert_eq!(lost["candidate"]["max"], 0);
@@ -114,7 +117,7 @@ fn propose_diff_verify_accept_and_undo_over_a_socket() {
     assert_eq!(scene_text(&mut c), before, "verifying changes nothing");
 
     // Accept: one history entry with the agent origin.
-    let acc = c.call("proposal.accept", json!({"id": id})).unwrap();
+    let acc = c.call("proposal.accept_verified", json!({"id": id, "verified_state": report["verified_state"]})).unwrap();
     assert!(acc["history_id"].is_u64());
     assert_eq!(acc["applied"], 2);
     let h = c.call("history.list", J::Null).unwrap();
@@ -200,6 +203,9 @@ fn accepting_needs_the_approve_capability() {
     assert_eq!(r["checks"], J::Null);
     assert_eq!(r["passed"], J::Null);
     let denied = editor.call_err("proposal.accept", json!({"id": id}));
+    assert_eq!(denied.code, PERMISSION_DENIED);
+    assert_eq!(denied.data.as_ref().unwrap()["required"], "approve");
+    let denied = editor.call_err("proposal.accept_verified", json!({"id": id, "verified_state": r["verified_state"]}));
     assert_eq!(denied.code, PERMISSION_DENIED);
     assert_eq!(denied.data.as_ref().unwrap()["required"], "approve");
     assert!(editor.call("history.list", J::Null).unwrap()["entries"].as_array().unwrap().is_empty());
@@ -347,7 +353,7 @@ fn discover_describes_the_engine_and_the_metrics() {
         assert!(names.contains(&n), "{n} in {names:?}");
     }
     assert_eq!(d["engine"]["verify"]["bot_available"], true);
-    for m in ["proposal.begin", "proposal.apply", "proposal.list", "proposal.get", "proposal.preview", "proposal.verify", "proposal.accept", "proposal.reject", "verify.self"] {
+    for m in ["proposal.begin", "proposal.apply", "proposal.list", "proposal.get", "proposal.preview", "proposal.verify", "proposal.accept", "proposal.accept_verified", "proposal.reject", "verify.self"] {
         assert!(d["methods"].as_array().unwrap().iter().any(|x| x["name"] == m), "{m}");
     }
     assert!(d["notifications"].as_array().unwrap().contains(&json!("watch.proposals")));
@@ -478,6 +484,122 @@ fn accept_is_refused_while_a_play_session_runs() {
     // Verifying during play works: it runs on the document, not on the session.
     let r = c.call("proposal.verify", json!({"id": id, "inputs": {"kind": "idle", "ticks": 10}})).unwrap();
     assert_eq!(r["identical"], true);
+    let guarded = c.call_err("proposal.accept_verified", json!({"id": id, "verified_state": r["verified_state"]}));
+    assert_eq!(guarded.kind(), Some("sim_running"));
     c.call("sim.stop", json!({})).unwrap();
     c.call("proposal.accept", json!({"id": id})).unwrap();
+}
+
+#[test]
+fn verified_accept_detects_scene_and_proposal_edits_between_requests() {
+    let host = TestHost::standard();
+    let mut c = host.client("tok-all");
+    let mut other = host.client("tok-other");
+    let body = guid_of(&mut c, "body_05");
+    let id = begin(&mut c, "lift");
+    c.call("proposal.apply", json!({"id": id, "ops": [{"op": "patch", "entity": body, "component": BODY, "path": "pos", "value": [0, 12]}]})).unwrap();
+    let verify = json!({"id": id, "inputs": {"kind": "idle", "ticks": 1}, "checks": ["lost_bodies.max == 0"]});
+    let report = c.call("proposal.verify", verify.clone()).unwrap();
+    assert_eq!(report["passed"], true);
+    assert_eq!(report["verified_state"]["id"], id);
+
+    // Another client changes only the entity name: the simulation checksum
+    // stays the same, but the exact document that was verified has changed.
+    other.call("world.rename", json!({"entity": body, "name": "renamed"})).unwrap();
+    assert_eq!(c.call("sim.state", J::Null).unwrap()["checksum"], report["checksums"]["base_start"]);
+    let before = scene_text(&mut c);
+    let history = c.call("history.list", J::Null).unwrap();
+    let err = c.call_err("proposal.accept_verified", json!({"id": id, "verified_state": report["verified_state"]}));
+    assert_eq!(err.code, CONFLICT);
+    assert_eq!(err.kind(), Some("stale_verification"));
+    assert_eq!(scene_text(&mut c), before);
+    assert_eq!(c.call("history.list", J::Null).unwrap(), history);
+    assert_eq!(c.call("proposal.get", json!({"id": id})).unwrap()["accepts_cleanly"], true);
+
+    let fresh = c.call("proposal.verify", verify.clone()).unwrap();
+    other.call("proposal.apply", json!({"id": id, "ops": [{"op": "patch", "entity": body, "component": BODY, "path": "pos", "value": [0, -30]}]})).unwrap();
+    let err = c.call_err("proposal.accept_verified", json!({"id": id, "verified_state": fresh["verified_state"]}));
+    assert_eq!(err.kind(), Some("stale_verification"));
+    assert_eq!(scene_text(&mut c), before);
+    assert_eq!(c.call("proposal.verify", verify.clone()).unwrap()["passed"], false, "the unverified candidate would fail");
+
+    other.call("proposal.apply", json!({"id": id, "ops": [{"op": "patch", "entity": body, "component": BODY, "path": "pos", "value": [0, 13]}]})).unwrap();
+    let final_report = c.call("proposal.verify", verify).unwrap();
+    assert_eq!(final_report["passed"], true);
+    let accepted = c.call("proposal.accept_verified", json!({"id": id, "verified_state": final_report["verified_state"]})).unwrap();
+    assert_eq!(accepted["checksum"], final_report["checksums"]["candidate_start"]);
+    let activity = c.call("activity.list", json!({})).unwrap();
+    let entry = activity["entries"].as_array().unwrap().iter().find(|e| e["method"] == "proposal.accept_verified" && e["ok"] == true).unwrap();
+    assert_eq!(entry["kind"], "proposal");
+    assert_eq!(entry["read"], false);
+    assert!(entry["summary"].as_str().unwrap().contains(&format!("proposal.accept_verified {id}")));
+    assert!(entry["diff"].is_object());
+}
+
+#[test]
+fn verified_accept_requires_a_complete_matching_state() {
+    let host = TestHost::standard();
+    let mut c = host.client("tok-all");
+    let id = begin(&mut c, "empty");
+    let report = c.call("proposal.verify", json!({"id": id, "inputs": {"kind": "idle", "ticks": 1}})).unwrap();
+    let state = report["verified_state"].clone();
+    for bad in [J::Null, json!({}), json!({"id": id, "document_revision": 0}), json!({"id": id, "document_revision": -1, "proposal_revision": 0})] {
+        assert_eq!(c.call_err("proposal.accept_verified", json!({"id": id, "verified_state": bad})).code, INVALID_PARAMS);
+    }
+    assert_eq!(c.call_err("proposal.accept_verified", json!({"id": id})).code, INVALID_PARAMS);
+    for document_id in [json!(""), json!("abcd"), json!("0000000000000000000000000000000g"), json!(0)] {
+        let mut bad = state.clone();
+        bad["document_id"] = document_id;
+        assert_eq!(c.call_err("proposal.accept_verified", json!({"id": id, "verified_state": bad})).code, INVALID_PARAMS);
+    }
+    for (key, value) in [
+        ("document_revision", json!(-1)),
+        ("proposal_revision", json!("0")),
+        ("id", json!("not-a-proposal")),
+    ] {
+        let mut bad = state.clone();
+        bad[key] = value;
+        assert_eq!(c.call_err("proposal.accept_verified", json!({"id": id, "verified_state": bad})).code, INVALID_PARAMS);
+    }
+    for key in ["document_id", "id", "document_revision", "proposal_revision"] {
+        let mut bad = state.clone();
+        bad.as_object_mut().unwrap().remove(key);
+        assert_eq!(c.call_err("proposal.accept_verified", json!({"id": id, "verified_state": bad})).code, INVALID_PARAMS);
+    }
+    let other = begin(&mut c, "also empty");
+    assert_eq!(c.call_err("proposal.accept_verified", json!({"id": other, "verified_state": state})).kind(), Some("stale_verification"));
+    assert_eq!(c.call("proposal.list", J::Null).unwrap()["proposals"].as_array().unwrap().len(), 2);
+    assert!(c.call("history.list", J::Null).unwrap()["entries"].as_array().unwrap().is_empty());
+    c.call("proposal.accept_verified", json!({"id": id, "verified_state": state})).unwrap();
+    assert_eq!(c.call_err("proposal.accept_verified", json!({"id": id, "verified_state": state})).kind(), Some("unknown_proposal"));
+}
+
+#[test]
+fn verified_accept_rejects_a_state_from_another_host_with_matching_counters() {
+    let host = TestHost::standard();
+    let other_host = TestHost::standard();
+    let mut c = host.client("tok-all");
+    let mut other = other_host.client("tok-all");
+    let body = guid_of(&mut c, "body_05");
+    let id = begin(&mut c, "lift");
+    let other_id = begin(&mut other, "sink");
+    assert_eq!(id, other_id);
+    for (client, y) in [(&mut c, 12), (&mut other, -30)] {
+        client.call("proposal.apply", json!({"id": id, "ops": [{"op": "patch", "entity": body, "component": BODY, "path": "pos", "value": [0, y]}]})).unwrap();
+    }
+    let params = json!({"id": id, "inputs": {"kind": "idle", "ticks": 1}, "checks": ["lost_bodies.max == 0"]});
+    let good = c.call("proposal.verify", params.clone()).unwrap();
+    let bad = other.call("proposal.verify", params).unwrap();
+    assert_eq!(good["passed"], true);
+    assert_eq!(bad["passed"], false);
+    for key in ["id", "document_revision", "proposal_revision"] {
+        assert_eq!(good["verified_state"][key], bad["verified_state"][key]);
+    }
+    assert_ne!(good["verified_state"]["document_id"], bad["verified_state"]["document_id"]);
+    let before = scene_text(&mut other);
+    let err = other.call_err("proposal.accept_verified", json!({"id": id, "verified_state": good["verified_state"]}));
+    assert_eq!(err.kind(), Some("stale_verification"));
+    assert_eq!(scene_text(&mut other), before);
+    assert!(other.call("history.list", J::Null).unwrap()["entries"].as_array().unwrap().is_empty());
+    assert!(other.call("proposal.get", json!({"id": id})).is_ok());
 }

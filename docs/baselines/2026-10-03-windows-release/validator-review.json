@@ -1,0 +1,289 @@
+{
+  "archive_sha256_unchanged": "5fbe098894d39cce96d8b92984e8946e86c20409c7c10db35f231265c2c3720c",
+  "campaigns": [
+    {
+      "directory": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "measurement_source": {
+        "dirty_status": "",
+        "head": "120efa6efa4b7ba6c82a88be7cb402e1e69ca2a1",
+        "source_file_count": 56,
+        "source_sha256": "0db1093287132450c36c9990f7971caf8def8dee30e7336d8d0b9b063b7d8887",
+        "tree": "b593c38723edf3a330df4aa8ca04c6a16b591c46"
+      },
+      "repetitions": 3,
+      "runs": 12,
+      "summary_equals_original": true
+    },
+    {
+      "directory": "software-final-20261003T0708Z",
+      "errors": [],
+      "measurement_source": {
+        "dirty_status": "",
+        "head": "120efa6efa4b7ba6c82a88be7cb402e1e69ca2a1",
+        "source_file_count": 56,
+        "source_sha256": "0db1093287132450c36c9990f7971caf8def8dee30e7336d8d0b9b063b7d8887",
+        "tree": "b593c38723edf3a330df4aa8ca04c6a16b591c46"
+      },
+      "repetitions": 3,
+      "runs": 12,
+      "summary_equals_original": true
+    }
+  ],
+  "collector_file_sha256": "f3b3fb22c7efec6a654f969e09acb4b7096fe2706b93404c5dad85b9f98a3416",
+  "finished_at": "2026-10-03T07:50:35.415615+00:00",
+  "operation": "saved_evidence_revalidation_without_new_measurements",
+  "raw_runs": [
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 585,
+      "records_sha256": "f6bdd6a6a128278555edf30c1832a3f2fa8e30bd81a73f235a4727b42fce4152",
+      "run_id": "rep-01-editor_measure",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "b9612d9ff5bc6c0b81f1dcd0e8fa6a1ea89a5198c167f0bfcfd121dcd2900411",
+      "run_id": "rep-01-gpu_2d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "060c2e993d897956e8b06b75ff4e6a07cd3fbbf0ebac26041d487ffade697e8a",
+      "run_id": "rep-01-gpu_3d_low",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "6126f4bb6add5160faaeff917bd0ce735e88241a364b4c37263f5084bed03404",
+      "run_id": "rep-01-gpu_3d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 585,
+      "records_sha256": "b5ea9341e2500a922a5c4a7e7e4987de96af8e13181be1063c01691476aabece",
+      "run_id": "rep-02-editor_measure",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "2f78aca8f9d250c6bf031ee245e37ac86de673bb4b116163a4f5ecb9f632388e",
+      "run_id": "rep-02-gpu_2d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "f69f547c3aaab543b3997016a8fc520a8bb5d05402ef39ee4918dbc4c9a11eb8",
+      "run_id": "rep-02-gpu_3d_low",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "842671a760ecda96ee9f8cbcb439f876624072db66265274e47c7ed4a64c137f",
+      "run_id": "rep-02-gpu_3d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 585,
+      "records_sha256": "4281df17dfdcd24f3974cc4e82df7606d4a319f2ad11d951daee7588c4662ffa",
+      "run_id": "rep-03-editor_measure",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "c23cccc52e295c375173cadfc27c3f667ed14d630b3deed4d6186c05def4cea3",
+      "run_id": "rep-03-gpu_2d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "dca3410dd2d20ec4c41afcdfb135b91454af86240faaae0bf1a868f3da655887",
+      "run_id": "rep-03-gpu_3d_low",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "hardware-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "bf5fb5987ab6974c9e9d19420cad03538fb3370306f2722130d5f875598f3cf7",
+      "run_id": "rep-03-gpu_3d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 585,
+      "records_sha256": "c2ec9d6ce0505f1e9a18a11d75080bf8a53dcc254760255cc40ed6554451f024",
+      "run_id": "rep-01-editor_measure",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "26eb11e2aa710ba18aef3117ec0ecd9154f3fb36e17bbadbb7cd2d8fe622a645",
+      "run_id": "rep-01-gpu_2d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "b15d9c2eed1169038bac4cef287dcc38523555784bde86978ad303fa799af3d9",
+      "run_id": "rep-01-gpu_3d_low",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "5a90cd0d123c0f80466c8ad2a9a231722bcc3fea47a533644ca4f1464d2c1b7c",
+      "run_id": "rep-01-gpu_3d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 585,
+      "records_sha256": "e1907a991f2bfa0f4764f919a83e8de0a6a1974733a8c3ec453d9d583ce3fa85",
+      "run_id": "rep-02-editor_measure",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "07b384b71632e6e96d9a4be0b6b4cfdb492d521ae98fe985caf8a80d6ea1ccf2",
+      "run_id": "rep-02-gpu_2d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "88156736a364d618a08be3bb78e45ceab86276f938902ea02466a9c22be68418",
+      "run_id": "rep-02-gpu_3d_low",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "61a85202eaa22e1877b1e8c44ee7d7a8eb095672a5d4a6ea73a96901a322df6c",
+      "run_id": "rep-02-gpu_3d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 585,
+      "records_sha256": "25a40a3f688d45642daedc354edfdbebf4934af03a70725a505bcc0658956c0c",
+      "run_id": "rep-03-editor_measure",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "7452f57a1404eeac98eab138e49870d8c08b3279ee1634bd0a5b8b205fa1340e",
+      "run_id": "rep-03-gpu_2d_default",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "44dc69f7bbe2f28691244ad8f82535d509b78f9b712330b18d1db6982ec1eb84",
+      "run_id": "rep-03-gpu_3d_low",
+      "summary_equals_original": true
+    },
+    {
+      "campaign": "software-final-20261003T0708Z",
+      "errors": [],
+      "raw_equals_saved_records": true,
+      "record_count": 43,
+      "records_sha256": "a5cad4e32108e19f67c739391f413046cb8d43e7c93d75acccd25f21b9bcd566",
+      "run_id": "rep-03-gpu_3d_default",
+      "summary_equals_original": true
+    }
+  ],
+  "regression_tests": {
+    "count": 19,
+    "outcome": {
+      "argv": [
+        "python",
+        "tools/editor_release_baseline.py",
+        "--self-test"
+      ],
+      "cwd": "C:\\Users\\hot41\\.codex\\worktrees\\haneul-18-editor-release-baseline\\rust-ai-native-game-engine",
+      "elapsed_seconds": 1.1647298000752926,
+      "exit_code": 0,
+      "finished_at": "2026-10-03T07:50:34.240161+00:00",
+      "started_at": "2026-10-03T07:50:33.074929+00:00"
+    },
+    "scope": "Collector contract and synthetic malformed-output collection tests; no Cargo/host/GPU measurement launched.",
+    "stderr": "test_editor_counts_scene_identity_and_zero_sample_availability (test_editor_release_baseline.EditorContractTests.test_editor_counts_scene_identity_and_zero_sample_availability) ... ok\ntest_editor_malformed_sort_and_phase_keys_are_rejected_without_raising (test_editor_release_baseline.EditorContractTests.test_editor_malformed_sort_and_phase_keys_are_rejected_without_raising) ... ok\ntest_editor_missing_frame_is_incomplete (test_editor_release_baseline.EditorContractTests.test_editor_missing_frame_is_incomplete) ... ok\ntest_editor_zero_sample_timing_cannot_be_reported_as_a_measurement (test_editor_release_baseline.EditorContractTests.test_editor_zero_sample_timing_cannot_be_reported_as_a_measurement) ... ok\ntest_cargo_provenance_requires_the_actual_test_executable (test_editor_release_baseline.ParserTests.test_cargo_provenance_requires_the_actual_test_executable) ... ok\ntest_collect_persists_malformed_key_outcomes_and_marks_manifest_incomplete (test_editor_release_baseline.ParserTests.test_collect_persists_malformed_key_outcomes_and_marks_manifest_incomplete) ... ok\ntest_fixed_plan_has_all_builds_and_all_independent_repetitions (test_editor_release_baseline.ParserTests.test_fixed_plan_has_all_builds_and_all_independent_repetitions) ... ok\ntest_large_integer_timing_is_invalid_instead_of_crashing (test_editor_release_baseline.ParserTests.test_large_integer_timing_is_invalid_instead_of_crashing) ... ok\ntest_normal_process_exit_is_reaped_and_does_not_abort_collection (test_editor_release_baseline.ParserTests.test_normal_process_exit_is_reaped_and_does_not_abort_collection) ... ok\ntest_only_well_formed_object_records_are_accepted (test_editor_release_baseline.ParserTests.test_only_well_formed_object_records_are_accepted) ... ok\ntest_parser_rejects_nonfinite_json_constants (test_editor_release_baseline.ParserTests.test_parser_rejects_nonfinite_json_constants) ... ok\ntest_process_timeout_preserves_bounded_logs_and_owns_cleanup (test_editor_release_baseline.ParserTests.test_process_timeout_preserves_bounded_logs_and_owns_cleanup) ... ok\ntest_dx12_empty_driver_info_is_unavailable_but_missing_info_fails (test_editor_release_baseline.RendererContractTests.test_dx12_empty_driver_info_is_unavailable_but_missing_info_fails) ... ok\ntest_failed_scheduled_repetition_never_summarizes_as_complete (test_editor_release_baseline.RendererContractTests.test_failed_scheduled_repetition_never_summarizes_as_complete) ... ok\ntest_gpu_malformed_frame_pair_keys_are_rejected_without_raising (test_editor_release_baseline.RendererContractTests.test_gpu_malformed_frame_pair_keys_are_rejected_without_raising) ... ok\ntest_gpu_missing_counts_nonfinite_wall_and_scope_claim_are_rejected (test_editor_release_baseline.RendererContractTests.test_gpu_missing_counts_nonfinite_wall_and_scope_claim_are_rejected) ... ok\ntest_gpu_mode_must_match_resolved_adapter_kind (test_editor_release_baseline.RendererContractTests.test_gpu_mode_must_match_resolved_adapter_kind) ... ok\ntest_gpu_unhashable_case_key_is_rejected_without_raising (test_editor_release_baseline.RendererContractTests.test_gpu_unhashable_case_key_is_rejected_without_raising) ... ok\ntest_valid_gpu_records_accept_nullable_cpu_timing_without_claiming_gpu_time (test_editor_release_baseline.RendererContractTests.test_valid_gpu_records_accept_nullable_cpu_timing_without_claiming_gpu_time) ... ok\n\n----------------------------------------------------------------------\nRan 19 tests in 0.796s\n\nOK\n",
+    "stdout": "{\n  \"status\": \"incomplete\",\n  \"output\": \"C:\\\\Users\\\\hot41\\\\AppData\\\\Local\\\\Temp\\\\tmpoare6_dj\\\\capture\",\n  \"run_count\": 12,\n  \"errors\": 14\n}\n"
+  },
+  "schema_version": 1,
+  "source_after": {
+    "dirty_status": "",
+    "head": "1abf1aa423ed4f543219f6b7f897076295ec1677",
+    "source_file_count": 56,
+    "source_sha256": "0db1093287132450c36c9990f7971caf8def8dee30e7336d8d0b9b063b7d8887",
+    "tree": "84e988ef66b33501c19c6869e8ebe11712fed622"
+  },
+  "source_before": {
+    "dirty_status": "",
+    "head": "1abf1aa423ed4f543219f6b7f897076295ec1677",
+    "source_file_count": 56,
+    "source_sha256": "0db1093287132450c36c9990f7971caf8def8dee30e7336d8d0b9b063b7d8887",
+    "tree": "84e988ef66b33501c19c6869e8ebe11712fed622"
+  },
+  "started_at": "2026-10-03T07:50:34.979376+00:00",
+  "test_file_sha256": "f3ab4bd3c3f467cfc73f3c91f2a7acd96e6da8347f7c0a2c1840a41e7b8d4efe"
+}

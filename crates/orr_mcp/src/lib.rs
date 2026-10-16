@@ -24,7 +24,11 @@
 //! functions ([`tools::run`], [`tools::stage_proposal`]) and report texts
 //! ([`report`]). This adapter is for clients without one.
 //!
-//! Also `list_proposals`, `history`, `undo` and `sim_run`. Tool groups
+//! Also `list_proposals`, `history`, `undo`, `sim_run` and `sim_input`.
+//! Discover structured input with `get_schema` `{ "input": true }`, start a
+//! session, set an input for a player and step. The host owns input validation;
+//! not every game exposes structured input. Exact decimal values stay exact.
+//! Tool groups
 //! (`scene`, `propose`, `verify`, `sim`, `history`) switch on and off with
 //! `--tools`, to keep the prompt small. Resources: `orrery://scene`,
 //! `orrery://schema` and `orrery://agents` (the generated AGENTS.md).

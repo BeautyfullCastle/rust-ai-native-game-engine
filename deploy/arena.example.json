@@ -1,0 +1,12 @@
+{
+  "build_id": "15666999077270074354",
+  "format": "orr.deployment/1",
+  "frame_format_version": 2,
+  "game": "arena",
+  "game_code_id": "11193926287361",
+  "game_code_identity": "Orrery Arena release example",
+  "provenance": {
+    "binaries": [],
+    "source_revision": null
+  }
+}

@@ -54,7 +54,7 @@ pub(crate) fn is_h3(conn: &quinn::Connection) -> bool {
 /// HTTP/3 handshake, the CONNECT request, and the reliable stream's hello.
 /// `None` for anything that is not a well-formed Orrery WebTransport client.
 pub(crate) async fn accept(shared: &Shared, conn: quinn::Connection) -> Option<Accepted> {
-    let mut h3 = h3::server::builder()
+    let h3 = h3::server::builder()
         .enable_webtransport(true)
         .enable_extended_connect(true)
         .enable_datagram(true)
@@ -63,13 +63,7 @@ pub(crate) async fn accept(shared: &Shared, conn: quinn::Connection) -> Option<A
         .build(h3_quinn::Connection::new(conn))
         .await
         .ok()?;
-    let (req, stream) = h3.accept().await.ok()??.resolve_request().await.ok()?;
-    let is_wt =
-        req.method() == http::Method::CONNECT && req.extensions().get::<Protocol>() == Some(&Protocol::WEB_TRANSPORT);
-    if !is_wt {
-        return None;
-    }
-    let session = WebTransportSession::accept(req, stream, h3).await.ok()?;
+    let session = accept_session(h3).await?;
     let max = shared.cfg.max_message_size;
     match session.accept_bi().await.ok()?? {
         AcceptedBi::BidiStream(_, bi) => {
@@ -82,6 +76,29 @@ pub(crate) async fn accept(shared: &Shared, conn: quinn::Connection) -> Option<A
         AcceptedBi::Request(..) => None,
     }
 }
+
+async fn accept_session<C>(mut h3: h3::server::Connection<C, Bytes>) -> Option<WebTransportSession<C, Bytes>>
+where
+    C: h3::quic::Connection<Bytes> + h3_datagram::quic_traits::DatagramConnectionExt<Bytes>,
+{
+    // CONNECT and the peer control stream arrive independently. Consume the
+    // initial SETTINGS before WebTransport checks their negotiated capabilities.
+    // The caller's existing setup deadline bounds this wait.
+    if !matches!(std::future::poll_fn(|cx| h3.inner.poll_control(cx)).await.ok()?, h3::proto::frame::Frame::Settings(_)) {
+        return None;
+    }
+    let (req, stream) = h3.accept().await.ok()??.resolve_request().await.ok()?;
+    let is_wt =
+        req.method() == http::Method::CONNECT && req.extensions().get::<Protocol>() == Some(&Protocol::WEB_TRANSPORT);
+    if !is_wt {
+        return None;
+    }
+    WebTransportSession::accept(req, stream, h3).await.ok()
+}
+
+#[cfg(test)]
+#[path = "wt/settings_tests.rs"]
+mod settings_tests;
 
 pub(crate) async fn server_conn(shared: Arc<Shared>, conn: quinn::Connection, acc: Accepted) {
     let id = shared.alloc_id();
@@ -147,13 +164,13 @@ async fn keep_session(session: &Session) -> DisconnectReason {
     }
 }
 
-enum FrameError {
+pub(crate) enum FrameError {
     Eof,
     Violation(String),
     Io(String),
 }
 
-async fn read_frame(recv: &mut Recv, max: usize) -> Result<(u8, Vec<u8>), FrameError> {
+pub(crate) async fn read_frame(recv: &mut (impl tokio::io::AsyncRead + Unpin), max: usize) -> Result<(u8, Vec<u8>), FrameError> {
     let mut head = [0u8; 4];
     let mut got = 0;
     while got < 4 {
@@ -211,7 +228,7 @@ async fn reader(shared: &Shared, cs: &ConnShared, conn: &quinn::Connection, mut 
     }
 }
 
-fn count_in(st: &StatsCell, channel: Channel, len: usize) {
+pub(crate) fn count_in(st: &StatsCell, channel: Channel, len: usize) {
     StatsCell::add(&st.messages_received, 1);
     StatsCell::add(&st.payload_received, len as u64);
     if channel == Channel::Unreliable {
@@ -243,7 +260,7 @@ async fn datagrams(
     }
 }
 
-async fn write_frame(send: &mut Send_, tag: u8, payload: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn write_frame(send: &mut (impl tokio::io::AsyncWrite + Unpin), tag: u8, payload: &[u8]) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(payload.len() + 5);
     buf.extend_from_slice(&(payload.len() as u32 + 1).to_le_bytes());
     buf.push(tag);
@@ -267,7 +284,7 @@ async fn writer(
                 Some(Out::Stream { tag, data }) => {
                     let n = data.len();
                     let res = write_frame(&mut send, tag, &data).await;
-                    st.queued.fetch_sub(n, Relaxed);
+                    st.queued.fetch_sub(n.max(1), Relaxed);
                     if let Err(e) = res {
                         return io_reason(conn, e);
                     }
@@ -279,6 +296,7 @@ async fn writer(
                 }
                 Some(Out::Datagram(b)) => {
                     let n = b.len() as u64;
+                    st.queued.fetch_sub(b.len().max(1), Relaxed);
                     match dgrams.send_datagram(b) {
                         Ok(()) => {
                             StatsCell::add(&st.messages_sent, 1);

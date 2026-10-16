@@ -15,6 +15,7 @@ use crate::types::PhysicsConfig;
 
 /// Linear and angular velocity of one body during the solve.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct Vw {
     pub v: FPVec3,
     pub w: FPVec3,
@@ -23,6 +24,7 @@ pub(crate) struct Vw {
 /// One direction of one contact point: the lever arm terms and the
 /// effective mass.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct Row {
     /// `ra x d` and `rb x d`.
     pub(crate) rad: FPVec3,
@@ -35,6 +37,7 @@ pub(crate) struct Row {
 
 /// One contact point of a manifold.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct ContactPt {
     pub point: FPVec3,
     pub sep: FP,
@@ -56,6 +59,7 @@ pub(crate) struct ContactPt {
 /// A manifold between bodies `a` and `b` (indices into the gathered
 /// arrays, `a < b`), normal pointing from `a` to `b`.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct Constraint {
     pub a: u32,
     pub b: u32,
@@ -65,6 +69,8 @@ pub(crate) struct Constraint {
     pub restitution: FP,
     /// Index of the first point in the shared point pool.
     pub first: u32,
+    /// External contacts already carry the current substep separation.
+    pub refreshed: bool,
     // Derived by `prepare`.
     pub(crate) t1: FPVec3,
     pub(crate) t2: FPVec3,
@@ -74,6 +80,7 @@ pub(crate) struct Constraint {
 
 /// Per-body data the solver needs besides the velocities.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct BodyInv {
     pub pos: FPVec3,
     pub inv_mass: FP,
@@ -135,7 +142,7 @@ fn mat_vec(m: &FPMat3, v: FPVec3) -> FPVec3 {
 }
 
 /// Same bits as `FPVec3::orthonormal_basis`, with the faster square root.
-fn basis(n: FPVec3) -> (FPVec3, FPVec3) {
+pub(crate) fn basis(n: FPVec3) -> (FPVec3, FPVec3) {
     let t1 = if n.x.abs() >= n.y.abs() && n.x.abs() >= n.z.abs() {
         FPVec3::new(-n.y, n.x, FP::ZERO)
     } else if n.y.abs() >= n.z.abs() {
@@ -223,7 +230,7 @@ pub(crate) fn update_targets(cons: &[Constraint], pool: &mut [ContactPt], pw: &[
         let moved = pa.v != FPVec3::ZERO || pa.w != FPVec3::ZERO || pb.v != FPVec3::ZERO || pb.w != FPVec3::ZERO;
         let first = c.first as usize;
         for p in pool[first..first + c.count as usize].iter_mut() {
-            let sep = if moved { p.sep + rel_vel(pa, pb, c.normal, &p.rows[0]) } else { p.sep };
+            let sep = if moved && !c.refreshed { p.sep + rel_vel(pa, pb, c.normal, &p.rows[0]) } else { p.sep };
             let bias = if sep >= FP::ZERO {
                 nmul(sep, inv_h)
             } else {

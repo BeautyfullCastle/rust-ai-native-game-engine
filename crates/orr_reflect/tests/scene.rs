@@ -113,11 +113,14 @@ fn bake_checksum_is_stable() {
     parse(SAMPLE).bake(&reg, &mut f2).unwrap();
     assert_eq!(f1.checksum(), f2.checksum());
     // Golden: the frame checksum of SAMPLE. Changes only if the format of a
-    // component, the bake order or the entity allocation changes on purpose.
+    // component, the checksum format, the bake order or entity allocation
+    // changes on purpose.
     assert_eq!(f1.checksum(), GOLDEN_SAMPLE_CHECKSUM, "checksum is {}", f1.checksum());
 }
 
-const GOLDEN_SAMPLE_CHECKSUM: u64 = 15635741705100430814;
+// ORRF v2 hashes the complete frame body. SAMPLE and its bake order are
+// unchanged; the incomplete v1 checksum was 15635741705100430814.
+const GOLDEN_SAMPLE_CHECKSUM: u64 = 14713264168317327511;
 
 #[test]
 fn entity_order_in_the_file_does_not_change_the_frame() {

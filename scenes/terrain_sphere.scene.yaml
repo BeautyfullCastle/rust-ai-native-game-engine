@@ -1,0 +1,68 @@
+# Opt-in sphere/terrain collision fixture. Run with terrain-physics feature.
+# The full canonical asset identity and SHA-256 are pinned below. No floor proxy.
+# The second sphere falls through a 2x2-cell hole; the first rests on terrain.
+schema: orr.scene/1
+singletons:
+  TerrainScenePin:
+    source_len: 24
+    identity_len: 24
+    source_path: [116, 101, 114, 114, 97, 105, 110, 47, 115, 112, 104, 101, 114, 101, 95, 100, 101, 109, 111, 46, 111, 114, 114, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    asset_id: [116, 101, 114, 114, 97, 105, 110, 47, 115, 112, 104, 101, 114, 101, 95, 100, 101, 109, 111, 46, 111, 114, 114, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    revision: [222, 246, 144, 9, 253, 3, 114, 79, 98, 141, 111, 138, 44, 78, 27, 216, 218, 20, 116, 80, 219, 24, 51, 7, 239, 12, 47, 250, 178, 56, 212, 101]
+    friction: 0.6
+    restitution: 0
+    layer: 1
+    mask: 4294967295
+  orr_physics3d::PhysicsState:
+    config:
+      gravity: [0, -10, 0]
+      dt: 0.0166666667
+      baumgarte: 0.2
+      linear_slop: 0.01
+      contact_margin: 0.02
+      restitution_threshold: 1
+      max_correction_speed: 6
+      max_linear_speed: 16
+      max_angular_speed: 16
+      velocity_iterations: 1
+      substeps: 8
+      sleep_ticks: 30
+      sleep_linear_speed: 0.05
+      sleep_angular_speed: 0.05
+entities:
+  e_00000001:
+    name: sphere_on_terrain
+    orr_physics3d::Body:
+      pos: [-2, 3, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 1
+      inv_inertia: [10, 10, 10]
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics3d::Collider:
+      shape: { kind: sphere, radius: 0.5 }
+      restitution: 0
+      friction: 0.6
+      layer: 1
+      mask: 4294967295
+  e_00000002:
+    name: sphere_over_hole
+    orr_physics3d::Body:
+      pos: [2, 3, 1]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 1
+      inv_inertia: [10, 10, 10]
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics3d::Collider:
+      shape: { kind: sphere, radius: 0.5 }
+      restitution: 0
+      friction: 0.6
+      layer: 1
+      mask: 4294967295

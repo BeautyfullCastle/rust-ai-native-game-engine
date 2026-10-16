@@ -1,0 +1,25 @@
+[package]
+name = "orr_model_bindings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "GPU-free immutable model descriptors and verified content loading"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+animated-models = ["orr_model/animation"]
+terrain = []
+irradiance-probes = []
+
+[dependencies]
+orr_model = { path = "../orr_model", features = ["import"] }
+orr_package = { path = "../orr_package" }
+orr_reflect = { path = "../orr_reflect", default-features = false, features = ["scene"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"

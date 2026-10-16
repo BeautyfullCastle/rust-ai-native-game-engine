@@ -1,0 +1,76 @@
+# Yard3D authoring: a ground slab and two boxes, with deterministic gravity.
+# Rain is disabled so editing and play remain small and easy to inspect.
+schema: orr.scene/1
+singletons:
+  Yard3dScene: { rain_batch: 0, rain_interval: 0, max_entities: 128, rain_seed: 42 }
+  orr_physics3d::PhysicsState:
+    config:
+      gravity: [0, -10, 0]
+      dt: 0.0166666667
+      baumgarte: 0.2
+      linear_slop: 0.01
+      contact_margin: 0.02
+      restitution_threshold: 1
+      max_correction_speed: 6
+      max_linear_speed: 500
+      max_angular_speed: 60
+      velocity_iterations: 1
+      substeps: 8
+      sleep_ticks: 30
+      sleep_linear_speed: 0.05
+      sleep_angular_speed: 0.05
+entities:
+  e_00000001:
+    name: ground
+    orr_physics3d::Body:
+      pos: [0, -0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [24, 0.5, 24] }
+      restitution: 0
+      friction: 0.6
+      layer: 1
+      mask: 4294967295
+  e_00000002:
+    name: box_left
+    orr_physics3d::Body:
+      pos: [-2, 1, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 1
+      inv_inertia: [6, 6, 6]
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.5, 0.5, 0.5] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 1
+      mask: 4294967295
+  e_00000003:
+    name: box_right
+    orr_physics3d::Body:
+      pos: [2, 3, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 1
+      inv_inertia: [6, 6, 6]
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.5, 0.5, 0.5] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 1
+      mask: 4294967295

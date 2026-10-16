@@ -6,11 +6,11 @@ use orr_session::{ClientState, RelayClient};
 use orr_sim::Game;
 use orr_testgame::{Arena, Bullet, PlayerTag, Position};
 
-/// Build id of the arena sample; the server room's build hash is
+/// Frame-format-bound build id of the arena sample; the room's build hash is
 /// `build_hash_of(ARENA_BUILD_ID, 0)` (`orr_server --game arena`).
-pub const ARENA_BUILD_ID: u64 = 0x0A2E_4A00_0001;
-/// Build id of the physics sample (`orr_server --game physics`).
-pub const PHYSICS_BUILD_ID: u64 = 0x0A2E_4A00_0002;
+pub const ARENA_BUILD_ID: u64 = orr_sim::frame_build_id(0x0A2E_4A00_0001);
+/// Frame-format-bound build id of the physics sample (`orr_server --game physics`).
+pub const PHYSICS_BUILD_ID: u64 = orr_sim::frame_build_id(0x0A2E_4A00_0002);
 
 fn state_name(s: &ClientState) -> String {
     match s {

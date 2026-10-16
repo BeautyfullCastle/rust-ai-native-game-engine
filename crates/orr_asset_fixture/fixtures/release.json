@@ -1,0 +1,9 @@
+{
+  "format": "orr.asset-release/1",
+  "game": "asset_fixture_v1",
+  "game_code_id": "11193926291457",
+  "build_id": "10434068928185386027",
+  "frame_format_version": 2,
+  "sim_manifest_sha256": "1679621b8296cea373c127f397f519dcbfae2d3e7602550f064909b614a31a3a",
+  "view_manifest_sha256": "5a49a3ca4283543fa090a44c7c817c8910d1a6ea0ab3128697f674e2894cafe0"
+}

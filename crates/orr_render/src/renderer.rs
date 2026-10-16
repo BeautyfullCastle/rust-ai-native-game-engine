@@ -8,6 +8,7 @@ use orr_rhi::{
 
 use crate::camera::Camera;
 use crate::list::{LineInstance, RenderList, ShapeInstance};
+use crate::stats::{CpuClock, FrameStats};
 
 const SHADER: &str = include_str!("shader2d.wgsl");
 const INITIAL_INSTANCES: usize = 1024;
@@ -41,16 +42,18 @@ impl<B: Rhi> Growing<B> {
     }
 
     /// Makes room for `count` items (contents are lost when it grows).
-    pub(crate) fn reserve(&mut self, rhi: &B, count: usize) {
+    pub(crate) fn reserve(&mut self, rhi: &B, count: usize) -> bool {
         if count > self.capacity {
             self.capacity = count.next_power_of_two();
             self.buffer = Self::make(rhi, self.label, self.capacity * self.item_size);
+            return true;
         }
+        false
     }
 
-    fn upload(&mut self, rhi: &B, count: usize, bytes: &[u8]) {
-        self.reserve(rhi, count);
-        rhi.write_buffer(&self.buffer, 0, bytes);
+    fn upload(&mut self, rhi: &B, count: usize, bytes: &[u8], stats: &mut FrameStats) {
+        stats.buffer_reallocations += u32::from(self.reserve(rhi, count));
+        stats.upload(rhi, &self.buffer, 0, bytes);
     }
 }
 
@@ -68,6 +71,7 @@ pub struct Renderer<B: Rhi> {
     line_bind: B::BindGroup,
     shapes: Growing<B>,
     lines: Growing<B>,
+    last_frame_stats: FrameStats,
 }
 
 const SHAPE_ATTRS: [VertexAttr; 5] = [
@@ -131,6 +135,7 @@ impl<B: Rhi> Renderer<B> {
             line_bind,
             shapes,
             lines,
+            last_frame_stats: FrameStats::default(),
         }
     }
 
@@ -142,9 +147,21 @@ impl<B: Rhi> Renderer<B> {
         &self.rhi
     }
 
+    /// Work submitted by the last completed draw, excluding target/presentation work.
+    pub fn last_frame_stats(&self) -> FrameStats {
+        self.last_frame_stats
+    }
+
     /// Draws `list` into `view` (`size` pixels) seen through `camera`, and
     /// submits it. Shapes first (later on top), then lines.
     pub fn draw(&mut self, view: &B::TextureView, size: (u32, u32), list: &RenderList, camera: &Camera) {
+        let prepare_clock = CpuClock::start();
+        let mut stats = FrameStats {
+            shape_instances: list.shapes.len() as u64,
+            line_instances: list.lines.len() as u64,
+            msaa_samples: 1,
+            ..FrameStats::default()
+        };
         let rhi = &self.rhi;
         let scale = camera.scale(size.0, size.1);
         let globals = Globals {
@@ -153,29 +170,38 @@ impl<B: Rhi> Renderer<B> {
             viewport: [size.0.max(1) as f32, size.1.max(1) as f32],
             pad: [0.0; 2],
         };
-        rhi.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        stats.upload(rhi, &self.globals, 0, bytemuck::bytes_of(&globals));
         if !list.shapes.is_empty() {
-            self.shapes.upload(rhi, list.shapes.len(), bytemuck::cast_slice(&list.shapes));
+            self.shapes.upload(rhi, list.shapes.len(), bytemuck::cast_slice(&list.shapes), &mut stats);
         }
         if !list.lines.is_empty() {
-            self.lines.upload(rhi, list.lines.len(), bytemuck::cast_slice(&list.lines));
+            self.lines.upload(rhi, list.lines.len(), bytemuck::cast_slice(&list.lines), &mut stats);
         }
 
+        stats.cpu_prepare_time = prepare_clock.elapsed();
+        let encode_clock = CpuClock::start();
         let mut commands: Vec<Command<B>> = Vec::with_capacity(8);
         if !list.shapes.is_empty() {
             commands.push(Command::SetPipeline(&self.shape_pipeline));
             commands.push(Command::SetBindGroup(0, &self.shape_bind));
             commands.push(Command::SetVertexBuffer(0, &self.shapes.buffer));
             commands.push(Command::Draw { vertices: 0..6, instances: 0..list.shapes.len() as u32 });
+            stats.main.draw(list.shapes.len() as u32);
         }
         if !list.lines.is_empty() {
             commands.push(Command::SetPipeline(&self.line_pipeline));
             commands.push(Command::SetBindGroup(0, &self.line_bind));
             commands.push(Command::SetVertexBuffer(0, &self.lines.buffer));
             commands.push(Command::Draw { vertices: 0..6, instances: 0..list.lines.len() as u32 });
+            stats.main.draw(list.lines.len() as u32);
         }
         let mut encoder = rhi.create_encoder("2d frame");
         rhi.encode_render_pass(&mut encoder, "2d", &ColorAttachment { view, clear: self.clear, resolve: None }, &commands);
+        stats.main.passes += 1;
+        stats.cpu_encode_time = encode_clock.elapsed();
+        let submit_clock = CpuClock::start();
         rhi.submit(encoder);
+        stats.cpu_submit_time = submit_clock.elapsed();
+        self.last_frame_stats = stats;
     }
 }

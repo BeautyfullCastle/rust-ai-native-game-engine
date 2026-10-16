@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "sample-animation",
+  "version": "1.0.0",
+  "engine": "^0.0.1",
+  "capabilities": ["animation"],
+  "dependencies": {},
+  "files": ["animated.glb", "LICENSE.txt"]
+}

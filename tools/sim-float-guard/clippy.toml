@@ -1,0 +1,10 @@
+# Used only by tools/check_sim_float_types.py and its regression fixtures.
+# View crates keep the workspace configuration; do not apply this globally.
+disallowed-types = [
+  { path = "f32", reason = "floating-point types are forbidden in repository-owned simulation code; use FP" },
+  { path = "f64", reason = "floating-point types are forbidden in repository-owned simulation code; use FP" },
+  { path = "std::collections::HashMap", reason = "non-deterministic iteration order in sim code; use BTreeMap or FrameMap" },
+  { path = "std::collections::HashSet", reason = "non-deterministic iteration order in sim code" },
+  { path = "std::time::Instant", reason = "wall clock is forbidden in sim code" },
+  { path = "std::time::SystemTime", reason = "wall clock is forbidden in sim code" },
+]

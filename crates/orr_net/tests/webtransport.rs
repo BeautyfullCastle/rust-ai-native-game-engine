@@ -159,6 +159,64 @@ fn h3_is_refused_when_webtransport_is_off() {
     drop(ep);
 }
 
+#[test]
+fn h3_peer_with_webtransport_disabled_is_explicitly_refused() {
+    use rustls::pki_types::CertificateDer;
+    use std::sync::Arc;
+
+    let (mut server, addr, _, der) = wt_server();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        tokio::time::timeout(WAIT, async {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(CertificateDer::from(der)).unwrap();
+            let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            tls.alpn_protocols = vec![b"h3".to_vec()];
+            let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+            let mut ep = quinn::Endpoint::client(loopback()).unwrap();
+            ep.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+            let conn = ep.connect(addr, "localhost").unwrap().await.expect("verified TLS handshake");
+            let handshake = conn.handshake_data().unwrap().downcast::<quinn::crypto::rustls::HandshakeData>().unwrap();
+            assert_eq!(handshake.protocol.as_deref(), Some(b"h3".as_slice()));
+
+            // h3 0.0.8's client builder sends SETTINGS_ENABLE_WEBTRANSPORT
+            // (0x2b603742) = 0. Extended CONNECT and HTTP/3 datagrams are
+            // enabled; the valid CONNECT must be rejected for WT support.
+            let (mut driver, mut sender) = h3::client::builder()
+                .enable_extended_connect(true)
+                .enable_datagram(true)
+                .send_grease(false)
+                .build::<_, _, bytes::Bytes>(h3_quinn::Connection::new(conn.clone()))
+                .await
+                .unwrap();
+            let driver = tokio::spawn(async move { driver.wait_idle().await });
+            let request = http::Request::builder()
+                .method(http::Method::CONNECT)
+                .uri(format!("https://localhost:{}/", addr.port()))
+                .extension(h3::ext::Protocol::WEB_TRANSPORT)
+                .body(())
+                .unwrap();
+            let mut stream = sender.send_request(request).await.expect("valid WebTransport CONNECT");
+            assert!(stream.recv_response().await.is_err(), "incompatible peer must not receive a successful session");
+            match conn.closed().await {
+                quinn::ConnectionError::ApplicationClosed(close) => {
+                    assert_eq!(close.error_code.into_inner(), 0x109, "H3_SETTINGS_ERROR");
+                    assert_eq!(close.reason.as_ref(), b"webtransport is not supported by client");
+                }
+                other => panic!("expected explicit HTTP/3 settings rejection, got {other:?}"),
+            }
+            driver.await.unwrap();
+        })
+        .await
+        .expect("settings rejection must complete; a timeout is not rejection evidence");
+    });
+    assert!(server.poll_event().is_none(), "incompatible peer must not enter the Orrery event stream");
+}
+
 /// `wss://` on the same certificate as QUIC, with the browser sub-protocol.
 #[test]
 fn wss_listener_uses_the_quic_certificate() {

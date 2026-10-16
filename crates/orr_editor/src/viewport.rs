@@ -20,7 +20,7 @@ use orr_ecs::Entity;
 use orr_reflect::Guid;
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu};
 use orr_render::{instance_of, Camera, OffscreenTarget, RenderList, Renderer};
-use orr_sample::physics_view::{BodyView, Outline};
+use orr_sample::editor_view::{Drawable, Outline};
 use orr_view::{RenderItem, Transform2, Vec2};
 
 use crate::model::{EntityRow, Summary};
@@ -129,10 +129,10 @@ fn shape_outline(list: &mut RenderList, pos: [f32; 2], angle: f32, shape: &Outli
 
 /// Builds the render list of the bodies of a frame. `vp` is the viewport in
 /// pixels (for the grid). `selected` is the frame entity to highlight.
-pub fn build_list(bodies: &[BodyView], selected: Option<Entity>, camera: &Camera, vp: (u32, u32)) -> RenderList {
+pub fn build_list(bodies: &[Drawable], selected: Option<Entity>, camera: &Camera, vp: (u32, u32)) -> RenderList {
     let mut list = RenderList::new();
     add_grid(&mut list, camera, vp);
-    let mut chosen: Option<&BodyView> = None;
+    let mut chosen: Option<&Drawable> = None;
     for b in bodies {
         let item = RenderItem { entity: b.entity, transform: Transform2::new(Vec2::new(b.pos[0], b.pos[1]), b.angle + b.turn), style: b.style };
         list.shapes.push(instance_of(&item));
@@ -168,13 +168,13 @@ pub fn preview_marks(summary: &Summary) -> (Vec<Guid>, Vec<Guid>, Vec<Guid>) {
 /// A frame with the GUID map of its entities, to look bodies up by GUID.
 pub struct Scene<'a> {
     /// The bodies of the frame.
-    pub bodies: &'a [BodyView],
+    pub bodies: &'a [Drawable],
     /// Its entities (handle, GUID).
     pub rows: &'a [EntityRow],
 }
 
 impl<'a> Scene<'a> {
-    fn body_of(&self, guid: &Guid) -> Option<&'a BodyView> {
+    fn body_of(&self, guid: &Guid) -> Option<&'a Drawable> {
         let row = self.rows.iter().find(|r| r.guid.as_ref() == Some(guid))?;
         self.bodies.iter().find(|b| b.entity == row.entity)
     }
@@ -222,7 +222,7 @@ pub fn build_preview_list(preview: &Scene<'_>, base: &Scene<'_>, summary: &Summa
 /// Draws the pulses of entities an agent just edited: an outline and a ring that
 /// grows and fades. `fade` is 1 at the start of a pulse and 0 at its end. Entities
 /// that are not drawn (no body and collider, or gone) are skipped.
-pub fn add_pulses(list: &mut RenderList, bodies: &[BodyView], pulses: &[(Entity, f32)]) {
+pub fn add_pulses(list: &mut RenderList, bodies: &[Drawable], pulses: &[(Entity, f32)]) {
     for (entity, fade) in pulses {
         let Some(b) = bodies.iter().find(|b| b.entity == *entity) else { continue };
         let color = [PULSE[0], PULSE[1], PULSE[2], fade.clamp(0.0, 1.0)];
@@ -233,12 +233,12 @@ pub fn add_pulses(list: &mut RenderList, bodies: &[BodyView], pulses: &[(Entity,
 }
 
 /// The body under a world point: the last one drawn (on top) that contains it.
-pub fn pick(bodies: &[BodyView], world: [f32; 2]) -> Option<Entity> {
+pub fn pick(bodies: &[Drawable], world: [f32; 2]) -> Option<Entity> {
     bodies.iter().rev().find(|b| b.hit(world)).map(|b| b.entity)
 }
 
 /// World position of a frame entity's body.
-pub fn body_pos(bodies: &[BodyView], entity: Entity) -> Option<[f32; 2]> {
+pub fn body_pos(bodies: &[Drawable], entity: Entity) -> Option<[f32; 2]> {
     bodies.iter().find(|b| b.entity == entity).map(|b| b.pos)
 }
 

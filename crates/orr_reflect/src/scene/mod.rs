@@ -44,6 +44,8 @@ mod bake;
 mod decode;
 mod encode;
 mod json;
+#[cfg(feature = "linked-prefabs")]
+mod linked;
 mod node;
 mod schema;
 
@@ -51,6 +53,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub use bake::{BakeError, SceneIndex};
+#[cfg(feature = "linked-prefabs")]
+pub use linked::PrefabLink;
 pub use node::{Diag as SceneDiagnostic, Pos as ScenePos};
 
 use crate::registry::TypeRegistry;
@@ -106,6 +110,9 @@ pub struct SceneEntity {
 /// A scene document.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
+    /// Editor-only, validated links from instance roots to embedded source snapshots.
+    #[cfg(feature = "linked-prefabs")]
+    pub prefab_links: BTreeMap<Guid, PrefabLink>,
     /// Singleton values by type name, sorted by name.
     pub singletons: Vec<(String, Value)>,
     /// Entities by GUID (sorted).
@@ -149,6 +156,15 @@ impl fmt::Display for SceneError {
 impl std::error::Error for SceneError {}
 
 impl Scene {
+    /// Whether this document carries editor-only linked prefab metadata.
+    /// Available in every scene build to enforce downstream feature boundaries.
+    pub fn has_prefab_links(&self) -> bool {
+        #[cfg(feature = "linked-prefabs")]
+        { !self.prefab_links.is_empty() }
+        #[cfg(not(feature = "linked-prefabs"))]
+        { false }
+    }
+
     /// Parses and validates scene text against the registry.
     ///
     /// Never panics on bad input. On success every component value is valid
@@ -156,7 +172,10 @@ impl Scene {
     /// [`bake`](Self::bake) can only fail if the target `Frame` lacks a type.
     pub fn parse(text: &str, registry: &TypeRegistry) -> Result<Scene, SceneError> {
         let root = node::parse(text).map_err(|d| SceneError { diagnostics: vec![d] })?;
+        #[cfg(not(feature = "linked-prefabs"))]
         let mut scene = decode::decode_scene(&root, registry).map_err(|diagnostics| SceneError { diagnostics })?;
+        #[cfg(feature = "linked-prefabs")]
+        let mut scene = linked::decode_scene(&root, text.len(), registry).map_err(|diagnostics| SceneError { diagnostics })?;
         scene.read_comments(text, &root);
         Ok(scene)
     }
@@ -265,6 +284,16 @@ impl TypeRegistry {
     /// The JSON Schema (draft 2020-12) of scene files for this registry.
     /// Output is deterministic: the same registry gives the same text.
     pub fn json_schema(&self) -> String {
+        #[cfg(feature = "linked-prefabs")]
+        if linked::supports_profile(self) {
+            return schema::linked_scene_schema(self).pretty();
+        }
+        schema::scene_schema(self).pretty()
+    }
+
+    /// Legacy scene/1 schema for consumers that have not opted into linked metadata.
+    /// This remains available even when another crate enables the optional parser.
+    pub fn legacy_json_schema(&self) -> String {
         schema::scene_schema(self).pretty()
     }
 

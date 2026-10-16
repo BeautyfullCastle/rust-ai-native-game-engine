@@ -1,0 +1,61 @@
+   Compiling orr_games v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_games)
+   Compiling orr_viewstream v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_viewstream)
+   Compiling orr_relay_net v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_relay_net)
+   Compiling orr_render v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_render)
+   Compiling orr_sample v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_sample)
+   Compiling orr_edit v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_edit)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 03s
+     Running tests/atomic_batch.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/atomic_batch-499a145a0cbcbc17)
+
+running 5 tests
+test noop_batch_does_not_clear_redo_or_add_history ... ok
+test isolated_batch_api_preserves_revision_while_legacy_batch_keeps_rollback_versioning ... ok
+test successful_batch_is_one_undo_and_redo_entry ... ok
+test rejected_position_prefix_preserves_nonempty_redo ... ok
+test rejected_batch_preserves_nonempty_redo_and_all_history_metadata ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/bake_admission.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/bake_admission-f72ff9ee7ef11571)
+
+running 5 tests
+test every_admitted_path_uses_common_bake_and_failure_is_atomic ... ok
+test failed_proposal_admission_does_not_reserve_document_guids ... ok
+test proposal_acceptance_discards_successful_prefix_when_asset_disappears ... ok
+test staged_batch_retains_admission_and_preserves_metadata_on_rejection ... ok
+test transaction_rollback_restores_snapshot_even_after_asset_disappears ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/play.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/play-561a8211361ca099)
+
+running 9 tests
+test branching_after_a_seek_keeps_the_timeline_consistent ... ok
+test spawn_add_remove_despawn_in_play_replay_identically ... ok
+test play_edit_changes_the_outcome ... ok
+test seek_back_after_a_play_edit_gives_identical_frames ... ok
+test play_edit_is_recorded_and_replays_to_the_same_checksum ... ok
+test play_starts_from_the_edit_frame_and_is_deterministic ... ok
+test refused_play_edits_change_nothing ... ok
+test stop_play_leaves_the_document_untouched ... ok
+test capture_scene_reads_the_live_state_back ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/proposal.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/proposal-03740bbe3073cbbd)
+
+running 11 tests
+test an_empty_document_can_propose_too ... ok
+test staged_ops_show_in_the_preview_and_not_in_the_document ... ok
+test unified_diff_hunks_and_edge_cases ... ok
+test accept_is_one_undo_entry_with_the_agent_origin ... ok
+test a_conflicting_accept_fails_and_changes_nothing ... ok
+test spawned_guids_are_stable_and_unique_across_proposals ... ok
+test diff_text_is_exact_for_a_known_edit ... ok
+test person_edits_meanwhile_and_a_clean_accept_still_works ... ok
+test apply_all_is_all_or_nothing ... ok
+test reject_list_tx_and_load ... ok
+test summary_lists_added_removed_renamed_and_changed ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

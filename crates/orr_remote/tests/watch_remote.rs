@@ -8,7 +8,7 @@ use common::*;
 use orr_bridge::{Bridge, BridgeError, BridgeEvent, DebugCommand, EventKey, Lifecycle, SimControl, Snapshot};
 use orr_edit::{EditorDoc, Op, Origin, PlayController};
 use orr_physics::{Body, BODY_DYNAMIC};
-use orr_remote::{Auth, ErpClient, ErpServer, ErpTarget, RemoteBridge, RemoteConfig, ServerConfig};
+use orr_remote::{Auth, ErpClient, ErpServer, ErpTarget, RemoteBridge, RemoteConfig, ServerConfig, ViewDeliveryMode};
 use orr_sample::physics_game::{PhysEvent, PhysGame};
 use orr_session::{ControlOp, Speed};
 use orr_sim::{PlayerSlot, SimEvent};
@@ -32,6 +32,9 @@ fn wait_tick(b: &RemoteBridge<PhysGame>, tick: u64) -> Snapshot {
 fn bridge(host: &TestHost, token: &str) -> RemoteBridge<PhysGame> {
     let mut cfg = RemoteConfig::new(&host.url);
     cfg.token = Some(token.to_string());
+    // These original FIFO assertions exercise the preserved legacy contract.
+    // Negotiated coverage/reset semantics have separate recovery tests.
+    cfg.view_delivery = ViewDeliveryMode::Legacy;
     RemoteBridge::<PhysGame>::connect(cfg).expect("connect bridge")
 }
 
@@ -341,7 +344,11 @@ fn remote_bridge_events_decode() {
     let mut server = ErpServer::start(ServerConfig::new(Auth::DevNoAuth)).unwrap();
     let url = server.url();
     let t = std::thread::spawn(move || {
-        let b = RemoteBridge::<PhysGame>::connect(RemoteConfig::new(&url)).unwrap();
+        // This fixture injects an event without any corresponding simulation
+        // frame; it tests legacy decoding, not the negotiated coverage contract.
+        let mut cfg = RemoteConfig::new(&url);
+        cfg.view_delivery = ViewDeliveryMode::Legacy;
+        let b = RemoteBridge::<PhysGame>::connect(cfg).unwrap();
         let mut b = b;
         wait_for("a sim event", || b.drain_events().into_iter().find(|e| matches!(e, BridgeEvent::Sim { .. })))
     });

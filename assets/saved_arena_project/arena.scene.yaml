@@ -1,0 +1,12 @@
+schema: orr.scene/1
+singletons:
+  Score: { kills: [0,0,0,0,0,0,0,0] }
+entities:
+  e_00000001:
+    name: hero
+    Position: { pos: [-60,0] }
+    PlayerTag: { slot: 0 }
+  e_00000002:
+    name: target
+    Position: { pos: [60,0] }
+    PlayerTag: { slot: 1 }

@@ -22,6 +22,8 @@
 #![deny(clippy::float_arithmetic)]
 
 mod bot;
+#[cfg(any(target_arch = "wasm32", test))]
+mod build_id;
 mod link;
 mod phys;
 mod report;

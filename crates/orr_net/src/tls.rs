@@ -1,4 +1,4 @@
-//! TLS setup for the QUIC backend.
+//! TLS setup shared by QUIC and secure WebSocket backends.
 
 use crate::config::NetConfig;
 use crate::NetError;
@@ -185,9 +185,21 @@ pub(crate) fn build_quic_server_config(
 /// raw quinn clients with the same trust rules.
 #[doc(hidden)]
 pub fn build_quic_client_config(trust: &QuicTrust, cfg: &NetConfig) -> Result<quinn::ClientConfig, NetError> {
+    let rc = build_client_rustls(trust, false)?;
+    let qc = QuicClientConfig::try_from(Arc::new(rc)).map_err(NetError::new)?;
+    let mut cc = quinn::ClientConfig::new(Arc::new(qc));
+    cc.transport_config(Arc::new(transport_config(cfg, false, false)?));
+    Ok(cc)
+}
+
+pub(crate) fn build_client_rustls(trust: &QuicTrust, wss: bool) -> Result<rustls::ClientConfig, NetError> {
+    if wss && matches!(trust, QuicTrust::Sha256Fingerprint(_) | QuicTrust::DangerousSkipVerificationDevOnly) {
+        return Err(NetError("WSS requires WebPki or certificate CA trust; verification bypass is unsupported".into()));
+    }
     let prov = provider();
+    let versions: &[&rustls::SupportedProtocolVersion] = if wss { &[&rustls::version::TLS13, &rustls::version::TLS12] } else { &[&rustls::version::TLS13] };
     let builder = rustls::ClientConfig::builder_with_provider(prov.clone())
-        .with_protocol_versions(&[&rustls::version::TLS13])
+        .with_protocol_versions(versions)
         .map_err(NetError::new)?;
     let mut rc = match trust {
         QuicTrust::WebPki => {
@@ -203,6 +215,9 @@ pub fn build_quic_client_config(trust: &QuicTrust, cfg: &NetConfig) -> Result<qu
             let mut roots = RootCertStore::empty();
             for c in CertificateDer::pem_file_iter(path).map_err(NetError::new)? {
                 roots.add(c.map_err(NetError::new)?).map_err(NetError::new)?;
+            }
+            if wss && roots.is_empty() {
+                return Err(NetError("WSS CA file holds no certificate".into()));
             }
             builder.with_root_certificates(roots).with_no_client_auth()
         }
@@ -221,11 +236,8 @@ pub fn build_quic_client_config(trust: &QuicTrust, cfg: &NetConfig) -> Result<qu
             }))
             .with_no_client_auth(),
     };
-    rc.alpn_protocols = vec![ALPN.to_vec()];
-    let qc = QuicClientConfig::try_from(Arc::new(rc)).map_err(NetError::new)?;
-    let mut cc = quinn::ClientConfig::new(Arc::new(qc));
-    cc.transport_config(Arc::new(transport_config(cfg, false, false)?));
-    Ok(cc)
+    rc.alpn_protocols = vec![if wss { b"http/1.1".to_vec() } else { ALPN.to_vec() }];
+    Ok(rc)
 }
 
 /// Verifier that pins a fingerprint, or accepts anything when `pin` is `None`.

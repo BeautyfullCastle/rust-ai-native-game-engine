@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "sample-irradiance-grid",
+  "version": "1.0.0",
+  "engine": "^0.0.1",
+  "capabilities": ["irradiance-probes"],
+  "dependencies": {},
+  "files": ["authored-room.irradiance.json", "README.md", "LICENSE.txt", "generate.py"]
+}

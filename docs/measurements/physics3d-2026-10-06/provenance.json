@@ -1,0 +1,872 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-06",
+  "scope": "Documentation-only archive of two completed, distinct native experiments. No new measurements or accepted runtime optimization.",
+  "source": {
+    "measured_local_commit": "a9e5ccbcc86ecf282179aa0b908ab5efd6d097c0",
+    "tree": "05ef672c3e515efd0e96ff81a44c1dfdd748c7a8",
+    "published_equivalent_commit": "b5ea974a2bda490efb336346fd6208a726a1e1cd",
+    "published_commit_url": "https://github.com/BeautyfullCastle/rust-ai-native-game-engine/commit/b5ea974a2bda490efb336346fd6208a726a1e1cd",
+    "pull_request_url": "https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/87",
+    "equivalence": "Published commit tree verified equal to the measured local tree; local commit is provenance only, not a remote link.",
+    "baseline_file_sha256": {
+      "Cargo.toml": "1ee557955c0560e0bc814c4ee6902ef6cf876f1df0e057ae8afd4472629ca122",
+      "Cargo.lock": "1aa7b12f7da8c7e00b4fa42b3228d0f3efea19f3d3b44a0c2dcc8bd36f250314",
+      "crates/orr_physics3d/Cargo.toml": "5fbb426580df34910087a6f155e020f0ea68a48ced22fdc297a97cdc3e816ea5",
+      "crates/orr_physics3d/benches/physics3d.rs": "d39726c659880b4a851b676c05b00ac2deb082ce7fd00f552014f0eefbd3806a",
+      "crates/orr_physics3d/tests/common/scenes.rs": "590ea3e8087eae394e3c6bedcad4ea12c0094196259a2491ffc1cbf22d5dc3a6",
+      "crates/orr_physics3d/src/solver.rs": "798a1c32348578456979d2667adb85a8506557b79b2a993ae198dd43cd79652f",
+      "crates/orr_physics3d/src/fastmath.rs": "ea5e4517644f26274c2021bcf07304338ca97eb15f172d620fbdecc7f4ffbc1e",
+      "crates/orr_fp/src/lib.rs": "b22231063e7c53b73a58cd3db90ca04972a777004b2862d484d3436ecab7ff33"
+    },
+    "candidate_solver_sha256": "4131bee419a008ee083fd83401b5743c4d30c1477c028968121fb9265bac0122",
+    "candidate_patch_sha256": "222307d596123779b38342309098f9a1021c1b256f52984a8d1adad6d7b1e3d7",
+    "candidate_retained": false
+  },
+  "toolchain": {
+    "rustc_verbose": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n",
+    "cargo_verbose": "cargo 1.97.1 (c980f4866 2026-06-30)\nrelease: 1.97.1\ncommit-hash: c980f4866141969fab6254a680546a277789d6f0\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nlibgit2: 1.9.2 (sys:0.20.4 vendored)\nlibcurl: 8.20.0-DEV (sys:0.4.88+curl-8.20.0 vendored ssl:OpenSSL/3.6.2)\nssl: OpenSSL 3.6.2 7 Apr 2026\nos: Debian 13.0.0 [64-bit]\n",
+    "criterion_version": "0.5.1",
+    "criterion_lock_checksum": "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f",
+    "installed_targets": [
+      "x86_64-unknown-linux-gnu"
+    ],
+    "wasmtime_available": false,
+    "profile": "bench inherits release: opt-level=3 (default), thin LTO, codegen-units=1, debug=1; no overrides",
+    "rustup_toolchain": "1.97.1",
+    "other_build_variables": {},
+    "build_cache": "Existing warm target reused; absolute cache and toolchain paths omitted",
+    "kernel": "Linux 6.18.44 x86_64"
+  },
+  "machine": {
+    "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+    "allowed_logical_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "benchmark_logical_affinity": [
+      0
+    ],
+    "taskset_version": "util-linux 2.41.5",
+    "limitations": [
+      "Logical affinity is not dedicated physical-core isolation.",
+      "All postlaunch monitor observations were [0]; pre-taskset initial affinity was inherited 0-8.",
+      "Usable CPU topology and cgroup quota/throttle data unavailable.",
+      "Visible process namespace cannot establish absence of all host workloads."
+    ]
+  },
+  "binaries": {
+    "baseline-physics3d": {
+      "sha256": "13089aace80a803e35d58aefcf874103097ab722eca17e1c2fdabd902404d70a",
+      "size_bytes": 15506408,
+      "source": "baseline"
+    },
+    "candidate-physics3d": {
+      "sha256": "3c2980cf1ad24178ff902202f16f8e10c2c76d266d44b08a62a1316b9f58d891",
+      "size_bytes": 15506560,
+      "source": "baseline plus rejected candidate.patch.txt"
+    }
+  },
+  "method": {
+    "build_command": [
+      "cargo",
+      "bench",
+      "-p",
+      "orr_physics3d",
+      "--bench",
+      "physics3d",
+      "--no-run",
+      "--locked",
+      "--offline",
+      "-j1"
+    ],
+    "benchmark_command_template": [
+      "taskset",
+      "-c",
+      "0",
+      "<binary identified by SHA-256>",
+      "--bench",
+      "--noplot",
+      "--sample-size",
+      "20",
+      "--warm-up-time",
+      "1",
+      "--measurement-time",
+      "2",
+      "--nresamples",
+      "1000",
+      "--save-baseline",
+      "<run baseline_name>"
+    ],
+    "requested_sample_count": 20,
+    "requested_warmup_seconds": 1,
+    "requested_measurement_seconds": 2,
+    "bootstrap_resamples": 1000,
+    "criterion_sampling_configuration": "Auto (unchanged harness default); actual mode retained per case/run",
+    "confidence_level": 0.95,
+    "disk_floor_bytes": 1073741824,
+    "disk_guard_interval_seconds": 0.25,
+    "monitor_interval_seconds": 5,
+    "benchmark_wall_cap_seconds": 180,
+    "build_wall_cap_seconds": 300,
+    "output_isolation": "Fresh CRITERION_HOME directory and unique save-baseline label for every run; no prior Criterion baseline comparison"
+  },
+  "builds": {
+    "baseline": {
+      "stage": "build",
+      "limit_seconds": 300,
+      "free_floor_bytes": 1073741824,
+      "utc_start": "2026-10-06T00:01:41.296057+00:00",
+      "utc_end": "2026-10-06T00:02:09.091151+00:00",
+      "elapsed_seconds": 27.79507092700078,
+      "exit_code": 0,
+      "aborted": false,
+      "abort_reason": null,
+      "free_start_bytes": 1442467840,
+      "minimum_free_bytes": 1391218688,
+      "free_end_bytes": 1404882944
+    },
+    "candidate": {
+      "stage": "build",
+      "limit_seconds": 300,
+      "free_floor_bytes": 1073741824,
+      "utc_start": "2026-10-06T00:08:50.708919+00:00",
+      "utc_end": "2026-10-06T00:09:21.522949+00:00",
+      "elapsed_seconds": 30.814007256994955,
+      "exit_code": 0,
+      "aborted": false,
+      "abort_reason": null,
+      "free_start_bytes": 1375232000,
+      "minimum_free_bytes": 1350172672,
+      "free_end_bytes": 1379295232
+    }
+  },
+  "validation": {
+    "debug_command": [
+      "cargo",
+      "test",
+      "-p",
+      "orr_physics3d",
+      "--lib",
+      "solver::tests",
+      "--locked",
+      "--offline",
+      "-j1"
+    ],
+    "debug_result": {
+      "stage": "debug",
+      "limit_seconds": 180,
+      "free_floor_bytes": 1073741824,
+      "utc_start": "2026-10-06T00:12:18.033239+00:00",
+      "utc_end": "2026-10-06T00:12:46.346927+00:00",
+      "elapsed_seconds": 28.313667144000647,
+      "exit_code": -15,
+      "aborted": true,
+      "abort_reason": "disk_floor",
+      "free_start_bytes": 1359585280,
+      "minimum_free_bytes": 1071673344,
+      "free_end_bytes": 1071673344
+    },
+    "tests_executed": 0,
+    "release_correctness": "Not run",
+    "strict_clippy": "Not run",
+    "wasm_correctness_and_performance": "Not run; target/runtime unavailable",
+    "zero_impulse_identity": "Independent mathematical/code review only; candidate tests were authored but did not execute",
+    "source_restored_to": "a9e5ccbcc86ecf282179aa0b908ab5efd6d097c0",
+    "source_clean_after_reversion": true,
+    "issue_8": "Open; phase breakdown, full Session rollback and platform acceptance incomplete"
+  },
+  "experiments": [
+    {
+      "id": "baseline_repeat",
+      "aggregate_samples": 320,
+      "run_order": [
+        "pass1",
+        "pass2"
+      ],
+      "runs": [
+        {
+          "id": "pass1",
+          "binary": "baseline-physics3d",
+          "baseline_name": "native_a9e5ccb_20261006_pass1",
+          "criterion_home": "criterion_native_a9e5ccb_20261006_pass1",
+          "result": {
+            "stage": "baseline1",
+            "limit_seconds": 180,
+            "free_floor_bytes": 1073741824,
+            "utc_start": "2026-10-06T00:02:42.402645+00:00",
+            "utc_end": "2026-10-06T00:03:15.702114+00:00",
+            "elapsed_seconds": 33.29945166900143,
+            "exit_code": 0,
+            "aborted": false,
+            "abort_reason": null,
+            "free_start_bytes": 1404551168,
+            "minimum_free_bytes": 1404170240,
+            "free_end_bytes": 1404125184
+          },
+          "observed_postlaunch_affinity": [
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ]
+          ],
+          "load_1min_min": 0.26,
+          "load_1min_max": 0.55
+        },
+        {
+          "id": "pass2",
+          "binary": "baseline-physics3d",
+          "baseline_name": "native_a9e5ccb_20261006_pass2",
+          "criterion_home": "criterion_native_a9e5ccb_20261006_pass2",
+          "result": {
+            "stage": "baseline2",
+            "limit_seconds": 180,
+            "free_floor_bytes": 1073741824,
+            "utc_start": "2026-10-06T00:03:15.734374+00:00",
+            "utc_end": "2026-10-06T00:03:48.795873+00:00",
+            "elapsed_seconds": 33.06148127400229,
+            "exit_code": 0,
+            "aborted": false,
+            "abort_reason": null,
+            "free_start_bytes": 1404112896,
+            "minimum_free_bytes": 1403740160,
+            "free_end_bytes": 1403695104
+          },
+          "observed_postlaunch_affinity": [
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ]
+          ],
+          "load_1min_min": 0.59,
+          "load_1min_max": 0.75
+        }
+      ],
+      "comparisons": [
+        {
+          "case": "mixed_settling_500",
+          "pass1_slope_ns": 1243442.637543554,
+          "pass2_slope_ns": 1188462.8327526134,
+          "pass2_vs_pass1_percent": -4.421579502819228,
+          "slope_95ci_overlap": false
+        },
+        {
+          "case": "mixed_settling_1000",
+          "pass1_slope_ns": 2768267.5822299654,
+          "pass2_slope_ns": 2747375.072735192,
+          "pass2_vs_pass1_percent": -0.7547142345951885,
+          "slope_95ci_overlap": true
+        },
+        {
+          "case": "mixed_settled_500",
+          "pass1_slope_ns": 1344172.8910278745,
+          "pass2_slope_ns": 1353849.5951717272,
+          "pass2_vs_pass1_percent": 0.7199002604830751,
+          "slope_95ci_overlap": true
+        },
+        {
+          "case": "mixed_settled_1000",
+          "pass1_slope_ns": 3007355.200958188,
+          "pass2_slope_ns": 3040472.9967770036,
+          "pass2_vs_pass1_percent": 1.1012266129476034,
+          "slope_95ci_overlap": true
+        },
+        {
+          "case": "field_sleeping_500",
+          "pass1_slope_ns": 5508.782034073414,
+          "pass2_slope_ns": 5528.857965149004,
+          "pass2_vs_pass1_percent": 0.3644350230489035,
+          "slope_95ci_overlap": true
+        },
+        {
+          "case": "field_sleeping_1000",
+          "pass1_slope_ns": 10361.81919967602,
+          "pass2_slope_ns": 11002.445900168168,
+          "pass2_vs_pass1_percent": 6.182569760647616,
+          "slope_95ci_overlap": false
+        },
+        {
+          "case": "rollback8_mixed_settling_1000",
+          "pass1_slope_ns": 18783773.941463415,
+          "pass2_slope_ns": 18931877.073867597,
+          "pass2_vs_pass1_percent": 0.7884631324126978,
+          "slope_95ci_overlap": true
+        },
+        {
+          "case": "rollback8_field_sleeping_1000",
+          "pass1_slope_ns": 90233.60931720719,
+          "pass2_slope_ns": 91666.1963259392,
+          "pass2_vs_pass1_percent": 1.5876423647156912,
+          "slope_95ci_overlap": true
+        }
+      ]
+    },
+    {
+      "id": "zero_impulse_abba",
+      "aggregate_samples": 640,
+      "run_order": [
+        "a1",
+        "b1",
+        "b2",
+        "a2"
+      ],
+      "runs": [
+        {
+          "id": "a1",
+          "binary": "baseline-physics3d",
+          "baseline_name": "native_zero_impulse_a1",
+          "criterion_home": "criterion_native_zero_impulse_a1",
+          "result": {
+            "stage": "a1",
+            "limit_seconds": 180,
+            "free_floor_bytes": 1073741824,
+            "utc_start": "2026-10-06T00:09:36.837750+00:00",
+            "utc_end": "2026-10-06T00:10:08.891563+00:00",
+            "elapsed_seconds": 32.053792241997144,
+            "exit_code": 0,
+            "aborted": false,
+            "abort_reason": null,
+            "free_start_bytes": 1363488768,
+            "minimum_free_bytes": 1362714624,
+            "free_end_bytes": 1362669568
+          },
+          "observed_postlaunch_affinity": [
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ]
+          ],
+          "load_1min_min": 0.31,
+          "load_1min_max": 0.58
+        },
+        {
+          "id": "b1",
+          "binary": "candidate-physics3d",
+          "baseline_name": "native_zero_impulse_b1",
+          "criterion_home": "criterion_native_zero_impulse_b1",
+          "result": {
+            "stage": "b1",
+            "limit_seconds": 180,
+            "free_floor_bytes": 1073741824,
+            "utc_start": "2026-10-06T00:10:08.976855+00:00",
+            "utc_end": "2026-10-06T00:10:40.027193+00:00",
+            "elapsed_seconds": 31.05031720700208,
+            "exit_code": 0,
+            "aborted": false,
+            "abort_reason": null,
+            "free_start_bytes": 1362657280,
+            "minimum_free_bytes": 1361874944,
+            "free_end_bytes": 1361829888
+          },
+          "observed_postlaunch_affinity": [
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ]
+          ],
+          "load_1min_min": 0.62,
+          "load_1min_max": 0.77
+        },
+        {
+          "id": "b2",
+          "binary": "candidate-physics3d",
+          "baseline_name": "native_zero_impulse_b2",
+          "criterion_home": "criterion_native_zero_impulse_b2",
+          "result": {
+            "stage": "b2",
+            "limit_seconds": 180,
+            "free_floor_bytes": 1073741824,
+            "utc_start": "2026-10-06T00:10:40.109765+00:00",
+            "utc_end": "2026-10-06T00:11:11.700352+00:00",
+            "elapsed_seconds": 31.590567021004972,
+            "exit_code": 0,
+            "aborted": false,
+            "abort_reason": null,
+            "free_start_bytes": 1361813504,
+            "minimum_free_bytes": 1361039360,
+            "free_end_bytes": 1360994304
+          },
+          "observed_postlaunch_affinity": [
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ]
+          ],
+          "load_1min_min": 0.77,
+          "load_1min_max": 0.86
+        },
+        {
+          "id": "a2",
+          "binary": "baseline-physics3d",
+          "baseline_name": "native_zero_impulse_a2",
+          "criterion_home": "criterion_native_zero_impulse_a2",
+          "result": {
+            "stage": "a2",
+            "limit_seconds": 180,
+            "free_floor_bytes": 1073741824,
+            "utc_start": "2026-10-06T00:11:11.822924+00:00",
+            "utc_end": "2026-10-06T00:11:44.909969+00:00",
+            "elapsed_seconds": 33.08702296500269,
+            "exit_code": 0,
+            "aborted": false,
+            "abort_reason": null,
+            "free_start_bytes": 1360982016,
+            "minimum_free_bytes": 1360072704,
+            "free_end_bytes": 1360027648
+          },
+          "observed_postlaunch_affinity": [
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ],
+            [
+              0
+            ]
+          ],
+          "load_1min_min": 0.86,
+          "load_1min_max": 0.92
+        }
+      ],
+      "comparisons": [
+        {
+          "case": "mixed_settling_500",
+          "slopes_ns": {
+            "a1": 1204621.2586672474,
+            "b1": 1214498.8392421603,
+            "b2": 1190074.3800958188,
+            "a2": 1260839.5341463415
+          },
+          "criterion_point_ns": {
+            "a1": 1204621.2586672474,
+            "b1": 1214498.8392421603,
+            "b2": 1190074.3800958188,
+            "a2": 1260839.5341463415
+          },
+          "criterion_point_type": {
+            "a1": "slope",
+            "b1": "slope",
+            "b2": "slope",
+            "a2": "slope"
+          },
+          "medians_ns": {
+            "a1": 1204702.8166666667,
+            "b1": 1203991.6180555555,
+            "b2": 1182302.4300595238,
+            "a2": 1230835.552777778
+          },
+          "slope_pair1_pct": 0.8199739547881668,
+          "slope_pair2_pct": -5.612542447634672,
+          "median_pair1_pct": -0.05903519119171419,
+          "median_pair2_pct": -3.9431037402781755,
+          "geomean_slope_ratio_pct": -2.449290048261843,
+          "geomean_median_ratio_pct": -2.02031389754197,
+          "baseline_drift_pct": 4.666883891895801,
+          "candidate_drift_pct": -2.011073074518721,
+          "baseline_median_drift_pct": 2.169226779382716,
+          "candidate_median_drift_pct": -1.8014401155931448
+        },
+        {
+          "case": "mixed_settling_1000",
+          "slopes_ns": {
+            "a1": 2912715.338501742,
+            "b1": 2720753.638327526,
+            "b2": 2903733.373867596,
+            "a2": 2837082.943466899
+          },
+          "criterion_point_ns": {
+            "a1": 2912715.338501742,
+            "b1": 2720753.638327526,
+            "b2": 2903733.373867596,
+            "a2": 2837082.943466899
+          },
+          "criterion_point_type": {
+            "a1": "slope",
+            "b1": "slope",
+            "b2": "slope",
+            "a2": "slope"
+          },
+          "medians_ns": {
+            "a1": 2826506.7767857146,
+            "b1": 2690878.7053571427,
+            "b2": 2844358.575,
+            "a2": 2746679.578125
+          },
+          "slope_pair1_pct": -6.590472389689772,
+          "slope_pair2_pct": 2.3492591414775665,
+          "median_pair1_pct": -4.7984343268692715,
+          "median_pair2_pct": 3.556257440909061,
+          "geomean_slope_ratio_pct": -2.222722743621841,
+          "geomean_median_ratio_pct": -0.708923645554449,
+          "baseline_drift_pct": -2.5966284461476863,
+          "candidate_drift_pct": 6.725332752014612,
+          "baseline_median_drift_pct": -2.8242351766618934,
+          "candidate_median_drift_pct": 5.703708210158331
+        },
+        {
+          "case": "mixed_settled_500",
+          "slopes_ns": {
+            "a1": 1405926.7733449477,
+            "b1": 1340096.7766114983,
+            "b2": 1532944.7169736186,
+            "a2": 1286018.0923780487
+          },
+          "criterion_point_ns": {
+            "a1": 1405926.7733449477,
+            "b1": 1340096.7766114983,
+            "b2": 1532944.7169736186,
+            "a2": 1286018.0923780487
+          },
+          "criterion_point_type": {
+            "a1": "slope",
+            "b1": "slope",
+            "b2": "slope",
+            "a2": "slope"
+          },
+          "medians_ns": {
+            "a1": 1317661.0799278845,
+            "b1": 1338953.6006944445,
+            "b2": 1429630.9393939395,
+            "a2": 1278895.9538143382
+          },
+          "slope_pair1_pct": -4.682320443818577,
+          "slope_pair2_pct": 19.20086708414528,
+          "median_pair1_pct": 1.6159330415773887,
+          "median_pair2_pct": 11.78633688925439,
+          "geomean_slope_ratio_pct": 6.592448379542981,
+          "geomean_median_ratio_pct": 6.579889868125144,
+          "baseline_drift_pct": -8.528799880637816,
+          "candidate_drift_pct": 14.390598032012726,
+          "baseline_median_drift_pct": -2.94196487276287,
+          "candidate_median_drift_pct": 6.772253993899824
+        },
+        {
+          "case": "mixed_settled_1000",
+          "slopes_ns": {
+            "a1": 3045581.762369338,
+            "b1": 3148201.1666666665,
+            "b2": 3427414.5454123113,
+            "a2": 2987213.780371661
+          },
+          "criterion_point_ns": {
+            "a1": 3045581.762369338,
+            "b1": 3148201.1666666665,
+            "b2": 3427414.5454123113,
+            "a2": 2987213.780371661
+          },
+          "criterion_point_type": {
+            "a1": "slope",
+            "b1": "slope",
+            "b2": "slope",
+            "a2": "slope"
+          },
+          "medians_ns": {
+            "a1": 3026272.75,
+            "b1": 3078896.894444444,
+            "b2": 3197697.583333333,
+            "a2": 2984601.5092592593
+          },
+          "slope_pair1_pct": 3.3694516287585907,
+          "slope_pair2_pct": 14.736165450665606,
+          "median_pair1_pct": 1.7389095032641855,
+          "median_pair2_pct": 7.139850107727153,
+          "geomean_slope_ratio_pct": 8.904611952946318,
+          "geomean_median_ratio_pct": 4.404461180082464,
+          "baseline_drift_pct": -1.9164805463068313,
+          "candidate_drift_pct": 8.868981490191041,
+          "baseline_median_drift_pct": -1.3769823206034815,
+          "candidate_median_drift_pct": 3.8585471667873072
+        },
+        {
+          "case": "field_sleeping_500",
+          "slopes_ns": {
+            "a1": 5632.964229901613,
+            "b1": 5305.806410144919,
+            "b2": 5647.725443971577,
+            "a2": 5682.086735197683
+          },
+          "criterion_point_ns": {
+            "a1": 5632.964229901613,
+            "b1": 5305.806410144919,
+            "b2": 5647.725443971577,
+            "a2": 5682.086735197683
+          },
+          "criterion_point_type": {
+            "a1": "slope",
+            "b1": "slope",
+            "b2": "slope",
+            "a2": "slope"
+          },
+          "medians_ns": {
+            "a1": 5703.792446117712,
+            "b1": 5275.646621371788,
+            "b2": 5507.547855157389,
+            "a2": 5687.31820622986
+          },
+          "slope_pair1_pct": -5.807915804258679,
+          "slope_pair2_pct": -0.6047301427705265,
+          "median_pair1_pct": -7.506335982427648,
+          "median_pair2_pct": -3.1608984156285103,
+          "geomean_slope_ratio_pct": -3.241291724979145,
+          "geomean_median_ratio_pct": -5.358553869309368,
+          "baseline_drift_pct": 0.8720542735796366,
+          "candidate_drift_pct": 6.444242541018741,
+          "baseline_median_drift_pct": -0.2888295821329323,
+          "candidate_median_drift_pct": 4.395693086154839
+        },
+        {
+          "case": "field_sleeping_1000",
+          "slopes_ns": {
+            "a1": 11481.601765523354,
+            "b1": 10716.697134857819,
+            "b2": 11192.957594779913,
+            "a2": 10741.61272294843
+          },
+          "criterion_point_ns": {
+            "a1": 11481.601765523354,
+            "b1": 10716.697134857819,
+            "b2": 11192.957594779913,
+            "a2": 10741.61272294843
+          },
+          "criterion_point_type": {
+            "a1": "slope",
+            "b1": "slope",
+            "b2": "slope",
+            "a2": "slope"
+          },
+          "medians_ns": {
+            "a1": 10936.389450867053,
+            "b1": 10566.29173928198,
+            "b2": 10920.750598878694,
+            "a2": 10135.285828025477
+          },
+          "slope_pair1_pct": -6.66200279618101,
+          "slope_pair2_pct": 4.201835268806775,
+          "median_pair1_pct": -3.3840941130322544,
+          "median_pair2_pct": 7.749803845504766,
+          "geomean_slope_ratio_pct": -1.3795629245505037,
+          "geomean_median_ratio_pct": 2.0310977480715087,
+          "baseline_drift_pct": -6.444998334613405,
+          "candidate_drift_pct": 4.444097411066883,
+          "baseline_median_drift_pct": -7.325119743043384,
+          "candidate_median_drift_pct": 3.3546192774419836
+        },
+        {
+          "case": "rollback8_mixed_settling_1000",
+          "slopes_ns": {
+            "a1": null,
+            "b1": null,
+            "b2": null,
+            "a2": 19352097.316027876
+          },
+          "criterion_point_ns": {
+            "a1": 19662919.5,
+            "b1": 18416171.291666664,
+            "b2": 18677639.89,
+            "a2": 19352097.316027876
+          },
+          "criterion_point_type": {
+            "a1": "mean (Flat sampling)",
+            "b1": "mean (Flat sampling)",
+            "b2": "mean (Flat sampling)",
+            "a2": "slope"
+          },
+          "medians_ns": {
+            "a1": 19508565.166666664,
+            "b1": 18331822.0,
+            "b2": 18659278.3,
+            "a2": 19159656.41764706
+          },
+          "slope_pair1_pct": null,
+          "slope_pair2_pct": null,
+          "median_pair1_pct": -6.031930880684699,
+          "median_pair2_pct": -2.611623646790373,
+          "geomean_slope_ratio_pct": null,
+          "geomean_median_ratio_pct": -4.337062137020409,
+          "baseline_drift_pct": null,
+          "candidate_drift_pct": null,
+          "baseline_median_drift_pct": -1.7884900608465482,
+          "candidate_median_drift_pct": 1.7862725265388235
+        },
+        {
+          "case": "rollback8_field_sleeping_1000",
+          "slopes_ns": {
+            "a1": 92368.83685674082,
+            "b1": 97406.52850387542,
+            "b2": 98751.56038896395,
+            "a2": 97050.85535714286
+          },
+          "criterion_point_ns": {
+            "a1": 92368.83685674082,
+            "b1": 97406.52850387542,
+            "b2": 98751.56038896395,
+            "a2": 97050.85535714286
+          },
+          "criterion_point_type": {
+            "a1": "slope",
+            "b1": "slope",
+            "b2": "slope",
+            "a2": "slope"
+          },
+          "medians_ns": {
+            "a1": 91559.58352732794,
+            "b1": 96169.40401785714,
+            "b2": 98272.95471938775,
+            "a2": 91957.6320970696
+          },
+          "slope_pair1_pct": 5.453886633808969,
+          "slope_pair2_pct": 1.7523854123310478,
+          "median_pair1_pct": 5.034776604410074,
+          "median_pair2_pct": 6.8676438032373,
+          "geomean_slope_ratio_pct": 3.5866039408165795,
+          "geomean_median_ratio_pct": 5.947246746259061,
+          "baseline_drift_pct": 5.06882912000246,
+          "candidate_drift_pct": 1.3808436721312933,
+          "baseline_median_drift_pct": 0.4347426609065508,
+          "candidate_median_drift_pct": 2.1873388142657157
+        }
+      ]
+    }
+  ],
+  "original_evidence": {
+    "baseline_repeat": {
+      "manifest_sha256": "b1de51e89814ba85de2e32f739979ef25099430904421f318c042588b4bacefe",
+      "manifest_entry_count": 154,
+      "manifest_verified": true,
+      "selected_original_file_sha256": {
+        "REPORT.md": "2da7204eca8088c6b117207eb96346a9cb53005c9c6e2a3c93253bf79eacaf2a",
+        "metadata.json": "8e92685f63d7ba4aad11a75d123f0ecf1e17f88aeddf4831ad6f9e3e4e1693e6",
+        "summary.json": "b9cafdeb0a23982d415c8e1b4e33e23bf7ceef12056d42ffe4023d702b472f8e",
+        "raw-samples.csv": "3e7abfd8daa0f8ff437ae05955cce61dc1facf5bd45ab26857890e81944eca19",
+        "build.log": "4207dbe9f0839e5f6232188a20ca72a0bf0d2987a1b247fd2d4fd91cc75a4f6b",
+        "build.result.json": "c466f74d6e058326bb5a3dadddb1b4131134a005c86414fca255a9beaebe00f9",
+        "executable-and-runs.json": "95d3cb6a5db3d42396b04983c84c92ec1838dd59f05878f127ceed7ee0f54df8",
+        "baseline1.log": "87c0f9398acd1a5e6e8b8058ca4942d3821ea99af73e4f87e230ac0f1d66a399",
+        "baseline2.log": "ccfdb84e8b7cb520c6b7794f25d5189c0b58534f3778fe6d76a1621c74cbf26c",
+        "run_bounded.py": "0718b404886b8ab9dcf57ff0639c3f3febe836671fdcd9f6ec1ecf200af7673e",
+        "run_baselines.py": "f6440c1db06090b0e6b512468a4410b1ecbde059a0282fa9632c2ac99a552ea6",
+        "summarize.py": "3a3cc486b2ad59dd6f7ad2772eb015306b7453f2c010f84b04ccdc16edffb2c0"
+      }
+    },
+    "zero_impulse_abba": {
+      "manifest_sha256": "8fb23022045c6508ddce8ad171947cd79d6ce322a80b6475b2ede25cd83c71e9",
+      "manifest_entry_count": 302,
+      "manifest_verified": true,
+      "selected_original_file_sha256": {
+        "REPORT.md": "e4bce6b21ca6ff278c195315f9774f05ece254375a98c0aa5c6b3ddfd1c87935",
+        "metadata.json": "3daf4b63f3431985bcaf6ebe22585c763d3fab050c604eb5d7792c578e7a429e",
+        "summary.json": "1d619e1f364680c59d7dea3bbe50d93f9b1d75350e0e76fa057b7adb44a7f66b",
+        "raw-samples.csv": "14ebf25fc13d64891e66515342042fb7642d396fa2a5fb0f8ce3a90a402ac245",
+        "build.log": "9b21396dab36335a7384876ef9f815ed03e660366a0d9d845efd0ef544d9dc27",
+        "build.result.json": "7a6795b3311ecb64a190f669722ffc7893086bf52bf380e7fbe942756bd2659b",
+        "candidate-executable.json": "3197a741990a811a95903d3b6c6a1529caf88859d27beab4b8a21f9420f4af54",
+        "abba.json": "f47236ad0a02dc44f1230a9a94e73cccaf7dfa85bac82e50cb0914faebb82462",
+        "candidate.patch": "222307d596123779b38342309098f9a1021c1b256f52984a8d1adad6d7b1e3d7",
+        "binary-layout.txt": "243c492ba1db25fec0154d9e18cfeceac82e22ff8608215e72be76550bbf8ffe",
+        "a1.log": "ecdf639578ad1d24cbaf898593b999a51ef6b8814688b3d259fd03a8a1454e6c",
+        "b1.log": "180786be84bb3717cb1460e8a8b83bee3ee896485c78a224cb2262233086e493",
+        "b2.log": "ace26081aa75bbfc1fa9c30db365403ab67ba1bd3f82bdf34758d0ec09b7d0b1",
+        "a2.log": "5bb2b10e7738ee7aea8dc12f860e1196926af562d5ea8111ecbef0fea2efe393",
+        "debug.log": "12c2a298d23f8ff1e6269f27d729a6b707866b3fef83e7fac2b282aeb44f3ac4",
+        "debug.result.json": "92626d6e34ba2a191d554d3fc1c250cd678d59ec9e575624ebe71c05f7a4addf",
+        "debug-cache-cleanup.json": "59ab761a243144c14d47c3bf46961f8ee31cce59510f9b13017ac7c56b73dae0",
+        "run_candidate.py": "247abfbdb6592ec1c2f7aec713d84a8fcaff25e2b4ba637cbb834125b68ea0d9",
+        "summarize_candidate.py": "46de31a1577c3ab64b24f2cf33332976d969a94138815c1c80fb477af4f56853"
+      }
+    }
+  },
+  "archive_notes": [
+    "The sample objects and estimates objects are copied without numeric changes from original Criterion JSON, with original hashes retained.",
+    "Absolute workspace paths, process IDs, host identifiers, caches and raw process/environment logs are not published.",
+    "Original manifest hashes describe the collector evidence sets, not this selected archive; original logs, scripts and binaries are not bundled.",
+    "A separate SHA256SUMS verifies the repository archive.",
+    "Archived bootstrap confidence intervals are preserved outputs; no claim that bootstrap reruns without the original RNG state reproduce identical confidence bounds."
+  ]
+}

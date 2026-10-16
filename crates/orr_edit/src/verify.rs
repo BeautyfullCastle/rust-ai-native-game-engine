@@ -9,10 +9,11 @@
 //! set: running it twice gives an identical [`VerifyReport`].
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use orr_ecs::Frame;
 use orr_reflect::TypeRegistry;
-use orr_session::ReplayReader;
+use orr_session::{ReplayParseError, ReplayReader};
 use orr_sim::{DebugCommand, Game, MetricValue, Metrics, PlayerSlot, Simulation, TickInputs};
 
 use crate::doc::EditorDoc;
@@ -43,7 +44,16 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
     /// Parses a `.orrp` recording (for example `StoppedPlay::replay` or a
     /// saved file).
     pub fn from_replay(bytes: &[u8]) -> Result<Self, EditError> {
-        let reader = ReplayReader::<G>::parse(bytes).map_err(|e| EditError::Verify(format!("bad replay: {e}")))?;
+        Self::from_replay_cancellable(bytes, &AtomicBool::new(false))
+    }
+
+    /// Like [`from_replay`](Self::from_replay), with cooperative cancellation
+    /// during replay preparation. No partial inputs are returned on cancellation.
+    pub fn from_replay_cancellable(bytes: &[u8], cancel: &AtomicBool) -> Result<Self, EditError> {
+        let reader = ReplayReader::<G>::parse_cancellable(bytes, cancel).map_err(|error| match error {
+            ReplayParseError::Cancelled => EditError::VerifyCancelled,
+            ReplayParseError::Replay(error) => EditError::Verify(format!("bad replay: {error}")),
+        })?;
         Ok(VerifyInputs::Recorded(reader))
     }
 
@@ -58,9 +68,9 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
     }
 
     /// The ticks to run, given the tick the frames are at.
-    fn tick_list(&self, start: u64, max: Option<u32>) -> Result<Vec<u64>, EditError> {
-        let mut ticks: Vec<u64> = match self {
-            VerifyInputs::Scripted { ticks, .. } => (start + 1..=start + u64::from(*ticks)).collect(),
+    fn tick_list(&self, start: u64, max: Option<u32>, cancel: &AtomicBool) -> Result<Vec<u64>, EditError> {
+        match self {
+            VerifyInputs::Scripted { ticks, .. } => collect_ticks(start + 1..=start + u64::from(*ticks), max, cancel),
             VerifyInputs::Recorded(r) => {
                 if r.tick_count() == 0 {
                     return Err(EditError::Verify("the recording has no ticks".into()));
@@ -72,16 +82,9 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
                         start + 1
                     )));
                 }
-                (r.first_tick()..=r.last_tick()).take_while(|&t| r.tick(t).is_some()).collect()
+                collect_ticks((r.first_tick()..=r.last_tick()).take_while(|&t| r.tick(t).is_some()), max, cancel)
             }
-        };
-        if let Some(m) = max {
-            ticks.truncate(m as usize);
         }
-        if ticks.is_empty() {
-            return Err(EditError::Verify("no ticks to run".into()));
-        }
-        Ok(ticks)
     }
 
     fn tick_rate(&self, default: u32) -> u32 {
@@ -92,38 +95,68 @@ impl<'a, G: Game> VerifyInputs<'a, G> {
     }
 
     /// Runs `tick` on `sim`; returns how many debug commands it applied.
-    fn step(&self, sim: &mut Simulation<G>, tick: u64, debug: bool) -> u32 {
+    fn step(&self, sim: &mut Simulation<G>, tick: u64, debug: bool, cancel: &AtomicBool) -> Result<u32, EditError> {
         match self {
             VerifyInputs::Scripted { players, input, .. } => {
                 let mut ti = TickInputs::<G::Input, G::Command>::new(tick, *players);
                 for s in 0..*players {
+                    // A callback may request cancellation; do not invoke the
+                    // next player's callback after it returns.
+                    check_cancelled(cancel)?;
                     ti.set_input(PlayerSlot(s), input(tick, PlayerSlot(s)));
                 }
+                check_cancelled(cancel)?;
                 sim.step_with_debug(&ti, &[]);
-                0
+                Ok(0)
             }
             VerifyInputs::Recorded(r) => {
-                let Some((inputs, commands)) = r.tick(tick) else { return 0 };
+                let Some((inputs, commands)) = r.tick(tick) else { return Ok(0) };
                 let mut ti = TickInputs::<G::Input, G::Command>::new(tick, inputs.len() as u8);
                 for (i, inp) in inputs.iter().enumerate() {
                     ti.set_input(PlayerSlot(i as u8), *inp);
                 }
                 ti.set_commands(commands.clone());
                 let cmds: &[DebugCommand] = if debug { r.debug_commands(tick) } else { &[] };
+                check_cancelled(cancel)?;
                 sim.step_with_debug(&ti, cmds);
-                cmds.len() as u32
+                Ok(cmds.len() as u32)
             }
         }
     }
 }
 
+// Bound iteration before collection; never reserve storage from the uncapped
+// iterator's size hint. Check on both sides of next() so cancellation during
+// the final visit (including exhaustion) cannot return a partial tick list.
+fn collect_ticks(mut source: impl Iterator<Item = u64>, max: Option<u32>, cancel: &AtomicBool) -> Result<Vec<u64>, EditError> {
+    let mut ticks = Vec::new();
+    check_cancelled(cancel)?;
+    while max.is_none_or(|limit| ticks.len() < limit as usize) {
+        check_cancelled(cancel)?;
+        let next = source.next();
+        check_cancelled(cancel)?;
+        let Some(tick) = next else { break };
+        ticks.push(tick);
+    }
+    if ticks.is_empty() {
+        return Err(EditError::Verify("no ticks to run".into()));
+    }
+    Ok(ticks)
+}
+
 /// Settings of a verification run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifyOptions {
-    /// Sample metrics and checksums every this many ticks (besides the
-    /// start and the end). 0 = only the start and the end.
+    /// Sample metrics and the displayed checksum series every this many
+    /// ticks relative to the start (besides the start and the end).
+    /// 0 = endpoints only; 1 = every tick boundary. Checksums are still
+    /// compared every tick; events entirely within a tick are not sampled.
     pub sample_every: u32,
     /// Run at most this many ticks (of a recording or of a script).
+    /// Also caps tick-list preparation to at most this many iterator visits
+    /// and O(max_ticks) storage; `None` leaves that preparation uncapped.
+    /// This does not bound replay parsing/decompression, snapshot or report
+    /// allocations, game/metric hooks, or the work of a single simulation tick.
     pub max_ticks: Option<u32>,
     /// Tick rate of a scripted run (a recording brings its own).
     pub tick_rate: u32,
@@ -217,6 +250,9 @@ pub struct VerifyReport {
     /// Any edit of the scene makes the initial frames differ, so this is
     /// `Some(start_tick)` for a real change: judge behaviour by the metrics.
     pub first_divergence: Option<u64>,
+    /// Requested metric sampling interval, relative to `start_tick`.
+    /// 0 = endpoints only; 1 = every tick boundary.
+    pub sample_every: u32,
     /// Checksums at the sampled ticks.
     pub samples: Vec<ChecksumSample>,
     /// Every metric, base against candidate, sorted by name.
@@ -240,12 +276,29 @@ impl VerifyReport {
         self.metrics.iter().find(|m| m.name == name)
     }
 
+    /// Whether metrics were sampled at the start and after every tick run.
+    /// Derived from the actual sample boundaries, including short runs for
+    /// which endpoint-only sampling covers every boundary. This does not
+    /// observe events created and removed entirely within one tick.
+    pub fn every_tick_boundary_observed(&self) -> bool {
+        self.samples.first().is_some_and(|s| s.tick == self.start_tick)
+            && self.samples.last().is_some_and(|s| s.tick == self.end_tick)
+            && self.samples.windows(2).all(|pair| pair[0].tick.checked_add(1) == Some(pair[1].tick))
+    }
+
     /// A short human-readable summary, one line per fact.
     pub fn lines(&self) -> Vec<String> {
         let mut out = vec![format!(
             "ran {} ticks ({}..{}): base {:016x}, candidate {:016x}",
             self.ticks, self.start_tick, self.end_tick, self.base_final_checksum, self.candidate_final_checksum
         )];
+        out.push(format!(
+            "metrics: {} sampled tick boundaries (sample_every {}, start/end included)",
+            self.samples.len(), self.sample_every
+        ));
+        if !self.every_tick_boundary_observed() {
+            out.push("WARNING: sampled min/max; between samples not checked. Use --sample-every 1 for every tick boundary.".to_string());
+        }
         match self.first_divergence {
             None => out.push("no divergence".to_string()),
             Some(t) => out.push(format!("first checksum divergence at tick {t}")),
@@ -282,7 +335,9 @@ fn run_side<G: Game>(
     tick_rate: u32,
     metrics: &dyn Metrics,
     opts: &VerifyOptions,
+    cancel: &AtomicBool,
 ) -> Result<SideRun, EditError> {
+    check_cancelled(cancel)?;
     let mut sim = Simulation::<G>::from_frame(frame, tick_rate, opts.build_id)
         .map_err(|e| EditError::Verify(format!("frame does not match the game: {e}")))?;
     let n = ticks.len();
@@ -290,13 +345,22 @@ fn run_side<G: Game>(
     let mut run = SideRun { start_checksum: sim.checksum(), checksums: Vec::with_capacity(n), samples: Vec::new(), debug_replayed: 0 };
     run.samples.push((0, sim.tick(), metrics.sample(sim.frame())));
     for (i, &t) in ticks.iter().enumerate() {
-        run.debug_replayed += inputs.step(&mut sim, t, opts.debug_commands);
+        check_cancelled(cancel)?;
+        run.debug_replayed += inputs.step(&mut sim, t, opts.debug_commands, cancel)?;
+        check_cancelled(cancel)?;
         run.checksums.push(sim.checksum());
         if sampled(i + 1) {
             run.samples.push((i + 1, sim.tick(), metrics.sample(sim.frame())));
         }
+        // A metric sampler or another thread may have requested cancellation
+        // while the final tick was being recorded. Do not return a partial run.
+        check_cancelled(cancel)?;
     }
     Ok(run)
+}
+
+fn check_cancelled(cancel: &AtomicBool) -> Result<(), EditError> {
+    if cancel.load(Ordering::Relaxed) { Err(EditError::VerifyCancelled) } else { Ok(()) }
 }
 
 /// Runs `base` and `candidate` (frames at the same tick, of game `G`) on the
@@ -309,27 +373,65 @@ pub fn verify_frames<G: Game>(
     metrics: &dyn Metrics,
     opts: &VerifyOptions,
 ) -> Result<VerifyReport, EditError> {
+    static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
+    verify_frames_cancellable::<G>(base, candidate, inputs, metrics, opts, &NEVER_CANCELLED)
+}
+
+/// Runs `base` and `candidate` like [`verify_frames`], returning
+/// [`EditError::VerifyCancelled`] if `cancel` is set before a complete report
+/// is ready. The flag is checked before setup, during tick-list collection,
+/// before each scripted player input callback and simulation tick, between
+/// sequential sides, and before report assembly. In parallel mode,
+/// both scoped workers observe the same flag and are joined before returning.
+///
+/// The flag may be shared with another thread and set with
+/// [`AtomicBool::store`](AtomicBool::store). Cancellation never returns a
+/// successful partial report. Tick-list collection checks before and after
+/// each iterator visit. Cancellation is cooperative: parsing/decompression,
+/// snapshot/report allocations, hooks, a single input callback and a single
+/// simulation tick are not preempted; there is no hard preemption or wall-clock latency guarantee.
+pub fn verify_frames_cancellable<G: Game>(
+    base: &Frame,
+    candidate: &Frame,
+    inputs: &VerifyInputs<'_, G>,
+    metrics: &dyn Metrics,
+    opts: &VerifyOptions,
+    cancel: &AtomicBool,
+) -> Result<VerifyReport, EditError> {
+    check_cancelled(cancel)?;
     if base.tick() != candidate.tick() {
         return Err(EditError::Verify(format!("frames are at different ticks ({} and {})", base.tick(), candidate.tick())));
     }
     let start = base.tick();
-    let ticks = inputs.tick_list(start, opts.max_ticks)?;
+    let ticks = inputs.tick_list(start, opts.max_ticks, cancel)?;
+    check_cancelled(cancel)?;
     let rate = inputs.tick_rate(opts.tick_rate);
     let (b, c) = if opts.parallel && ticks.len() >= 16 {
         std::thread::scope(|s| {
-            let h = s.spawn(|| run_side::<G>(base, inputs, &ticks, rate, metrics, opts));
-            let c = run_side::<G>(candidate, inputs, &ticks, rate, metrics, opts);
+            let h = s.spawn(|| run_side::<G>(base, inputs, &ticks, rate, metrics, opts, cancel));
+            let c = run_side::<G>(candidate, inputs, &ticks, rate, metrics, opts, cancel);
             let b = h.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
             (b, c)
         })
     } else {
-        (run_side::<G>(base, inputs, &ticks, rate, metrics, opts), run_side::<G>(candidate, inputs, &ticks, rate, metrics, opts))
+        let b = run_side::<G>(base, inputs, &ticks, rate, metrics, opts, cancel);
+        // A cancellation on the first side should keep the second side from
+        // starting at all. Preserve ordinary first-side errors as before.
+        if matches!(&b, Err(EditError::VerifyCancelled)) {
+            return Err(EditError::VerifyCancelled);
+        }
+        check_cancelled(cancel)?;
+        let c = run_side::<G>(candidate, inputs, &ticks, rate, metrics, opts, cancel);
+        (b, c)
     };
+    check_cancelled(cancel)?;
     let (b, c) = (b?, c?);
-    Ok(assemble(start, &ticks, b, c, inputs))
+    let report = assemble(start, &ticks, b, c, inputs, opts.sample_every);
+    check_cancelled(cancel)?;
+    Ok(report)
 }
 
-fn assemble<G: Game>(start: u64, ticks: &[u64], b: SideRun, c: SideRun, inputs: &VerifyInputs<'_, G>) -> VerifyReport {
+fn assemble<G: Game>(start: u64, ticks: &[u64], b: SideRun, c: SideRun, inputs: &VerifyInputs<'_, G>, sample_every: u32) -> VerifyReport {
     let end = *ticks.last().unwrap_or(&start);
     let first_divergence = if b.start_checksum != c.start_checksum {
         Some(start)
@@ -378,6 +480,7 @@ fn assemble<G: Game>(start: u64, ticks: &[u64], b: SideRun, c: SideRun, inputs: 
         base_final_checksum: b.checksums.last().copied().unwrap_or(b.start_checksum),
         candidate_final_checksum: c.checksums.last().copied().unwrap_or(c.start_checksum),
         first_divergence,
+        sample_every,
         samples,
         metrics,
         first_metric_difference,
@@ -515,5 +618,56 @@ impl Metrics for ReflectMetrics<'_> {
         let mut out = vec![("entities".to_string(), MetricValue::Int(i64::from(frame.alive_count())))];
         out.extend(counts.into_iter().map(|(n, c)| (format!("components.{n}"), MetricValue::Int(c))));
         out
+    }
+}
+
+#[cfg(test)]
+mod tick_budget_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn collection_caps_iterator_visits_before_allocating() {
+        for (max, expected, visits_expected) in [(None, 8, 9), (Some(0), 0, 0), (Some(3), 3, 3), (Some(8), 8, 8), (Some(12), 8, 9)] {
+            let visits = Cell::new(0);
+            let mut finite = 1..=8;
+            let source = std::iter::from_fn(|| {
+                visits.set(visits.get() + 1);
+                finite.next()
+            });
+            let result = collect_ticks(source, max, &AtomicBool::new(false));
+            if expected == 0 {
+                assert!(matches!(result, Err(EditError::Verify(message)) if message == "no ticks to run"));
+            } else {
+                assert_eq!(result.unwrap(), (1..=expected).collect::<Vec<_>>());
+            }
+            assert_eq!(visits.get(), visits_expected);
+            if let Some(limit) = max {
+                assert!(visits.get() <= limit);
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_during_collection_never_returns_a_partial_list() {
+        // Exercise a middle visit, the last capped visit, and exhaustion.
+        for cancel_at in [2, 4, 5] {
+            let cancel = AtomicBool::new(false);
+            let visits = Cell::new(0);
+            let mut finite = 1..=4;
+            let source = std::iter::from_fn(|| {
+                visits.set(visits.get() + 1);
+                if visits.get() == cancel_at {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                finite.next()
+            });
+            let max = if cancel_at == 5 { None } else { Some(4) };
+            assert!(matches!(collect_ticks(source, max, &cancel), Err(EditError::VerifyCancelled)));
+            assert_eq!(visits.get(), cancel_at);
+        }
+        let cancel = AtomicBool::new(true);
+        let source = std::iter::from_fn(|| panic!("pre-cancelled collection must not visit the iterator"));
+        assert!(matches!(collect_ticks(source, Some(0), &cancel), Err(EditError::VerifyCancelled)));
     }
 }

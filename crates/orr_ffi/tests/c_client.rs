@@ -68,9 +68,7 @@ fn rust_result() -> (usize, usize, u64) {
 
 #[test]
 fn c_program_sees_what_the_rust_bridge_sees() {
-    let Some(lib) = ensure_lib() else {
-        return skip_or_fail("the orr_ffi shared library is not there and `cargo build -p orr_ffi` did not make it");
-    };
+    let lib = ensure_lib();
     let dir = std::env::temp_dir().join(format!("orr_ffi_c_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exe = match compile_c(&dir, &lib, "view_client") {

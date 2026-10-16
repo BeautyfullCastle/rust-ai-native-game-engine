@@ -1,0 +1,11 @@
+
+running 6 tests
+test cpu_interval_rejects_backward_clock - should panic ... ok
+test cpu_timestamp_conversion_rejects_invalid_fields ... ok
+test measure_full_lz4_vs_negotiated ... ignored, cost probe: run in an explicitly reserved, quiet release lane
+test measure_thread_cpu_full_lz4_vs_negotiated ... ignored, CPU cost probe: run once in an explicitly reserved, quiet release lane
+test thousand_body_lifecycle_reconstruction_and_bounds ... ok
+test thousand_body_missing_and_stale_base_require_explicit_full ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.34s
+

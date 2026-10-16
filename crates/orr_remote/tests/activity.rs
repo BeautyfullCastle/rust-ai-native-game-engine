@@ -34,7 +34,7 @@ fn every_kind_of_request_is_recorded_with_a_summary() {
     c.call("world.patch", json!({"entity": body, "component": BODY, "path": "pos", "value": [6, 18]})).unwrap();
     let id = c.call("proposal.begin", json!({"label": "lift hero"})).unwrap()["id"].as_str().unwrap().to_string();
     c.call("proposal.apply", json!({"id": id, "ops": [{"op": "patch", "entity": body, "component": BODY, "path": "pos", "value": [0, 12]}]})).unwrap();
-    c.call("proposal.verify", json!({"id": id, "inputs": {"kind": "bot", "ticks": 60}, "checks": ["lost_bodies.max == 0"]})).unwrap();
+    let verified = c.call("proposal.verify", json!({"id": id, "inputs": {"kind": "bot", "ticks": 60}, "sample_every": 7, "checks": ["lost_bodies.max == 0"]})).unwrap();
     let accepted = c.call("proposal.accept", json!({"id": id})).unwrap();
     c.call("sim.start", json!({})).unwrap();
     c.call("sim.step", json!({"n": 60})).unwrap();
@@ -75,6 +75,10 @@ fn every_kind_of_request_is_recorded_with_a_summary() {
     assert_eq!(verify["kind"], "verify");
     assert_eq!(verify["summary"], format!("proposal.verify {id}: 1/1 checks passed (60 ticks)"));
     assert_eq!(verify["verify"]["passed"], true);
+    assert_eq!(verified["metric_sampling"], json!({
+        "requested_interval": 7, "sample_count": 10, "scope": "sampled_tick_boundaries", "every_tick_boundary_observed": false
+    }));
+    assert_eq!(verify["verify"]["metric_sampling"], verified["metric_sampling"]);
     assert_eq!(verify["verify"]["checks"]["results"][0]["check"], "lost_bodies.max == 0");
     assert!(verify["verify"]["metrics"].as_array().unwrap().iter().any(|m| m["name"] == "lost_bodies"));
     let accept = find(&plain, "proposal.accept");

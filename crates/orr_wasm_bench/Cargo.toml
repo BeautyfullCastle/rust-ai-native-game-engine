@@ -26,3 +26,6 @@ wasm-bindgen = "0.2"
 [[bin]]
 name = "bench_runner"
 path = "src/bin/bench_runner.rs"
+# No unit tests here; keep the normal binary build, skip its empty test harness.
+# Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
+test = false

@@ -1,0 +1,80 @@
+   Compiling zerocopy-derive v0.8.59
+   Compiling thiserror v2.0.21
+   Compiling serde v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling num-traits v0.2.19
+   Compiling zerocopy v0.8.59
+   Compiling anstyle v1.0.14
+   Compiling regex-syntax v0.8.11
+   Compiling half v2.7.1
+   Compiling clap_lex v1.1.1
+   Compiling ciborium-io v0.2.2
+   Compiling serde_json v1.0.151
+   Compiling ciborium-ll v0.2.2
+   Compiling clap_builder v4.6.7
+   Compiling saphyr-parser v0.1.0
+   Compiling itertools v0.10.5
+   Compiling regex-automata v0.4.18
+   Compiling cast v0.3.0
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling criterion-plot v0.5.0
+   Compiling orr_reflect v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_reflect)
+   Compiling is-terminal v0.4.17
+   Compiling regex v1.13.1
+   Compiling clap v4.6.7
+   Compiling tinytemplate v1.2.1
+   Compiling ciborium v0.2.2
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling criterion v0.5.1
+   Compiling orr_physics3d v0.0.1 (/workspace/scratch/edd3c9d10b8b/terrain-physics/crates/orr_physics3d)
+    Finished `release` profile [optimized + debuginfo] target(s) in 31.73s
+     Running tests/physics3d.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/physics3d-5d7faa43be8b19e1)
+
+running 26 tests
+test capsule_standing_upright_stays_upright ... ok
+test capsule_lying_across_a_box_stays_on_top ... ok
+test box_dropped_on_its_edge_falls_flat ... ok
+test free_spin_keeps_its_rate_and_kinetic_energy ... ok
+test collision_filters_let_masked_bodies_pass ... ok
+test impulse_off_center_produces_spin_and_motion ... ok
+test box_overhanging_past_its_center_of_mass_tips_off ... ok
+test kinematic_spin_rotates_by_omega_times_time ... ok
+test no_tunneling_through_a_wall_at_moderate_speed ... ok
+test friction_holds_a_box_on_a_slope_when_mu_exceeds_tan_angle ... ok
+test offset_box_on_box_stays_when_over_the_support ... ok
+test raycast_hits_a_rotated_box_face ... ok
+test kinematic_platform_carries_a_box ... ok
+test raycast_hits_every_shape_with_the_right_distance_and_normal ... ok
+test sphere_cast_is_exact_for_sphere_box_and_capsule_targets ... ok
+test restitution_bounces_back_to_the_expected_height ... ok
+test mass_properties_match_numeric_integration ... ok
+test sphere_box_capsule_come_to_rest_and_sleep ... ok
+test tilted_capsule_topples_and_lies_down ... ok
+test sphere_lands_on_a_static_capsule_and_slides_off ... ok
+test removing_the_support_wakes_a_sleeping_box ... ok
+test sphere_rolls_off_a_box_edge_and_reaches_the_ground ... ok
+test a_resting_stack_sleeps_and_wakes_on_impulse_and_on_contact ... ok
+test energy_does_not_grow_in_a_bouncing_pile ... ok
+test every_shape_pair_survives_a_drop_onto_each_other ... ok
+test pyramid_and_big_pile_stay_inside_the_arena ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/static_contacts.rs (/workspace/scratch/edd3c9d10b8b/shared-target/release/deps/static_contacts-7e0b12377eabd8a4)
+
+running 10 tests
+test errors_in_late_substeps_and_final_validation_are_atomic ... ok
+test duplicate_features_and_unallocated_objects_are_rejected_atomically ... ok
+test provider_sees_every_substep_and_final_integrated_pose ... ok
+test static_filters_and_materials_use_existing_solver ... ok
+test zero_duration_substeps_are_explicit_atomic_errors ... ok
+test sleeping_contact_cache_survives_idle_and_impulse_wakes ... ok
+test static_contacts_sleep_and_despawned_support_wakes_the_body ... ok
+test cache_order_and_rollback_hold_with_interleaved_convex_pairs ... ok
+test no_static_objects_preserve_convex_frame_bytes ... ok
+test independent_normals_and_shuffled_features_solve_identically ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

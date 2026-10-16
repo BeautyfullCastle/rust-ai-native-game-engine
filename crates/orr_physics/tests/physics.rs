@@ -12,7 +12,10 @@ use orr_physics::{
 use orr_sim::{Game, SimCommand, Simulation, System, TickInputs};
 
 /// Checksum of the scripted scene in [`golden_scene`] after `GOLDEN_TICKS`.
-const GOLDEN_CHECKSUM: u64 = 0x9407b6ed32022f2b;
+// Frame goldens intentionally migrated to ORRF v2's complete encoded-body
+// checksum. Physics, inputs, state assertions and raw query hashes are
+// unchanged; see docs/frame-compatibility.md for the compatibility boundary.
+const GOLDEN_CHECKSUM: u64 = 0x7d96620a818ddf8b;
 const GOLDEN_TICKS: u32 = 300;
 
 fn new_frame(cfg: PhysicsConfig) -> Frame {
@@ -991,7 +994,7 @@ fn documented_range_limits_stay_inside_the_solver_ranges() {
 
 /// Checksum of [`sleepy_scene`] after settling, one impulse and settling
 /// again: pins the sleep, island and wake code on every platform.
-const SLEEPY_GOLDEN_CHECKSUM: u64 = 0xd7045bf847e9c5e9;
+const SLEEPY_GOLDEN_CHECKSUM: u64 = 0x6ae200c3b2f80bda;
 
 #[test]
 fn golden_sleepy_scene_checksum() {
@@ -1013,7 +1016,7 @@ fn golden_sleepy_scene_checksum() {
 // ---- (g) capsules ----
 
 /// Checksum of [`capsule_scene`] after `CAPSULE_GOLDEN_TICKS`.
-const CAPSULE_GOLDEN_CHECKSUM: u64 = 0x9a7a7a033ee3efe1;
+const CAPSULE_GOLDEN_CHECKSUM: u64 = 0x58b4b19a31bfc1e7;
 /// Hash of the ray and shape cast results over the settled capsule scene.
 const CAPSULE_QUERY_GOLDEN: u64 = 0x6b0ddaa803998756;
 const CAPSULE_GOLDEN_TICKS: u32 = 300;

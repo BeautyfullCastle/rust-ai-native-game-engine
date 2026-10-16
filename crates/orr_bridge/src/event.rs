@@ -39,6 +39,9 @@ pub enum Lifecycle {
 /// One notification from the sim to the view.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BridgeEvent<E> {
+    /// Legacy split-read API recovery marker. Prefer Bridge::poll_view, whose
+    /// separate resync field pairs this with its exact snapshot baseline.
+    ViewResynced(crate::ViewResync),
     /// A game event with its state: `Predicted` (may still be canceled),
     /// `Verified` (final, announced once) or `Canceled` (a rollback removed
     /// it). `key` is the deterministic event identity, the same across a
