@@ -669,6 +669,27 @@ impl Temp {
         Self(path)
     }
 
+    #[cfg(unix)]
+    fn socket() -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+        // Canonical per-user temporary roots can exceed macOS's socket path
+        // limit. Only socket fixtures use this short root, with physical
+        // ancestry even where /tmp itself is a symlink.
+        let root = Path::new("/tmp").canonicalize().unwrap();
+        assert!(root.is_absolute());
+        for ancestor in root.ancestors() {
+            let metadata = fs::symlink_metadata(ancestor).unwrap();
+            assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        }
+        let path = root.join(format!(
+            "orr-static-pivot-socket-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        Self(path)
+    }
+
     fn join(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
@@ -690,7 +711,10 @@ struct CliFixture {
 
 impl CliFixture {
     fn new() -> Self {
-        let temp = Temp::new();
+        Self::with_temp(Temp::new())
+    }
+
+    fn with_temp(temp: Temp) -> Self {
         let input = temp.join("chair.pivot.json");
         let output = temp.join("chair.model.json");
         let source = rich_fixture().to_bytes().unwrap();
@@ -1195,12 +1219,19 @@ fn cli_windows_nonlocal_prefixes_reject() {
 #[cfg(unix)]
 #[test]
 fn cli_unix_socket_inputs_reject_without_opening_or_publishing() {
-    use std::os::unix::net::UnixListener;
-    let fixture = CliFixture::new();
-    for (path, original) in [
+    use std::os::unix::{ffi::OsStrExt, net::UnixListener};
+    let fixture = CliFixture::with_temp(Temp::socket());
+    let inputs = [
         (fixture.input.clone(), fixture.recipe.as_slice()),
         (fixture.temp.join(SOURCE_PATH), fixture.source.as_slice()),
-    ] {
+    ];
+    for (path, _) in &inputs {
+        assert!(
+            path.as_os_str().as_bytes().len() <= 100,
+            "socket fixture path exceeds the conservative Unix limit: {path:?}"
+        );
+    }
+    for (path, original) in inputs {
         fs::remove_file(&path).unwrap();
         // Capability errors are real test failures; there is no runtime skip or
         // new ignored test. A restricted executor must record an explicit local
