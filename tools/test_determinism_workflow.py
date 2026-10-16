@@ -33,7 +33,7 @@ RESULTS = {
     "LINKED_PREFABS_RESULT": "${{ needs['sample-linked-prefabs'].result }}",
     "ROOM_RESULT": "${{ needs['sample-room'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs", "sample-room"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs", "sample-room", "static-model-authoring"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -49,6 +49,7 @@ class DeterminismWorkflowTests(unittest.TestCase):
         cls.jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         cls.gate = cls.jobs["cross_platform_checksum_compare"]
         cls.step = cls.gate["steps"][0]
+        cls.authoring_step = cls.gate["steps"][1]
 
     def assert_required(self, entry):
         self.assertFalse(entry.get("continue-on-error", False))
@@ -67,10 +68,92 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(self.gate["name"], "cross-platform checksum comparison")
         self.assertEqual(self.gate["runs-on"], "ubuntu-latest")
         self.assertFalse(self.gate.get("continue-on-error", False))
-        self.assertEqual(len(self.gate["steps"]), 1)
+        self.assertEqual(len(self.gate["steps"]), 2)
         self.assert_required(self.step)
         self.assertEqual(self.step["shell"], "bash")
         self.assertEqual(self.step["env"], RESULTS)
+
+    def test_static_authoring_matrix_routes_are_required(self):
+        job = self.jobs["static-model-authoring"]
+        self.assert_required(job)
+        self.assertNotIn("needs", job)
+        self.assertEqual(job["name"], "static model authoring (${{ matrix.feature }}, ${{ matrix.mode }}, ${{ matrix.os }})")
+        self.assertEqual(job["runs-on"], "${{ matrix.os }}")
+        self.assertEqual(job["timeout-minutes"], 90)
+        self.assertEqual(job["env"], {"PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(job["strategy"], {"fail-fast": False, "matrix": {"include": [
+            {"feature": feature, "mode": mode, "os": os_name, "timeout": 60 if mode == "export" else 45}
+            for feature in ("uv", "pivot")
+            for mode, os_name in (("cpu", "ubuntu-22.04"), ("cpu", "windows-latest"),
+                                  ("gpu", "ubuntu-22.04"), ("export", "ubuntu-22.04"))
+        ]}})
+        steps = job["steps"]
+        self.assertEqual(len(steps), 7)
+        for step, action in zip(steps[:3], ("actions/checkout@v4", "dtolnay/rust-toolchain@stable", "Swatinem/rust-cache@v2")):
+            self.assertEqual(step, {"uses": action})
+        self.assertEqual(steps[3], {
+            "name": "Install static authoring software Vulkan dependency",
+            "if": "matrix.mode != 'cpu'",
+            "run": "sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers",
+        })
+        self.assertEqual(steps[4], {
+            "name": "Install static authoring namespace acceptance dependency",
+            "if": "matrix.mode == 'export'",
+            "run": "sudo apt-get update -q && sudo apt-get install -y -q bubblewrap",
+        })
+        evidence = "${{ matrix.mode == 'export' && '/tmp' || runner.temp }}/orr-static-${{ matrix.feature }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}"
+        self.assertEqual(steps[5], {
+            "name": "Required independent static model authoring acceptance", "shell": "bash",
+            "timeout-minutes": "${{ matrix.timeout }}",
+            "env": {"ORR_STATIC_UV_EVIDENCE": evidence, "ORR_STATIC_PIVOT_EVIDENCE": evidence},
+            "run": "python -B tools/static_model_${{ matrix.feature }}_gate.py ${{ matrix.mode }}",
+        })
+        self.assertEqual(steps[6], {
+            "name": "Retain static authoring and partial failure evidence", "if": "always()",
+            "uses": "actions/upload-artifact@v4", "with": {
+                "name": "static-${{ matrix.feature }}-${{ matrix.mode }}-${{ matrix.os }}", "path": evidence,
+                "include-hidden-files": True, "if-no-files-found": "error", "retention-days": 7,
+            },
+        })
+        for name in ("sample-build", "sample-room"):
+            for step in self.jobs[name]["steps"]:
+                self.assertNotIn("static_model_uv_gate.py", step.get("run", ""))
+                self.assertNotIn("static_model_pivot_gate.py", step.get("run", ""))
+
+    def test_authoring_aggregate_is_independently_fail_closed(self):
+        step = self.authoring_step
+        self.assertEqual(set(step), {"name", "shell", "env", "run"})
+        self.assert_required(step)
+        self.assertEqual(step["name"], "Require every independent static authoring matrix row to pass")
+        self.assertEqual(step["shell"], "bash")
+        self.assertEqual(step["env"], {"AUTHORING_RESULT": "${{ needs['static-model-authoring'].result }}"})
+        syntax = subprocess.run(["bash", "-n"], input=step["run"], capture_output=True, text=True, check=False)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        for state in ("success", "failure", "cancelled", "skipped", "", "unknown", None):
+            env = {key: value for key, value in os.environ.items() if key not in (*RESULTS, "AUTHORING_RESULT")}
+            env.update({name: "success" for name in RESULTS})
+            if state is not None:
+                env["AUTHORING_RESULT"] = state
+            for script in (step["run"], self.step["run"] + "\n" + step["run"]):
+                with self.subTest(state=state, combined=script != step["run"]):
+                    result = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                                            env=env, capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode == 0, state == "success", result.stdout + result.stderr)
+                    if state != "success":
+                        self.assertIn("::error::AUTHORING_RESULT must be success", result.stdout)
+                        self.assertNotIn("All eight independent static authoring routes passed", result.stdout)
+        # A successful authoring matrix must never rescue any failed inherited lane.
+        for name in RESULTS:
+            for state in ("failure", "cancelled", "skipped", "", "unknown", None):
+                env = {key: value for key, value in os.environ.items() if key not in (*RESULTS, "AUTHORING_RESULT")}
+                env.update({key: "success" for key in RESULTS if key != name})
+                env["AUTHORING_RESULT"] = "success"
+                if state is not None:
+                    env[name] = state
+                result = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", self.step["run"] + "\n" + step["run"]],
+                                        env=env, capture_output=True, text=True, check=False)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("All eight independent static authoring routes passed", result.stdout)
 
     def test_actual_checksum_and_sample_runners_are_required(self):
         # There are no checksum artifacts. A green target proves determinism

@@ -50,6 +50,10 @@ BYTECODE_SETUP = '''      - name: Prevent Python bytecode in source checkout
         run: printf '%s\\n' 'PYTHONDONTWRITEBYTECODE=1' >> "$GITHUB_ENV"
 '''
 
+# Pin the complete reviewed matrix, including routing, isolation, and retention.
+AUTHORING_JOB = '  static-model-authoring:\n    # Independent feature routes own separate runners, private targets and evidence.\n    # Keep all eight rows mandatory; the final aggregate requires this matrix.\n    name: static model authoring (${{ matrix.feature }}, ${{ matrix.mode }}, ${{ matrix.os }})\n    runs-on: ${{ matrix.os }}\n    timeout-minutes: 90\n    env:\n      PYTHONDONTWRITEBYTECODE: "1"\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n          - feature: uv\n            mode: cpu\n            os: ubuntu-22.04\n            timeout: 45\n          - feature: uv\n            mode: cpu\n            os: windows-latest\n            timeout: 45\n          - feature: uv\n            mode: gpu\n            os: ubuntu-22.04\n            timeout: 45\n          - feature: uv\n            mode: export\n            os: ubuntu-22.04\n            timeout: 60\n          - feature: pivot\n            mode: cpu\n            os: ubuntu-22.04\n            timeout: 45\n          - feature: pivot\n            mode: cpu\n            os: windows-latest\n            timeout: 45\n          - feature: pivot\n            mode: gpu\n            os: ubuntu-22.04\n            timeout: 45\n          - feature: pivot\n            mode: export\n            os: ubuntu-22.04\n            timeout: 60\n    steps:\n      - uses: actions/checkout@v4\n      - uses: dtolnay/rust-toolchain@stable\n      - uses: Swatinem/rust-cache@v2\n      - name: Install static authoring software Vulkan dependency\n        if: matrix.mode != \'cpu\'\n        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers\n      - name: Install static authoring namespace acceptance dependency\n        if: matrix.mode == \'export\'\n        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap\n      - name: Required independent static model authoring acceptance\n        shell: bash\n        timeout-minutes: ${{ matrix.timeout }}\n        env:\n          ORR_STATIC_UV_EVIDENCE: ${{ matrix.mode == \'export\' && \'/tmp\' || runner.temp }}/orr-static-${{ matrix.feature }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}\n          ORR_STATIC_PIVOT_EVIDENCE: ${{ matrix.mode == \'export\' && \'/tmp\' || runner.temp }}/orr-static-${{ matrix.feature }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}\n        run: python -B tools/static_model_${{ matrix.feature }}_gate.py ${{ matrix.mode }}\n      - name: Retain static authoring and partial failure evidence\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: static-${{ matrix.feature }}-${{ matrix.mode }}-${{ matrix.os }}\n          path: ${{ matrix.mode == \'export\' && \'/tmp\' || runner.temp }}/orr-static-${{ matrix.feature }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}\n          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 7\n\n'
+AUTHORING_AGGREGATE_STEP = '      - name: Require every independent static authoring matrix row to pass\n        shell: bash\n        env:\n          AUTHORING_RESULT: ${{ needs[\'static-model-authoring\'].result }}\n        run: |\n          echo "AUTHORING_RESULT=$AUTHORING_RESULT"\n          if [[ "$AUTHORING_RESULT" != "success" ]]; then\n            echo "::error::AUTHORING_RESULT must be success, got \'$AUTHORING_RESULT\'"\n            exit 1\n          fi\n          echo "All eight independent static authoring routes passed."\n'
+
 
 def workflow_contract(text):
     # Reuse the protected checker unchanged: its exact sample header is part
@@ -68,37 +72,15 @@ def workflow_contract(text):
     assert text.count(BYTECODE_SETUP) == 1, 'unique bytecode setup'
     assert sample.count('PYTHONDONTWRITEBYTECODE') == 1, 'inherited setting must not be overridden later'
     assert 'os: [ubuntu-22.04, windows-latest]' in header
-    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room]' in aggregate
+    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]' in aggregate
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate, re.M) == ['${{ always() }}'], 'one failure-aware aggregate condition'
-    prerequisites = {
-        'gpu': "        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers\n",
-        'export': "        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap\n",
-    }
-    entries = [
-        ('cpu', 'CPU CLI and bindings', 'CPU', None, 45),
-        ('gpu', 'actual software GPU', 'GPU', "runner.os == 'Linux'", 45),
-        ('export', 'source-hidden Room export', 'Room export', "runner.os == 'Linux' && runner.arch == 'X64'", 60),
-    ]
-    for mode, title, artifact, condition, timeout in entries:
-        marker = '      - name: Required static UV variant ' + title + ' acceptance\n'
-        assert text.count(marker) == 1 and marker in sample
-        block = sample.split(marker, 1)[1].split('      - name:', 1)[0]
-        assert f'        run: python -B tools/static_model_uv_gate.py {mode}\n' in block
-        assert '        shell: bash\n' in block and f'        timeout-minutes: {timeout}\n' in block
-        assert 'continue-on-error' not in block and 'ORR_STATIC_UV_EVIDENCE:' in block
-        conditions = re.findall(r'^        if:[ \t]*(.*)$', block, re.M)
-        assert conditions == ([] if condition is None else [condition]), 'exact acceptance condition census'
-        if condition is not None:
-            assert sample.index(prerequisites[mode]) < sample.index(marker)
-        marker = '      - name: Retain static UV variant ' + artifact + ' and partial failure evidence\n'
-        assert text.count(marker) == 1 and marker in sample
-        block = sample.split(marker, 1)[1].split('      - name:', 1)[0]
-        expected_condition = 'always()' + (' && ' + condition if condition else '')
-        assert re.findall(r'^        if:[ \t]*(.*)$', block, re.M) == [expected_condition], 'exact retention condition census'
-        assert '        uses: actions/upload-artifact@v4\n' in block
-        assert '          if-no-files-found: error\n' in block and '          retention-days: 7\n' in block
-        if mode == 'export':
-            assert '          include-hidden-files: true\n' in block
+    authoring = workflow_job(text, 'static-model-authoring')
+    assert authoring == AUTHORING_JOB, 'exact independent eight-row authoring matrix'
+    assert aggregate.endswith(AUTHORING_AGGREGATE_STEP), 'required fail-closed authoring result'
+    assert text.count(AUTHORING_AGGREGATE_STEP) == 1, 'unique authoring result owner'
+    assert 'static_model_uv_gate.py' not in sample and 'static_model_pivot_gate.py' not in sample
+    assert 'Required static UV variant ' not in text, 'old serial UV routes must be relocated, not duplicated'
+    assert 'Required static pivot ' not in sample, 'pivot must use independent matrix only'
     for title in ['Required static prop CPU CLI and bindings acceptance',
                   'Required static prop actual software GPU acceptance',
                   'Required static prop source-hidden Room export acceptance',
@@ -857,16 +839,56 @@ class UvGateTests(unittest.TestCase):
 
     def test_workflow_rejects_disabled_moved_or_unretained_modes(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
-        for old, new in [('run: python -B tools/static_model_uv_gate.py cpu', 'run: echo skipped'),
-                         ('run: python -B tools/static_model_uv_gate.py gpu', 'run: echo skipped'),
-                         ('run: python -B tools/static_model_uv_gate.py export', 'run: echo skipped'),
-                         ('Retain static UV variant CPU and partial failure evidence', 'missing retention'),
-                         ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]')]:
-            with self.subTest(old=old), self.assertRaises(AssertionError):
-                workflow_contract(text.replace(old, new, 1))
+        matrix = workflow_job(text, 'static-model-authoring')
+        mutations = [
+            ('  static-model-authoring:\n', '  static-model-authoring:\n    if: false\n'),
+            ('    runs-on: ${{ matrix.os }}\n', '    runs-on: ubuntu-latest\n'),
+            ('    timeout-minutes: 90\n', '    continue-on-error: true\n    timeout-minutes: 90\n'),
+            ('      PYTHONDONTWRITEBYTECODE: "1"\n', ''),
+            ('      PYTHONDONTWRITEBYTECODE: "1"\n', '      PYTHONDONTWRITEBYTECODE: "0"\n'),
+            ('      fail-fast: false\n', '      fail-fast: true\n'),
+            ('        include:\n', '        exclude:\n'),
+            ('            os: windows-latest\n', '            os: ubuntu-22.04\n'),
+            ('            mode: gpu\n', '            mode: cpu\n'),
+            ('            mode: export\n', '            mode: cpu\n'),
+            ('          - feature: pivot\n', '          - feature: uv\n'),
+            ("        if: matrix.mode != 'cpu'\n", '        if: false\n'),
+            ("        if: matrix.mode == 'export'\n", '        if: false\n'),
+            ('mesa-vulkan-drivers', 'unavailable-gpu'),
+            ('bubblewrap', 'unavailable-namespace'),
+            ('      - name: Required independent static model authoring acceptance\n',
+             '      - name: Required independent static model authoring acceptance\n        if: false\n'),
+            ('        shell: bash\n', '        shell: pwsh\n'),
+            ('        timeout-minutes: ${{ matrix.timeout }}\n', '        timeout-minutes: 1\n'),
+            ('          ORR_STATIC_UV_EVIDENCE:', '          OTHER_EVIDENCE:'),
+            ('          ORR_STATIC_PIVOT_EVIDENCE:', '          OTHER_EVIDENCE:'),
+            ("matrix.mode == 'export' && '/tmp' || runner.temp", 'github.workspace'),
+            ('python -B tools/static_model_${{ matrix.feature }}_gate.py ${{ matrix.mode }}', 'echo skipped'),
+            ('        if: always()\n', '        if: success()\n'),
+            ('actions/upload-artifact@v4', 'actions/upload-artifact@v3'),
+            ('static-${{ matrix.feature }}-${{ matrix.mode }}-${{ matrix.os }}', 'shared-evidence'),
+            ('          include-hidden-files: true\n', ''),
+            ('          if-no-files-found: error\n', '          if-no-files-found: ignore\n'),
+            ('          retention-days: 7\n', '          retention-days: 1\n'),
+        ]
+        for old, new in mutations:
+            self.assertIn(old, matrix)
+            changed = matrix.replace(old, new, 1)
+            self.assertNotEqual(changed, matrix)
+            with self.subTest(matrix_mutation=old), self.assertRaises(AssertionError):
+                workflow_contract(text.replace(matrix, changed, 1))
+        rows = list(re.finditer(r'^          - feature:.*(?:\n            .*?){3}\n', matrix, re.M))
+        self.assertEqual(len(rows), 8)
+        for row in rows:
+            for change in ('', row.group() * 2):
+                with self.subTest(row=row.group(), replacement=change), self.assertRaises(AssertionError):
+                    workflow_contract(text.replace(matrix, matrix[:row.start()] + change + matrix[row.end():], 1))
+        with self.assertRaises(AssertionError):
+            workflow_contract(text.replace(matrix, '', 1).replace('  sample-room:\n', '  sample-room:\n' + matrix, 1))
+        with self.assertRaises(AssertionError):
+            workflow_contract(text.replace('  sample-build:\n', matrix + '  sample-build:\n', 1))
         setup_mutations = {
-            'missing': '',
-            'duplicate': BYTECODE_SETUP * 2,
+            'missing': '', 'duplicate': BYTECODE_SETUP * 2,
             'conditional': BYTECODE_SETUP.replace('        shell:', '        if: false\n        shell:'),
             'continue on error': BYTECODE_SETUP.replace('        shell:', '        continue-on-error: true\n        shell:'),
             'wrong shell': BYTECODE_SETUP.replace('shell: bash', 'shell: pwsh'),
@@ -888,50 +910,16 @@ class UvGateTests(unittest.TestCase):
             '    env:\n      PYTHONDONTWRITEBYTECODE: "1"\n    strategy:\n', 1)
         with self.assertRaises(AssertionError):
             workflow_contract(text.replace(sample, job_environment, 1))
-        old = '      - name: Required static UV variant CPU CLI and bindings acceptance\n'
-        with self.assertRaises(AssertionError):
-            workflow_contract(text.replace(old, old + '        if: false\n'))
         for key in ('PYTHONDONTWRITEBYTECODE', "'PYTHONDONTWRITEBYTECODE'", '"PYTHONDONTWRITEBYTECODE"'):
             for value in ('""', '"0"', '"1"'):
                 overridden = text.replace('          ORR_STATIC_GATE_EVIDENCE:',
                     '          ' + key + ': ' + value + '\n          ORR_STATIC_GATE_EVIDENCE:', 1)
                 with self.subTest(step_override_key=key, value=value), self.assertRaises(AssertionError):
                     workflow_contract(overridden)
-        for title, condition, middle in [
-            ('Required static UV variant CPU CLI and bindings acceptance', None, '        shell: bash\n'),
-            ('Required static UV variant actual software GPU acceptance', "runner.os == 'Linux'", '        shell: bash\n'),
-            ('Required static UV variant source-hidden Room export acceptance', "runner.os == 'Linux' && runner.arch == 'X64'", '        shell: bash\n'),
-            ('Retain static UV variant CPU and partial failure evidence', 'always()', '        uses: actions/upload-artifact@v4\n'),
-            ('Retain static UV variant GPU and partial failure evidence', "always() && runner.os == 'Linux'", '        uses: actions/upload-artifact@v4\n'),
-            ('Retain static UV variant Room export and partial failure evidence', "always() && runner.os == 'Linux' && runner.arch == 'X64'", '        uses: actions/upload-artifact@v4\n'),
-        ]:
-            marker = '      - name: ' + title + '\n'
-            block = text.split(marker, 1)[1].split('      - name:', 1)[0]
-            mutations = {
-                'first conditional': '        if: false\n' + block,
-                'middle conditional': block.replace(middle, middle + '        if: false\n', 1),
-                'duplicate conditional': '        if: ' + (condition or 'false') + '\n' + block,
-            }
-            if condition is None:
-                mutations['duplicate conditional'] = '        if: false\n        if: false\n' + block
-            else:
-                line = '        if: ' + condition + '\n'
-                mutations['missing conditional'] = block.replace(line, '', 1)
-                mutations['wrong conditional'] = block.replace(line, '        if: false\n', 1)
-                mutations['middle duplicate conditional'] = block.replace(middle, middle + line, 1)
-            for label, changed in mutations.items():
-                with self.subTest(title=title, mutation=label), self.assertRaises(AssertionError):
-                    workflow_contract(text.replace(marker + block, marker + changed, 1))
-        start = text.index(old)
-        end = text.index('      - name: Required animation clip extraction cpu acceptance\n', start)
-        pair = text[start:end]
-        relocated = (text[:start] + text[end:]).replace('  sample-room:\n', '  sample-room:\n' + pair, 1)
-        with self.assertRaises(AssertionError):
-            workflow_contract(relocated)
 
     def test_workflow_preserves_required_room_and_aggregate(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
-        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room]', 'needs: [native]'),
+        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]', 'needs: [native]'),
                          ('Required generated Room GPU and source-hidden production export', 'missing Room gate'),
                          ('  sample-room:\n', '  sample-room:\n    # static_model_uv_gate.py forbidden\n'),
                          ('  sample-build:\n', '  sample-build:\n    if: false\n'),

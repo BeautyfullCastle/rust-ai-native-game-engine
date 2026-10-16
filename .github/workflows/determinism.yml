@@ -242,6 +242,77 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  static-model-authoring:
+    # Independent feature routes own separate runners, private targets and evidence.
+    # Keep all eight rows mandatory; the final aggregate requires this matrix.
+    name: static model authoring (${{ matrix.feature }}, ${{ matrix.mode }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature: uv
+            mode: cpu
+            os: ubuntu-22.04
+            timeout: 45
+          - feature: uv
+            mode: cpu
+            os: windows-latest
+            timeout: 45
+          - feature: uv
+            mode: gpu
+            os: ubuntu-22.04
+            timeout: 45
+          - feature: uv
+            mode: export
+            os: ubuntu-22.04
+            timeout: 60
+          - feature: pivot
+            mode: cpu
+            os: ubuntu-22.04
+            timeout: 45
+          - feature: pivot
+            mode: cpu
+            os: windows-latest
+            timeout: 45
+          - feature: pivot
+            mode: gpu
+            os: ubuntu-22.04
+            timeout: 45
+          - feature: pivot
+            mode: export
+            os: ubuntu-22.04
+            timeout: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install static authoring software Vulkan dependency
+        if: matrix.mode != 'cpu'
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Install static authoring namespace acceptance dependency
+        if: matrix.mode == 'export'
+        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+      - name: Required independent static model authoring acceptance
+        shell: bash
+        timeout-minutes: ${{ matrix.timeout }}
+        env:
+          ORR_STATIC_UV_EVIDENCE: ${{ matrix.mode == 'export' && '/tmp' || runner.temp }}/orr-static-${{ matrix.feature }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          ORR_STATIC_PIVOT_EVIDENCE: ${{ matrix.mode == 'export' && '/tmp' || runner.temp }}/orr-static-${{ matrix.feature }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/static_model_${{ matrix.feature }}_gate.py ${{ matrix.mode }}
+      - name: Retain static authoring and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-${{ matrix.feature }}-${{ matrix.mode }}-${{ matrix.os }}
+          path: ${{ matrix.mode == 'export' && '/tmp' || runner.temp }}/orr-static-${{ matrix.feature }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
   sample-build:
     # View-layer demos, audio, and editor. Build and test on Linux and Windows,
     # plus required Linux software-GPU/window tests; separate from the sim jobs.
@@ -274,21 +345,6 @@ jobs:
         with:
           name: static-prop-cpu-${{ matrix.os }}
           path: ${{ runner.temp }}/static-prop-cpu-${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Required static UV variant CPU CLI and bindings acceptance
-        shell: bash
-        timeout-minutes: 45
-        env:
-          ORR_STATIC_UV_EVIDENCE: ${{ runner.temp }}/static-uv-cpu-${{ github.run_id }}-${{ github.run_attempt }}
-        run: python -B tools/static_model_uv_gate.py cpu
-      - name: Retain static UV variant CPU and partial failure evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: static-uv-cpu-${{ matrix.os }}
-          path: ${{ runner.temp }}/static-uv-cpu-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
 
@@ -969,22 +1025,6 @@ jobs:
         with:
           name: static-prop-gpu-${{ matrix.os }}
           path: ${{ runner.temp }}/static-prop-gpu-${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Required static UV variant actual software GPU acceptance
-        if: runner.os == 'Linux'
-        shell: bash
-        timeout-minutes: 45
-        env:
-          ORR_STATIC_UV_EVIDENCE: ${{ runner.temp }}/static-uv-gpu-${{ github.run_id }}-${{ github.run_attempt }}
-        run: python -B tools/static_model_uv_gate.py gpu
-      - name: Retain static UV variant GPU and partial failure evidence
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: static-uv-gpu-${{ matrix.os }}
-          path: ${{ runner.temp }}/static-uv-gpu-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
 
@@ -2015,23 +2055,6 @@ jobs:
         with:
           name: static-prop-room-export-ubuntu-22.04
           path: /tmp/orr-static-prop-export-${{ github.run_id }}-${{ github.run_attempt }}
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Required static UV variant source-hidden Room export acceptance
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        shell: bash
-        timeout-minutes: 60
-        env:
-          ORR_STATIC_UV_EVIDENCE: /tmp/orr-static-uv-export-${{ github.run_id }}-${{ github.run_attempt }}
-        run: python -B tools/static_model_uv_gate.py export
-      - name: Retain static UV variant Room export and partial failure evidence
-        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: static-uv-room-export-ubuntu-22.04
-          path: /tmp/orr-static-uv-export-${{ github.run_id }}-${{ github.run_attempt }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -5501,7 +5524,7 @@ jobs:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
     # target, sample graphics/audio/editor matrix, linked-prefab and Room lanes must pass.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room]
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -5541,3 +5564,14 @@ jobs:
           echo "orr_physics, orr_physics3d, orr_games, orr_wasm_bench, and orr_asset_fixture tests."
           echo "No checksum artifacts are exchanged: each target independently"
           echo "matches those shared expected values, so every runner must pass."
+      - name: Require every independent static authoring matrix row to pass
+        shell: bash
+        env:
+          AUTHORING_RESULT: ${{ needs['static-model-authoring'].result }}
+        run: |
+          echo "AUTHORING_RESULT=$AUTHORING_RESULT"
+          if [[ "$AUTHORING_RESULT" != "success" ]]; then
+            echo "::error::AUTHORING_RESULT must be success, got '$AUTHORING_RESULT'"
+            exit 1
+          fi
+          echo "All eight independent static authoring routes passed."
