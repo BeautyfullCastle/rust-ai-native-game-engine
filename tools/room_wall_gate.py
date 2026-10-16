@@ -208,13 +208,47 @@ def initialize(root, destination, phase):
 def fixture_result(output, count, marker):
     """The marker alone cannot launder skipped, repeated or failing fixtures."""
     require(type(count) is int and count > 0, 'fixture census is not frozen')
-    require(re.findall(r'^Ran (\d+) tests in [0-9.]+s$', output, re.M) == [str(count)],
-            'single exact Python fixture total')
-    require(len(re.findall(r'^test_\w+ \(.+\) \.\.\. ok$', output, re.M)) == count,
-            'exact all-pass Python fixture records')
+    output = output.replace('\r\n', '\n')
+    require('\r' not in output, 'bare carriage return in fixture output')
     require(not re.search(r'(?im)(?:\.\.\. (?:skipped|FAIL|ERROR|expected failure|unexpected success)|^FAILED|^ERROR:|^FAIL:)', output),
             'fixture failed or skipped')
-    require(output.rstrip().endswith(marker), 'fixture completion marker')
+    require(re.findall(r'^Ran (\d+) tests in [0-9]+(?:\.[0-9]+)?s$', output, re.M) == [str(count)],
+            'single exact Python fixture total')
+    footer = re.search(r'\n-{70}\nRan ' + str(count) + r' tests in [0-9]+(?:\.[0-9]+)?s\n\nOK\n'
+                       + re.escape(marker) + r'\n*\Z', output)
+    require(footer is not None and output.count(marker) == 1, 'terminal fixture OK and completion marker')
+    header = re.compile(r'(test_[A-Za-z0-9_]+) \((__main__\.[A-Za-z_][A-Za-z0-9_]*)'
+                        r'(?:\.(test_[A-Za-z0-9_]+))?\) \.\.\. (.*)')
+    names, identities, completed, active = set(), set(), set(), None
+    for line in output[:footer.start()].split('\n'):
+        record = header.fullmatch(line)
+        if record is not None:
+            name, class_identity, repeated_name, line = record.groups()
+            # Python 3.10 prints the class; newer unittest prints class.method.
+            # Canonicalize only these verified forms to the same test identity.
+            identity = class_identity + '.' + name
+            require(active is None, 'fixture record started before previous completion')
+            require((repeated_name is None or name == repeated_name)
+                    and name not in names and identity not in identities,
+                    'unique matching named fixture records')
+            names.add(name)
+            identities.add(identity)
+            active = identity
+        if line == 'ok':
+            require(active is not None, 'orphan or duplicate fixture completion')
+            completed.add(active)
+            active = None
+        elif line.strip():
+            # Bounded lifecycle fixtures legitimately print child diagnostics
+            # between unittest's header and its standalone completion. Only an
+            # active record may own that output; reserved statuses cannot hide
+            # inside it or open a second record on the same line.
+            require(active is not None, 'fixture payload outside active record')
+            require(re.match(r'(?i)(?:test_|Ran\b|[-=]{5,}|ok\b|fail(?:ed)?\b|error\b|skip(?:ped)?\b|'
+                             r'expected failure\b|unexpected success\b)', line.lstrip()) is None,
+                    'fixture failed, skipped or emitted an ambiguous record')
+    require(active is None and len(names) == len(identities) == len(completed) == count,
+            'exact complete all-pass Python fixture records')
 
 
 def workflow_job(text, name):

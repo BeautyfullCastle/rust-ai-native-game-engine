@@ -196,12 +196,74 @@ class RoomWallSemanticTests(unittest.TestCase):
 
     def test_fixture_marker_cannot_launder_missing_skipped_or_failed_rows(self):
         marker = 'ROOM_WALL_GATE_FIXTURES: 1 passed; 0 failed; 0 skipped'
-        value = 'test_one (__main__.Fixture.test_one) ... ok\n\nRan 1 tests in 0.01s\n\nOK\n' + marker
+        value = ('test_one (__main__.Fixture.test_one) ... ok\n\n' + '-' * 70
+                 + '\nRan 1 tests in 0.01s\n\nOK\n' + marker + '\n')
         gate.fixture_result(value, 1, marker)
-        for changed in (marker, value.replace(' ... ok', ' ... skipped'), value.replace('Ran 1', 'Ran 0'),
-                        value.replace(' ... ok', ' ... FAIL'), value + '\n' + value):
-            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+        noisy = value.replace(' ... ok\n', ' ... deadline: failed\n\nexpected-two: passed\n'
+                              'unexpected-seven: failed\nparent complete\n\nok\n', 1)
+        gate.fixture_result(noisy, 1, marker)
+        gate.fixture_result(noisy.replace('\n', '\r\n'), 1, marker)
+        gate.fixture_result(value.replace(' ... ok', ' ... \nok'), 1, marker)
+        class_only = noisy.replace('(__main__.Fixture.test_one)', '(__main__.Fixture)')
+        gate.fixture_result(class_only, 1, marker)
+        gate.fixture_result(class_only.replace('\n', '\r\n'), 1, marker)
+        hosted_shape = value.replace('test_one (__main__.Fixture.test_one)',
+                                    'test_actual_model_census_matches_test_source (__main__.StaticPropGateTests)')
+        gate.fixture_result(hosted_shape, 1, marker)
+        cases = {
+            'marker-only': marker,
+            'wrong-total': value.replace('Ran 1', 'Ran 0'),
+            'malformed-duration': value.replace('0.01s', '0..01s'),
+            'missing-total': value.replace('Ran 1 tests in 0.01s\n', ''),
+            'duplicate-stream': value + value,
+            'duplicate-name': value.replace('\n\n' + '-' * 70, '\ntest_one (__main__.Fixture.test_one) ... ok\n\n' + '-' * 70),
+            'duplicate-method-other-class': value.replace('\n\n' + '-' * 70, '\ntest_one (__main__.Other.test_one) ... ok\n\n' + '-' * 70),
+            'mismatched-identity': value.replace('Fixture.test_one', 'Fixture.test_two'),
+            'class-only-explicit-mismatch': class_only.replace('(__main__.Fixture)', '(__main__.Fixture.test_two)'),
+            'extra-identity-segment': value.replace('Fixture.test_one', 'Fixture.test_one.extra'),
+            'missing-class-module': class_only.replace('__main__.Fixture', 'Fixture'),
+            'unverified-class-module': class_only.replace('__main__.Fixture', 'other.Fixture'),
+            'malformed-header': value.replace(' ... ok', ' .. ok'),
+            'missing-record': value.split('\n', 1)[1],
+            'missing-completion': noisy.replace('\nok\n', '\n'),
+            'nested-record': noisy.replace('\nok\n', '\ntest_two (__main__.Fixture.test_two) ... ok\nok\n'),
+            'nested-inline-record': noisy.replace('deadline: failed', 'test_two (__main__.Fixture.test_two) ... ok'),
+            'orphan-initial-completion': 'ok\n' + value,
+            'duplicate-completion': value.replace(' ... ok\n', ' ... ok\nok\n'),
+            'payload-before-record': 'child output\n' + value,
+            'payload-after-record': value.replace(' ... ok\n', ' ... ok\nchild output\n'),
+            'missing-OK': value.replace('\nOK\n', '\n'),
+            'duplicate-OK': value.replace('\nOK\n', '\nOK\nOK\n'),
+            'false-OK': value.replace('\nOK\n', '\nOK (skipped=1)\n'),
+            'failed-footer': value.replace('\nOK\n', '\nFAILED (failures=1)\n'),
+            'missing-marker': value.replace(marker, ''),
+            'duplicate-marker': value + marker,
+            'payload-after-marker': value + 'child output\n',
+            'bare-carriage-return': noisy.replace('parent complete', 'parent\rcomplete'),
+        }
+        for status in ('skipped', "skipped 'unavailable'", 'FAIL', 'ERROR', 'FAILED (failures=1)',
+                       'expected failure', 'unexpected success', 'ok extra', 'OK', 'SKIP: unavailable'):
+            cases['inline-status-' + status] = value.replace(' ... ok', ' ... ' + status)
+            cases['noisy-status-' + status] = noisy.replace('parent complete', status)
+        for status in ('skipped', 'FAIL', 'ERROR', 'expected failure', 'unexpected success'):
+            cases['embedded-status-' + status] = noisy.replace('parent complete', 'child ... ' + status)
+        for label, changed in cases.items():
+            with self.subTest(label=label), self.assertRaises(AssertionError):
                 gate.fixture_result(changed, 1, marker)
+        two_marker = 'ROOM_WALL_GATE_FIXTURES: 2 passed; 0 failed; 0 skipped'
+        two = (noisy.replace('\n\n' + '-' * 70, '\ntest_two (__main__.Fixture.test_two) ... ok\n\n' + '-' * 70)
+               .replace('Ran 1', 'Ran 2').replace(marker, two_marker))
+        gate.fixture_result(two, 2, two_marker)
+        mixed = two.replace('(__main__.Fixture.test_one)', '(__main__.Fixture)')
+        gate.fixture_result(mixed, 2, two_marker)
+        gate.fixture_result(two.replace('(__main__.Fixture.test_two)', '(__main__.Fixture)'), 2, two_marker)
+        for changed in (two.replace('test_two', 'test_one'),
+                        mixed.replace('test_two', 'test_one'),
+                        two.replace('(__main__.Fixture.test_two)', '(__main__.Fixture)').replace('test_two', 'test_one'),
+                        two.replace('test_two (__main__.Fixture.test_two) ... ok\n', ''),
+                        two.replace('\nok\n', '\n')):
+            with self.subTest(two_records=changed), self.assertRaises(AssertionError):
+                gate.fixture_result(changed, 2, two_marker)
 
     def test_exact_test_results_reject_ignored_filtered_and_duplicate(self):
         names = ['one', 'two']
