@@ -71,9 +71,31 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&base).unwrap();
-        let base = base.canonicalize().unwrap();
+        let canonical_base = base.canonicalize().unwrap();
+        #[cfg(not(windows))]
+        let base = canonical_base.clone();
+        #[cfg(windows)]
+        {
+            use std::path::{Component, Prefix};
+            // Keep the trusted native fixture spelling: canonicalize returns a
+            // verbatim path on Windows, which output admission rightly rejects.
+            // Reject other prefixes here rather than normalizing arbitrary input.
+            assert!(base.is_absolute());
+            let mut components = base.components();
+            assert!(matches!(
+                components.next(),
+                Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+            ));
+            assert_eq!(components.next(), Some(Component::RootDir));
+            assert!(components.all(|component| matches!(component, Component::Normal(_))));
+        }
+        assert_eq!(base.canonicalize().unwrap(), canonical_base);
         let root = base.join("admitted room");
         fs::create_dir(&root).unwrap();
+        assert_eq!(
+            root.canonicalize().unwrap(),
+            canonical_base.join("admitted room")
+        );
         let object = root.join(".orr/packages/objects").join(PACKAGE_DIGEST);
         fs::create_dir_all(&object).unwrap();
         for (name, bytes) in ASSETS {

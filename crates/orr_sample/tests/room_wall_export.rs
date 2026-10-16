@@ -721,12 +721,18 @@ impl Work {
         output: &Path,
     ) -> String {
         let mut c = self.isolated(&self.probe, project, bundle);
-        c.args(["--ignored", "--exact", TEST, "--nocapture"])
-            .env("ORR_ROOM_WALL_CHILD", "source-hidden-v1")
-            .env("ORR_ROOM_WALL_CHILD_PROJECT", project)
-            .env("ORR_ROOM_WALL_CHILD_TICKS", ticks.to_string())
-            .env("ORR_ROOM_WALL_CHILD_HELD", held)
-            .env("ORR_ROOM_WALL_CHILD_OUTPUT", output);
+        c.args([
+            "--ignored",
+            "--exact",
+            TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ORR_ROOM_WALL_CHILD", "source-hidden-v1")
+        .env("ORR_ROOM_WALL_CHILD_PROJECT", project)
+        .env("ORR_ROOM_WALL_CHILD_TICKS", ticks.to_string())
+        .env("ORR_ROOM_WALL_CHILD_HELD", held)
+        .env("ORR_ROOM_WALL_CHILD_OUTPUT", output);
         good(bounded_output(&mut c))
     }
 }

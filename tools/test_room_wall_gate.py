@@ -661,6 +661,22 @@ class RoomWallSemanticTests(unittest.TestCase):
                 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
 
     def test_runtime_and_probe_require_actual_checksum_and_namespace_markers(self):
+        # The strict result parser requires the named header before child stdout.
+        def check_child_invocation(source):
+            commands = re.findall(
+                r'fn probe\([^{}]*\) -> String \{\s*'
+                r'let mut c = self\.isolated\(&self\.probe, project, bundle\);\s*'
+                r'c\.args\(\[([^\]]*)\]\)\s*'
+                r'\.env\("ORR_ROOM_WALL_CHILD", "source-hidden-v1"\)', source, re.S)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual([arg.strip() for arg in commands[0].split(',') if arg.strip()],
+                             ['"--ignored"', '"--exact"', 'TEST', '"--nocapture"', '"--test-threads=1"'])
+        source = (ROOT / gate.FEATURE_PATHS[4]).read_text()
+        check_child_invocation(source)
+        changed = source.replace('"--test-threads=1",', '', 1)
+        self.assertNotEqual(changed, source)
+        with self.assertRaises(AssertionError):
+            check_child_invocation(changed)
         checksum = '0x0000000000000001'
         runtime = self.runtime_output(1, checksum)
         probe = self.probe_output(1, checksum)
