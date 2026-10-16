@@ -375,8 +375,74 @@ class PivotGateTests(unittest.TestCase):
         (root/args[2]).write_text(json.dumps(changed))
         with self.assertRaisesRegex(AssertionError,'transform bits'):gate.check_variant(root,*args)
         self.assertEqual(gate.f32(16777217),16777216)
-        for value in (True,None,'1',float('inf'),float('nan')):
+        for value in (True,None,'1',float('inf'),float('nan'),1e100):
             with self.assertRaises((AssertionError,OverflowError)):gate.f32(value)
+
+        # Actual Rust f32 JSON uses shortest round-trip decimals, unlike the
+        # expanded Python f64 returned by unpacking an f32 arithmetic result.
+        # These literal decimal cases reproduce the hosted export failure.
+        for stem, short_translation in [('red', [-1.1, 2.4, -0.15]),
+                                        ('blue', [0.9, 1.15, 0.1])]:
+            root,args,cooked=self.variant_fixture(stem=stem)
+            source=json.loads((root/args[0]).read_text())
+            for original,variant in zip(source['primitives'],cooked['primitives']):
+                original['transform'][3][:3]=[-0.099999994,1.9,0.1]
+                variant['transform'][3][:3]=short_translation
+            (root/args[0]).write_text(json.dumps(source))
+            cooked['dependencies'][1]['sha256']=gate.runner.digest(root/args[0])
+            (root/args[2]).write_text(json.dumps(cooked))
+            self.assertNotEqual(short_translation[0],gate.f32(short_translation[0]))
+            with self.subTest(stem=stem,case='shortest-f32-decimals'):
+                self.assertEqual(gate.check_variant(root,*args),cooked)
+
+            # One changed f32 bit anywhere in the full matrix still rejects,
+            # including unchanged axes and non-translation matrix columns.
+            for column in range(4):
+                for row in range(4):
+                    changed=copy.deepcopy(cooked)
+                    value=changed['primitives'][0]['transform'][column][row]
+                    bits=struct.unpack('<I',struct.pack('<f',value))[0]
+                    changed['primitives'][0]['transform'][column][row]=struct.unpack('<f',struct.pack('<I',bits^1))[0]
+                    (root/args[2]).write_text(json.dumps(changed))
+                    with self.subTest(stem=stem,column=column,row=row), self.assertRaisesRegex(AssertionError,'transform bits'):
+                        gate.check_variant(root,*args)
+
+            mutations=[]
+            for matrix in (cooked['primitives'][0]['transform'][:3],
+                           cooked['primitives'][0]['transform']+[cooked['primitives'][0]['transform'][0]],
+                           [column[:3] for column in cooked['primitives'][0]['transform']],
+                           [column+[0.0] for column in cooked['primitives'][0]['transform']]):
+                changed=copy.deepcopy(cooked);changed['primitives'][0]['transform']=matrix;mutations.append(changed)
+            changed=copy.deepcopy(cooked);changed['primitives'][0]['transform'][0][1]=False;mutations.append(changed)
+            changed=copy.deepcopy(cooked);changed['primitives'][0]['transform'][2][2]=True;mutations.append(changed)
+            for matrix in (None,{},'not a matrix'):
+                changed=copy.deepcopy(cooked);changed['primitives'][0]['transform']=matrix;mutations.append(changed)
+            changed=copy.deepcopy(cooked);changed['primitives'][0]['transform'][0]={};mutations.append(changed)
+            for value in (float('inf'),float('nan'),1e100):
+                changed=copy.deepcopy(cooked);changed['primitives'][0]['transform'][0][0]=value;mutations.append(changed)
+            changed=copy.deepcopy(cooked);changed['primitives'][0]['extra']=0;mutations.append(changed)
+            changed=copy.deepcopy(cooked);del changed['primitives'][0]['indices'];mutations.append(changed)
+            changed=copy.deepcopy(cooked);changed['primitives'][0]['vertices'][0]['position'][0]=0.125;mutations.append(changed)
+            for index,changed in enumerate(mutations):
+                (root/args[2]).write_text(json.dumps(changed))
+                with self.subTest(stem=stem,mutation=index), self.assertRaises((AssertionError,OverflowError)):
+                    gate.check_variant(root,*args)
+
+            source_matrices=[None,{},'not a matrix',source['primitives'][0]['transform'][:3],
+                source['primitives'][0]['transform']+[source['primitives'][0]['transform'][0]],
+                [column[:3] for column in source['primitives'][0]['transform']],
+                [column+[0.0] for column in source['primitives'][0]['transform']]]
+            matrix=copy.deepcopy(source['primitives'][0]['transform']);matrix[0][1]=False;source_matrices.append(matrix)
+            matrix=copy.deepcopy(source['primitives'][0]['transform']);matrix[2][2]=True;source_matrices.append(matrix)
+            for value in (float('inf'),float('nan'),1e100):
+                matrix=copy.deepcopy(source['primitives'][0]['transform']);matrix[0][0]=value;source_matrices.append(matrix)
+            for index,matrix in enumerate(source_matrices):
+                malformed=copy.deepcopy(source);malformed['primitives'][0]['transform']=matrix
+                (root/args[0]).write_text(json.dumps(malformed))
+                rebound=copy.deepcopy(cooked);rebound['dependencies'][1]['sha256']=gate.runner.digest(root/args[0])
+                (root/args[2]).write_text(json.dumps(rebound))
+                with self.subTest(stem=stem,source_matrix=index), self.assertRaises((AssertionError,OverflowError)):
+                    gate.check_variant(root,*args)
 
     def test_numeric_oracle_has_nonvacuous_node_material_and_background_coverage(self):
         samples,coverage=gate.oracle_samples([(0,gate.PIVOTS[0]),(1,gate.PIVOTS[0])])

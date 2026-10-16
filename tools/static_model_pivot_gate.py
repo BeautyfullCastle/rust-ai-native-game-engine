@@ -342,14 +342,26 @@ def check_variant(captures, source_file, recipe_file, cooked_file, asset_id):
     assert len(cooked['primitives']) == len(source['primitives']) >= 4
     for original, variant in zip(source['primitives'], cooked['primitives']):
         assert original['id'].startswith(source['asset_id'] + '#node=')
+        assert type(original['transform']) is list and len(original['transform']) == 4, 'source transform shape'
+        for column in original['transform']:
+            assert type(column) is list and len(column) == 4, 'source transform shape'
+            for value in column:
+                f32(value)
         expected = copy.deepcopy(original)
         expected['id'] = asset_id + original['id'][len(source['asset_id']):]
         for axis, value in enumerate(pivot):
             if f32(value) != 0:
                 expected['transform'][3][axis] = f32(f32(original['transform'][3][axis]) - f32(value))
-        assert variant == expected, 'only identity and translation column may change'
+        assert type(variant) is dict and set(variant) == set(expected), 'exact primitive fields'
+        assert {key: value for key, value in variant.items() if key != 'transform'} == {
+            key: value for key, value in expected.items() if key != 'transform'
+        }, 'only identity and translation column may change'
+        # Rust serializes f32 values using their shortest round-trip decimals.
+        # Python's expanded arithmetic result can differ as an f64 while naming
+        # exactly the same f32. Compare every transform bit, never a tolerance.
+        assert type(variant['transform']) is list and len(variant['transform']) == len(expected['transform']) == 4
         for actual_column, expected_column in zip(variant['transform'], expected['transform']):
-            assert len(actual_column) == len(expected_column) == 4
+            assert type(actual_column) is list and len(actual_column) == len(expected_column) == 4
             assert b''.join(struct.pack('<f', f32(v)) for v in actual_column) == b''.join(
                 struct.pack('<f', f32(v)) for v in expected_column), 'preserve all transform bits including signed zero'
     assert cooked['materials'] == source['materials'], 'all material factors, slots and sampler preserved'
