@@ -33,7 +33,7 @@ RESULTS = {
     "LINKED_PREFABS_RESULT": "${{ needs['sample-linked-prefabs'].result }}",
     "ROOM_RESULT": "${{ needs['sample-room'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs", "sample-room", "static-model-authoring"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs", "sample-room", "static-model-authoring", "room-wall-authoring"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -50,6 +50,7 @@ class DeterminismWorkflowTests(unittest.TestCase):
         cls.gate = cls.jobs["cross_platform_checksum_compare"]
         cls.step = cls.gate["steps"][0]
         cls.authoring_step = cls.gate["steps"][1]
+        cls.wall_step = cls.gate["steps"][2]
 
     def assert_required(self, entry):
         self.assertFalse(entry.get("continue-on-error", False))
@@ -68,7 +69,7 @@ class DeterminismWorkflowTests(unittest.TestCase):
         self.assertEqual(self.gate["name"], "cross-platform checksum comparison")
         self.assertEqual(self.gate["runs-on"], "ubuntu-latest")
         self.assertFalse(self.gate.get("continue-on-error", False))
-        self.assertEqual(len(self.gate["steps"]), 2)
+        self.assertEqual(len(self.gate["steps"]), 3)
         self.assert_required(self.step)
         self.assertEqual(self.step["shell"], "bash")
         self.assertEqual(self.step["env"], RESULTS)
@@ -154,6 +155,87 @@ class DeterminismWorkflowTests(unittest.TestCase):
                                         env=env, capture_output=True, text=True, check=False)
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("All eight independent static authoring routes passed", result.stdout)
+
+    def test_room_wall_matrix_routes_are_required(self):
+        job = self.jobs["room-wall-authoring"]
+        self.assert_required(job)
+        self.assertNotIn("needs", job)
+        self.assertEqual(job["name"], "room wall authoring (${{ matrix.mode }}, ${{ matrix.os }})")
+        self.assertEqual(job["runs-on"], "${{ matrix.os }}")
+        self.assertEqual(job["timeout-minutes"], 90)
+        self.assertEqual(job["env"], {"PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(job["strategy"], {"fail-fast": False, "matrix": {"include": [
+            {"mode": mode, "os": os_name, "timeout": 60 if mode == "export" else 45}
+            for mode, os_name in (("cpu", "ubuntu-22.04"), ("cpu", "windows-latest"),
+                                  ("gpu", "ubuntu-22.04"), ("export", "ubuntu-22.04"))
+        ]}})
+        steps = job["steps"]
+        self.assertEqual(len(steps), 7)
+        for step, action in zip(steps[:3], ("actions/checkout@v4", "dtolnay/rust-toolchain@stable", "Swatinem/rust-cache@v2")):
+            self.assertEqual(step, {"uses": action})
+        self.assertEqual(steps[3], {
+            "name": "Install Room wall software Vulkan dependency", "if": "matrix.mode != 'cpu'",
+            "run": "sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers",
+        })
+        self.assertEqual(steps[4], {
+            "name": "Install Room wall namespace acceptance dependency", "if": "matrix.mode == 'export'",
+            "run": "sudo apt-get update -q && sudo apt-get install -y -q bubblewrap",
+        })
+        evidence = "${{ matrix.mode == 'export' && '/tmp' || runner.temp }}/orr-room-wall-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}"
+        self.assertEqual(steps[5], {
+            "name": "Required independent Room wall authoring acceptance", "shell": "bash",
+            "timeout-minutes": "${{ matrix.timeout }}", "env": {"ORR_ROOM_WALL_GATE_EVIDENCE": evidence},
+            "run": "unset PYTHONOPTIMIZE\npython -B tools/room_wall_gate.py ${{ matrix.mode }}\n",
+        })
+        self.assertEqual(steps[6], {
+            "name": "Retain Room wall and partial failure evidence", "if": "always()",
+            "uses": "actions/upload-artifact@v4", "with": {
+                "name": "room-wall-${{ matrix.mode }}-${{ matrix.os }}", "path": evidence,
+                "include-hidden-files": True, "if-no-files-found": "error", "retention-days": 7,
+            },
+        })
+        for name, other in self.jobs.items():
+            if name != "room-wall-authoring":
+                for step in other["steps"]:
+                    self.assertNotIn("tools/room_wall_gate.py", step.get("run", ""))
+
+    def test_room_wall_aggregate_is_independently_fail_closed(self):
+        step = self.wall_step
+        self.assertEqual(set(step), {"name", "if", "shell", "env", "run"})
+        self.assertEqual(step["if"], "always()")
+        self.assertEqual(step["name"], "Require every independent Room wall authoring matrix row to pass")
+        self.assertEqual(step["shell"], "bash")
+        self.assertEqual(step["env"], {"ROOM_WALL_RESULT": "${{ needs['room-wall-authoring'].result }}"})
+        syntax = subprocess.run(["bash", "-n"], input=step["run"], capture_output=True, text=True, check=False)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        names = (*RESULTS, "AUTHORING_RESULT", "ROOM_WALL_RESULT")
+        combined = self.step["run"] + "\n" + self.authoring_step["run"] + "\n" + step["run"]
+        for state in ("success", "failure", "cancelled", "skipped", "", "unknown", None):
+            env = {key: value for key, value in os.environ.items() if key not in names}
+            env.update({name: "success" for name in names if name != "ROOM_WALL_RESULT"})
+            if state is not None:
+                env["ROOM_WALL_RESULT"] = state
+            for script in (step["run"], combined):
+                with self.subTest(state=state, combined=script == combined):
+                    result = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                                            env=env, capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode == 0, state == "success", result.stdout + result.stderr)
+                    if state != "success":
+                        self.assertIn("::error::ROOM_WALL_RESULT must be success", result.stdout)
+                        self.assertNotIn("All four independent Room wall authoring routes passed", result.stdout)
+        # A successful Room wall result cannot rescue any failed inherited result.
+        # GitHub retains failure from earlier steps even though this step always runs.
+        for name in names[:-1]:
+            for state in ("failure", "cancelled", "skipped", "", "unknown", None):
+                env = {key: value for key, value in os.environ.items() if key not in names}
+                env.update({key: "success" for key in names if key != name})
+                if state is not None:
+                    env[name] = state
+                with self.subTest(failed_name=name, state=state):
+                    result = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", combined],
+                                            env=env, capture_output=True, text=True, check=False)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertNotIn("All four independent Room wall authoring routes passed", result.stdout)
 
     def test_actual_checksum_and_sample_runners_are_required(self):
         # There are no checksum artifacts. A green target proves determinism

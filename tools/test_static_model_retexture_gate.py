@@ -63,7 +63,7 @@ def workflow_contract(text):
     assert text.count(BYTECODE_SETUP) == 1, 'unique bytecode setup'
     assert sample.count('PYTHONDONTWRITEBYTECODE') == 1, 'inherited setting must not be overridden later'
     assert 'os: [ubuntu-22.04, windows-latest]' in header
-    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]' in aggregate
+    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in aggregate
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate, re.M) == ['${{ always() }}'], 'one failure-aware aggregate condition'
     prerequisites = {
         'gpu': "        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers\n",
@@ -690,7 +690,7 @@ class RetextureGateTests(unittest.TestCase):
 
     def test_workflow_preserves_required_room_and_aggregate(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
-        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]', 'needs: [native]'),
+        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
                          ('Required generated Room GPU and source-hidden production export', 'missing Room gate'),
                          ('  sample-room:\n', '  sample-room:\n    # static_model_retexture_gate.py forbidden\n'),
                          ('  sample-build:\n', '  sample-build:\n    if: false\n'),
