@@ -150,7 +150,7 @@ def workflow_contract(text):
         'Required generated Room GPU and source-hidden production export',
     ]:
         assert text.count('      - name: ' + marker + '\n') == 1
-    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room]' in text
+    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]' in text
     assert '    if: \u0024{{ always() }}\n' in text
 
 class StaticPropGateTests(unittest.TestCase):
@@ -580,13 +580,21 @@ class StaticPropGateTests(unittest.TestCase):
             ('run: python -B tools/static_model_extract_gate.py export', 'run: echo skipped'),
             ('Retain static prop CPU and partial failure evidence', 'missing retention'),
             ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]'),
-            ('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room]', 'needs: [native]'),
-            ('sudo apt-get update -q && sudo apt-get install -y -q bubblewrap', 'echo namespace skipped'),
+            ('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]', 'needs: [native]'),
+            ("      - name: Provision repository-hidden authored runtime proof\n"
+             "        if: runner.os == 'Linux'\n"
+             "        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap\n",
+             "      - name: Provision repository-hidden authored runtime proof\n"
+             "        if: runner.os == 'Linux'\n"
+             "        run: echo namespace skipped\n"),
             ("      - if: runner.os == 'Linux'\n        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers\n",
              "      - if: runner.os == 'Linux'\n        run: echo Vulkan skipped\n"),
         ]:
+            self.assertEqual(text.count(old), 1, 'mutation must select one intended workflow target')
+            changed = text.replace(old, new, 1)
+            self.assertNotEqual(changed, text)
             with self.subTest(old=old), self.assertRaises(AssertionError):
-                workflow_contract(text.replace(old, new, 1))
+                workflow_contract(changed)
         first = text.index('      - name: Required static prop source-hidden Room export acceptance\n')
         last = text.index('      - name: Mandatory authored runtime compositor readback\n', first)
         pair = text[first:last]
