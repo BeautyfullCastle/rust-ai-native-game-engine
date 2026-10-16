@@ -55,6 +55,8 @@ AUTHORING_JOB = '  static-model-authoring:\n    # Independent feature routes own
 AUTHORING_AGGREGATE_STEP = '      - name: Require every independent static authoring matrix row to pass\n        shell: bash\n        env:\n          AUTHORING_RESULT: ${{ needs[\'static-model-authoring\'].result }}\n        run: |\n          echo "AUTHORING_RESULT=$AUTHORING_RESULT"\n          if [[ "$AUTHORING_RESULT" != "success" ]]; then\n            echo "::error::AUTHORING_RESULT must be success, got \'$AUTHORING_RESULT\'"\n            exit 1\n          fi\n          echo "All eight independent static authoring routes passed."\n'
 
 
+ROOM_WALL_AGGREGATE_STEP = '      - name: Require every independent Room wall authoring matrix row to pass\n        if: always()\n        shell: bash\n        env:\n          ROOM_WALL_RESULT: ${{ needs[\'room-wall-authoring\'].result }}\n        run: |\n          echo "ROOM_WALL_RESULT=$ROOM_WALL_RESULT"\n          if [[ "$ROOM_WALL_RESULT" != "success" ]]; then\n            echo "::error::ROOM_WALL_RESULT must be success, got \'$ROOM_WALL_RESULT\'"\n            exit 1\n          fi\n          echo "All four independent Room wall authoring routes passed."\n'
+
 def workflow_contract(text):
     # Reuse the protected checker unchanged: its exact sample header is part
     # of the Room/RAW16 contract, even though this setup belongs to sample-build.
@@ -72,11 +74,12 @@ def workflow_contract(text):
     assert text.count(BYTECODE_SETUP) == 1, 'unique bytecode setup'
     assert sample.count('PYTHONDONTWRITEBYTECODE') == 1, 'inherited setting must not be overridden later'
     assert 'os: [ubuntu-22.04, windows-latest]' in header
-    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]' in aggregate
+    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in aggregate
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate, re.M) == ['${{ always() }}'], 'one failure-aware aggregate condition'
     authoring = workflow_job(text, 'static-model-authoring')
     assert authoring == AUTHORING_JOB, 'exact independent eight-row authoring matrix'
-    assert aggregate.endswith(AUTHORING_AGGREGATE_STEP), 'required fail-closed authoring result'
+    assert aggregate.endswith(AUTHORING_AGGREGATE_STEP + ROOM_WALL_AGGREGATE_STEP), 'required fail-closed authoring results'
+    assert aggregate.count(AUTHORING_AGGREGATE_STEP) == aggregate.count(ROOM_WALL_AGGREGATE_STEP) == 1
     assert text.count(AUTHORING_AGGREGATE_STEP) == 1, 'unique authoring result owner'
     assert 'static_model_uv_gate.py' not in sample and 'static_model_pivot_gate.py' not in sample
     assert 'Required static UV variant ' not in text, 'old serial UV routes must be relocated, not duplicated'
@@ -919,7 +922,7 @@ class UvGateTests(unittest.TestCase):
 
     def test_workflow_preserves_required_room_and_aggregate(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
-        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]', 'needs: [native]'),
+        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
                          ('Required generated Room GPU and source-hidden production export', 'missing Room gate'),
                          ('  sample-room:\n', '  sample-room:\n    # static_model_uv_gate.py forbidden\n'),
                          ('  sample-build:\n', '  sample-build:\n    if: false\n'),

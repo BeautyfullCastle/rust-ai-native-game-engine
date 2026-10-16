@@ -114,7 +114,7 @@ def workflow_contract(text):
     retention_binding_contract(acceptance, retention)
     aggregate = workflow_job(text, 'cross_platform_checksum_compare')
     aggregate_header = aggregate.split('    steps:\n', 1)[0]
-    expected_needs = '[native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]'
+    expected_needs = '[native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]'
     assert re.findall(r'^    needs:[ \t]*(.*)$', aggregate_header, re.M) == [expected_needs]
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate_header, re.M) == ['${{ always() }}']
     assert 'continue-on-error' not in aggregate_header
@@ -124,8 +124,10 @@ def workflow_contract(text):
     assert re.findall(r'^      - name: (.*)$', aggregate, re.M) == [
         'Require every checksum and sample runner to pass',
         'Require every independent static authoring matrix row to pass',
+        'Require every independent Room wall authoring matrix row to pass',
     ]
-    assert workflow_lines(result_marker+aggregate.split(result_marker, 1)[1]) == workflow_lines(authoring_result), 'required authoring aggregate result gate'
+    authoring_tail = aggregate.split(result_marker, 1)[1].split('      - name:', 1)[0]
+    assert workflow_lines(result_marker + authoring_tail) == workflow_lines(authoring_result), 'required authoring aggregate result gate'
 
 
 class PivotGateTests(unittest.TestCase):
@@ -655,7 +657,7 @@ class PivotGateTests(unittest.TestCase):
                 workflow_contract(text.replace(authoring,changed,1))
         aggregate = workflow_job(text,'cross_platform_checksum_compare')
         for label,old,new in [
-            ('missing dependency',', static-model-authoring]',']'),
+            ('missing dependency',', static-model-authoring, room-wall-authoring]',', room-wall-authoring]'),
             ('aggregate conditional','    if: ${{ always() }}','    if: false'),
             ('aggregate allowed failure','    runs-on:','    continue-on-error: true\n    runs-on:'),
             ('missing result gate','Require every independent static authoring matrix row to pass','missing authoring gate'),

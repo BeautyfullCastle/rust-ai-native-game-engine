@@ -33,10 +33,10 @@ NATIVE_HEADER = '''  native:
           - os: ubuntu-24.04-arm
             name: ubuntu-24.04-arm64
 '''
-# Exact aggregate with the seven-result inherited step unchanged and a separate
-# mandatory eight-row authoring matrix result. Pin both steps and dependency edges;
-# their actual Bash allowlists and failure states are tested separately.
-AGGREGATE_SHA256 = '288b682ea63349d107f289e9de26623356d82020310d3166194b40ede0c067c0'
+# Exact aggregate preserves the seven-result and eight-row authoring steps,
+# and adds the independent four-row Room wall result. Pin all three steps and
+# dependency edges; actual Bash failure states are tested separately.
+AGGREGATE_SHA256 = '735c422dec31a6070eb5c8cb84120bd47d07183585db086b58677455450aff8c'
 
 
 def listing(names):
@@ -341,8 +341,8 @@ class Raw16GateTests(unittest.TestCase):
                     workflow_contract(workflow.replace(upload, changed, 1))
         for old, new in [('ORR_RAW16_REQUIRE_SOFTWARE: "1"', 'ORR_RAW16_REQUIRE_SOFTWARE: "0"'),
                          ('needs: [native, wasm32', 'needs: [wasm32'),
-                         (', sample-room, static-model-authoring]', ', static-model-authoring]'),
-                         (', static-model-authoring]', ']'),
+                         (', sample-room, static-model-authoring, room-wall-authoring]', ', static-model-authoring, room-wall-authoring]'),
+                         (', static-model-authoring, room-wall-authoring]', ', room-wall-authoring]'),
                          ("          AUTHORING_RESULT: ${{ needs['static-model-authoring'].result }}\n", ''),
                          ('      - name: Require every independent static authoring matrix row to pass\n', '      - name: Require every independent static authoring matrix row to pass\n        if: false\n'),
                          ('[[ \"$AUTHORING_RESULT\" != \"success\" ]]', '[[ \"$AUTHORING_RESULT\" == \"success\" ]]'),
@@ -353,8 +353,12 @@ class Raw16GateTests(unittest.TestCase):
                          ('    runs-on: ${{ matrix.os }}\n', '    runs-on: ubuntu-latest\n'),
                          ('        include:\n', '        exclude:\n          - os: windows-latest\n        include:\n'),
                          ('            name: ubuntu-24.04-arm64\n', '            name: ubuntu-24.04-arm64\n          - os: ubuntu-22.04\n            name: extra\n')]:
-            with self.subTest(old=old), self.assertRaises(AssertionError):
-                workflow_contract(workflow.replace(old, new, 1))
+            with self.subTest(old=old):
+                self.assertIn(old, workflow, 'negative-control target must exist')
+                changed = workflow.replace(old, new, 1)
+                self.assertNotEqual(changed, workflow, 'negative control must change input')
+                with self.assertRaises(AssertionError):
+                    workflow_contract(changed)
 
         aggregate = section(workflow, '  cross_platform_checksum_compare:', 2)
         for changed in (aggregate.replace('          failed=0', '          exit 0\n          failed=0', 1),

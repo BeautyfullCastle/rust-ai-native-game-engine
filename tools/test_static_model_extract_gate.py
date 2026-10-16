@@ -150,7 +150,7 @@ def workflow_contract(text):
         'Required generated Room GPU and source-hidden production export',
     ]:
         assert text.count('      - name: ' + marker + '\n') == 1
-    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]' in text
+    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in text
     assert '    if: \u0024{{ always() }}\n' in text
 
 class StaticPropGateTests(unittest.TestCase):
@@ -580,7 +580,7 @@ class StaticPropGateTests(unittest.TestCase):
             ('run: python -B tools/static_model_extract_gate.py export', 'run: echo skipped'),
             ('Retain static prop CPU and partial failure evidence', 'missing retention'),
             ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]'),
-            ('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring]', 'needs: [native]'),
+            ('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
             ("      - name: Provision repository-hidden authored runtime proof\n"
              "        if: runner.os == 'Linux'\n"
              "        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap\n",
