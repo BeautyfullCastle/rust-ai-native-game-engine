@@ -227,6 +227,8 @@ pub struct EditorApp {
     pub windows_projects: crate::windows_project_panel::Panel,
     #[cfg(feature="room-authoring")]
     pub room_authoring: crate::room_authoring_panel::Panel,
+    #[cfg(feature="package-manager")]
+    pub package_manager: crate::package_manager_panel::Panel,
     shot: Option<ScreenshotJob>,
     remote_capture: Option<RemoteCapture>,
     encoder: Option<EncoderWorker>,
@@ -251,11 +253,80 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+    }
+
+    #[cfg(feature="package-manager")]
+    fn package_manager_root(&self) -> Option<PathBuf> {
+        if !self.editor.game().is_room() || !self.editor.spec().is_local() { return None; }
+        let scene = self.editor.path()?;
+        scene.parent()?.ancestors().take(16)
+            .find(|root| root.join("orr.project.json").is_file()).map(|root|root.to_path_buf())
+    }
+
+    #[cfg(feature="package-manager")]
+    fn package_manager_blocker(&self) -> Option<String> {
+        if !self.editor.game().is_room() || !self.editor.spec().is_local()
+            || self.editor.mode() != Mode::Edit || !self.editor.can_mutate()
+            || self.editor.previewing().is_some() || self.editor.in_gesture()
+            || self.editor.history().in_tx || self.editor.sim().in_tx {
+            return Some("Content packages require an idle editable local Room project".into());
+        }
+        if self.editor.is_dirty() || self.models.bindings.as_ref().is_some_and(|bindings| bindings.dirty())
+            || self.room_camera.as_ref().is_some_and(|camera| camera.dirty()) {
+            return Some("Save the scene and model/camera sidecars before managing packages".into());
+        }
+        if self.shot.is_some() || self.remote_capture.is_some() || self.encoder.is_some() || self.ui.dialog.is_some() {
+            return Some("Finish capture and path dialogs before managing packages".into());
+        }
+        #[cfg(all(windows,target_arch="x86_64",feature="windows-export"))]
+        if self.windows_export.open || self.windows_export.busy() {
+            return Some("Close the Windows export window before managing packages".into());
+        }
+        #[cfg(all(windows,target_arch="x86_64",feature="windows-projects"))]
+        if self.windows_projects.busy() {
+            return Some("Finish project creation/opening before managing packages".into());
+        }
+        None
+    }
+
+    #[cfg(feature="package-manager")]
+    fn package_model_request(&mut self) {
+        let Some((package,asset)) = self.package_manager.take_model_request() else { return };
+        let result = (|| -> Result<(),String> {
+            if let Some(blocked) = self.package_manager_blocker() { return Err(blocked); }
+            let root = self.package_manager_root().ok_or("No current Room project")?;
+            let guid = self.editor.selected_guid().ok_or("Select a persistent entity before assigning a package model")?;
+            let transform = self.models.bindings.as_ref()
+                .and_then(|bindings|bindings.document().bindings.get(&guid.to_string()))
+                .map(|binding|binding.transform).unwrap_or_default();
+            self.models.project = root.display().to_string();
+            self.models.package = package.clone();
+            self.models.asset = asset.clone();
+            self.models.kind = orr_model_bindings::model_bindings::ModelKind::Static;
+            self.models.transform = transform;
+            self.models.load_candidate(&self.editor)?;
+            self.models.assign(&self.editor)
+        })();
+        self.package_manager.status = match result {
+            Ok(()) => format!("Assigned verified static model {package}/{asset}. Save model bindings in the inspector to persist it."),
+            Err(error) => format!("Package model was not assigned: {error}"),
+        };
+    }
+
+    fn package_work_pending(&self) -> bool {
+        #[cfg(feature="package-manager")]
+        { self.package_manager.busy() }
+        #[cfg(not(feature="package-manager"))]
+        { false }
     }
 
     #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
     fn windows_project_blocker(&self) -> Option<String> {
+        #[cfg(feature="package-manager")]
+        if self.package_manager.busy() {
+            return Some("Finish the content package operation before changing projects".into());
+        }
         if !self.editor.game().is_room() || !self.editor.spec().is_local()
             || self.editor.mode() != Mode::Edit || !self.editor.can_mutate()
             || self.editor.previewing().is_some() || self.editor.in_gesture() {
@@ -443,6 +514,13 @@ impl eframe::App for EditorApp {
             self.ui.body_drag = None;
         }
         self.dialogs(&ctx);
+        #[cfg(feature="package-manager")]
+        if self.editor.game().is_room() {
+            let root = self.package_manager_root();
+            let blocked = self.package_manager_blocker();
+            self.package_manager.show(&ctx,root.as_deref(),blocked.as_deref());
+            self.package_model_request();
+        }
         #[cfg(feature="room-authoring")]
         if self.editor.game().is_room() { self.room_authoring.show(&ctx, &mut self.editor); }
         #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
@@ -545,7 +623,7 @@ impl EditorApp {
                     self.ui.dialog = Some(Dialog { kind: DialogKind::NewMesh, text: String::new() });
                     ui.close();
                 }
-                if ui.button("Open scene\u{2026}").clicked() {
+                if ui.add_enabled(!self.package_work_pending(), egui::Button::new("Open scene\u{2026}")).clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::Open, text });
                     ui.close();
@@ -554,7 +632,7 @@ impl EditorApp {
                     self.save();
                     ui.close();
                 }
-                if ui.button("Save As\u{2026}").clicked() {
+                if ui.add_enabled(!self.package_work_pending(), egui::Button::new("Save As\u{2026}")).clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::SaveAs, text });
                     ui.close();
@@ -564,8 +642,13 @@ impl EditorApp {
                     self.room_authoring.open = true;
                     ui.close();
                 }
+                #[cfg(feature="package-manager")]
+                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Content packages\u{2026}")).clicked() {
+                    self.package_manager.open = true;
+                    ui.close();
+                }
                 #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
-                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Export Windows game\u{2026}")).clicked() {
+                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local() && !self.package_work_pending(), egui::Button::new("Export Windows game\u{2026}")).clicked() {
                     self.windows_export.use_current_scene(self.editor.path().as_deref());
                     self.windows_export.open = true;
                     ui.close();

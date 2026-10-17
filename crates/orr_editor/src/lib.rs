@@ -125,6 +125,10 @@ pub mod windows_export_panel;
 pub mod windows_project_panel;
 #[cfg(feature="room-authoring")]
 pub mod room_authoring_panel;
+#[cfg(feature="package-manager")]
+pub mod package_manager;
+#[cfg(feature="package-manager")]
+pub mod package_manager_panel;
 
 #[cfg(feature = "project-ui")]
 pub mod project_ui;
