@@ -59,11 +59,12 @@ pub struct Panel {
     preview: Option<PreviewedPlan>,
     model_request: Option<ModelRequest>,
     pending: Option<Receiver<Completion>>,
+    model_import: crate::model_package_import_panel::Panel,
 }
 
 impl Panel {
     pub fn busy(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.model_import.busy()
     }
 
     pub fn take_model_request(&mut self) -> Option<(String, String)> {
@@ -98,6 +99,25 @@ impl Panel {
         self.select_project(project);
         self.select_source();
         self.poll();
+        let import_was_busy = self.model_import.busy();
+        let import_report = self.model_import.poll(
+            self.root.as_deref(),
+            self.project_generation,
+            self.source_generation,
+        );
+        if import_was_busy && !self.model_import.busy() {
+            self.status = self.model_import.status().to_owned();
+        }
+        if let Some(report) = import_report {
+            self.source = report.root.display().to_string();
+            self.select_source();
+            self.preview = None;
+            self.model_request = None;
+            self.status = format!(
+                "Imported raw package {}/{}; not installed or assigned. Preview and add it explicitly. Source SHA-256: {}; license SHA-256: {}.",
+                report.package, report.asset, report.source_sha256, report.license_sha256
+            );
+        }
         if !self.open {
             return;
         }
@@ -107,6 +127,7 @@ impl Panel {
             .open(&mut open)
             .default_width(700.0)
             .default_pos(egui::pos2(250.0, 350.0))
+            .vscroll(true)
             .show(context, |ui| {
                 ui.label("Manage validated local content packages for the current Room project.");
                 if let Some(root) = &self.root {
@@ -167,6 +188,16 @@ impl Panel {
                         self.start_add();
                     }
                 });
+                self.model_import.show(
+                    ui,
+                    can_operate,
+                    self.root.as_deref(),
+                    self.project_generation,
+                    self.source_generation,
+                );
+                if !self.model_import.status().is_empty() {
+                    ui.label(self.model_import.status());
+                }
                 if self.busy() {
                     ui.spinner();
                     context.request_repaint_after(std::time::Duration::from_millis(40));

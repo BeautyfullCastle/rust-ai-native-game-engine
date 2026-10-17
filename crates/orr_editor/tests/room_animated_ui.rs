@@ -7,7 +7,10 @@
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
 use egui::accesskit::Role;
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 use egui_wgpu::{wgpu, WgpuSetupCreateNew};
 use orr_editor::{
     editor::Mode,
@@ -142,14 +145,14 @@ fn wait_for(
 fn click(harness: &mut Harness<'_, EditorApp>, label: &str) {
     harness.get_by_label(label).scroll_to_me();
     harness.run_steps(2);
-    harness.get_by_label(label).click();
+    harness.get_by_label(label).click_accesskit();
     settle(harness);
 }
 
 fn click_role(harness: &mut Harness<'_, EditorApp>, role: Role, label: &str) {
     harness.get_by_role_and_label(role, label).scroll_to_me();
     harness.run_steps(2);
-    harness.get_by_role_and_label(role, label).click();
+    harness.get_by_role_and_label(role, label).click_accesskit();
     settle(harness);
 }
 
@@ -451,9 +454,19 @@ fn room_animated_package_ui_save_reopen_playback_and_export() {
         .editor
         .select(Some(orr_editor::Target::Guid(player.clone())));
     settle(&mut harness);
+    assert!(!harness
+        .get_by_label("Use animated model sample-animation/animated.glb")
+        .accesskit_node()
+        .is_disabled());
     click(
         &mut harness,
         "Use animated model sample-animation/animated.glb",
+    );
+    assert!(
+        harness.state().models.error().is_none(),
+        "animated model request refused: {:?}; package status: {}",
+        harness.state().models.error(),
+        harness.state().package_manager.status
     );
     wait_for(&mut harness, "animated Room PLAYER binding", |app| {
         player_binding(app, &player).is_some_and(|binding| {

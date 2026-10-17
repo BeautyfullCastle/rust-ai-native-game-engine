@@ -127,6 +127,10 @@ pub mod windows_project_panel;
 pub mod room_authoring_panel;
 #[cfg(feature="package-manager")]
 pub mod package_manager;
+#[cfg(feature = "package-manager")]
+mod model_package_import;
+#[cfg(feature = "package-manager")]
+mod model_package_import_panel;
 #[cfg(feature="package-manager")]
 pub mod package_manager_panel;
 

@@ -255,7 +255,7 @@ fn validate_addition(
     Ok(())
 }
 
-fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
     let text = path
         .to_str()
         .ok_or_else(|| format!("{label} path must be Unicode"))?;
