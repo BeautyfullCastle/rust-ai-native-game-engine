@@ -1,6 +1,6 @@
 #![cfg(all(windows, feature = "project-create", feature = "room-project"))]
 
-#[path = "../examples/room_create_windows/authoring.rs"]
+#[path = "../src/windows_room/authoring.rs"]
 mod authoring;
 
 use orr_ecs::Frame;

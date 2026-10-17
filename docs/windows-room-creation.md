@@ -1,15 +1,24 @@
 # Create a Room project on Windows
 
-The optional `room_create_windows` example creates a new, admitted flat-room
-project using the existing Room simulation, content package manager, static
-model bindings and camera. It creates seven actors and two model bindings. The
-created directory opens in the existing Room-enabled editor and runtime.
+The `orr_new_room` production CLI creates a new, admitted flat-room project
+using the existing Room simulation, content package manager, static model
+bindings and camera. It creates seven actors and two model bindings. The created
+directory opens in the existing Room-enabled editor and runtime.
+
+```powershell
+cargo build --locked --release -p orr_sample --no-default-features --features project-create,room-project --bin orr_new_room
+.\target\release\orr_new_room.exe --output 'C:\Games\New Room Ω' --seed room-01
+orr_editor --room-project 'C:\Games\New Room Ω'
+room_escape --project 'C:\Games\New Room Ω'
+```
+
+The older `room_create_windows` example remains as a compatibility entry point;
+it delegates to the same creator implementation. To build and run that example
+explicitly:
 
 ```powershell
 cargo build --locked --release -p orr_sample --no-default-features --features project-create,room-project --example room_create_windows
 .\target\release\examples\room_create_windows.exe --output C:\Games\NewRoom --seed room-01
-orr_editor --room-project C:\Games\NewRoom
-room_escape --project C:\Games\NewRoom
 ```
 
 Both `--output` and `--seed` are required exactly once. `--help` prints usage on
@@ -44,6 +53,7 @@ when opening staged files. Files use Windows default access control; Unix mode
 ## Verify the creator
 
 ```powershell
+cargo test --locked --release -p orr_sample --no-default-features --features project-create,room-project --test room_creator_cli -- --test-threads=1
 cargo test --locked --release -p orr_sample --no-default-features --features project-create,room-project --test room_create_windows -- --test-threads=1
 $env:ORR_WINDOWS_ROOM_CREATOR = (Resolve-Path .\target\release\examples\room_create_windows.exe).Path
 New-Item -ItemType Directory C:\Evidence\NewRoomCreation
@@ -63,10 +73,11 @@ at ticks 0, 20, 21, 62 and 63 for comparison with the same actual editor inputs.
 Native editor and renderer checks must also be run explicitly before claiming
 their acceptance.
 
-This private example is separate from the existing Linux-only public creator.
-The shared creator, CLI, Cargo and library files retain their current ownership;
-this increment adds no public API, dependency, schema or default feature. The
-example fails before opening a project on other targets or without both features.
+This Windows command is separate from the existing Linux-only public creator.
+The shared Linux creator, CLI, Cargo and library files retain their ownership;
+this increment adds no public library API, dependency, schema or default feature.
+The command and compatibility example fail before opening a project on other
+targets or without both features.
 The Room profile has no new HUD, checkpoint, skinning or progress support here.
 
 The production folder exporter remains Linux x86-64-only. Creating and playing a

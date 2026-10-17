@@ -5,7 +5,7 @@ use std::{
     path::{Component, Path, PathBuf, Prefix},
 };
 
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400u32;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_UNITS: usize = 32_760;
