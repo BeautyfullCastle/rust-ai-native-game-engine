@@ -121,6 +121,9 @@ pub mod terrain_yard3d;
 #[cfg(feature = "navigation")]
 pub mod navigation_yard3d;
 
+#[cfg(feature = "mesh-navigation")]
+pub mod mesh_navigation;
+
 #[cfg(feature = "collect-dodge")]
 pub mod collect_dodge;
 

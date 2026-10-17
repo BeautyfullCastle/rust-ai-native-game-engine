@@ -4,6 +4,8 @@ use orr_sample::{
     room_camera::{Document, Projection},
     room_project::PreparedRoomCamera,
 };
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::{
     fs::{File, Metadata},
     io::{Read, Write},
@@ -41,18 +43,62 @@ struct RootPin {
 impl RootPin {
     fn new(parent: &Path) -> Result<Self, String> {
         let path = checked_directory(parent)?;
-        let directory = File::open(&path).map_err(|e| e.to_string())?;
+        let directory = open_directory(&path)?;
         Ok(Self { path, directory })
     }
     fn recheck(&self, path: &Path) -> Result<(), String> {
         let current = checked_directory(path.parent().unwrap_or(Path::new(".")))?;
         let metadata = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
         let pinned = self.directory.metadata().map_err(|e| e.to_string())?;
-        if current != self.path || !same_directory(&metadata, &pinned) {
+        if current != self.path
+            || !is_safe_directory(&metadata)
+            || !is_safe_directory(&pinned)
+            || !same_directory(&metadata, &pinned)
+        {
             return Err("Camera project directory changed; reopen before saving".into());
         }
         Ok(())
     }
+}
+#[cfg(windows)]
+fn open_directory(path: &Path) -> Result<File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    let metadata = directory.metadata().map_err(|error| error.to_string())?;
+    if !is_safe_directory(&metadata) {
+        return Err("Camera project root must be a regular non-reparse directory".into());
+    }
+    Ok(directory)
+}
+#[cfg(not(windows))]
+fn open_directory(path: &Path) -> Result<File, String> {
+    let directory = File::open(path).map_err(|error| error.to_string())?;
+    if !directory
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_dir()
+    {
+        return Err("Camera project root must be a directory".into());
+    }
+    Ok(directory)
+}
+#[cfg(windows)]
+fn is_safe_directory(metadata: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    metadata.is_dir() && metadata.file_attributes() & 0x0400 == 0
+}
+#[cfg(not(windows))]
+fn is_safe_directory(metadata: &Metadata) -> bool {
+    metadata.is_dir()
 }
 #[cfg(unix)]
 fn same_directory(a: &Metadata, b: &Metadata) -> bool {
@@ -115,6 +161,9 @@ impl Panel {
     }
     pub fn document(&self) -> &Document {
         &self.document
+    }
+    pub fn dirty(&self) -> bool {
+        self.document != self.saved || self.candidate != self.document
     }
     pub fn apply_document(&mut self, candidate: Document) -> Result<(), String> {
         // Serialization performs shared validation before any mutation.
@@ -180,7 +229,7 @@ impl Panel {
     pub fn show(&mut self, ui: &mut egui::Ui, editable: bool) -> bool {
         let mut reset_live = false;
         ui.collapsing("Room camera", |ui| {
-            ui.label(if self.document != self.saved {
+            ui.label(if self.dirty() {
                 "Camera (unsaved)"
             } else {
                 "Camera saved"
@@ -289,7 +338,7 @@ mod tests {
     }
     #[test]
     fn widgets_stage_apply_undo_save_reopen() {
-        use egui_kittest::{Harness, kittest::Queryable};
+        use egui_kittest::{kittest::Queryable, Harness};
         let (_dir, prepared) = fixture();
         let original = prepared.document.clone();
         let path = prepared.path.clone();
@@ -347,7 +396,7 @@ mod tests {
     }
     #[test]
     fn invalid_widget_apply_preserves_document_and_reset_is_explicit() {
-        use egui_kittest::{Harness, kittest::Queryable};
+        use egui_kittest::{kittest::Queryable, Harness};
         let (_dir, prepared) = fixture();
         let original = prepared.document.clone();
         let mut panel = Panel::new(prepared);
@@ -391,6 +440,34 @@ mod tests {
             panel.apply_document(candidate).unwrap();
         }
         assert_eq!(panel.undo.len(), MAX_UNDO);
+    }
+    #[test]
+    fn dirty_tracks_staged_applied_undo_and_saved_camera_values() {
+        let (_dir, prepared) = fixture();
+        let mut panel = Panel::new(prepared);
+        assert!(!panel.dirty());
+
+        panel.candidate.target[0] += 1.0;
+        assert!(panel.dirty());
+        panel.candidate = panel.document.clone();
+        assert!(!panel.dirty());
+
+        let mut changed = panel.document.clone();
+        changed.target[0] += 1.0;
+        panel.apply_document(changed).unwrap();
+        assert!(panel.dirty());
+        assert!(panel.undo());
+        assert!(!panel.dirty());
+
+        let mut changed = panel.document.clone();
+        changed.target[0] += 1.0;
+        panel.apply_document(changed).unwrap();
+        assert!(panel.dirty());
+        panel.save().unwrap();
+        assert!(!panel.dirty());
+
+        panel.candidate.target[1] += 1.0;
+        assert!(panel.dirty());
     }
     #[test]
     fn external_exact_byte_edits_and_nonregular_targets_refuse_save() {
@@ -538,7 +615,7 @@ mod tests {
     }
     #[test]
     fn play_widgets_cannot_apply_or_save_staged_values() {
-        use egui_kittest::{Harness, kittest::Queryable};
+        use egui_kittest::{kittest::Queryable, Harness};
         let (_dir, prepared) = fixture();
         let original = prepared.document.clone();
         let path = prepared.path.clone();

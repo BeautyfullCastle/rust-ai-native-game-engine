@@ -53,6 +53,14 @@ use crate::backend::{Backend, HostSpec};
 use crate::diagnostics::{EditorDiagnostics, Telemetry};
 use crate::model::{ClientInfo, EntityRow, GuidSelection, History, ProposalDetail, ProposalInfo, SimState, Stopped, Target};
 pub use crate::model::Mode;
+#[cfg(feature="room-authoring")]
+#[path="room_authoring.rs"]
+mod room_authoring;
+#[cfg(feature="room-authoring")]
+pub(crate) use room_authoring::RoomWall;
+#[cfg(all(test, windows, target_arch="x86_64", feature="windows-projects"))]
+#[path="editor/room_wall_tests.rs"]
+mod room_wall_tests;
 use crate::viewport::{self, Scene};
 
 /// Most entities one hierarchy refresh asks for.
@@ -210,6 +218,10 @@ pub struct Editor {
     navigation_view: crate::navigation_view::NavigationView,
     #[cfg(feature = "navigation")]
     navigation_blocker: Option<String>,
+    #[cfg(feature = "mesh-navigation")]
+    mesh_navigation_blocker: Option<String>,
+    #[cfg(feature = "mesh-navigation")]
+    scene_load_epoch: u64,
     status: Option<Message>,
     log: Vec<Message>,
     // caches of host answers
@@ -252,6 +264,12 @@ pub struct Editor {
     feed: Feed,
     agent_clients: BTreeMap<String, ErpClient>,
     script_owner: BTreeMap<String, String>,
+}
+
+#[cfg(feature = "mesh-navigation")]
+fn next_scene_load_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Editor {
@@ -324,6 +342,10 @@ impl Editor {
             navigation_view: crate::navigation_view::NavigationView::default(),
             #[cfg(feature = "navigation")]
             navigation_blocker: None,
+            #[cfg(feature = "mesh-navigation")]
+            mesh_navigation_blocker: None,
+            #[cfg(feature = "mesh-navigation")]
+            scene_load_epoch: next_scene_load_epoch(),
             status: None,
             log: Vec::new(),
             sim: SimState::default(),
@@ -857,6 +879,26 @@ impl Editor {
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
+        #[cfg(feature = "mesh-navigation")]
+        if self.game().is_mesh_navigation() {
+            if let Some(view) = self.snapshot.as_ref().and_then(|snapshot| {
+                orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).ok()
+            }) {
+                let mut low = [f32::INFINITY; 3];
+                let mut high = [f32::NEG_INFINITY; 3];
+                for point in view.graph.vertices().iter().copied().chain([view.agent.spec.start, view.agent.spec.goal]) {
+                    for axis in 0..3 {
+                        let value = point[axis].to_f32();
+                        low[axis] = low[axis].min(value);
+                        high[axis] = high[axis].max(value);
+                    }
+                }
+                let center = std::array::from_fn(|axis| (low[axis] + high[axis]) * 0.5);
+                let extent = (0..3).map(|axis| high[axis] - low[axis]).fold(0.0_f32, f32::max);
+                self.camera3d = orr_render::OrbitCamera::new(center, 0.55, 0.5, (extent * 1.8).max(2.0));
+            }
+            return;
+        }
         if self.game().is_room() {
             #[cfg(feature="room-project")] if self.has_room_camera() { self.reset_room_camera(); return; }
         }
@@ -1310,7 +1352,11 @@ impl Editor {
         let frame = s.predicted();
         self.bodies = self.backend.game.drawables(frame);
         if self.game().is_3d() {
-            self.yard_frame = crate::viewport3d::YardFrame::extract(frame);
+            self.yard_frame = if self.game().is_mesh_navigation() {
+                crate::viewport3d::YardFrame::default()
+            } else {
+                crate::viewport3d::YardFrame::extract(frame)
+            };
             #[cfg(feature = "room-project")]
             if self.game().is_room() {
                 self.yard_frame.items = orr_sample::room_view::items(frame);
@@ -1349,7 +1395,7 @@ impl Editor {
         }
         if self.initial_camera_fit {
             self.initial_camera_fit = false;
-            if self.game().has_keyboard() { self.fit_camera(); }
+            if self.game().has_keyboard() || self.game().is_mesh_navigation() { self.fit_camera(); }
         }
     }
 
@@ -1519,6 +1565,71 @@ impl Editor {
         self.ingest();
     }
 
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_workspace_source_stamp(
+        &mut self,
+    ) -> Result<(EditorGame, PathBuf, u64), String> {
+        let game = self.game();
+        if !matches!(game, EditorGame::PhysGame | EditorGame::MeshNavigation)
+            || !self.spec().is_local()
+            || self.erp_status().is_some()
+            || !self.can_mutate()
+            || self.mode() != Mode::Edit
+            || self.previewing().is_some()
+            || self.gesture.busy()
+            || self.batch_uncertain
+            || self.history.in_tx
+            || self.sim.in_tx
+            || self
+                .pending
+                .values()
+                .any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..)))
+        {
+            return Err(
+                "Mesh workspace changes require an idle local PhysGame or MeshNavigation editor in Edit mode without an ERP listener"
+                    .into(),
+            );
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false)
+        {
+            return Err(
+                "Save the scene and finish transactions before changing mesh workspaces".into(),
+            );
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals
+            .get("proposals")
+            .and_then(J::as_array)
+            .is_none_or(|open| !open.is_empty())
+        {
+            return Err("Resolve open proposals before changing mesh workspaces".into());
+        }
+        let path = state
+            .get("scene_path")
+            .and_then(J::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .ok_or("Save the current scene before changing mesh workspaces")?;
+        let checksum = state
+            .get("checksum")
+            .and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.predicted().checksum() != checksum)
+        {
+            return Err(
+                "Wait for the current authoritative Frame before changing mesh workspaces".into(),
+            );
+        }
+        Ok((game, path, checksum))
+    }
+
     /// Waits (briefly) until the staged frame of the previewed proposal and its entities have arrived.
     fn wait_preview(&mut self) {
         let end = Instant::now() + Duration::from_secs(3);
@@ -1535,6 +1646,97 @@ impl Editor {
     }
 
     // ---- files ----
+
+    #[cfg(all(windows, target_arch = "x86_64", feature = "windows-export"))]
+    pub(crate) fn windows_export_scene(&mut self) -> Result<(PathBuf, u64), String> {
+        if !self.game().is_room() || !self.spec().is_local() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some() || self.gesture.busy()
+            || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            return Err("Export requires an idle local Room editor in Edit mode".into());
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            return Err("Save the scene and finish transactions before exporting".into());
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            return Err("Resolve open proposals before exporting".into());
+        }
+        let path = state.get("scene_path").and_then(J::as_str).filter(|path| !path.is_empty())
+            .map(PathBuf::from).ok_or("Save the current scene before exporting")?;
+        let checksum = state.get("checksum").and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        Ok((path, checksum))
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64", feature = "windows-projects"))]
+    pub(crate) fn windows_project_source_stamp(&mut self) -> Result<(PathBuf, u64), String> {
+        if self.game().is_room() {
+            return self.windows_export_scene();
+        }
+        if self.game() != EditorGame::PhysGame || !self.spec().is_local()
+            || self.erp_status().is_some() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some() || self.gesture.busy()
+            || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            return Err("Project creation requires an idle local PhysGame editor in Edit mode without an ERP listener".into());
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            return Err("Save the scene and finish transactions before creating a project".into());
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            return Err("Resolve open proposals before creating a project".into());
+        }
+        let path = state.get("scene_path").and_then(J::as_str).filter(|path| !path.is_empty())
+            .map(PathBuf::from).ok_or("Save the current scene before creating a project")?;
+        let checksum = state.get("checksum").and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        Ok((path, checksum))
+    }
+
+    #[cfg(feature = "mesh-navigation")]
+    pub fn create_mesh_scene(&mut self, path: &Path) -> bool {
+        if !self.game().is_mesh_navigation() || !self.spec().is_local() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some()
+            || self.gesture.busy() || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            self.error("New mesh scenes require an idle local MeshNavigation editor in Edit mode");
+            return false;
+        }
+        let state = match self.call("sim.state", J::Null) {
+            Ok(state) => state,
+            Err(error) => { self.error(error); return false; }
+        };
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            self.error("Save the current scene and finish transactions before creating a new mesh scene");
+            return false;
+        }
+        let proposals = match self.call("proposal.list", J::Null) {
+            Ok(proposals) => proposals,
+            Err(error) => { self.error(error); return false; }
+        };
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            self.error("Resolve open proposals before creating a new mesh scene");
+            return false;
+        }
+        if let Err(error) = crate::mesh_scene::create(path) {
+            self.error(format!("cannot create {}: {error}", path.display()));
+            return false;
+        }
+        self.open_path(path)
+    }
 
     /// Replaces the document with a scene file. Refused in play mode.
     pub fn open_path(&mut self, path: &Path) -> bool {
@@ -1559,10 +1761,12 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
+                #[cfg(feature = "mesh-navigation")]
+                { self.scene_load_epoch = next_scene_load_epoch(); }
                 self.clear_room_camera();
                 self.select(None);
                 self.refit = true;
-                if self.game() == EditorGame::Arena {
+                if self.game() == EditorGame::Arena || self.game().is_mesh_navigation() {
                     self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
                 }
                 self.backend.spec.set_local_scene_path(path.to_path_buf());
@@ -1887,6 +2091,13 @@ impl Editor {
     #[cfg(feature = "navigation")]
     pub fn set_navigation_blocker(&mut self, blocker: Option<String>) { self.navigation_blocker = blocker; }
 
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
+    #[cfg(feature = "mesh-navigation")]
+    pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
+
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
         document.validate()?;
@@ -1945,7 +2156,7 @@ impl Editor {
 
     /// Creates a persisted Yard3D box, or a sphere in the admitted terrain game.
     pub fn spawn_yard_body(&mut self, pos: orr_fp::FPVec3) -> bool {
-        if self.game().is_navigation() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
+        if self.game().is_navigation() || self.game().is_mesh_navigation() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
         if !self.game().is_3d() || self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
             self.error("Yard bodies require editable Yard3D scene mode"); return false;
         }
@@ -2131,6 +2342,10 @@ impl Editor {
 
     /// Deletes the selected entity. Refusals (something still points at it) are reported.
     pub fn delete_selected(&mut self) -> bool {
+        if self.game().is_room() {
+            self.error("Use Room level authoring to remove a wall with admission and model-binding checks; required Room actors cannot be deleted here");
+            return false;
+        }
         let Some(t) = self.selection.clone() else {
             self.error("nothing selected");
             return false;
@@ -2374,6 +2589,19 @@ impl Editor {
     /// Starts a play session from the scene, paused at tick 0. Does nothing
     /// if one already runs.
     pub fn start_play(&mut self) -> bool {
+        #[cfg(feature = "mesh-navigation")]
+        if self.game().is_mesh_navigation() && self.sim.mode != Mode::Play {
+            let blocker = self.mesh_navigation_blocker.clone().or_else(|| {
+                if !self.proposals().is_empty() {
+                    return Some("Resolve open proposals before Play".into());
+                }
+                match self.snapshot.as_ref() {
+                    Some(snapshot) => orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).err(),
+                    None => Some("Wait for an admitted mesh agent before Play".into()),
+                }
+            });
+            if let Some(error) = blocker { self.error(error); return false; }
+        }
         #[cfg(feature = "navigation")]
         if self.game().is_navigation() && self.sim.mode != Mode::Play {
             let blocker = self.navigation_blocker.clone().or_else(|| {
@@ -2636,6 +2864,10 @@ mod gesture_tests;
 mod input_tests;
 #[cfg(test)]
 mod multi_selection_tests;
+
+#[cfg(all(test, windows, target_arch = "x86_64", feature = "windows-projects"))]
+#[path = "editor/windows_project_stamp_tests.rs"]
+mod windows_project_stamp_tests;
 
 #[cfg(test)]
 mod tick_state_refresh_tests {

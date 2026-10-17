@@ -7,7 +7,7 @@ use crate::{
     game::EditorGame,
     model::Mode,
 };
-use egui::{Color32, Ui};
+use egui::{Color32, PointerButton, Response, Sense, TextureId, Ui, Vec2};
 use orr_reflect::Guid;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -16,6 +16,85 @@ use std::{
 
 const MAX_LOADED: usize = 8;
 type AssetKey = (String, String);
+
+pub fn preview_camera_image(
+    ui: &mut Ui,
+    texture: TextureId,
+    desired: Vec2,
+    camera: &mut crate::animated_preview::PreviewCamera,
+) -> Response {
+    let response = ui.add(egui::Image::new((texture, desired)).sense(Sense::click_and_drag()));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Image,
+            true,
+            "Animated model preview camera",
+        )
+    });
+    let orbiting = response.dragged_by(PointerButton::Primary);
+    let panning =
+        response.dragged_by(PointerButton::Secondary) || response.dragged_by(PointerButton::Middle);
+    let mut changed = false;
+    if orbiting || panning {
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        let delta = ui.input(|input| input.pointer.delta()) * pixels_per_point;
+        let drag = [delta.x, delta.y];
+        let viewport = [desired.x * pixels_per_point, desired.y * pixels_per_point];
+        if orbiting {
+            changed |= camera.orbit(drag);
+        }
+        if panning {
+            changed |= camera.pan(drag, viewport);
+        }
+    }
+    if response.hovered() {
+        let line_speed = ui
+            .ctx()
+            .options(|options| options.input_options.line_scroll_speed);
+        let scroll = ui.input_mut(|input| {
+            let scroll = input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::MouseWheel { unit, delta, .. } => Some(
+                        delta.y
+                            * match unit {
+                                egui::MouseWheelUnit::Point => 1.0,
+                                egui::MouseWheelUnit::Line => line_speed,
+                                egui::MouseWheelUnit::Page => desired.y,
+                            },
+                    ),
+                    _ => None,
+                })
+                .sum::<f32>();
+            input.smooth_scroll_delta.y = 0.0;
+            scroll
+        });
+        if scroll != 0.0 {
+            changed |= camera.zoom(scroll * 0.01);
+        }
+    }
+    if changed {
+        ui.ctx().request_repaint();
+    }
+    let reset = ui.button("Reset preview camera").clicked() && camera.reset();
+    ui.weak("Drag to orbit · right/middle-drag to pan · wheel to zoom");
+    if reset {
+        ui.ctx().request_repaint();
+    }
+    response
+}
+
+fn preview_target_size(desired: Vec2, pixels_per_point: f32) -> (u32, u32) {
+    let physical = desired * pixels_per_point;
+    let scale = (1024.0 / physical.max_elem()).min(1.0);
+    let bounded = physical * scale;
+    (
+        bounded.x.round().clamp(1.0, 1024.0) as u32,
+        bounded.y.round().clamp(1.0, 1024.0) as u32,
+    )
+}
 
 /// All document state belongs to the separate sidecar; playback is transient.
 pub struct AnimatedPanel {
@@ -519,14 +598,12 @@ impl AnimatedPanel {
         let width = ui.available_width().clamp(64.0, 512.0);
         let desired = egui::vec2(width, width * 0.75);
         let ppp = ui.ctx().pixels_per_point();
-        let pixels = (
-            (desired.x * ppp).round().clamp(1.0, 1024.0) as u32,
-            (desired.y * ppp).round().clamp(1.0, 1024.0) as u32,
-        );
+        let pixels = preview_target_size(desired, ppp);
         match self.players.pose(guid) {
             Ok(Some(pose)) => match self.gpu.as_mut().unwrap().draw(&model, &pose, pixels) {
                 Ok(id) => {
-                    ui.image((id, desired));
+                    let camera = self.gpu.as_mut().unwrap().camera_mut();
+                    preview_camera_image(ui, id, desired, camera);
                 }
                 Err(e) => self.error = Some(e.to_string()),
             },
@@ -535,7 +612,22 @@ impl AnimatedPanel {
         }
     }
 }
+
 fn field(ui: &mut Ui, label: &str, text: &mut String) {
     let response = ui.label(label);
     ui.text_edit_singleline(text).labelled_by(response.id);
+}
+
+#[cfg(test)]
+mod camera_target_tests {
+    use super::*;
+
+    #[test]
+    fn physical_target_limit_preserves_the_preview_aspect() {
+        let desired = egui::vec2(512.0, 384.0);
+        assert_eq!(preview_target_size(desired, 1.0), (512, 384));
+        assert_eq!(preview_target_size(desired, 2.0), (1024, 768));
+        assert_eq!(preview_target_size(desired, 2.5), (1024, 768));
+        assert_eq!(preview_target_size(desired, 4.0), (1024, 768));
+    }
 }

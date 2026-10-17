@@ -115,6 +115,41 @@ pub mod navigation_panel;
 #[cfg(feature = "navigation")]
 pub mod navigation_view;
 
+#[cfg(feature = "mesh-navigation")]
+pub mod mesh_navigation;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art_import;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art_import_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art_panel;
+#[cfg(feature="mesh-navigation")]
+mod mesh_scene;
+#[cfg(feature="mesh-navigation")]
+mod mesh_workspace;
+#[cfg(feature="mesh-export")]
+mod mesh_export;
+#[cfg(feature="mesh-export")]
+mod mesh_export_panel;
+#[cfg(feature="mesh-export")]
+pub mod mesh_player;
+#[cfg(all(windows, target_arch = "x86_64", feature="windows-export"))]
+pub mod windows_export_panel;
+#[cfg(all(windows, target_arch = "x86_64", feature="windows-projects"))]
+pub mod windows_project_panel;
+#[cfg(feature="room-authoring")]
+pub mod room_authoring_panel;
+#[cfg(feature="package-manager")]
+pub mod package_manager;
+#[cfg(feature = "package-manager")]
+mod model_package_import;
+#[cfg(feature = "package-manager")]
+mod model_package_import_panel;
+#[cfg(feature="package-manager")]
+pub mod package_manager_panel;
+
 #[cfg(feature = "project-ui")]
 pub mod project_ui;
 
