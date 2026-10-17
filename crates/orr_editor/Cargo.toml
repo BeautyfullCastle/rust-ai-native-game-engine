@@ -31,6 +31,7 @@ collect-ui = ["collect-dodge", "project-ui", "orr_sample/collect-ui"]
 project-ui = ["sprites", "orr_sample/game-ui"]
 navigation = ["terrain", "orr_remote/navigation", "dep:orr_navigation"]
 mesh-navigation = ["models", "orr_remote/mesh-navigation", "dep:orr_navigation"]
+mesh-export = ["mesh-navigation"]
 terrain-physics = ["terrain", "orr_remote/terrain-physics"]
 default = []
 terrain = ["orr_model_bindings/terrain", "models", "dep:orr_terrain", "dep:orr_terrain_view"]
@@ -86,6 +87,13 @@ path = "src/main.rs"
 # No unit tests here; keep the normal binary build, skip its empty test harness.
 # Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
 test = false
+
+[[bin]]
+name = "orr_mesh_player"
+path = "src/mesh_player/entry.rs"
+required-features = ["mesh-export"]
+test = false
+bench = false
 
 [[bin]]
 name = "orr_input_map"

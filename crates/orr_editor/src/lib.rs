@@ -125,6 +125,12 @@ mod mesh_art_panel;
 mod mesh_scene;
 #[cfg(feature="mesh-navigation")]
 mod mesh_workspace;
+#[cfg(feature="mesh-export")]
+mod mesh_export;
+#[cfg(feature="mesh-export")]
+mod mesh_export_panel;
+#[cfg(feature="mesh-export")]
+pub mod mesh_player;
 #[cfg(all(windows, target_arch = "x86_64", feature="windows-export"))]
 pub mod windows_export_panel;
 #[cfg(all(windows, target_arch = "x86_64", feature="windows-projects"))]

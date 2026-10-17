@@ -223,6 +223,8 @@ pub struct EditorApp {
     pub navigation: crate::navigation_panel::NavigationPanel,
     #[cfg(feature="mesh-navigation")]
     pub mesh_navigation: crate::mesh_navigation::Panel,
+    #[cfg(feature="mesh-export")]
+    mesh_export: crate::mesh_export_panel::Panel,
     #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
     pub windows_export: crate::windows_export_panel::Panel,
     #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
@@ -255,7 +257,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -332,6 +334,15 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_workspace_blocker(&self) -> Option<String> {
+        #[cfg(feature="mesh-export")]
+        if self.mesh_export.busy() {
+            return Some("Finish the mesh game export before changing mesh workspaces".into());
+        }
+        self.mesh_authoring_blocker()
+    }
+
+    #[cfg(feature="mesh-navigation")]
+    fn mesh_authoring_blocker(&self) -> Option<String> {
         if !matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
             || !self.editor.spec().is_local() || self.editor.mode() != Mode::Edit
             || !self.editor.can_mutate() || self.editor.previewing().is_some()
@@ -652,6 +663,11 @@ impl eframe::App for EditorApp {
                 || self.room_camera.as_ref().is_some_and(|camera| camera.dirty());
             self.windows_export.show(&ctx, &mut self.editor, presentation_dirty);
         }
+        #[cfg(feature="mesh-export")]
+        {
+            let blocked = self.mesh_authoring_blocker().or_else(|| self.mesh_navigation.play_blocker(&self.editor));
+            self.mesh_export.show(&ctx, &mut self.editor, blocked.as_deref());
+        }
         #[cfg(feature = "animated-models")]
         egui::Window::new("Animation authoring · local sidecar")
             .open(&mut self.ui.animated_window)
@@ -683,6 +699,42 @@ impl eframe::App for EditorApp {
 }
 
 impl EditorApp {
+    #[cfg(feature="mesh-export")]
+    pub(crate) fn mesh_player_ui(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        self.frames += 1;
+        self.editor.pump();
+        self.mesh_navigation.sync(&self.editor);
+        let blocker = self.mesh_navigation.play_blocker(&self.editor);
+        self.editor.set_mesh_navigation_blocker(blocker);
+        egui::Panel::top("mesh_player_controls").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let playing = self.editor.timeline().is_some_and(|timeline| timeline.playing);
+                let available = self.editor.down().is_none() && self.editor.mode() == Mode::Play;
+                let label = if playing { "Pause" } else { "Resume" };
+                if ui.add_enabled(available, egui::Button::new(label)).clicked() {
+                    if playing { self.editor.pause(); } else { self.editor.play(); }
+                }
+                if ui.add_enabled(available, egui::Button::new("Replay")).clicked() {
+                    self.editor.pause();
+                    self.editor.sync();
+                    self.editor.seek(0);
+                    self.editor.sync();
+                    self.editor.play();
+                }
+                if let Some(timeline) = self.editor.timeline() {
+                    ui.label(format!("Tick {} · {}", timeline.tick, if timeline.playing { "Playing" } else { "Paused" }));
+                }
+                if let Some(error) = self.editor.down() {
+                    ui.colored_label(Color32::RED, &error.reason);
+                }
+            });
+        });
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.yard_viewport(ui));
+        self.screenshot(&ctx);
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+
     /// Turns the entities agents just touched into pulses (and drops the expired ones).
     fn start_pulses(&mut self, now: f64) {
         for name in self.editor.feed_mut().take_touched() {
@@ -768,6 +820,11 @@ impl EditorApp {
                 #[cfg(feature="package-manager")]
                 if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Content packages\u{2026}")).clicked() {
                     self.package_manager.open = true;
+                    ui.close();
+                }
+                #[cfg(feature="mesh-export")]
+                if self.editor.game().is_mesh_navigation() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Export mesh game\u{2026}")).clicked() {
+                    self.mesh_export.open = true;
                     ui.close();
                 }
                 #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
