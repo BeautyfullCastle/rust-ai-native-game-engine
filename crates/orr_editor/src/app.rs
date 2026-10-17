@@ -223,6 +223,8 @@ pub struct EditorApp {
     pub mesh_navigation: crate::mesh_navigation::Panel,
     #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
     pub windows_export: crate::windows_export_panel::Panel,
+    #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
+    pub windows_projects: crate::windows_project_panel::Panel,
     shot: Option<ScreenshotJob>,
     remote_capture: Option<RemoteCapture>,
     encoder: Option<EncoderWorker>,
@@ -247,7 +249,87 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+    }
+
+    #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
+    fn windows_project_blocker(&self) -> Option<String> {
+        if !self.editor.game().is_room() || !self.editor.spec().is_local()
+            || self.editor.mode() != Mode::Edit || !self.editor.can_mutate()
+            || self.editor.previewing().is_some() || self.editor.in_gesture() {
+            return Some("Room project changes require an idle local Room editor in Edit mode".into());
+        }
+        if self.editor.erp_status().is_some() {
+            return Some("Close the ERP-listening editor and reopen without --erp before switching projects; its endpoint is never silently replaced".into());
+        }
+        if self.editor.is_dirty()
+            || self.models.bindings.as_ref().is_some_and(|bindings| bindings.dirty())
+            || self.room_camera.as_ref().is_some_and(|camera| camera.dirty()) {
+            return Some("Save the current scene and model/camera sidecars, or explicitly undo/discard their edits, before changing projects".into());
+        }
+        if self.windows_export.busy() || self.shot.is_some() || self.remote_capture.is_some()
+            || self.encoder.is_some() || self.ui.dialog.is_some() {
+            return Some("Finish active export, capture and path dialogs before changing projects".into());
+        }
+        None
+    }
+
+    #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
+    fn poll_windows_project(&mut self) {
+        self.windows_projects.poll();
+        let Some(root) = self.windows_projects.take_ready() else { return };
+        if let Some(blocked) = self.windows_project_blocker() {
+            self.windows_projects.status = format!("Project is retained at {}; open it after resolving: {blocked}", root.display());
+            return;
+        }
+        let original = match self.editor.windows_export_scene() {
+            Ok(stamp) => stamp,
+            Err(error) => {
+                self.windows_projects.status = format!("Current project retained: {error}. Requested project: {}", root.display());
+                return;
+            }
+        };
+        let candidate = (|| -> Result<Self, String> {
+            let mut prepared = orr_sample::windows_project::open_room_project(&root)?;
+            let expected_checksum = prepared.scene().frame().checksum();
+            let camera = prepared.take_camera();
+            let (_, path, scene, models) = prepared.into_parts();
+            let mut editor = Editor::start(&crate::HostSpec::PreparedRoom {
+                scene: path, text: scene.text().to_owned(), listen: None, debug_hooks: false,
+            })?;
+            editor.sync();
+            if editor.checksum() != expected_checksum {
+                return Err("New Room host differs from the admitted project".into());
+            }
+            let camera = match camera {
+                Some(camera) => {
+                    editor.install_room_camera(camera.document.clone())?;
+                    Some(crate::room_camera_panel::Panel::new(camera))
+                }
+                None => None,
+            };
+            let mut replacement = Self::new(editor, self.render_state.clone());
+            replacement.models.install_room(models)?;
+            replacement.room_camera = camera;
+            replacement.viewport_hdr_disabled = self.viewport_hdr_disabled;
+            if self.editor.windows_export_scene()? != original {
+                return Err("Current Room document changed during preparation; save it and reopen the requested project".into());
+            }
+            Ok(replacement)
+        })();
+        match candidate {
+            Ok(mut replacement) => {
+                replacement.windows_projects = std::mem::take(&mut self.windows_projects);
+                replacement.windows_projects.root = root.display().to_string();
+                replacement.windows_projects.status = format!("Opened Room project: {}", root.display());
+                replacement.gpu = self.gpu.take();
+                replacement.gpu3d = self.gpu3d.take();
+                *self = replacement;
+            }
+            Err(error) => {
+                self.windows_projects.status = format!("Current project retained; cannot open {}: {error}", root.display());
+            }
+        }
     }
 
     /// Deliberately restrict HDR for compatibility. This one-way builder must
@@ -297,6 +379,8 @@ impl eframe::App for EditorApp {
         }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
         self.editor.pump();
+        #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
+        self.poll_windows_project();
         #[cfg(feature="mesh-navigation")]
         {
             self.mesh_navigation.sync(&self.editor);
@@ -357,6 +441,12 @@ impl eframe::App for EditorApp {
             self.ui.body_drag = None;
         }
         self.dialogs(&ctx);
+        #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
+        {
+            let blocked = self.windows_project_blocker();
+            let editor = &mut self.editor;
+            self.windows_projects.show(&ctx, blocked.as_deref(), || editor.windows_export_scene().map(|_| ()));
+        }
         #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
         {
             let presentation_dirty = self.models.bindings.as_ref().is_some_and(|bindings| bindings.dirty())
@@ -470,6 +560,15 @@ impl EditorApp {
                     self.windows_export.use_current_scene(self.editor.path().as_deref());
                     self.windows_export.open = true;
                     ui.close();
+                }
+                #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
+                if self.editor.game().is_room() {
+                    for label in ["New Room project\u{2026}", "Open Room project\u{2026}"] {
+                        if ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new(label)).clicked() {
+                            self.windows_projects.open = true;
+                            ui.close();
+                        }
+                    }
                 }
             });
             ui.menu_button("Edit", |ui| {

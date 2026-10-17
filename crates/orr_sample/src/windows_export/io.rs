@@ -6,6 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(all(feature = "project-create", feature = "room-project"))]
+use crate::windows_project::authoring::export_platform as platform;
+#[cfg(not(all(feature = "project-create", feature = "room-project")))]
 #[path = "../windows_room/platform.rs"]
 mod platform;
 

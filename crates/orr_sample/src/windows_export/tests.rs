@@ -9,6 +9,9 @@ use std::{
     process::Command,
 };
 
+#[cfg(feature = "project-create")]
+use crate::windows_project::authoring as room_authoring;
+#[cfg(not(feature = "project-create"))]
 #[path = "../windows_room/authoring.rs"]
 mod room_authoring;
 

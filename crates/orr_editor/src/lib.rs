@@ -121,6 +121,8 @@ pub mod mesh_navigation;
 mod mesh_scene;
 #[cfg(all(windows, target_arch = "x86_64", feature="windows-export"))]
 pub mod windows_export_panel;
+#[cfg(all(windows, target_arch = "x86_64", feature="windows-projects"))]
+pub mod windows_project_panel;
 
 #[cfg(feature = "project-ui")]
 pub mod project_ui;

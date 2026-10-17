@@ -57,7 +57,9 @@ pub mod project_compositor;
 pub mod project_export;
 #[cfg(all(windows, target_arch = "x86_64", feature = "project-export"))]
 pub mod windows_export;
-#[cfg(all(test, windows, target_arch = "x86_64", feature = "project-export", feature = "room-project"))]
+#[cfg(all(windows, target_arch = "x86_64", feature = "project-create", feature = "room-project"))]
+pub mod windows_project;
+#[cfg(all(windows, target_arch = "x86_64", feature = "room-project", any(feature="project-create", all(test, feature="project-export"))))]
 extern crate self as orr_sample;
 
 #[cfg(feature = "player-settings")]
