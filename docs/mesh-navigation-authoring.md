@@ -18,6 +18,24 @@ $scene = 'C:\Games\Level\level.scene.yaml'
 .\target\release\orr_mesh.exe asset --asset $asset
 ```
 
+Installed model packages can be consumed directly without extracting or guessing
+immutable object paths:
+
+```powershell
+.\target\release\orr_mesh_cook.exe --project 'C:\Games\MyGame' --package my-models --asset foreground.glb --output $asset
+```
+
+Use either `--source` or all of `--project`, `--package`, `--asset`, never both.
+Package mode uses the existing verified static-model loader with an explicit
+compiled `models` inventory. It validates the whole active project lock and
+installed content, including external model dependencies, before producing a
+graph. Missing `models`, unsupported capabilities, undeclared or tampered assets
+reject before output creation. Package digest and source hash are printed as
+provenance, not publisher authentication or ongoing graph-to-package binding.
+The saved graph and scene are independent snapshots, not live package references.
+See [local package authoring](package-source-authoring.md) for `orr_pkg_source`
+and normal `orr_pkg` install/verify commands.
+
 `asset` prints exact decimal `first_face_points`, plus the graph revision and
 counts. Choose start/goal on the intended connected surface; the first face's
 distinct vertices give a small connected route. Set all three coordinates,

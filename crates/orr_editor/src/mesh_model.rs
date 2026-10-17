@@ -210,7 +210,7 @@ fn validate_input_path(path: &Path) -> Result<(Option<&Path>, Option<&str>), Str
     ))
 }
 
-fn check_existing_components(path: &Path) -> Result<(), String> {
+pub fn check_existing_components(path: &Path) -> Result<(), String> {
     let mut current = Path::new("").to_path_buf();
     let components: Vec<_> = path.components().collect();
     for (index, component) in components.iter().enumerate() {

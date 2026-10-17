@@ -13,7 +13,7 @@ use std::{
     thread,
 };
 
-#[path = "../examples/package_source/authoring.rs"]
+#[path = "../src/source_authoring.rs"]
 mod authoring;
 
 use authoring::{Options, Report};
