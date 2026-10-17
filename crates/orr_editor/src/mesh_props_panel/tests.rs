@@ -276,6 +276,104 @@ fn prop_tint_fields_round_trip_through_update_history_and_drag() {
 }
 
 #[test]
+fn prop_duplicate_preserves_asset_state_and_creates_one_private_history_entry() {
+    let original_rotation = crate::mesh_rotation::from_degrees([12.0, 23.0, 34.0]).unwrap();
+    let original_tint = [0.4, 0.6, 0.8, 0.5];
+    let mut original = document(1);
+    original.props[0].name = "Lantern".into();
+    original.props[0].art = original.props[0]
+        .art
+        .clone()
+        .with_transform([2.0, 1.0, 3.0], 0.75)
+        .unwrap()
+        .with_rotation(original_rotation)
+        .unwrap()
+        .with_tint(original_tint)
+        .unwrap();
+    let mut panel = Panel::default();
+    panel.reset_history(original, Some(0));
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.selected = Some(1);
+
+    panel.duplicate_selected_prop();
+
+    assert_eq!(panel.history.len(), 2);
+    assert!(panel.dirty());
+    assert_eq!(panel.selected, Some(2));
+    assert_eq!(panel.document.props[1].name, "Lantern copy");
+    assert_eq!(panel.document.props[1].art.offset(), [2.0, 1.0, 3.0]);
+    assert_eq!(panel.document.props[1].art.scale(), 0.75);
+    assert_eq!(panel.document.props[1].art.rotation(), original_rotation);
+    assert_eq!(panel.document.props[1].art.tint(), original_tint);
+    assert_eq!(
+        panel.document.props[1].art.label(),
+        panel.document.props[0].art.label()
+    );
+
+    panel.undo();
+    assert_eq!(panel.document.props.len(), 1);
+    assert!(!panel.dirty());
+    panel.redo();
+    assert_eq!(panel.document.props.len(), 2);
+    assert!(panel.dirty());
+}
+
+#[test]
+fn staged_prop_relocation_preserves_art_and_cancel_does_not_mutate_history() {
+    let rotation = crate::mesh_rotation::from_degrees([0.0, 45.0, 0.0]).unwrap();
+    let tint = [0.25, 0.5, 0.75, 1.0];
+    let mut original = document(1);
+    original.props[0].art = original.props[0]
+        .art
+        .clone()
+        .with_transform([0.0, 1.0, 0.0], 1.5)
+        .unwrap()
+        .with_rotation(rotation)
+        .unwrap()
+        .with_tint(tint)
+        .unwrap();
+    let destination = [
+        orr_fp::FP::from_raw(5 * orr_fp::FP::SCALE),
+        orr_fp::FP::from_raw(2 * orr_fp::FP::SCALE),
+        orr_fp::FP::from_raw(7 * orr_fp::FP::SCALE),
+    ];
+    let relocated =
+        super::relocate_prop_document(&original, 1, destination, GRAPH_REVISION).unwrap();
+
+    assert_eq!(original.props[0].art.offset(), [0.0, 1.0, 0.0]);
+    assert_eq!(relocated.props[0].art.offset(), [5.0, 2.0, 7.0]);
+    assert_eq!(relocated.props[0].art.scale(), 1.5);
+    assert_eq!(relocated.props[0].art.rotation(), rotation);
+    assert_eq!(relocated.props[0].art.tint(), tint);
+
+    let mut panel = Panel::default();
+    panel.reset_history(original.clone(), Some(0));
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.selected = Some(1);
+    panel.placement = Some(super::PropPlacement {
+        prop_id: 1,
+        scene: Path::new("mesh.scene.yaml").to_path_buf(),
+        scene_epoch: 3,
+        graph_revision: GRAPH_REVISION,
+        checksum: 99,
+        position: Some(destination),
+    });
+    assert!(panel.dirty());
+    panel.cancel_placement();
+    assert_eq!(panel.document.props[0].art.offset(), [0.0, 1.0, 0.0]);
+    assert_eq!(panel.history.len(), 1);
+    assert!(!panel.dirty());
+}
+
+#[test]
+fn prop_duplicate_name_falls_back_to_bounded_id_name() {
+    let mut original = document(1);
+    original.props[0].name = "x".repeat(64);
+    let duplicated = super::duplicate_prop_document(&original, 1, 2).unwrap();
+    assert_eq!(duplicated.props[1].name, "Prop 2");
+}
+
+#[test]
 fn prop_history_tracks_saved_state_and_keeps_a_bounded_cursor() {
     let mut panel = Panel::default();
     assert!(!panel.dirty());

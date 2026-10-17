@@ -416,6 +416,52 @@ fn viewport_pointer_for_world(harness: &Harness<'_, EditorApp>, world: [f32; 3])
     pointer
 }
 
+fn ramp_triangle_barycenter(harness: &Harness<'_, EditorApp>) -> [f32; 3] {
+    let graph = mesh_view(harness).graph;
+    let triangle = graph
+        .triangles()
+        .iter()
+        .find(|triangle| {
+            let heights = triangle
+                .vertices
+                .map(|index| graph.vertices()[index as usize][1].raw());
+            heights.contains(&0) && heights.contains(&(2 * 65_536))
+        })
+        .expect("ramp-and-bridge graph has a sloped triangle");
+    let raw_sum: [i128; 3] = std::array::from_fn(|axis| {
+        triangle
+            .vertices
+            .iter()
+            .map(|index| i128::from(graph.vertices()[*index as usize][axis].raw()))
+            .sum()
+    });
+    let point = raw_sum.map(|coordinate| orr_fp::FP::from_raw((coordinate / 3) as i64).to_f32());
+    assert!(
+        point[1] > 0.0,
+        "placement target lies above the ground floor"
+    );
+    point
+}
+
+fn click_viewport(harness: &mut Harness<'_, EditorApp>, point: Pos2) {
+    harness.event(Event::PointerMoved(point));
+    harness.run_steps(2);
+    harness.event(Event::PointerButton {
+        pos: point,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    harness.step();
+    harness.event(Event::PointerButton {
+        pos: point,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    settle(harness);
+}
+
 fn pointer_pixel(harness: &Harness<'_, EditorApp>, pointer: Pos2) -> [f32; 2] {
     let viewport = harness.state().ui.viewport_rect.unwrap();
     let size = harness.state().ui.viewport_px;
@@ -927,8 +973,6 @@ fn production_mesh_prop_view_drag_is_local_reversible_and_persisted() {
     click_button(&mut harness, LBL_STOP);
     assert_eq!(harness.state().editor.mode(), Mode::Edit);
 
-    let optional_export = export_bundle_if_requested(&mut harness, &fixture, &snapped_sidecar);
-
     let target_scene = fixture
         ._temporary
         .path()
@@ -1026,7 +1070,157 @@ fn production_mesh_prop_view_drag_is_local_reversible_and_persisted() {
     );
     let empty_props_save_as_target_reload_verified = true;
 
+    if harness.query_by_label("Duplicate selected prop").is_none() {
+        click(&mut harness, "Mesh props");
+    }
+    let existing_prop_row = harness
+        .query_by_label_contains("Viewport prop")
+        .expect("saved prop is listed after returning to its scene");
+    existing_prop_row.scroll_to_me();
+    harness.run_steps(3);
+    harness
+        .query_by_label_contains("Viewport prop")
+        .expect("saved prop row remains visible")
+        .click_accesskit();
+    settle(&mut harness);
+    let source_before_duplicate = fs::read(&sidecar).unwrap();
+    let scene_history_before_duplicate = harness.state().editor.history().clone();
+    let single_prop_pixels = viewport_pixels(&mut harness, "single-prop-before-duplicate.png");
+    click_button(&mut harness, "Duplicate selected prop");
+    assert_eq!(fs::read(&sidecar).unwrap(), source_before_duplicate);
+    assert_eq!(
+        harness.state().editor.history(),
+        &scene_history_before_duplicate,
+        "duplicating a cosmetic prop does not mutate ECS history"
+    );
+    let duplicate_ready_pixels = viewport_pixels(&mut harness, "duplicate-prop-ready.png");
+    click_button(&mut harness, "Place selected prop on mesh");
+    let placement_world = ramp_triangle_barycenter(&harness);
+    let placement_pointer = viewport_pointer_for_world(&harness, placement_world);
+    click_viewport(&mut harness, placement_pointer);
+    let staged_cancel_pixels = viewport_pixels(&mut harness, "prop-placement-cancel-preview.png");
+    assert!(changed_pixel_count(&duplicate_ready_pixels, &staged_cancel_pixels) > 5);
+    click_button(&mut harness, "Cancel prop placement");
+    let cancelled_placement_pixels = viewport_pixels(&mut harness, "prop-placement-cancelled.png");
+    assert!(changed_pixel_count(&duplicate_ready_pixels, &cancelled_placement_pixels) < 20);
+    assert_eq!(fs::read(&sidecar).unwrap(), source_before_duplicate);
+    assert_eq!(
+        harness.state().editor.history(),
+        &scene_history_before_duplicate,
+        "cancelling staged placement leaves the host and saved sidecar unchanged"
+    );
+    click_button(&mut harness, "Place selected prop on mesh");
+    click_viewport(&mut harness, placement_pointer);
+    assert!(!harness
+        .get_by_role_and_label(Role::Button, "Apply prop placement")
+        .accesskit_node()
+        .is_disabled());
+    assert_eq!(fs::read(&sidecar).unwrap(), source_before_duplicate);
+    assert_eq!(
+        harness.state().editor.history(),
+        &scene_history_before_duplicate,
+        "placement remains cosmetic until explicit Apply"
+    );
+    let staged_placement_pixels = viewport_pixels(&mut harness, "prop-placement-staged.png");
+    assert!(changed_pixel_count(&duplicate_ready_pixels, &staged_placement_pixels) > 5);
+    click_button(&mut harness, "Apply prop placement");
+    let applied_placement_pixels = viewport_pixels(&mut harness, "prop-placement-applied.png");
+    assert!(changed_pixel_count(&duplicate_ready_pixels, &applied_placement_pixels) > 20);
+    assert_eq!(fs::read(&sidecar).unwrap(), source_before_duplicate);
+    assert_eq!(
+        harness.state().editor.history(),
+        &scene_history_before_duplicate,
+        "applying cosmetic placement does not mutate ECS history"
+    );
+    click_button(&mut harness, "Undo prop edit");
+    let undone_placement_pixels = viewport_pixels(&mut harness, "prop-placement-undone.png");
+    assert!(changed_pixel_count(&duplicate_ready_pixels, &undone_placement_pixels) < 20);
+    click_button(&mut harness, "Redo prop edit");
+    let redone_placement_pixels = viewport_pixels(&mut harness, "prop-placement-redone.png");
+    assert!(changed_pixel_count(&applied_placement_pixels, &redone_placement_pixels) < 20);
+    click_button(&mut harness, "Undo prop edit");
+    click_button(&mut harness, "Undo prop edit");
+    let undone_duplicate_pixels = viewport_pixels(&mut harness, "duplicate-prop-undone.png");
+    assert!(changed_pixel_count(&single_prop_pixels, &undone_duplicate_pixels) < 20);
+    click_button(&mut harness, "Redo prop edit");
+    let redone_duplicate_pixels = viewport_pixels(&mut harness, "duplicate-prop-redone.png");
+    assert!(changed_pixel_count(&duplicate_ready_pixels, &redone_duplicate_pixels) < 20);
+    click_button(&mut harness, "Redo prop edit");
+    let final_placement_pixels = viewport_pixels(&mut harness, "prop-placement-final-redo.png");
+    assert!(changed_pixel_count(&applied_placement_pixels, &final_placement_pixels) < 20);
+    click_button(&mut harness, "Save props");
+    let placement_sidecar = fs::read(&sidecar).expect("placed clone saves explicitly");
+    let optional_export = export_bundle_if_requested(&mut harness, &fixture, &placement_sidecar);
+    let placement_document: serde_json::Value = serde_json::from_slice(&placement_sidecar).unwrap();
+    let original_id = original_document["props"][0]["id"].as_u64().unwrap();
+    let placed_prop = placement_document["props"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|prop| prop["id"].as_u64() != Some(original_id))
+        .expect("duplicate has its own stable identifier");
+    assert_eq!(placement_document["props"].as_array().unwrap().len(), 2);
+    assert!(placed_prop["name"].as_str().unwrap().contains("copy"));
+    assert_eq!(
+        placed_prop["art"]["model"],
+        original_document["props"][0]["art"]["model"]
+    );
+    let placed_offset = placed_prop["art"]["offset"].as_array().unwrap();
+    assert!(placed_offset[1].as_f64().unwrap() > 0.0);
+    for (axis, expected) in placement_world.into_iter().enumerate() {
+        assert!(
+            (placed_offset[axis].as_f64().unwrap() - f64::from(expected)).abs() < 0.05,
+            "placed coordinate {axis} stays on the selected ramp triangle"
+        );
+    }
+    assert_eq!(
+        fs::read(&fixture.scene).unwrap(),
+        fixture.scene_bytes.as_deref().unwrap()
+    );
+    let placement_saved_pixels = viewport_pixels(&mut harness, "prop-placement-saved.png");
+    menu_click(&mut harness, "File", "Save Ctrl+S");
+    let placement_scene_bytes = fs::read(&fixture.scene).unwrap();
+    let placement_scene_checksum = harness.state().editor.checksum();
     drop(harness);
+    assert!(
+        !fixture.package.exists(),
+        "package stays hidden during placement reopen"
+    );
+    let mut placement_reopened = create_harness(&fixture);
+    placement_reopened.run_steps(4);
+    menu_click(&mut placement_reopened, "File", "Open mesh scene…");
+    type_scene_path(&mut placement_reopened, &fixture.scene, "OK");
+    wait_for(
+        &mut placement_reopened,
+        "fresh placement scene reopen",
+        |app| {
+            app.editor.game() == EditorGame::MeshNavigation
+                && same_path(app.editor.path().as_deref(), &fixture.scene)
+                && app.editor.checksum() == placement_scene_checksum
+        },
+    );
+    assert!(!fixture.package.exists());
+    let placement_reopened_pixels =
+        viewport_pixels(&mut placement_reopened, "prop-placement-reopened.png");
+    assert!(changed_pixel_count(&placement_saved_pixels, &placement_reopened_pixels) < 20);
+    assert_eq!(fs::read(&sidecar).unwrap(), placement_sidecar);
+    assert_eq!(fs::read(&fixture.scene).unwrap(), placement_scene_bytes);
+    click_button(&mut placement_reopened, LBL_PLAY);
+    click_button(&mut placement_reopened, LBL_PAUSE);
+    placement_reopened.state_mut().editor.seek(0);
+    settle(&mut placement_reopened);
+    for _ in 0..16 {
+        click_button(&mut placement_reopened, LBL_STEP);
+    }
+    assert_eq!(
+        placement_reopened.state().editor.timeline().unwrap().tick,
+        16
+    );
+    assert_eq!(fs::read(&sidecar).unwrap(), placement_sidecar);
+    click_button(&mut placement_reopened, LBL_STOP);
+    drop(placement_reopened);
+    let placement_workflow_verified = true;
+
     fs::rename(&hidden_package, &fixture.package).expect("restore owned package source");
     fixture.hidden_package = None;
     assert!(fixture.package.join(MODEL_ASSET).is_file());
@@ -1046,6 +1240,19 @@ fn production_mesh_prop_view_drag_is_local_reversible_and_persisted() {
         "props-after-escape.png",
         "props-reopened.png",
         "props-play16.png",
+        "duplicate-prop-ready.png",
+        "single-prop-before-duplicate.png",
+        "prop-placement-cancelled.png",
+        "prop-placement-cancel-preview.png",
+        "prop-placement-staged.png",
+        "prop-placement-applied.png",
+        "prop-placement-undone.png",
+        "prop-placement-redone.png",
+        "duplicate-prop-undone.png",
+        "duplicate-prop-redone.png",
+        "prop-placement-final-redo.png",
+        "prop-placement-saved.png",
+        "prop-placement-reopened.png",
     ];
     let captures = capture_names
         .iter()
@@ -1064,8 +1271,8 @@ fn production_mesh_prop_view_drag_is_local_reversible_and_persisted() {
         "scene_sha256": sha256_hex(&fs::read(&fixture.scene).unwrap()),
         "scene_checksum": format!("0x{:016x}", fixture.scene_checksum.unwrap()),
         "props_sidecar_path": sidecar.display().to_string(),
-        "props_sidecar_sha256": sha256_hex(&snapped_sidecar),
-        "props_count": snapped_document["props"].as_array().unwrap().len(),
+        "props_sidecar_sha256": sha256_hex(&placement_sidecar),
+        "props_count": placement_document["props"].as_array().unwrap().len(),
         "package_source_directory": fixture.package.display().to_string(),
         "model_sha256": model_sha256,
         "license_sha256": license_sha256,
@@ -1105,6 +1312,33 @@ fn production_mesh_prop_view_drag_is_local_reversible_and_persisted() {
         serde_json::json!(save_as_collision_recovery_verified);
     output_receipt["empty_props_save_as_target_reload_verified"] =
         serde_json::json!(empty_props_save_as_target_reload_verified);
+    output_receipt["duplicate_placement_workflow_verified"] =
+        serde_json::json!(placement_workflow_verified);
+    output_receipt["duplicate_prop_id"] = serde_json::json!(placed_prop["id"]);
+    output_receipt["duplicate_prop_placement_world"] = serde_json::json!(placement_world);
+    output_receipt["duplicate_prop_saved_offset"] = serde_json::json!(placed_prop["art"]["offset"]);
+    output_receipt["duplicate_prop_staged_pixels"] = serde_json::json!(changed_pixel_count(
+        &duplicate_ready_pixels,
+        &staged_placement_pixels
+    ));
+    output_receipt["duplicate_prop_applied_pixel_diff"] = serde_json::json!(changed_pixel_count(
+        &duplicate_ready_pixels,
+        &applied_placement_pixels
+    ));
+    output_receipt["placement_undo_pixels_match"] = serde_json::json!(
+        changed_pixel_count(&duplicate_ready_pixels, &undone_placement_pixels) < 20
+    );
+    output_receipt["placement_redo_pixels_match"] = serde_json::json!(
+        changed_pixel_count(&applied_placement_pixels, &redone_placement_pixels) < 20
+    );
+    output_receipt["duplicate_prop_reopen_pixels_match"] = serde_json::json!(
+        changed_pixel_count(&placement_saved_pixels, &placement_reopened_pixels) < 20
+    );
+    output_receipt["duplicate_prop_undo_pixels_match"] =
+        serde_json::json!(changed_pixel_count(&single_prop_pixels, &undone_duplicate_pixels) < 20);
+    output_receipt["duplicate_prop_redo_pixels_match"] = serde_json::json!(
+        changed_pixel_count(&duplicate_ready_pixels, &redone_duplicate_pixels) < 20
+    );
     fs::write(
         fixture.capture_directory.join("acceptance.json"),
         serde_json::to_vec_pretty(&output_receipt).unwrap(),

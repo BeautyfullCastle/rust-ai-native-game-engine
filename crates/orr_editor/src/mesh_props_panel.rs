@@ -31,6 +31,15 @@ struct PropGesture {
     drag: crate::mesh_prop_view::Drag,
 }
 
+struct PropPlacement {
+    prop_id: u64,
+    scene: PathBuf,
+    scene_epoch: u64,
+    graph_revision: [u8; 32],
+    checksum: u64,
+    position: Option<[orr_fp::FP; 3]>,
+}
+
 struct HistoryEntry {
     id: u64,
     document: Document,
@@ -53,6 +62,7 @@ pub(crate) struct Panel {
     move_enabled: bool,
     snap_to_quarter: bool,
     gesture: Option<PropGesture>,
+    placement: Option<PropPlacement>,
     candidate: Option<Snapshot>,
     selected: Option<u64>,
     document: Document,
@@ -91,6 +101,7 @@ impl Default for Panel {
             move_enabled: false,
             snap_to_quarter: false,
             gesture: None,
+            placement: None,
             candidate: None,
             selected: None,
             document: Document::default(),
@@ -117,6 +128,9 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
+        if self.placement.is_some() && !self.placement_context_matches(editor) {
+            self.cancel_placement();
+        }
         if self.gesture.is_some() && !self.gesture_context_matches(editor) {
             self.cancel_gesture();
         }
@@ -222,7 +236,7 @@ impl Panel {
         }
     }
 
-    pub(crate) fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+    pub(crate) fn show(&mut self, ui: &mut Ui, editor: &Editor, agent_pick_busy: bool) {
         if editor.game() != EditorGame::MeshNavigation {
             return;
         }
@@ -311,19 +325,70 @@ impl Panel {
                 {
                     self.update_selected();
                 }
+                if ui
+                    .add_enabled(
+                        editable
+                            && self.selected_prop().is_some()
+                            && self.document.props.len() < MAX_PROPS,
+                        egui::Button::new("Duplicate selected prop"),
+                    )
+                    .clicked()
+                {
+                    self.duplicate_selected_prop();
+                }
+                if ui
+                    .add_enabled(
+                        editable && self.selected_prop().is_some() && !agent_pick_busy,
+                        egui::Button::new("Place selected prop on mesh"),
+                    )
+                    .clicked()
+                {
+                    self.begin_placement(editor, agent_pick_busy);
+                }
             });
+            let staged_position = self.placement.as_ref().and_then(|placement| placement.position);
+            let can_apply_placement =
+                staged_position.is_some() && self.placement_context_matches(editor);
+            if self.placement.is_some() {
+                ui.label(match staged_position {
+                    Some(position) => {
+                        let coordinates = position.map(orr_fp::FP::to_f32).map(format_number);
+                        format!(
+                            "Staged mesh placement at [{}, {}, {}]; apply explicitly to create one history entry.",
+                            coordinates[0], coordinates[1], coordinates[2]
+                        )
+                    }
+                    None => "Click an admitted walkable mesh triangle to stage this prop's placement.".into(),
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            can_apply_placement,
+                            egui::Button::new("Apply prop placement"),
+                        )
+                        .clicked()
+                    {
+                        self.apply_placement(editor);
+                    }
+                    if ui.button("Cancel prop placement").clicked() {
+                        self.cancel_placement();
+                    }
+                });
+            }
 
             ui.label(format!("Props: {}/{}", self.document.props.len(), MAX_PROPS));
             let mut selected_prop = None;
-            for prop in &self.document.props {
-                let label = format!("{} · prop-{:016x}", prop.name, prop.id);
-                if ui
-                    .selectable_label(self.selected == Some(prop.id), label)
-                    .clicked()
-                {
-                    selected_prop = Some(prop.id);
+            ui.add_enabled_ui(self.placement.is_none(), |ui| {
+                for prop in &self.document.props {
+                    let label = format!("{} · prop-{:016x}", prop.name, prop.id);
+                    if ui
+                        .selectable_label(self.selected == Some(prop.id), label)
+                        .clicked()
+                    {
+                        selected_prop = Some(prop.id);
+                    }
                 }
-            }
+            });
             if let Some(identifier) = selected_prop {
                 self.selected = Some(identifier);
                 self.copy_selection_fields();
@@ -422,6 +487,7 @@ impl Panel {
         if self.document_pending
             || self.context_stale
             || self.sidecar_error.is_some()
+            || (self.placement.is_some() && !self.placement_context_matches(editor))
             || !current_identity(editor).is_some_and(|(scene, revision)| {
                 self.scene.as_ref() == Some(&scene)
                     && self.graph_revision == Some(revision)
@@ -430,7 +496,17 @@ impl Panel {
         {
             return Vec::new();
         }
-        self.document.placements().unwrap_or_default()
+        if self
+            .placement
+            .as_ref()
+            .and_then(|placement| placement.position)
+            .is_none()
+        {
+            return self.document.placements().unwrap_or_default();
+        }
+        self.presentation_document()
+            .and_then(|document| document.placements())
+            .unwrap_or_default()
     }
 
     pub(crate) fn selected_bounds(&self, editor: &Editor) -> Option<crate::mesh_prop_view::Bounds> {
@@ -439,16 +515,16 @@ impl Panel {
         }
         let selected = self.selected?;
         let scene_models = self.placements(editor);
-        let prop = self
+        let selected_index = self
             .document
             .props
             .iter()
-            .find(|prop| prop.id == selected)?;
-        let model = prop.art.placement([orr_fp::FP::ZERO; 3]).ok()?;
+            .position(|prop| prop.id == selected)?;
+        let model = scene_models.get(selected_index)?;
         if scene_models.len() != self.document.props.len() {
             return None;
         }
-        crate::mesh_prop_view::bounds(&model).ok()
+        crate::mesh_prop_view::bounds(model).ok()
     }
 
     pub(crate) fn viewport(
@@ -458,14 +534,62 @@ impl Panel {
         size: (u32, u32),
         input: ViewInput,
     ) -> bool {
+        if self.placement.is_some() && !self.placement_context_matches(editor) {
+            self.cancel_placement();
+            return true;
+        }
         if self.gesture.is_some() && !self.gesture_context_matches(editor) {
             self.cancel_gesture();
             return true;
         }
         if input.cancel {
+            if self.placement.is_some() {
+                self.cancel_placement();
+                return true;
+            }
             let active = self.gesture.is_some();
             self.cancel_gesture();
             return active;
+        }
+        if self.placement.is_some() {
+            if input.clicked {
+                let Some(pixel) = input.pixel else {
+                    return true;
+                };
+                let Some(frame) = editor.snapshot().map(|snapshot| snapshot.predicted()) else {
+                    self.cancel_placement();
+                    return true;
+                };
+                let view = match mesh_from_view(frame) {
+                    Ok(view) => view,
+                    Err(error) => {
+                        self.error = Some(format!("Mesh placement is unavailable: {error}"));
+                        return true;
+                    }
+                };
+                let (origin, direction) = camera.screen_ray(pixel, size);
+                match crate::mesh_agent_view::pick(
+                    &view.graph,
+                    origin,
+                    direction,
+                    view.agent.spec.max_vertical,
+                ) {
+                    Ok(Some(hit)) => {
+                        if let Some(placement) = &mut self.placement {
+                            placement.position = Some(hit.position);
+                        }
+                        self.error = None;
+                        self.status =
+                            "Mesh prop position staged; apply explicitly or cancel.".into();
+                    }
+                    Ok(None) => {
+                        self.error =
+                            Some("The click did not hit an admitted walkable mesh triangle".into());
+                    }
+                    Err(error) => self.error = Some(format!("Mesh prop placement failed: {error}")),
+                }
+            }
+            return true;
         }
         if self.gesture.is_some() && !self.move_enabled {
             self.cancel_gesture();
@@ -579,7 +703,7 @@ impl Panel {
     }
 
     pub(crate) fn gesture_busy(&self) -> bool {
-        self.gesture.is_some()
+        self.gesture.is_some() || self.placement.is_some()
     }
 
     fn viewport_models(&self) -> Result<Vec<(u64, SceneModel)>, String> {
@@ -628,6 +752,7 @@ impl Panel {
 
     pub(crate) fn cancel_viewport_gesture(&mut self) {
         self.cancel_gesture();
+        self.cancel_placement();
     }
 
     fn finish_gesture(&mut self) {
@@ -667,6 +792,9 @@ impl Panel {
         if self.gesture.is_some() {
             return Some("Finish or cancel the active mesh prop move before Play".into());
         }
+        if self.placement.is_some() {
+            return Some("Apply or cancel the staged mesh prop placement before Play".into());
+        }
         if self.document_pending
             || current_identity(editor).is_none_or(|(scene, revision)| {
                 self.scene.as_ref() != Some(&scene)
@@ -694,7 +822,9 @@ impl Panel {
     }
 
     pub(crate) fn dirty(&self) -> bool {
-        self.gesture.is_some() || self.current_history_id() != self.saved_history_id
+        self.gesture.is_some()
+            || self.placement.is_some()
+            || self.current_history_id() != self.saved_history_id
     }
 
     fn load_candidate(&mut self) {
@@ -720,6 +850,148 @@ impl Panel {
                 self.error = Some(format!("Prop package load failed: {error}"));
             }
         }
+    }
+
+    fn duplicate_selected_prop(&mut self) {
+        let Some(selected) = self.selected else {
+            self.error = Some("Select a mesh prop before duplicating it".into());
+            return;
+        };
+        let Some(identifier) = self.available_prop_id() else {
+            self.error = Some("No more stable prop identifiers are available".into());
+            return;
+        };
+        let document = match duplicate_prop_document(&self.document, selected, identifier) {
+            Ok(document) => document,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        let Some(graph_revision) = self.graph_revision else {
+            self.error = Some("Wait for an admitted mesh graph before duplicating a prop".into());
+            return;
+        };
+        if let Err(error) = validate_document(&document, graph_revision) {
+            self.error = Some(error);
+            return;
+        }
+        self.push_document(document);
+        self.next_prop_id = identifier.checked_add(1).unwrap_or(1);
+        self.selected = Some(identifier);
+        self.confirm_remove = false;
+        self.copy_selection_fields();
+        self.error = None;
+        self.status = "Duplicated mesh prop in memory; save explicitly to persist.".into();
+    }
+
+    fn begin_placement(&mut self, editor: &Editor, agent_pick_busy: bool) {
+        if agent_pick_busy {
+            self.error = Some("Finish or cancel endpoint picking before placing a prop".into());
+            return;
+        }
+        if !self.can_edit(editor) {
+            self.error =
+                Some("Prop placement requires the matching editable local mesh scene".into());
+            return;
+        }
+        let Some(prop_id) = self.selected.filter(|identifier| {
+            self.document
+                .props
+                .iter()
+                .any(|prop| prop.id == *identifier)
+        }) else {
+            self.error = Some("Select a mesh prop before placing it on the mesh".into());
+            return;
+        };
+        let Some((scene, graph_revision)) = current_identity(editor) else {
+            self.error = Some("Wait for an admitted mesh graph before placing a prop".into());
+            return;
+        };
+        self.placement = Some(PropPlacement {
+            prop_id,
+            scene,
+            scene_epoch: editor.scene_load_epoch(),
+            graph_revision,
+            checksum: editor.sim().checksum,
+            position: None,
+        });
+        self.error = None;
+        self.status = "Click an admitted walkable mesh triangle to stage the prop position.".into();
+    }
+
+    fn apply_placement(&mut self, editor: &Editor) {
+        if !self.placement_context_matches(editor) {
+            self.cancel_placement();
+            self.error = Some("Mesh placement context changed; the prop was not moved".into());
+            return;
+        }
+        let Some(placement) = self.placement.as_ref() else {
+            return;
+        };
+        let (prop_id, graph_revision, Some(position)) = (
+            placement.prop_id,
+            placement.graph_revision,
+            placement.position,
+        ) else {
+            self.error = Some("Click a walkable mesh triangle before applying placement".into());
+            return;
+        };
+        let updated =
+            match relocate_prop_document(&self.document, prop_id, position, graph_revision) {
+                Ok(document) => document,
+                Err(error) => {
+                    self.error = Some(format!("Mesh prop placement rejected: {error}"));
+                    return;
+                }
+            };
+        self.placement = None;
+        if same_document_placements(&self.document, &updated) {
+            self.error = None;
+            self.status =
+                "Prop is already at the selected mesh position; no history entry was added.".into();
+            return;
+        }
+        self.push_document(updated);
+        self.selected = Some(prop_id);
+        self.copy_selection_fields();
+        self.error = None;
+        self.status =
+            "Placed mesh prop on the walkable surface; save explicitly to persist.".into();
+    }
+
+    fn cancel_placement(&mut self) {
+        if self.placement.take().is_some() {
+            self.status = "Mesh prop placement cancelled; the document was unchanged.".into();
+        }
+    }
+
+    fn placement_context_matches(&self, editor: &Editor) -> bool {
+        let Some(placement) = &self.placement else {
+            return false;
+        };
+        current_identity(editor).is_some_and(|(scene, graph_revision)| {
+            scene == placement.scene
+                && editor.scene_load_epoch() == placement.scene_epoch
+                && graph_revision == placement.graph_revision
+                && editor.sim().checksum == placement.checksum
+                && self.matching_edit_context(editor)
+        })
+    }
+
+    fn presentation_document(&self) -> Result<Document, String> {
+        let Some(placement) = self.placement.as_ref() else {
+            return Ok(self.document.clone());
+        };
+        let Some(position) = placement.position else {
+            return Ok(self.document.clone());
+        };
+        relocate_prop_document(
+            &self.document,
+            placement.prop_id,
+            position,
+            placement.graph_revision,
+        )
     }
 
     fn add_prop(&mut self) {
@@ -961,6 +1233,7 @@ impl Panel {
             && editor.previewing().is_none()
             && editor.proposals().is_empty()
             && self.gesture.is_none()
+            && self.placement.is_none()
             && !self.document_pending
             && current_identity(editor).is_some();
         discard_changes_ready(
@@ -1041,6 +1314,7 @@ impl Panel {
 
     fn can_edit(&self, editor: &Editor) -> bool {
         self.gesture.is_none()
+            && self.placement.is_none()
             && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
             && self.matching_edit_context(editor)
@@ -1048,6 +1322,7 @@ impl Panel {
 
     fn can_change_history(&self, editor: &Editor) -> bool {
         self.gesture.is_none()
+            && self.placement.is_none()
             && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
@@ -1067,6 +1342,7 @@ impl Panel {
 
     fn can_reload(&self, editor: &Editor) -> bool {
         self.gesture.is_none()
+            && self.placement.is_none()
             && !self.dirty()
             && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
@@ -1222,6 +1498,66 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
     }
     let view = mesh_from_view(editor.snapshot()?.predicted()).ok()?;
     Some((scene, view.graph.revision()))
+}
+
+fn duplicate_prop_document(
+    document: &Document,
+    selected: u64,
+    new_id: u64,
+) -> Result<Document, String> {
+    if document.props.len() >= MAX_PROPS {
+        return Err(format!("A mesh scene supports at most {MAX_PROPS} props"));
+    }
+    if new_id == 0 || document.props.iter().any(|prop| prop.id == new_id) {
+        return Err("A duplicate needs a fresh nonzero prop identifier".into());
+    }
+    let source = document
+        .props
+        .iter()
+        .find(|prop| prop.id == selected)
+        .ok_or("The selected mesh prop is no longer present")?;
+    let preferred = format!("{} copy", source.name);
+    let name = if preferred.len() <= 64 && document.props.iter().all(|prop| prop.name != preferred)
+    {
+        preferred
+    } else {
+        let fallback = format!("Prop {new_id}");
+        if document.props.iter().all(|prop| prop.name != fallback) {
+            fallback
+        } else {
+            (1..=MAX_PROPS)
+                .map(|suffix| format!("Prop {new_id}-{suffix}"))
+                .find(|candidate| document.props.iter().all(|prop| prop.name != *candidate))
+                .ok_or("No unique bounded name is available for the duplicate")?
+        }
+    };
+    let mut duplicated = document.clone();
+    duplicated.props.push(Prop {
+        id: new_id,
+        name: validate_name(&name)?,
+        art: source.art.clone(),
+    });
+    Ok(duplicated)
+}
+
+fn relocate_prop_document(
+    document: &Document,
+    selected: u64,
+    position: [orr_fp::FP; 3],
+    graph_revision: [u8; 32],
+) -> Result<Document, String> {
+    let mut relocated = document.clone();
+    let prop = relocated
+        .props
+        .iter_mut()
+        .find(|prop| prop.id == selected)
+        .ok_or("The selected mesh prop is no longer present")?;
+    prop.art = prop
+        .art
+        .clone()
+        .with_transform(position.map(orr_fp::FP::to_f32), prop.art.scale())?;
+    validate_document(&relocated, graph_revision)?;
+    Ok(relocated)
 }
 
 fn discard_invalid_ready(

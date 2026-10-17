@@ -6,6 +6,22 @@ a static prop. No package install, network request or script execution is needed
 
 ## Move and save
 
+Use **Duplicate selected prop** to copy the selected embedded model, license
+record, transform, rotation, and tint at its current position. The copy receives
+a fresh stable identifier and a bounded unique name, becomes selected, and
+creates one private history entry. Duplication is limited by the existing
+six-prop bound.
+
+Use **Place selected prop on mesh**, then click a walkable triangle in the
+viewport. The click uses the admitted navigation mesh picker and stages the
+selected prop's XYZ offset without changing the document. **Apply prop
+placement** commits that position as one private history entry; **Cancel prop
+placement**, Escape, focus loss, or a scene/graph/checksum context change leaves
+the document unchanged. While a placement is armed, other prop editing, history,
+Play, generic viewport selection, workspace changes, and export remain blocked.
+The staged location is a cosmetic placement on walkable mesh geometry, not a
+collider, physics result, or guarantee of collision-free placement.
+
 1. Enable **Move props in viewport** in the Mesh props inspector.
 2. Click a prop to select its transformed bounding box, or drag it with the left
    mouse button. The nearest world-space axis-aligned box is picked; equal hits

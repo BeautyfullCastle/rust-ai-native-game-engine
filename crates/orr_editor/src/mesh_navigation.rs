@@ -564,7 +564,8 @@ impl Panel {
             }
         });
         self.art.show(ui, editor);
-        self.props.show(ui, editor);
+        let agent_pick_busy = self.agent_pick_busy();
+        self.props.show(ui, editor, agent_pick_busy);
     }
 
     fn authoring_blocker(&self, editor: &Editor) -> Option<String> {
