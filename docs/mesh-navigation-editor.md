@@ -11,6 +11,22 @@ orr_editor --game mesh-navigation
 The scene can start empty; the panel opens from the
 `Static-mesh navigation` section of the editor.
 
+Use `File > New mesh scene…` to create a separate absolute `.scene.yaml` file
+inside an existing directory and open it in the current local mesh editor.
+Creation refuses existing files, links/reparse parents, unsaved host edits,
+open proposals, transactions and Play. Place and save an unplaced draft first,
+or explicitly use `Discard unplaced changes`; New never silently discards it.
+The existing `File > Save As…` and `File > Open scene…` path dialogs are also
+available, so creating and reopening a scene does not require a shell command.
+Path prompts have the accessible `Scene path` label.
+
+File creation uses no-clobber `create_new`, not a replace operation. If a later
+write or host-open fails, the newly created file can remain; no deletion or
+automatic retry is attempted. Parent-chain checks are preflight checks, not
+hostile-parent race isolation or crash durability. Host cleanliness/proposal
+checks precede creation, but existing `scene.load` has no compare-and-swap
+contract: do not create/open documents concurrently with another ERP editor.
+
 The panel can create the built-in ramp/bridge draft, open a bounded canonical
 `.orrmesh`, or import `.glb`, `.gltf`, or `.orrmodel` geometry. Imported source
 geometry is cooked to a new `.orrmesh` output without mutating the host; output

@@ -17,6 +17,7 @@ use orr_model::{
 };
 use orr_navigation::{mesh::StaticMeshGraph, AgentProfile};
 use orr_remote::mesh_navigation::{decode_asset, mesh_from_view};
+use serde_json::json;
 use std::path::Path;
 
 const BLANK_SCENE: &str = "schema: orr.scene/1\nsingletons: {}\nentities: {}\n";
@@ -341,6 +342,164 @@ fn model_import_saves_canonical_mesh_without_frame_mutation_and_reopens() {
     assert_eq!(reopened.checksum(), saved_checksum);
     let restored = mesh_from_view(reopened.snapshot().unwrap().predicted()).unwrap();
     assert_eq!(restored.graph.revision(), saved_graph.revision());
+}
+
+#[test]
+fn creating_mesh_scene_opens_a_clean_document_and_preserves_existing_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let source_scene = root_path.join("mesh-navigation.scene.yaml");
+    let existing_scene = root_path.join("existing.scene.yaml");
+    let new_scene = root_path.join("new.scene.yaml");
+    let existing_bytes = b"leave this scene untouched";
+    std::fs::write(&source_scene, BLANK_SCENE).unwrap();
+    std::fs::write(&existing_scene, existing_bytes).unwrap();
+    let mut editor = Editor::open_game(&source_scene, EditorGame::MeshNavigation).unwrap();
+    editor.sync();
+    let initial_checksum = editor.checksum();
+
+    assert!(!editor.create_mesh_scene(&existing_scene));
+    assert_eq!(std::fs::read(&existing_scene).unwrap(), existing_bytes);
+    assert_eq!(editor.path().as_deref(), Some(source_scene.as_path()));
+    assert_eq!(editor.checksum(), initial_checksum);
+
+    assert!(editor.create_mesh_scene(&new_scene));
+    editor.sync();
+    assert_eq!(std::fs::read_to_string(&new_scene).unwrap(), BLANK_SCENE);
+    assert_eq!(editor.path().as_deref(), Some(new_scene.as_path()));
+    assert_eq!(editor.checksum(), initial_checksum);
+    assert!(!editor.is_dirty());
+}
+
+#[test]
+fn creating_mesh_scene_requires_saving_an_authored_pin_first() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let source_scene = root_path.join("mesh-navigation.scene.yaml");
+    let new_scene = root_path.join("new.scene.yaml");
+    let mut harness = setup(&source_scene);
+    click(&mut harness, "Static-mesh navigation");
+    click(&mut harness, "Create ramp and bridge");
+    click(&mut harness, "Place mesh agent");
+    assert!(harness.state().editor.is_dirty());
+    let authored_checksum = harness.state().editor.checksum();
+
+    assert!(!harness.state_mut().editor.create_mesh_scene(&new_scene));
+    assert!(!new_scene.exists());
+    assert_eq!(
+        harness.state().editor.path().as_deref(),
+        Some(source_scene.as_path())
+    );
+    assert_eq!(harness.state().editor.checksum(), authored_checksum);
+
+    assert!(harness.state_mut().editor.save());
+    assert!(!harness.state().editor.is_dirty());
+    assert!(harness.state_mut().editor.create_mesh_scene(&new_scene));
+    harness.state_mut().editor.sync();
+    assert_eq!(
+        harness.state().editor.path().as_deref(),
+        Some(new_scene.as_path())
+    );
+    assert_eq!(std::fs::read_to_string(&new_scene).unwrap(), BLANK_SCENE);
+}
+
+#[test]
+fn creating_mesh_scene_rejects_open_proposals_and_play_mode() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let proposal_scene = root_path.join("proposal-source.scene.yaml");
+    let proposal_target = root_path.join("proposal-target.scene.yaml");
+    std::fs::write(&proposal_scene, BLANK_SCENE).unwrap();
+    let mut proposal_editor =
+        Editor::open_game(&proposal_scene, EditorGame::MeshNavigation).unwrap();
+    proposal_editor
+        .agent_client("mesh-author")
+        .unwrap()
+        .call("proposal.begin", json!({"label": "pending mesh proposal"}))
+        .unwrap();
+    proposal_editor.sync();
+    assert_eq!(proposal_editor.proposals().len(), 1);
+    assert!(!proposal_editor.create_mesh_scene(&proposal_target));
+    assert!(!proposal_target.exists());
+    assert_eq!(
+        proposal_editor.path().as_deref(),
+        Some(proposal_scene.as_path())
+    );
+
+    let play_scene = root_path.join("play-source.scene.yaml");
+    let play_target = root_path.join("play-target.scene.yaml");
+    let mut play_harness = setup(&play_scene);
+    click(&mut play_harness, "Static-mesh navigation");
+    click(&mut play_harness, "Create ramp and bridge");
+    click(&mut play_harness, "Place mesh agent");
+    assert!(play_harness.state_mut().editor.save());
+    play_harness.state_mut().editor.play();
+    play_harness.state_mut().editor.sync();
+    let play_editor = &mut play_harness.state_mut().editor;
+    assert_eq!(play_editor.mode(), Mode::Play);
+    assert!(!play_editor.create_mesh_scene(&play_target));
+    assert!(!play_target.exists());
+    assert_eq!(play_editor.path().as_deref(), Some(play_scene.as_path()));
+}
+
+#[test]
+fn discarding_unplaced_mesh_changes_allows_new_scene_without_host_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let source_scene = root_path.join("mesh-navigation.scene.yaml");
+    let new_scene = root_path.join("new.scene.yaml");
+    let mut harness = setup(&source_scene);
+    let source_bytes = std::fs::read(&source_scene).unwrap();
+    let initial_checksum = harness.state().editor.checksum();
+    let initial_history = harness.state().editor.history().entries.clone();
+
+    click(&mut harness, "Static-mesh navigation");
+    click(&mut harness, "Create ramp and bridge");
+    assert!(!harness
+        .get_by_label("Discard unplaced changes")
+        .accesskit_node()
+        .is_disabled());
+    click(&mut harness, "Discard unplaced changes");
+    assert!(harness
+        .get_by_label("Discard unplaced changes")
+        .accesskit_node()
+        .is_disabled());
+    assert!(harness.state().mesh_navigation.model().is_none());
+    assert!(harness
+        .get_by_label("Place mesh agent")
+        .accesskit_node()
+        .is_disabled());
+    assert_eq!(harness.state().editor.checksum(), initial_checksum);
+    assert_eq!(harness.state().editor.history().entries, initial_history);
+    assert_eq!(std::fs::read(&source_scene).unwrap(), source_bytes);
+
+    harness.get_by_label("File").click();
+    harness.run_steps(2);
+    harness.get_by_label("New mesh scene…").click();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::TextInput, "Scene path")
+        .focus();
+    harness.run_steps(2);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::TextInput, "Scene path")
+        .type_text(&new_scene.display().to_string());
+    harness.run_steps(2);
+    harness.get_by_label("Create").click();
+    harness.state_mut().editor.sync();
+    harness.run_steps(3);
+
+    assert!(new_scene.is_file());
+    assert_eq!(
+        harness.state().editor.path().as_deref(),
+        Some(new_scene.as_path())
+    );
+    assert_eq!(harness.state().editor.checksum(), initial_checksum);
+    assert_eq!(harness.state().editor.history().entries, initial_history);
+    assert_eq!(std::fs::read(&source_scene).unwrap(), source_bytes);
+    assert!(harness.state().mesh_navigation.model().is_none());
 }
 
 #[test]

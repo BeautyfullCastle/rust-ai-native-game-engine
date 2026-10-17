@@ -53,6 +53,8 @@ pub enum DialogKind {
     Open,
     /// Save under a new name.
     SaveAs,
+    #[cfg(feature="mesh-navigation")]
+    NewMesh,
 }
 
 /// An open path prompt.
@@ -435,6 +437,12 @@ impl EditorApp {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if !(mutable) { ui.disable(); }
+                #[cfg(feature="mesh-navigation")]
+                if self.editor.game().is_mesh_navigation()
+                    && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("New mesh scene\u{2026}")).clicked() {
+                    self.ui.dialog = Some(Dialog { kind: DialogKind::NewMesh, text: String::new() });
+                    ui.close();
+                }
                 if ui.button("Open scene\u{2026}").clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::Open, text });
@@ -1221,17 +1229,23 @@ impl EditorApp {
         let title = match dialog.kind {
             DialogKind::Open => "Open scene",
             DialogKind::SaveAs => "Save scene as",
+            #[cfg(feature="mesh-navigation")]
+            DialogKind::NewMesh => "New mesh scene",
         };
         let mut keep = true;
         let mut accept = false;
         egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            ui.label("File path:");
-            let r = ui.add(egui::TextEdit::singleline(&mut dialog.text).desired_width(420.0));
+            let label = ui.label("Scene path");
+            let r = ui.add(egui::TextEdit::singleline(&mut dialog.text).desired_width(420.0)).labelled_by(label.id);
             if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 accept = true;
             }
             ui.horizontal(|ui| {
-                if ui.button("OK").clicked() {
+                #[cfg(feature="mesh-navigation")]
+                let action = if dialog.kind == DialogKind::NewMesh { "Create" } else { "OK" };
+                #[cfg(not(feature="mesh-navigation"))]
+                let action = "OK";
+                if ui.button(action).clicked() {
                     accept = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -1250,6 +1264,15 @@ impl EditorApp {
             let ok = match dialog.kind {
                 DialogKind::Open => self.editor.open_path(&path),
                 DialogKind::SaveAs => self.editor.save_as(&path),
+                #[cfg(feature="mesh-navigation")]
+                DialogKind::NewMesh => {
+                    if self.mesh_navigation.has_unplaced_draft() {
+                        self.editor.error("Place or explicitly discard unplaced mesh changes before creating a new scene");
+                        false
+                    } else {
+                        self.editor.create_mesh_scene(&path)
+                    }
+                }
             };
             keep = !ok;
         }

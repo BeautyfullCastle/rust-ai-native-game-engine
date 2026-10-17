@@ -1574,6 +1574,41 @@ impl Editor {
 
     // ---- files ----
 
+    #[cfg(feature = "mesh-navigation")]
+    pub fn create_mesh_scene(&mut self, path: &Path) -> bool {
+        if !self.game().is_mesh_navigation() || !self.spec().is_local() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some()
+            || self.gesture.busy() || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            self.error("New mesh scenes require an idle local MeshNavigation editor in Edit mode");
+            return false;
+        }
+        let state = match self.call("sim.state", J::Null) {
+            Ok(state) => state,
+            Err(error) => { self.error(error); return false; }
+        };
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            self.error("Save the current scene and finish transactions before creating a new mesh scene");
+            return false;
+        }
+        let proposals = match self.call("proposal.list", J::Null) {
+            Ok(proposals) => proposals,
+            Err(error) => { self.error(error); return false; }
+        };
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            self.error("Resolve open proposals before creating a new mesh scene");
+            return false;
+        }
+        if let Err(error) = crate::mesh_scene::create(path) {
+            self.error(format!("cannot create {}: {error}", path.display()));
+            return false;
+        }
+        self.open_path(path)
+    }
+
     /// Replaces the document with a scene file. Refused in play mode.
     pub fn open_path(&mut self, path: &Path) -> bool {
         if self.sim.mode == Mode::Play {

@@ -9,7 +9,10 @@ use orr_editor::{
     Editor, EditorApp, Mode,
 };
 use orr_fp::{fp, FP};
-use orr_navigation::NavigationStatus;
+use orr_model::{
+    Dependency, Image, Material, ModelSource, Primitive, StaticModel, Vertex, Wrap, IDENTITY,
+};
+use orr_navigation::{mesh::StaticMeshGraph, AgentProfile, NavigationStatus};
 use orr_remote::mesh_navigation::{decode_asset, mesh_from_view, AgentSpec};
 use orr_rhi::{Rhi, Wgpu, WgpuOptions};
 use sha2::{Digest, Sha256};
@@ -21,7 +24,7 @@ fn gpu_available() -> bool {
     match Wgpu::headless(WgpuOptions::default()) {
         Ok(rhi) => {
             eprintln!(
-                "MeshNavigation EditorApp GPU: {} (software: {})",
+                "MeshNavigation GPU preflight: {} (software: {})",
                 rhi.adapter_name(),
                 rhi.is_software()
             );
@@ -70,6 +73,96 @@ fn menu_click(harness: &mut Harness<'_, EditorApp>, menu: &str, label: &str) {
     harness.run_steps(2);
     harness.get_by_label(label).click();
     settle(harness);
+}
+
+fn type_dialog_path(harness: &mut Harness<'_, EditorApp>, path: &Path, action: &str) {
+    harness
+        .get_by_role_and_label(Role::TextInput, "Scene path")
+        .scroll_to_me();
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::TextInput, "Scene path")
+        .focus();
+    harness.run_steps(2);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::TextInput, "Scene path")
+        .type_text(&path.display().to_string());
+    harness.run_steps(2);
+    harness.get_by_label(action).click();
+    settle(harness);
+}
+
+fn ramp_bridge_model_bytes() -> Vec<u8> {
+    let graph = StaticMeshGraph::bake(
+        &[
+            [fp!(0), fp!(0), fp!(0)],
+            [fp!(4), fp!(0), fp!(0)],
+            [fp!(0), fp!(0), fp!(2)],
+            [fp!(4), fp!(0), fp!(2)],
+            [fp!(6), fp!(2), fp!(0)],
+            [fp!(6), fp!(2), fp!(2)],
+            [fp!(2), fp!(2), fp!(0)],
+            [fp!(2), fp!(2), fp!(2)],
+        ],
+        &[
+            [0, 2, 3],
+            [0, 3, 1],
+            [1, 3, 5],
+            [1, 5, 4],
+            [6, 7, 5],
+            [6, 5, 4],
+        ],
+        AgentProfile {
+            max_slope: fp!(4),
+            radius: FP::ZERO,
+            headroom: FP::ZERO,
+            max_step: FP::ZERO,
+        },
+    )
+    .unwrap();
+    let source = ModelSource {
+        format: "orr_static_model".into(),
+        version: 1,
+        asset_id: "ramp.orrmodel".into(),
+        dependencies: vec![Dependency {
+            uri: "$source".into(),
+            sha256: "0".repeat(64),
+        }],
+        primitives: vec![Primitive {
+            id: "ramp.orrmodel#node=0".into(),
+            vertices: graph
+                .vertices()
+                .iter()
+                .map(|point| Vertex {
+                    position: point.map(FP::to_f32),
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
+                })
+                .collect(),
+            indices: graph
+                .triangles()
+                .iter()
+                .flat_map(|triangle| triangle.vertices)
+                .collect(),
+            material: 0,
+            transform: IDENTITY,
+        }],
+        materials: vec![Material {
+            base_color: [0.7, 0.7, 0.7, 1.0],
+            image: 0,
+            linear_filter: false,
+            wrap_s: Wrap::Clamp,
+            wrap_t: Wrap::Clamp,
+        }],
+        images: vec![Image {
+            width: 1,
+            height: 1,
+            rgba8: vec![255; 4],
+        }],
+    };
+    StaticModel::new(source).unwrap().to_bytes().unwrap()
 }
 
 fn type_into(harness: &mut Harness<'_, EditorApp>, label: &str, value: &str) {
@@ -129,6 +222,10 @@ fn viewport_pixels(harness: &mut Harness<'_, EditorApp>, name: &str) -> Vec<u8> 
         .state()
         .viewport3d_gpu()
         .expect("production MeshNavigation 3D viewport rendered");
+    eprintln!(
+        "MeshNavigation EditorApp viewport GPU: {}",
+        viewport.gpu().adapter_name()
+    );
     let size = viewport.gpu().target().size();
     let pixels = viewport.gpu().read_rgba8();
     assert_eq!(pixels.len(), (size.0 * size.1 * 4) as usize);
@@ -203,18 +300,57 @@ fn production_editor_authors_saves_reopens_and_runs_a_self_contained_mesh_scene(
 
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
+    let bootstrap_scene = root.join("bootstrap.scene.yaml");
     let original_scene = root.join("mesh-navigation.scene.yaml");
     let copied_scene = root.join("saved-copy.scene.yaml");
+    let blocked_scene = root.join("blocked.scene.yaml");
+    let model_source = root.join("ramp.orrmodel");
     let mesh_asset = root.join("ramp.orrmesh");
     let hidden_mesh_asset = root.join("ramp.orrmesh.hidden");
-    let mut harness = setup(&original_scene);
+    std::fs::write(&model_source, ramp_bridge_model_bytes()).unwrap();
+    let mut harness = setup(&bootstrap_scene);
     harness.run_steps(4);
     assert!(harness.state().has_gpu());
 
+    menu_click(&mut harness, "File", "New mesh scene…");
+    type_dialog_path(&mut harness, &original_scene, "Create");
+    assert!(original_scene.is_file());
+
     click(&mut harness, "Static-mesh navigation");
     let baseline = viewport_pixels(&mut harness, "baseline");
-    click(&mut harness, "Create ramp and bridge");
-    harness.state_mut().mesh_navigation.mesh_output_path = mesh_asset.display().to_string();
+    type_into(
+        &mut harness,
+        "Model source (.glb, .gltf, .orrmodel)",
+        &model_source.display().to_string(),
+    );
+    click(&mut harness, "Open model");
+    let unplaced_checksum = harness.state().editor.checksum();
+    menu_click(&mut harness, "File", "New mesh scene…");
+    harness
+        .get_by_role_and_label(Role::TextInput, "Scene path")
+        .focus();
+    harness.run_steps(2);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    harness.run_steps(2);
+    harness
+        .get_by_role_and_label(Role::TextInput, "Scene path")
+        .type_text(&blocked_scene.display().to_string());
+    harness.run_steps(2);
+    harness.get_by_label("Create").click();
+    settle(&mut harness);
+    assert!(!blocked_scene.exists());
+    assert_eq!(harness.state().editor.checksum(), unplaced_checksum);
+    assert_eq!(
+        harness.state().mesh_navigation.model_path,
+        model_source.display().to_string()
+    );
+    assert!(harness.state().ui.dialog.is_some());
+    click(&mut harness, "Cancel");
+    type_into(
+        &mut harness,
+        "Save mesh asset (.orrmesh)",
+        &mesh_asset.display().to_string(),
+    );
     click(&mut harness, "Save mesh asset");
     assert!(mesh_asset.is_file());
 
@@ -251,17 +387,32 @@ fn production_editor_authors_saves_reopens_and_runs_a_self_contained_mesh_scene(
     assert!(harness.state().mesh_navigation.model().is_some());
     assert_eq!(mesh_view(&harness).graph.revision(), saved_graph.revision());
 
-    assert!(harness.state_mut().editor.save_as(&copied_scene));
     menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save As…");
+    type_dialog_path(&mut harness, &copied_scene, "OK");
+    menu_click(&mut harness, "File", "Save Ctrl+S");
+    let saved_checksum = harness.state().editor.checksum();
     let saved_scene = std::fs::read(&copied_scene).unwrap();
     assert!(!saved_scene.is_empty());
     std::fs::rename(&mesh_asset, &hidden_mesh_asset).unwrap();
     assert!(!mesh_asset.exists());
+    std::fs::rename(&model_source, root.join("ramp.orrmodel.hidden")).unwrap();
+    assert!(!model_source.exists());
+    menu_click(&mut harness, "File", "Open scene…");
+    type_dialog_path(&mut harness, &original_scene, "OK");
+    assert_eq!(harness.state().editor.checksum(), saved_checksum);
+    assert_eq!(mesh_view(&harness).graph.revision(), saved_graph.revision());
+    menu_click(&mut harness, "File", "Open scene…");
+    type_dialog_path(&mut harness, &copied_scene, "OK");
+    assert_eq!(harness.state().editor.checksum(), saved_checksum);
+    assert_eq!(mesh_view(&harness).graph.revision(), saved_graph.revision());
+    let ui_reopened_pixels = viewport_pixels(&mut harness, "ui-reopened-source-hidden");
+    assert!(changed_pixel_count(&placed_pixels, &ui_reopened_pixels) < 20);
     drop(harness);
 
     let mut editor = Editor::open_game(&copied_scene, EditorGame::MeshNavigation).unwrap();
     editor.sync();
-    let saved_checksum = editor.checksum();
+    assert_eq!(editor.checksum(), saved_checksum);
     let mut harness = Harness::builder()
         .with_size([1280.0, 850.0])
         .with_step_dt(1.0 / 60.0)

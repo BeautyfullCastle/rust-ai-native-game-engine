@@ -189,6 +189,10 @@ impl Panel {
         self.view_model.clone()
     }
 
+    pub(crate) fn has_unplaced_draft(&self) -> bool {
+        self.draft_dirty
+    }
+
     pub fn play_blocker(&self, editor: &Editor) -> Option<String> {
         if editor.game() != EditorGame::MeshNavigation {
             return None;
@@ -384,6 +388,16 @@ impl Panel {
                     if let Err(error) = self.create_ramp_and_bridge() {
                         self.error = Some(error);
                     }
+                }
+                if ui
+                    .add_enabled(
+                        self.draft_dirty && editor.mode() == Mode::Edit,
+                        egui::Button::new("Discard unplaced changes"),
+                    )
+                    .clicked()
+                {
+                    *self = Self::default();
+                    self.sync(editor);
                 }
             });
             let asset_label = ui.label("Mesh asset (.orrmesh)");
