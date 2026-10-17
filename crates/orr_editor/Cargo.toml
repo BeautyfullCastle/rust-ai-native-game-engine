@@ -18,6 +18,7 @@ input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/input-actions"]
 # Optional new-project creator for explicit authoring and acceptance workflows.
 project-create = ["orr_sample/project-create"]
 room-project = ["models", "orr_remote/room-project", "orr_sample/room-project"]
+windows-export = ["room-project", "orr_sample/project-export"]
 image-reimport = ["sprites", "orr_sample/image-reimport"]
 linked-prefabs = ["collect-dodge", "dep:tempfile", "orr_remote/linked-prefabs", "orr_sample/linked-prefabs", "orr_reflect/linked-prefabs"]
 collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]

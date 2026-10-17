@@ -98,6 +98,12 @@ required-features = ["project-create"]
 test = false
 
 [[bin]]
+name = "orr_export_windows"
+path = "src/bin/orr_export_windows.rs"
+required-features = ["project-export"]
+test = false
+
+[[bin]]
 name = "orr_export_arena"
 path = "src/bin/orr_export_arena.rs"
 required-features = ["project-export"]

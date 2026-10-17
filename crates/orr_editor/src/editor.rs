@@ -1574,6 +1574,32 @@ impl Editor {
 
     // ---- files ----
 
+    #[cfg(all(windows, target_arch = "x86_64", feature = "windows-export"))]
+    pub(crate) fn windows_export_scene(&mut self) -> Result<(PathBuf, u64), String> {
+        if !self.game().is_room() || !self.spec().is_local() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some() || self.gesture.busy()
+            || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            return Err("Export requires an idle local Room editor in Edit mode".into());
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            return Err("Save the scene and finish transactions before exporting".into());
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            return Err("Resolve open proposals before exporting".into());
+        }
+        let path = state.get("scene_path").and_then(J::as_str).filter(|path| !path.is_empty())
+            .map(PathBuf::from).ok_or("Save the current scene before exporting")?;
+        let checksum = state.get("checksum").and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        Ok((path, checksum))
+    }
+
     #[cfg(feature = "mesh-navigation")]
     pub fn create_mesh_scene(&mut self, path: &Path) -> bool {
         if !self.game().is_mesh_navigation() || !self.spec().is_local() || !self.can_mutate()

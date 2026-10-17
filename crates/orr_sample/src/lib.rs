@@ -55,6 +55,10 @@ pub mod project_compositor;
 
 #[cfg(all(feature = "project-export", target_os = "linux", target_arch = "x86_64"))]
 pub mod project_export;
+#[cfg(all(windows, target_arch = "x86_64", feature = "project-export"))]
+pub mod windows_export;
+#[cfg(all(test, windows, target_arch = "x86_64", feature = "project-export", feature = "room-project"))]
+extern crate self as orr_sample;
 
 #[cfg(feature = "player-settings")]
 pub mod player_settings;
