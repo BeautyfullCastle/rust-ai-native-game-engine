@@ -44,6 +44,7 @@ pub struct Panel {
     graph: Option<StaticMeshGraph>,
     view_model: Option<Arc<StaticModel>>,
     art: crate::mesh_art_panel::Panel,
+    props: crate::mesh_props_panel::Panel,
 }
 
 impl Default for Panel {
@@ -72,6 +73,7 @@ impl Default for Panel {
             graph: None,
             view_model: None,
             art: crate::mesh_art_panel::Panel::default(),
+            props: crate::mesh_props_panel::Panel::default(),
         }
     }
 }
@@ -79,6 +81,7 @@ impl Default for Panel {
 impl Panel {
     pub fn sync(&mut self, editor: &Editor) {
         self.art.sync(editor);
+        self.props.sync(editor);
         if editor.game() != EditorGame::MeshNavigation {
             self.clear_host_view();
             return;
@@ -193,7 +196,7 @@ impl Panel {
     }
 
     pub(crate) fn has_unplaced_draft(&self) -> bool {
-        self.draft_dirty || self.art.dirty()
+        self.draft_dirty || self.art.dirty() || self.props.dirty()
     }
 
     pub(crate) fn art_model(&self, editor: &Editor) -> Option<crate::viewport3d::SceneModel> {
@@ -201,7 +204,11 @@ impl Panel {
     }
 
     pub(crate) fn art_dirty(&self) -> bool {
-        self.art.dirty()
+        self.art.dirty() || self.props.dirty()
+    }
+
+    pub(crate) fn prop_models(&self, editor: &Editor) -> Vec<crate::viewport3d::SceneModel> {
+        self.props.placements(editor)
     }
 
     pub(crate) fn art_import_busy(&self) -> bool {
@@ -213,6 +220,9 @@ impl Panel {
             return None;
         }
         if let Some(reason) = self.art.play_blocker(editor) {
+            return Some(reason);
+        }
+        if let Some(reason) = self.props.play_blocker(editor) {
             return Some(reason);
         }
         if !editor.proposals().is_empty() {
@@ -415,8 +425,10 @@ impl Panel {
                     .clicked()
                 {
                     let art = std::mem::take(&mut self.art);
+                    let props = std::mem::take(&mut self.props);
                     *self = Self {
                         art,
+                        props,
                         ..Self::default()
                     };
                     self.sync(editor);
@@ -511,6 +523,7 @@ impl Panel {
             }
         });
         self.art.show(ui, editor);
+        self.props.show(ui, editor);
     }
 
     fn authoring_blocker(&self, editor: &Editor) -> Option<String> {
@@ -594,11 +607,13 @@ impl Panel {
 
     fn reset_to_empty_pin(&mut self) {
         let art = std::mem::take(&mut self.art);
+        let props = std::mem::take(&mut self.props);
         *self = Self {
             loaded_scene: self.loaded_scene.clone(),
             loaded_scene_epoch: self.loaded_scene_epoch,
             last_frame: self.last_frame,
             art,
+            props,
             ..Self::default()
         };
     }

@@ -97,6 +97,9 @@ impl Panel {
                     if let Some(sidecar_sha256) = &receipt.sidecar_sha256 {
                         ui.label(format!("Agent-art sidecar SHA-256: {sidecar_sha256}"));
                     }
+                    if let Some(props_sha256) = &receipt.props_sha256 {
+                        ui.label(format!("Mesh props sidecar SHA-256: {props_sha256}"));
+                    }
                     ui.label(format!("Mesh player SHA-256: {}", receipt.runtime_sha256));
                     ui.label(format!("Scene copy: {}", receipt.scene.display()));
                     ui.label(format!("Manifest: {}", receipt.manifest.display()));
@@ -264,10 +267,18 @@ fn source_matches(
     {
         return false;
     }
+    if !saved_sidecars_match(&scene, receipt) {
+        return false;
+    }
     editor
         .snapshot()
         .and_then(|snapshot| mesh_from_view(snapshot.predicted()).ok())
         .is_some_and(|view| view.graph.revision() == request.graph_revision)
+}
+
+fn saved_sidecars_match(scene: &std::path::Path, receipt: &crate::mesh_export::Receipt) -> bool {
+    matches!(crate::mesh_art::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.sidecar_sha256)
+        && matches!(crate::mesh_props::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.props_sha256)
 }
 
 fn completion_metadata_matches(

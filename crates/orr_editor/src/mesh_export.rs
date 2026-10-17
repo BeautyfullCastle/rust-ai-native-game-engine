@@ -23,7 +23,11 @@ const MAX_SCENE_LEAF_BYTES: usize = 180;
 const MAX_RUNTIME_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const SIDECAR_SUFFIX: &str = ".mesh-art.json";
+const PROPS_SUFFIX: &str = ".mesh-props.json";
 const RUNTIME_MARKER: &[u8] = b"ORR_MESH_PLAYER_V1";
+const PROPS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_PROPS_V1";
+const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
+const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
@@ -39,6 +43,7 @@ pub(crate) struct Receipt {
     pub graph_revision: [u8; 32],
     pub scene_sha256: String,
     pub sidecar_sha256: Option<String>,
+    pub props_sha256: Option<String>,
     pub runtime_sha256: String,
 }
 
@@ -56,6 +61,8 @@ struct BundleManifest {
     schema: u32,
     scene: BundleFile,
     sidecar: Option<BundleFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    props: Option<BundleFile>,
     runtime: BundleFile,
     checksum: u64,
     graph_revision: [u8; 32],
@@ -103,8 +110,27 @@ pub(crate) fn export(
         }
         None => None,
     };
+    let props_path = crate::mesh_props::sidecar_path(&scene_path)?;
+    let props_bytes =
+        match read_optional_bounded(&props_path, 16 * 1024 * 1024, "mesh props sidecar")? {
+            Some(bytes) => {
+                let Some((_, admitted_hash)) =
+                    crate::mesh_props::load(&scene_path, graph_revision)?
+                else {
+                    return Err("mesh props sidecar could not be admitted".into());
+                };
+                if admitted_hash != digest(&bytes)
+                    || read_bounded(&props_path, 16 * 1024 * 1024, "mesh props sidecar recheck")?
+                        != bytes
+                {
+                    return Err("mesh props sidecar changed during admission".into());
+                }
+                Some(bytes)
+            }
+            None => None,
+        };
     let runtime_bytes = read_bounded(runtime, MAX_RUNTIME_BYTES, "mesh player runtime")?;
-    validate_runtime(&runtime_bytes)?;
+    validate_runtime(&runtime_bytes, props_bytes.is_some())?;
     let runtime_hash = digest(&runtime_bytes);
     let scene_name = scene_path
         .file_name()
@@ -114,6 +140,9 @@ pub(crate) fn export(
     let sidecar_name = sidecar_bytes
         .as_ref()
         .map(|_| format!("{scene_name}{SIDECAR_SUFFIX}"));
+    let props_name = props_bytes
+        .as_ref()
+        .map(|_| format!("{scene_name}{PROPS_SUFFIX}"));
     let parent = checked_output_parent(destination)?;
     let output_name = checked_leaf(
         destination
@@ -132,6 +161,9 @@ pub(crate) fn export(
     if let (Some(name), Some(bytes)) = (&sidecar_name, &sidecar_bytes) {
         write_new_file(&stage.path().join(name), bytes)?;
     }
+    if let (Some(name), Some(bytes)) = (&props_name, &props_bytes) {
+        write_new_file(&stage.path().join(name), bytes)?;
+    }
     write_new_file(&stage.path().join(RUNTIME_FILENAME), &runtime_bytes)?;
     let manifest = BundleManifest {
         schema: 1,
@@ -139,6 +171,10 @@ pub(crate) fn export(
         sidecar: sidecar_name
             .as_ref()
             .zip(sidecar_bytes.as_deref())
+            .map(|(name, bytes)| bundle_file(name, bytes)),
+        props: props_name
+            .as_ref()
+            .zip(props_bytes.as_deref())
             .map(|(name, bytes)| bundle_file(name, bytes)),
         runtime: bundle_file(RUNTIME_FILENAME, &runtime_bytes),
         checksum,
@@ -164,6 +200,14 @@ pub(crate) fn export(
             (None, None) => false,
             _ => true,
         }
+        || match (
+            &props_bytes,
+            read_optional_bounded(&props_path, 16 * 1024 * 1024, "mesh props sidecar recheck")?,
+        ) {
+            (Some(before), Some(after)) => before != &after,
+            (None, None) => false,
+            _ => true,
+        }
     {
         return Err("mesh bundle inputs changed before publication".into());
     }
@@ -174,6 +218,7 @@ pub(crate) fn export(
     refuse_existing(&output)?;
     publish_new_directory(stage.path(), &output)?;
     let sidecar_sha256 = sidecar_bytes.as_deref().map(digest);
+    let props_sha256 = props_bytes.as_deref().map(digest);
     Ok(Receipt {
         root: output.clone(),
         scene: output.join(scene_name),
@@ -183,6 +228,7 @@ pub(crate) fn export(
         graph_revision,
         scene_sha256: digest(&scene_bytes),
         sidecar_sha256,
+        props_sha256,
         runtime_sha256: runtime_hash,
     })
 }
@@ -205,6 +251,10 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             orr_model::MAX_FILE_BYTES as u64,
         )?;
     }
+    let props_name = format!("{}{}", manifest.scene.name, PROPS_SUFFIX);
+    if let Some(props) = &manifest.props {
+        validate_bundle_file(props, &props_name, 16 * 1024 * 1024)?;
+    }
     let expected_names: BTreeSet<String> = [
         MANIFEST_FILENAME.to_owned(),
         manifest.scene.name.clone(),
@@ -212,6 +262,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     ]
     .into_iter()
     .chain(manifest.sidecar.as_ref().map(|entry| entry.name.clone()))
+    .chain(manifest.props.as_ref().map(|entry| entry.name.clone()))
     .collect();
     let actual_names = inventory_names(&canonical_root)?;
     if actual_names != expected_names {
@@ -253,10 +304,31 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         (None, None) => {}
         _ => return Err("bundle art sidecar inventory does not match its manifest".into()),
     }
+    let props_path = canonical_root.join(&props_name);
+    match (
+        &manifest.props,
+        read_optional_bounded(&props_path, 16 * 1024 * 1024, "bundle mesh props sidecar")?,
+    ) {
+        (Some(record), Some(bytes)) => {
+            verify_file(record, &bytes, "bundle mesh props sidecar")?;
+            let Some((_, admitted_hash)) = crate::mesh_props::load(&scene_path, graph_revision)?
+            else {
+                return Err("bundle mesh props sidecar could not be admitted".into());
+            };
+            if admitted_hash != record.sha256 {
+                return Err("bundle mesh props admission hash does not match its manifest".into());
+            }
+            if read_bounded(&props_path, 16 * 1024 * 1024, "bundle mesh props recheck")? != bytes {
+                return Err("bundle mesh props sidecar changed during admission".into());
+            }
+        }
+        (None, None) => {}
+        _ => return Err("bundle mesh props sidecar inventory does not match its manifest".into()),
+    }
     let runtime_path = canonical_root.join(RUNTIME_FILENAME);
     let runtime_bytes = read_bounded(&runtime_path, MAX_RUNTIME_BYTES, "bundle runtime")?;
     verify_file(&manifest.runtime, &runtime_bytes, "bundle runtime")?;
-    validate_runtime(&runtime_bytes)?;
+    validate_runtime(&runtime_bytes, manifest.props.is_some())?;
     let sidecar_unchanged = match &manifest.sidecar {
         Some(record) => {
             let bytes = read_bounded(
@@ -274,6 +346,23 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         )?
         .is_none(),
     };
+    let props_unchanged = match &manifest.props {
+        Some(record) => {
+            let bytes = read_bounded(
+                &props_path,
+                16 * 1024 * 1024,
+                "bundle mesh props final recheck",
+            )?;
+            verify_file(record, &bytes, "bundle mesh props sidecar")?;
+            true
+        }
+        None => read_optional_bounded(
+            &props_path,
+            16 * 1024 * 1024,
+            "bundle mesh props final recheck",
+        )?
+        .is_none(),
+    };
     if checked_directory(root)? != canonical_root
         || read_bounded(
             &manifest_path,
@@ -285,6 +374,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             != runtime_bytes
         || inventory_names(&canonical_root)? != expected_names
         || !sidecar_unchanged
+        || !props_unchanged
     {
         return Err("mesh bundle changed while it was being opened".into());
     }
@@ -364,7 +454,7 @@ fn inventory_names(root: &Path) -> Result<BTreeSet<String>, String> {
         if !folded.insert(name.to_lowercase()) || !names.insert(name) {
             return Err("mesh bundle contains colliding filenames".into());
         }
-        if names.len() > 4 {
+        if names.len() > 5 {
             return Err("mesh bundle contains too many files".into());
         }
     }
@@ -719,7 +809,7 @@ fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String>
     }
 }
 
-fn validate_runtime(bytes: &[u8]) -> Result<(), String> {
+fn validate_runtime(bytes: &[u8], require_props: bool) -> Result<(), String> {
     if bytes.len() < 0x40 || &bytes[..2] != b"MZ" {
         return Err("mesh player runtime is missing its DOS executable header".into());
     }
@@ -789,44 +879,91 @@ fn validate_runtime(bytes: &[u8]) -> Result<(), String> {
     if section_table_end > bytes.len() {
         return Err("mesh player runtime has a truncated PE section table".into());
     }
-    let mut marker_section = None;
+    let runtime_marker_section = validate_runtime_section(bytes, RUNTIME_SECTION, RUNTIME_MARKER)?;
+    if runtime_marker_section.is_none() {
+        return Err("mesh player runtime has no .orrmesh marker section".into());
+    }
+    if require_props
+        && validate_runtime_section(bytes, PROPS_RUNTIME_SECTION, PROPS_RUNTIME_MARKER)?.is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh-props bundle support".into());
+    }
+    Ok(())
+}
+
+fn validate_runtime_section(
+    bytes: &[u8],
+    section_name: &[u8; 8],
+    marker: &[u8],
+) -> Result<Option<usize>, String> {
+    let pe_offset = u32::from_le_bytes(
+        bytes[0x3c..0x40]
+            .try_into()
+            .map_err(|_| "invalid DOS header")?,
+    ) as usize;
+    let section_count = u16::from_le_bytes(
+        bytes[pe_offset + 6..pe_offset + 8]
+            .try_into()
+            .map_err(|_| "invalid PE section count")?,
+    ) as usize;
+    let optional_size = u16::from_le_bytes(
+        bytes[pe_offset + 20..pe_offset + 22]
+            .try_into()
+            .map_err(|_| "invalid PE optional header size")?,
+    ) as usize;
+    let section_table = pe_offset
+        .checked_add(24)
+        .and_then(|offset| offset.checked_add(optional_size))
+        .ok_or("invalid PE section table offset")?;
+    let section_table_end = section_table
+        .checked_add(
+            section_count
+                .checked_mul(40)
+                .ok_or("invalid PE section count")?,
+        )
+        .ok_or("invalid PE section table size")?;
+    if section_table_end > bytes.len() {
+        return Err("mesh player runtime has a truncated PE section table".into());
+    }
+    let mut found = None;
     for index in 0..section_count {
         let section_start = section_table + index * 40;
         let section = &bytes[section_start..section_start + 40];
-        if &section[..8] == b".orrmesh" {
-            if marker_section.is_some() {
-                return Err("mesh player runtime has duplicate .orrmesh sections".into());
-            }
-            let raw_size = u32::from_le_bytes(
-                section[16..20]
-                    .try_into()
-                    .map_err(|_| "invalid PE section raw size")?,
-            ) as usize;
-            let raw_offset = u32::from_le_bytes(
-                section[20..24]
-                    .try_into()
-                    .map_err(|_| "invalid PE section raw offset")?,
-            ) as usize;
-            let raw_end = raw_offset
-                .checked_add(raw_size)
-                .ok_or("invalid PE section bounds")?;
-            if raw_size < RUNTIME_MARKER.len()
-                || raw_offset < section_table_end
-                || raw_end > bytes.len()
-                || &bytes[raw_offset..raw_offset + RUNTIME_MARKER.len()] != RUNTIME_MARKER
-            {
-                return Err(
-                    "mesh player runtime marker is not at the start of .orrmesh section data"
-                        .into(),
-                );
-            }
-            marker_section = Some(index);
+        if &section[..8] != section_name {
+            continue;
         }
+        if found.is_some() {
+            return Err(format!(
+                "mesh player runtime has duplicate {} sections",
+                String::from_utf8_lossy(section_name)
+            ));
+        }
+        let raw_size = u32::from_le_bytes(
+            section[16..20]
+                .try_into()
+                .map_err(|_| "invalid PE section raw size")?,
+        ) as usize;
+        let raw_offset = u32::from_le_bytes(
+            section[20..24]
+                .try_into()
+                .map_err(|_| "invalid PE section raw offset")?,
+        ) as usize;
+        let raw_end = raw_offset
+            .checked_add(raw_size)
+            .ok_or("invalid PE section bounds")?;
+        if raw_size < marker.len()
+            || raw_offset < section_table_end
+            || raw_end > bytes.len()
+            || &bytes[raw_offset..raw_offset + marker.len()] != marker
+        {
+            return Err(format!(
+                "mesh player runtime marker is not at the start of {} section data",
+                String::from_utf8_lossy(section_name)
+            ));
+        }
+        found = Some(index);
     }
-    if marker_section.is_none() {
-        return Err("mesh player runtime has no executable .orrmesh marker section".into());
-    }
-    Ok(())
+    Ok(found)
 }
 
 fn valid_digest(value: &str) -> bool {

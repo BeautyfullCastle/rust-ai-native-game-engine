@@ -353,7 +353,7 @@ impl EditorApp {
             return Some("Mesh workspace changes require an idle local Physics or MeshNavigation editor without an ERP listener".into());
         }
         if self.editor.is_dirty() || self.mesh_navigation.has_unplaced_draft() {
-            return Some("Save or explicitly undo/discard scene, unplaced mesh and agent art changes before changing mesh workspaces".into());
+            return Some("Save or explicitly undo/discard scene, unplaced mesh, agent art and prop changes before changing mesh workspaces".into());
         }
         if self.package_work_pending() || self.shot.is_some() || self.remote_capture.is_some()
             || self.encoder.is_some() || self.ui.dialog.is_some() {
@@ -432,7 +432,7 @@ impl EditorApp {
         }
         #[cfg(feature="mesh-navigation")]
         if self.mesh_navigation.art_dirty() {
-            return Some("Save or explicitly discard agent art changes before changing projects".into());
+            return Some("Save or explicitly discard agent art and prop changes before changing projects".into());
         }
         if (!self.editor.game().is_room() && self.editor.game() != crate::game::EditorGame::PhysGame) || !self.editor.spec().is_local()
             || self.editor.mode() != Mode::Edit || !self.editor.can_mutate()
@@ -1316,6 +1316,7 @@ impl EditorApp {
                 if let Some(model) = self.mesh_navigation.art_model(&self.editor) {
                     models.push(model);
                 }
+                models.extend(self.mesh_navigation.prop_models(&self.editor));
             }
             models
         };
@@ -1660,7 +1661,7 @@ impl EditorApp {
             }
             #[cfg(feature="mesh-navigation")]
             if dialog.kind != DialogKind::SaveAs && self.mesh_navigation.art_dirty() {
-                self.editor.error("Save or explicitly discard agent art changes before changing scenes");
+                self.editor.error("Save or explicitly discard agent art and prop changes before changing scenes");
                 self.ui.dialog = Some(dialog);
                 return;
             }

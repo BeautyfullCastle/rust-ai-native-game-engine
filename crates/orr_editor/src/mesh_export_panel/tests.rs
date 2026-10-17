@@ -1,4 +1,4 @@
-use super::{completion_metadata_matches, Request};
+use super::{completion_metadata_matches, saved_sidecars_match, Request};
 use std::path::PathBuf;
 
 fn request() -> Request {
@@ -21,8 +21,30 @@ fn receipt(request: &Request) -> crate::mesh_export::Receipt {
         graph_revision: request.graph_revision,
         scene_sha256: "scene-hash".into(),
         sidecar_sha256: None,
+        props_sha256: None,
         runtime_sha256: "runtime-hash".into(),
     }
+}
+
+#[test]
+fn completed_export_is_not_current_after_either_saved_sidecar_changes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let scene = temporary.path().join("mesh.scene.yaml");
+    std::fs::write(&scene, b"owned scene").unwrap();
+    let mut receipt = receipt(&request());
+    assert!(saved_sidecars_match(&scene, &receipt));
+    let art = crate::mesh_art::sidecar_path(&scene).unwrap();
+    let props = crate::mesh_props::sidecar_path(&scene).unwrap();
+    std::fs::write(&art, b"saved art").unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.sidecar_sha256 = crate::mesh_art::sidecar_stamp(&scene).unwrap();
+    assert!(saved_sidecars_match(&scene, &receipt));
+    std::fs::write(&props, b"saved props").unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.props_sha256 = crate::mesh_props::sidecar_stamp(&scene).unwrap();
+    assert!(saved_sidecars_match(&scene, &receipt));
+    std::fs::write(&props, b"newer props").unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
 }
 
 #[test]

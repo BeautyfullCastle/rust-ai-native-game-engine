@@ -210,6 +210,24 @@ impl Snapshot {
         })
     }
 
+    pub(crate) fn encode_embedded(&self, scene_filename: &str) -> Result<Vec<u8>, String> {
+        self.sidecar_bytes(scene_filename)
+    }
+
+    pub(crate) fn decode_embedded(
+        bytes: &[u8],
+        scene_filename: &str,
+        graph_revision: [u8; 32],
+    ) -> Result<Self, String> {
+        if bytes.len() > MAX_SIDE_CAR_BYTES {
+            return Err("embedded mesh art exceeds the 64 MiB limit".into());
+        }
+        validate_leaf(scene_filename, "scene filename")?;
+        let decoded: Sidecar = serde_json::from_slice(bytes)
+            .map_err(|error| format!("invalid embedded mesh art: {error}"))?;
+        Self::from_sidecar(decoded, scene_filename, graph_revision)
+    }
+
     fn sidecar_bytes(&self, scene_filename: &str) -> Result<Vec<u8>, String> {
         validate_leaf(scene_filename, "scene filename")?;
         validate_source_budget(self.model.source())?;

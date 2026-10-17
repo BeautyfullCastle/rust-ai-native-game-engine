@@ -391,6 +391,12 @@ fn sidecar_path(scene: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn props_sidecar_path(scene: &Path) -> PathBuf {
+    let mut value = scene.as_os_str().to_os_string();
+    value.push(".mesh-props.json");
+    PathBuf::from(value)
+}
+
 fn mesh_view(harness: &Harness<'_, EditorApp>) -> orr_remote::mesh_navigation::MeshView {
     let snapshot = harness.state().editor.snapshot().unwrap();
     mesh_from_view(snapshot.predicted()).unwrap()
@@ -474,6 +480,7 @@ fn verify_bundle(
     fixture: &Fixture,
     scene_bytes: &[u8],
     sidecar_bytes: &[u8],
+    props_bytes: &[u8],
     expected_checksum: u64,
     expected_graph_revision: [u8; 32],
 ) -> serde_json::Value {
@@ -483,6 +490,7 @@ fn verify_bundle(
     let runtime_bytes = fs::read(&fixture.runtime).unwrap();
     let scene_record = &manifest["scene"];
     let sidecar_record = &manifest["sidecar"];
+    let props_record = &manifest["props"];
     let runtime_record = &manifest["runtime"];
     let exported_scene = fixture
         .bundle_output
@@ -493,12 +501,21 @@ fn verify_bundle(
     let exported_runtime = fixture
         .bundle_output
         .join(runtime_record["name"].as_str().unwrap());
+    let exported_props = fixture
+        .bundle_output
+        .join(props_record["name"].as_str().unwrap());
+    assert_eq!(
+        props_record["name"],
+        format!("{}.mesh-props.json", scene_record["name"].as_str().unwrap())
+    );
     assert_eq!(fs::read(&exported_scene).unwrap(), scene_bytes);
     assert_eq!(fs::read(&exported_sidecar).unwrap(), sidecar_bytes);
+    assert_eq!(fs::read(&exported_props).unwrap(), props_bytes);
     assert_eq!(fs::read(&exported_runtime).unwrap(), runtime_bytes);
     for (record, bytes) in [
         (scene_record, scene_bytes),
         (sidecar_record, sidecar_bytes),
+        (props_record, props_bytes),
         (runtime_record, runtime_bytes.as_slice()),
     ] {
         assert_eq!(record["bytes"].as_u64(), Some(bytes.len() as u64));
@@ -510,6 +527,7 @@ fn verify_bundle(
             "orr.mesh-bundle.json".to_owned(),
             scene_record["name"].as_str().unwrap().to_owned(),
             sidecar_record["name"].as_str().unwrap().to_owned(),
+            props_record["name"].as_str().unwrap().to_owned(),
             runtime_record["name"].as_str().unwrap().to_owned(),
         ]
         .into_iter()
@@ -755,8 +773,211 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
     );
     assert_eq!(saved_art["offset"], serde_json::json!([0.25, 0.5, 0.25]));
     assert_eq!(saved_art["scale"], serde_json::json!(0.5));
+    if harness
+        .query_by_label("Prop package source directory")
+        .is_none()
+    {
+        click(&mut harness, "Mesh props");
+    }
+    for (label, value) in [
+        (
+            "Prop package source directory",
+            fixture.package_output.display().to_string(),
+        ),
+        ("Prop model asset", MODEL_ASSET.to_owned()),
+        ("Prop license asset", LICENSE_ASSET.to_owned()),
+    ] {
+        set_field(&mut harness, label, &value);
+    }
+    click(&mut harness, "I have reviewed rights to use these props");
+    click(&mut harness, "Load prop candidate");
+    let props_only_candidate_pixels = viewport_pixels(&mut harness);
+    assert_eq!(harness.state().editor.checksum(), scene_checksum);
+    assert_eq!(mesh_view(&harness).graph.revision(), graph_revision);
+    assert_eq!(fs::read(&sidecar).unwrap(), sidecar_bytes);
+    assert_eq!(
+        changed_pixel_count(&applied_pixels, &props_only_candidate_pixels),
+        0
+    );
+    assert!(!props_sidecar_path(&fixture.scene).exists());
+
+    for (label, value) in [
+        ("Prop name", "Bench"),
+        ("Prop position X", "3.25"),
+        ("Prop position Y", "2.5"),
+        ("Prop position Z", "1"),
+        ("Prop scale", "0.5"),
+    ] {
+        set_field(&mut harness, label, value);
+    }
+    click(&mut harness, "Add prop");
+    let added_prop_pixels = viewport_pixels(&mut harness);
+    let props_path = props_sidecar_path(&fixture.scene);
+    assert_eq!(harness.state().editor.checksum(), scene_checksum);
+    assert_eq!(mesh_view(&harness).graph.revision(), graph_revision);
+    assert_eq!(fs::read(&sidecar).unwrap(), sidecar_bytes);
+    assert!(
+        !props_path.exists(),
+        "adding a prop only changes in-memory props"
+    );
+    assert!(changed_pixel_count(&props_only_candidate_pixels, &added_prop_pixels) > 20);
+    assert!(harness
+        .get_by_label(LBL_PLAY)
+        .accesskit_node()
+        .is_disabled());
+    click(&mut harness, "Undo prop edit");
+    let undone_add_pixels = viewport_pixels(&mut harness);
+    assert_eq!(changed_pixel_count(&applied_pixels, &undone_add_pixels), 0);
+    click(&mut harness, "Redo prop edit");
+    let redone_add_pixels = viewport_pixels(&mut harness);
+    assert!(changed_pixel_count(&added_prop_pixels, &redone_add_pixels) < 20);
+
+    set_field(&mut harness, "Prop position X", "3.5");
+    click(&mut harness, "Update selected prop");
+    let updated_prop_pixels = viewport_pixels(&mut harness);
+    assert!(changed_pixel_count(&added_prop_pixels, &updated_prop_pixels) > 20);
+    click(&mut harness, "Undo prop edit");
+    let undone_update_pixels = viewport_pixels(&mut harness);
+    assert!(changed_pixel_count(&added_prop_pixels, &undone_update_pixels) < 20);
+    click(&mut harness, "Redo prop edit");
+    let redone_update_pixels = viewport_pixels(&mut harness);
+    assert!(changed_pixel_count(&updated_prop_pixels, &redone_update_pixels) < 20);
+
+    click(&mut harness, "I confirm removing this prop");
+    click(&mut harness, "Remove selected prop");
+    let removed_prop_pixels = viewport_pixels(&mut harness);
+    assert_eq!(
+        changed_pixel_count(&applied_pixels, &removed_prop_pixels),
+        0
+    );
+    click(&mut harness, "Undo prop edit");
+    let restored_prop_pixels = viewport_pixels(&mut harness);
+    assert!(changed_pixel_count(&updated_prop_pixels, &restored_prop_pixels) < 20);
+    click(&mut harness, "Redo prop edit");
+    assert_eq!(
+        changed_pixel_count(&applied_pixels, &viewport_pixels(&mut harness)),
+        0
+    );
+    click(&mut harness, "Undo prop edit");
+    click(&mut harness, "Save props");
+
+    let initial_props_bytes = fs::read(&props_path).expect("Save props writes the props sidecar");
+    assert_eq!(fs::read(&fixture.scene).unwrap(), scene_bytes);
+    assert_eq!(harness.state().editor.checksum(), scene_checksum);
+    assert_eq!(fs::read(&sidecar).unwrap(), sidecar_bytes);
+    let initial_saved_props: serde_json::Value =
+        serde_json::from_slice(&initial_props_bytes).unwrap();
+    let saved_prop = &initial_saved_props["props"][0];
+    assert_eq!(initial_saved_props["props"].as_array().unwrap().len(), 1);
+    assert!(saved_prop["id"]
+        .as_u64()
+        .is_some_and(|identifier| identifier > 0));
+    assert_eq!(saved_prop["name"], "Bench");
+    assert_eq!(saved_prop["art"]["manifest"]["name"], PACKAGE_NAME);
+    assert_eq!(saved_prop["art"]["asset"], MODEL_ASSET);
+    assert_eq!(saved_prop["art"]["license"], LICENSE_ASSET);
+    assert_eq!(
+        saved_prop["art"]["asset_sha256"],
+        sha256_hex(&fixture.model_bytes)
+    );
+    assert_eq!(
+        saved_prop["art"]["license_sha256"],
+        sha256_hex(&fixture.license_bytes)
+    );
+    assert_eq!(
+        saved_prop["art"]["offset"],
+        serde_json::json!([3.5, 2.5, 1.0])
+    );
+    assert_eq!(saved_prop["art"]["scale"], serde_json::json!(0.5));
+    assert!(saved_prop["art"]["model"].is_object());
+    assert_eq!(
+        initial_saved_props["graph_revision"],
+        serde_json::json!(graph_revision)
+    );
+
+    fs::write(&props_path, b"{invalid props sidecar").unwrap();
+    click(&mut harness, "Reload props");
+    assert!(harness
+        .get_by_label(LBL_PLAY)
+        .accesskit_node()
+        .is_disabled());
+    assert!(harness
+        .get_by_role_and_label(Role::Button, "Discard invalid props sidecar")
+        .accesskit_node()
+        .is_disabled());
+    assert!(props_path.is_file());
+    click(&mut harness, "I confirm discarding invalid mesh props");
+    click(&mut harness, "Discard invalid props sidecar");
+    assert!(!props_path.exists());
+    fs::write(&props_path, &initial_props_bytes).unwrap();
+    click(&mut harness, "Reload props");
+    assert_eq!(fs::read(&props_path).unwrap(), initial_props_bytes);
+    let bench_recovery_pixels = viewport_pixels(&mut harness);
+    assert!(changed_pixel_count(&updated_prop_pixels, &bench_recovery_pixels) < 20);
+    assert!(!harness
+        .get_by_label(LBL_PLAY)
+        .accesskit_node()
+        .is_disabled());
+    let props_recovery_verified = fs::read(&props_path).unwrap() == initial_props_bytes;
+    assert!(props_recovery_verified);
+
+    click(&mut harness, "I have reviewed rights to use these props");
+    click(&mut harness, "Load prop candidate");
+    for (name, position) in [
+        ("Bench2", [2.5, 0.25, 2.0]),
+        ("Bench3", [3.0, 0.25, 2.5]),
+        ("Bench4", [3.5, 0.25, 3.0]),
+        ("Bench5", [4.0, 0.25, 3.5]),
+        ("Bench6", [4.5, 0.25, 4.0]),
+    ] {
+        for (label, value) in [
+            ("Prop name", name.to_owned()),
+            ("Prop position X", position[0].to_string()),
+            ("Prop position Y", position[1].to_string()),
+            ("Prop position Z", position[2].to_string()),
+            ("Prop scale", "0.2".to_owned()),
+        ] {
+            set_field(&mut harness, label, &value);
+        }
+        click(&mut harness, "Add prop");
+    }
+    assert!(harness
+        .get_by_role_and_label(Role::Button, "Add prop")
+        .accesskit_node()
+        .is_disabled());
+    let six_prop_pixels = viewport_pixels(&mut harness);
+    assert!(changed_pixel_count(&bench_recovery_pixels, &six_prop_pixels) > 20);
+    assert_eq!(harness.state().editor.checksum(), scene_checksum);
+    assert_eq!(mesh_view(&harness).graph.revision(), graph_revision);
+    assert_eq!(fs::read(&sidecar).unwrap(), sidecar_bytes);
+    click(&mut harness, "Save props");
+    let props_bytes = fs::read(&props_path).expect("Save props persists all six placements");
+    let saved_props: serde_json::Value = serde_json::from_slice(&props_bytes).unwrap();
+    let saved_prop_records = saved_props["props"].as_array().unwrap();
+    assert_eq!(saved_prop_records.len(), 6);
+    assert_eq!(
+        saved_props["graph_revision"],
+        serde_json::json!(graph_revision)
+    );
+    let saved_names = saved_prop_records
+        .iter()
+        .map(|prop| prop["name"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        saved_names,
+        ["Bench", "Bench2", "Bench3", "Bench4", "Bench5", "Bench6"]
+            .into_iter()
+            .collect()
+    );
+    let saved_ids = saved_prop_records
+        .iter()
+        .map(|prop| prop["id"].as_u64().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(saved_ids.len(), 6);
+    let recovered_prop_pixels = viewport_pixels(&mut harness);
+
     if let Some(directory) = capture_directory.as_deref() {
-        capture(directory, "saved-agent-art-import.png", &mut harness);
+        capture(directory, "saved-agent-art-and-prop.png", &mut harness);
     }
     drop(harness);
 
@@ -775,10 +996,11 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
     assert_eq!(mesh_view(&harness).graph.revision(), graph_revision);
     assert_eq!(fs::read(&fixture.scene).unwrap(), scene_bytes);
     assert_eq!(fs::read(&sidecar).unwrap(), sidecar_bytes);
+    assert_eq!(fs::read(&props_path).unwrap(), props_bytes);
     assert!(!fixture.raw_source.exists());
     assert!(!fixture.package_output.exists());
     let reopened_pixels = viewport_pixels(&mut harness);
-    assert!(changed_pixel_count(&applied_pixels, &reopened_pixels) < 20);
+    assert!(changed_pixel_count(&recovered_prop_pixels, &reopened_pixels) < 20);
     if let Some(directory) = capture_directory.as_deref() {
         capture(
             directory,
@@ -860,17 +1082,24 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
     );
     let final_scene_bytes = fs::read(&fixture.scene).unwrap();
     let final_sidecar_bytes = fs::read(&sidecar).unwrap();
+    let final_props_bytes = fs::read(&props_path).unwrap();
     assert_eq!(final_scene_bytes, scene_bytes);
     assert_eq!(final_sidecar_bytes, sidecar_bytes);
+    assert_eq!(final_props_bytes, props_bytes);
     let export_manifest = verify_bundle(
         &fixture,
         &final_scene_bytes,
         &final_sidecar_bytes,
+        &final_props_bytes,
         scene_checksum,
         graph_revision,
     );
     let export_manifest_bytes =
         fs::read(fixture.bundle_output.join("orr.mesh-bundle.json")).unwrap();
+    let expected_props_name = format!(
+        "{}.mesh-props.json",
+        fixture.scene.file_name().unwrap().to_string_lossy()
+    );
 
     fixture
         .restore_sources()
@@ -889,6 +1118,7 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
             "artifact_root": fixture.raw_source.parent().unwrap().display().to_string(),
             "scene_path": fixture.scene.display().to_string(),
             "sidecar_path": sidecar.display().to_string(),
+            "props_sidecar_path": props_path.display().to_string(),
             "raw_source_directory": fixture.raw_source.display().to_string(),
             "raw_source_hidden_path": fixture.hidden_raw_source.display().to_string(),
             "package_source_directory": fixture.package_output.display().to_string(),
@@ -897,6 +1127,8 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
             "runtime_path": fixture.runtime.display().to_string(),
             "scene_sha256": sha256_hex(&final_scene_bytes),
             "sidecar_sha256": sha256_hex(&final_sidecar_bytes),
+            "props_sidecar_sha256": sha256_hex(&final_props_bytes),
+            "props_count": saved_props["props"].as_array().unwrap().len(),
             "raw_model_sha256": sha256_hex(&fixture.model_bytes),
             "raw_license_sha256": sha256_hex(&fixture.license_bytes),
             "package_manifest_sha256": package_manifest_sha256,
@@ -907,9 +1139,12 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
             "sources_restored": fixture.sources_restored,
             "game": "MeshNavigation",
             "ticks": 16,
-            "viewport_changed_pixels_after_reopen": changed_pixel_count(&applied_pixels, &reopened_pixels),
+            "viewport_changed_pixels_after_reopen": changed_pixel_count(&recovered_prop_pixels, &reopened_pixels),
+            "viewport_changed_pixels_for_prop": changed_pixel_count(&applied_pixels, &recovered_prop_pixels),
             "viewport_changed_pixels_after_16_steps": changed_pixel_count(&reopened_pixels, &stepped_pixels),
             "bundle_contains_admitted_sidecar": true,
+            "bundle_contains_props_sidecar": export_manifest["props"]["name"] == expected_props_name,
+            "props_invalid_sidecar_recovery_verified": props_recovery_verified,
             "player_executed": false,
             "physical_os_input": false,
             "gpu_adapter": expected_adapter,

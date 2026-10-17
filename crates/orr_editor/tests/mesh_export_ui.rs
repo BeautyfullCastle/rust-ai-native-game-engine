@@ -553,7 +553,7 @@ fn default_physics_to_mesh_scene_exports_a_verified_bundle_without_overwrites() 
     let dirty_scene_checksum = harness.state().editor.checksum();
     assert_ne!(dirty_scene_checksum, initial_checksum);
     let dirty_scene_blocker =
-        "Save or explicitly undo/discard scene, unplaced mesh and agent art changes before changing mesh workspaces";
+        "Save or explicitly undo/discard scene, unplaced mesh, agent art and prop changes before changing mesh workspaces";
     assert!(harness
         .get_by_role_and_label(Role::Button, "Export mesh game")
         .accesskit_node()
