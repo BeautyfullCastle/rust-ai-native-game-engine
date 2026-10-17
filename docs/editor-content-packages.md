@@ -32,6 +32,11 @@ notice file is not evidence of legal trust. Byte verification does not decode
 arbitrary content as a model. After verification, the panel offers `Use model {package}/{asset}`
 for installed `.glb`, `.gltf` and `.orrmodel` files. Choose an entity before
 using one; saving the resulting model binding remains a separate editor action.
+With the explicit `room-animated-models` feature, packages declaring `animation`
+also offer `Use animated model {package}/{asset}` for GLB/glTF assets. This loads
+and assigns clip zero with Loop playback through the existing model inspector.
+Choose another clip or Once playback there and assign again before saving.
+See [Room animated models](room-animated-models.md) for consuming-route limits.
 No preview is a runtime activation or permanence promise.
 
 Use loads through the existing static-model admission and assigns to the

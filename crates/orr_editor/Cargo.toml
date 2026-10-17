@@ -18,6 +18,7 @@ input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/input-actions"]
 # Optional new-project creator for explicit authoring and acceptance workflows.
 project-create = ["orr_sample/project-create"]
 room-project = ["models", "orr_remote/room-project", "orr_sample/room-project"]
+room-animated-models = ["room-project", "animated-models", "orr_sample/room-animated-models"]
 room-authoring = ["room-project"]
 package-manager = ["room-project"]
 windows-export = ["room-project", "orr_sample/project-export"]

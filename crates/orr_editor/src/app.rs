@@ -292,7 +292,7 @@ impl EditorApp {
 
     #[cfg(feature="package-manager")]
     fn package_model_request(&mut self) {
-        let Some((package,asset)) = self.package_manager.take_model_request() else { return };
+        let Some((package,asset,kind)) = self.package_manager.take_model_asset_request() else { return };
         let result = (|| -> Result<(),String> {
             if let Some(blocked) = self.package_manager_blocker() { return Err(blocked); }
             let root = self.package_manager_root().ok_or("No current Room project")?;
@@ -303,13 +303,20 @@ impl EditorApp {
             self.models.project = root.display().to_string();
             self.models.package = package.clone();
             self.models.asset = asset.clone();
-            self.models.kind = orr_model_bindings::model_bindings::ModelKind::Static;
+            self.models.kind = kind;
+            #[cfg(feature="animated-models")]
+            if kind == orr_model_bindings::model_bindings::ModelKind::Animated {
+                self.models.animation = orr_model_bindings::model_bindings::AnimationDescriptor {
+                    clip_index: 0,
+                    playback: orr_model_bindings::model_bindings::PlaybackMode::Loop,
+                };
+            }
             self.models.transform = transform;
             self.models.load_candidate(&self.editor)?;
             self.models.assign(&self.editor)
         })();
         self.package_manager.status = match result {
-            Ok(()) => format!("Assigned verified static model {package}/{asset}. Save model bindings in the inspector to persist it."),
+            Ok(()) => format!("Assigned verified {}model {package}/{asset}. Save model bindings in the inspector to persist it.", if kind == orr_model_bindings::model_bindings::ModelKind::Animated { "animated " } else { "static " }),
             Err(error) => format!("Package model was not assigned: {error}"),
         };
     }

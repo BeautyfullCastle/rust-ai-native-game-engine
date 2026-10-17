@@ -16,6 +16,7 @@ material-demo = ["particle-demo", "dep:orr_model", "dep:sha2", "orr_render/metal
 # Explicit optional pickup/preset preview; Arena default is unchanged.
 particle-demo = ["orr_games/collect-dodge", "orr_render/imported-scene", "orr_render/particles"]
 room-project = ["project", "orr_games/room-escape", "dep:orr_model", "dep:orr_model_bindings", "orr_render/imported-scene"]
+room-animated-models = ["room-project", "orr_model_bindings/animated-models", "orr_model/animation", "orr_render/animation"]
 # Explicit Linux authoring transaction; does not execute the exporter or runtime.
 image-reimport = ["project-export", "collect-sprites", "dep:semver"]
 linked-prefabs = ["collect-dodge", "orr_reflect/linked-prefabs"]

@@ -305,8 +305,14 @@ impl ModelPanel {
             let mut out = BTreeMap::new();
             let mut unique = BTreeMap::new();
             for (guid, binding) in &bindings.document().bindings {
-                if binding.kind != ModelKind::Static || binding.animation.is_some() {
-                    return Err("Room supports static bindings only".into());
+                if binding.kind == ModelKind::Animated {
+                    #[cfg(not(feature = "room-animated-models"))]
+                    return Err("Room supports static model bindings only in this build".into());
+                }
+                if (binding.kind == ModelKind::Static && binding.animation.is_some())
+                    || (binding.kind == ModelKind::Animated && binding.animation.is_none())
+                {
+                    return Err("Room model kind and animation descriptor do not match".into());
                 }
                 let key = (binding.package.clone(), binding.asset.clone());
                 if !unique.contains_key(&key) {
@@ -317,6 +323,17 @@ impl ModelPanel {
                 binding.validate(&unique[&key])?;
                 out.insert(guid.clone(), unique[&key].clone());
             }
+            let animation_bindings = bindings
+                .document()
+                .bindings
+                .iter()
+                .map(|(guid, binding)| {
+                    out.get(guid)
+                        .map(|asset| (binding, asset))
+                        .ok_or_else(|| "Room model binding asset missing after load".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            orr_sample::room_project::validate_animation_workload(animation_bindings)?;
             if before != project.verify().map_err(|e| e.to_string())? {
                 return Err("Room active lock changed during model load; retry".into());
             }
@@ -378,8 +395,9 @@ impl ModelPanel {
             );
         }
         self.candidate = None;
-        if editor.game().is_room() && self.kind != ModelKind::Static {
-            return Err("Room v1 supports static models only".into());
+        if editor.game().is_room() && self.kind == ModelKind::Animated {
+            #[cfg(not(feature = "room-animated-models"))]
+            return Err("Room supports static model bindings only in this build".into());
         }
         let loaded = self.load_requested()?;
         self.candidate = Some((self.package.clone(), self.asset.clone(), self.kind, loaded));
@@ -390,8 +408,9 @@ impl ModelPanel {
         #[cfg(feature = "room-project")]
         if let Some(identity) = &self.room_identity {
             Self::validate_room_identity(bindings, identity)?;
-            if self.kind != ModelKind::Static {
-                return Err("Room supports static bindings only".into());
+            if self.kind == ModelKind::Animated {
+                #[cfg(not(feature = "room-animated-models"))]
+                return Err("Room supports static model bindings only in this build".into());
             }
             let project = orr_package::Project::open(
                 identity.0.parent().ok_or("Room root missing")?,
@@ -685,10 +704,13 @@ impl ModelPanel {
             && (document.bindings.is_empty()
                 || document.bindings.len() > 68
                 || document.bindings.values().any(|binding| {
-                    binding.kind != ModelKind::Static || binding.animation.is_some()
+                    (binding.kind == ModelKind::Static && binding.animation.is_some())
+                        || (binding.kind == ModelKind::Animated && binding.animation.is_none())
+                        || (binding.kind == ModelKind::Animated
+                            && !cfg!(feature = "room-animated-models"))
                 }))
         {
-            return Err("Room v1 requires1..=68 static model bindings".into());
+            return Err("Room requires1..=68 supported, kind-consistent model bindings".into());
         }
         #[cfg(feature = "room-project")]
         if editor.game().is_room() {
@@ -756,16 +778,20 @@ impl ModelPanel {
                     .validate_for(model)
                     .map_err(|e| e.to_string())?;
                     if editor.game().is_room() {
-                        for x in [-16.0, 16.0] {
-                            for y in [-4.0, 4.0] {
-                                for z in [-16.0, 16.0] {
-                                    let pose = orr_view::Transform3 {
-                                        pos: orr_view::Vec3::new(x, y, z),
+                        for x_position in [-16.0, 16.0] {
+                            for y_position in [-4.0, 4.0] {
+                                for z_position in [-16.0, 16.0] {
+                                    let body_pose = orr_view::Transform3 {
+                                        pos: orr_view::Vec3::new(
+                                            x_position, y_position, z_position,
+                                        ),
                                         rot: orr_view::Quat::IDENTITY,
                                     };
-                                    Self::instance(pose, local).validate_for(model).map_err(
-                                        |e| format!("room reachable model placement: {e}"),
-                                    )?;
+                                    Self::instance(body_pose, local)
+                                        .validate_for(model)
+                                        .map_err(|error| {
+                                            format!("room reachable model placement: {error}")
+                                        })?;
                                 }
                             }
                         }
@@ -786,9 +812,18 @@ impl ModelPanel {
                         let animation = binding
                             .animation
                             .ok_or("Animated binding has no clip descriptor")?;
-                        let pose = model
+                        let clip = model
+                            .source()
+                            .clips
+                            .get(animation.clip_index as usize)
+                            .ok_or("Animated binding clip is out of range")?;
+                        let clip_zero_pose = model
                             .sample_clip(animation.clip_index, 0.0)
                             .map_err(|e| e.to_string())?;
+                        let clip_end_pose = model
+                            .sample_clip(animation.clip_index, clip.duration())
+                            .map_err(|error| error.to_string())?;
+                        let rest_pose = model.rest_pose().map_err(|error| error.to_string())?;
                         let transform = row_pose.map_or_else(
                             || {
                                 orr_model::animation::Trs {
@@ -800,13 +835,54 @@ impl ModelPanel {
                             },
                             |body| Self::animated_instance(body, local),
                         );
-                        // Edit/Stop renders rest, which can differ from clip time zero.
-                        // Admit both before committing the independent sidecar.
-                        let rest = model.rest_pose().map_err(|e| e.to_string())?;
-                        for pose in [&rest, &pose] {
-                            orr_render::SkinnedInstance { pose, transform }
-                                .validate_for(model)
-                                .map_err(|e| e.to_string())?;
+                        for sampled_pose in [&rest_pose, &clip_zero_pose, &clip_end_pose] {
+                            orr_render::SkinnedInstance {
+                                pose: sampled_pose,
+                                transform,
+                            }
+                            .validate_for(model)
+                            .map_err(|error| error.to_string())?;
+                        }
+                        if editor.game().is_room() {
+                            for x_position in [-16.0, 16.0] {
+                                for y_position in [-4.0, 4.0] {
+                                    for z_position in [-16.0, 16.0] {
+                                        let body_pose = orr_view::Transform3 {
+                                            pos: orr_view::Vec3::new(
+                                                x_position, y_position, z_position,
+                                            ),
+                                            rot: orr_view::Quat::IDENTITY,
+                                        };
+                                        let instance_transform =
+                                            Self::animated_instance(body_pose, local);
+                                        for sampled_pose in
+                                            [&rest_pose, &clip_zero_pose, &clip_end_pose]
+                                        {
+                                            orr_render::SkinnedInstance {
+                                                pose: sampled_pose,
+                                                transform: instance_transform,
+                                            }
+                                            .validate_for(model)
+                                            .map_err(|error| {
+                                                format!("room reachable animated placement: {error}")
+                                            })?;
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(body_pose) = row_pose {
+                                let instance_transform = Self::animated_instance(body_pose, local);
+                                for sampled_pose in [&rest_pose, &clip_zero_pose, &clip_end_pose] {
+                                    orr_render::SkinnedInstance {
+                                        pose: sampled_pose,
+                                        transform: instance_transform,
+                                    }
+                                    .validate_for(model)
+                                    .map_err(|error| {
+                                        format!("room current animated placement: {error}")
+                                    })?;
+                                }
+                            }
                         }
                         model.source().primitives.len()
                     }
@@ -824,6 +900,20 @@ impl ModelPanel {
             if draws > orr_render::imported_scene::MAX_IMPORTED_DRAWS {
                 return Err("Viewport model draw limit exceeded".into());
             }
+        }
+        #[cfg(feature = "room-project")]
+        if editor.game().is_room() {
+            let animation_bindings = document
+                .bindings
+                .iter()
+                .map(|(guid, binding)| {
+                    loaded
+                        .get(guid)
+                        .map(|asset| (binding, asset))
+                        .ok_or_else(|| "Missing verified Room animation asset".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            orr_sample::room_project::validate_animation_workload(animation_bindings)?;
         }
         Ok(())
     }
@@ -980,7 +1070,10 @@ impl ModelPanel {
         self.sync_scene(editor);
         let blockout_editable = self.editable(editor);
         let blockout_root = if self.scene_matches(editor) {
-            self.bindings.as_ref().ok_or_else(|| "Open model bindings before authoring a box".to_owned()).and_then(Bindings::project_root)
+            self.bindings
+                .as_ref()
+                .ok_or_else(|| "Open model bindings before authoring a box".to_owned())
+                .and_then(Bindings::project_root)
         } else {
             Err("Open model bindings for the admitted local scene before authoring a box".into())
         };
@@ -1018,7 +1111,9 @@ impl ModelPanel {
                             ui.label("Model kind");
                             ui.selectable_value(&mut self.kind, ModelKind::Static, "Static");
                             #[cfg(feature = "animated-models")]
-                            if !editor.game().is_room() { ui.selectable_value(&mut self.kind, ModelKind::Animated, "Animated"); }
+                            if !editor.game().is_room() || cfg!(feature = "room-animated-models") {
+                                ui.selectable_value(&mut self.kind, ModelKind::Animated, "Animated");
+                            }
                         });
                         ui.horizontal(|ui| { ui.label("Package"); ui.text_edit_singleline(&mut self.package); });
                         ui.horizontal(|ui| { ui.label("Asset"); ui.text_edit_singleline(&mut self.asset); });

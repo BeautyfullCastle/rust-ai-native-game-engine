@@ -1,5 +1,6 @@
 use crate::package_manager::{self, Plan};
 use egui::Context;
+use orr_model_bindings::model_bindings::ModelKind;
 use orr_package::{Lock, PackagePreview};
 use std::{
     path::{Path, PathBuf},
@@ -42,6 +43,7 @@ struct ModelRequest {
     source_generation: u64,
     package: String,
     asset: String,
+    kind: ModelKind,
 }
 
 #[derive(Default)]
@@ -65,13 +67,23 @@ impl Panel {
     }
 
     pub fn take_model_request(&mut self) -> Option<(String, String)> {
+        let request = self.take_current_request()?;
+        (request.kind == ModelKind::Static).then_some((request.package, request.asset))
+    }
+
+    pub(crate) fn take_model_asset_request(&mut self) -> Option<(String, String, ModelKind)> {
+        let request = self.take_current_request()?;
+        Some((request.package, request.asset, request.kind))
+    }
+
+    fn take_current_request(&mut self) -> Option<ModelRequest> {
         let request = self.model_request.take()?;
         if self.root.as_ref() == Some(&request.root)
             && self.source.trim() == request.source_identity.as_str()
             && self.project_generation == request.project_generation
             && self.source_generation == request.source_generation
         {
-            Some((request.package, request.asset))
+            Some(request)
         } else {
             None
         }
@@ -163,7 +175,7 @@ impl Panel {
                     ui.separator();
                     ui.label("Installed package bytes verified from this project's lock:");
                     lock_table(ui, "verified-installed-packages", lock);
-                    ui.label("Select an entity, then use a verified static model; binding save is separate.");
+                    ui.label("Select an entity, then use a verified model; binding save is separate.");
                     model_asset_buttons(
                         ui,
                         lock,
@@ -544,22 +556,33 @@ fn model_asset_buttons(
                 continue;
             }
             found = true;
-            if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::new(format!("Use model {package_name}/{asset}")),
-                )
-                .clicked()
-            {
-                if let Some(root) = root {
-                    *request = Some(ModelRequest {
-                        root: root.clone(),
-                        source_identity: source.to_owned(),
-                        project_generation: generations.0,
-                        source_generation: generations.1,
-                        package: package_name.clone(),
-                        asset: asset.clone(),
-                    });
+            #[cfg(not(feature = "room-animated-models"))]
+            let kinds = [ModelKind::Static];
+            #[cfg(feature = "room-animated-models")]
+            let kinds = [ModelKind::Static, ModelKind::Animated];
+            for kind in kinds {
+                if kind == ModelKind::Animated
+                    && (!package.manifest.capabilities.contains("animation")
+                        || asset.to_ascii_lowercase().ends_with(".orrmodel"))
+                {
+                    continue;
+                }
+                let label = match kind {
+                    ModelKind::Static => format!("Use model {package_name}/{asset}"),
+                    ModelKind::Animated => format!("Use animated model {package_name}/{asset}"),
+                };
+                if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                    if let Some(root) = root {
+                        *request = Some(ModelRequest {
+                            root: root.clone(),
+                            source_identity: source.to_owned(),
+                            project_generation: generations.0,
+                            source_generation: generations.1,
+                            package: package_name.clone(),
+                            asset: asset.clone(),
+                            kind,
+                        });
+                    }
                 }
             }
         }
@@ -674,6 +697,7 @@ mod tests {
                 source_generation: 7,
                 package: "art".into(),
                 asset: "hero.glb".into(),
+                kind: ModelKind::Static,
             }),
             ..Panel::default()
         }
@@ -728,5 +752,38 @@ mod tests {
         assert!(panel.preview.is_none());
         assert!(panel.model_request.is_none());
         assert!(panel.status.contains("publication outcome uncertain"));
+    }
+
+    #[test]
+    fn typed_model_request_preserves_kind_and_requires_current_identity() {
+        let mut panel = panel_with_cached_state();
+        assert_eq!(
+            panel.take_model_asset_request(),
+            Some(("art".into(), "hero.glb".into(), ModelKind::Static))
+        );
+        assert!(panel.take_model_asset_request().is_none());
+
+        let mut panel = panel_with_cached_state();
+        panel.source_generation += 1;
+        assert!(panel.take_model_asset_request().is_none());
+
+        let mut panel = panel_with_cached_state();
+        panel.root = Some(PathBuf::from("C:/rooms/other"));
+        assert!(panel.take_model_asset_request().is_none());
+    }
+
+    #[cfg(feature = "room-animated-models")]
+    #[test]
+    fn animated_requests_never_degrade_to_static_requests() {
+        let mut panel = panel_with_cached_state();
+        panel.model_request.as_mut().unwrap().kind = ModelKind::Animated;
+        assert!(panel.take_model_request().is_none());
+
+        let mut panel = panel_with_cached_state();
+        panel.model_request.as_mut().unwrap().kind = ModelKind::Animated;
+        assert_eq!(
+            panel.take_model_asset_request(),
+            Some(("art".into(), "hero.glb".into(), ModelKind::Animated))
+        );
     }
 }
