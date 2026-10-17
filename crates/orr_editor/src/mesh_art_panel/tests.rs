@@ -1,6 +1,6 @@
 use super::{
-    document_frame_ready, parse_rotation, parse_transform, reported_scene_matches_request, Panel,
-    MAX_HISTORY,
+    document_frame_ready, parse_rotation, parse_surface, parse_transform,
+    reported_scene_matches_request, Panel, MAX_HISTORY,
 };
 use crate::{backend::HostSpec, game::EditorGame, mesh_art::Snapshot, model::Mode};
 use orr_package::Manifest;
@@ -64,6 +64,58 @@ fn rotation_parser_accepts_intrinsic_xyz_degrees_and_rejects_invalid_values() {
 }
 
 #[test]
+fn surface_parser_preserves_identity_and_validates_numeric_fields() {
+    assert_eq!(
+        parse_surface(
+            false,
+            "invalid",
+            &["NaN".into(), "bad".into()],
+            &["0".into(), "0".into()],
+            "-1",
+            &["bad".into(), "0".into(), "0".into()],
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        parse_surface(
+            true,
+            "0",
+            &["0.25".into(), "-0.5".into()],
+            &["2".into(), "0.5".into()],
+            "1",
+            &["0.5".into(), "0".into(), "-1".into()],
+        )
+        .unwrap(),
+        Some(crate::mesh_surface::Settings {
+            material: 0,
+            uv_offset: [0.25, -0.5],
+            uv_scale: [2.0, 0.5],
+            uv_quarter_turns: 1,
+            pivot: [0.5, 0.0, -1.0],
+        })
+    );
+    assert!(parse_surface(
+        true,
+        "-1",
+        &["0".into(), "0".into()],
+        &["1".into(), "1".into()],
+        "0",
+        &["0".into(), "0".into(), "0".into()]
+    )
+    .is_err());
+    assert!(parse_surface(
+        true,
+        "0",
+        &["NaN".into(), "0".into()],
+        &["1".into(), "1".into()],
+        "0",
+        &["0".into(), "0".into(), "0".into()]
+    )
+    .is_err());
+}
+
+#[test]
 fn private_undo_redo_restores_agent_art_rotation_fields() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
@@ -90,6 +142,75 @@ fn private_undo_redo_restores_agent_art_rotation_fields() {
         second_rotation,
     );
     assert_quaternion_close(parse_rotation(&panel.rotation).unwrap(), second_rotation);
+}
+
+#[test]
+fn private_undo_redo_restores_agent_art_surface_settings() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = static_package(&temporary.path().canonicalize().unwrap());
+    let material = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", [0x5a; 32])
+        .unwrap()
+        .material_choices()[0];
+    let first_surface = crate::mesh_surface::Settings {
+        material,
+        uv_offset: [0.25, -0.5],
+        uv_scale: [2.0, 0.5],
+        uv_quarter_turns: 1,
+        pivot: [0.5, 0.0, -1.0],
+    };
+    let second_surface = crate::mesh_surface::Settings {
+        material,
+        uv_offset: [-0.25, 0.75],
+        uv_scale: [0.75, 1.5],
+        uv_quarter_turns: 3,
+        pivot: [-0.5, 0.25, 1.0],
+    };
+    let first = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", [0x5a; 32])
+        .unwrap()
+        .with_surface(Some(first_surface))
+        .unwrap();
+    let second = first.clone().with_surface(Some(second_surface)).unwrap();
+    let mut panel = Panel::default();
+
+    panel.push_state(Some(first.clone()));
+    panel.saved_id = Some(panel.current_entry().unwrap().id);
+    panel.push_state(Some(second.clone()));
+    panel.undo();
+    assert_eq!(
+        panel.current_snapshot().unwrap().surface(),
+        Some(first_surface)
+    );
+    assert_eq!(
+        parse_surface(
+            panel.surface_enabled,
+            &panel.surface_material,
+            &panel.surface_uv_offset,
+            &panel.surface_uv_scale,
+            &panel.surface_quarter_turns,
+            &panel.surface_pivot,
+        )
+        .unwrap(),
+        Some(first_surface)
+    );
+
+    panel.redo();
+    assert_eq!(
+        panel.current_snapshot().unwrap().surface(),
+        Some(second_surface)
+    );
+    assert_eq!(
+        parse_surface(
+            panel.surface_enabled,
+            &panel.surface_material,
+            &panel.surface_uv_offset,
+            &panel.surface_uv_scale,
+            &panel.surface_quarter_turns,
+            &panel.surface_pivot,
+        )
+        .unwrap(),
+        Some(second_surface)
+    );
+    assert_eq!(second.clone().with_surface(None).unwrap().surface(), None);
 }
 
 #[test]

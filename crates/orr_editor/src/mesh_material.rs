@@ -24,30 +24,7 @@ pub(crate) fn validate(tint: [f32; 4]) -> Result<[f32; 4], String> {
 pub(crate) fn tinted_model(model: &StaticModel, tint: [f32; 4]) -> Result<StaticModel, String> {
     let tint = validate(tint)?;
     let source_model = model.source();
-    let mut work_bytes = source_model
-        .images
-        .iter()
-        .try_fold(0usize, |total, image| total.checked_add(image.rgba8.len()))
-        .ok_or_else(|| "material tint work estimate overflowed".to_owned())?;
-    for primitive in &source_model.primitives {
-        let vertex_bytes = primitive
-            .vertices
-            .len()
-            .checked_mul(std::mem::size_of::<orr_model::Vertex>())
-            .ok_or_else(|| "material tint work estimate overflowed".to_owned())?;
-        let index_bytes = primitive
-            .indices
-            .len()
-            .checked_mul(std::mem::size_of::<u32>())
-            .ok_or_else(|| "material tint work estimate overflowed".to_owned())?;
-        work_bytes = work_bytes
-            .checked_add(vertex_bytes)
-            .and_then(|value| value.checked_add(index_bytes))
-            .ok_or_else(|| "material tint work estimate overflowed".to_owned())?;
-    }
-    if work_bytes > MAX_DERIVED_WORK_BYTES {
-        return Err("material tint derived model exceeds the 8 MiB work limit".into());
-    }
+    check_derived_work(source_model)?;
     let mut source = model.source().clone();
     for material in &mut source.materials {
         for (component, multiplier) in material.base_color.iter_mut().zip(tint) {
@@ -55,6 +32,72 @@ pub(crate) fn tinted_model(model: &StaticModel, tint: [f32; 4]) -> Result<Static
         }
     }
     StaticModel::new(source).map_err(|error| format!("validate tinted model: {error}"))
+}
+
+pub(crate) fn check_derived_work(source: &orr_model::ModelSource) -> Result<(), String> {
+    let mut work_bytes = std::mem::size_of::<orr_model::ModelSource>();
+    add_work_bytes(&mut work_bytes, source.format.len())?;
+    add_work_bytes(&mut work_bytes, source.asset_id.len())?;
+    add_repeated_work(
+        &mut work_bytes,
+        source.dependencies.len(),
+        std::mem::size_of::<orr_model::Dependency>(),
+    )?;
+    add_repeated_work(
+        &mut work_bytes,
+        source.primitives.len(),
+        std::mem::size_of::<orr_model::Primitive>(),
+    )?;
+    add_repeated_work(
+        &mut work_bytes,
+        source.materials.len(),
+        std::mem::size_of::<orr_model::Material>(),
+    )?;
+    add_repeated_work(
+        &mut work_bytes,
+        source.images.len(),
+        std::mem::size_of::<orr_model::Image>(),
+    )?;
+    for dependency in &source.dependencies {
+        add_work_bytes(&mut work_bytes, dependency.uri.len())?;
+        add_work_bytes(&mut work_bytes, dependency.sha256.len())?;
+    }
+    for primitive in &source.primitives {
+        add_work_bytes(&mut work_bytes, primitive.id.len())?;
+        let vertex_bytes = primitive
+            .vertices
+            .len()
+            .checked_mul(std::mem::size_of::<orr_model::Vertex>())
+            .ok_or_else(|| "derived mesh work estimate overflowed".to_owned())?;
+        let index_bytes = primitive
+            .indices
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| "derived mesh work estimate overflowed".to_owned())?;
+        add_work_bytes(&mut work_bytes, vertex_bytes)?;
+        add_work_bytes(&mut work_bytes, index_bytes)?;
+    }
+    for image in &source.images {
+        add_work_bytes(&mut work_bytes, image.rgba8.len())?;
+    }
+    if work_bytes > MAX_DERIVED_WORK_BYTES {
+        return Err("derived mesh presentation exceeds the 8 MiB work limit".into());
+    }
+    Ok(())
+}
+
+fn add_work_bytes(total: &mut usize, bytes: usize) -> Result<(), String> {
+    *total = total
+        .checked_add(bytes)
+        .ok_or_else(|| "derived mesh work estimate overflowed".to_owned())?;
+    Ok(())
+}
+
+fn add_repeated_work(total: &mut usize, count: usize, size: usize) -> Result<(), String> {
+    let bytes = count
+        .checked_mul(size)
+        .ok_or_else(|| "derived mesh work estimate overflowed".to_owned())?;
+    add_work_bytes(total, bytes)
 }
 
 #[cfg(test)]

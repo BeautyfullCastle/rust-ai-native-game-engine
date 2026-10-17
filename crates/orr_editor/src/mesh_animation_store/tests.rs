@@ -1,3 +1,4 @@
+#[cfg(feature = "mesh-animated-models")]
 use super::*;
 #[cfg(feature = "mesh-animated-models")]
 use crate::mesh_animation::Snapshot;

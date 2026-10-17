@@ -33,12 +33,14 @@ const ROTATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ROTATION_V1";
 const CAMERA_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CAMERA_V1";
 const MATERIAL_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MATERIAL_V1";
 const ANIMATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ANIMATION_V1";
+const SURFACE_RUNTIME_MARKER: &[u8] = b"ORR_MESH_SURFACE_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
 const CAMERA_RUNTIME_SECTION: &[u8; 8] = b".orrcam\0";
 const MATERIAL_RUNTIME_SECTION: &[u8; 8] = b".orrmat\0";
 const ANIMATION_RUNTIME_SECTION: &[u8; 8] = b".orranim";
+const SURFACE_RUNTIME_SECTION: &[u8; 8] = b".orrsurf";
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
@@ -108,6 +110,7 @@ pub(crate) fn export(
     let sidecar_path = mesh_art::sidecar_path(&scene_path)?;
     let mut requires_rotation = false;
     let mut requires_material = false;
+    let mut requires_surface = false;
     let sidecar_bytes = match read_optional_bounded(
         &sidecar_path,
         orr_model::MAX_FILE_BYTES as u64,
@@ -121,6 +124,8 @@ pub(crate) fn export(
                 || serialized_rotation_present(&bytes, false)?;
             requires_material |=
                 art.tint() != [1.0, 1.0, 1.0, 1.0] || serialized_material_present(&bytes, false)?;
+            requires_surface |=
+                art.surface().is_some() || serialized_surface_present(&bytes, false)?;
             if admitted_hash != digest(&bytes) {
                 return Err("mesh art sidecar changed during admission".into());
             }
@@ -155,6 +160,11 @@ pub(crate) fn export(
                     .iter()
                     .any(|prop| prop.art.tint() != [1.0, 1.0, 1.0, 1.0])
                     || serialized_material_present(&bytes, true)?;
+                requires_surface |= document
+                    .props
+                    .iter()
+                    .any(|prop| prop.art.surface().is_some())
+                    || serialized_surface_present(&bytes, true)?;
                 if admitted_hash != digest(&bytes)
                     || read_bounded(&props_path, 16 * 1024 * 1024, "mesh props sidecar recheck")?
                         != bytes
@@ -238,6 +248,7 @@ pub(crate) fn export(
         camera_bytes.is_some(),
         requires_material,
         animation_bytes.is_some(),
+        requires_surface,
     )?;
     let runtime_hash = digest(&runtime_bytes);
     let scene_name = scene_path
@@ -461,6 +472,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let sidecar_path = mesh_art::sidecar_path(&scene_path)?;
     let mut requires_rotation = false;
     let mut requires_material = false;
+    let mut requires_surface = false;
     match (
         &manifest.sidecar,
         read_optional_bounded(
@@ -478,6 +490,8 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
                 || serialized_rotation_present(&bytes, false)?;
             requires_material |=
                 art.tint() != [1.0, 1.0, 1.0, 1.0] || serialized_material_present(&bytes, false)?;
+            requires_surface |=
+                art.surface().is_some() || serialized_surface_present(&bytes, false)?;
             if admitted_hash != record.sha256 {
                 return Err("bundle art admission hash does not match its manifest".into());
             }
@@ -515,6 +529,11 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
                 .iter()
                 .any(|prop| prop.art.tint() != [1.0, 1.0, 1.0, 1.0])
                 || serialized_material_present(&bytes, true)?;
+            requires_surface |= document
+                .props
+                .iter()
+                .any(|prop| prop.art.surface().is_some())
+                || serialized_surface_present(&bytes, true)?;
             if admitted_hash != record.sha256 {
                 return Err("bundle mesh props admission hash does not match its manifest".into());
             }
@@ -602,6 +621,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         manifest.camera.is_some(),
         requires_material,
         manifest.animation.is_some(),
+        requires_surface,
     )?;
     let sidecar_unchanged = match &manifest.sidecar {
         Some(record) => {
@@ -1166,6 +1186,23 @@ fn serialized_material_present(bytes: &[u8], props: bool) -> Result<bool, String
     }))
 }
 
+fn serialized_surface_present(bytes: &[u8], props: bool) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("inspect serialized mesh surface: {error}"))?;
+    if !props {
+        return Ok(value.get("surface").is_some());
+    }
+    let records = value
+        .get("props")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("mesh props sidecar has no props inventory")?;
+    Ok(records.iter().any(|record| {
+        record
+            .get("art")
+            .is_some_and(|art| art.get("surface").is_some())
+    }))
+}
+
 #[cfg(test)]
 fn validate_runtime_for(
     bytes: &[u8],
@@ -1206,7 +1243,13 @@ fn validate_runtime_with_material(
         require_camera,
         require_material,
         false,
+        false,
     )
+}
+
+#[cfg(test)]
+fn validate_runtime_with_surface(bytes: &[u8], require_props: bool) -> Result<(), String> {
+    validate_runtime_with_animation(bytes, require_props, false, false, false, false, true)
 }
 
 fn validate_runtime_with_animation(
@@ -1216,6 +1259,7 @@ fn validate_runtime_with_animation(
     require_camera: bool,
     require_material: bool,
     require_animation: bool,
+    require_surface: bool,
 ) -> Result<(), String> {
     if bytes.len() < 0x40 || &bytes[..2] != b"MZ" {
         return Err("mesh player runtime is missing its DOS executable header".into());
@@ -1317,6 +1361,12 @@ fn validate_runtime_with_animation(
             .is_none()
     {
         return Err("mesh player runtime does not advertise mesh-animation bundle support".into());
+    }
+    if require_surface
+        && validate_runtime_section(bytes, SURFACE_RUNTIME_SECTION, SURFACE_RUNTIME_MARKER)?
+            .is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh-surface bundle support".into());
     }
     Ok(())
 }

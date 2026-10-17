@@ -276,6 +276,75 @@ fn prop_tint_fields_round_trip_through_update_history_and_drag() {
 }
 
 #[test]
+fn prop_surface_settings_round_trip_through_update_history_and_drag() {
+    let mut panel = Panel::default();
+    panel.reset_history(document(1), Some(0));
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    panel.surface_enabled = true;
+    panel.surface_material = snapshot().material_choices()[0].to_string();
+    panel.surface_uv_offset = ["0.25".into(), "-0.5".into()];
+    panel.surface_uv_scale = ["2".into(), "0.5".into()];
+    panel.surface_quarter_turns = "1".into();
+    panel.surface_pivot = ["0.5".into(), "0".into(), "-1".into()];
+    panel.update_selected();
+    let first_surface = panel.document.props[0].art.surface().unwrap();
+    assert_eq!(first_surface.uv_offset, [0.25, -0.5]);
+    assert_eq!(first_surface.uv_scale, [2.0, 0.5]);
+    assert_eq!(first_surface.uv_quarter_turns, 1);
+    assert_eq!(first_surface.pivot, [0.5, 0.0, -1.0]);
+
+    panel.surface_uv_offset = ["-0.25".into(), "0.75".into()];
+    panel.surface_uv_scale = ["0.75".into(), "1.5".into()];
+    panel.surface_quarter_turns = "3".into();
+    panel.surface_pivot = ["-0.5".into(), "0.25".into(), "1".into()];
+    panel.update_selected();
+    let second_surface = panel.document.props[0].art.surface().unwrap();
+    assert_eq!(second_surface.uv_offset, [-0.25, 0.75]);
+    assert_eq!(second_surface.uv_scale, [0.75, 1.5]);
+    assert_eq!(second_surface.uv_quarter_turns, 3);
+    assert_eq!(second_surface.pivot, [-0.5, 0.25, 1.0]);
+
+    panel.undo();
+    assert_eq!(panel.document.props[0].art.surface(), Some(first_surface));
+    panel.redo();
+    assert_eq!(panel.document.props[0].art.surface(), Some(second_surface));
+
+    let original = panel.document.clone();
+    panel.gesture = Some(super::PropGesture {
+        original: original.clone(),
+        selected: 1,
+        drag: crate::mesh_prop_view::Drag::new(
+            &orr_render::Camera3D::orthographic([0.0, 5.0, 5.0], [0.0; 3], 4.0),
+            [0.0, 0.0],
+            (100, 100),
+            panel.document.props[0].art.offset(),
+        )
+        .unwrap(),
+    });
+    panel.document.props[0].art = panel.document.props[0]
+        .art
+        .clone()
+        .with_transform([4.0, 0.0, 5.0], 1.0)
+        .unwrap();
+    assert_eq!(panel.document.props[0].art.surface(), Some(second_surface));
+    panel.cancel_gesture();
+    assert_eq!(panel.document.props[0].art.surface(), Some(second_surface));
+    let invalid_scale = super::parse_surface(
+        true,
+        "0",
+        &["0".into(), "0".into()],
+        &["0".into(), "1".into()],
+        "0",
+        &["0".into(), "0".into(), "0".into()],
+    )
+    .unwrap()
+    .unwrap();
+    assert!(snapshot().with_surface(Some(invalid_scale)).is_err());
+}
+
+#[test]
 fn prop_duplicate_preserves_asset_state_and_creates_one_private_history_entry() {
     let original_rotation = crate::mesh_rotation::from_degrees([12.0, 23.0, 34.0]).unwrap();
     let original_tint = [0.4, 0.6, 0.8, 0.5];
@@ -289,6 +358,14 @@ fn prop_duplicate_preserves_asset_state_and_creates_one_private_history_entry() 
         .with_rotation(original_rotation)
         .unwrap()
         .with_tint(original_tint)
+        .unwrap()
+        .with_surface(Some(crate::mesh_surface::Settings {
+            material: snapshot().material_choices()[0],
+            uv_offset: [0.2, -0.3],
+            uv_scale: [1.5, 0.75],
+            uv_quarter_turns: 2,
+            pivot: [0.25, 0.5, -0.75],
+        }))
         .unwrap();
     let mut panel = Panel::default();
     panel.reset_history(original, Some(0));
@@ -305,6 +382,10 @@ fn prop_duplicate_preserves_asset_state_and_creates_one_private_history_entry() 
     assert_eq!(panel.document.props[1].art.scale(), 0.75);
     assert_eq!(panel.document.props[1].art.rotation(), original_rotation);
     assert_eq!(panel.document.props[1].art.tint(), original_tint);
+    assert_eq!(
+        panel.document.props[1].art.surface(),
+        panel.document.props[0].art.surface()
+    );
     assert_eq!(
         panel.document.props[1].art.label(),
         panel.document.props[0].art.label()

@@ -54,6 +54,12 @@ pub(crate) struct Panel {
     scale: String,
     rotation: [String; 3],
     tint: [String; 4],
+    surface_enabled: bool,
+    surface_material: String,
+    surface_uv_offset: [String; 2],
+    surface_uv_scale: [String; 2],
+    surface_quarter_turns: String,
+    surface_pivot: [String; 3],
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -93,6 +99,12 @@ impl Default for Panel {
             scale: "1".into(),
             rotation: ["0".into(), "0".into(), "0".into()],
             tint: ["1".into(), "1".into(), "1".into(), "1".into()],
+            surface_enabled: false,
+            surface_material: "0".into(),
+            surface_uv_offset: ["0".into(), "0".into()],
+            surface_uv_scale: ["1".into(), "1".into()],
+            surface_quarter_turns: "0".into(),
+            surface_pivot: ["0".into(), "0".into(), "0".into()],
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -305,6 +317,27 @@ impl Panel {
                     .enumerate()
                 {
                     field(ui, label, &mut self.tint[channel]);
+                }
+                ui.checkbox(&mut self.surface_enabled, "Edit prop UV and pivot");
+                if self.surface_enabled {
+                    field(ui, "Prop UV material index", &mut self.surface_material);
+                    if let Some(snapshot) = self.candidate.as_ref().or_else(|| self.selected_prop().map(|prop| &prop.art)) {
+                        let choices = snapshot
+                            .material_choices()
+                            .into_iter()
+                            .map(|index| index.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        ui.label(format!("UV materials used by this model: {choices}"));
+                    }
+                    field(ui, "Prop UV offset U", &mut self.surface_uv_offset[0]);
+                    field(ui, "Prop UV offset V", &mut self.surface_uv_offset[1]);
+                    field(ui, "Prop UV scale U", &mut self.surface_uv_scale[0]);
+                    field(ui, "Prop UV scale V", &mut self.surface_uv_scale[1]);
+                    field(ui, "Prop UV quarter turns", &mut self.surface_quarter_turns);
+                    for (axis, label) in ["Prop pivot X", "Prop pivot Y", "Prop pivot Z"].into_iter().enumerate() {
+                        field(ui, label, &mut self.surface_pivot[axis]);
+                    }
                 }
             });
             ui.horizontal(|ui| {
@@ -1360,7 +1393,15 @@ impl Panel {
         snapshot
             .with_transform(position, scale)?
             .with_rotation(crate::mesh_rotation::from_degrees(rotation)?)?
-            .with_tint(tint)
+            .with_tint(tint)?
+            .with_surface(parse_surface(
+                self.surface_enabled,
+                &self.surface_material,
+                &self.surface_uv_offset,
+                &self.surface_uv_scale,
+                &self.surface_quarter_turns,
+                &self.surface_pivot,
+            )?)
     }
 
     fn selected_prop(&self) -> Option<&Prop> {
@@ -1466,6 +1507,21 @@ impl Panel {
             self.rotation = rotation.map(format_number);
         }
         self.tint = snapshot.tint().map(format_number);
+        if let Some(settings) = snapshot.surface() {
+            self.surface_enabled = true;
+            self.surface_material = settings.material.to_string();
+            self.surface_uv_offset = settings.uv_offset.map(format_number);
+            self.surface_uv_scale = settings.uv_scale.map(format_number);
+            self.surface_quarter_turns = settings.uv_quarter_turns.to_string();
+            self.surface_pivot = settings.pivot.map(format_number);
+        } else {
+            self.surface_enabled = false;
+            self.surface_material = "0".into();
+            self.surface_uv_offset = ["0".into(), "0".into()];
+            self.surface_uv_scale = ["1".into(), "1".into()];
+            self.surface_quarter_turns = "0".into();
+            self.surface_pivot = ["0".into(), "0".into(), "0".into()];
+        }
     }
 }
 
@@ -1478,6 +1534,73 @@ fn parse_tint(values: &[String; 4]) -> Result<[f32; 4], String> {
             .map_err(|_| "Prop tint values must be finite RGBA multipliers in 0..=1")?;
     }
     crate::mesh_material::validate(tint)
+}
+
+fn parse_surface(
+    enabled: bool,
+    material: &str,
+    uv_offset: &[String; 2],
+    uv_scale: &[String; 2],
+    uv_quarter_turns: &str,
+    pivot: &[String; 3],
+) -> Result<Option<crate::mesh_surface::Settings>, String> {
+    if !enabled {
+        return Ok(None);
+    }
+    let material = material
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "UV material index must be a nonnegative integer")?;
+    let parse_pair = |values: &[String; 2], name: &str| -> Result<[f32; 2], String> {
+        Ok([
+            values[0]
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("{name} U must be a number"))?,
+            values[1]
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| format!("{name} V must be a number"))?,
+        ])
+    };
+    let uv_offset = parse_pair(uv_offset, "UV offset")?;
+    let uv_scale = parse_pair(uv_scale, "UV scale")?;
+    let uv_quarter_turns = uv_quarter_turns
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "UV quarter turns must be an integer from 0 through 3")?;
+    let pivot = [
+        pivot[0]
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "pivot X must be a number")?,
+        pivot[1]
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "pivot Y must be a number")?,
+        pivot[2]
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "pivot Z must be a number")?,
+    ];
+    if uv_offset
+        .iter()
+        .chain(uv_scale.iter())
+        .chain(pivot.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err("UV and pivot values must be finite".into());
+    }
+    if uv_quarter_turns > 3 {
+        return Err("UV quarter turns must be from 0 through 3".into());
+    }
+    Ok(Some(crate::mesh_surface::Settings {
+        material,
+        uv_offset,
+        uv_scale,
+        uv_quarter_turns,
+        pivot,
+    }))
 }
 
 fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {

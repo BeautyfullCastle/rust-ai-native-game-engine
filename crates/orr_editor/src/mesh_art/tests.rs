@@ -43,6 +43,99 @@ fn revision() -> [u8; 32] {
 }
 
 #[test]
+fn surface_round_trips_from_embedded_original_and_survives_other_art_edits() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = package(&root);
+    let original = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", revision()).unwrap();
+    let original_model = original.model.to_bytes().unwrap();
+    let original_cooked_sha = original.cooked_sha256.clone();
+    let material = original.material_choices()[0];
+    let settings = crate::mesh_surface::Settings {
+        material,
+        uv_offset: [0.25, -0.125],
+        uv_scale: [1.5, 0.5],
+        uv_quarter_turns: 1,
+        pivot: [0.25, -0.5, 0.125],
+    };
+    let changed = original
+        .clone()
+        .with_surface(Some(settings))
+        .unwrap()
+        .with_tint([0.5, 0.75, 1.0, 1.0])
+        .unwrap()
+        .with_transform([1.0, 2.0, 3.0], 0.75)
+        .unwrap()
+        .with_rotation(crate::mesh_rotation::from_degrees([10.0, 20.0, 30.0]).unwrap())
+        .unwrap();
+    assert_eq!(changed.surface(), Some(settings));
+    assert_eq!(changed.model.to_bytes().unwrap(), original_model);
+    assert_eq!(changed.cooked_sha256, original_cooked_sha);
+    assert_ne!(changed.render_model.to_bytes().unwrap(), original_model);
+    let encoded = changed.encode_embedded("surface.scene.yaml").unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(document["surface"]["material"], material);
+    assert_eq!(
+        document["model"],
+        serde_json::to_value(original.model.source()).unwrap()
+    );
+    let hidden = root.join("hidden-source");
+    fs::rename(&source, &hidden).unwrap();
+    let reopened = Snapshot::decode_embedded(&encoded, "surface.scene.yaml", revision()).unwrap();
+    assert_eq!(reopened.surface(), Some(settings));
+    assert_eq!(
+        reopened.render_model.to_bytes().unwrap(),
+        changed.render_model.to_bytes().unwrap()
+    );
+    assert_eq!(
+        reopened.encode_embedded("surface.scene.yaml").unwrap(),
+        encoded
+    );
+    fs::rename(&hidden, &source).unwrap();
+    let reset = changed.with_surface(None).unwrap();
+    assert_eq!(reset.surface(), None);
+    assert_eq!(reset.model.to_bytes().unwrap(), original_model);
+}
+
+#[test]
+fn explicit_identity_surface_is_retained_but_invalid_surface_forms_are_rejected() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = package(&root);
+    let original = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", revision()).unwrap();
+    let settings = crate::mesh_surface::Settings {
+        material: original.material_choices()[0],
+        ..Default::default()
+    };
+    let identity = original.clone().with_surface(Some(settings)).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &identity.render_model,
+        &original.model
+    ));
+    let bytes = identity.encode_embedded("surface.scene.yaml").unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(document["surface"].is_object());
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        let mut bad = document.clone();
+        bad["surface"] = invalid;
+        assert!(Snapshot::decode_embedded(
+            &serde_json::to_vec(&bad).unwrap(),
+            "surface.scene.yaml",
+            revision()
+        )
+        .is_err());
+    }
+    let mut invalid = settings;
+    invalid.uv_scale = [0.0, 1.0];
+    assert!(original.clone().with_surface(Some(invalid)).is_err());
+    assert_eq!(original.surface(), None);
+}
+
+#[test]
 fn legacy_sidecars_default_to_identity_without_adding_rotation_or_tint_fields() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
@@ -52,9 +145,11 @@ fn legacy_sidecars_default_to_identity_without_adding_rotation_or_tint_fields() 
     let encoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(encoded.get("rotation").is_none());
     assert!(encoded.get("tint").is_none());
+    assert!(encoded.get("surface").is_none());
     let loaded = Snapshot::decode_embedded(&bytes, "legacy.scene.yaml", revision()).unwrap();
     assert_eq!(loaded.rotation(), [0.0, 0.0, 0.0, 1.0]);
     assert_eq!(loaded.tint(), [1.0; 4]);
+    assert_eq!(loaded.surface(), None);
     assert_eq!(loaded.encode_embedded("legacy.scene.yaml").unwrap(), bytes);
 }
 

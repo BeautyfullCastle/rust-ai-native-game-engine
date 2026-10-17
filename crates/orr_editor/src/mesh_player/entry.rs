@@ -23,6 +23,10 @@ static MESH_MATERIAL_MARKER: [u8; 20] = *b"ORR_MESH_MATERIAL_V1";
 #[unsafe(link_section = ".orranim")]
 static MESH_ANIMATION_MARKER: [u8; 21] = *b"ORR_MESH_ANIMATION_V1";
 
+#[used]
+#[unsafe(link_section = ".orrsurf")]
+static MESH_SURFACE_MARKER: [u8; 19] = *b"ORR_MESH_SURFACE_V1";
+
 fn main() {
     std::hint::black_box(&MESH_PLAYER_MARKER);
     std::hint::black_box(&MESH_PROPS_MARKER);
@@ -31,6 +35,7 @@ fn main() {
     std::hint::black_box(&MESH_MATERIAL_MARKER);
     #[cfg(feature = "mesh-animated-models")]
     std::hint::black_box(&MESH_ANIMATION_MARKER);
+    std::hint::black_box(&MESH_SURFACE_MARKER);
     if let Err(error) = orr_editor::mesh_player::run() {
         eprintln!("orr_mesh_player: {error}");
         std::process::exit(2);

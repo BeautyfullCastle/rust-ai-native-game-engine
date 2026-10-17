@@ -131,6 +131,28 @@ fn test_runtime_with_material() -> Vec<u8> {
     bytes
 }
 
+fn test_runtime_with_surface() -> Vec<u8> {
+    let mut bytes = test_runtime_with_material();
+    bytes.resize(1088, 0);
+    bytes[0x46..0x48].copy_from_slice(&6u16.to_le_bytes());
+    bytes[0x210..0x218].copy_from_slice(b".orrsurf");
+    bytes[0x220..0x224].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x224..0x228].copy_from_slice(&0x380u32.to_le_bytes());
+    bytes[0x234..0x238].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x380..0x380 + b"ORR_MESH_SURFACE_V1".len()].copy_from_slice(b"ORR_MESH_SURFACE_V1");
+    bytes
+}
+
+fn surface_settings(uv_offset: [f32; 2]) -> crate::mesh_surface::Settings {
+    crate::mesh_surface::Settings {
+        material: 0,
+        uv_offset,
+        uv_scale: [1.0, 1.0],
+        uv_quarter_turns: 0,
+        pivot: [0.0, 0.0, 0.0],
+    }
+}
+
 #[cfg(feature = "mesh-animated-models")]
 fn test_runtime_with_animation() -> Vec<u8> {
     let mut bytes = test_runtime_with_material();
@@ -168,6 +190,27 @@ fn set_prop_tint(scene: &std::path::Path, revision: [u8; 32], tint: [f32; 4]) {
     props["props"][0]["art"]["tint"] = serde_json::json!(tint);
     fs::write(&path, serde_json::to_vec(&props).unwrap()).unwrap();
     mesh_props::load(scene, revision).unwrap().unwrap();
+}
+
+fn save_surface(
+    scene: &std::path::Path,
+    revision: [u8; 32],
+    settings: crate::mesh_surface::Settings,
+    art_only: bool,
+) {
+    add_props(scene, revision);
+    let (mut document, props_hash) = mesh_props::load(scene, revision).unwrap().unwrap();
+    document.props[0].art = document.props[0]
+        .art
+        .clone()
+        .with_surface(Some(settings))
+        .unwrap();
+    if art_only {
+        crate::mesh_art::save(scene, Some(&document.props[0].art), None).unwrap();
+        fs::remove_file(mesh_props::sidecar_path(scene).unwrap()).unwrap();
+    } else {
+        mesh_props::save(scene, Some(&document), Some(&props_hash), revision).unwrap();
+    }
 }
 
 fn add_camera(scene: &std::path::Path, revision: [u8; 32]) -> Vec<u8> {
@@ -687,6 +730,75 @@ fn material_runtime_marker_requires_its_own_bounded_pe_section() {
 }
 
 #[test]
+fn explicit_surface_fields_require_a_surface_capable_player_for_export_and_open() {
+    for art_only in [false, true] {
+        for uv_offset in [[0.0, 0.0], [0.25, -0.5]] {
+            let (temporary, scene, runtime, checksum) = fixture();
+            let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+            let settings = surface_settings(uv_offset);
+            save_surface(&scene, revision, settings, art_only);
+            let legacy_runtime = test_runtime_with_material();
+            fs::write(&runtime, &legacy_runtime).unwrap();
+            let destination = temporary.path().join("surface-bundle");
+            assert!(export(&scene, checksum, &destination, &runtime).is_err());
+            assert!(!destination.exists());
+
+            let capable_runtime = temporary.path().join("surface-player.exe");
+            fs::write(&capable_runtime, test_runtime_with_surface()).unwrap();
+            let receipt = export(&scene, checksum, &destination, &capable_runtime).unwrap();
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+            assert!(manifest.get("surface").is_none());
+            let prepared = open_bundle(&destination).unwrap();
+            assert_eq!(prepared.checksum, checksum);
+            assert_eq!(receipt.props_sha256.is_some(), !art_only);
+            assert_eq!(receipt.sidecar_sha256.is_some(), art_only);
+            let bundle_scene = destination.join("walk.scene.yaml");
+            if art_only {
+                let (art, _) = crate::mesh_art::load(&bundle_scene, revision)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(art.surface(), Some(settings));
+            } else {
+                let (document, _) = mesh_props::load(&bundle_scene, revision).unwrap().unwrap();
+                assert_eq!(document.props[0].art.surface(), Some(settings));
+            }
+
+            fs::write(destination.join(RUNTIME_FILENAME), &legacy_runtime).unwrap();
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+            manifest["runtime"]["bytes"] = serde_json::json!(legacy_runtime.len());
+            manifest["runtime"]["sha256"] = serde_json::json!(super::digest(&legacy_runtime));
+            fs::write(&receipt.manifest, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert!(open_bundle(&destination).is_err());
+        }
+    }
+}
+
+#[test]
+fn surface_marker_must_be_a_distinct_bounded_pe_section() {
+    super::validate_runtime_with_surface(&test_runtime_with_surface(), false).unwrap();
+    assert!(super::validate_runtime_with_surface(&test_runtime_with_material(), false).is_err());
+
+    let mut bytes = test_runtime_with_surface();
+    bytes[0x380..0x380 + b"ORR_MESH_SURFACE_V1".len()].fill(0);
+    bytes[0x100..0x100 + b"ORR_MESH_SURFACE_V1".len()].copy_from_slice(b"ORR_MESH_SURFACE_V1");
+    assert!(super::validate_runtime_with_surface(&bytes, false).is_err());
+
+    let mut bytes = test_runtime_with_surface();
+    bytes[0x224..0x228].copy_from_slice(&0x100u32.to_le_bytes());
+    assert!(super::validate_runtime_with_surface(&bytes, false).is_err());
+    super::validate_runtime_with_material(
+        &test_runtime_with_material(),
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
 fn camera_sidecar_with_another_graph_revision_is_refused_before_staging() {
     let (temporary, scene, _runtime, checksum) = fixture();
     let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
@@ -814,4 +926,44 @@ fn animation_sidecars_fail_closed_without_feature_support() {
     .unwrap();
     let error = open_bundle(&destination).unwrap_err();
     assert!(error.contains("rebuild with mesh-animated-models support"));
+}
+
+#[cfg(feature = "mesh-animated-models")]
+fn test_runtime_with_animation_and_surface() -> Vec<u8> {
+    let mut bytes = test_runtime_with_animation();
+    bytes.resize(1216, 0);
+    bytes[0x46..0x48].copy_from_slice(&7u16.to_le_bytes());
+    bytes[0x184..0x188].copy_from_slice(&0x400u32.to_le_bytes());
+    bytes[0x238..0x240].copy_from_slice(b".orrsurf");
+    bytes[0x248..0x24c].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x24c..0x250].copy_from_slice(&0x3c0u32.to_le_bytes());
+    bytes[0x25c..0x260].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x3c0..0x3c0 + b"ORR_MESH_SURFACE_V1".len()].copy_from_slice(b"ORR_MESH_SURFACE_V1");
+    bytes[0x400..0x400 + b"ORR_MESH_PROPS_V1".len()].copy_from_slice(b"ORR_MESH_PROPS_V1");
+    bytes
+}
+
+#[cfg(feature = "mesh-animated-models")]
+#[test]
+fn surface_marker_composes_with_all_existing_player_sections() {
+    super::validate_runtime_with_animation(
+        &test_runtime_with_animation_and_surface(),
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+    )
+    .unwrap();
+    assert!(super::validate_runtime_with_animation(
+        &test_runtime_with_animation(),
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+    )
+    .is_err());
 }

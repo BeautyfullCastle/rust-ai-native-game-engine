@@ -39,6 +39,7 @@ pub(crate) struct Snapshot {
     model: Arc<StaticModel>,
     render_model: Arc<StaticModel>,
     tint: [f32; 4],
+    surface: Option<crate::mesh_surface::Settings>,
     offset: [f32; 3],
     scale: f32,
     rotation: [f32; 4],
@@ -64,6 +65,12 @@ struct Sidecar {
         skip_serializing_if = "crate::mesh_material::is_identity"
     )]
     tint: [f32; 4],
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_surface"
+    )]
+    surface: Option<crate::mesh_surface::Settings>,
     offset: [f32; 3],
     scale: f32,
     #[serde(
@@ -171,6 +178,7 @@ impl Snapshot {
             render_model: Arc::clone(&model),
             model,
             tint: crate::mesh_material::identity(),
+            surface: None,
             offset: [0.0; 3],
             scale: 1.0,
             rotation: identity_rotation(),
@@ -211,13 +219,36 @@ impl Snapshot {
         self.tint
     }
 
+    pub(crate) fn surface(&self) -> Option<crate::mesh_surface::Settings> {
+        self.surface
+    }
+
+    pub(crate) fn material_choices(&self) -> Vec<u32> {
+        self.model
+            .source()
+            .primitives
+            .iter()
+            .map(|primitive| primitive.material)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn with_surface(
+        mut self,
+        surface: Option<crate::mesh_surface::Settings>,
+    ) -> Result<Self, String> {
+        self.surface = surface
+            .map(|settings| crate::mesh_surface::validate(settings, &self.model))
+            .transpose()?;
+        self.render_model = render_model(&self.model, self.tint, self.surface)?;
+        self.placement([orr_fp::FP::ZERO; 3])?;
+        Ok(self)
+    }
+
     pub(crate) fn with_tint(mut self, tint: [f32; 4]) -> Result<Self, String> {
         self.tint = crate::mesh_material::validate(tint)?;
-        self.render_model = if crate::mesh_material::is_identity(&self.tint) {
-            Arc::clone(&self.model)
-        } else {
-            Arc::new(crate::mesh_material::tinted_model(&self.model, self.tint)?)
-        };
+        self.render_model = render_model(&self.model, self.tint, self.surface)?;
         self.placement([orr_fp::FP::ZERO; 3])?;
         Ok(self)
     }
@@ -274,6 +305,9 @@ impl Snapshot {
         validate_leaf(scene_filename, "scene filename")?;
         validate_source_budget(self.model.source())?;
         crate::mesh_material::validate(self.tint)?;
+        if let Some(settings) = self.surface {
+            crate::mesh_surface::validate(settings, &self.model)?;
+        }
         let model_bytes = self.model.to_bytes().map_err(|error| error.to_string())?;
         if digest(&model_bytes) != self.cooked_sha256 {
             return Err("embedded cooked model digest changed".into());
@@ -303,6 +337,7 @@ impl Snapshot {
             license_text: self.license_text.clone(),
             model: self.model.source().clone(),
             tint: self.tint,
+            surface: self.surface,
             offset: self.offset,
             scale: self.scale,
             rotation: self.rotation,
@@ -351,11 +386,11 @@ impl Snapshot {
         {
             return Err("embedded model exceeds limits or has external dependencies".into());
         }
-        let render_model = if crate::mesh_material::is_identity(&tint) {
-            Arc::clone(&model)
-        } else {
-            Arc::new(crate::mesh_material::tinted_model(&model, tint)?)
-        };
+        let surface = sidecar
+            .surface
+            .map(|settings| crate::mesh_surface::validate(settings, &model))
+            .transpose()?;
+        let render_model = render_model(&model, tint, surface)?;
         let snapshot = Self {
             graph_revision: sidecar.graph_revision,
             manifest: sidecar.manifest,
@@ -369,6 +404,7 @@ impl Snapshot {
             render_model,
             model,
             tint,
+            surface,
             offset: sidecar.offset,
             scale: sidecar.scale,
             rotation: sidecar.rotation,
@@ -384,6 +420,36 @@ impl Snapshot {
 
 fn identity_rotation() -> [f32; 4] {
     [0.0, 0.0, 0.0, 1.0]
+}
+
+fn deserialize_surface<'de, Deserializer>(
+    deserializer: Deserializer,
+) -> Result<Option<crate::mesh_surface::Settings>, Deserializer::Error>
+where
+    Deserializer: serde::Deserializer<'de>,
+{
+    crate::mesh_surface::Settings::deserialize(deserializer).map(Some)
+}
+
+fn render_model(
+    model: &Arc<StaticModel>,
+    tint: [f32; 4],
+    surface: Option<crate::mesh_surface::Settings>,
+) -> Result<Arc<StaticModel>, String> {
+    match surface {
+        Some(settings) => {
+            let settings = crate::mesh_surface::validate(settings, model)?;
+            if crate::mesh_surface::is_identity(&settings)
+                && crate::mesh_material::is_identity(&tint)
+            {
+                Ok(Arc::clone(model))
+            } else {
+                crate::mesh_surface::derived_model(model, settings, tint).map(Arc::new)
+            }
+        }
+        None if crate::mesh_material::is_identity(&tint) => Ok(Arc::clone(model)),
+        None => crate::mesh_material::tinted_model(model, tint).map(Arc::new),
+    }
 }
 
 fn rotation_is_identity(rotation: &[f32; 4]) -> bool {
