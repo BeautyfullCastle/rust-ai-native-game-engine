@@ -548,7 +548,12 @@ impl eframe::App for EditorApp {
             self.package_model_request();
         }
         #[cfg(feature="room-authoring")]
-        if self.editor.game().is_room() { self.room_authoring.show(&ctx, &mut self.editor); }
+        if self.editor.game().is_room() {
+            let removal_blocker = if !self.models.scene_matches(&self.editor) || self.models.bindings.as_ref().is_none_or(|bindings| bindings.dirty()) {
+                Some("Open matching model bindings and save or discard model edits before removing a Room wall.")
+            } else { None };
+            self.room_authoring.show(&ctx, &mut self.editor, removal_blocker);
+        }
         #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
         {
             let blocked = self.windows_project_blocker();
@@ -821,10 +826,10 @@ impl EditorApp {
                 let c = self.editor.camera.center;
                 self.editor.spawn_body(c);
             }
-            if self.editor.game().is_3d() && !self.editor.game().is_navigation() && !self.editor.game().is_mesh_navigation() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
+            if self.editor.game().is_3d() && !self.editor.game().is_room() && !self.editor.game().is_navigation() && !self.editor.game().is_mesh_navigation() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
                 self.editor.spawn_yard_body(orr_fp::FPVec3::new(FP::ZERO,FP::from_int(5),FP::ZERO));
             }
-            if ui.add_enabled(self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).clicked() {
+            if ui.add_enabled(!self.editor.game().is_room() && self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).on_disabled_hover_text("Room walls use the validated removal action in Room level authoring.").clicked() {
                 self.editor.delete_selected();
             }
         });

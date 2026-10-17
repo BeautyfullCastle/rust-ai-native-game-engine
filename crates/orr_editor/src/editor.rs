@@ -56,6 +56,11 @@ pub use crate::model::Mode;
 #[cfg(feature="room-authoring")]
 #[path="room_authoring.rs"]
 mod room_authoring;
+#[cfg(feature="room-authoring")]
+pub(crate) use room_authoring::RoomWall;
+#[cfg(all(test, windows, target_arch="x86_64", feature="windows-projects"))]
+#[path="editor/room_wall_tests.rs"]
+mod room_wall_tests;
 use crate::viewport::{self, Scene};
 
 /// Most entities one hierarchy refresh asks for.
@@ -2272,6 +2277,10 @@ impl Editor {
 
     /// Deletes the selected entity. Refusals (something still points at it) are reported.
     pub fn delete_selected(&mut self) -> bool {
+        if self.game().is_room() {
+            self.error("Use Room level authoring to remove a wall with admission and model-binding checks; required Room actors cannot be deleted here");
+            return false;
+        }
         let Some(t) = self.selection.clone() else {
             self.error("nothing selected");
             return false;
