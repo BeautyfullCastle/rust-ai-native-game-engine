@@ -43,6 +43,7 @@ pub struct Panel {
     host_triangle_count: usize,
     graph: Option<StaticMeshGraph>,
     view_model: Option<Arc<StaticModel>>,
+    art: crate::mesh_art_panel::Panel,
 }
 
 impl Default for Panel {
@@ -70,12 +71,14 @@ impl Default for Panel {
             host_triangle_count: 0,
             graph: None,
             view_model: None,
+            art: crate::mesh_art_panel::Panel::default(),
         }
     }
 }
 
 impl Panel {
     pub fn sync(&mut self, editor: &Editor) {
+        self.art.sync(editor);
         if editor.game() != EditorGame::MeshNavigation {
             self.clear_host_view();
             return;
@@ -190,12 +193,23 @@ impl Panel {
     }
 
     pub(crate) fn has_unplaced_draft(&self) -> bool {
-        self.draft_dirty
+        self.draft_dirty || self.art.dirty()
+    }
+
+    pub(crate) fn art_model(&self, editor: &Editor) -> Option<crate::viewport3d::SceneModel> {
+        self.art.placement(editor)
+    }
+
+    pub(crate) fn art_dirty(&self) -> bool {
+        self.art.dirty()
     }
 
     pub fn play_blocker(&self, editor: &Editor) -> Option<String> {
         if editor.game() != EditorGame::MeshNavigation {
             return None;
+        }
+        if let Some(reason) = self.art.play_blocker(editor) {
+            return Some(reason);
         }
         if !editor.proposals().is_empty() {
             return Some("Resolve open proposals before Play".into());
@@ -396,7 +410,11 @@ impl Panel {
                     )
                     .clicked()
                 {
-                    *self = Self::default();
+                    let art = std::mem::take(&mut self.art);
+                    *self = Self {
+                        art,
+                        ..Self::default()
+                    };
                     self.sync(editor);
                 }
             });
@@ -488,6 +506,7 @@ impl Panel {
                 ui.colored_label(egui::Color32::RED, error);
             }
         });
+        self.art.show(ui, editor);
     }
 
     fn authoring_blocker(&self, editor: &Editor) -> Option<String> {
@@ -570,10 +589,12 @@ impl Panel {
     }
 
     fn reset_to_empty_pin(&mut self) {
+        let art = std::mem::take(&mut self.art);
         *self = Self {
             loaded_scene: self.loaded_scene.clone(),
             loaded_scene_epoch: self.loaded_scene_epoch,
             last_frame: self.last_frame,
+            art,
             ..Self::default()
         };
     }

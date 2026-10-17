@@ -334,6 +334,10 @@ impl EditorApp {
         if self.package_manager.busy() {
             return Some("Finish the content package operation before changing projects".into());
         }
+        #[cfg(feature="mesh-navigation")]
+        if self.mesh_navigation.art_dirty() {
+            return Some("Save or explicitly discard agent art changes before changing projects".into());
+        }
         if (!self.editor.game().is_room() && self.editor.game() != crate::game::EditorGame::PhysGame) || !self.editor.spec().is_local()
             || self.editor.mode() != Mode::Edit || !self.editor.can_mutate()
             || self.editor.previewing().is_some() || self.editor.in_gesture() {
@@ -707,13 +711,17 @@ impl EditorApp {
             });
             ui.separator();
             let playing = self.editor.timeline().is_some_and(|t| t.playing);
-            if ui.add_enabled(live && !playing, egui::Button::new(LBL_PLAY)).clicked() {
+            #[cfg(feature="mesh-navigation")]
+            let start_blocker = if self.editor.mode() != Mode::Play { self.mesh_navigation.play_blocker(&self.editor) } else { None };
+            #[cfg(not(feature="mesh-navigation"))]
+            let start_blocker: Option<String> = None;
+            if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_PLAY)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable")).clicked() {
                 self.editor.play();
             }
             if ui.add_enabled(live && playing, egui::Button::new(LBL_PAUSE)).clicked() {
                 self.editor.pause();
             }
-            if ui.add_enabled(live && !playing, egui::Button::new(LBL_STEP)).clicked() {
+            if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_STEP)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Pause playback or reconnect the host before stepping")).clicked() {
                 self.editor.step(1);
             }
             if ui.add_enabled(live && self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
@@ -1157,6 +1165,9 @@ impl EditorApp {
                 if let Some(model) = self.mesh_navigation.model() {
                     models.push(crate::viewport3d::SceneModel { model, instance: Default::default() });
                 }
+                if let Some(model) = self.mesh_navigation.art_model(&self.editor) {
+                    models.push(model);
+                }
             }
             models
         };
@@ -1491,6 +1502,12 @@ impl EditorApp {
         });
         if accept && !dialog.text.trim().is_empty() {
             let path = PathBuf::from(dialog.text.trim());
+            #[cfg(feature="mesh-navigation")]
+            if dialog.kind != DialogKind::SaveAs && self.mesh_navigation.art_dirty() {
+                self.editor.error("Save or explicitly discard agent art changes before changing scenes");
+                self.ui.dialog = Some(dialog);
+                return;
+            }
             #[cfg(feature="terrain")]
             if self.terrain.document.dirty() {
                 self.editor.error("Save or explicitly discard terrain changes before changing the scene path");
