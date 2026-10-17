@@ -269,6 +269,8 @@ impl Backend {
             EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.to_path_buf(), cfg)?,
             #[cfg(feature = "navigation")]
             EditorGame::NavigationYard3D => orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+            #[cfg(feature = "mesh-navigation")]
+            EditorGame::MeshNavigation => orr_remote::mesh_navigation::spawn_mesh_navigation_scene_host(scene.to_path_buf(), cfg)?,
         };
         let connector = host.connector();
         let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));

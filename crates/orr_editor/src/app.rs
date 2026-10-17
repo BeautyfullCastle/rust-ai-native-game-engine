@@ -217,6 +217,8 @@ pub struct EditorApp {
     pub terrain: crate::terrain_panel::TerrainPanel,
     #[cfg(feature="navigation")]
     pub navigation: crate::navigation_panel::NavigationPanel,
+    #[cfg(feature="mesh-navigation")]
+    pub mesh_navigation: crate::mesh_navigation::Panel,
     shot: Option<ScreenshotJob>,
     remote_capture: Option<RemoteCapture>,
     encoder: Option<EncoderWorker>,
@@ -241,7 +243,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     /// Deliberately restrict HDR for compatibility. This one-way builder must
@@ -291,6 +293,12 @@ impl eframe::App for EditorApp {
         }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
         self.editor.pump();
+        #[cfg(feature="mesh-navigation")]
+        {
+            self.mesh_navigation.sync(&self.editor);
+            let blocker = self.mesh_navigation.play_blocker(&self.editor);
+            self.editor.set_mesh_navigation_blocker(blocker);
+        }
         #[cfg(feature="navigation")]
         {
             self.terrain.sync_for_editor(&self.editor);
@@ -333,7 +341,9 @@ impl eframe::App for EditorApp {
         let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 470.0) } else { ("bottom", 120.0) };
         egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).show(ui, |ui| self.bottom(ui));
         egui::Panel::left("hierarchy").resizable(true).default_size(230.0).show(ui, |ui| self.hierarchy(ui));
-        egui::Panel::right("inspector").resizable(true).default_size(340.0).show(ui, |ui| self.inspector(ui));
+        let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0);
+        let inspector = if self.editor.game().is_mesh_navigation() { inspector.max_size(340.0) } else { inspector };
+        inspector.show(ui, |ui| self.inspector(ui));
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
 
         // A scrub widget can disappear after selection/navigation changes.
@@ -572,7 +582,7 @@ impl EditorApp {
                 let c = self.editor.camera.center;
                 self.editor.spawn_body(c);
             }
-            if self.editor.game().is_3d() && !self.editor.game().is_navigation() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
+            if self.editor.game().is_3d() && !self.editor.game().is_navigation() && !self.editor.game().is_mesh_navigation() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
                 self.editor.spawn_yard_body(orr_fp::FPVec3::new(FP::ZERO,FP::from_int(5),FP::ZERO));
             }
             if ui.add_enabled(self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).clicked() {
@@ -614,6 +624,14 @@ impl EditorApp {
 
     fn inspector(&mut self, ui: &mut Ui) {
         ui.heading("Inspector");
+        #[cfg(feature="mesh-navigation")]
+        if self.editor.game().is_mesh_navigation() {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            egui::ScrollArea::vertical().id_salt("mesh_navigation_inspector").auto_shrink([false, false]).show(ui, |ui| {
+                self.mesh_navigation.show(ui, &mut self.editor);
+            });
+            return;
+        }
         #[cfg(feature = "linked-prefabs")]
         self.linked_prefabs.show(ui, &mut self.editor);
         if self.editor.game().is_3d() { self.yard_transform(ui); }
@@ -885,17 +903,30 @@ impl EditorApp {
             }
             models
         };
+        #[cfg(feature="mesh-navigation")]
+        let scene_models: Vec<_> = {
+            #[cfg(feature="terrain")]
+            let mut models = scene_models;
+            #[cfg(not(feature="terrain"))]
+            let mut models = Vec::new();
+            if self.editor.game().is_mesh_navigation() {
+                if let Some(model) = self.mesh_navigation.model() {
+                    models.push(crate::viewport3d::SceneModel { model, instance: Default::default() });
+                }
+            }
+            models
+        };
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
-            #[cfg(all(feature="animated-models", not(feature="irradiance-probes"), not(feature="terrain")))]
+            #[cfg(all(feature="animated-models", not(feature="irradiance-probes"), not(any(feature="terrain", feature="mesh-navigation"))))]
             let rendered = gpu.render_mixed_post_processed(px,&list,&camera,&placements,&animated_placements,self.ui.yard_post_process);
-            #[cfg(all(feature="models", not(feature="animated-models"), not(feature="irradiance-probes"), not(feature="terrain")))]
+            #[cfg(all(feature="models", not(feature="animated-models"), not(feature="irradiance-probes"), not(any(feature="terrain", feature="mesh-navigation"))))]
             let rendered = gpu.render_post_processed(px,&list,&camera,&placements,self.ui.yard_post_process);
-            #[cfg(all(feature="irradiance-probes", not(feature="terrain")))]
+            #[cfg(all(feature="irradiance-probes", not(any(feature="terrain", feature="mesh-navigation"))))]
             let rendered = gpu.render_irradiance(px,&list,&camera,&placements,
                 #[cfg(feature="animated-models")] &animated_placements,
                 self.ui.yard_post_process,self.irradiance.grid_for_editor(&self.editor));
-            #[cfg(feature="terrain")]
+            #[cfg(any(feature="terrain", feature="mesh-navigation"))]
             let rendered = gpu.render_scene(px, &list, &camera, &placements, &scene_models,
                 #[cfg(feature="animated-models")] &animated_placements,
                 self.ui.yard_post_process,
@@ -929,7 +960,8 @@ impl EditorApp {
         }
         #[cfg(feature="terrain")]
         if frame_drawn || !self.editor.has_room_camera() { self.terrain.paint_selection(&self.editor, ui.painter(), &camera, rect); }
-        ui.painter().text(rect.left_top()+egui::vec2(10.0,10.0),egui::Align2::LEFT_TOP,"Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan",egui::FontId::proportional(12.0),Color32::WHITE);
+        let viewport_hint = if self.editor.game().is_mesh_navigation() { "Static mesh · point agent · right-drag orbit · middle-drag pan" } else { "Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan" };
+        ui.painter().text(rect.left_top()+egui::vec2(10.0,10.0),egui::Align2::LEFT_TOP,viewport_hint,egui::FontId::proportional(12.0),Color32::WHITE);
         if self.editor.previewing().is_some(){ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"3D proposal preview unavailable; displaying live host snapshot",egui::FontId::proportional(14.0),Color32::YELLOW);}
     }
 

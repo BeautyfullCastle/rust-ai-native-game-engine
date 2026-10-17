@@ -115,6 +115,9 @@ pub mod navigation_panel;
 #[cfg(feature = "navigation")]
 pub mod navigation_view;
 
+#[cfg(feature = "mesh-navigation")]
+pub mod mesh_navigation;
+
 #[cfg(feature = "project-ui")]
 pub mod project_ui;
 

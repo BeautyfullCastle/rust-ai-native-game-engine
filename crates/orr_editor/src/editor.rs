@@ -210,6 +210,10 @@ pub struct Editor {
     navigation_view: crate::navigation_view::NavigationView,
     #[cfg(feature = "navigation")]
     navigation_blocker: Option<String>,
+    #[cfg(feature = "mesh-navigation")]
+    mesh_navigation_blocker: Option<String>,
+    #[cfg(feature = "mesh-navigation")]
+    scene_load_epoch: u64,
     status: Option<Message>,
     log: Vec<Message>,
     // caches of host answers
@@ -252,6 +256,12 @@ pub struct Editor {
     feed: Feed,
     agent_clients: BTreeMap<String, ErpClient>,
     script_owner: BTreeMap<String, String>,
+}
+
+#[cfg(feature = "mesh-navigation")]
+fn next_scene_load_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Editor {
@@ -324,6 +334,10 @@ impl Editor {
             navigation_view: crate::navigation_view::NavigationView::default(),
             #[cfg(feature = "navigation")]
             navigation_blocker: None,
+            #[cfg(feature = "mesh-navigation")]
+            mesh_navigation_blocker: None,
+            #[cfg(feature = "mesh-navigation")]
+            scene_load_epoch: next_scene_load_epoch(),
             status: None,
             log: Vec::new(),
             sim: SimState::default(),
@@ -857,6 +871,26 @@ impl Editor {
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
+        #[cfg(feature = "mesh-navigation")]
+        if self.game().is_mesh_navigation() {
+            if let Some(view) = self.snapshot.as_ref().and_then(|snapshot| {
+                orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).ok()
+            }) {
+                let mut low = [f32::INFINITY; 3];
+                let mut high = [f32::NEG_INFINITY; 3];
+                for point in view.graph.vertices().iter().copied().chain([view.agent.spec.start, view.agent.spec.goal]) {
+                    for axis in 0..3 {
+                        let value = point[axis].to_f32();
+                        low[axis] = low[axis].min(value);
+                        high[axis] = high[axis].max(value);
+                    }
+                }
+                let center = std::array::from_fn(|axis| (low[axis] + high[axis]) * 0.5);
+                let extent = (0..3).map(|axis| high[axis] - low[axis]).fold(0.0_f32, f32::max);
+                self.camera3d = orr_render::OrbitCamera::new(center, 0.55, 0.5, (extent * 1.8).max(2.0));
+            }
+            return;
+        }
         if self.game().is_room() {
             #[cfg(feature="room-project")] if self.has_room_camera() { self.reset_room_camera(); return; }
         }
@@ -1310,7 +1344,11 @@ impl Editor {
         let frame = s.predicted();
         self.bodies = self.backend.game.drawables(frame);
         if self.game().is_3d() {
-            self.yard_frame = crate::viewport3d::YardFrame::extract(frame);
+            self.yard_frame = if self.game().is_mesh_navigation() {
+                crate::viewport3d::YardFrame::default()
+            } else {
+                crate::viewport3d::YardFrame::extract(frame)
+            };
             #[cfg(feature = "room-project")]
             if self.game().is_room() {
                 self.yard_frame.items = orr_sample::room_view::items(frame);
@@ -1349,7 +1387,7 @@ impl Editor {
         }
         if self.initial_camera_fit {
             self.initial_camera_fit = false;
-            if self.game().has_keyboard() { self.fit_camera(); }
+            if self.game().has_keyboard() || self.game().is_mesh_navigation() { self.fit_camera(); }
         }
     }
 
@@ -1559,10 +1597,12 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
+                #[cfg(feature = "mesh-navigation")]
+                { self.scene_load_epoch = next_scene_load_epoch(); }
                 self.clear_room_camera();
                 self.select(None);
                 self.refit = true;
-                if self.game() == EditorGame::Arena {
+                if self.game() == EditorGame::Arena || self.game().is_mesh_navigation() {
                     self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
                 }
                 self.backend.spec.set_local_scene_path(path.to_path_buf());
@@ -1887,6 +1927,13 @@ impl Editor {
     #[cfg(feature = "navigation")]
     pub fn set_navigation_blocker(&mut self, blocker: Option<String>) { self.navigation_blocker = blocker; }
 
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
+    #[cfg(feature = "mesh-navigation")]
+    pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
+
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
         document.validate()?;
@@ -1945,7 +1992,7 @@ impl Editor {
 
     /// Creates a persisted Yard3D box, or a sphere in the admitted terrain game.
     pub fn spawn_yard_body(&mut self, pos: orr_fp::FPVec3) -> bool {
-        if self.game().is_navigation() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
+        if self.game().is_navigation() || self.game().is_mesh_navigation() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
         if !self.game().is_3d() || self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
             self.error("Yard bodies require editable Yard3D scene mode"); return false;
         }
@@ -2374,6 +2421,19 @@ impl Editor {
     /// Starts a play session from the scene, paused at tick 0. Does nothing
     /// if one already runs.
     pub fn start_play(&mut self) -> bool {
+        #[cfg(feature = "mesh-navigation")]
+        if self.game().is_mesh_navigation() && self.sim.mode != Mode::Play {
+            let blocker = self.mesh_navigation_blocker.clone().or_else(|| {
+                if !self.proposals().is_empty() {
+                    return Some("Resolve open proposals before Play".into());
+                }
+                match self.snapshot.as_ref() {
+                    Some(snapshot) => orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).err(),
+                    None => Some("Wait for an admitted mesh agent before Play".into()),
+                }
+            });
+            if let Some(error) = blocker { self.error(error); return false; }
+        }
         #[cfg(feature = "navigation")]
         if self.game().is_navigation() && self.sim.mode != Mode::Play {
             let blocker = self.navigation_blocker.clone().or_else(|| {
