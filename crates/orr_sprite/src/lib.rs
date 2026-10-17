@@ -1,6 +1,8 @@
 //! Optional, GPU-free presentation data. No simulation state, wall clock, image
 //! decoder or renderer is owned here. Times are caller-supplied milliseconds.
 //! JSON schema version 1 is separate from ORAM, motion and PCM formats.
+pub mod grid;
+
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 
