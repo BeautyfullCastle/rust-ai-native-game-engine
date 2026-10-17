@@ -1386,7 +1386,7 @@ impl EditorApp {
         #[cfg(feature="mesh-animated-models")]
         let animated_placements = {
             let mut placements = animated_placements;
-            let animation = if self.editor.game().is_mesh_navigation() { self.mesh_animation.placement(&self.editor) } else { Ok(None) };
+            let animation = if self.editor.game().is_mesh_navigation() && !self.mesh_navigation.geometry_preview_active() { self.mesh_animation.placement(&self.editor) } else { Ok(None) };
             match animation {
                 Ok(Some(placement)) => placements.push(placement),
                 Ok(None) => {}
@@ -1407,9 +1407,11 @@ impl EditorApp {
         #[cfg(feature="mesh-navigation")]
         let list = {
             let mut list = list;
-            self.mesh_navigation.paint_agent_endpoints(&self.editor, &mut list);
-            if let Some(bounds) = self.mesh_navigation.selected_prop_bounds(&self.editor) {
-                list.aabb(bounds.min, bounds.max, 2.0, [1.0, 0.85, 0.2, 1.0]);
+            if !self.mesh_navigation.geometry_preview_active() {
+                self.mesh_navigation.paint_agent_endpoints(&self.editor, &mut list);
+                if let Some(bounds) = self.mesh_navigation.selected_prop_bounds(&self.editor) {
+                    list.aabb(bounds.min, bounds.max, 2.0, [1.0, 0.85, 0.2, 1.0]);
+                }
             }
             list
         };
@@ -1447,12 +1449,14 @@ impl EditorApp {
                 let show_static_art = !self.mesh_animation.active(&self.editor);
                 #[cfg(not(feature="mesh-animated-models"))]
                 let show_static_art = true;
-                if show_static_art {
+                if show_static_art && !self.mesh_navigation.geometry_preview_active() {
                     if let Some(model) = self.mesh_navigation.art_model(&self.editor) {
                         models.push(model);
                     }
                 }
-                models.extend(self.mesh_navigation.prop_models(&self.editor));
+                if !self.mesh_navigation.geometry_preview_active() {
+                    models.extend(self.mesh_navigation.prop_models(&self.editor));
+                }
             }
             models
         };

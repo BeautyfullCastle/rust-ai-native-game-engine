@@ -20,12 +20,25 @@ mod agent_viewport;
 mod geometry;
 #[path = "mesh_navigation/geometry_panel.rs"]
 mod geometry_panel;
+#[path = "mesh_navigation/geometry_preview.rs"]
+mod geometry_preview;
+#[path = "mesh_navigation/geometry_history.rs"]
+mod geometry_history;
 pub(crate) use agent_viewport::ViewInput as AgentViewInput;
 
 const MAX_ASSET_BYTES: usize = 8192;
 const MAX_ASSET_PATH_BYTES: usize = 4096;
 const MAX_VIEW_COORDINATE_RAW: i64 = 256 * 65_536;
 const VIEW_ASSET_ID: &str = "mesh/navigation/view.orrmodel";
+
+struct GeometryOrigin {
+    dirty: bool,
+    asset_path: String,
+    model_path: String,
+    asset_source: Option<String>,
+    model_source: Option<String>,
+    settings: [String; 9],
+}
 
 pub struct Panel {
     pub start: [String; 3],
@@ -57,6 +70,10 @@ pub struct Panel {
     geometry_staged: bool,
     geometry_host_context: Option<(u64, u64)>,
     geometry_presentation_pending: bool,
+    geometry_history: geometry_history::History,
+    geometry_origin: Option<GeometryOrigin>,
+    geometry_preview: Option<Arc<StaticModel>>,
+    geometry_preview_visible: bool,
 }
 
 impl Default for Panel {
@@ -91,12 +108,24 @@ impl Default for Panel {
             geometry_staged: false,
             geometry_host_context: None,
             geometry_presentation_pending: false,
+            geometry_history: geometry_history::History::default(),
+            geometry_origin: None,
+            geometry_preview: None,
+            geometry_preview_visible: false,
         }
     }
 }
 
 impl Panel {
     pub fn sync(&mut self, editor: &Editor) {
+        self.geometry_preview_visible = self.geometry_staged
+            && editor.game().is_mesh_navigation()
+            && editor.mode() == Mode::Edit
+            && self.loaded_scene_epoch == Some(editor.scene_load_epoch())
+            && editor.snapshot().is_some_and(|snapshot| {
+                let frame = snapshot.predicted();
+                self.geometry_host_context == Some((frame.tick(), frame.checksum()))
+            });
         self.sync_agent_picking(editor);
         self.art.sync(editor);
         self.props.sync(editor);
@@ -123,9 +152,7 @@ impl Panel {
         self.last_frame = Some(frame_identity);
         let pin = *frame.singleton::<MeshScenePin>();
         if new_document {
-            self.geometry.reset();
-            self.geometry_staged = false;
-            self.geometry_host_context = None;
+            self.clear_geometry_history();
             self.loaded_scene = scene;
             self.loaded_scene_epoch = Some(scene_epoch);
             self.loaded_graph_revision = None;
@@ -213,7 +240,14 @@ impl Panel {
     }
 
     pub fn model(&self) -> Option<Arc<StaticModel>> {
+        if self.geometry_preview_active() {
+            return self.geometry_preview.clone();
+        }
         self.view_model.clone()
+    }
+
+    pub(crate) fn geometry_preview_active(&self) -> bool {
+        self.geometry_preview_visible && self.geometry_preview.is_some()
     }
 
     pub(crate) fn set_geometry_presentation_pending(&mut self, pending: bool) {
@@ -299,6 +333,7 @@ impl Panel {
     }
 
     pub fn create_ramp_and_bridge(&mut self) -> Result<(), String> {
+        self.geometry_replacement_blocker()?;
         let max_slope = parse_fixed(&self.max_slope)?;
         if max_slope.raw() < 0 {
             return Err("Maximum slope must be nonnegative".into());
@@ -307,6 +342,7 @@ impl Panel {
         let spec = self.parse_spec()?;
         validate_route(&graph, spec)?;
         validate_display_bounds(&graph, &spec)?;
+        self.clear_geometry_history();
         self.graph = Some(graph);
         self.draft_dirty = true;
         self.asset_path.clear();
@@ -318,6 +354,7 @@ impl Panel {
     }
 
     pub fn open_mesh_asset(&mut self) -> Result<(), String> {
+        self.geometry_replacement_blocker()?;
         if self.asset_path.len() > MAX_ASSET_PATH_BYTES {
             return Err("Mesh asset path exceeds the 4096-byte limit".into());
         }
@@ -352,6 +389,7 @@ impl Panel {
         validate_route(&graph, spec)?;
         validate_display_bounds(&graph, &spec)?;
         self.max_slope = format_fixed(graph.profile().max_slope);
+        self.clear_geometry_history();
         self.graph = Some(graph);
         self.draft_dirty = true;
         self.model_path.clear();
@@ -363,6 +401,7 @@ impl Panel {
     }
 
     pub fn open_model(&mut self) -> Result<(), String> {
+        self.geometry_replacement_blocker()?;
         if self.model_path.len() > MAX_ASSET_PATH_BYTES {
             return Err("Model path exceeds the 4096-byte limit".into());
         }
@@ -392,6 +431,7 @@ impl Panel {
         let spec = self.parse_spec()?;
         validate_route(&graph, spec)?;
         validate_display_bounds(&graph, &spec)?;
+        self.clear_geometry_history();
         self.graph = Some(graph);
         self.draft_dirty = true;
         self.model_path = path.display().to_string();
@@ -462,8 +502,7 @@ impl Panel {
             }
             self.draft_dirty = false;
             self.agent_viewport = agent_viewport::State::default();
-            self.geometry_staged = false;
-            self.geometry_host_context = None;
+            self.clear_geometry_history();
             self.error = None;
             self.sync(editor);
             Ok(())
@@ -519,8 +558,26 @@ impl Panel {
                 }
             }
             if self.geometry_staged {
-                ui.weak("Geometry is staged locally; Place mesh agent commits it and updates the viewport.");
+                if self.geometry_preview_active() {
+                    ui.strong("PENDING GEOMETRY PREVIEW · host unchanged");
+                    ui.weak("Surface-only preview; Place mesh agent commits geometry and the agent together.");
+                } else {
+                    ui.colored_label(egui::Color32::YELLOW, "STAGED GEOMETRY PREVIEW UNAVAILABLE · host changed or Edit mode required");
+                    ui.weak("The local draft is preserved. Discard unplaced changes before editing the newer host.");
+                }
             }
+            let history_ready = geometry_blocker.is_none() && !self.geometry.dirty();
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(history_ready && self.geometry_history.can_undo(), egui::Button::new("Undo staged geometry")).clicked() {
+                    if let Err(error) = self.change_geometry_history(editor, false) { self.error = Some(error); }
+                }
+                if ui.add_enabled(history_ready && self.geometry_history.can_redo(), egui::Button::new("Redo staged geometry")).clicked() {
+                    if let Err(error) = self.change_geometry_history(editor, true) { self.error = Some(error); }
+                }
+                if ui.add_enabled(geometry_blocker.is_none() && self.geometry_staged, egui::Button::new("Frame staged geometry")).clicked() {
+                    if let Err(error) = self.frame_staged_geometry(editor) { self.error = Some(error); }
+                }
+            });
             let asset_label = ui.label("Mesh asset (.orrmesh)");
             ui.horizontal(|ui| {
                 let input_width = (ui.available_width() - 100.0).max(40.0);
@@ -691,7 +748,7 @@ impl Panel {
         if self.geometry_presentation_pending {
             return Err("Save or discard camera and animation edits before geometry".into());
         }
-        if self.geometry_staged {
+        if self.geometry_host_context.is_some() {
             let snapshot = editor.snapshot().ok_or("Wait for the staged geometry host Frame")?;
             let frame = snapshot.predicted();
             if self.geometry_host_context != Some((frame.tick(), frame.checksum())) {
@@ -740,7 +797,24 @@ impl Panel {
         let snapshot = editor.snapshot().ok_or("Wait for the mesh geometry host Frame")?;
         let frame = snapshot.predicted();
         let host_context = (frame.tick(), frame.checksum());
+        let preview = geometry_preview::build(&graph)?;
+        let mut history = self.geometry_history.clone();
+        let first_edit = history.current().is_none();
+        if first_edit { history.reset(self.graph.as_ref())?; }
+        if !history.push(Some(&graph))? { return Err("Mesh geometry operation did not change the graph".into()); }
+        let origin = first_edit.then(|| GeometryOrigin {
+            dirty: self.draft_dirty,
+            asset_path: self.asset_path.clone(),
+            model_path: self.model_path.clone(),
+            asset_source: self.loaded_asset_source.clone(),
+            model_source: self.loaded_model_source.clone(),
+            settings: self.geometry_settings(),
+        });
         self.cancel_agent_pick();
+        if let Some(origin) = origin { self.geometry_origin = Some(origin); }
+        self.geometry_history = history;
+        self.geometry_preview = Some(preview);
+        self.geometry_preview_visible = true;
         self.graph = Some(graph);
         self.draft_dirty = true;
         self.geometry_staged = true;
@@ -751,6 +825,80 @@ impl Panel {
         self.loaded_model_source = None;
         self.geometry.acknowledge();
         self.error = None;
+        Ok(())
+    }
+
+    fn geometry_settings(&self) -> [String; 9] {
+        [self.start[0].clone(), self.start[1].clone(), self.start[2].clone(),
+         self.goal[0].clone(), self.goal[1].clone(), self.goal[2].clone(),
+         self.max_slope.clone(), self.max_vertical.clone(), self.distance_per_tick.clone()]
+    }
+
+    fn geometry_replacement_blocker(&self) -> Result<(), String> {
+        if self.geometry_staged || self.geometry.dirty() {
+            return Err("Discard unplaced geometry changes before creating or opening another mesh source".into());
+        }
+        Ok(())
+    }
+
+    fn clear_geometry_history(&mut self) {
+        self.geometry.reset();
+        self.geometry_history = geometry_history::History::default();
+        self.geometry_origin = None;
+        self.geometry_preview = None;
+        self.geometry_preview_visible = false;
+        self.geometry_staged = false;
+        self.geometry_host_context = None;
+    }
+
+    fn change_geometry_history(&mut self, editor: &Editor, redo: bool) -> Result<(), String> {
+        if let Some(reason) = self.geometry_blocker(editor) { return Err(reason); }
+        if self.geometry.dirty() { return Err("Stage or reset geometry fields before local Undo/Redo".into()); }
+        if self.asset_path.trim() != self.loaded_asset_source.as_deref().unwrap_or_default()
+            || self.model_path.trim() != self.loaded_model_source.as_deref().unwrap_or_default() {
+            return Err("Open or clear pending mesh source paths before local geometry Undo/Redo".into());
+        }
+        self.geometry_bindings_blocker(editor)?;
+        let mut history = self.geometry_history.clone();
+        let graph = if redo { history.redo() } else { history.undo() }.ok_or("No local geometry history in that direction")?;
+        let staged = !history.at_origin();
+        let preview = if staged { Some(geometry_preview::build(graph.as_ref().ok_or("Staged geometry has no graph")?)?) } else { None };
+        let origin = self.geometry_origin.as_ref().ok_or("Geometry history has no origin")?;
+        let settings_changed = origin.settings != self.geometry_settings();
+        let dirty = origin.dirty || staged || settings_changed;
+        let sources = if staged {
+            (String::new(), String::new(), None, None)
+        } else {
+            (origin.asset_path.clone(), origin.model_path.clone(), origin.asset_source.clone(), origin.model_source.clone())
+        };
+        self.cancel_agent_pick();
+        self.geometry_history = history;
+        self.graph = graph;
+        self.geometry_preview = preview;
+        self.geometry_staged = staged;
+        self.geometry_preview_visible = staged;
+        self.draft_dirty = dirty;
+        (self.asset_path, self.model_path, self.loaded_asset_source, self.loaded_model_source) = sources;
+        self.geometry.acknowledge();
+        self.error = None;
+        Ok(())
+    }
+
+    fn frame_staged_geometry(&self, editor: &mut Editor) -> Result<(), String> {
+        if let Some(reason) = self.geometry_blocker(editor) { return Err(reason); }
+        self.geometry_bindings_blocker(editor)?;
+        if !self.geometry_staged { return Err("Stage geometry before framing its preview".into()); }
+        let graph = self.graph.as_ref().ok_or("Staged geometry has no graph")?;
+        let mut low = [f32::INFINITY; 3];
+        let mut high = [f32::NEG_INFINITY; 3];
+        for point in graph.vertices() {
+            let values = point_to_f32(*point)?;
+            for axis in 0..3 { low[axis] = low[axis].min(values[axis]); high[axis] = high[axis].max(values[axis]); }
+        }
+        if !low.iter().chain(&high).all(|value| value.is_finite()) { return Err("Staged geometry has no finite bounds".into()); }
+        let center = std::array::from_fn(|axis| (low[axis] + high[axis]) * 0.5);
+        let extent = (0..3).map(|axis| high[axis] - low[axis]).fold(0.0_f32, f32::max);
+        editor.camera3d = orr_render::OrbitCamera::new(center, 0.55, 0.5, (extent * 1.8).max(2.0));
         Ok(())
     }
 
