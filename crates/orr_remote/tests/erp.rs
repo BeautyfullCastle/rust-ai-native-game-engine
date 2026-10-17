@@ -142,6 +142,83 @@ fn a_transaction_belongs_to_its_client_and_dies_with_the_connection() {
 }
 
 #[test]
+fn a_transaction_rejects_mutations_from_a_second_connection_with_the_same_principal() {
+    let host = TestHost::start(ServerConfig::new(Auth::Tokens(vec![
+        token("user", "tok-user-owner", "all"),
+        token("user", "tok-user-second", "all"),
+    ])));
+    let mut owner = host.client("tok-user-owner");
+    let mut second = host.client("tok-user-second");
+    assert_eq!(owner.call("rpc.discover", J::Null).unwrap()["you"]["client"], "user");
+    assert_eq!(second.call("rpc.discover", J::Null).unwrap()["you"]["client"], "user");
+    let body = guid_of(&mut owner, "body_03");
+    let original_scene = scene_text(&mut owner);
+    let original_checksum = checksum(&owner.call("sim.checksum", json!({})).unwrap());
+
+    owner.call("tx.begin", json!({"label":"owner transaction"})).unwrap();
+    owner.call(
+        "world.patch",
+        json!({"entity":body,"component":BODY,"path":"pos.x","value":2}),
+    ).unwrap();
+    let staged_scene = scene_text(&mut owner);
+    let staged_checksum = checksum(&owner.call("sim.checksum", json!({})).unwrap());
+    assert_ne!(staged_checksum, original_checksum);
+
+    for method in [
+        "world.patch",
+        "world.insert",
+        "world.remove",
+        "world.spawn",
+        "world.despawn",
+        "world.rename",
+        "world.singleton.patch",
+        "world.patch_batch",
+    ] {
+        assert_eq!(
+            second.call_err(method, J::Null).kind(),
+            Some("tx_busy"),
+            "{method} must reject a different connection even when its principal matches",
+        );
+    }
+    assert_eq!(scene_text(&mut owner), staged_scene);
+    assert_eq!(checksum(&owner.call("sim.checksum", json!({})).unwrap()), staged_checksum);
+    let history = owner.call("history.list", J::Null).unwrap();
+    assert_eq!(history["entries"].as_array().unwrap().len(), 0);
+    assert_eq!(history["in_tx"], true);
+
+    owner.call("tx.commit", J::Null).unwrap();
+    let committed_scene = scene_text(&mut owner);
+    let history = owner.call("history.list", J::Null).unwrap();
+    assert_eq!(history["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(history["entries"][0]["op_count"], 1);
+
+    owner.call("tx.begin", json!({"label":"rollback transaction"})).unwrap();
+    owner.call(
+        "world.patch",
+        json!({"entity":body,"component":BODY,"path":"pos.x","value":4}),
+    ).unwrap();
+    assert_eq!(second.call_err("world.spawn", J::Null).kind(), Some("tx_busy"));
+    owner.call("tx.rollback", J::Null).unwrap();
+    assert_eq!(scene_text(&mut owner), committed_scene);
+    assert_eq!(scene_text(&mut owner), staged_scene);
+    assert_ne!(committed_scene, original_scene);
+    assert_eq!(
+        owner.call("history.list", J::Null).unwrap()["entries"].as_array().unwrap().len(),
+        1,
+    );
+
+    second.call(
+        "world.patch",
+        json!({"entity":body,"component":BODY,"path":"pos.x","value":5}),
+    ).unwrap();
+    assert_ne!(scene_text(&mut second), committed_scene);
+    assert_eq!(
+        owner.call("history.list", J::Null).unwrap()["entries"].as_array().unwrap().len(),
+        2,
+    );
+}
+
+#[test]
 fn a_transaction_left_open_times_out() {
     let mut cfg = ServerConfig::new(Auth::Tokens(vec![token("claude", "tok-all", "all")]));
     cfg.tx_timeout = Duration::from_millis(100);

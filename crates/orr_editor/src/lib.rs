@@ -123,6 +123,8 @@ mod mesh_scene;
 pub mod windows_export_panel;
 #[cfg(all(windows, target_arch = "x86_64", feature="windows-projects"))]
 pub mod windows_project_panel;
+#[cfg(feature="room-authoring")]
+pub mod room_authoring_panel;
 
 #[cfg(feature = "project-ui")]
 pub mod project_ui;
