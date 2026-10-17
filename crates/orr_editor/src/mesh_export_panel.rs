@@ -51,7 +51,7 @@ impl Panel {
             .default_width(560.0)
             .vscroll(true)
             .show(context, |ui| {
-                ui.label("Exports the saved MeshNavigation scene and optional camera, agent-art, and mesh-props sidecars.");
+                ui.label("Exports the saved MeshNavigation scene and optional camera, agent-art, mesh-props, and animated-model sidecars.");
                 ui.label("Choose a trusted local mesh player executable. The executable is validated and copied, never run by the editor.");
                 if let Some(reason) = blocked {
                     ui.label(reason);
@@ -102,6 +102,9 @@ impl Panel {
                     }
                     if let Some(camera_sha256) = &receipt.camera_sha256 {
                         ui.label(format!("Mesh camera sidecar SHA-256: {camera_sha256}"));
+                    }
+                    if let Some(animation_sha256) = &receipt.animation_sha256 {
+                        ui.label(format!("Mesh animation sidecar SHA-256: {animation_sha256}"));
                     }
                     ui.label(format!("Mesh player SHA-256: {}", receipt.runtime_sha256));
                     ui.label(format!("Scene copy: {}", receipt.scene.display()));
@@ -283,6 +286,31 @@ fn saved_sidecars_match(scene: &std::path::Path, receipt: &crate::mesh_export::R
     matches!(crate::mesh_art::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.sidecar_sha256)
         && matches!(crate::mesh_props::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.props_sha256)
         && matches!(crate::mesh_camera_store::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.camera_sha256)
+        && animation_sidecar_matches(scene, receipt)
+}
+
+#[cfg(feature = "mesh-animated-models")]
+fn animation_sidecar_matches(
+    scene: &std::path::Path,
+    receipt: &crate::mesh_export::Receipt,
+) -> bool {
+    matches!(crate::mesh_animation_store::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.animation_sha256)
+}
+
+#[cfg(not(feature = "mesh-animated-models"))]
+fn animation_sidecar_matches(
+    scene: &std::path::Path,
+    receipt: &crate::mesh_export::Receipt,
+) -> bool {
+    let Some(filename) = scene.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let path = scene.with_file_name(format!("{filename}.mesh-animation.json"));
+    receipt.animation_sha256.is_none()
+        && matches!(
+            std::fs::symlink_metadata(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
 }
 
 fn completion_metadata_matches(

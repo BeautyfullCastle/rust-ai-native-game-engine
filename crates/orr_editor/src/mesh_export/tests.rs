@@ -131,6 +131,20 @@ fn test_runtime_with_material() -> Vec<u8> {
     bytes
 }
 
+#[cfg(feature = "mesh-animated-models")]
+fn test_runtime_with_animation() -> Vec<u8> {
+    let mut bytes = test_runtime_with_material();
+    bytes.resize(1088, 0);
+    bytes[0x46..0x48].copy_from_slice(&6u16.to_le_bytes());
+    bytes[0x210..0x218].copy_from_slice(b".orranim");
+    bytes[0x218..0x21c].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x220..0x224].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x224..0x228].copy_from_slice(&0x380u32.to_le_bytes());
+    bytes[0x234..0x238].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x380..0x380 + b"ORR_MESH_ANIMATION_V1".len()].copy_from_slice(b"ORR_MESH_ANIMATION_V1");
+    bytes
+}
+
 fn set_art_tint(scene: &std::path::Path, revision: [u8; 32], tint: [f32; 4]) {
     add_props(scene, revision);
     let (document, props_hash) = mesh_props::load(scene, revision).unwrap().unwrap();
@@ -364,6 +378,7 @@ fn export_opens_self_contained_bundle_without_changing_sources() {
         serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
     assert!(manifest.get("props").is_none());
     assert!(manifest.get("camera").is_none());
+    assert!(manifest.get("animation").is_none());
 }
 
 #[test]
@@ -682,4 +697,121 @@ fn camera_sidecar_with_another_graph_revision_is_refused_before_staging() {
 
     assert!(export(&scene, checksum, &destination, &camera_runtime).is_err());
     assert!(!destination.exists());
+}
+
+#[cfg(feature = "mesh-animated-models")]
+#[test]
+fn animation_bundle_requires_marker_and_reopens_without_source_package() {
+    let (temporary, scene, runtime, checksum) = fixture();
+    let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+    let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/animation_demo")
+        .canonicalize()
+        .unwrap();
+    let snapshot = crate::mesh_animation::Snapshot::from_package(
+        &package,
+        "animated.glb",
+        "LICENSE.txt",
+        revision,
+    )
+    .unwrap();
+    let sidecar_hash = crate::mesh_animation_store::save(&scene, Some(&snapshot), None, revision)
+        .unwrap()
+        .unwrap();
+    let destination = temporary.path().join("animation-bundle");
+
+    assert!(export(&scene, checksum, &destination, &runtime).is_err());
+    assert!(!destination.exists());
+
+    let capable_runtime = temporary.path().join("animation-player.exe");
+    fs::write(&capable_runtime, test_runtime_with_animation()).unwrap();
+    let receipt = export(&scene, checksum, &destination, &capable_runtime).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+    assert_eq!(
+        manifest["animation"]["name"],
+        "walk.scene.yaml.mesh-animation.json"
+    );
+    assert_eq!(manifest["animation"]["sha256"], sidecar_hash);
+    assert_eq!(
+        receipt.animation_sha256.as_deref(),
+        Some(sidecar_hash.as_str())
+    );
+    assert_eq!(open_bundle(&destination).unwrap().checksum, checksum);
+
+    fs::remove_file(crate::mesh_animation_store::sidecar_path(&scene).unwrap()).unwrap();
+    assert_eq!(open_bundle(&destination).unwrap().checksum, checksum);
+}
+
+#[cfg(feature = "mesh-animated-models")]
+#[test]
+fn animation_bundle_rejects_wrong_marker_and_revision_before_publish() {
+    let (temporary, scene, _runtime, checksum) = fixture();
+    let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+    let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/animation_demo")
+        .canonicalize()
+        .unwrap();
+    let snapshot = crate::mesh_animation::Snapshot::from_package(
+        &package,
+        "animated.glb",
+        "LICENSE.txt",
+        revision,
+    )
+    .unwrap();
+    let existing_hash = crate::mesh_animation_store::save(&scene, Some(&snapshot), None, revision)
+        .unwrap()
+        .unwrap();
+    let destination = temporary.path().join("animation-bundle");
+
+    let mut wrong_marker = test_runtime_with_animation();
+    wrong_marker[0x380..0x380 + b"ORR_MESH_ANIMATION_V1".len()].fill(0);
+    wrong_marker[0x100..0x100 + b"ORR_MESH_ANIMATION_V1".len()]
+        .copy_from_slice(b"ORR_MESH_ANIMATION_V1");
+    let incapable_runtime = temporary.path().join("incapable-player.exe");
+    fs::write(&incapable_runtime, wrong_marker).unwrap();
+    assert!(export(&scene, checksum, &destination, &incapable_runtime).is_err());
+    assert!(!destination.exists());
+
+    let bad_revision = [revision[0].wrapping_add(1); 32];
+    let bad_snapshot = crate::mesh_animation::Snapshot::from_package(
+        &package,
+        "animated.glb",
+        "LICENSE.txt",
+        bad_revision,
+    )
+    .unwrap();
+    crate::mesh_animation_store::save(
+        &scene,
+        Some(&bad_snapshot),
+        Some(&existing_hash),
+        bad_revision,
+    )
+    .unwrap();
+    let capable_runtime = temporary.path().join("animation-player.exe");
+    fs::write(&capable_runtime, test_runtime_with_animation()).unwrap();
+    assert!(export(&scene, checksum, &destination, &capable_runtime).is_err());
+    assert!(!destination.exists());
+}
+
+#[cfg(not(feature = "mesh-animated-models"))]
+#[test]
+fn animation_sidecars_fail_closed_without_feature_support() {
+    let (temporary, scene, runtime, checksum) = fixture();
+    let sidecar = scene.with_file_name("walk.scene.yaml.mesh-animation.json");
+    fs::write(&sidecar, b"{}").unwrap();
+    let destination = temporary.path().join("animation-bundle");
+    let error = export(&scene, checksum, &destination, &runtime).unwrap_err();
+    assert!(error.contains("rebuild with mesh-animated-models support"));
+    assert!(!destination.exists());
+
+    fs::remove_file(&sidecar).unwrap();
+    export(&scene, checksum, &destination, &runtime).unwrap();
+    fs::write(
+        destination.join("walk.scene.yaml.mesh-animation.json"),
+        b"{}",
+    )
+    .unwrap();
+    let error = open_bundle(&destination).unwrap_err();
+    assert!(error.contains("rebuild with mesh-animated-models support"));
 }

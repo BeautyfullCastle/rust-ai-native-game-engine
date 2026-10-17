@@ -617,7 +617,7 @@ fn validate_provenance(provenance: Provenance<'_>) -> Result<(), String> {
     Ok(())
 }
 
-fn preflight_manifest_files(root: &Path, manifest: &Manifest) -> Result<(), String> {
+pub(crate) fn preflight_manifest_files(root: &Path, manifest: &Manifest) -> Result<(), String> {
     if manifest.files.is_empty() || manifest.files.len() > 4096 {
         return Err("model package has an invalid declared file count".into());
     }
@@ -653,7 +653,7 @@ fn preflight_manifest_files(root: &Path, manifest: &Manifest) -> Result<(), Stri
     Ok(())
 }
 
-fn declared_path(value: &str, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn declared_path(value: &str, label: &str) -> Result<PathBuf, String> {
     if value.is_empty() || value.len() > 240 || value.starts_with('/') || value.contains('\\') {
         return Err(format!(
             "{label} must be a normalized declared package path"
@@ -685,7 +685,7 @@ fn declared_path(value: &str, label: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
     validate_absolute_path(path, label)?;
     let mut current = PathBuf::new();
     let components: Vec<_> = path.components().collect();
@@ -775,7 +775,11 @@ pub(crate) fn recheck_scene(scene: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn read_package_file(root: &Path, relative: &Path, limit: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn read_package_file(
+    root: &Path,
+    relative: &Path,
+    limit: u64,
+) -> Result<Vec<u8>, String> {
     let path = root.join(relative);
     let mut current = root.to_path_buf();
     for component in relative.components() {

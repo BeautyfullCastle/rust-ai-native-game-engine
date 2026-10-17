@@ -109,10 +109,14 @@ fn create_refuses_existing_scene_and_art_sidecar_without_overwriting() {
 }
 
 #[test]
-fn create_refuses_orphan_camera_and_props_sidecars_without_creating_a_scene() {
+fn create_refuses_orphan_presentation_sidecars_without_creating_a_scene() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
-    for suffix in [".mesh-camera.json", ".mesh-props.json"] {
+    for suffix in [
+        ".mesh-camera.json",
+        ".mesh-props.json",
+        ".mesh-animation.json",
+    ] {
         let scene = root.join(format!("blocked-{suffix}.scene.yaml"));
         let sidecar = scene.with_file_name(format!(
             "{}{suffix}",

@@ -164,7 +164,12 @@ fn refuse_existing_sidecar(scene: &Path) -> Result<(), String> {
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or("mesh scene filename must be Unicode")?;
-    for suffix in [SIDECAR_SUFFIX, ".mesh-props.json", ".mesh-camera.json"] {
+    for suffix in [
+        SIDECAR_SUFFIX,
+        ".mesh-props.json",
+        ".mesh-camera.json",
+        ".mesh-animation.json",
+    ] {
         let sidecar_name = format!("{filename}{suffix}");
         if sidecar_name.len() > 255 {
             return Err("mesh scene name is too long for its sidecars".into());

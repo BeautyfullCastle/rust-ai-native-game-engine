@@ -143,6 +143,12 @@ mod mesh_material;
 mod mesh_camera_store;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_camera_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_animation_store;
+#[cfg(feature = "mesh-animated-models")]
+mod mesh_animation;
+#[cfg(feature = "mesh-animated-models")]
+mod mesh_animation_panel;
 #[cfg(feature="mesh-navigation")]
 mod mesh_scene;
 #[cfg(feature="mesh-navigation")]

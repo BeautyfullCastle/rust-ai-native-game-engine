@@ -25,16 +25,20 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const SIDECAR_SUFFIX: &str = ".mesh-art.json";
 const PROPS_SUFFIX: &str = ".mesh-props.json";
 const CAMERA_SUFFIX: &str = ".mesh-camera.json";
+const ANIMATION_SUFFIX: &str = ".mesh-animation.json";
+const MAX_ANIMATION_BYTES: u64 = 32 * 1024 * 1024;
 const RUNTIME_MARKER: &[u8] = b"ORR_MESH_PLAYER_V1";
 const PROPS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_PROPS_V1";
 const ROTATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ROTATION_V1";
 const CAMERA_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CAMERA_V1";
 const MATERIAL_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MATERIAL_V1";
+const ANIMATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ANIMATION_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
 const CAMERA_RUNTIME_SECTION: &[u8; 8] = b".orrcam\0";
 const MATERIAL_RUNTIME_SECTION: &[u8; 8] = b".orrmat\0";
+const ANIMATION_RUNTIME_SECTION: &[u8; 8] = b".orranim";
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
@@ -52,6 +56,7 @@ pub(crate) struct Receipt {
     pub sidecar_sha256: Option<String>,
     pub props_sha256: Option<String>,
     pub camera_sha256: Option<String>,
+    pub animation_sha256: Option<String>,
     pub runtime_sha256: String,
 }
 
@@ -73,6 +78,8 @@ struct BundleManifest {
     props: Option<BundleFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     camera: Option<BundleFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    animation: Option<BundleFile>,
     runtime: BundleFile,
     checksum: u64,
     graph_revision: [u8; 32],
@@ -183,13 +190,54 @@ pub(crate) fn export(
         }
         None => None,
     };
+    let animation_path = animation_sidecar_path(&scene_path)?;
+    #[cfg(feature = "mesh-animated-models")]
+    let animation_bytes: Option<Vec<u8>> = match read_optional_bounded(
+        &animation_path,
+        MAX_ANIMATION_BYTES,
+        "mesh animation sidecar",
+    )? {
+        Some(bytes) => {
+            let Some((_, admitted_hash)) =
+                crate::mesh_animation_store::load(&scene_path, graph_revision)?
+            else {
+                return Err("mesh animation sidecar could not be admitted".into());
+            };
+            if admitted_hash != digest(&bytes)
+                || read_bounded(
+                    &animation_path,
+                    MAX_ANIMATION_BYTES,
+                    "mesh animation sidecar recheck",
+                )? != bytes
+            {
+                return Err("mesh animation sidecar changed during admission".into());
+            }
+            Some(bytes)
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "mesh-animated-models"))]
+    let animation_bytes: Option<Vec<u8>> = match read_optional_bounded(
+        &animation_path,
+        MAX_ANIMATION_BYTES,
+        "mesh animation sidecar",
+    )? {
+        Some(_) => {
+            return Err(
+                "mesh animation sidecar is present; rebuild with mesh-animated-models support"
+                    .into(),
+            )
+        }
+        None => None,
+    };
     let runtime_bytes = read_bounded(runtime, MAX_RUNTIME_BYTES, "mesh player runtime")?;
-    validate_runtime_with_material(
+    validate_runtime_with_animation(
         &runtime_bytes,
         props_bytes.is_some(),
         requires_rotation,
         camera_bytes.is_some(),
         requires_material,
+        animation_bytes.is_some(),
     )?;
     let runtime_hash = digest(&runtime_bytes);
     let scene_name = scene_path
@@ -206,6 +254,9 @@ pub(crate) fn export(
     let camera_name = camera_bytes
         .as_ref()
         .map(|_| format!("{scene_name}{CAMERA_SUFFIX}"));
+    let animation_name = animation_bytes
+        .as_ref()
+        .map(|_| format!("{scene_name}{ANIMATION_SUFFIX}"));
     let parent = checked_output_parent(destination)?;
     let output_name = checked_leaf(
         destination
@@ -230,6 +281,9 @@ pub(crate) fn export(
     if let (Some(name), Some(bytes)) = (&camera_name, &camera_bytes) {
         write_new_file(&stage.path().join(name), bytes)?;
     }
+    if let (Some(name), Some(bytes)) = (&animation_name, &animation_bytes) {
+        write_new_file(&stage.path().join(name), bytes)?;
+    }
     write_new_file(&stage.path().join(RUNTIME_FILENAME), &runtime_bytes)?;
     let manifest = BundleManifest {
         schema: 1,
@@ -245,6 +299,10 @@ pub(crate) fn export(
         camera: camera_name
             .as_ref()
             .zip(camera_bytes.as_deref())
+            .map(|(name, bytes)| bundle_file(name, bytes)),
+        animation: animation_name
+            .as_ref()
+            .zip(animation_bytes.as_deref())
             .map(|(name, bytes)| bundle_file(name, bytes)),
         runtime: bundle_file(RUNTIME_FILENAME, &runtime_bytes),
         checksum,
@@ -290,6 +348,18 @@ pub(crate) fn export(
             (None, None) => false,
             _ => true,
         }
+        || match (
+            &animation_bytes,
+            read_optional_bounded(
+                &animation_path,
+                MAX_ANIMATION_BYTES,
+                "mesh animation sidecar recheck",
+            )?,
+        ) {
+            (Some(before), Some(after)) => before != &after,
+            (None, None) => false,
+            _ => true,
+        }
     {
         return Err("mesh bundle inputs changed before publication".into());
     }
@@ -302,6 +372,7 @@ pub(crate) fn export(
     let sidecar_sha256 = sidecar_bytes.as_deref().map(digest);
     let props_sha256 = props_bytes.as_deref().map(digest);
     let camera_sha256 = camera_bytes.as_deref().map(digest);
+    let animation_sha256 = animation_bytes.as_deref().map(digest);
     Ok(Receipt {
         root: output.clone(),
         scene: output.join(scene_name),
@@ -313,6 +384,7 @@ pub(crate) fn export(
         sidecar_sha256,
         props_sha256,
         camera_sha256,
+        animation_sha256,
         runtime_sha256: runtime_hash,
     })
 }
@@ -343,6 +415,24 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     if let Some(camera) = &manifest.camera {
         validate_bundle_file(camera, &camera_name, crate::mesh_camera::MAX_BYTES as u64)?;
     }
+    let animation_name = format!("{}{}", manifest.scene.name, ANIMATION_SUFFIX);
+    #[cfg(feature = "mesh-animated-models")]
+    if let Some(animation) = &manifest.animation {
+        validate_bundle_file(animation, &animation_name, MAX_ANIMATION_BYTES)?;
+    }
+    #[cfg(not(feature = "mesh-animated-models"))]
+    if manifest.animation.is_some()
+        || read_optional_bounded(
+            &canonical_root.join(&animation_name),
+            MAX_ANIMATION_BYTES,
+            "bundle mesh animation sidecar",
+        )?
+        .is_some()
+    {
+        return Err(
+            "bundle contains mesh animation; rebuild with mesh-animated-models support".into(),
+        );
+    }
     let expected_names: BTreeSet<String> = [
         MANIFEST_FILENAME.to_owned(),
         manifest.scene.name.clone(),
@@ -352,6 +442,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     .chain(manifest.sidecar.as_ref().map(|entry| entry.name.clone()))
     .chain(manifest.props.as_ref().map(|entry| entry.name.clone()))
     .chain(manifest.camera.as_ref().map(|entry| entry.name.clone()))
+    .chain(manifest.animation.as_ref().map(|entry| entry.name.clone()))
     .collect();
     let actual_names = inventory_names(&canonical_root)?;
     if actual_names != expected_names {
@@ -465,15 +556,52 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         (None, None) => {}
         _ => return Err("bundle mesh camera sidecar inventory does not match its manifest".into()),
     }
+    let animation_path = canonical_root.join(&animation_name);
+    #[cfg(feature = "mesh-animated-models")]
+    match (
+        &manifest.animation,
+        read_optional_bounded(
+            &animation_path,
+            MAX_ANIMATION_BYTES,
+            "bundle mesh animation sidecar",
+        )?,
+    ) {
+        (Some(record), Some(bytes)) => {
+            verify_file(record, &bytes, "bundle mesh animation sidecar")?;
+            let Some((_, admitted_hash)) =
+                crate::mesh_animation_store::load(&scene_path, graph_revision)?
+            else {
+                return Err("bundle mesh animation sidecar could not be admitted".into());
+            };
+            if admitted_hash != record.sha256
+                || read_bounded(
+                    &animation_path,
+                    MAX_ANIMATION_BYTES,
+                    "bundle mesh animation recheck",
+                )? != bytes
+            {
+                return Err(
+                    "bundle mesh animation admission hash does not match its manifest".into(),
+                );
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(
+                "bundle mesh animation sidecar inventory does not match its manifest".into(),
+            )
+        }
+    }
     let runtime_path = canonical_root.join(RUNTIME_FILENAME);
     let runtime_bytes = read_bounded(&runtime_path, MAX_RUNTIME_BYTES, "bundle runtime")?;
     verify_file(&manifest.runtime, &runtime_bytes, "bundle runtime")?;
-    validate_runtime_with_material(
+    validate_runtime_with_animation(
         &runtime_bytes,
         manifest.props.is_some(),
         requires_rotation,
         manifest.camera.is_some(),
         requires_material,
+        manifest.animation.is_some(),
     )?;
     let sidecar_unchanged = match &manifest.sidecar {
         Some(record) => {
@@ -526,6 +654,31 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         )?
         .is_none(),
     };
+    #[cfg(feature = "mesh-animated-models")]
+    let animation_unchanged = match &manifest.animation {
+        Some(record) => {
+            let bytes = read_bounded(
+                &animation_path,
+                MAX_ANIMATION_BYTES,
+                "bundle mesh animation final recheck",
+            )?;
+            verify_file(record, &bytes, "bundle mesh animation sidecar")?;
+            true
+        }
+        None => read_optional_bounded(
+            &animation_path,
+            MAX_ANIMATION_BYTES,
+            "bundle mesh animation final recheck",
+        )?
+        .is_none(),
+    };
+    #[cfg(not(feature = "mesh-animated-models"))]
+    let animation_unchanged = read_optional_bounded(
+        &animation_path,
+        MAX_ANIMATION_BYTES,
+        "bundle mesh animation final recheck",
+    )?
+    .is_none();
     if checked_directory(root)? != canonical_root
         || read_bounded(
             &manifest_path,
@@ -539,6 +692,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         || !sidecar_unchanged
         || !props_unchanged
         || !camera_unchanged
+        || !animation_unchanged
     {
         return Err("mesh bundle changed while it was being opened".into());
     }
@@ -1037,12 +1191,31 @@ fn validate_runtime_with_camera(
     )
 }
 
+#[cfg(test)]
 fn validate_runtime_with_material(
     bytes: &[u8],
     require_props: bool,
     require_rotation: bool,
     require_camera: bool,
     require_material: bool,
+) -> Result<(), String> {
+    validate_runtime_with_animation(
+        bytes,
+        require_props,
+        require_rotation,
+        require_camera,
+        require_material,
+        false,
+    )
+}
+
+fn validate_runtime_with_animation(
+    bytes: &[u8],
+    require_props: bool,
+    require_rotation: bool,
+    require_camera: bool,
+    require_material: bool,
+    require_animation: bool,
 ) -> Result<(), String> {
     if bytes.len() < 0x40 || &bytes[..2] != b"MZ" {
         return Err("mesh player runtime is missing its DOS executable header".into());
@@ -1139,7 +1312,21 @@ fn validate_runtime_with_material(
     {
         return Err("mesh player runtime does not advertise mesh-material bundle support".into());
     }
+    if require_animation
+        && validate_runtime_section(bytes, ANIMATION_RUNTIME_SECTION, ANIMATION_RUNTIME_MARKER)?
+            .is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh-animation bundle support".into());
+    }
     Ok(())
+}
+
+fn animation_sidecar_path(scene: &Path) -> Result<PathBuf, String> {
+    let filename = scene
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("mesh scene filename must be Unicode")?;
+    Ok(scene.with_file_name(format!("{filename}{ANIMATION_SUFFIX}")))
 }
 
 fn validate_runtime_section(

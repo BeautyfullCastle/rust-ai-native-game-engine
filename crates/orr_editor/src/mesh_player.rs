@@ -328,10 +328,25 @@ fn launch(options: Options) -> Result<(), String> {
     panel.sync(&editor);
     let mut camera_panel = crate::mesh_camera_panel::Panel::default();
     camera_panel.sync(&mut editor);
+    #[cfg(feature = "mesh-animated-models")]
+    let mut animation_panel = crate::mesh_animation_panel::Panel::default();
+    #[cfg(feature = "mesh-animated-models")]
+    animation_panel.sync(&editor);
+    #[cfg(feature = "mesh-animated-models")]
+    let animation_blocker = animation_panel.play_blocker(&editor);
+    #[cfg(not(feature = "mesh-animated-models"))]
+    let animation_blocker = match crate::mesh_animation_store::has_sidecar(&bundle.scene) {
+        Ok(false) => None,
+        Ok(true) => Some(
+            "Mesh animation sidecar is present; rebuild with mesh-animated-models support".into(),
+        ),
+        Err(error) => Some(error),
+    };
     editor.set_mesh_navigation_blocker(
         panel
             .play_blocker(&editor)
-            .or_else(|| camera_panel.play_blocker(&editor)),
+            .or_else(|| camera_panel.play_blocker(&editor))
+            .or(animation_blocker),
     );
     start_playback(&mut editor, options.ticks, screenshot.is_some())?;
 

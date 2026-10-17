@@ -1,0 +1,147 @@
+use super::{frame_gate, parse_settings, Panel, MAX_HISTORY};
+use crate::{backend::HostSpec, game::EditorGame, mesh_animation::Snapshot, model::Mode};
+use std::path::{Path, PathBuf};
+
+const ANIMATED_GLB: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/animation_demo/animated.glb"
+));
+const LICENSE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/animation_demo/LICENSE.txt"
+));
+
+fn animated_package(root: &Path) -> PathBuf {
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+    };
+    let package = root.join("animated-package");
+    fs::create_dir(&package).unwrap();
+    fs::write(package.join("animated.glb"), ANIMATED_GLB).unwrap();
+    fs::write(package.join("LICENSE.txt"), LICENSE).unwrap();
+    let runtime = orr_package::Runtime::content_only();
+    let manifest = orr_package::Manifest {
+        schema: 1,
+        name: "sample-animation".into(),
+        version: "1.0.0".into(),
+        engine: format!("={}", runtime.engine_version),
+        capabilities: BTreeSet::from(["animation".into()]),
+        dependencies: BTreeMap::new(),
+        files: BTreeSet::from(["animated.glb".into(), "LICENSE.txt".into()]),
+    };
+    fs::write(
+        package.join("orr.package.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    package
+}
+
+#[test]
+fn parses_finite_animation_settings_and_rejects_bad_values() {
+    let settings = parse_settings(
+        &["1.25".into(), "-2".into(), "0.5".into()],
+        "0.75",
+        &["90".into(), "0".into(), "0".into()],
+        "1",
+        "1.5",
+        false,
+    )
+    .unwrap();
+    assert_eq!(settings.offset, [1.25, -2.0, 0.5]);
+    assert_eq!(settings.scale, 0.75);
+    assert_eq!(settings.clip, 1);
+    assert_eq!(settings.rate, 1.5);
+    assert!(!settings.looped);
+    let zeros = || std::array::from_fn(|_| "0".to_owned());
+    assert!(parse_settings(
+        &["NaN".into(), "0".into(), "0".into()],
+        "1",
+        &zeros(),
+        "0",
+        "1",
+        true
+    )
+    .is_err());
+    assert!(parse_settings(&zeros(), "inf", &zeros(), "0", "1", true).is_err());
+    assert!(parse_settings(&zeros(), "1", &zeros(), "0", "inf", true).is_err());
+    assert!(parse_settings(&zeros(), "1", &zeros(), "-1", "1", true).is_err());
+}
+
+#[test]
+fn animated_snapshot_roundtrips_clip_settings_and_private_history() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let package = animated_package(&root);
+    let initial =
+        Snapshot::from_package(&package, "animated.glb", "LICENSE.txt", [0x35; 32]).unwrap();
+    let clips = initial.clips();
+    assert!(clips.len() >= 2);
+    let mut settings = initial.settings();
+    settings.clip = clips[1].0;
+    settings.rate = 1.5;
+    settings.looped = false;
+    let first = initial.with_settings(settings).unwrap();
+    let mut changed = first.settings();
+    changed.offset[0] = 1.0;
+    let second = first.clone().with_settings(changed).unwrap();
+    let mut panel = Panel::default();
+    panel.push_state(Some(first.clone()));
+    panel.saved_id = Some(panel.current_entry().unwrap().id);
+    panel.push_state(Some(second));
+    panel.undo();
+    let restored = panel.current_snapshot().unwrap().settings();
+    assert_eq!(restored.clip, settings.clip);
+    assert_eq!(restored.rate, settings.rate);
+    assert_eq!(restored.looped, settings.looped);
+    panel.redo();
+    assert_eq!(panel.current_snapshot().unwrap().settings().offset[0], 1.0);
+    for _ in 0..MAX_HISTORY + 2 {
+        let current = panel.current_snapshot().cloned();
+        panel.push_state(current);
+    }
+    assert_eq!(panel.history.len(), MAX_HISTORY);
+}
+
+#[test]
+fn frame_gate_rejects_incoherent_scene_and_edit_frame() {
+    let scene = PathBuf::from(r"C:\workspace\mesh.scene.yaml");
+    let spec = HostSpec::local_game(scene.clone(), EditorGame::MeshNavigation);
+    assert!(frame_gate(
+        EditorGame::MeshNavigation,
+        &spec,
+        Some(&scene),
+        Mode::Play,
+        true,
+        1,
+        2
+    ));
+    assert!(!frame_gate(
+        EditorGame::MeshNavigation,
+        &spec,
+        Some(&scene),
+        Mode::Edit,
+        true,
+        1,
+        2
+    ));
+    assert!(!frame_gate(
+        EditorGame::MeshNavigation,
+        &spec,
+        Some(Path::new(r"C:\workspace\other.scene.yaml")),
+        Mode::Edit,
+        true,
+        1,
+        1
+    ));
+    assert!(!frame_gate(
+        EditorGame::MeshNavigation,
+        &spec,
+        Some(&scene),
+        Mode::Edit,
+        false,
+        1,
+        1
+    ));
+}

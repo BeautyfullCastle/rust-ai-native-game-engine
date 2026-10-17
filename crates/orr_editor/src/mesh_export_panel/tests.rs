@@ -23,6 +23,7 @@ fn receipt(request: &Request) -> crate::mesh_export::Receipt {
         sidecar_sha256: None,
         props_sha256: None,
         camera_sha256: None,
+        animation_sha256: None,
         runtime_sha256: "runtime-hash".into(),
     }
 }
@@ -37,6 +38,7 @@ fn completed_export_is_not_current_after_either_saved_sidecar_changes() {
     let art = crate::mesh_art::sidecar_path(&scene).unwrap();
     let props = crate::mesh_props::sidecar_path(&scene).unwrap();
     let camera = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
+    let animation = scene.with_file_name("mesh.scene.yaml.mesh-animation.json");
     let camera_document = crate::mesh_camera::Document::from_orbit(
         orr_render::camera3d::OrbitCamera::new([1.0, 2.0, 3.0], 0.4, 0.2, 8.0),
     )
@@ -57,6 +59,17 @@ fn completed_export_is_not_current_after_either_saved_sidecar_changes() {
     receipt.props_sha256 = crate::mesh_props::sidecar_stamp(&scene).unwrap();
     assert!(saved_sidecars_match(&scene, &receipt));
     std::fs::write(&props, b"newer props").unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    std::fs::remove_file(&props).unwrap();
+    receipt.props_sha256 = None;
+    std::fs::remove_file(&camera).unwrap();
+    receipt.camera_sha256 = None;
+    std::fs::write(&animation, b"saved animation").unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.animation_sha256 = Some(crate::mesh_art::digest(&std::fs::read(&animation).unwrap()));
+    #[cfg(feature = "mesh-animated-models")]
+    assert!(saved_sidecars_match(&scene, &receipt));
+    #[cfg(not(feature = "mesh-animated-models"))]
     assert!(!saved_sidecars_match(&scene, &receipt));
 }
 
