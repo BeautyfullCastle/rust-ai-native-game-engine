@@ -24,12 +24,17 @@ const MAX_RUNTIME_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const SIDECAR_SUFFIX: &str = ".mesh-art.json";
 const PROPS_SUFFIX: &str = ".mesh-props.json";
+const CAMERA_SUFFIX: &str = ".mesh-camera.json";
 const RUNTIME_MARKER: &[u8] = b"ORR_MESH_PLAYER_V1";
 const PROPS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_PROPS_V1";
 const ROTATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ROTATION_V1";
+const CAMERA_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CAMERA_V1";
+const MATERIAL_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MATERIAL_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
+const CAMERA_RUNTIME_SECTION: &[u8; 8] = b".orrcam\0";
+const MATERIAL_RUNTIME_SECTION: &[u8; 8] = b".orrmat\0";
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
@@ -46,6 +51,7 @@ pub(crate) struct Receipt {
     pub scene_sha256: String,
     pub sidecar_sha256: Option<String>,
     pub props_sha256: Option<String>,
+    pub camera_sha256: Option<String>,
     pub runtime_sha256: String,
 }
 
@@ -65,6 +71,8 @@ struct BundleManifest {
     sidecar: Option<BundleFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     props: Option<BundleFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    camera: Option<BundleFile>,
     runtime: BundleFile,
     checksum: u64,
     graph_revision: [u8; 32],
@@ -92,6 +100,7 @@ pub(crate) fn export(
     }
     let sidecar_path = mesh_art::sidecar_path(&scene_path)?;
     let mut requires_rotation = false;
+    let mut requires_material = false;
     let sidecar_bytes = match read_optional_bounded(
         &sidecar_path,
         orr_model::MAX_FILE_BYTES as u64,
@@ -103,6 +112,8 @@ pub(crate) fn export(
             };
             requires_rotation |= art.rotation() != [0.0, 0.0, 0.0, 1.0]
                 || serialized_rotation_present(&bytes, false)?;
+            requires_material |=
+                art.tint() != [1.0, 1.0, 1.0, 1.0] || serialized_material_present(&bytes, false)?;
             if admitted_hash != digest(&bytes) {
                 return Err("mesh art sidecar changed during admission".into());
             }
@@ -132,6 +143,11 @@ pub(crate) fn export(
                     .iter()
                     .any(|prop| prop.art.rotation() != [0.0, 0.0, 0.0, 1.0])
                     || serialized_rotation_present(&bytes, true)?;
+                requires_material |= document
+                    .props
+                    .iter()
+                    .any(|prop| prop.art.tint() != [1.0, 1.0, 1.0, 1.0])
+                    || serialized_material_present(&bytes, true)?;
                 if admitted_hash != digest(&bytes)
                     || read_bounded(&props_path, 16 * 1024 * 1024, "mesh props sidecar recheck")?
                         != bytes
@@ -142,8 +158,39 @@ pub(crate) fn export(
             }
             None => None,
         };
+    let camera_path = crate::mesh_camera_store::sidecar_path(&scene_path)?;
+    let camera_bytes = match read_optional_bounded(
+        &camera_path,
+        crate::mesh_camera::MAX_BYTES as u64,
+        "mesh camera sidecar",
+    )? {
+        Some(bytes) => {
+            let Some((_, admitted_hash)) =
+                crate::mesh_camera_store::load(&scene_path, graph_revision)?
+            else {
+                return Err("mesh camera sidecar could not be admitted".into());
+            };
+            if admitted_hash != digest(&bytes)
+                || read_bounded(
+                    &camera_path,
+                    crate::mesh_camera::MAX_BYTES as u64,
+                    "mesh camera sidecar recheck",
+                )? != bytes
+            {
+                return Err("mesh camera sidecar changed during admission".into());
+            }
+            Some(bytes)
+        }
+        None => None,
+    };
     let runtime_bytes = read_bounded(runtime, MAX_RUNTIME_BYTES, "mesh player runtime")?;
-    validate_runtime_for(&runtime_bytes, props_bytes.is_some(), requires_rotation)?;
+    validate_runtime_with_material(
+        &runtime_bytes,
+        props_bytes.is_some(),
+        requires_rotation,
+        camera_bytes.is_some(),
+        requires_material,
+    )?;
     let runtime_hash = digest(&runtime_bytes);
     let scene_name = scene_path
         .file_name()
@@ -156,6 +203,9 @@ pub(crate) fn export(
     let props_name = props_bytes
         .as_ref()
         .map(|_| format!("{scene_name}{PROPS_SUFFIX}"));
+    let camera_name = camera_bytes
+        .as_ref()
+        .map(|_| format!("{scene_name}{CAMERA_SUFFIX}"));
     let parent = checked_output_parent(destination)?;
     let output_name = checked_leaf(
         destination
@@ -177,6 +227,9 @@ pub(crate) fn export(
     if let (Some(name), Some(bytes)) = (&props_name, &props_bytes) {
         write_new_file(&stage.path().join(name), bytes)?;
     }
+    if let (Some(name), Some(bytes)) = (&camera_name, &camera_bytes) {
+        write_new_file(&stage.path().join(name), bytes)?;
+    }
     write_new_file(&stage.path().join(RUNTIME_FILENAME), &runtime_bytes)?;
     let manifest = BundleManifest {
         schema: 1,
@@ -188,6 +241,10 @@ pub(crate) fn export(
         props: props_name
             .as_ref()
             .zip(props_bytes.as_deref())
+            .map(|(name, bytes)| bundle_file(name, bytes)),
+        camera: camera_name
+            .as_ref()
+            .zip(camera_bytes.as_deref())
             .map(|(name, bytes)| bundle_file(name, bytes)),
         runtime: bundle_file(RUNTIME_FILENAME, &runtime_bytes),
         checksum,
@@ -221,6 +278,18 @@ pub(crate) fn export(
             (None, None) => false,
             _ => true,
         }
+        || match (
+            &camera_bytes,
+            read_optional_bounded(
+                &camera_path,
+                crate::mesh_camera::MAX_BYTES as u64,
+                "mesh camera sidecar recheck",
+            )?,
+        ) {
+            (Some(before), Some(after)) => before != &after,
+            (None, None) => false,
+            _ => true,
+        }
     {
         return Err("mesh bundle inputs changed before publication".into());
     }
@@ -232,6 +301,7 @@ pub(crate) fn export(
     publish_new_directory(stage.path(), &output)?;
     let sidecar_sha256 = sidecar_bytes.as_deref().map(digest);
     let props_sha256 = props_bytes.as_deref().map(digest);
+    let camera_sha256 = camera_bytes.as_deref().map(digest);
     Ok(Receipt {
         root: output.clone(),
         scene: output.join(scene_name),
@@ -242,6 +312,7 @@ pub(crate) fn export(
         scene_sha256: digest(&scene_bytes),
         sidecar_sha256,
         props_sha256,
+        camera_sha256,
         runtime_sha256: runtime_hash,
     })
 }
@@ -268,6 +339,10 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     if let Some(props) = &manifest.props {
         validate_bundle_file(props, &props_name, 16 * 1024 * 1024)?;
     }
+    let camera_name = format!("{}{}", manifest.scene.name, CAMERA_SUFFIX);
+    if let Some(camera) = &manifest.camera {
+        validate_bundle_file(camera, &camera_name, crate::mesh_camera::MAX_BYTES as u64)?;
+    }
     let expected_names: BTreeSet<String> = [
         MANIFEST_FILENAME.to_owned(),
         manifest.scene.name.clone(),
@@ -276,6 +351,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     .into_iter()
     .chain(manifest.sidecar.as_ref().map(|entry| entry.name.clone()))
     .chain(manifest.props.as_ref().map(|entry| entry.name.clone()))
+    .chain(manifest.camera.as_ref().map(|entry| entry.name.clone()))
     .collect();
     let actual_names = inventory_names(&canonical_root)?;
     if actual_names != expected_names {
@@ -293,6 +369,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     }
     let sidecar_path = mesh_art::sidecar_path(&scene_path)?;
     let mut requires_rotation = false;
+    let mut requires_material = false;
     match (
         &manifest.sidecar,
         read_optional_bounded(
@@ -308,6 +385,8 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             };
             requires_rotation |= art.rotation() != [0.0, 0.0, 0.0, 1.0]
                 || serialized_rotation_present(&bytes, false)?;
+            requires_material |=
+                art.tint() != [1.0, 1.0, 1.0, 1.0] || serialized_material_present(&bytes, false)?;
             if admitted_hash != record.sha256 {
                 return Err("bundle art admission hash does not match its manifest".into());
             }
@@ -340,6 +419,11 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
                 .iter()
                 .any(|prop| prop.art.rotation() != [0.0, 0.0, 0.0, 1.0])
                 || serialized_rotation_present(&bytes, true)?;
+            requires_material |= document
+                .props
+                .iter()
+                .any(|prop| prop.art.tint() != [1.0, 1.0, 1.0, 1.0])
+                || serialized_material_present(&bytes, true)?;
             if admitted_hash != record.sha256 {
                 return Err("bundle mesh props admission hash does not match its manifest".into());
             }
@@ -350,10 +434,47 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         (None, None) => {}
         _ => return Err("bundle mesh props sidecar inventory does not match its manifest".into()),
     }
+    let camera_path = canonical_root.join(&camera_name);
+    match (
+        &manifest.camera,
+        read_optional_bounded(
+            &camera_path,
+            crate::mesh_camera::MAX_BYTES as u64,
+            "bundle mesh camera sidecar",
+        )?,
+    ) {
+        (Some(record), Some(bytes)) => {
+            verify_file(record, &bytes, "bundle mesh camera sidecar")?;
+            let Some((_, admitted_hash)) =
+                crate::mesh_camera_store::load(&scene_path, graph_revision)?
+            else {
+                return Err("bundle mesh camera sidecar could not be admitted".into());
+            };
+            if admitted_hash != record.sha256 {
+                return Err("bundle mesh camera admission hash does not match its manifest".into());
+            }
+            if read_bounded(
+                &camera_path,
+                crate::mesh_camera::MAX_BYTES as u64,
+                "bundle mesh camera recheck",
+            )? != bytes
+            {
+                return Err("bundle mesh camera sidecar changed during admission".into());
+            }
+        }
+        (None, None) => {}
+        _ => return Err("bundle mesh camera sidecar inventory does not match its manifest".into()),
+    }
     let runtime_path = canonical_root.join(RUNTIME_FILENAME);
     let runtime_bytes = read_bounded(&runtime_path, MAX_RUNTIME_BYTES, "bundle runtime")?;
     verify_file(&manifest.runtime, &runtime_bytes, "bundle runtime")?;
-    validate_runtime_for(&runtime_bytes, manifest.props.is_some(), requires_rotation)?;
+    validate_runtime_with_material(
+        &runtime_bytes,
+        manifest.props.is_some(),
+        requires_rotation,
+        manifest.camera.is_some(),
+        requires_material,
+    )?;
     let sidecar_unchanged = match &manifest.sidecar {
         Some(record) => {
             let bytes = read_bounded(
@@ -388,6 +509,23 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         )?
         .is_none(),
     };
+    let camera_unchanged = match &manifest.camera {
+        Some(record) => {
+            let bytes = read_bounded(
+                &camera_path,
+                crate::mesh_camera::MAX_BYTES as u64,
+                "bundle mesh camera final recheck",
+            )?;
+            verify_file(record, &bytes, "bundle mesh camera sidecar")?;
+            true
+        }
+        None => read_optional_bounded(
+            &camera_path,
+            crate::mesh_camera::MAX_BYTES as u64,
+            "bundle mesh camera final recheck",
+        )?
+        .is_none(),
+    };
     if checked_directory(root)? != canonical_root
         || read_bounded(
             &manifest_path,
@@ -400,6 +538,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         || inventory_names(&canonical_root)? != expected_names
         || !sidecar_unchanged
         || !props_unchanged
+        || !camera_unchanged
     {
         return Err("mesh bundle changed while it was being opened".into());
     }
@@ -479,7 +618,7 @@ fn inventory_names(root: &Path) -> Result<BTreeSet<String>, String> {
         if !folded.insert(name.to_lowercase()) || !names.insert(name) {
             return Err("mesh bundle contains colliding filenames".into());
         }
-        if names.len() > 5 {
+        if names.len() > 6 {
             return Err("mesh bundle contains too many files".into());
         }
     }
@@ -856,10 +995,54 @@ fn serialized_rotation_present(bytes: &[u8], props: bool) -> Result<bool, String
     }))
 }
 
+fn serialized_material_present(bytes: &[u8], props: bool) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("inspect serialized mesh material: {error}"))?;
+    if !props {
+        return Ok(value.get("tint").is_some());
+    }
+    let records = value
+        .get("props")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("mesh props sidecar has no props inventory")?;
+    Ok(records.iter().any(|record| {
+        record
+            .get("art")
+            .is_some_and(|art| art.get("tint").is_some())
+    }))
+}
+
+#[cfg(test)]
 fn validate_runtime_for(
     bytes: &[u8],
     require_props: bool,
     require_rotation: bool,
+) -> Result<(), String> {
+    validate_runtime_with_camera(bytes, require_props, require_rotation, false)
+}
+
+#[cfg(test)]
+fn validate_runtime_with_camera(
+    bytes: &[u8],
+    require_props: bool,
+    require_rotation: bool,
+    require_camera: bool,
+) -> Result<(), String> {
+    validate_runtime_with_material(
+        bytes,
+        require_props,
+        require_rotation,
+        require_camera,
+        false,
+    )
+}
+
+fn validate_runtime_with_material(
+    bytes: &[u8],
+    require_props: bool,
+    require_rotation: bool,
+    require_camera: bool,
+    require_material: bool,
 ) -> Result<(), String> {
     if bytes.len() < 0x40 || &bytes[..2] != b"MZ" {
         return Err("mesh player runtime is missing its DOS executable header".into());
@@ -944,6 +1127,17 @@ fn validate_runtime_for(
             .is_none()
     {
         return Err("mesh player runtime does not advertise mesh-rotation support".into());
+    }
+    if require_camera
+        && validate_runtime_section(bytes, CAMERA_RUNTIME_SECTION, CAMERA_RUNTIME_MARKER)?.is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh-camera bundle support".into());
+    }
+    if require_material
+        && validate_runtime_section(bytes, MATERIAL_RUNTIME_SECTION, MATERIAL_RUNTIME_MARKER)?
+            .is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh-material bundle support".into());
     }
     Ok(())
 }

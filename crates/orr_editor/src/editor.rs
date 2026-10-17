@@ -193,6 +193,14 @@ struct Preview {
     rows: Vec<EntityRow>,
 }
 
+#[cfg(feature = "mesh-navigation")]
+struct MeshCamera {
+    document: crate::mesh_camera::Document,
+    scene: PathBuf,
+    epoch: u64,
+    graph_revision: [u8; 32],
+}
+
 /// See the module docs.
 pub struct Editor {
     backend: Backend,
@@ -207,6 +215,8 @@ pub struct Editor {
     /// The viewport camera (world units, y up).
     pub camera: Camera,
     pub camera3d: orr_render::OrbitCamera,
+    #[cfg(feature = "mesh-navigation")]
+    mesh_camera: Option<MeshCamera>,
     #[cfg(feature="room-project")]
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
@@ -335,6 +345,8 @@ impl Editor {
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
             camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
+            #[cfg(feature = "mesh-navigation")]
+            mesh_camera: None,
             yard_frame: crate::viewport3d::YardFrame::default(),
             #[cfg(feature = "terrain-physics")]
             terrain_view: crate::terrain_physics::TerrainPhysicsView::default(),
@@ -2108,6 +2120,40 @@ impl Editor {
         self.room_camera_scene = self.path();
         Ok(())
     }
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn install_mesh_camera(&mut self, document: crate::mesh_camera::Document) -> Result<(), String> {
+        if self.game() != EditorGame::MeshNavigation || !self.spec().is_local() {
+            return Err("game camera requires a local MeshNavigation scene".into());
+        }
+        let scene = self.path().ok_or("the mesh scene has no local path")?;
+        let snapshot = self.snapshot().ok_or("wait for an admitted mesh Frame")?;
+        let view = orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted())?;
+        let graph_revision = view.graph.revision();
+        let orbit = document.orbit();
+        for size in [(1, 16384), (16384, 1), (800, 600)] {
+            document.camera(&orbit, size)?;
+        }
+        self.camera3d = orbit;
+        self.mesh_camera = Some(MeshCamera { document, scene, epoch: self.scene_load_epoch(), graph_revision });
+        self.initial_camera_fit = false;
+        self.refit = false;
+        self.refit_checksum = None;
+        Ok(())
+    }
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn has_mesh_camera(&self) -> bool {
+        let Some(camera) = self.mesh_camera.as_ref() else { return false; };
+        self.game() == EditorGame::MeshNavigation && self.spec().is_local()
+            && self.path().as_ref() == Some(&camera.scene) && self.scene_load_epoch() == camera.epoch
+            && self.snapshot().and_then(|snapshot| orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).ok())
+                .is_some_and(|view| view.graph.revision() == camera.graph_revision)
+    }
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn clear_mesh_camera(&mut self) {
+        if self.mesh_camera.take().is_some() && self.game() == EditorGame::MeshNavigation {
+            self.fit_camera();
+        }
+    }
     pub fn has_room_camera(&self) -> bool {
         #[cfg(feature="room-project")]
         { self.game().is_room() && self.spec().is_local() && self.room_camera.is_some()
@@ -2118,25 +2164,35 @@ impl Editor {
     pub fn presentation_camera3d(&self, size:(u32,u32)) -> Result<orr_render::Camera3D,String> {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { return self.room_camera.as_ref().unwrap().camera(&self.camera3d,size); }
+        #[cfg(feature = "mesh-navigation")]
+        if self.has_mesh_camera() { return self.mesh_camera.as_ref().unwrap().document.camera(&self.camera3d, size); }
         let _ = size;
         Ok(self.camera3d.camera())
     }
     pub fn orbit3d(&mut self, delta:[f32;2]) {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { self.room_camera.as_ref().unwrap().orbit_delta(&mut self.camera3d,delta); return; }
+        #[cfg(feature = "mesh-navigation")]
+        if self.has_mesh_camera() { self.mesh_camera.as_ref().unwrap().document.orbit_delta(&mut self.camera3d, delta); return; }
         self.camera3d.orbit(delta);
     }
     pub fn pan3d(&mut self, delta:[f32;2],size:(u32,u32)) {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { self.room_camera.as_ref().unwrap().pan(&mut self.camera3d,delta,size); return; }
+        #[cfg(feature = "mesh-navigation")]
+        if self.has_mesh_camera() { self.mesh_camera.as_ref().unwrap().document.pan(&mut self.camera3d, delta, size); return; }
         self.camera3d.pan(delta,size);
     }
     pub fn zoom3d(&mut self, delta:f32) {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { self.room_camera.as_ref().unwrap().zoom(&mut self.camera3d,delta); return; }
+        #[cfg(feature = "mesh-navigation")]
+        if self.has_mesh_camera() { self.mesh_camera.as_ref().unwrap().document.zoom(&mut self.camera3d, delta); return; }
         self.camera3d.zoom(delta);
     }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature = "mesh-navigation")]
+        self.clear_mesh_camera();
         #[cfg(feature="room-project")]
         if self.room_camera.take().is_some() {
             self.room_camera_scene = None;
@@ -2621,6 +2677,8 @@ impl Editor {
         match self.call("sim.start", json!({})) {
             Ok(r) => {
                 self.apply_state(&r);
+                #[cfg(feature = "mesh-navigation")]
+                if self.has_mesh_camera() { self.camera3d = self.mesh_camera.as_ref().unwrap().document.orbit(); }
                 self.mark_changed();
                 self.info("play started");
                 true

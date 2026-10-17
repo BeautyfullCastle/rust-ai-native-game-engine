@@ -43,7 +43,7 @@ fn revision() -> [u8; 32] {
 }
 
 #[test]
-fn legacy_sidecars_default_to_identity_without_adding_a_rotation_field() {
+fn legacy_sidecars_default_to_identity_without_adding_rotation_or_tint_fields() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     let source = package(&root);
@@ -51,9 +51,65 @@ fn legacy_sidecars_default_to_identity_without_adding_a_rotation_field() {
     let bytes = snapshot.encode_embedded("legacy.scene.yaml").unwrap();
     let encoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(encoded.get("rotation").is_none());
+    assert!(encoded.get("tint").is_none());
     let loaded = Snapshot::decode_embedded(&bytes, "legacy.scene.yaml", revision()).unwrap();
     assert_eq!(loaded.rotation(), [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(loaded.tint(), [1.0; 4]);
     assert_eq!(loaded.encode_embedded("legacy.scene.yaml").unwrap(), bytes);
+}
+
+#[test]
+fn tint_round_trips_while_original_cooked_digest_and_model_provenance_stay_fixed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = package(&root);
+    let original = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", revision()).unwrap();
+    let original_bytes = original.model.to_bytes().unwrap();
+    let cooked_digest = original.cooked_sha256.clone();
+    let tinted = original.clone().with_tint([0.5, 0.75, 1.0, 0.25]).unwrap();
+    assert_eq!(tinted.model.to_bytes().unwrap(), original_bytes);
+    assert_eq!(tinted.cooked_sha256, cooked_digest);
+    assert_eq!(tinted.tint(), [0.5, 0.75, 1.0, 0.25]);
+    let bytes = tinted.encode_embedded("tinted.scene.yaml").unwrap();
+    let encoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(encoded["tint"], serde_json::json!([0.5, 0.75, 1.0, 0.25]));
+    let loaded = Snapshot::decode_embedded(&bytes, "tinted.scene.yaml", revision()).unwrap();
+    assert_eq!(loaded.tint(), tinted.tint());
+    assert_eq!(loaded.model.to_bytes().unwrap(), original_bytes);
+    assert_eq!(loaded.cooked_sha256, cooked_digest);
+    assert_eq!(loaded.encode_embedded("tinted.scene.yaml").unwrap(), bytes);
+    assert_eq!(
+        loaded
+            .placement([orr_fp::FP::ZERO; 3])
+            .unwrap()
+            .model
+            .source()
+            .materials[0]
+            .base_color,
+        tinted
+            .placement([orr_fp::FP::ZERO; 3])
+            .unwrap()
+            .model
+            .source()
+            .materials[0]
+            .base_color
+    );
+    for invalid in [
+        serde_json::json!([2, 1, 1, 1]),
+        serde_json::json!([1, -1, 1, 1]),
+        serde_json::json!([1, 1, 1, "invalid"]),
+    ] {
+        let mut corrupted = encoded.clone();
+        corrupted["tint"] = invalid;
+        assert!(Snapshot::decode_embedded(
+            &serde_json::to_vec(&corrupted).unwrap(),
+            "tinted.scene.yaml",
+            revision()
+        )
+        .is_err());
+    }
+    assert!(tinted.clone().with_tint([f32::NAN, 1.0, 1.0, 1.0]).is_err());
+    assert!(tinted.with_tint([1.01, 1.0, 1.0, 1.0]).is_err());
 }
 
 #[test]

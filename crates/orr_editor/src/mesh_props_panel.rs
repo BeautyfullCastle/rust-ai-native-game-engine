@@ -44,6 +44,7 @@ pub(crate) struct Panel {
     position: [String; 3],
     scale: String,
     rotation: [String; 3],
+    tint: [String; 4],
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -81,6 +82,7 @@ impl Default for Panel {
             position: ["0".into(), "0".into(), "0".into()],
             scale: "1".into(),
             rotation: ["0".into(), "0".into(), "0".into()],
+            tint: ["1".into(), "1".into(), "1".into(), "1".into()],
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -284,6 +286,12 @@ impl Panel {
                 field(ui, "Prop rotation X (degrees)", &mut self.rotation[0]);
                 field(ui, "Prop rotation Y (degrees)", &mut self.rotation[1]);
                 field(ui, "Prop rotation Z (degrees)", &mut self.rotation[2]);
+                for (channel, label) in ["Prop tint R", "Prop tint G", "Prop tint B", "Prop tint A"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    field(ui, label, &mut self.tint[channel]);
+                }
             });
             ui.horizontal(|ui| {
                 if ui
@@ -1072,9 +1080,11 @@ impl Panel {
     fn transformed(&self, snapshot: Snapshot) -> Result<Snapshot, String> {
         let (position, scale, rotation) =
             parse_transform(&self.position, &self.scale, &self.rotation)?;
+        let tint = parse_tint(&self.tint)?;
         snapshot
             .with_transform(position, scale)?
-            .with_rotation(crate::mesh_rotation::from_degrees(rotation)?)
+            .with_rotation(crate::mesh_rotation::from_degrees(rotation)?)?
+            .with_tint(tint)
     }
 
     fn selected_prop(&self) -> Option<&Prop> {
@@ -1179,7 +1189,19 @@ impl Panel {
         if let Ok(rotation) = crate::mesh_rotation::to_degrees(snapshot.rotation()) {
             self.rotation = rotation.map(format_number);
         }
+        self.tint = snapshot.tint().map(format_number);
     }
+}
+
+fn parse_tint(values: &[String; 4]) -> Result<[f32; 4], String> {
+    let mut tint = [0.0; 4];
+    for (index, value) in values.iter().enumerate() {
+        tint[index] = value
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "Prop tint values must be finite RGBA multipliers in 0..=1")?;
+    }
+    crate::mesh_material::validate(tint)
 }
 
 fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {

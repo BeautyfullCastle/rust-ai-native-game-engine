@@ -326,7 +326,13 @@ fn launch(options: Options) -> Result<(), String> {
     }
     let mut panel = crate::mesh_navigation::Panel::default();
     panel.sync(&editor);
-    editor.set_mesh_navigation_blocker(panel.play_blocker(&editor));
+    let mut camera_panel = crate::mesh_camera_panel::Panel::default();
+    camera_panel.sync(&mut editor);
+    editor.set_mesh_navigation_blocker(
+        panel
+            .play_blocker(&editor)
+            .or_else(|| camera_panel.play_blocker(&editor)),
+    );
     start_playback(&mut editor, options.ticks, screenshot.is_some())?;
 
     let (width, height) = options.size;

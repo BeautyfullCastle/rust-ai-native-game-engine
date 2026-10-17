@@ -18,6 +18,7 @@ pub(crate) struct Panel {
     offset: [String; 3],
     scale: String,
     rotation: [String; 3],
+    tint: [String; 4],
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -48,6 +49,7 @@ impl Default for Panel {
             offset: ["0".into(), "0".into(), "0".into()],
             scale: "1".into(),
             rotation: ["0".into(), "0".into(), "0".into()],
+            tint: ["1".into(), "1".into(), "1".into(), "1".into()],
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -274,6 +276,12 @@ impl Panel {
                 {
                     text_field(ui, label, &mut self.rotation[axis]);
                 }
+                for (channel, label) in ["Art tint R", "Art tint G", "Art tint B", "Art tint A"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    text_field(ui, label, &mut self.tint[channel]);
+                }
                 if ui.button("Apply agent art").clicked() {
                     self.apply(editor);
                 }
@@ -477,7 +485,8 @@ impl Panel {
             .and_then(|(offset, scale)| base.with_transform(offset, scale))
             .and_then(|snapshot| {
                 parse_rotation(&self.rotation).and_then(|rotation| snapshot.with_rotation(rotation))
-            });
+            })
+            .and_then(|snapshot| parse_tint(&self.tint).and_then(|tint| snapshot.with_tint(tint)));
         match result {
             Ok(snapshot) if Some(snapshot.graph_revision()) == self.graph_revision => {
                 self.push_state(Some(snapshot.clone()));
@@ -744,6 +753,7 @@ impl Panel {
         self.rotation = crate::mesh_rotation::to_degrees(snapshot.rotation())
             .map(|angles| angles.map(format_number))
             .unwrap_or_else(|_| ["invalid".into(), "invalid".into(), "invalid".into()]);
+        self.tint = snapshot.tint().map(format_number);
     }
 
     fn copy_current_transform(&mut self) {
@@ -753,8 +763,20 @@ impl Panel {
             self.offset = ["0".into(), "0".into(), "0".into()];
             self.scale = "1".into();
             self.rotation = ["0".into(), "0".into(), "0".into()];
+            self.tint = ["1".into(), "1".into(), "1".into(), "1".into()];
         }
     }
+}
+
+fn parse_tint(values: &[String; 4]) -> Result<[f32; 4], String> {
+    let mut tint = [0.0; 4];
+    for (index, value) in values.iter().enumerate() {
+        tint[index] = value
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "Art tint values must be finite RGBA multipliers in 0..=1")?;
+    }
+    crate::mesh_material::validate(tint)
 }
 
 fn reported_scene_matches_request(

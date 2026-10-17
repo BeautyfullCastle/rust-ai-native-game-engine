@@ -164,16 +164,23 @@ fn refuse_existing_sidecar(scene: &Path) -> Result<(), String> {
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or("mesh scene filename must be Unicode")?;
-    let sidecar_name = format!("{filename}{SIDECAR_SUFFIX}");
-    if sidecar_name.len() > 255 {
-        return Err("mesh scene name is too long for its art sidecar".into());
+    for suffix in [SIDECAR_SUFFIX, ".mesh-props.json", ".mesh-camera.json"] {
+        let sidecar_name = format!("{filename}{suffix}");
+        if sidecar_name.len() > 255 {
+            return Err("mesh scene name is too long for its sidecars".into());
+        }
+        let sidecar = scene.with_file_name(sidecar_name);
+        match fs::symlink_metadata(&sidecar) {
+            Ok(_) => {
+                return Err(format!(
+                    "new mesh scene refused because its {suffix} sidecar path already exists"
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("mesh sidecar metadata: {error}")),
+        }
     }
-    let sidecar = scene.with_file_name(sidecar_name);
-    match fs::symlink_metadata(&sidecar) {
-        Ok(_) => Err("new mesh scene refused because its art sidecar path already exists".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("mesh art sidecar metadata: {error}")),
-    }
+    Ok(())
 }
 
 fn read_scene(path: &Path) -> Result<Vec<u8>, String> {

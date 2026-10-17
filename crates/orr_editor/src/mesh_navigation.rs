@@ -429,7 +429,9 @@ impl Panel {
             editor.host_call("world.singleton.patch", pin_patch(&pin))?;
             editor.mesh_navigation_mark_edited();
             editor.sync();
-            editor.fit_camera();
+            if !editor.has_mesh_camera() {
+                editor.fit_camera();
+            }
             self.draft_dirty = false;
             self.agent_viewport = agent_viewport::State::default();
             self.error = None;

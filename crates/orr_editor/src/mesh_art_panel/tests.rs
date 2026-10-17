@@ -92,6 +92,36 @@ fn private_undo_redo_restores_agent_art_rotation_fields() {
     assert_quaternion_close(parse_rotation(&panel.rotation).unwrap(), second_rotation);
 }
 
+#[test]
+fn art_tint_parser_and_undo_redo_preserve_snapshot_tint() {
+    let first_tint = [0.5, 0.75, 1.0, 0.25];
+    let second_tint = [1.0, 0.25, 0.5, 0.75];
+    assert_eq!(
+        super::parse_tint(&first_tint.map(|value| value.to_string())).unwrap(),
+        first_tint
+    );
+    assert!(super::parse_tint(&["NaN".into(), "1".into(), "1".into(), "1".into()]).is_err());
+    assert!(super::parse_tint(&["-0.1".into(), "1".into(), "1".into(), "1".into()]).is_err());
+
+    let temporary = tempfile::tempdir().unwrap();
+    let source = static_package(&temporary.path().canonicalize().unwrap());
+    let first = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", [0x5a; 32])
+        .unwrap()
+        .with_tint(first_tint)
+        .unwrap();
+    let second = first.clone().with_tint(second_tint).unwrap();
+    let mut panel = Panel::default();
+    panel.push_state(Some(first.clone()));
+    panel.saved_id = Some(panel.current_entry().unwrap().id);
+    panel.push_state(Some(second.clone()));
+    panel.undo();
+    assert_eq!(panel.current_snapshot().unwrap().tint(), first_tint);
+    assert_eq!(super::parse_tint(&panel.tint).unwrap(), first_tint);
+    panel.redo();
+    assert_eq!(panel.current_snapshot().unwrap().tint(), second_tint);
+    assert_eq!(super::parse_tint(&panel.tint).unwrap(), second_tint);
+}
+
 fn assert_quaternion_close(actual: [f32; 4], expected: [f32; 4]) {
     for (actual, expected) in actual.into_iter().zip(expected) {
         assert!((actual - expected).abs() < 1.0e-5);

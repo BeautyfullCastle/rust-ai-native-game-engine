@@ -3,11 +3,13 @@ use super::{
 };
 use crate::{
     mesh_art::Snapshot,
+    mesh_camera::{Document as CameraDocument, Projection as CameraProjection},
     mesh_props::{self, Document, Prop},
 };
 use orr_fp::{fp, FP};
 use orr_navigation::{mesh::StaticMeshGraph, AgentProfile};
 use orr_remote::mesh_navigation::{authoring::create_mesh_scene, AgentSpec};
+use orr_render::camera3d::OrbitCamera;
 use std::fs;
 
 const STATIC_GLB: &[u8] = include_bytes!("../../../orr_model/tests/fixtures/model.glb");
@@ -100,6 +102,71 @@ fn test_runtime_with_rotation() -> Vec<u8> {
     bytes[0x240..0x240 + b"ORR_MESH_PROPS_V1".len()].copy_from_slice(b"ORR_MESH_PROPS_V1");
     bytes[0x280..0x280 + b"ORR_MESH_ROTATION_V1".len()].copy_from_slice(b"ORR_MESH_ROTATION_V1");
     bytes
+}
+
+fn test_runtime_with_camera() -> Vec<u8> {
+    let mut bytes = test_runtime_with_rotation();
+    bytes[0x46..0x48].copy_from_slice(&4u16.to_le_bytes());
+    bytes[0x1c0..0x1c8].copy_from_slice(b".orrcam\0");
+    bytes[0x1d0..0x1d4].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x1d4..0x1d8].copy_from_slice(&0x2c0u32.to_le_bytes());
+    bytes[0x1e4..0x1e8].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x2c0..0x2c0 + b"ORR_MESH_CAMERA_V1".len()].copy_from_slice(b"ORR_MESH_CAMERA_V1");
+    bytes
+}
+
+fn test_runtime_with_material() -> Vec<u8> {
+    let mut bytes = test_runtime_with_camera();
+    bytes.resize(1024, 0);
+    bytes[0x200..0x240].fill(0);
+    bytes[0x46..0x48].copy_from_slice(&5u16.to_le_bytes());
+    bytes[0x15c..0x160].copy_from_slice(&0x340u32.to_le_bytes());
+    bytes[0x1e8..0x1f0].copy_from_slice(b".orrmat\0");
+    bytes[0x1f0..0x1f4].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x1f8..0x1fc].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x1fc..0x200].copy_from_slice(&0x300u32.to_le_bytes());
+    bytes[0x20c..0x210].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x300..0x300 + b"ORR_MESH_MATERIAL_V1".len()].copy_from_slice(b"ORR_MESH_MATERIAL_V1");
+    bytes[0x340..0x340 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
+    bytes
+}
+
+fn set_art_tint(scene: &std::path::Path, revision: [u8; 32], tint: [f32; 4]) {
+    add_props(scene, revision);
+    let (document, props_hash) = mesh_props::load(scene, revision).unwrap().unwrap();
+    let filename = scene.file_name().unwrap().to_str().unwrap();
+    let mut art: serde_json::Value =
+        serde_json::from_slice(&document.props[0].art.encode_embedded(filename).unwrap()).unwrap();
+    art["tint"] = serde_json::json!(tint);
+    mesh_props::save(scene, None, Some(&props_hash), revision).unwrap();
+    fs::write(
+        crate::mesh_art::sidecar_path(scene).unwrap(),
+        serde_json::to_vec(&art).unwrap(),
+    )
+    .unwrap();
+    crate::mesh_art::load(scene, revision).unwrap().unwrap();
+}
+
+fn set_prop_tint(scene: &std::path::Path, revision: [u8; 32], tint: [f32; 4]) {
+    add_props(scene, revision);
+    let path = mesh_props::sidecar_path(scene).unwrap();
+    let mut props: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    props["props"][0]["art"]["tint"] = serde_json::json!(tint);
+    fs::write(&path, serde_json::to_vec(&props).unwrap()).unwrap();
+    mesh_props::load(scene, revision).unwrap().unwrap();
+}
+
+fn add_camera(scene: &std::path::Path, revision: [u8; 32]) -> Vec<u8> {
+    let camera = CameraDocument::from_orbit(OrbitCamera::new([1.0, 2.0, 3.0], 0.4, 0.2, 8.0))
+        .unwrap()
+        .with_projection(
+            CameraProjection::Orthographic { half_height: 4.0 },
+            0.1,
+            500.0,
+        )
+        .unwrap();
+    crate::mesh_camera_store::save(scene, Some(&camera), None, revision).unwrap();
+    fs::read(crate::mesh_camera_store::sidecar_path(scene).unwrap()).unwrap()
 }
 
 #[test]
@@ -296,6 +363,7 @@ fn export_opens_self_contained_bundle_without_changing_sources() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
     assert!(manifest.get("props").is_none());
+    assert!(manifest.get("camera").is_none());
 }
 
 #[test]
@@ -433,4 +501,185 @@ fn props_bundle_rejects_invalid_admission_even_with_updated_file_hash() {
     manifest["props"]["sha256"] = serde_json::json!(super::digest(&bytes));
     fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     assert!(open_bundle(&destination).is_err());
+}
+
+#[test]
+fn camera_sidecar_is_copied_and_re_admitted_only_by_a_camera_capable_player() {
+    let (temporary, scene, runtime, checksum) = fixture();
+    let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+    let camera_before = add_camera(&scene, revision);
+    let camera_path = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
+    let destination = temporary.path().join("with-camera");
+
+    assert!(export(&scene, checksum, &destination, &runtime).is_err());
+    assert!(!destination.exists());
+
+    let camera_runtime = temporary.path().join("camera-player.exe");
+    fs::write(&camera_runtime, test_runtime_with_camera()).unwrap();
+    let receipt = export(&scene, checksum, &destination, &camera_runtime).unwrap();
+    let prepared = open_bundle(&destination).unwrap();
+    let bundled_camera = destination.join("walk.scene.yaml.mesh-camera.json");
+    let expected_hash = super::digest(&camera_before);
+    assert_eq!(
+        receipt.camera_sha256.as_deref(),
+        Some(expected_hash.as_str())
+    );
+    assert_eq!(fs::read(&bundled_camera).unwrap(), camera_before);
+    assert_eq!(fs::read(&camera_path).unwrap(), camera_before);
+    assert_eq!(prepared.graph_revision, revision);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+    assert_eq!(
+        manifest["camera"]["name"],
+        "walk.scene.yaml.mesh-camera.json"
+    );
+    assert_eq!(manifest["camera"]["sha256"], expected_hash);
+}
+
+#[test]
+fn camera_bundle_rejects_tampering_missing_files_and_invalid_admission() {
+    let (temporary, scene, _, checksum) = fixture();
+    let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+    add_camera(&scene, revision);
+    let runtime = temporary.path().join("camera-player.exe");
+    fs::write(&runtime, test_runtime_with_camera()).unwrap();
+    let destination = temporary.path().join("bundle");
+    export(&scene, checksum, &destination, &runtime).unwrap();
+
+    let camera_path = destination.join("walk.scene.yaml.mesh-camera.json");
+    let original = fs::read(&camera_path).unwrap();
+    fs::write(&camera_path, b"tampered").unwrap();
+    assert!(open_bundle(&destination).is_err());
+    fs::write(&camera_path, &original).unwrap();
+    fs::remove_file(&camera_path).unwrap();
+    assert!(open_bundle(&destination).is_err());
+    fs::write(&camera_path, &original).unwrap();
+
+    let mut invalid: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    invalid["graph_revision"] = serde_json::to_value([0_u8; 32]).unwrap();
+    let invalid_bytes = serde_json::to_vec(&invalid).unwrap();
+    fs::write(&camera_path, &invalid_bytes).unwrap();
+    let manifest_path = destination.join(MANIFEST_FILENAME);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["camera"]["bytes"] = serde_json::json!(invalid_bytes.len());
+    manifest["camera"]["sha256"] = serde_json::json!(super::digest(&invalid_bytes));
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(open_bundle(&destination).is_err());
+}
+
+#[test]
+fn camera_runtime_marker_must_be_in_a_distinct_bounded_pe_section() {
+    super::validate_runtime_with_camera(&test_runtime_with_camera(), false, false, true).unwrap();
+    assert!(
+        super::validate_runtime_with_camera(&test_runtime_with_rotation(), false, false, true)
+            .is_err()
+    );
+    let mut bytes = test_runtime_with_camera();
+    bytes[0x2c0..0x2c0 + b"ORR_MESH_CAMERA_V1".len()].fill(0);
+    bytes[0x100..0x100 + b"ORR_MESH_CAMERA_V1".len()].copy_from_slice(b"ORR_MESH_CAMERA_V1");
+    assert!(super::validate_runtime_with_camera(&bytes, false, false, true).is_err());
+    let mut bytes = test_runtime_with_camera();
+    bytes[0x1d4..0x1d8].copy_from_slice(&0x100u32.to_le_bytes());
+    assert!(super::validate_runtime_with_camera(&bytes, false, false, true).is_err());
+    let mut bytes = test_runtime_with_camera();
+    bytes[0x1c0..0x1c8].copy_from_slice(b".orrrot\0");
+    assert!(super::validate_runtime_with_camera(&bytes, false, false, true).is_err());
+    super::validate_runtime_with_camera(&test_runtime(), false, false, false).unwrap();
+}
+
+#[test]
+fn explicit_material_fields_require_material_capability_even_when_identity() {
+    for art_only in [false, true] {
+        for tint in [[1.0, 1.0, 1.0, 1.0], [0.25, 0.5, 0.75, 1.0]] {
+            let (temporary, scene, runtime, checksum) = fixture();
+            let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+            if art_only {
+                set_art_tint(&scene, revision, tint);
+            } else {
+                set_prop_tint(&scene, revision, tint);
+            }
+            let legacy_runtime = if art_only {
+                test_runtime()
+            } else {
+                test_runtime_with_props()
+            };
+            fs::write(&runtime, &legacy_runtime).unwrap();
+            let destination = temporary.path().join("material-bundle");
+            assert!(export(&scene, checksum, &destination, &runtime).is_err());
+            assert!(!destination.exists());
+
+            let material_runtime = temporary.path().join("material-player.exe");
+            fs::write(&material_runtime, test_runtime_with_material()).unwrap();
+            let receipt = export(&scene, checksum, &destination, &material_runtime).unwrap();
+            let prepared = open_bundle(&destination).unwrap();
+            assert_eq!(prepared.checksum, checksum);
+            if art_only {
+                let (art, _) = crate::mesh_art::load(&prepared.scene, revision)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(art.tint(), tint);
+                assert!(receipt.sidecar_sha256.is_some());
+                assert_eq!(receipt.props_sha256, None);
+            } else {
+                let (document, _) = mesh_props::load(&prepared.scene, revision)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(document.props[0].art.tint(), tint);
+                assert!(receipt.props_sha256.is_some());
+                assert_eq!(receipt.sidecar_sha256, None);
+            }
+
+            fs::write(destination.join(RUNTIME_FILENAME), &legacy_runtime).unwrap();
+            let manifest_path = destination.join(MANIFEST_FILENAME);
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            manifest["runtime"]["bytes"] = serde_json::json!(legacy_runtime.len());
+            manifest["runtime"]["sha256"] = serde_json::json!(super::digest(&legacy_runtime));
+            fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert!(open_bundle(&destination).is_err());
+        }
+    }
+}
+
+#[test]
+fn material_runtime_marker_requires_its_own_bounded_pe_section() {
+    super::validate_runtime_with_material(&test_runtime_with_material(), false, false, false, true)
+        .unwrap();
+    assert!(super::validate_runtime_with_material(
+        &test_runtime_with_camera(),
+        false,
+        false,
+        false,
+        true
+    )
+    .is_err());
+
+    let mut bytes = test_runtime_with_material();
+    bytes[0x300..0x300 + b"ORR_MESH_MATERIAL_V1".len()].fill(0);
+    bytes[0x100..0x100 + b"ORR_MESH_MATERIAL_V1".len()].copy_from_slice(b"ORR_MESH_MATERIAL_V1");
+    assert!(super::validate_runtime_with_material(&bytes, false, false, false, true).is_err());
+
+    let mut bytes = test_runtime_with_material();
+    bytes[0x1fc..0x200].copy_from_slice(&0x100u32.to_le_bytes());
+    assert!(super::validate_runtime_with_material(&bytes, false, false, false, true).is_err());
+
+    let mut bytes = test_runtime_with_material();
+    bytes[0x1f8..0x1fc].copy_from_slice(&8u32.to_le_bytes());
+    assert!(super::validate_runtime_with_material(&bytes, false, false, false, true).is_err());
+
+    super::validate_runtime_with_material(&test_runtime(), false, false, false, false).unwrap();
+}
+
+#[test]
+fn camera_sidecar_with_another_graph_revision_is_refused_before_staging() {
+    let (temporary, scene, _runtime, checksum) = fixture();
+    let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+    add_camera(&scene, [revision[0].wrapping_add(1); 32]);
+    let camera_runtime = temporary.path().join("camera-player.exe");
+    fs::write(&camera_runtime, test_runtime_with_camera()).unwrap();
+    let destination = temporary.path().join("bundle");
+
+    assert!(export(&scene, checksum, &destination, &camera_runtime).is_err());
+    assert!(!destination.exists());
 }

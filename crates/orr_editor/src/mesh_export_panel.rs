@@ -51,7 +51,7 @@ impl Panel {
             .default_width(560.0)
             .vscroll(true)
             .show(context, |ui| {
-                ui.label("Exports the saved MeshNavigation scene and optional saved agent-art sidecar.");
+                ui.label("Exports the saved MeshNavigation scene and optional camera, agent-art, and mesh-props sidecars.");
                 ui.label("Choose a trusted local mesh player executable. The executable is validated and copied, never run by the editor.");
                 if let Some(reason) = blocked {
                     ui.label(reason);
@@ -99,6 +99,9 @@ impl Panel {
                     }
                     if let Some(props_sha256) = &receipt.props_sha256 {
                         ui.label(format!("Mesh props sidecar SHA-256: {props_sha256}"));
+                    }
+                    if let Some(camera_sha256) = &receipt.camera_sha256 {
+                        ui.label(format!("Mesh camera sidecar SHA-256: {camera_sha256}"));
                     }
                     ui.label(format!("Mesh player SHA-256: {}", receipt.runtime_sha256));
                     ui.label(format!("Scene copy: {}", receipt.scene.display()));
@@ -279,6 +282,7 @@ fn source_matches(
 fn saved_sidecars_match(scene: &std::path::Path, receipt: &crate::mesh_export::Receipt) -> bool {
     matches!(crate::mesh_art::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.sidecar_sha256)
         && matches!(crate::mesh_props::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.props_sha256)
+        && matches!(crate::mesh_camera_store::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.camera_sha256)
 }
 
 fn completion_metadata_matches(

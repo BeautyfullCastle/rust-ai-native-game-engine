@@ -223,6 +223,8 @@ pub struct EditorApp {
     pub navigation: crate::navigation_panel::NavigationPanel,
     #[cfg(feature="mesh-navigation")]
     pub mesh_navigation: crate::mesh_navigation::Panel,
+    #[cfg(feature = "mesh-navigation")]
+    mesh_camera: crate::mesh_camera_panel::Panel,
     #[cfg(feature="mesh-export")]
     mesh_export: crate::mesh_export_panel::Panel,
     #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
@@ -257,7 +259,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -358,7 +360,7 @@ impl EditorApp {
             || self.editor.in_gesture() || self.editor.erp_status().is_some() {
             return Some("Mesh workspace changes require an idle local Physics or MeshNavigation editor without an ERP listener".into());
         }
-        if self.editor.is_dirty() || self.mesh_navigation.has_unplaced_draft() {
+        if self.editor.is_dirty() || self.mesh_navigation.has_unplaced_draft() || self.mesh_camera.dirty() {
             return Some("Save or explicitly undo/discard scene, unplaced mesh, agent art and prop changes before changing mesh workspaces".into());
         }
         if self.package_work_pending() || self.shot.is_some() || self.remote_capture.is_some()
@@ -408,6 +410,7 @@ impl EditorApp {
             let original = self.editor.mesh_workspace_source_stamp()?;
             let editor = crate::mesh_workspace::prepare(path, intent)?;
             let mut replacement = Self::new(editor, self.render_state.clone());
+            replacement.mesh_camera.sync(&mut replacement.editor);
             replacement.mesh_navigation.sync(&replacement.editor);
             replacement.viewport_hdr_disabled = self.viewport_hdr_disabled;
             if let Some(blocked) = self.mesh_workspace_blocker() { return Err(blocked); }
@@ -437,7 +440,7 @@ impl EditorApp {
             return Some("Finish the content package operation before changing projects".into());
         }
         #[cfg(feature="mesh-navigation")]
-        if self.mesh_navigation.art_dirty() {
+        if self.mesh_navigation.art_dirty() || self.mesh_camera.dirty() {
             return Some("Save or explicitly discard agent art and prop changes before changing projects".into());
         }
         if (!self.editor.game().is_room() && self.editor.game() != crate::game::EditorGame::PhysGame) || !self.editor.spec().is_local()
@@ -588,8 +591,9 @@ impl eframe::App for EditorApp {
         self.poll_windows_project();
         #[cfg(feature="mesh-navigation")]
         {
+            self.mesh_camera.sync(&mut self.editor);
             self.mesh_navigation.sync(&self.editor);
-            let blocker = self.mesh_navigation.play_blocker(&self.editor);
+            let blocker = self.mesh_navigation.play_blocker(&self.editor).or_else(|| self.mesh_camera.play_blocker(&self.editor));
             self.editor.set_mesh_navigation_blocker(blocker);
         }
         #[cfg(feature="navigation")]
@@ -681,7 +685,7 @@ impl eframe::App for EditorApp {
         }
         #[cfg(feature="mesh-export")]
         {
-            let blocked = self.mesh_authoring_blocker().or_else(|| self.mesh_navigation.play_blocker(&self.editor));
+            let blocked = self.mesh_authoring_blocker().or_else(|| self.mesh_navigation.play_blocker(&self.editor)).or_else(|| self.mesh_camera.play_blocker(&self.editor));
             self.mesh_export.show(&ctx, &mut self.editor, blocked.as_deref());
         }
         #[cfg(feature = "animated-models")]
@@ -720,8 +724,9 @@ impl EditorApp {
         let ctx = ui.ctx().clone();
         self.frames += 1;
         self.editor.pump();
+        self.mesh_camera.sync(&mut self.editor);
         self.mesh_navigation.sync(&self.editor);
-        let blocker = self.mesh_navigation.play_blocker(&self.editor);
+        let blocker = self.mesh_navigation.play_blocker(&self.editor).or_else(|| self.mesh_camera.play_blocker(&self.editor));
         self.editor.set_mesh_navigation_blocker(blocker);
         egui::Panel::top("mesh_player_controls").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -877,7 +882,7 @@ impl EditorApp {
             ui.separator();
             let playing = self.editor.timeline().is_some_and(|t| t.playing);
             #[cfg(feature="mesh-navigation")]
-            let start_blocker = if self.editor.mode() != Mode::Play { self.mesh_navigation.play_blocker(&self.editor) } else { None };
+            let start_blocker = if self.editor.mode() != Mode::Play { self.mesh_navigation.play_blocker(&self.editor).or_else(|| self.mesh_camera.play_blocker(&self.editor)) } else { None };
             #[cfg(not(feature="mesh-navigation"))]
             let start_blocker: Option<String> = None;
             if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_PLAY)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable")).clicked() {
@@ -1046,6 +1051,7 @@ impl EditorApp {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             egui::ScrollArea::vertical().id_salt("mesh_navigation_inspector").auto_shrink([false, false]).show(ui, |ui| {
                 self.mesh_navigation.show(ui, &mut self.editor);
+                self.mesh_camera.show(ui, &mut self.editor);
             });
             return;
         }
@@ -1726,7 +1732,7 @@ impl EditorApp {
                 return;
             }
             #[cfg(feature="mesh-navigation")]
-            if dialog.kind != DialogKind::SaveAs && self.mesh_navigation.has_unplaced_draft() {
+            if dialog.kind != DialogKind::SaveAs && (self.mesh_navigation.has_unplaced_draft() || self.mesh_camera.dirty()) {
                 self.editor.error("Apply, save or explicitly discard mesh drafts, agent art and prop changes before changing scenes");
                 self.ui.dialog = Some(dialog);
                 return;

@@ -299,6 +299,35 @@ fn mesh_view(harness: &Harness<'_, EditorApp>) -> orr_remote::mesh_navigation::M
     mesh_from_view(snapshot.predicted()).expect("admitted mesh pin decodes")
 }
 
+fn drag_viewport_camera(harness: &mut Harness<'_, EditorApp>, delta: egui::Vec2) {
+    let viewport = harness
+        .state()
+        .ui
+        .viewport_rect
+        .expect("EditorApp has a production 3D viewport rectangle");
+    let start = viewport.center();
+    harness.event(Event::PointerMoved(start));
+    harness.step();
+    harness.event(Event::PointerButton {
+        pos: start,
+        button: PointerButton::Secondary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    harness.step();
+    for step in 1..=4 {
+        harness.event(Event::PointerMoved(start + delta * (step as f32 / 4.0)));
+        harness.step();
+    }
+    harness.event(Event::PointerButton {
+        pos: start + delta,
+        button: PointerButton::Secondary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    settle(harness);
+}
+
 fn world_point_for_height(graph: &StaticMeshGraph, y_raw: i64) -> [f32; 3] {
     let triangle = graph
         .triangles()
@@ -488,26 +517,33 @@ fn export_if_requested(
         "{}.mesh-art.json",
         fixture.scene.file_name().unwrap().to_string_lossy()
     );
+    let camera_name = format!(
+        "{}.mesh-camera.json",
+        fixture.scene.file_name().unwrap().to_string_lossy()
+    );
     let props_name = format!(
         "{}.mesh-props.json",
         fixture.scene.file_name().unwrap().to_string_lossy()
     );
     let sidecar_copy = export.output.join(&sidecar_name);
     let props_copy = export.output.join(&props_name);
+    let camera_copy = export.output.join(&camera_name);
     let runtime_copy = export.output.join("orr_mesh_player.exe");
     assert!(
         scene_copy.is_file()
             && sidecar_copy.is_file()
             && props_copy.is_file()
+            && camera_copy.is_file()
             && runtime_copy.is_file()
     );
     assert_eq!(
         fs::read_dir(&export.output).unwrap().count(),
-        5,
-        "rotation bundle contains scene, both sidecars, player, and manifest"
+        6,
+        "rotation bundle contains scene, art, props, camera, player, and manifest"
     );
     assert_eq!(manifest["sidecar"]["name"], sidecar_name);
     assert_eq!(manifest["props"]["name"], props_name);
+    assert_eq!(manifest["camera"]["name"], camera_name);
     assert_eq!(
         manifest["scene"]["name"].as_str(),
         fixture.scene.file_name().unwrap().to_str()
@@ -531,10 +567,23 @@ fn export_if_requested(
         props_bytes,
         fs::read(format!("{}.mesh-props.json", fixture.scene.display())).unwrap()
     );
+    let camera_bytes = fs::read(&camera_copy).unwrap();
+    let runtime_bytes = fs::read(&runtime_copy).unwrap();
+    assert!(runtime_bytes
+        .windows(b"ORR_MESH_MATERIAL_V1".len())
+        .any(|window| window == b"ORR_MESH_MATERIAL_V1"));
+    assert!(runtime_bytes
+        .windows(b".orrmat".len())
+        .any(|window| window == b".orrmat"));
+    assert_eq!(
+        camera_bytes,
+        fs::read(format!("{}.mesh-camera.json", fixture.scene.display())).unwrap()
+    );
     for (record, path) in [
         (&manifest["scene"], &scene_copy),
         (&manifest["sidecar"], &sidecar_copy),
         (&manifest["props"], &props_copy),
+        (&manifest["camera"], &camera_copy),
         (&manifest["runtime"], &runtime_copy),
     ] {
         let bytes = fs::read(path).unwrap();
@@ -547,6 +596,7 @@ fn export_if_requested(
         "scene_sha256": sha256_hex(&fs::read(scene_copy).unwrap()),
         "sidecar_sha256": sha256_hex(&sidecar_bytes),
         "props_sha256": sha256_hex(&props_bytes),
+        "camera_sha256": sha256_hex(&camera_bytes),
         "runtime_sha256": sha256_hex(&fs::read(runtime_copy).unwrap()),
     })
 }
@@ -701,6 +751,25 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
     click(&mut harness, "Redo agent art");
     let redone_agent_art_pixels = viewport_pixels(&mut harness, "redone-agent-art");
     assert!(changed_pixel_count(&rotated_agent_art_pixels, &redone_agent_art_pixels) < 20);
+    let untinted_agent_art_pixels = viewport_pixels(&mut harness, "untinted-agent-art");
+    let agent_art_tint = [0.25, 0.8, 0.35, 1.0];
+    for (label, value) in [
+        ("Art tint R", "0.25"),
+        ("Art tint G", "0.8"),
+        ("Art tint B", "0.35"),
+        ("Art tint A", "1"),
+    ] {
+        type_field(&mut harness, label, value);
+    }
+    click(&mut harness, "Apply agent art");
+    let tinted_agent_art_pixels = viewport_pixels(&mut harness, "tinted-agent-art");
+    assert!(changed_pixel_count(&untinted_agent_art_pixels, &tinted_agent_art_pixels) > 20);
+    click(&mut harness, "Undo agent art");
+    let undone_agent_art_tint_pixels = viewport_pixels(&mut harness, "undone-agent-art-tint");
+    assert!(changed_pixel_count(&untinted_agent_art_pixels, &undone_agent_art_tint_pixels) < 20);
+    click(&mut harness, "Redo agent art");
+    let redone_agent_art_tint_pixels = viewport_pixels(&mut harness, "redone-agent-art-tint");
+    assert!(changed_pixel_count(&tinted_agent_art_pixels, &redone_agent_art_tint_pixels) < 20);
     click(&mut harness, "Save agent art");
 
     if harness.query_by_label("Prop position X").is_none() {
@@ -752,6 +821,25 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
     click(&mut harness, "Redo prop edit");
     let redone_prop_pixels = viewport_pixels(&mut harness, "redone-prop");
     assert!(changed_pixel_count(&rotated_prop_pixels, &redone_prop_pixels) < 20);
+    let untinted_prop_pixels = viewport_pixels(&mut harness, "untinted-prop");
+    let prop_tint = [0.9, 0.2, 0.6, 1.0];
+    for (label, value) in [
+        ("Prop tint R", "0.9"),
+        ("Prop tint G", "0.2"),
+        ("Prop tint B", "0.6"),
+        ("Prop tint A", "1"),
+    ] {
+        type_field(&mut harness, label, value);
+    }
+    click(&mut harness, "Update selected prop");
+    let tinted_prop_pixels = viewport_pixels(&mut harness, "tinted-prop");
+    assert!(changed_pixel_count(&untinted_prop_pixels, &tinted_prop_pixels) > 20);
+    click(&mut harness, "Undo prop edit");
+    let undone_prop_tint_pixels = viewport_pixels(&mut harness, "undone-prop-tint");
+    assert!(changed_pixel_count(&untinted_prop_pixels, &undone_prop_tint_pixels) < 20);
+    click(&mut harness, "Redo prop edit");
+    let redone_prop_tint_pixels = viewport_pixels(&mut harness, "redone-prop-tint");
+    assert!(changed_pixel_count(&tinted_prop_pixels, &redone_prop_tint_pixels) < 20);
     click(&mut harness, "Save props");
 
     let art_sidecar = PathBuf::from(format!("{}.mesh-art.json", fixture.scene.display()));
@@ -768,6 +856,11 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
     let prop_quaternion = props_document["props"][0]["art"]["rotation"]
         .as_array()
         .unwrap();
+    assert_eq!(art_document["tint"], serde_json::json!(agent_art_tint));
+    assert_eq!(
+        props_document["props"][0]["art"]["tint"],
+        serde_json::json!(prop_tint)
+    );
     assert_eq!(agent_art_quaternion.len(), 4);
     assert_eq!(prop_quaternion.len(), 4);
     for quaternion in [agent_art_quaternion, prop_quaternion] {
@@ -777,10 +870,147 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
             .sum::<f64>();
         assert!((squared_norm - 1.0).abs() < 1e-5);
     }
+
+    if harness.query_by_label("Game camera target X").is_none() {
+        click(&mut harness, "Mesh game camera");
+    }
+    click(&mut harness, "Capture viewport as game camera");
+    assert!(harness
+        .query_by_label("Viewport pose captured in the form; Apply and Save remain explicit.")
+        .is_some());
+    for (label, value) in [
+        ("Game camera target X", "2"),
+        ("Game camera target Y", "1"),
+        ("Game camera target Z", "1"),
+        ("Game camera yaw (degrees)", "45"),
+        ("Game camera pitch (degrees)", "35"),
+        ("Game camera distance", "9"),
+        ("Game camera field of view (degrees)", "40"),
+        ("Game camera near plane", "0.05"),
+        ("Game camera far plane", "200"),
+    ] {
+        type_field(&mut harness, label, value);
+    }
+    click(&mut harness, "Perspective game camera");
+    click(&mut harness, "Apply game camera");
+    let perspective_camera = harness
+        .state()
+        .editor
+        .presentation_camera3d((900, 850))
+        .expect("valid authored perspective camera is presented");
+    assert_eq!(perspective_camera.target, [2.0, 1.0, 1.0]);
+    match perspective_camera.projection {
+        orr_render::camera3d::Projection::Perspective { fov_y, near, far } => {
+            assert!((fov_y.to_degrees() - 40.0).abs() < 1.0e-4);
+            assert!((near - 0.05).abs() < 1.0e-6);
+            assert_eq!(far, 200.0);
+        }
+        _ => panic!("authored perspective camera must use perspective projection"),
+    }
+    let perspective_camera_pixels = viewport_pixels(&mut harness, "authored-camera-perspective");
+    assert!(harness
+        .get_by_label(LBL_PLAY)
+        .accesskit_node()
+        .is_disabled());
+
+    type_field(&mut harness, "Game camera orthographic half height", "3");
+    click(&mut harness, "Orthographic game camera");
+    click(&mut harness, "Apply game camera");
+    let orthographic_camera = harness
+        .state()
+        .editor
+        .presentation_camera3d((900, 850))
+        .expect("valid authored orthographic camera is presented");
+    assert_eq!(orthographic_camera.target, [2.0, 1.0, 1.0]);
+    match orthographic_camera.projection {
+        orr_render::camera3d::Projection::Orthographic {
+            half_height,
+            near,
+            far,
+        } => {
+            assert!((half_height - 3.0).abs() < 1.0e-5);
+            assert!((near - 0.05).abs() < 1.0e-6);
+            assert_eq!(far, 200.0);
+        }
+        _ => panic!("authored orthographic camera must use orthographic projection"),
+    }
+    let orthographic_camera_pixels = viewport_pixels(&mut harness, "authored-camera-orthographic");
+    assert!(changed_pixel_count(&perspective_camera_pixels, &orthographic_camera_pixels) > 20);
+    click(&mut harness, "Undo game camera");
+    let undone_camera_pixels = viewport_pixels(&mut harness, "undone-camera-projection");
+    assert!(changed_pixel_count(&perspective_camera_pixels, &undone_camera_pixels) < 20);
+    let undone_camera = harness
+        .state()
+        .editor
+        .presentation_camera3d((900, 850))
+        .unwrap();
+    assert!(matches!(
+        undone_camera.projection,
+        orr_render::camera3d::Projection::Perspective { .. }
+    ));
+    click(&mut harness, "Redo game camera");
+    let redone_camera_pixels = viewport_pixels(&mut harness, "redone-camera-projection");
+    assert!(changed_pixel_count(&orthographic_camera_pixels, &redone_camera_pixels) < 20);
+    let redone_camera = harness
+        .state()
+        .editor
+        .presentation_camera3d((900, 850))
+        .unwrap();
+    assert!(matches!(
+        redone_camera.projection,
+        orr_render::camera3d::Projection::Orthographic { .. }
+    ));
+    click(&mut harness, "Save game camera");
+    let camera_sidecar = PathBuf::from(format!("{}.mesh-camera.json", fixture.scene.display()));
+    let camera_bytes = fs::read(&camera_sidecar).expect("game camera saved as a sidecar");
+    let camera_document: serde_json::Value = serde_json::from_slice(&camera_bytes).unwrap();
+    assert_eq!(
+        camera_document["scene_filename"],
+        fixture.scene.file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        camera_document["camera"]["target"],
+        serde_json::json!([2.0, 1.0, 1.0])
+    );
+    assert!(
+        (camera_document["camera"]["yaw"].as_f64().unwrap() - 45.0f64.to_radians()).abs() < 1.0e-6
+    );
+    assert!(
+        (camera_document["camera"]["pitch"].as_f64().unwrap() - 35.0f64.to_radians()).abs()
+            < 1.0e-6
+    );
+    assert_eq!(camera_document["camera"]["distance"], 9.0);
+    assert_eq!(camera_document["camera"]["fov_y_degrees"], 40.0);
+    assert_eq!(
+        camera_document["camera"]["projection"]["type"],
+        "orthographic"
+    );
+    assert_eq!(camera_document["camera"]["projection"]["half_height"], 3.0);
+    assert_eq!(camera_document["camera"]["near"], 0.05);
+    assert_eq!(camera_document["camera"]["far"], 200.0);
+
+    drag_viewport_camera(&mut harness, egui::vec2(36.0, 24.0));
+    let navigated_camera = harness
+        .state()
+        .editor
+        .presentation_camera3d((900, 850))
+        .unwrap();
+    assert_ne!(navigated_camera.eye, redone_camera.eye);
+    click(&mut harness, "Reset viewport to game camera");
+    let reset_camera = harness
+        .state()
+        .editor
+        .presentation_camera3d((900, 850))
+        .unwrap();
+    assert_eq!(reset_camera.eye, redone_camera.eye);
+    assert_eq!(reset_camera.target, redone_camera.target);
+    assert_eq!(reset_camera.projection, redone_camera.projection);
+
     let placed_pixels = viewport_pixels(&mut harness, "saved-art-and-props");
     assert_eq!(mesh_view(&harness).pin, placed_view.pin);
     let host_checksum_after_rotation = harness.state().editor.checksum();
     assert_eq!(host_checksum_after_rotation, placed_checksum);
+    assert_eq!(fs::read(&camera_sidecar).unwrap(), camera_bytes);
     assert_eq!(
         harness.state().editor.history().entries.len(),
         original_history_len + 1,
@@ -824,11 +1054,41 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
     assert_eq!(reopened_view.graph.revision(), placed_view.graph.revision());
     assert_eq!(reopened_view.agent.spec, placed_view.agent.spec);
     assert_eq!(reopened_view.pin, placed_view.pin);
+    let reopened_camera = reopened
+        .state()
+        .editor
+        .presentation_camera3d((900, 850))
+        .expect("saved mesh camera is admitted after fresh reopen");
+    assert_eq!(reopened_camera.target, [2.0, 1.0, 1.0]);
+    match reopened_camera.projection {
+        orr_render::camera3d::Projection::Orthographic { half_height, .. } => {
+            assert!((half_height - 3.0).abs() < 1.0e-5);
+        }
+        _ => panic!("fresh reopen retains the saved orthographic camera"),
+    }
     let reopened_pixels = viewport_pixels(&mut reopened, "fresh-physics-reopen");
     assert!(changed_pixel_count(&placed_pixels, &reopened_pixels) < 20);
 
+    drag_viewport_camera(&mut reopened, egui::vec2(28.0, 16.0));
+    assert_ne!(
+        reopened
+            .state()
+            .editor
+            .presentation_camera3d((900, 850))
+            .unwrap()
+            .eye,
+        reopened_camera.eye
+    );
     click(&mut reopened, LBL_PLAY);
     wait_for_playing(&mut reopened);
+    let play_camera = reopened
+        .state()
+        .editor
+        .presentation_camera3d((900, 850))
+        .unwrap();
+    assert_eq!(play_camera.eye, reopened_camera.eye);
+    assert_eq!(play_camera.target, reopened_camera.target);
+    assert_eq!(play_camera.projection, reopened_camera.projection);
     click(&mut reopened, LBL_PAUSE);
     reopened.state_mut().editor.seek(0);
     settle(&mut reopened);
@@ -847,6 +1107,7 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
     assert_eq!(fs::read(&fixture.scene).unwrap(), saved_scene);
     assert_eq!(fs::read(&art_sidecar).unwrap(), art_bytes);
     assert_eq!(fs::read(&props_sidecar).unwrap(), props_bytes);
+    assert_eq!(fs::read(&camera_sidecar).unwrap(), camera_bytes);
     click(&mut reopened, LBL_STOP);
     assert_eq!(reopened.state().editor.mode(), Mode::Edit);
     assert_eq!(reopened.state().editor.checksum(), placed_checksum);
@@ -897,6 +1158,51 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
         "props_sidecar_path": props_sidecar,
         "props_sidecar_sha256": sha256_hex(&props_bytes),
     });
+    let camera_receipt = serde_json::json!({
+        "camera_sidecar_path": camera_sidecar,
+        "camera_sidecar_sha256": sha256_hex(&camera_bytes),
+        "camera_document": camera_document,
+        "camera_pose_and_projection_saved": true,
+        "camera_private_undo_redo_verified": true,
+        "camera_dirty_play_blocked": true,
+        "camera_reset_viewport_verified": true,
+        "play_resets_transient_camera_to_authored_pose": true,
+        "camera_sidecar_unchanged_until_explicit_save": true,
+        "fresh_reopen_camera_matches": true,
+        "fresh_reopen_camera_pixel_diff": changed_pixel_count(&placed_pixels, &reopened_pixels),
+    });
+    let material_receipt = serde_json::json!({
+        "agent_art_tint_rgba": agent_art_tint,
+        "agent_art_tint_pixel_diff": changed_pixel_count(
+            &untinted_agent_art_pixels,
+            &tinted_agent_art_pixels
+        ),
+        "agent_art_tint_undo_pixels_match": changed_pixel_count(
+            &untinted_agent_art_pixels,
+            &undone_agent_art_tint_pixels
+        ) < 20,
+        "agent_art_tint_redo_pixels_match": changed_pixel_count(
+            &tinted_agent_art_pixels,
+            &redone_agent_art_tint_pixels
+        ) < 20,
+        "prop_tint_rgba": prop_tint,
+        "prop_tint_pixel_diff": changed_pixel_count(&untinted_prop_pixels, &tinted_prop_pixels),
+        "prop_tint_undo_pixels_match": changed_pixel_count(
+            &untinted_prop_pixels,
+            &undone_prop_tint_pixels
+        ) < 20,
+        "prop_tint_redo_pixels_match": changed_pixel_count(
+            &tinted_prop_pixels,
+            &redone_prop_tint_pixels
+        ) < 20,
+        "material_tints_saved_and_reopened": true,
+        "fresh_reopen_material_pixels_match": changed_pixel_count(
+            &placed_pixels,
+            &reopened_pixels
+        ) < 20,
+        "source_package_unchanged": true,
+        "material_runtime_marker": "ORR_MESH_MATERIAL_V1",
+    });
     let mut receipt = serde_json::json!({
         "artifact_root": fixture.root,
         "model_package": fixture.package,
@@ -929,6 +1235,14 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
         .as_object_mut()
         .unwrap()
         .extend(rotation_receipt.as_object().unwrap().clone());
+    receipt
+        .as_object_mut()
+        .unwrap()
+        .extend(camera_receipt.as_object().unwrap().clone());
+    receipt
+        .as_object_mut()
+        .unwrap()
+        .extend(material_receipt.as_object().unwrap().clone());
     fs::write(
         fixture.capture_directory.join("acceptance.json"),
         serde_json::to_vec_pretty(&receipt).unwrap(),

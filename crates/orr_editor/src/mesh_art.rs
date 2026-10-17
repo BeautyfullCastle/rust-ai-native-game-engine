@@ -37,6 +37,8 @@ pub(crate) struct Snapshot {
     license_sha256: String,
     license_text: String,
     model: Arc<StaticModel>,
+    render_model: Arc<StaticModel>,
+    tint: [f32; 4],
     offset: [f32; 3],
     scale: f32,
     rotation: [f32; 4],
@@ -57,6 +59,11 @@ struct Sidecar {
     license_sha256: String,
     license_text: String,
     model: ModelSource,
+    #[serde(
+        default = "crate::mesh_material::identity",
+        skip_serializing_if = "crate::mesh_material::is_identity"
+    )]
+    tint: [f32; 4],
     offset: [f32; 3],
     scale: f32,
     #[serde(
@@ -150,6 +157,7 @@ impl Snapshot {
         if checked_directory(&package_root, "package root")? != package_root {
             return Err("model package root changed while its snapshot was prepared".into());
         }
+        let model = Arc::new(model);
         let snapshot = Self {
             graph_revision,
             manifest: locked.manifest,
@@ -160,7 +168,9 @@ impl Snapshot {
             license: license.to_owned(),
             license_sha256,
             license_text: license_text.to_owned(),
-            model: Arc::new(model),
+            render_model: Arc::clone(&model),
+            model,
+            tint: crate::mesh_material::identity(),
             offset: [0.0; 3],
             scale: 1.0,
             rotation: identity_rotation(),
@@ -197,6 +207,21 @@ impl Snapshot {
         self.rotation
     }
 
+    pub(crate) fn tint(&self) -> [f32; 4] {
+        self.tint
+    }
+
+    pub(crate) fn with_tint(mut self, tint: [f32; 4]) -> Result<Self, String> {
+        self.tint = crate::mesh_material::validate(tint)?;
+        self.render_model = if crate::mesh_material::is_identity(&self.tint) {
+            Arc::clone(&self.model)
+        } else {
+            Arc::new(crate::mesh_material::tinted_model(&self.model, self.tint)?)
+        };
+        self.placement([orr_fp::FP::ZERO; 3])?;
+        Ok(self)
+    }
+
     pub(crate) fn with_rotation(mut self, rotation: [f32; 4]) -> Result<Self, String> {
         self.rotation = crate::mesh_rotation::validate_normalize(rotation)?;
         self.placement([orr_fp::FP::ZERO; 3])?;
@@ -219,10 +244,10 @@ impl Snapshot {
             rotation: self.rotation,
         };
         instance
-            .validate_for(&self.model)
+            .validate_for(&self.render_model)
             .map_err(|error| format!("mesh art placement: {error}"))?;
         Ok(SceneModel {
-            model: Arc::clone(&self.model),
+            model: Arc::clone(&self.render_model),
             instance,
         })
     }
@@ -248,6 +273,7 @@ impl Snapshot {
     fn sidecar_bytes(&self, scene_filename: &str) -> Result<Vec<u8>, String> {
         validate_leaf(scene_filename, "scene filename")?;
         validate_source_budget(self.model.source())?;
+        crate::mesh_material::validate(self.tint)?;
         let model_bytes = self.model.to_bytes().map_err(|error| error.to_string())?;
         if digest(&model_bytes) != self.cooked_sha256 {
             return Err("embedded cooked model digest changed".into());
@@ -276,6 +302,7 @@ impl Snapshot {
             license_sha256: self.license_sha256.clone(),
             license_text: self.license_text.clone(),
             model: self.model.source().clone(),
+            tint: self.tint,
             offset: self.offset,
             scale: self.scale,
             rotation: self.rotation,
@@ -311,6 +338,8 @@ impl Snapshot {
         validate_source_budget(&sidecar.model)?;
         let model =
             StaticModel::new(sidecar.model).map_err(|error| format!("embedded model: {error}"))?;
+        let tint = crate::mesh_material::validate(sidecar.tint)?;
+        let model = Arc::new(model);
         let model_bytes = model.to_bytes().map_err(|error| error.to_string())?;
         if model_bytes.len() > MAX_SIDE_CAR_BYTES
             || digest(&model_bytes) != sidecar.cooked_sha256
@@ -322,6 +351,11 @@ impl Snapshot {
         {
             return Err("embedded model exceeds limits or has external dependencies".into());
         }
+        let render_model = if crate::mesh_material::is_identity(&tint) {
+            Arc::clone(&model)
+        } else {
+            Arc::new(crate::mesh_material::tinted_model(&model, tint)?)
+        };
         let snapshot = Self {
             graph_revision: sidecar.graph_revision,
             manifest: sidecar.manifest,
@@ -332,7 +366,9 @@ impl Snapshot {
             license: sidecar.license,
             license_sha256: sidecar.license_sha256,
             license_text: sidecar.license_text,
-            model: Arc::new(model),
+            render_model,
+            model,
+            tint,
             offset: sidecar.offset,
             scale: sidecar.scale,
             rotation: sidecar.rotation,
@@ -705,7 +741,7 @@ fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|error| format!("canonicalize {label}: {error}"))
 }
 
-fn checked_scene(scene: &Path) -> Result<(PathBuf, String), String> {
+pub(crate) fn checked_scene(scene: &Path) -> Result<(PathBuf, String), String> {
     validate_absolute_path(scene, "scene")?;
     let parent = scene.parent().ok_or("scene needs a parent directory")?;
     let parent = checked_directory(parent, "scene parent")?;
@@ -726,7 +762,7 @@ fn checked_scene(scene: &Path) -> Result<(PathBuf, String), String> {
     Ok((canonical_scene, filename.to_owned()))
 }
 
-fn recheck_scene(scene: &Path) -> Result<(), String> {
+pub(crate) fn recheck_scene(scene: &Path) -> Result<(), String> {
     let parent = scene.parent().ok_or("scene parent missing")?;
     if checked_directory(parent, "scene parent")? != parent {
         return Err("scene parent changed during mesh art save".into());
@@ -761,7 +797,11 @@ fn read_package_file(root: &Path, relative: &Path, limit: u64) -> Result<Vec<u8>
     read_regular_file(&path, limit, "declared package file")
 }
 
-fn read_optional_file(path: &Path, limit: u64, label: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read_optional_file(
+    path: &Path,
+    limit: u64,
+    label: &str,
+) -> Result<Option<Vec<u8>>, String> {
     match fs::symlink_metadata(path) {
         Ok(_) => read_regular_file(path, limit, label).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -929,14 +969,14 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn validate_expected(expected: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_expected(expected: Option<&str>) -> Result<(), String> {
     if expected.is_some_and(|value| !valid_digest(value)) {
         return Err("expected mesh art sidecar digest must be lowercase SHA-256".into());
     }
     Ok(())
 }
 
-fn digest(bytes: &[u8]) -> String {
+pub(crate) fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

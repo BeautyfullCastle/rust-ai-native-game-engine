@@ -228,6 +228,54 @@ fn prop_rotation_fields_round_trip_through_update_and_history() {
 }
 
 #[test]
+fn prop_tint_fields_round_trip_through_update_history_and_drag() {
+    let initial_tint = [0.4, 0.6, 0.8, 0.5];
+    let updated_tint = [0.2, 0.3, 0.4, 1.0];
+    let mut panel = Panel::default();
+    let mut initial_document = document(1);
+    initial_document.props[0].art = initial_document.props[0]
+        .art
+        .clone()
+        .with_tint(initial_tint)
+        .unwrap();
+    panel.reset_history(initial_document, Some(0));
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    assert_eq!(super::parse_tint(&panel.tint).unwrap(), initial_tint);
+    panel.position = ["2".into(), "0".into(), "3".into()];
+    panel.tint = updated_tint.map(|value| value.to_string());
+    panel.update_selected();
+    assert_eq!(panel.document.props[0].art.tint(), updated_tint);
+    panel.undo();
+    assert_eq!(panel.document.props[0].art.tint(), initial_tint);
+    panel.redo();
+    assert_eq!(panel.document.props[0].art.tint(), updated_tint);
+
+    let original = panel.document.clone();
+    panel.gesture = Some(super::PropGesture {
+        original: original.clone(),
+        selected: 1,
+        drag: crate::mesh_prop_view::Drag::new(
+            &orr_render::Camera3D::orthographic([0.0, 5.0, 5.0], [0.0; 3], 4.0),
+            [0.0, 0.0],
+            (100, 100),
+            [2.0, 0.0, 3.0],
+        )
+        .unwrap(),
+    });
+    panel.document.props[0].art = panel.document.props[0]
+        .art
+        .clone()
+        .with_transform([4.0, 0.0, 5.0], 1.0)
+        .unwrap();
+    assert_eq!(panel.document.props[0].art.tint(), updated_tint);
+    panel.cancel_gesture();
+    assert_eq!(panel.document.props[0].art.tint(), updated_tint);
+    assert!(super::parse_tint(&["1".into(), "1.1".into(), "1".into(), "1".into()]).is_err());
+}
+
+#[test]
 fn prop_history_tracks_saved_state_and_keeps_a_bounded_cursor() {
     let mut panel = Panel::default();
     assert!(!panel.dirty());

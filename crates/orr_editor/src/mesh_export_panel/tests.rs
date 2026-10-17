@@ -22,6 +22,7 @@ fn receipt(request: &Request) -> crate::mesh_export::Receipt {
         scene_sha256: "scene-hash".into(),
         sidecar_sha256: None,
         props_sha256: None,
+        camera_sha256: None,
         runtime_sha256: "runtime-hash".into(),
     }
 }
@@ -35,6 +36,18 @@ fn completed_export_is_not_current_after_either_saved_sidecar_changes() {
     assert!(saved_sidecars_match(&scene, &receipt));
     let art = crate::mesh_art::sidecar_path(&scene).unwrap();
     let props = crate::mesh_props::sidecar_path(&scene).unwrap();
+    let camera = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
+    let camera_document = crate::mesh_camera::Document::from_orbit(
+        orr_render::camera3d::OrbitCamera::new([1.0, 2.0, 3.0], 0.4, 0.2, 8.0),
+    )
+    .unwrap();
+    crate::mesh_camera_store::save(&scene, Some(&camera_document), None, [7; 32]).unwrap();
+    receipt.camera_sha256 = crate::mesh_camera_store::sidecar_stamp(&scene).unwrap();
+    assert!(saved_sidecars_match(&scene, &receipt));
+    std::fs::write(&camera, b"newer camera").unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.camera_sha256 = crate::mesh_camera_store::sidecar_stamp(&scene).unwrap();
+    assert!(saved_sidecars_match(&scene, &receipt));
     std::fs::write(&art, b"saved art").unwrap();
     assert!(!saved_sidecars_match(&scene, &receipt));
     receipt.sidecar_sha256 = crate::mesh_art::sidecar_stamp(&scene).unwrap();

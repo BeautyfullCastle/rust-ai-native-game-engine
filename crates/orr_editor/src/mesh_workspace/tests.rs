@@ -109,6 +109,24 @@ fn create_refuses_existing_scene_and_art_sidecar_without_overwriting() {
 }
 
 #[test]
+fn create_refuses_orphan_camera_and_props_sidecars_without_creating_a_scene() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    for suffix in [".mesh-camera.json", ".mesh-props.json"] {
+        let scene = root.join(format!("blocked-{suffix}.scene.yaml"));
+        let sidecar = scene.with_file_name(format!(
+            "{}{suffix}",
+            scene.file_name().unwrap().to_str().unwrap()
+        ));
+        let original = b"preserve orphan sidecar";
+        fs::write(&sidecar, original).unwrap();
+        assert!(prepare(&scene, Intent::Create).is_err());
+        assert!(!scene.exists());
+        assert_eq!(fs::read(sidecar).unwrap(), original);
+    }
+}
+
+#[test]
 fn open_rejects_invalid_scene_without_changing_source_bytes() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
