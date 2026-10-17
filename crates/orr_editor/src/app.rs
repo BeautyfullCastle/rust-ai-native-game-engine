@@ -343,6 +343,9 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_authoring_blocker(&self) -> Option<String> {
+        if self.mesh_navigation.prop_gesture_busy() {
+            return Some("Finish or cancel the viewport prop move before changing mesh workspaces or exporting".into());
+        }
         if self.mesh_navigation.art_import_busy() {
             return Some("Finish the raw agent-art import before changing mesh workspaces or exporting".into());
         }
@@ -608,6 +611,12 @@ impl eframe::App for EditorApp {
             // Escape cancels an active drag without changing its inspection
             // target. With no gesture, Escape clears the GUID selection.
             let cancelling_gesture = self.editor.in_gesture();
+            #[cfg(feature="mesh-navigation")]
+            let cancelling_gesture = {
+                let moving = self.mesh_navigation.prop_gesture_busy();
+                self.mesh_navigation.cancel_prop_gesture();
+                cancelling_gesture || moving
+            };
             self.editor.cancel_edit();
             if !cancelling_gesture && ctx.input(|i| i.key_pressed(Key::Escape)) { self.editor.select(None); }
             // Focus loss may hide the physical release. Forget egui's drag
@@ -750,6 +759,8 @@ impl EditorApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        #[cfg(feature="mesh-navigation")]
+        if self.mesh_navigation.prop_gesture_busy() { return; }
         if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
@@ -785,6 +796,8 @@ impl EditorApp {
 
     fn top_bar(&mut self, ui: &mut Ui) {
         let mutable = self.editor.can_mutate() && self.editor.previewing().is_none();
+        #[cfg(feature="mesh-navigation")]
+        let mutable = mutable && !self.mesh_navigation.prop_gesture_busy();
         let live = self.editor.down().is_none();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -1251,9 +1264,15 @@ impl EditorApp {
         let ppp=ui.ctx().pixels_per_point();
         let px=(((rect.width()*ppp).round() as u32).clamp(1,8192),((rect.height()*ppp).round() as u32).clamp(1,8192));
         self.ui.viewport_rect=Some(rect);self.ui.viewport_px=px;
-        if resp.dragged_by(PointerButton::Secondary){let d=resp.drag_delta();self.editor.orbit3d([d.x*ppp,d.y*ppp]);}
-        if resp.dragged_by(PointerButton::Middle){let d=resp.drag_delta();self.editor.pan3d([d.x*ppp,d.y*ppp],px);}
-        if resp.hovered(){let scroll=ui.input(|i|i.smooth_scroll_delta.y);if scroll!=0.0 {self.editor.zoom3d(scroll*0.01);}}
+        #[cfg(feature="mesh-navigation")]
+        let prop_moving = self.mesh_navigation.prop_gesture_busy();
+        #[cfg(not(feature="mesh-navigation"))]
+        let prop_moving = false;
+        if !prop_moving {
+            if resp.dragged_by(PointerButton::Secondary){let delta=resp.drag_delta();self.editor.orbit3d([delta.x*ppp,delta.y*ppp]);}
+            if resp.dragged_by(PointerButton::Middle){let delta=resp.drag_delta();self.editor.pan3d([delta.x*ppp,delta.y*ppp],px);}
+            if resp.hovered(){let scroll=ui.input(|input|input.smooth_scroll_delta.y);if scroll!=0.0 {self.editor.zoom3d(scroll*0.01);}}
+        }
         let camera = match self.editor.presentation_camera3d(px) {
             Ok(camera) => camera,
             Err(error) => {
@@ -1262,6 +1281,26 @@ impl EditorApp {
             }
         };
         let mut frame_drawn = false;
+        #[cfg(feature="mesh-navigation")]
+        let prop_pointer_consumed = {
+            let to_pixel = |position: Pos2| [(position.x - rect.min.x) * ppp, (position.y - rect.min.y) * ppp];
+            let pointer_down = ui.input(|input| input.pointer.primary_down());
+            let moving = self.mesh_navigation.prop_gesture_busy();
+            let content_busy = self.mesh_navigation.art_import_busy();
+            #[cfg(feature="mesh-export")]
+            let content_busy = content_busy || self.mesh_export.busy();
+            self.mesh_navigation.prop_viewport(&self.editor, &camera, px, crate::mesh_props_panel::ViewInput {
+                pixel: resp.interact_pointer_pos().or_else(|| resp.hover_pos()).map(to_pixel),
+                press_pixel: ui.input(|input| input.pointer.press_origin()).map(to_pixel),
+                started: resp.drag_started_by(PointerButton::Primary),
+                dragging: resp.dragged_by(PointerButton::Primary),
+                released: (resp.drag_stopped() || moving) && !pointer_down,
+                clicked: resp.clicked_by(PointerButton::Primary),
+                cancel: ui.input(|input| !input.focused || input.key_pressed(Key::Escape)) || self.ui.dialog.is_some() || content_busy,
+            })
+        };
+        #[cfg(not(feature="mesh-navigation"))]
+        let prop_pointer_consumed = false;
         let selected=if self.editor.yard_rows_coherent(){self.editor.selection().and_then(|t|self.editor.row_of(t)).map(|r|r.entity)}else{None};
         #[cfg(feature="models")]
         let placements=self.models.placements(&self.editor);
@@ -1283,6 +1322,14 @@ impl EditorApp {
         #[cfg(not(feature="models"))]
         let hidden=Vec::new();
         let list=self.editor.yard_frame().list(&hidden,selected);
+        #[cfg(feature="mesh-navigation")]
+        let list = {
+            let mut list = list;
+            if let Some(bounds) = self.mesh_navigation.selected_prop_bounds(&self.editor) {
+                list.aabb(bounds.min, bounds.max, 2.0, [1.0, 0.85, 0.2, 1.0]);
+            }
+            list
+        };
         #[cfg(feature="terrain")]
         let scene_models: Vec<_> = {
             #[cfg(feature="navigation")]
@@ -1352,7 +1399,7 @@ impl EditorApp {
             ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
         }
-        if (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
+        if !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
             if let Some(at) = resp.interact_pointer_pos() {
                 let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
                 #[cfg(feature="terrain")]
@@ -1654,8 +1701,8 @@ impl EditorApp {
         if accept && !dialog.text.trim().is_empty() {
             let path = PathBuf::from(dialog.text.trim());
             #[cfg(feature="mesh-navigation")]
-            if self.mesh_navigation.art_import_busy() {
-                self.editor.error("Finish the raw agent-art import before changing the scene path");
+            if self.mesh_navigation.art_import_busy() || self.mesh_navigation.prop_gesture_busy() {
+                self.editor.error("Finish agent-art imports or viewport prop moves before changing the scene path");
                 self.ui.dialog = Some(dialog);
                 return;
             }

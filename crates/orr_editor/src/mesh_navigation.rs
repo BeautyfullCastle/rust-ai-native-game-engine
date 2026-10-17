@@ -211,6 +211,31 @@ impl Panel {
         self.props.placements(editor)
     }
 
+    pub(crate) fn prop_viewport(
+        &mut self,
+        editor: &Editor,
+        camera: &orr_render::Camera3D,
+        size: (u32, u32),
+        input: crate::mesh_props_panel::ViewInput,
+    ) -> bool {
+        self.props.viewport(editor, camera, size, input)
+    }
+
+    pub(crate) fn selected_prop_bounds(
+        &self,
+        editor: &Editor,
+    ) -> Option<crate::mesh_prop_view::Bounds> {
+        self.props.selected_bounds(editor)
+    }
+
+    pub(crate) fn prop_gesture_busy(&self) -> bool {
+        self.props.gesture_busy()
+    }
+
+    pub(crate) fn cancel_prop_gesture(&mut self) {
+        self.props.cancel_viewport_gesture();
+    }
+
     pub(crate) fn art_import_busy(&self) -> bool {
         self.art.import_busy()
     }

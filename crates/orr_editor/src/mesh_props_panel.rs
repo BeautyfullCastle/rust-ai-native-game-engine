@@ -9,9 +9,27 @@ use crate::{
 };
 use egui::Ui;
 use orr_remote::mesh_navigation::mesh_from_view;
+use orr_render::Camera3D;
 use std::path::{Path, PathBuf};
 
 const MAX_HISTORY: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ViewInput {
+    pub pixel: Option<[f32; 2]>,
+    pub press_pixel: Option<[f32; 2]>,
+    pub started: bool,
+    pub dragging: bool,
+    pub released: bool,
+    pub clicked: bool,
+    pub cancel: bool,
+}
+
+struct PropGesture {
+    original: Document,
+    selected: u64,
+    drag: crate::mesh_prop_view::Drag,
+}
 
 struct HistoryEntry {
     id: u64,
@@ -28,6 +46,11 @@ pub(crate) struct Panel {
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
+    confirm_discard_changes: bool,
+    recovery_target: Option<(PathBuf, u64, [u8; 32])>,
+    move_enabled: bool,
+    snap_to_quarter: bool,
+    gesture: Option<PropGesture>,
     candidate: Option<Snapshot>,
     selected: Option<u64>,
     document: Document,
@@ -59,6 +82,11 @@ impl Default for Panel {
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
+            confirm_discard_changes: false,
+            recovery_target: None,
+            move_enabled: false,
+            snap_to_quarter: false,
+            gesture: None,
             candidate: None,
             selected: None,
             document: Document::default(),
@@ -85,6 +113,9 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
+        if self.gesture.is_some() && !self.gesture_context_matches(editor) {
+            self.cancel_gesture();
+        }
         if editor.game() != EditorGame::MeshNavigation {
             self.document_pending = true;
             return;
@@ -95,6 +126,17 @@ impl Panel {
         };
         self.document_pending = false;
         let scene_epoch = editor.scene_load_epoch();
+        let requested_context = (scene.clone(), scene_epoch, graph_revision);
+        if self.recovery_target.as_ref() != Some(&requested_context) {
+            self.confirm_discard_changes = false;
+            self.recovery_target = Some(requested_context.clone());
+        }
+        if self.scene.as_ref() != Some(&scene)
+            || self.scene_epoch != Some(scene_epoch)
+            || self.graph_revision != Some(graph_revision)
+        {
+            self.move_enabled = false;
+        }
         if self.scene.as_ref() == Some(&scene)
             && self.scene_epoch == Some(scene_epoch)
             && self.graph_revision == Some(graph_revision)
@@ -106,25 +148,33 @@ impl Panel {
             && self.graph_revision == Some(graph_revision)
         {
             self.scene = Some(scene);
+            self.move_enabled = false;
             self.sidecar_digest = None;
             self.context_stale = false;
             self.sidecar_error = None;
             self.confirm_discard_invalid = false;
-            if self.document.props.is_empty() {
-                self.saved_history_id = self.current_history_id();
-                self.status = "Scene path changed; no mesh props are present.".into();
-            } else {
-                self.saved_history_id = None;
-                self.status =
-                    "Scene path changed; save mesh props to create their new sidecar explicitly."
-                        .into();
+            if self.document.props.is_empty() && !self.dirty() {
+                self.scene = None;
+                self.scene_epoch = None;
+                self.graph_revision = None;
+                self.recovery_target = None;
+                self.confirm_discard_changes = false;
+                self.candidate = None;
+                self.selected = None;
+                self.confirm_remove = false;
+                self.sync(editor);
+                return;
             }
+            self.recovery_target = Some(requested_context);
+            self.saved_history_id = None;
+            self.status = "Scene path changed; save mesh props explicitly or discard and reload the target sidecar.".into();
             return;
         }
         if self.dirty() {
             self.context_stale = true;
+            self.recovery_target = Some(requested_context);
             self.confirm_discard_invalid = false;
-            self.status = "Unsaved mesh props belong to a different scene or graph revision; undo to the saved state before continuing.".into();
+            self.status = "Unsaved mesh props belong to a different scene or graph revision; discard and reload explicitly or return to the original scene.".into();
             return;
         }
 
@@ -132,10 +182,13 @@ impl Panel {
         self.scene_epoch = Some(scene_epoch);
         self.graph_revision = Some(graph_revision);
         self.context_stale = false;
+        self.move_enabled = false;
         self.candidate = None;
         self.selected = None;
         self.confirm_remove = false;
         self.confirm_discard_invalid = false;
+        self.confirm_discard_changes = false;
+        self.recovery_target = None;
         self.error = None;
         self.sidecar_error = None;
         self.sidecar_digest = None;
@@ -173,7 +226,20 @@ impl Panel {
         ui.collapsing("Mesh props", |ui| {
             ui.label("Static cosmetic props are saved in a separate scene sidecar and do not affect navigation physics.");
             ui.weak("Up to six props reserve the remaining viewport asset slots for the graph and agent art.");
-            let editable = self.can_edit(editor);
+            ui.add_enabled_ui(
+                self.matching_edit_context(editor) && editor.spec().is_local(),
+                |ui| {
+                    ui.checkbox(&mut self.move_enabled, "Move props in viewport");
+                    if self.move_enabled {
+                        ui.checkbox(&mut self.snap_to_quarter, "Snap movement to 0.25 units");
+                        ui.weak("Drag a prop on its horizontal plane. This changes cosmetic presentation only, not ECS entities or physics.");
+                    }
+                },
+            );
+            if !self.move_enabled && self.gesture.is_some() {
+                self.cancel_gesture();
+            }
+            let editable = self.can_edit(editor) && self.gesture.is_none();
             ui.add_enabled_ui(editable, |ui| {
                 let package_changed = field(ui, "Prop package source directory", &mut self.package_root);
                 let asset_changed = field(ui, "Prop model asset", &mut self.asset);
@@ -277,6 +343,21 @@ impl Panel {
                     self.discard_invalid_sidecar(editor);
                 }
             }
+            if self.dirty() || self.context_stale {
+                ui.checkbox(
+                    &mut self.confirm_discard_changes,
+                    "I confirm discarding unsaved prop changes",
+                );
+                if ui
+                    .add_enabled(
+                        self.can_discard_changes(editor),
+                        egui::Button::new("Discard unsaved props and reload"),
+                    )
+                    .clicked()
+                {
+                    self.discard_changes_and_reload(editor);
+                }
+            }
             ui.horizontal(|ui| {
                 let history_enabled = self.can_change_history(editor);
                 if ui
@@ -339,9 +420,239 @@ impl Panel {
         self.document.placements().unwrap_or_default()
     }
 
+    pub(crate) fn selected_bounds(&self, editor: &Editor) -> Option<crate::mesh_prop_view::Bounds> {
+        if !self.move_enabled || !self.matching_edit_context(editor) {
+            return None;
+        }
+        let selected = self.selected?;
+        let scene_models = self.placements(editor);
+        let prop = self
+            .document
+            .props
+            .iter()
+            .find(|prop| prop.id == selected)?;
+        let model = prop.art.placement([orr_fp::FP::ZERO; 3]).ok()?;
+        if scene_models.len() != self.document.props.len() {
+            return None;
+        }
+        crate::mesh_prop_view::bounds(&model).ok()
+    }
+
+    pub(crate) fn viewport(
+        &mut self,
+        editor: &Editor,
+        camera: &Camera3D,
+        size: (u32, u32),
+        input: ViewInput,
+    ) -> bool {
+        if self.gesture.is_some() && !self.gesture_context_matches(editor) {
+            self.cancel_gesture();
+            return true;
+        }
+        if input.cancel {
+            let active = self.gesture.is_some();
+            self.cancel_gesture();
+            return active;
+        }
+        if self.gesture.is_some() && !self.move_enabled {
+            self.cancel_gesture();
+            return true;
+        }
+        if let Some((gesture_selected, drag)) = self
+            .gesture
+            .as_ref()
+            .map(|gesture| (gesture.selected, gesture.drag))
+        {
+            if let Some(pixel) = input.pixel.filter(|_| input.dragging || input.released) {
+                let snap = self.snap_to_quarter.then_some(0.25);
+                if let Some(position) = drag.position(camera, pixel, size, snap) {
+                    let changed = if let Some(prop) = self
+                        .document
+                        .props
+                        .iter_mut()
+                        .find(|prop| prop.id == gesture_selected)
+                    {
+                        let mut offset = prop.art.offset();
+                        offset[0] = position[0];
+                        offset[2] = position[2];
+                        if let Ok(art) = prop.art.clone().with_transform(offset, prop.art.scale()) {
+                            prop.art = art;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if changed {
+                        self.copy_selection_fields();
+                    }
+                }
+            }
+            if input.released {
+                self.finish_gesture();
+            }
+            return true;
+        }
+        if !self.move_enabled || !self.can_edit(editor) || editor.mode() != Mode::Edit {
+            return false;
+        }
+        if input.started {
+            let Some(pixel) = input.press_pixel else {
+                return false;
+            };
+            let (origin, direction) = camera.screen_ray(pixel, size);
+            let models = match self.viewport_models() {
+                Ok(models) => models,
+                Err(error) => {
+                    self.error = Some(error);
+                    return true;
+                }
+            };
+            let selected = match crate::mesh_prop_view::pick(&models, origin, direction) {
+                Ok(selected) => selected,
+                Err(error) => {
+                    self.error = Some(error);
+                    return true;
+                }
+            };
+            let Some(selected) = selected else {
+                self.selected = None;
+                self.confirm_remove = false;
+                return true;
+            };
+            self.selected = Some(selected);
+            self.copy_selection_fields();
+            let Some(position) = self.selected_prop().map(|prop| prop.art.offset()) else {
+                return true;
+            };
+            let Some(drag) = crate::mesh_prop_view::Drag::new(camera, pixel, size, position) else {
+                return true;
+            };
+            self.gesture = Some(PropGesture {
+                original: self.document.clone(),
+                selected,
+                drag,
+            });
+            self.confirm_remove = false;
+            if input.released {
+                self.finish_gesture();
+            }
+            return true;
+        }
+        if input.clicked {
+            let Some(pixel) = input.pixel else {
+                return false;
+            };
+            let (origin, direction) = camera.screen_ray(pixel, size);
+            let models = match self.viewport_models() {
+                Ok(models) => models,
+                Err(error) => {
+                    self.error = Some(error);
+                    return true;
+                }
+            };
+            match crate::mesh_prop_view::pick(&models, origin, direction) {
+                Ok(selected) => {
+                    self.selected = selected;
+                    self.copy_selection_fields();
+                    self.confirm_remove = false;
+                }
+                Err(error) => self.error = Some(error),
+            }
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn gesture_busy(&self) -> bool {
+        self.gesture.is_some()
+    }
+
+    fn viewport_models(&self) -> Result<Vec<(u64, SceneModel)>, String> {
+        self.document
+            .props
+            .iter()
+            .map(|prop| {
+                prop.art
+                    .placement([orr_fp::FP::ZERO; 3])
+                    .map(|model| (prop.id, model))
+            })
+            .collect()
+    }
+
+    fn matching_edit_context(&self, editor: &Editor) -> bool {
+        let Some((scene, graph_revision)) = current_identity(editor) else {
+            return false;
+        };
+        editor.mode() == Mode::Edit
+            && editor.can_mutate()
+            && !editor.screenshot_gesture_busy()
+            && editor.previewing().is_none()
+            && editor.proposals().is_empty()
+            && !self.document_pending
+            && !self.context_stale
+            && self.sidecar_error.is_none()
+            && self.scene.as_ref() == Some(&scene)
+            && self.scene_epoch == Some(editor.scene_load_epoch())
+            && self.graph_revision == Some(graph_revision)
+    }
+
+    fn gesture_context_matches(&self, editor: &Editor) -> bool {
+        editor.spec().is_local() && self.matching_edit_context(editor)
+    }
+
+    fn cancel_gesture(&mut self) {
+        let Some(gesture) = self.gesture.take() else {
+            return;
+        };
+        self.document = gesture.original;
+        self.selected = Some(gesture.selected);
+        self.copy_selection_fields();
+        self.status =
+            "Viewport prop movement cancelled; the original placement was restored.".into();
+    }
+
+    pub(crate) fn cancel_viewport_gesture(&mut self) {
+        self.cancel_gesture();
+    }
+
+    fn finish_gesture(&mut self) {
+        let Some(gesture) = self.gesture.take() else {
+            return;
+        };
+        let updated = self.document.clone();
+        self.document = gesture.original.clone();
+        self.selected = Some(gesture.selected);
+        self.copy_selection_fields();
+        if same_document_placements(&gesture.original, &updated) {
+            return;
+        }
+        let Some(graph_revision) = self.graph_revision else {
+            self.error = Some(
+                "Mesh graph changed before the prop move completed; original placement restored."
+                    .into(),
+            );
+            return;
+        };
+        if let Err(error) = validate_document(&updated, graph_revision) {
+            self.error = Some(format!(
+                "Mesh prop move was rejected; original placement restored: {error}"
+            ));
+            return;
+        }
+        self.push_document(updated);
+        self.selected = Some(gesture.selected);
+        self.copy_selection_fields();
+        self.status = "Moved mesh prop in viewport; save explicitly to persist.".into();
+    }
+
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
         if editor.game() != EditorGame::MeshNavigation {
             return None;
+        }
+        if self.gesture.is_some() {
+            return Some("Finish or cancel the active mesh prop move before Play".into());
         }
         if self.document_pending
             || current_identity(editor).is_none_or(|(scene, revision)| {
@@ -370,7 +681,7 @@ impl Panel {
     }
 
     pub(crate) fn dirty(&self) -> bool {
-        self.current_history_id() != self.saved_history_id
+        self.gesture.is_some() || self.current_history_id() != self.saved_history_id
     }
 
     fn load_candidate(&mut self) {
@@ -547,6 +858,8 @@ impl Panel {
                 self.sidecar_error = None;
                 self.context_stale = false;
                 self.confirm_discard_invalid = false;
+                self.confirm_discard_changes = false;
+                self.recovery_target = None;
                 self.error = None;
                 self.status = "Mesh props saved for this scene.".into();
             }
@@ -570,6 +883,8 @@ impl Panel {
         self.sidecar_digest = None;
         self.sidecar_error = None;
         self.confirm_discard_invalid = false;
+        self.confirm_discard_changes = false;
+        self.recovery_target = None;
         self.error = None;
         match mesh_props::load(&scene, revision) {
             Ok(Some((document, digest))) => {
@@ -579,6 +894,9 @@ impl Panel {
                 self.copy_selection_fields();
                 self.reset_history(document, Some(0));
                 self.recompute_next_prop_id();
+                self.context_stale = false;
+                self.confirm_discard_changes = false;
+                self.recovery_target = None;
                 self.status = "Reloaded saved mesh props.".into();
             }
             Ok(None) => {
@@ -619,6 +937,53 @@ impl Panel {
             !self.dirty(),
             scene_matches,
         )
+    }
+
+    fn can_discard_changes(&self, editor: &Editor) -> bool {
+        let editable_context = editor.game() == EditorGame::MeshNavigation
+            && editor.spec().is_local()
+            && editor.mode() == Mode::Edit
+            && editor.can_mutate()
+            && !editor.screenshot_gesture_busy()
+            && editor.previewing().is_none()
+            && editor.proposals().is_empty()
+            && self.gesture.is_none()
+            && !self.document_pending
+            && current_identity(editor).is_some();
+        discard_changes_ready(
+            self.confirm_discard_changes,
+            editable_context,
+            self.dirty() || self.context_stale,
+        )
+    }
+
+    fn discard_changes_and_reload(&mut self, editor: &Editor) {
+        if !self.can_discard_changes(editor) {
+            self.confirm_discard_changes = false;
+            self.error = Some("Discard is available only for confirmed unsaved props in an idle admitted local mesh scene".into());
+            return;
+        }
+        self.document = Document::default();
+        self.candidate = None;
+        self.selected = None;
+        self.scene = None;
+        self.scene_epoch = None;
+        self.graph_revision = None;
+        self.document_pending = false;
+        self.context_stale = false;
+        self.sidecar_digest = None;
+        self.sidecar_error = None;
+        self.confirm_remove = false;
+        self.confirm_discard_invalid = false;
+        self.confirm_discard_changes = false;
+        self.recovery_target = None;
+        self.move_enabled = false;
+        self.error = None;
+        self.reset_history(Document::default(), Some(0));
+        self.next_prop_id = 1;
+        self.status =
+            "Unsaved props discarded in memory; reloading the target scene sidecar.".into();
+        self.sync(editor);
     }
 
     fn discard_invalid_sidecar(&mut self, editor: &Editor) {
@@ -662,23 +1027,15 @@ impl Panel {
     }
 
     fn can_edit(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        self.gesture.is_none()
+            && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
-            && editor.mode() == Mode::Edit
-            && editor.can_mutate()
-            && editor.previewing().is_none()
-            && editor.proposals().is_empty()
-            && !self.document_pending
-            && !self.context_stale
-            && self.sidecar_error.is_none()
-            && self.scene_epoch == Some(editor.scene_load_epoch())
-            && current_identity(editor).is_some_and(|(scene, revision)| {
-                self.scene.as_ref() == Some(&scene) && self.graph_revision == Some(revision)
-            })
+            && self.matching_edit_context(editor)
     }
 
     fn can_change_history(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        self.gesture.is_none()
+            && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -696,7 +1053,8 @@ impl Panel {
     }
 
     fn can_reload(&self, editor: &Editor) -> bool {
-        !self.dirty()
+        self.gesture.is_none()
+            && !self.dirty()
             && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
@@ -849,6 +1207,10 @@ fn discard_invalid_ready(
         && matching_scene_epoch_and_revision
 }
 
+fn discard_changes_ready(confirmed: bool, editable_context: bool, has_changes: bool) -> bool {
+    confirmed && editable_context && has_changes
+}
+
 fn reported_scene_matches_request(
     game: EditorGame,
     spec: &HostSpec,
@@ -959,6 +1321,27 @@ fn field(ui: &mut Ui, label: &str, value: &mut String) -> bool {
 
 fn format_number(value: f32) -> String {
     value.to_string()
+}
+
+fn same_document_placements(left: &Document, right: &Document) -> bool {
+    left.props.len() == right.props.len()
+        && left
+            .props
+            .iter()
+            .zip(&right.props)
+            .all(|(left_prop, right_prop)| {
+                left_prop.id == right_prop.id
+                    && left_prop.name == right_prop.name
+                    && left_prop.art.scale() == right_prop.art.scale()
+                    && left_prop
+                        .art
+                        .offset()
+                        .iter()
+                        .zip(right_prop.art.offset())
+                        .all(|(left_value, right_value)| {
+                            (*left_value - right_value).abs() <= 1.0e-5
+                        })
+            })
 }
 
 #[cfg(test)]

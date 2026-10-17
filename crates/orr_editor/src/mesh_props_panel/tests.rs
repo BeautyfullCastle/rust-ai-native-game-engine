@@ -79,6 +79,69 @@ fn document_validation_checks_prop_count_ids_names_and_graph_revision() {
 }
 
 #[test]
+fn viewport_drag_commits_one_history_entry_ignores_no_motion_and_cancel_restores() {
+    let camera = orr_render::Camera3D::orthographic([0.0, 5.0, 5.0], [0.0; 3], 4.0);
+    let viewport = (100, 100);
+    let mut panel = Panel::default();
+    panel.reset_history(document(1), Some(0));
+    panel.graph_revision = Some(panel.document.props[0].art.graph_revision());
+    panel.selected = Some(1);
+    let original = panel.document.clone();
+    let original_offset = panel.document.props[0].art.offset();
+    let drag =
+        crate::mesh_prop_view::Drag::new(&camera, [0.0, 0.0], viewport, original_offset).unwrap();
+
+    panel.gesture = Some(super::PropGesture {
+        original: original.clone(),
+        selected: 1,
+        drag,
+    });
+    panel.document.props[0].art = panel.document.props[0]
+        .art
+        .clone()
+        .with_transform([1.0, 0.0, 2.0], 1.0)
+        .unwrap();
+    panel.finish_gesture();
+    assert_eq!(panel.history.len(), 2);
+    assert!(panel.dirty());
+    panel.undo();
+    assert_eq!(panel.document.props[0].art.offset(), original_offset);
+    panel.redo();
+    assert_eq!(panel.document.props[0].art.offset(), [1.0, 0.0, 2.0]);
+
+    panel.undo();
+    panel.gesture = Some(super::PropGesture {
+        original: panel.document.clone(),
+        selected: 1,
+        drag,
+    });
+    let mut near_offset = original_offset;
+    near_offset[0] += 0.000001;
+    panel.document.props[0].art = panel.document.props[0]
+        .art
+        .clone()
+        .with_transform(near_offset, 1.0)
+        .unwrap();
+    panel.finish_gesture();
+    assert_eq!(panel.history.len(), 2);
+    assert_eq!(panel.document.props[0].art.offset(), original_offset);
+
+    panel.gesture = Some(super::PropGesture {
+        original: panel.document.clone(),
+        selected: 1,
+        drag,
+    });
+    panel.document.props[0].art = panel.document.props[0]
+        .art
+        .clone()
+        .with_transform([3.0, 0.0, 4.0], 1.0)
+        .unwrap();
+    panel.cancel_gesture();
+    assert_eq!(panel.document.props[0].art.offset(), original_offset);
+    assert!(!panel.dirty());
+}
+
+#[test]
 fn prop_history_tracks_saved_state_and_keeps_a_bounded_cursor() {
     let mut panel = Panel::default();
     assert!(!panel.dirty());
@@ -183,4 +246,14 @@ fn invalid_sidecar_discard_requires_confirmation_and_every_safety_guard() {
     assert!(!discard_invalid_ready(true, true, true, false, true, true));
     assert!(!discard_invalid_ready(true, true, true, true, false, true));
     assert!(!discard_invalid_ready(true, true, true, true, true, false));
+}
+
+#[test]
+fn unsaved_prop_discard_requires_confirmation_changes_and_idle_context() {
+    use super::discard_changes_ready;
+
+    assert!(discard_changes_ready(true, true, true));
+    assert!(!discard_changes_ready(false, true, true));
+    assert!(!discard_changes_ready(true, false, true));
+    assert!(!discard_changes_ready(true, true, false));
 }

@@ -129,6 +129,8 @@ mod mesh_art_panel;
 mod mesh_props;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_props_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_prop_view;
 #[cfg(feature="mesh-navigation")]
 mod mesh_scene;
 #[cfg(feature="mesh-navigation")]
