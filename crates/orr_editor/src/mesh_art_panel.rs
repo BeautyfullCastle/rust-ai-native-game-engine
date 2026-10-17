@@ -11,6 +11,7 @@ struct HistoryEntry {
 }
 
 pub(crate) struct Panel {
+    importer: crate::mesh_art_import_panel::Panel,
     package_root: String,
     asset: String,
     license: String,
@@ -39,6 +40,7 @@ pub(crate) struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            importer: crate::mesh_art_import_panel::Panel::default(),
             package_root: String::new(),
             asset: "model.glb".into(),
             license: "LICENSE.txt".into(),
@@ -180,6 +182,24 @@ impl Panel {
             return;
         }
         self.sync(editor);
+        let import_enabled = !self.document_pending && self.can_edit_context(editor);
+        let import_scene = import_enabled.then(|| editor.path()).flatten();
+        if let Some(report) = self.importer.show(
+            ui,
+            import_scene.as_deref(),
+            editor.scene_load_epoch(),
+            import_scene.as_ref().and(self.graph_revision),
+            import_enabled,
+        ) {
+            self.package_root = report.root.display().to_string();
+            self.asset = report.asset;
+            self.license = report.license;
+            self.copy_transform(&report.snapshot);
+            self.candidate = Some(report.snapshot);
+            self.license_acknowledged = false;
+            self.error = None;
+            self.status = "Imported raw agent art is selected but not applied; use Apply agent art and Save agent art explicitly.".into();
+        }
         ui.collapsing("Mesh agent art", |ui| {
             if self.document_pending {
                 ui.label("Waiting for the requested scene to become the authoritative editor document.");
@@ -351,6 +371,9 @@ impl Panel {
         if editor.game() != EditorGame::MeshNavigation {
             return None;
         }
+        if self.import_busy() {
+            return Some("Finish the raw agent-art import before Play".into());
+        }
         if self.document_pending
             || !document_frame_ready(
                 editor.game(),
@@ -386,6 +409,10 @@ impl Panel {
 
     pub(crate) fn dirty(&self) -> bool {
         self.current_entry().map(|entry| entry.id) != self.saved_id
+    }
+
+    pub(crate) fn import_busy(&self) -> bool {
+        self.importer.busy()
     }
 
     fn load_candidate(&mut self) {
@@ -485,6 +512,10 @@ impl Panel {
     }
 
     fn can_edit(&self, editor: &Editor) -> bool {
+        !self.import_busy() && self.can_edit_context(editor)
+    }
+
+    fn can_edit_context(&self, editor: &Editor) -> bool {
         editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
@@ -503,7 +534,8 @@ impl Panel {
     }
 
     fn can_change_history(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        !self.import_busy()
+            && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
             && !self.document_pending
             && document_frame_ready(

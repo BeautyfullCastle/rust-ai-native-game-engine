@@ -343,6 +343,9 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_authoring_blocker(&self) -> Option<String> {
+        if self.mesh_navigation.art_import_busy() {
+            return Some("Finish the raw agent-art import before changing mesh workspaces or exporting".into());
+        }
         if !matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
             || !self.editor.spec().is_local() || self.editor.mode() != Mode::Edit
             || !self.editor.can_mutate() || self.editor.previewing().is_some()
@@ -1649,6 +1652,12 @@ impl EditorApp {
         });
         if accept && !dialog.text.trim().is_empty() {
             let path = PathBuf::from(dialog.text.trim());
+            #[cfg(feature="mesh-navigation")]
+            if self.mesh_navigation.art_import_busy() {
+                self.editor.error("Finish the raw agent-art import before changing the scene path");
+                self.ui.dialog = Some(dialog);
+                return;
+            }
             #[cfg(feature="mesh-navigation")]
             if dialog.kind != DialogKind::SaveAs && self.mesh_navigation.art_dirty() {
                 self.editor.error("Save or explicitly discard agent art changes before changing scenes");

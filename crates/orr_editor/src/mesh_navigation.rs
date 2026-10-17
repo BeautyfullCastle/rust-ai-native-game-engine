@@ -204,6 +204,10 @@ impl Panel {
         self.art.dirty()
     }
 
+    pub(crate) fn art_import_busy(&self) -> bool {
+        self.art.import_busy()
+    }
+
     pub fn play_blocker(&self, editor: &Editor) -> Option<String> {
         if editor.game() != EditorGame::MeshNavigation {
             return None;

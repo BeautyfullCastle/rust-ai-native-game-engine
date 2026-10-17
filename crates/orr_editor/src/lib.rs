@@ -120,6 +120,10 @@ pub mod mesh_navigation;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_art;
 #[cfg(feature = "mesh-navigation")]
+mod mesh_art_import;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art_import_panel;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_art_panel;
 #[cfg(feature="mesh-navigation")]
 mod mesh_scene;
