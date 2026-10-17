@@ -334,13 +334,30 @@ impl EditorApp {
         if self.package_manager.busy() {
             return Some("Finish the content package operation before changing projects".into());
         }
-        if !self.editor.game().is_room() || !self.editor.spec().is_local()
+        if (!self.editor.game().is_room() && self.editor.game() != crate::game::EditorGame::PhysGame) || !self.editor.spec().is_local()
             || self.editor.mode() != Mode::Edit || !self.editor.can_mutate()
             || self.editor.previewing().is_some() || self.editor.in_gesture() {
-            return Some("Room project changes require an idle local Room editor in Edit mode".into());
+            return Some("Room project changes require an idle local Room or PhysGame editor in Edit mode".into());
         }
         if self.editor.erp_status().is_some() {
             return Some("Close the ERP-listening editor and reopen without --erp before switching projects; its endpoint is never silently replaced".into());
+        }
+        #[cfg(feature="sprites")]
+        if self.sprites.bindings.as_ref().is_some_and(|bindings| bindings.dirty()) {
+            return Some("Save or explicitly discard sprite bindings before changing projects".into());
+        }
+        #[cfg(feature="animated-models")]
+        if self.animated_models.bindings.as_ref().is_some_and(|bindings| bindings.dirty()) {
+            return Some("Save or explicitly discard animation preview bindings before changing projects".into());
+        }
+        #[cfg(feature="terrain")]
+        if self.terrain.document.dirty() {
+            return Some("Save or explicitly discard terrain edits before changing projects".into());
+        }
+        #[cfg(feature="irradiance-probes")]
+        if self.irradiance.bindings.as_ref().is_some_and(|bindings| bindings.dirty())
+            || self.irradiance.is_baking() || self.irradiance.is_validating_bake() {
+            return Some("Finish irradiance work and save or explicitly discard its bindings before changing projects".into());
         }
         if self.editor.is_dirty()
             || self.models.bindings.as_ref().is_some_and(|bindings| bindings.dirty())
@@ -362,7 +379,8 @@ impl EditorApp {
             self.windows_projects.status = format!("Project is retained at {}; open it after resolving: {blocked}", root.display());
             return;
         }
-        let original = match self.editor.windows_export_scene() {
+        let original_game = self.editor.game();
+        let original = match self.editor.windows_project_source_stamp() {
             Ok(stamp) => stamp,
             Err(error) => {
                 self.windows_projects.status = format!("Current project retained: {error}. Requested project: {}", root.display());
@@ -392,8 +410,9 @@ impl EditorApp {
             replacement.models.install_room(models)?;
             replacement.room_camera = camera;
             replacement.viewport_hdr_disabled = self.viewport_hdr_disabled;
-            if self.editor.windows_export_scene()? != original {
-                return Err("Current Room document changed during preparation; save it and reopen the requested project".into());
+            if let Some(blocked) = self.windows_project_blocker() { return Err(blocked); }
+            if self.editor.game() != original_game || self.editor.windows_project_source_stamp()? != original {
+                return Err("Current document changed during preparation; save it and reopen the requested project".into());
             }
             Ok(replacement)
         })();
@@ -534,7 +553,7 @@ impl eframe::App for EditorApp {
         {
             let blocked = self.windows_project_blocker();
             let editor = &mut self.editor;
-            self.windows_projects.show(&ctx, blocked.as_deref(), || editor.windows_export_scene().map(|_| ()));
+            self.windows_projects.show(&ctx, blocked.as_deref(), || editor.windows_project_source_stamp().map(|_| ()));
         }
         #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
         {
@@ -661,7 +680,7 @@ impl EditorApp {
                     ui.close();
                 }
                 #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
-                if self.editor.game().is_room() {
+                if self.editor.game().is_room() || self.editor.game() == crate::game::EditorGame::PhysGame {
                     for label in ["New Room project\u{2026}", "Open Room project\u{2026}"] {
                         if ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new(label)).clicked() {
                             self.windows_projects.open = true;

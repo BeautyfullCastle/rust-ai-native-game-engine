@@ -1603,6 +1603,36 @@ impl Editor {
         Ok((path, checksum))
     }
 
+    #[cfg(all(windows, target_arch = "x86_64", feature = "windows-projects"))]
+    pub(crate) fn windows_project_source_stamp(&mut self) -> Result<(PathBuf, u64), String> {
+        if self.game().is_room() {
+            return self.windows_export_scene();
+        }
+        if self.game() != EditorGame::PhysGame || !self.spec().is_local()
+            || self.erp_status().is_some() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some() || self.gesture.busy()
+            || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            return Err("Project creation requires an idle local PhysGame editor in Edit mode without an ERP listener".into());
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            return Err("Save the scene and finish transactions before creating a project".into());
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            return Err("Resolve open proposals before creating a project".into());
+        }
+        let path = state.get("scene_path").and_then(J::as_str).filter(|path| !path.is_empty())
+            .map(PathBuf::from).ok_or("Save the current scene before creating a project")?;
+        let checksum = state.get("checksum").and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        Ok((path, checksum))
+    }
+
     #[cfg(feature = "mesh-navigation")]
     pub fn create_mesh_scene(&mut self, path: &Path) -> bool {
         if !self.game().is_mesh_navigation() || !self.spec().is_local() || !self.can_mutate()
@@ -2760,6 +2790,10 @@ mod gesture_tests;
 mod input_tests;
 #[cfg(test)]
 mod multi_selection_tests;
+
+#[cfg(all(test, windows, target_arch = "x86_64", feature = "windows-projects"))]
+#[path = "editor/windows_project_stamp_tests.rs"]
+mod windows_project_stamp_tests;
 
 #[cfg(test)]
 mod tick_state_refresh_tests {
