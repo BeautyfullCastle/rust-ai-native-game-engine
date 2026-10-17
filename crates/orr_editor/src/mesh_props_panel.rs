@@ -43,6 +43,7 @@ pub(crate) struct Panel {
     name: String,
     position: [String; 3],
     scale: String,
+    rotation: [String; 3],
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -79,6 +80,7 @@ impl Default for Panel {
             name: "prop".into(),
             position: ["0".into(), "0".into(), "0".into()],
             scale: "1".into(),
+            rotation: ["0".into(), "0".into(), "0".into()],
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -279,6 +281,9 @@ impl Panel {
                 field(ui, "Prop position Y", &mut self.position[1]);
                 field(ui, "Prop position Z", &mut self.position[2]);
                 field(ui, "Prop scale", &mut self.scale);
+                field(ui, "Prop rotation X (degrees)", &mut self.rotation[0]);
+                field(ui, "Prop rotation Y (degrees)", &mut self.rotation[1]);
+                field(ui, "Prop rotation Z (degrees)", &mut self.rotation[2]);
             });
             ui.horizontal(|ui| {
                 if ui
@@ -1065,8 +1070,11 @@ impl Panel {
     }
 
     fn transformed(&self, snapshot: Snapshot) -> Result<Snapshot, String> {
-        let (position, scale) = parse_transform(&self.position, &self.scale)?;
-        snapshot.with_transform(position, scale)
+        let (position, scale, rotation) =
+            parse_transform(&self.position, &self.scale, &self.rotation)?;
+        snapshot
+            .with_transform(position, scale)?
+            .with_rotation(crate::mesh_rotation::from_degrees(rotation)?)
     }
 
     fn selected_prop(&self) -> Option<&Prop> {
@@ -1168,6 +1176,9 @@ impl Panel {
     fn copy_snapshot_fields(&mut self, snapshot: &Snapshot) {
         self.position = snapshot.offset().map(format_number);
         self.scale = format_number(snapshot.scale());
+        if let Ok(rotation) = crate::mesh_rotation::to_degrees(snapshot.rotation()) {
+            self.rotation = rotation.map(format_number);
+        }
     }
 }
 
@@ -1257,7 +1268,11 @@ fn document_frame_ready(
         && (mode == Mode::Play || frame_checksum == state_checksum)
 }
 
-fn parse_transform(position: &[String; 3], scale: &str) -> Result<([f32; 3], f32), String> {
+fn parse_transform(
+    position: &[String; 3],
+    scale: &str,
+    rotation: &[String; 3],
+) -> Result<([f32; 3], f32, [f32; 3]), String> {
     let parsed_position = [
         position[0]
             .trim()
@@ -1276,10 +1291,27 @@ fn parse_transform(position: &[String; 3], scale: &str) -> Result<([f32; 3], f32
         .trim()
         .parse::<f32>()
         .map_err(|_| "prop scale must be a number")?;
-    if parsed_position.iter().any(|value| !value.is_finite()) || !parsed_scale.is_finite() {
+    let parsed_rotation = [
+        rotation[0]
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "prop rotation X must be a number")?,
+        rotation[1]
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "prop rotation Y must be a number")?,
+        rotation[2]
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "prop rotation Z must be a number")?,
+    ];
+    if parsed_position.iter().any(|value| !value.is_finite())
+        || !parsed_scale.is_finite()
+        || parsed_rotation.iter().any(|value| !value.is_finite())
+    {
         return Err("prop transform values must be finite".into());
     }
-    Ok((parsed_position, parsed_scale))
+    Ok((parsed_position, parsed_scale, parsed_rotation))
 }
 
 fn validate_name(name: &str) -> Result<String, String> {
@@ -1333,6 +1365,14 @@ fn same_document_placements(left: &Document, right: &Document) -> bool {
                 left_prop.id == right_prop.id
                     && left_prop.name == right_prop.name
                     && left_prop.art.scale() == right_prop.art.scale()
+                    && left_prop
+                        .art
+                        .rotation()
+                        .iter()
+                        .zip(right_prop.art.rotation())
+                        .all(|(left_value, right_value)| {
+                            (*left_value - right_value).abs() <= 1.0e-5
+                        })
                     && left_prop
                         .art
                         .offset()

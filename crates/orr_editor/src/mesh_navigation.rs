@@ -14,6 +14,9 @@ use std::{fs, fs::OpenOptions, io::Read, path::PathBuf, sync::Arc};
 
 #[path = "mesh_model.rs"]
 mod mesh_model;
+#[path = "mesh_navigation/agent_viewport.rs"]
+mod agent_viewport;
+pub(crate) use agent_viewport::ViewInput as AgentViewInput;
 
 const MAX_ASSET_BYTES: usize = 8192;
 const MAX_ASSET_PATH_BYTES: usize = 4096;
@@ -45,6 +48,7 @@ pub struct Panel {
     view_model: Option<Arc<StaticModel>>,
     art: crate::mesh_art_panel::Panel,
     props: crate::mesh_props_panel::Panel,
+    agent_viewport: agent_viewport::State,
 }
 
 impl Default for Panel {
@@ -74,12 +78,14 @@ impl Default for Panel {
             view_model: None,
             art: crate::mesh_art_panel::Panel::default(),
             props: crate::mesh_props_panel::Panel::default(),
+            agent_viewport: agent_viewport::State::default(),
         }
     }
 }
 
 impl Panel {
     pub fn sync(&mut self, editor: &Editor) {
+        self.sync_agent_picking(editor);
         self.art.sync(editor);
         self.props.sync(editor);
         if editor.game() != EditorGame::MeshNavigation {
@@ -196,7 +202,7 @@ impl Panel {
     }
 
     pub(crate) fn has_unplaced_draft(&self) -> bool {
-        self.draft_dirty || self.art.dirty() || self.props.dirty()
+        self.draft_dirty || self.art_dirty()
     }
 
     pub(crate) fn art_model(&self, editor: &Editor) -> Option<crate::viewport3d::SceneModel> {
@@ -241,6 +247,9 @@ impl Panel {
     }
 
     pub fn play_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.agent_pick_busy() {
+            return Some("Finish or cancel viewport endpoint picking before Play".into());
+        }
         if editor.game() != EditorGame::MeshNavigation {
             return None;
         }
@@ -388,6 +397,9 @@ impl Panel {
 
     pub fn place_agent(&mut self, editor: &mut Editor) -> Result<(), String> {
         let result = (|| {
+            if self.agent_pick_busy() || self.props.gesture_busy() {
+                return Err("Finish or cancel active viewport picking or prop movement before placing an agent".into());
+            }
             if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
                 return Err("Mesh authoring requires a local MeshNavigation host".into());
             }
@@ -419,6 +431,7 @@ impl Panel {
             editor.sync();
             editor.fit_camera();
             self.draft_dirty = false;
+            self.agent_viewport = agent_viewport::State::default();
             self.error = None;
             self.sync(editor);
             Ok(())
@@ -519,6 +532,7 @@ impl Panel {
             self.draft_dirty |= field(ui, "Maximum slope", &mut self.max_slope);
             self.draft_dirty |= field(ui, "Maximum vertical projection", &mut self.max_vertical);
             self.draft_dirty |= field(ui, "Distance per tick", &mut self.distance_per_tick);
+            self.show_agent_picking(ui, editor);
             if let Some(reason) = self.authoring_blocker(editor) {
                 ui.label(reason);
             }
@@ -552,6 +566,9 @@ impl Panel {
     }
 
     fn authoring_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.agent_pick_busy() || self.props.gesture_busy() {
+            return Some("Finish or cancel active viewport picking or prop movement before placing an agent".into());
+        }
         if !editor.spec().is_local() || !editor.can_mutate() {
             return Some("Mesh placement requires a writable local host".into());
         }

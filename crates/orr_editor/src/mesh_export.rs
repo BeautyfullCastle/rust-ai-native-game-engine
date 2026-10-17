@@ -26,8 +26,10 @@ const SIDECAR_SUFFIX: &str = ".mesh-art.json";
 const PROPS_SUFFIX: &str = ".mesh-props.json";
 const RUNTIME_MARKER: &[u8] = b"ORR_MESH_PLAYER_V1";
 const PROPS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_PROPS_V1";
+const ROTATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ROTATION_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
+const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
@@ -89,14 +91,20 @@ pub(crate) fn export(
         return Err("mesh scene checksum changed before export".into());
     }
     let sidecar_path = mesh_art::sidecar_path(&scene_path)?;
+    let mut requires_rotation = false;
     let sidecar_bytes = match read_optional_bounded(
         &sidecar_path,
         orr_model::MAX_FILE_BYTES as u64,
         "mesh art sidecar",
     )? {
         Some(bytes) => {
-            if mesh_art::load(&scene_path, graph_revision)?.is_none() {
+            let Some((art, admitted_hash)) = mesh_art::load(&scene_path, graph_revision)? else {
                 return Err("mesh art sidecar could not be admitted".into());
+            };
+            requires_rotation |= art.rotation() != [0.0, 0.0, 0.0, 1.0]
+                || serialized_rotation_present(&bytes, false)?;
+            if admitted_hash != digest(&bytes) {
+                return Err("mesh art sidecar changed during admission".into());
             }
             if read_bounded(
                 &sidecar_path,
@@ -114,11 +122,16 @@ pub(crate) fn export(
     let props_bytes =
         match read_optional_bounded(&props_path, 16 * 1024 * 1024, "mesh props sidecar")? {
             Some(bytes) => {
-                let Some((_, admitted_hash)) =
+                let Some((document, admitted_hash)) =
                     crate::mesh_props::load(&scene_path, graph_revision)?
                 else {
                     return Err("mesh props sidecar could not be admitted".into());
                 };
+                requires_rotation |= document
+                    .props
+                    .iter()
+                    .any(|prop| prop.art.rotation() != [0.0, 0.0, 0.0, 1.0])
+                    || serialized_rotation_present(&bytes, true)?;
                 if admitted_hash != digest(&bytes)
                     || read_bounded(&props_path, 16 * 1024 * 1024, "mesh props sidecar recheck")?
                         != bytes
@@ -130,7 +143,7 @@ pub(crate) fn export(
             None => None,
         };
     let runtime_bytes = read_bounded(runtime, MAX_RUNTIME_BYTES, "mesh player runtime")?;
-    validate_runtime(&runtime_bytes, props_bytes.is_some())?;
+    validate_runtime_for(&runtime_bytes, props_bytes.is_some(), requires_rotation)?;
     let runtime_hash = digest(&runtime_bytes);
     let scene_name = scene_path
         .file_name()
@@ -279,6 +292,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         return Err("bundle mesh graph revision does not match its manifest".into());
     }
     let sidecar_path = mesh_art::sidecar_path(&scene_path)?;
+    let mut requires_rotation = false;
     match (
         &manifest.sidecar,
         read_optional_bounded(
@@ -289,8 +303,13 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     ) {
         (Some(record), Some(bytes)) => {
             verify_file(record, &bytes, "bundle art sidecar")?;
-            if mesh_art::load(&scene_path, graph_revision)?.is_none() {
+            let Some((art, admitted_hash)) = mesh_art::load(&scene_path, graph_revision)? else {
                 return Err("bundle art sidecar could not be admitted".into());
+            };
+            requires_rotation |= art.rotation() != [0.0, 0.0, 0.0, 1.0]
+                || serialized_rotation_present(&bytes, false)?;
+            if admitted_hash != record.sha256 {
+                return Err("bundle art admission hash does not match its manifest".into());
             }
             if read_bounded(
                 &sidecar_path,
@@ -311,10 +330,16 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     ) {
         (Some(record), Some(bytes)) => {
             verify_file(record, &bytes, "bundle mesh props sidecar")?;
-            let Some((_, admitted_hash)) = crate::mesh_props::load(&scene_path, graph_revision)?
+            let Some((document, admitted_hash)) =
+                crate::mesh_props::load(&scene_path, graph_revision)?
             else {
                 return Err("bundle mesh props sidecar could not be admitted".into());
             };
+            requires_rotation |= document
+                .props
+                .iter()
+                .any(|prop| prop.art.rotation() != [0.0, 0.0, 0.0, 1.0])
+                || serialized_rotation_present(&bytes, true)?;
             if admitted_hash != record.sha256 {
                 return Err("bundle mesh props admission hash does not match its manifest".into());
             }
@@ -328,7 +353,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let runtime_path = canonical_root.join(RUNTIME_FILENAME);
     let runtime_bytes = read_bounded(&runtime_path, MAX_RUNTIME_BYTES, "bundle runtime")?;
     verify_file(&manifest.runtime, &runtime_bytes, "bundle runtime")?;
-    validate_runtime(&runtime_bytes, manifest.props.is_some())?;
+    validate_runtime_for(&runtime_bytes, manifest.props.is_some(), requires_rotation)?;
     let sidecar_unchanged = match &manifest.sidecar {
         Some(record) => {
             let bytes = read_bounded(
@@ -809,7 +834,33 @@ fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String>
     }
 }
 
+#[cfg(test)]
 fn validate_runtime(bytes: &[u8], require_props: bool) -> Result<(), String> {
+    validate_runtime_for(bytes, require_props, false)
+}
+
+fn serialized_rotation_present(bytes: &[u8], props: bool) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("inspect serialized mesh rotation: {error}"))?;
+    if !props {
+        return Ok(value.get("rotation").is_some());
+    }
+    let records = value
+        .get("props")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("mesh props sidecar has no props inventory")?;
+    Ok(records.iter().any(|record| {
+        record
+            .get("art")
+            .is_some_and(|art| art.get("rotation").is_some())
+    }))
+}
+
+fn validate_runtime_for(
+    bytes: &[u8],
+    require_props: bool,
+    require_rotation: bool,
+) -> Result<(), String> {
     if bytes.len() < 0x40 || &bytes[..2] != b"MZ" {
         return Err("mesh player runtime is missing its DOS executable header".into());
     }
@@ -887,6 +938,12 @@ fn validate_runtime(bytes: &[u8], require_props: bool) -> Result<(), String> {
         && validate_runtime_section(bytes, PROPS_RUNTIME_SECTION, PROPS_RUNTIME_MARKER)?.is_none()
     {
         return Err("mesh player runtime does not advertise mesh-props bundle support".into());
+    }
+    if require_rotation
+        && validate_runtime_section(bytes, ROTATION_RUNTIME_SECTION, ROTATION_RUNTIME_MARKER)?
+            .is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh-rotation support".into());
     }
     Ok(())
 }

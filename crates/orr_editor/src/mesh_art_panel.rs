@@ -17,6 +17,7 @@ pub(crate) struct Panel {
     license: String,
     offset: [String; 3],
     scale: String,
+    rotation: [String; 3],
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -46,6 +47,7 @@ impl Default for Panel {
             license: "LICENSE.txt".into(),
             offset: ["0".into(), "0".into(), "0".into()],
             scale: "1".into(),
+            rotation: ["0".into(), "0".into(), "0".into()],
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -262,6 +264,16 @@ impl Panel {
                     text_field(ui, label, &mut self.offset[axis]);
                 }
                 text_field(ui, "Agent art scale", &mut self.scale);
+                for (axis, label) in [
+                    "Agent art rotation X (degrees)",
+                    "Agent art rotation Y (degrees)",
+                    "Agent art rotation Z (degrees)",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    text_field(ui, label, &mut self.rotation[axis]);
+                }
                 if ui.button("Apply agent art").clicked() {
                     self.apply(editor);
                 }
@@ -462,7 +474,10 @@ impl Panel {
             return;
         };
         let result = parse_transform(&self.offset, &self.scale)
-            .and_then(|(offset, scale)| base.with_transform(offset, scale));
+            .and_then(|(offset, scale)| base.with_transform(offset, scale))
+            .and_then(|snapshot| {
+                parse_rotation(&self.rotation).and_then(|rotation| snapshot.with_rotation(rotation))
+            });
         match result {
             Ok(snapshot) if Some(snapshot.graph_revision()) == self.graph_revision => {
                 self.push_state(Some(snapshot.clone()));
@@ -726,6 +741,9 @@ impl Panel {
     fn copy_transform(&mut self, snapshot: &Snapshot) {
         self.offset = snapshot.offset().map(format_number);
         self.scale = format_number(snapshot.scale());
+        self.rotation = crate::mesh_rotation::to_degrees(snapshot.rotation())
+            .map(|angles| angles.map(format_number))
+            .unwrap_or_else(|_| ["invalid".into(), "invalid".into(), "invalid".into()]);
     }
 
     fn copy_current_transform(&mut self) {
@@ -734,6 +752,7 @@ impl Panel {
         } else {
             self.offset = ["0".into(), "0".into(), "0".into()];
             self.scale = "1".into();
+            self.rotation = ["0".into(), "0".into(), "0".into()];
         }
     }
 }
@@ -807,6 +826,21 @@ fn parse_transform(offset: &[String; 3], scale: &str) -> Result<([f32; 3], f32),
         return Err("agent art transform values must be finite".into());
     }
     Ok((parsed_offset, parsed_scale))
+}
+
+fn parse_rotation(rotation: &[String; 3]) -> Result<[f32; 4], String> {
+    let angles = [
+        rotation[0]
+            .parse::<f32>()
+            .map_err(|_| "rotation X must be a number")?,
+        rotation[1]
+            .parse::<f32>()
+            .map_err(|_| "rotation Y must be a number")?,
+        rotation[2]
+            .parse::<f32>()
+            .map_err(|_| "rotation Z must be a number")?,
+    ];
+    crate::mesh_rotation::from_degrees(angles)
 }
 
 fn format_number(value: f32) -> String {

@@ -343,6 +343,9 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_authoring_blocker(&self) -> Option<String> {
+        if self.mesh_navigation.agent_pick_busy() {
+            return Some("Finish or cancel viewport endpoint picking before changing workspaces or exporting".into());
+        }
         if self.mesh_navigation.prop_gesture_busy() {
             return Some("Finish or cancel the viewport prop move before changing mesh workspaces or exporting".into());
         }
@@ -613,8 +616,9 @@ impl eframe::App for EditorApp {
             let cancelling_gesture = self.editor.in_gesture();
             #[cfg(feature="mesh-navigation")]
             let cancelling_gesture = {
-                let moving = self.mesh_navigation.prop_gesture_busy();
+                let moving = self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy();
                 self.mesh_navigation.cancel_prop_gesture();
+                self.mesh_navigation.cancel_agent_pick();
                 cancelling_gesture || moving
             };
             self.editor.cancel_edit();
@@ -760,7 +764,7 @@ impl EditorApp {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         #[cfg(feature="mesh-navigation")]
-        if self.mesh_navigation.prop_gesture_busy() { return; }
+        if self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() { return; }
         if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
@@ -797,7 +801,7 @@ impl EditorApp {
     fn top_bar(&mut self, ui: &mut Ui) {
         let mutable = self.editor.can_mutate() && self.editor.previewing().is_none();
         #[cfg(feature="mesh-navigation")]
-        let mutable = mutable && !self.mesh_navigation.prop_gesture_busy();
+        let mutable = mutable && !self.mesh_navigation.prop_gesture_busy() && !self.mesh_navigation.agent_pick_busy();
         let live = self.editor.down().is_none();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -1282,6 +1286,20 @@ impl EditorApp {
         };
         let mut frame_drawn = false;
         #[cfg(feature="mesh-navigation")]
+        let agent_pointer_consumed = {
+            let to_pixel = |position: Pos2| [(position.x - rect.min.x) * ppp, (position.y - rect.min.y) * ppp];
+            let content_busy = self.mesh_navigation.art_import_busy();
+            #[cfg(feature="mesh-export")]
+            let content_busy = content_busy || self.mesh_export.busy();
+            self.mesh_navigation.agent_viewport_input(&self.editor, &camera, px, crate::mesh_navigation::AgentViewInput {
+                pixel: resp.interact_pointer_pos().or_else(|| resp.hover_pos()).map(to_pixel),
+                clicked: resp.clicked_by(PointerButton::Primary),
+                cancel: ui.input(|input| !input.focused || input.key_pressed(Key::Escape)) || self.ui.dialog.is_some() || content_busy,
+            })
+        };
+        #[cfg(not(feature="mesh-navigation"))]
+        let agent_pointer_consumed = false;
+        #[cfg(feature="mesh-navigation")]
         let prop_pointer_consumed = {
             let to_pixel = |position: Pos2| [(position.x - rect.min.x) * ppp, (position.y - rect.min.y) * ppp];
             let pointer_down = ui.input(|input| input.pointer.primary_down());
@@ -1289,7 +1307,7 @@ impl EditorApp {
             let content_busy = self.mesh_navigation.art_import_busy();
             #[cfg(feature="mesh-export")]
             let content_busy = content_busy || self.mesh_export.busy();
-            self.mesh_navigation.prop_viewport(&self.editor, &camera, px, crate::mesh_props_panel::ViewInput {
+            !agent_pointer_consumed && self.mesh_navigation.prop_viewport(&self.editor, &camera, px, crate::mesh_props_panel::ViewInput {
                 pixel: resp.interact_pointer_pos().or_else(|| resp.hover_pos()).map(to_pixel),
                 press_pixel: ui.input(|input| input.pointer.press_origin()).map(to_pixel),
                 started: resp.drag_started_by(PointerButton::Primary),
@@ -1325,6 +1343,7 @@ impl EditorApp {
         #[cfg(feature="mesh-navigation")]
         let list = {
             let mut list = list;
+            self.mesh_navigation.paint_agent_endpoints(&self.editor, &mut list);
             if let Some(bounds) = self.mesh_navigation.selected_prop_bounds(&self.editor) {
                 list.aabb(bounds.min, bounds.max, 2.0, [1.0, 0.85, 0.2, 1.0]);
             }
@@ -1399,7 +1418,7 @@ impl EditorApp {
             ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
         }
-        if !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
+        if !agent_pointer_consumed && !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
             if let Some(at) = resp.interact_pointer_pos() {
                 let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
                 #[cfg(feature="terrain")]
@@ -1701,14 +1720,14 @@ impl EditorApp {
         if accept && !dialog.text.trim().is_empty() {
             let path = PathBuf::from(dialog.text.trim());
             #[cfg(feature="mesh-navigation")]
-            if self.mesh_navigation.art_import_busy() || self.mesh_navigation.prop_gesture_busy() {
-                self.editor.error("Finish agent-art imports or viewport prop moves before changing the scene path");
+            if self.mesh_navigation.art_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() {
+                self.editor.error("Finish content imports, viewport moves or endpoint picking before changing the scene path");
                 self.ui.dialog = Some(dialog);
                 return;
             }
             #[cfg(feature="mesh-navigation")]
-            if dialog.kind != DialogKind::SaveAs && self.mesh_navigation.art_dirty() {
-                self.editor.error("Save or explicitly discard agent art and prop changes before changing scenes");
+            if dialog.kind != DialogKind::SaveAs && self.mesh_navigation.has_unplaced_draft() {
+                self.editor.error("Apply, save or explicitly discard mesh drafts, agent art and prop changes before changing scenes");
                 self.ui.dialog = Some(dialog);
                 return;
             }

@@ -131,6 +131,10 @@ mod mesh_props;
 mod mesh_props_panel;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_prop_view;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_agent_view;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_rotation;
 #[cfg(feature="mesh-navigation")]
 mod mesh_scene;
 #[cfg(feature="mesh-navigation")]

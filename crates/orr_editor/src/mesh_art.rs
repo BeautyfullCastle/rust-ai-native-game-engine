@@ -39,6 +39,7 @@ pub(crate) struct Snapshot {
     model: Arc<StaticModel>,
     offset: [f32; 3],
     scale: f32,
+    rotation: [f32; 4],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +59,11 @@ struct Sidecar {
     model: ModelSource,
     offset: [f32; 3],
     scale: f32,
+    #[serde(
+        default = "identity_rotation",
+        skip_serializing_if = "rotation_is_identity"
+    )]
+    rotation: [f32; 4],
 }
 
 struct Provenance<'a> {
@@ -157,6 +163,7 @@ impl Snapshot {
             model: Arc::new(model),
             offset: [0.0; 3],
             scale: 1.0,
+            rotation: identity_rotation(),
         };
         snapshot.sidecar_bytes("room.scene.yaml")?;
         Ok(snapshot)
@@ -186,6 +193,16 @@ impl Snapshot {
         self.scale
     }
 
+    pub(crate) fn rotation(&self) -> [f32; 4] {
+        self.rotation
+    }
+
+    pub(crate) fn with_rotation(mut self, rotation: [f32; 4]) -> Result<Self, String> {
+        self.rotation = crate::mesh_rotation::validate_normalize(rotation)?;
+        self.placement([orr_fp::FP::ZERO; 3])?;
+        Ok(self)
+    }
+
     pub(crate) fn graph_revision(&self) -> [u8; 32] {
         self.graph_revision
     }
@@ -199,7 +216,7 @@ impl Snapshot {
         let instance = StaticInstance {
             translation: std::array::from_fn(|axis| position[axis] + self.offset[axis]),
             scale: [self.scale; 3],
-            ..StaticInstance::default()
+            rotation: self.rotation,
         };
         instance
             .validate_for(&self.model)
@@ -261,6 +278,7 @@ impl Snapshot {
             model: self.model.source().clone(),
             offset: self.offset,
             scale: self.scale,
+            rotation: self.rotation,
         })
         .map_err(|error| format!("serialize mesh art sidecar: {error}"))?;
         if bytes.len() > MAX_SIDE_CAR_BYTES {
@@ -317,11 +335,23 @@ impl Snapshot {
             model: Arc::new(model),
             offset: sidecar.offset,
             scale: sidecar.scale,
+            rotation: sidecar.rotation,
         };
         let offset = snapshot.offset;
         let scale = snapshot.scale;
-        snapshot.with_transform(offset, scale)
+        let rotation = snapshot.rotation;
+        snapshot
+            .with_rotation(rotation)?
+            .with_transform(offset, scale)
     }
+}
+
+fn identity_rotation() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+fn rotation_is_identity(rotation: &[f32; 4]) -> bool {
+    *rotation == identity_rotation()
 }
 
 pub(crate) fn sidecar_path(scene: &Path) -> Result<PathBuf, String> {

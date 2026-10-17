@@ -1,8 +1,39 @@
 use super::{
-    document_frame_ready, parse_transform, reported_scene_matches_request, Panel, MAX_HISTORY,
+    document_frame_ready, parse_rotation, parse_transform, reported_scene_matches_request, Panel,
+    MAX_HISTORY,
 };
-use crate::{backend::HostSpec, game::EditorGame, model::Mode};
-use std::path::PathBuf;
+use crate::{backend::HostSpec, game::EditorGame, mesh_art::Snapshot, model::Mode};
+use orr_package::Manifest;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
+
+const STATIC_GLB: &[u8] = include_bytes!("../../../orr_model/tests/fixtures/model.glb");
+
+fn static_package(root: &Path) -> PathBuf {
+    let package_root = root.join("verified-static-package");
+    fs::create_dir(&package_root).unwrap();
+    fs::write(package_root.join("model.glb"), STATIC_GLB).unwrap();
+    fs::write(package_root.join("LICENSE.txt"), b"Example license text\n").unwrap();
+    let runtime = orr_package::Runtime::content_only();
+    let manifest = Manifest {
+        schema: 1,
+        name: "verified-static".into(),
+        version: "1.0.0".into(),
+        engine: format!("={}", runtime.engine_version),
+        capabilities: BTreeSet::from(["models".into()]),
+        dependencies: BTreeMap::new(),
+        files: BTreeSet::from(["LICENSE.txt".into(), "model.glb".into()]),
+    };
+    fs::write(
+        package_root.join("orr.package.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    package_root
+}
 
 #[test]
 fn transform_parser_accepts_finite_values_and_rejects_invalid_values() {
@@ -15,6 +46,56 @@ fn transform_parser_accepts_finite_values_and_rejects_invalid_values() {
     assert!(parse_transform(&["NaN".into(), "0".into(), "0".into()], "1").is_err());
     assert!(parse_transform(&["0".into(), "0".into(), "0".into()], "inf").is_err());
     assert!(parse_transform(&["bad".into(), "0".into(), "0".into()], "1").is_err());
+}
+
+#[test]
+fn rotation_parser_accepts_intrinsic_xyz_degrees_and_rejects_invalid_values() {
+    let quaternion = parse_rotation(&["90".into(), "0".into(), "0".into()]).unwrap();
+    let expected = std::f32::consts::FRAC_1_SQRT_2;
+    assert!((quaternion[0] - expected).abs() < 1.0e-6);
+    assert!(quaternion[1].abs() < 1.0e-6);
+    assert!(quaternion[2].abs() < 1.0e-6);
+    assert!((quaternion[3] - expected).abs() < 1.0e-6);
+
+    assert!(parse_rotation(&["NaN".into(), "0".into(), "0".into()]).is_err());
+    assert!(parse_rotation(&["0".into(), "inf".into(), "0".into()]).is_err());
+    assert!(parse_rotation(&["360001".into(), "0".into(), "0".into()]).is_err());
+    assert!(parse_rotation(&["bad".into(), "0".into(), "0".into()]).is_err());
+}
+
+#[test]
+fn private_undo_redo_restores_agent_art_rotation_fields() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = static_package(&root);
+    let first_rotation = crate::mesh_rotation::from_degrees([20.0, 35.0, -15.0]).unwrap();
+    let second_rotation = crate::mesh_rotation::from_degrees([-45.0, 10.0, 75.0]).unwrap();
+    let first = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", [0x5a; 32])
+        .unwrap()
+        .with_rotation(first_rotation)
+        .unwrap();
+    let second = first.clone().with_rotation(second_rotation).unwrap();
+    let mut panel = Panel::default();
+
+    panel.push_state(Some(first.clone()));
+    panel.saved_id = Some(panel.current_entry().unwrap().id);
+    panel.push_state(Some(second.clone()));
+    panel.undo();
+    assert_quaternion_close(panel.current_snapshot().unwrap().rotation(), first_rotation);
+    assert_quaternion_close(parse_rotation(&panel.rotation).unwrap(), first_rotation);
+
+    panel.redo();
+    assert_quaternion_close(
+        panel.current_snapshot().unwrap().rotation(),
+        second_rotation,
+    );
+    assert_quaternion_close(parse_rotation(&panel.rotation).unwrap(), second_rotation);
+}
+
+fn assert_quaternion_close(actual: [f32; 4], expected: [f32; 4]) {
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        assert!((actual - expected).abs() < 1.0e-5);
+    }
 }
 
 #[test]

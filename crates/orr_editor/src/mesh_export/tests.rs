@@ -85,6 +85,144 @@ fn graph_revision(yaml: &str) -> [u8; 32] {
         .revision()
 }
 
+fn test_runtime_with_rotation() -> Vec<u8> {
+    let mut bytes = test_runtime_with_props();
+    bytes.resize(768, 0);
+    bytes[0x46..0x48].copy_from_slice(&3u16.to_le_bytes());
+    bytes[0x15c..0x160].copy_from_slice(&0x200u32.to_le_bytes());
+    bytes[0x184..0x188].copy_from_slice(&0x240u32.to_le_bytes());
+    bytes[0x198..0x1a0].copy_from_slice(b".orrrot\0");
+    bytes[0x1a8..0x1ac].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x1ac..0x1b0].copy_from_slice(&0x280u32.to_le_bytes());
+    bytes[0x1bc..0x1c0].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x1c0..].fill(0);
+    bytes[0x200..0x200 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
+    bytes[0x240..0x240 + b"ORR_MESH_PROPS_V1".len()].copy_from_slice(b"ORR_MESH_PROPS_V1");
+    bytes[0x280..0x280 + b"ORR_MESH_ROTATION_V1".len()].copy_from_slice(b"ORR_MESH_ROTATION_V1");
+    bytes
+}
+
+#[test]
+fn rotation_capability_requires_a_dedicated_bounded_marker_section() {
+    super::validate_runtime_for(&test_runtime_with_rotation(), true, true).unwrap();
+    assert!(super::validate_runtime_for(&test_runtime_with_props(), true, true).is_err());
+    let mut bytes = test_runtime_with_rotation();
+    bytes[0x280..0x280 + b"ORR_MESH_ROTATION_V1".len()].fill(0);
+    bytes[0x100..0x100 + b"ORR_MESH_ROTATION_V1".len()].copy_from_slice(b"ORR_MESH_ROTATION_V1");
+    assert!(super::validate_runtime_for(&bytes, true, true).is_err());
+    let mut bytes = test_runtime_with_rotation();
+    bytes[0x1ac..0x1b0].copy_from_slice(&0x100u32.to_le_bytes());
+    assert!(super::validate_runtime_for(&bytes, true, true).is_err());
+    let mut bytes = test_runtime_with_rotation();
+    bytes[0x46..0x48].copy_from_slice(&4u16.to_le_bytes());
+    bytes[0x1c0..0x1c8].copy_from_slice(b".orrrot\0");
+    assert!(super::validate_runtime_for(&bytes, true, true).is_err());
+    super::validate_runtime_for(&test_runtime(), false, false).unwrap();
+    super::validate_runtime_for(&test_runtime_with_props(), true, false).unwrap();
+}
+
+#[test]
+fn explicit_identity_fields_still_require_rotation_aware_players_for_export_and_open() {
+    for art_only in [false, true] {
+        let (temporary, scene, runtime, checksum) = fixture();
+        let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+        add_props(&scene, revision);
+        let (document, props_hash) = mesh_props::load(&scene, revision).unwrap().unwrap();
+        if art_only {
+            let filename = scene.file_name().unwrap().to_str().unwrap();
+            let mut art: serde_json::Value =
+                serde_json::from_slice(&document.props[0].art.encode_embedded(filename).unwrap())
+                    .unwrap();
+            art["rotation"] = serde_json::json!([0, 0, 0, 1]);
+            mesh_props::save(&scene, None, Some(&props_hash), revision).unwrap();
+            fs::write(
+                crate::mesh_art::sidecar_path(&scene).unwrap(),
+                serde_json::to_vec(&art).unwrap(),
+            )
+            .unwrap();
+            crate::mesh_art::load(&scene, revision).unwrap().unwrap();
+        } else {
+            let path = mesh_props::sidecar_path(&scene).unwrap();
+            let mut props: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            props["props"][0]["art"]["rotation"] = serde_json::json!([0, 0, 0, 1]);
+            fs::write(path, serde_json::to_vec(&props).unwrap()).unwrap();
+            mesh_props::load(&scene, revision).unwrap().unwrap();
+        }
+        let legacy = test_runtime_with_props();
+        fs::write(&runtime, &legacy).unwrap();
+        let destination = temporary.path().join("identity-field-bundle");
+        assert!(export(&scene, checksum, &destination, &runtime).is_err());
+        assert!(!destination.exists());
+        fs::write(&runtime, test_runtime_with_rotation()).unwrap();
+        export(&scene, checksum, &destination, &runtime).unwrap();
+        open_bundle(&destination).unwrap();
+        fs::write(destination.join(RUNTIME_FILENAME), &legacy).unwrap();
+        let manifest_path = destination.join(MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["runtime"]["bytes"] = serde_json::json!(legacy.len());
+        manifest["runtime"]["sha256"] = serde_json::json!(super::digest(&legacy));
+        fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(open_bundle(&destination).is_err());
+    }
+}
+
+#[test]
+fn rotated_props_and_art_each_require_capability_and_reopen_from_embedded_bytes() {
+    for art_only in [false, true] {
+        let (temporary, scene, runtime, checksum) = fixture();
+        let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+        add_props(&scene, revision);
+        let (mut document, hash) = mesh_props::load(&scene, revision).unwrap().unwrap();
+        let rotation = crate::mesh_rotation::from_degrees([20.0, 35.0, -15.0]).unwrap();
+        document.props[0].art = document.props[0]
+            .art
+            .clone()
+            .with_rotation(rotation)
+            .unwrap();
+        if art_only {
+            crate::mesh_art::save(&scene, Some(&document.props[0].art), None).unwrap();
+            mesh_props::save(&scene, None, Some(&hash), revision).unwrap();
+        } else {
+            mesh_props::save(&scene, Some(&document), Some(&hash), revision).unwrap();
+            fs::write(&runtime, test_runtime_with_props()).unwrap();
+        }
+        let destination = temporary.path().join("rotated-bundle");
+        assert!(export(&scene, checksum, &destination, &runtime).is_err());
+        assert!(!destination.exists());
+        fs::write(&runtime, test_runtime_with_rotation()).unwrap();
+        let receipt = export(&scene, checksum, &destination, &runtime).unwrap();
+        assert_eq!(receipt.props_sha256.is_some(), !art_only);
+        assert_eq!(receipt.sidecar_sha256.is_some(), art_only);
+        open_bundle(&destination).unwrap();
+        fs::rename(
+            scene.parent().unwrap().join("verified-static-package"),
+            scene.parent().unwrap().join("package-hidden"),
+        )
+        .unwrap();
+        let bundle_scene = destination.join("walk.scene.yaml");
+        let loaded = if art_only {
+            crate::mesh_art::load(&bundle_scene, revision)
+                .unwrap()
+                .unwrap()
+                .0
+        } else {
+            mesh_props::load(&bundle_scene, revision)
+                .unwrap()
+                .unwrap()
+                .0
+                .props
+                .remove(0)
+                .art
+        };
+        for (actual, expected) in loaded.rotation().into_iter().zip(rotation) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
+        open_bundle(&destination).unwrap();
+    }
+}
+
 fn add_props(scene: &std::path::Path, revision: [u8; 32]) {
     let root = scene.parent().unwrap();
     let package_root = root.join("verified-static-package");

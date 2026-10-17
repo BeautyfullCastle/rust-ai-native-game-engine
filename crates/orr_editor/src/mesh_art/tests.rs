@@ -43,6 +43,73 @@ fn revision() -> [u8; 32] {
 }
 
 #[test]
+fn legacy_sidecars_default_to_identity_without_adding_a_rotation_field() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = package(&root);
+    let snapshot = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", revision()).unwrap();
+    let bytes = snapshot.encode_embedded("legacy.scene.yaml").unwrap();
+    let encoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(encoded.get("rotation").is_none());
+    let loaded = Snapshot::decode_embedded(&bytes, "legacy.scene.yaml", revision()).unwrap();
+    assert_eq!(loaded.rotation(), [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(loaded.encode_embedded("legacy.scene.yaml").unwrap(), bytes);
+}
+
+#[test]
+fn rotated_snapshot_reopens_without_source_and_translation_updates_preserve_orientation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = package(&root);
+    let scene_path = scene(&root, "rotated.scene.yaml");
+    let rotation = crate::mesh_rotation::from_degrees([20.0, 35.0, -15.0]).unwrap();
+    let snapshot = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", revision())
+        .unwrap()
+        .with_rotation(rotation)
+        .unwrap()
+        .with_transform([1.0, 2.0, 3.0], 0.75)
+        .unwrap();
+    assert_eq!(
+        snapshot
+            .placement([orr_fp::FP::ZERO; 3])
+            .unwrap()
+            .instance
+            .rotation,
+        snapshot.rotation()
+    );
+    let saved_hash = save(&scene_path, Some(&snapshot), None).unwrap().unwrap();
+    fs::rename(&source, root.join("source-hidden")).unwrap();
+    let (loaded, loaded_hash) = load(&scene_path, revision()).unwrap().unwrap();
+    assert_eq!(loaded_hash, saved_hash);
+    for (actual, expected) in loaded.rotation().into_iter().zip(rotation) {
+        assert!((actual - expected).abs() < 1.0e-6);
+    }
+    assert_eq!(loaded.offset(), [1.0, 2.0, 3.0]);
+    assert_eq!(loaded.scale(), 0.75);
+    let encoded: serde_json::Value =
+        serde_json::from_slice(&loaded.encode_embedded("rotated.scene.yaml").unwrap()).unwrap();
+    assert_eq!(encoded["rotation"].as_array().unwrap().len(), 4);
+    for invalid in [
+        serde_json::json!([0, 0, 0, 0]),
+        serde_json::json!([1000001, 0, 0, 1]),
+    ] {
+        let mut corrupted = encoded.clone();
+        corrupted["rotation"] = invalid;
+        assert!(Snapshot::decode_embedded(
+            &serde_json::to_vec(&corrupted).unwrap(),
+            "rotated.scene.yaml",
+            revision()
+        )
+        .is_err());
+    }
+    assert!(loaded
+        .clone()
+        .with_rotation([f32::NAN, 0.0, 0.0, 1.0])
+        .is_err());
+    assert!(loaded.with_rotation([0.0; 4]).is_err());
+}
+
+#[test]
 fn embedded_snapshot_reopens_without_source_and_preserves_transform_and_license() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();

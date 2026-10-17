@@ -37,14 +37,26 @@ fn document(count: usize) -> Document {
 #[test]
 fn prop_transform_parser_accepts_finite_positions_and_rejects_invalid_values() {
     assert_eq!(
-        parse_transform(&["-1.25".into(), "0".into(), "3.5".into()], "0.75").unwrap(),
-        ([-1.25, 0.0, 3.5], 0.75)
+        parse_transform(
+            &["-1.25".into(), "0".into(), "3.5".into()],
+            "0.75",
+            &["90".into(), "0".into(), "-45".into()],
+        )
+        .unwrap(),
+        ([-1.25, 0.0, 3.5], 0.75, [90.0, 0.0, -45.0])
     );
-    assert!(parse_transform(&["NaN".into(), "0".into(), "0".into()], "1").is_err());
-    assert!(parse_transform(&["0".into(), "0".into(), "inf".into()], "1").is_err());
-    assert!(parse_transform(&["0".into(), "0".into(), "0".into()], "NaN").is_err());
-    let (position, negative_scale) =
-        parse_transform(&["0".into(), "0".into(), "0".into()], "-1").unwrap();
+    let zero_rotation = &["0".into(), "0".into(), "0".into()];
+    assert!(parse_transform(&["NaN".into(), "0".into(), "0".into()], "1", zero_rotation).is_err());
+    assert!(parse_transform(&["0".into(), "0".into(), "inf".into()], "1", zero_rotation).is_err());
+    assert!(parse_transform(&["0".into(), "0".into(), "0".into()], "NaN", zero_rotation).is_err());
+    assert!(parse_transform(
+        &["0".into(), "0".into(), "0".into()],
+        "1",
+        &["0".into(), "inf".into(), "0".into()]
+    )
+    .is_err());
+    let (position, negative_scale, _) =
+        parse_transform(&["0".into(), "0".into(), "0".into()], "-1", zero_rotation).unwrap();
     assert!(snapshot().with_transform(position, negative_scale).is_err());
 }
 
@@ -83,7 +95,14 @@ fn viewport_drag_commits_one_history_entry_ignores_no_motion_and_cancel_restores
     let camera = orr_render::Camera3D::orthographic([0.0, 5.0, 5.0], [0.0; 3], 4.0);
     let viewport = (100, 100);
     let mut panel = Panel::default();
-    panel.reset_history(document(1), Some(0));
+    let mut original_document = document(1);
+    let original_rotation = crate::mesh_rotation::from_degrees([15.0, -25.0, 40.0]).unwrap();
+    original_document.props[0].art = original_document.props[0]
+        .art
+        .clone()
+        .with_rotation(original_rotation)
+        .unwrap();
+    panel.reset_history(original_document, Some(0));
     panel.graph_revision = Some(panel.document.props[0].art.graph_revision());
     panel.selected = Some(1);
     let original = panel.document.clone();
@@ -104,10 +123,28 @@ fn viewport_drag_commits_one_history_entry_ignores_no_motion_and_cancel_restores
     panel.finish_gesture();
     assert_eq!(panel.history.len(), 2);
     assert!(panel.dirty());
+    assert!(panel.document.props[0]
+        .art
+        .rotation()
+        .iter()
+        .zip(original_rotation)
+        .all(|(actual, expected)| (*actual - expected).abs() < 1.0e-5));
     panel.undo();
     assert_eq!(panel.document.props[0].art.offset(), original_offset);
+    assert!(panel.document.props[0]
+        .art
+        .rotation()
+        .iter()
+        .zip(original_rotation)
+        .all(|(actual, expected)| (*actual - expected).abs() < 1.0e-5));
     panel.redo();
     assert_eq!(panel.document.props[0].art.offset(), [1.0, 0.0, 2.0]);
+    assert!(panel.document.props[0]
+        .art
+        .rotation()
+        .iter()
+        .zip(original_rotation)
+        .all(|(actual, expected)| (*actual - expected).abs() < 1.0e-5));
 
     panel.undo();
     panel.gesture = Some(super::PropGesture {
@@ -139,6 +176,55 @@ fn viewport_drag_commits_one_history_entry_ignores_no_motion_and_cancel_restores
     panel.cancel_gesture();
     assert_eq!(panel.document.props[0].art.offset(), original_offset);
     assert!(!panel.dirty());
+}
+
+#[test]
+fn prop_rotation_fields_round_trip_through_update_and_history() {
+    let mut panel = Panel::default();
+    let mut initial_document = document(1);
+    let original_rotation = crate::mesh_rotation::from_degrees([10.0, 20.0, 30.0]).unwrap();
+    initial_document.props[0].art = initial_document.props[0]
+        .art
+        .clone()
+        .with_rotation(original_rotation)
+        .unwrap();
+    panel.reset_history(initial_document, Some(0));
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    let selected_degrees = panel
+        .rotation
+        .each_ref()
+        .map(|value| value.parse::<f32>().unwrap());
+    assert!(selected_degrees
+        .iter()
+        .zip([10.0, 20.0, 30.0])
+        .all(|(actual, expected)| (*actual - expected).abs() < 1.0e-4));
+
+    panel.position = ["2".into(), "0".into(), "3".into()];
+    panel.rotation = ["45".into(), "90".into(), "-30".into()];
+    panel.update_selected();
+    let updated_rotation = panel.document.props[0].art.rotation();
+    let expected_rotation = crate::mesh_rotation::from_degrees([45.0, 90.0, -30.0]).unwrap();
+    assert!(updated_rotation
+        .iter()
+        .zip(expected_rotation)
+        .all(|(actual, expected)| (*actual - expected).abs() < 1.0e-5));
+
+    panel.undo();
+    assert!(panel.document.props[0]
+        .art
+        .rotation()
+        .iter()
+        .zip(original_rotation)
+        .all(|(actual, expected)| (*actual - expected).abs() < 1.0e-5));
+    panel.redo();
+    assert!(panel.document.props[0]
+        .art
+        .rotation()
+        .iter()
+        .zip(expected_rotation)
+        .all(|(actual, expected)| (*actual - expected).abs() < 1.0e-5));
 }
 
 #[test]
