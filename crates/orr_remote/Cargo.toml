@@ -15,6 +15,7 @@ room-project = ["sample-host", "orr_sample/room-project"]
 linked-prefabs = ["orr_edit/linked-prefabs", "orr_reflect/linked-prefabs", "orr_sample?/linked-prefabs"]
 collect-dodge = ["sample-host", "orr_sample/collect-dodge"]
 navigation = ["sample-host", "dep:orr_games", "orr_games/navigation", "dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
+mesh-navigation = ["sample-host", "dep:orr_games", "orr_games/mesh-navigation", "dep:orr_navigation_runtime", "dep:orr_navigation"]
 terrain-physics = ["sample-host", "dep:orr_games", "orr_games/terrain-physics", "dep:orr_terrain_physics3d", "dep:orr_terrain"]
 default = ["sample-host"]
 # The headless host binary `orr_remote_host` (PhysGame from `orr_sample`).
@@ -69,3 +70,9 @@ path = "src/bin/orr_remote_host.rs"
 # Guarded by orr_tui/tests/deps.rs; put new tests in the library or tests/.
 test = false
 required-features = ["sample-host"]
+
+[[bin]]
+name = "orr_mesh"
+path = "src/bin/orr_mesh.rs"
+test = false
+required-features = ["mesh-navigation"]

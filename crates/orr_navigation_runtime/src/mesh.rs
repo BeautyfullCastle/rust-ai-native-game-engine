@@ -117,8 +117,7 @@ impl MeshRuntime {
         validate_spec(spec)?;
         check_graph_shape(graph)?;
         let graph_bytes = graph.to_bytes();
-        check_graph_bytes(&graph_bytes)?;
-        let canonical_graph = StaticMeshGraph::from_bytes(&graph_bytes)?;
+        let canonical_graph = decode_asset(&graph_bytes)?;
         if canonical_graph.revision() != binding.graph_revision {
             return Err(RuntimeError::StaleBinding);
         }
@@ -225,8 +224,7 @@ impl MeshRuntime {
         validate_spec(spec)?;
         check_graph_shape(graph)?;
         let graph_bytes = graph.to_bytes();
-        check_graph_bytes(&graph_bytes)?;
-        let canonical_graph = StaticMeshGraph::from_bytes(&graph_bytes)?;
+        let canonical_graph = decode_asset(&graph_bytes)?;
         if canonical_graph.revision() != binding.graph_revision {
             return Err(RuntimeError::StaleBinding);
         }
@@ -294,19 +292,62 @@ impl MeshRuntime {
         if !frame.list_is_alive(state.graph_bytes) {
             return Err(RuntimeError::InvalidState);
         }
-        let stored_bytes = frame.list(state.graph_bytes);
-        if stored_bytes.len() > MAX_GRAPH_BYTES {
-            return Err(RuntimeError::Limit);
-        }
-        let graph_bytes: Vec<u8> = stored_bytes.iter().map(|byte| byte.value).collect();
-        check_graph_bytes(&graph_bytes)?;
-        let graph = StaticMeshGraph::from_bytes(&graph_bytes)?;
-        if graph.revision() != state.binding.graph_revision {
-            return Err(RuntimeError::StaleBinding);
-        }
-        let path = validate_agent(&graph, &agent)?;
+        let (graph, path) = decode_state(
+            &state,
+            &agent,
+            frame.list(state.graph_bytes),
+            expected_binding,
+        )?;
         Ok((state, agent, graph, path))
     }
+}
+
+pub fn decode_asset(bytes: &[u8]) -> Result<StaticMeshGraph, RuntimeError> {
+    check_graph_bytes(bytes)?;
+    StaticMeshGraph::from_bytes(bytes).map_err(RuntimeError::Navigation)
+}
+
+pub fn decode_readback(
+    state: &RuntimeState,
+    agent: &RuntimeAgent,
+    stored_bytes: &[AssetByte],
+    expected_binding: WorldBinding,
+) -> Result<AgentReadback, RuntimeError> {
+    let (_, path) = decode_state(state, agent, stored_bytes, expected_binding)?;
+    Ok(AgentReadback {
+        entity: state.agent,
+        spec: agent.spec,
+        binding: state.binding,
+        position: agent.position,
+        distance: agent.distance,
+        status: navigation_status(agent.status)?,
+        path,
+    })
+}
+
+fn decode_state(
+    state: &RuntimeState,
+    agent: &RuntimeAgent,
+    stored_bytes: &[AssetByte],
+    expected_binding: WorldBinding,
+) -> Result<(StaticMeshGraph, MeshPath), RuntimeError> {
+    if !state.is_active() || state.agent.is_none() {
+        return Err(RuntimeError::InvalidState);
+    }
+    if state.binding != expected_binding {
+        return Err(RuntimeError::StaleBinding);
+    }
+    validate_binding(expected_binding, expected_binding.graph_revision)?;
+    if stored_bytes.len() > MAX_GRAPH_BYTES {
+        return Err(RuntimeError::Limit);
+    }
+    let graph_bytes: Vec<u8> = stored_bytes.iter().map(|byte| byte.value).collect();
+    let graph = decode_asset(&graph_bytes)?;
+    if graph.revision() != state.binding.graph_revision {
+        return Err(RuntimeError::StaleBinding);
+    }
+    let path = validate_agent(&graph, agent)?;
+    Ok((graph, path))
 }
 
 const STATUS_STOPPED: u32 = 0;

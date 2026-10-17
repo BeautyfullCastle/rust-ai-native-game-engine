@@ -14,6 +14,7 @@ workspace = true
 room-escape = []
 collect-dodge = []
 navigation = ["dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
+mesh-navigation = ["dep:orr_navigation_runtime", "dep:orr_navigation"]
 default = []
 terrain-physics = ["dep:orr_terrain_physics3d", "dep:orr_terrain"]
 

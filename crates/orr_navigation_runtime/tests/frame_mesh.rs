@@ -3,8 +3,8 @@ use orr_fp::{fp, FP};
 use orr_navigation::{mesh::StaticMeshGraph, AgentProfile, NavigationError, NavigationStatus};
 use orr_navigation_runtime::{
     mesh::{
-        AgentSpec, AssetByte, MeshRuntime, RuntimeAgent, RuntimeError, RuntimeState, WorldBinding,
-        MAX_GRAPH_BYTES,
+        decode_asset, decode_readback, AgentSpec, AssetByte, MeshRuntime, RuntimeAgent,
+        RuntimeError, RuntimeState, WorldBinding, MAX_GRAPH_BYTES,
     },
     NavigationRuntime,
 };
@@ -137,6 +137,53 @@ fn mesh_runtime_co_registers_and_snapshots_route_progress_in_frame_bytes() {
         MeshRuntime::agent(&first, binding).unwrap(),
         MeshRuntime::agent(&second, binding).unwrap()
     );
+}
+
+#[test]
+fn bounded_readback_decoder_matches_frame_authority_and_rejects_forged_state() {
+    let (mut frame, graph, binding, spec) = setup();
+    let entity = admit(&mut frame, &graph, binding, spec);
+    MeshRuntime::step(&mut frame, binding).unwrap();
+    let state = *frame.singleton::<RuntimeState>();
+    let agent = *frame.get::<RuntimeAgent>(entity).unwrap();
+    let stored_bytes = frame.list(state.graph_bytes);
+    let before = frame.to_bytes();
+    assert_eq!(
+        decode_asset(&graph.to_bytes()).unwrap().to_bytes(),
+        graph.to_bytes()
+    );
+    assert_eq!(
+        decode_readback(&state, &agent, stored_bytes, binding).unwrap(),
+        MeshRuntime::agent(&frame, binding).unwrap()
+    );
+
+    let mut stale_binding = binding;
+    stale_binding.world_revision[0] ^= 1;
+    assert_eq!(
+        decode_readback(&state, &agent, stored_bytes, stale_binding),
+        Err(RuntimeError::StaleBinding)
+    );
+    let mut missing_agent = state;
+    missing_agent.agent = Entity::NONE;
+    assert_eq!(
+        decode_readback(&missing_agent, &agent, stored_bytes, binding),
+        Err(RuntimeError::InvalidState)
+    );
+    let mut forged_agent = agent;
+    forged_agent.position[0] += FP::ONE;
+    assert!(decode_readback(&state, &forged_agent, stored_bytes, binding).is_err());
+    assert!(decode_readback(&state, &agent, &[], binding).is_err());
+    assert_eq!(
+        decode_readback(
+            &state,
+            &agent,
+            &vec![AssetByte { value: 0 }; MAX_GRAPH_BYTES + 1],
+            binding
+        ),
+        Err(RuntimeError::Limit)
+    );
+    assert!(decode_asset(&vec![0; MAX_GRAPH_BYTES + 1]).is_err());
+    assert_eq!(frame.to_bytes(), before);
 }
 
 #[test]
