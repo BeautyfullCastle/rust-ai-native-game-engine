@@ -16,6 +16,10 @@ use std::{fs, fs::OpenOptions, io::Read, path::PathBuf, sync::Arc};
 mod mesh_model;
 #[path = "mesh_navigation/agent_viewport.rs"]
 mod agent_viewport;
+#[path = "mesh_navigation/geometry.rs"]
+mod geometry;
+#[path = "mesh_navigation/geometry_panel.rs"]
+mod geometry_panel;
 pub(crate) use agent_viewport::ViewInput as AgentViewInput;
 
 const MAX_ASSET_BYTES: usize = 8192;
@@ -49,6 +53,10 @@ pub struct Panel {
     art: crate::mesh_art_panel::Panel,
     props: crate::mesh_props_panel::Panel,
     agent_viewport: agent_viewport::State,
+    geometry: geometry_panel::Panel,
+    geometry_staged: bool,
+    geometry_host_context: Option<(u64, u64)>,
+    geometry_presentation_pending: bool,
 }
 
 impl Default for Panel {
@@ -79,6 +87,10 @@ impl Default for Panel {
             art: crate::mesh_art_panel::Panel::default(),
             props: crate::mesh_props_panel::Panel::default(),
             agent_viewport: agent_viewport::State::default(),
+            geometry: geometry_panel::Panel::default(),
+            geometry_staged: false,
+            geometry_host_context: None,
+            geometry_presentation_pending: false,
         }
     }
 }
@@ -111,6 +123,9 @@ impl Panel {
         self.last_frame = Some(frame_identity);
         let pin = *frame.singleton::<MeshScenePin>();
         if new_document {
+            self.geometry.reset();
+            self.geometry_staged = false;
+            self.geometry_host_context = None;
             self.loaded_scene = scene;
             self.loaded_scene_epoch = Some(scene_epoch);
             self.loaded_graph_revision = None;
@@ -134,7 +149,7 @@ impl Panel {
         }
         if pin.is_empty() {
             if self.loaded_graph_revision.is_some() {
-                if self.draft_dirty {
+                if self.draft_dirty || self.geometry.dirty() {
                     self.loaded_graph_revision = None;
                     self.loaded_spec = None;
                 } else {
@@ -201,8 +216,12 @@ impl Panel {
         self.view_model.clone()
     }
 
+    pub(crate) fn set_geometry_presentation_pending(&mut self, pending: bool) {
+        self.geometry_presentation_pending = pending;
+    }
+
     pub(crate) fn has_unplaced_draft(&self) -> bool {
-        self.draft_dirty || self.art_dirty()
+        self.draft_dirty || self.geometry.dirty() || self.art_dirty()
     }
 
     pub(crate) fn art_model(&self, editor: &Editor) -> Option<crate::viewport3d::SceneModel> {
@@ -252,6 +271,9 @@ impl Panel {
         }
         if editor.game() != EditorGame::MeshNavigation {
             return None;
+        }
+        if self.geometry.dirty() {
+            return Some("Stage or reset mesh geometry fields before Play".into());
         }
         if let Some(reason) = self.art.play_blocker(editor) {
             return Some(reason);
@@ -397,6 +419,12 @@ impl Panel {
 
     pub fn place_agent(&mut self, editor: &mut Editor) -> Result<(), String> {
         let result = (|| {
+            if self.geometry.dirty() {
+                return Err("Stage or reset mesh geometry fields before placing a mesh agent".into());
+            }
+            if self.geometry_staged {
+                self.geometry_bindings_blocker(editor)?;
+            }
             if self.agent_pick_busy() || self.props.gesture_busy() {
                 return Err("Finish or cancel active viewport picking or prop movement before placing an agent".into());
             }
@@ -434,6 +462,8 @@ impl Panel {
             }
             self.draft_dirty = false;
             self.agent_viewport = agent_viewport::State::default();
+            self.geometry_staged = false;
+            self.geometry_host_context = None;
             self.error = None;
             self.sync(editor);
             Ok(())
@@ -459,7 +489,7 @@ impl Panel {
                 }
                 if ui
                     .add_enabled(
-                        self.draft_dirty && editor.mode() == Mode::Edit,
+                        (self.draft_dirty || self.geometry.dirty()) && editor.mode() == Mode::Edit,
                         egui::Button::new("Discard unplaced changes"),
                     )
                     .clicked()
@@ -474,6 +504,23 @@ impl Panel {
                     self.sync(editor);
                 }
             });
+            let geometry_blocker = self.geometry_blocker(editor);
+            if let Some(reason) = &geometry_blocker {
+                ui.weak(reason);
+            }
+            let geometry_action = self.geometry_profile().ok().and_then(|profile| {
+                ui.add_enabled_ui(geometry_blocker.is_none(), |ui| {
+                    self.geometry.show(ui, self.graph.as_ref(), profile)
+                }).inner
+            });
+            if let Some(action) = geometry_action {
+                if let Err(error) = self.stage_geometry(action, editor) {
+                    self.error = Some(error);
+                }
+            }
+            if self.geometry_staged {
+                ui.weak("Geometry is staged locally; Place mesh agent commits it and updates the viewport.");
+            }
             let asset_label = ui.label("Mesh asset (.orrmesh)");
             ui.horizontal(|ui| {
                 let input_width = (ui.available_width() - 100.0).max(40.0);
@@ -569,6 +616,9 @@ impl Panel {
     }
 
     fn authoring_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.geometry.dirty() {
+            return Some("Stage or reset mesh geometry fields before placing a mesh agent".into());
+        }
         if self.agent_pick_busy() || self.props.gesture_busy() {
             return Some("Finish or cancel active viewport picking or prop movement before placing an agent".into());
         }
@@ -607,6 +657,103 @@ impl Panel {
             .err()
     }
 
+    fn geometry_blocker(&self, editor: &Editor) -> Option<String> {
+        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() || !editor.can_mutate() {
+            return Some("Mesh geometry requires a writable local MeshNavigation host".into());
+        }
+        if editor.mode() != Mode::Edit || editor.previewing().is_some() {
+            return Some("Stop Play and clear previews before editing mesh geometry".into());
+        }
+        if self.agent_pick_busy() || self.props.gesture_busy() {
+            return Some("Finish or cancel active viewport picking or prop movement before editing geometry".into());
+        }
+        if self.geometry_presentation_pending || self.art_import_busy() || self.art_dirty() {
+            return Some("Finish importing and save or discard presentation edits before geometry".into());
+        }
+        if editor.snapshot().is_none() || self.loaded_scene_epoch != Some(editor.scene_load_epoch()) || self.loaded_scene != editor.path() {
+            return Some("Wait for the current mesh scene Frame before editing geometry".into());
+        }
+        if !editor.proposals().is_empty() {
+            return Some("Resolve open proposals before editing mesh geometry".into());
+        }
+        self.geometry_profile().err()
+    }
+
+    fn geometry_profile(&self) -> Result<AgentProfile, String> {
+        let max_slope = parse_fixed(&self.max_slope)?;
+        if max_slope < FP::ZERO || max_slope > FP::from_int(4) {
+            return Err("Maximum slope must be within 0..=4 for mesh geometry".into());
+        }
+        Ok(AgentProfile { max_slope, radius: FP::ZERO, headroom: FP::ZERO, max_step: FP::ZERO })
+    }
+
+    fn geometry_bindings_blocker(&self, editor: &Editor) -> Result<(), String> {
+        if self.geometry_presentation_pending {
+            return Err("Save or discard camera and animation edits before geometry".into());
+        }
+        if self.geometry_staged {
+            let snapshot = editor.snapshot().ok_or("Wait for the staged geometry host Frame")?;
+            let frame = snapshot.predicted();
+            if self.geometry_host_context != Some((frame.tick(), frame.checksum())) {
+                return Err("Host mesh changed while geometry was staged; discard the unplaced changes before retrying".into());
+            }
+        }
+        let scene = editor.path().ok_or("Save the mesh scene before editing geometry")?;
+        for path in [
+            crate::mesh_art::sidecar_path(&scene)?,
+            crate::mesh_props::sidecar_path(&scene)?,
+            crate::mesh_camera_store::sidecar_path(&scene)?,
+            crate::mesh_animation_store::sidecar_path(&scene)?,
+        ] {
+            match fs::symlink_metadata(&path) {
+                Ok(_) => return Err("Remove and save existing scene-bound art, props, camera and animation before geometry edits; their graph revisions are not silently rebound".into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(format!("Inspect mesh geometry presentation binding: {error}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn stage_geometry(&mut self, action: geometry_panel::Action, editor: &Editor) -> Result<(), String> {
+        if let Some(reason) = self.geometry_blocker(editor) {
+            return Err(reason);
+        }
+        self.geometry_bindings_blocker(editor)?;
+        let profile = self.geometry_profile()?;
+        if self.graph.as_ref().is_some_and(|graph| graph.profile() != profile) {
+            return Err("Maximum slope differs from the open graph; create or reopen the mesh".into());
+        }
+        let graph = match action {
+            geometry_panel::Action::AppendQuad(quad) => geometry::append_quad(self.graph.as_ref(), profile, quad)?,
+            geometry_panel::Action::MoveVertex { index, position } => geometry::move_vertex(self.graph.as_ref().ok_or("Create or open a mesh first")?, index, position)?,
+            geometry_panel::Action::RemoveFace(index) => geometry::remove_face(self.graph.as_ref().ok_or("Create or open a mesh first")?, index)?,
+        };
+        if graph.to_bytes().len() > MAX_ASSET_BYTES {
+            return Err("Mesh geometry exceeds the 8192-byte scene limit".into());
+        }
+        for point in graph.vertices() {
+            point_to_f32(*point)?;
+        }
+        if self.graph.as_ref().is_some_and(|current| current.revision() == graph.revision()) {
+            return Err("Mesh geometry operation did not change the graph".into());
+        }
+        let snapshot = editor.snapshot().ok_or("Wait for the mesh geometry host Frame")?;
+        let frame = snapshot.predicted();
+        let host_context = (frame.tick(), frame.checksum());
+        self.cancel_agent_pick();
+        self.graph = Some(graph);
+        self.draft_dirty = true;
+        self.geometry_staged = true;
+        self.geometry_host_context = Some(host_context);
+        self.asset_path.clear();
+        self.model_path.clear();
+        self.loaded_asset_source = None;
+        self.loaded_model_source = None;
+        self.geometry.acknowledge();
+        self.error = None;
+        Ok(())
+    }
+
     fn parse_spec(&self) -> Result<AgentSpec, String> {
         let start = [
             parse_fixed(&self.start[0])?,
@@ -635,6 +782,9 @@ impl Panel {
     }
 
     fn draft_is_stale(&self) -> bool {
+        if self.geometry.dirty() {
+            return true;
+        }
         let (Some(graph), Some(loaded_revision), Some(loaded_spec)) =
             (&self.graph, self.loaded_graph_revision, self.loaded_spec)
         else {

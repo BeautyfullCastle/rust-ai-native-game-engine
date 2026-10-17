@@ -381,6 +381,8 @@ impl EditorApp {
         self.mesh_camera.sync(&mut self.editor);
         #[cfg(feature="mesh-animated-models")]
         self.mesh_animation.sync(&self.editor);
+        let geometry_pending = self.mesh_camera.dirty() || self.mesh_animation_dirty();
+        self.mesh_navigation.set_geometry_presentation_pending(geometry_pending);
         self.mesh_navigation.sync(&self.editor);
         let blocker = self.mesh_presentation_blocker();
         self.editor.set_mesh_navigation_blocker(blocker);
