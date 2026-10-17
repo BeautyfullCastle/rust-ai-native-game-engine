@@ -123,6 +123,8 @@ mod mesh_art;
 mod mesh_art_panel;
 #[cfg(feature="mesh-navigation")]
 mod mesh_scene;
+#[cfg(feature="mesh-navigation")]
+mod mesh_workspace;
 #[cfg(all(windows, target_arch = "x86_64", feature="windows-export"))]
 pub mod windows_export_panel;
 #[cfg(all(windows, target_arch = "x86_64", feature="windows-projects"))]

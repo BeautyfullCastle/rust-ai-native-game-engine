@@ -55,6 +55,8 @@ pub enum DialogKind {
     SaveAs,
     #[cfg(feature="mesh-navigation")]
     NewMesh,
+    #[cfg(feature="mesh-navigation")]
+    OpenMesh,
 }
 
 /// An open path prompt.
@@ -326,6 +328,86 @@ impl EditorApp {
         { self.package_manager.busy() }
         #[cfg(not(feature="package-manager"))]
         { false }
+    }
+
+    #[cfg(feature="mesh-navigation")]
+    fn mesh_workspace_blocker(&self) -> Option<String> {
+        if !matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
+            || !self.editor.spec().is_local() || self.editor.mode() != Mode::Edit
+            || !self.editor.can_mutate() || self.editor.previewing().is_some()
+            || self.editor.in_gesture() || self.editor.erp_status().is_some() {
+            return Some("Mesh workspace changes require an idle local Physics or MeshNavigation editor without an ERP listener".into());
+        }
+        if self.editor.is_dirty() || self.mesh_navigation.has_unplaced_draft() {
+            return Some("Save or explicitly undo/discard scene, unplaced mesh and agent art changes before changing mesh workspaces".into());
+        }
+        if self.package_work_pending() || self.shot.is_some() || self.remote_capture.is_some()
+            || self.encoder.is_some() || self.ui.dialog.is_some() {
+            return Some("Finish content operations, captures and path dialogs before changing mesh workspaces".into());
+        }
+        #[cfg(feature="models")]
+        if self.models.bindings.as_ref().is_some_and(|bindings| bindings.dirty()) {
+            return Some("Save or explicitly discard model bindings before changing mesh workspaces".into());
+        }
+        #[cfg(feature="sprites")]
+        if self.sprites.bindings.as_ref().is_some_and(|bindings| bindings.dirty()) {
+            return Some("Save or explicitly discard sprite bindings before changing mesh workspaces".into());
+        }
+        #[cfg(feature="animated-models")]
+        if self.animated_models.bindings.as_ref().is_some_and(|bindings| bindings.dirty()) {
+            return Some("Save or explicitly discard animation preview bindings before changing mesh workspaces".into());
+        }
+        #[cfg(feature="terrain")]
+        if self.terrain.document.dirty() {
+            return Some("Save or explicitly discard terrain edits before changing mesh workspaces".into());
+        }
+        #[cfg(feature="irradiance-probes")]
+        if self.irradiance.bindings.as_ref().is_some_and(|bindings| bindings.dirty())
+            || self.irradiance.is_baking() || self.irradiance.is_validating_bake() {
+            return Some("Finish irradiance work and save or explicitly discard its bindings before changing mesh workspaces".into());
+        }
+        #[cfg(feature="room-project")]
+        if self.room_camera.as_ref().is_some_and(|camera| camera.dirty()) {
+            return Some("Save or explicitly discard camera edits before changing mesh workspaces".into());
+        }
+        #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
+        if self.windows_export.busy() {
+            return Some("Finish Windows export before changing mesh workspaces".into());
+        }
+        #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
+        if self.windows_projects.busy() {
+            return Some("Finish Room project preparation before changing mesh workspaces".into());
+        }
+        None
+    }
+
+    #[cfg(feature="mesh-navigation")]
+    fn switch_mesh_workspace(&mut self, path: &std::path::Path, intent: crate::mesh_workspace::Intent) -> bool {
+        let candidate = (|| -> Result<Self, String> {
+            if let Some(blocked) = self.mesh_workspace_blocker() { return Err(blocked); }
+            let original = self.editor.mesh_workspace_source_stamp()?;
+            let editor = crate::mesh_workspace::prepare(path, intent)?;
+            let mut replacement = Self::new(editor, self.render_state.clone());
+            replacement.mesh_navigation.sync(&replacement.editor);
+            replacement.viewport_hdr_disabled = self.viewport_hdr_disabled;
+            if let Some(blocked) = self.mesh_workspace_blocker() { return Err(blocked); }
+            if self.editor.mesh_workspace_source_stamp()? != original {
+                return Err("Current document changed during preparation; save it before retrying the requested mesh workspace".into());
+            }
+            Ok(replacement)
+        })();
+        match candidate {
+            Ok(mut replacement) => {
+                replacement.gpu = self.gpu.take();
+                replacement.gpu3d = self.gpu3d.take();
+                *self = replacement;
+                true
+            }
+            Err(error) => {
+                self.editor.error(format!("Current workspace retained; cannot use {}: {error}. Any newly created scene is retained.", path.display()));
+                false
+            }
+        }
     }
 
     #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
@@ -653,9 +735,15 @@ impl EditorApp {
             ui.menu_button("File", |ui| {
                 if !(mutable) { ui.disable(); }
                 #[cfg(feature="mesh-navigation")]
-                if self.editor.game().is_mesh_navigation()
+                if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
                     && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("New mesh scene\u{2026}")).clicked() {
                     self.ui.dialog = Some(Dialog { kind: DialogKind::NewMesh, text: String::new() });
+                    ui.close();
+                }
+                #[cfg(feature="mesh-navigation")]
+                if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
+                    && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Open mesh scene\u{2026}")).clicked() {
+                    self.ui.dialog = Some(Dialog { kind: DialogKind::OpenMesh, text: String::new() });
                     ui.close();
                 }
                 if ui.add_enabled(!self.package_work_pending(), egui::Button::new("Open scene\u{2026}")).clicked() {
@@ -1478,6 +1566,8 @@ impl EditorApp {
             DialogKind::SaveAs => "Save scene as",
             #[cfg(feature="mesh-navigation")]
             DialogKind::NewMesh => "New mesh scene",
+            #[cfg(feature="mesh-navigation")]
+            DialogKind::OpenMesh => "Open mesh scene",
         };
         let mut keep = true;
         let mut accept = false;
@@ -1518,14 +1608,9 @@ impl EditorApp {
                 DialogKind::Open => self.editor.open_path(&path),
                 DialogKind::SaveAs => self.editor.save_as(&path),
                 #[cfg(feature="mesh-navigation")]
-                DialogKind::NewMesh => {
-                    if self.mesh_navigation.has_unplaced_draft() {
-                        self.editor.error("Place or explicitly discard unplaced mesh changes before creating a new scene");
-                        false
-                    } else {
-                        self.editor.create_mesh_scene(&path)
-                    }
-                }
+                DialogKind::NewMesh => self.switch_mesh_workspace(&path, crate::mesh_workspace::Intent::Create),
+                #[cfg(feature="mesh-navigation")]
+                DialogKind::OpenMesh => self.switch_mesh_workspace(&path, crate::mesh_workspace::Intent::Open),
             };
             keep = !ok;
         }

@@ -1565,6 +1565,71 @@ impl Editor {
         self.ingest();
     }
 
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_workspace_source_stamp(
+        &mut self,
+    ) -> Result<(EditorGame, PathBuf, u64), String> {
+        let game = self.game();
+        if !matches!(game, EditorGame::PhysGame | EditorGame::MeshNavigation)
+            || !self.spec().is_local()
+            || self.erp_status().is_some()
+            || !self.can_mutate()
+            || self.mode() != Mode::Edit
+            || self.previewing().is_some()
+            || self.gesture.busy()
+            || self.batch_uncertain
+            || self.history.in_tx
+            || self.sim.in_tx
+            || self
+                .pending
+                .values()
+                .any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..)))
+        {
+            return Err(
+                "Mesh workspace changes require an idle local PhysGame or MeshNavigation editor in Edit mode without an ERP listener"
+                    .into(),
+            );
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false)
+        {
+            return Err(
+                "Save the scene and finish transactions before changing mesh workspaces".into(),
+            );
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals
+            .get("proposals")
+            .and_then(J::as_array)
+            .is_none_or(|open| !open.is_empty())
+        {
+            return Err("Resolve open proposals before changing mesh workspaces".into());
+        }
+        let path = state
+            .get("scene_path")
+            .and_then(J::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .ok_or("Save the current scene before changing mesh workspaces")?;
+        let checksum = state
+            .get("checksum")
+            .and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.predicted().checksum() != checksum)
+        {
+            return Err(
+                "Wait for the current authoritative Frame before changing mesh workspaces".into(),
+            );
+        }
+        Ok((game, path, checksum))
+    }
+
     /// Waits (briefly) until the staged frame of the previewed proposal and its entities have arrived.
     fn wait_preview(&mut self) {
         let end = Instant::now() + Duration::from_secs(3);
