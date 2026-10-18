@@ -41,6 +41,9 @@ mod room_wall_footprint;
 #[cfg(feature = "room-authoring")]
 #[path = "app/room_actor_placement.rs"]
 mod room_actor_placement;
+#[cfg(feature="models")]
+#[path="app/frame_selection.rs"]
+mod frame_selection;
 
 /// Button labels (tests click them by these texts).
 pub const LBL_PLAY: &str = "\u{25B6} Play";
@@ -1722,6 +1725,8 @@ impl EditorApp {
     }
 
     fn yard_viewport(&mut self,ui:&mut Ui){
+        #[cfg(feature="models")]
+        self.frame_selection_button(ui);
         #[cfg(feature="terrain")]
         self.terrain.sync_for_editor(&self.editor);
         #[cfg(all(feature="terrain", feature="irradiance-probes"))]
@@ -1777,6 +1782,8 @@ impl EditorApp {
         let ppp=ui.ctx().pixels_per_point();
         let px=(((rect.width()*ppp).round() as u32).clamp(1,8192),((rect.height()*ppp).round() as u32).clamp(1,8192));
         self.ui.viewport_rect=Some(rect);self.ui.viewport_px=px;
+        #[cfg(feature="models")]
+        self.frame_selection_shortcut(ui, &resp, px);
         #[cfg(feature="mesh-navigation")]
         let prop_moving = self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.geometry_vertex_dragging();
         #[cfg(not(feature="mesh-navigation"))]
