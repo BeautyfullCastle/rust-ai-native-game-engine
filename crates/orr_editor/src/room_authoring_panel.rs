@@ -1,3 +1,6 @@
+mod wall_footprint;
+pub(crate) use wall_footprint::ViewInput;
+
 use crate::{
     editor::{Editor, RoomWall},
     model::Mode,
@@ -8,6 +11,8 @@ use std::path::PathBuf;
 
 pub struct Panel {
     pub open: bool,
+    footprint: wall_footprint::State,
+    footprint_grid: wall_footprint::GridStep,
     pub player: [String; 2],
     pub key: [String; 2],
     pub exit: [String; 2],
@@ -31,6 +36,8 @@ impl Default for Panel {
     fn default() -> Self {
         Self {
             open: false,
+            footprint: Default::default(),
+            footprint_grid: Default::default(),
             player: ["0".into(), "0".into()],
             key: ["0".into(), "0".into()],
             exit: ["0".into(), "0".into()],
@@ -54,6 +61,7 @@ impl Default for Panel {
 
 impl Panel {
     pub fn show(&mut self, context: &Context, editor: &mut Editor, removal_blocker: Option<&str>) {
+        self.sync_wall_footprint(editor);
         let current_stamp = (editor.path(), editor.sim().checksum);
         if self
             .wall_source_stamp
@@ -136,6 +144,7 @@ impl Panel {
                         "Wall half-depth Z",
                         &mut self.wall_half_extents,
                     );
+                    self.show_wall_footprint(ui, editor);
                     let center = parse_position(&self.wall_center);
                     let half_extents = parse_position(&self.wall_half_extents);
                     let can_add_wall = !self.wall_name.trim().is_empty()
@@ -152,7 +161,7 @@ impl Panel {
                         ui.label("Room wall name must contain 1..=64 bytes.");
                     }
                     if ui
-                        .add_enabled(can_add_wall, egui::Button::new("Create Room wall"))
+                        .add_enabled(can_add_wall && !self.wall_footprint_busy(), egui::Button::new("Create Room wall"))
                         .clicked()
                     {
                         match (center, half_extents) {
@@ -304,7 +313,9 @@ impl Panel {
                         Ok(()) => {
                             self.status = match self.refresh_walls(editor) {
                                 Ok(_) => format!("Updated Room wall {guid}."),
-                                Err(error) => format!("Updated Room wall {guid}, but could not refresh the wall list: {error}"),
+                                Err(error) => format!(
+                                    "Updated Room wall {guid}, but could not refresh the wall list: {error}"
+                                ),
                             };
                         }
                         Err(error) => self.status = error,
@@ -352,7 +363,9 @@ impl Panel {
                             self.selected_wall_guid = Some(new_guid.clone());
                             self.status = match self.refresh_walls(editor) {
                                 Ok(_) => format!("Duplicated Room wall as {new_guid}."),
-                                Err(error) => format!("Duplicated Room wall as {new_guid}, but could not refresh the wall list: {error}"),
+                                Err(error) => format!(
+                                    "Duplicated Room wall as {new_guid}, but could not refresh the wall list: {error}"
+                                ),
                             };
                         }
                         Err(error) => self.status = error,
@@ -380,7 +393,9 @@ impl Panel {
                         self.confirm_remove_wall = false;
                         self.status = match self.refresh_walls(editor) {
                             Ok(_) => format!("Removed Room wall {guid}."),
-                            Err(error) => format!("Removed Room wall {guid}, but could not refresh the wall list: {error}"),
+                            Err(error) => format!(
+                                "Removed Room wall {guid}, but could not refresh the wall list: {error}"
+                            ),
                         };
                     }
                     Err(error) => self.status = error,

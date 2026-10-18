@@ -3,7 +3,9 @@ use orr_fp::{FPVec3, FP};
 use orr_reflect::Value;
 use orr_remote::json::value_to_json;
 use serde_json::json;
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
+#[cfg(any(test, all(windows, target_arch = "x86_64")))]
+use std::collections::BTreeSet;
 
 const ACTOR: &str = orr_sample::room_project::ACTOR;
 const BODY: &str = "orr_physics3d::Body";
@@ -473,6 +475,7 @@ impl Editor {
         })
     }
 
+    #[cfg(any(test, all(windows, target_arch = "x86_64")))]
     pub(crate) fn capture_room_wall_stamp(
         &mut self,
         guids: &[String],
@@ -515,6 +518,7 @@ impl Editor {
         crate::room_wall_stamp::Template::capture(captured)
     }
 
+    #[cfg(any(test, all(windows, target_arch = "x86_64")))]
     pub(crate) fn instantiate_room_wall_stamp(
         &mut self,
         template: &crate::room_wall_stamp::Template,
