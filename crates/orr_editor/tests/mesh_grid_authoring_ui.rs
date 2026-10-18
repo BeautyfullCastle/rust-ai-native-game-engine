@@ -7,7 +7,7 @@
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 #![recursion_limit = "256"]
 
-use egui::accesskit::Role;
+use egui::accesskit::{Role, Toggled};
 use egui::{Key, Modifiers};
 use egui_kittest::{
     kittest::{NodeT, Queryable},
@@ -195,9 +195,13 @@ fn type_field(harness: &mut Harness<'_, EditorApp>, label: &str, value: &str) {
     harness.run_steps(2);
     harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
     harness.run_steps(2);
-    harness
-        .get_by_role_and_label(Role::TextInput, label)
-        .type_text(value);
+    if value.is_empty() {
+        harness.key_press(Key::Backspace);
+    } else {
+        harness
+            .get_by_role_and_label(Role::TextInput, label)
+            .type_text(value);
+    }
     settle(harness);
 }
 
@@ -208,6 +212,14 @@ fn fixed_field_value(harness: &Harness<'_, EditorApp>, label: &str) -> FP {
         .value()
         .expect("accessible fixed-point field value");
     orr_reflect::decimal::parse_fp(&value).expect("valid fixed-point field")
+}
+
+fn text_field_value(harness: &Harness<'_, EditorApp>, label: &str) -> String {
+    harness
+        .get_by_role_and_label(Role::TextInput, label)
+        .accesskit_node()
+        .value()
+        .expect("accessible text field value")
 }
 
 fn menu_click(harness: &mut Harness<'_, EditorApp>, menu: &str, item: &str) {
@@ -581,7 +593,69 @@ fn mesh_grid_authoring_builds_hole_and_preserves_a_playable_mission() {
         initial_graph.revision()
     );
 
-    type_field(&mut harness, "Excluded grid cells", "0");
+    type_field(&mut harness, "Grid columns", "5");
+    type_field(&mut harness, "Grid rows", "3");
+    type_field(&mut harness, "Excluded grid cells", "");
+    let palette_checksum = harness.state().editor.checksum();
+    let palette_history_len = harness.state().editor.history().entries.len();
+    assert_eq!(
+        harness
+            .get_by_label("I confirm replacing staged geometry with this grid")
+            .accesskit_node()
+            .toggled(),
+        Some(Toggled::True)
+    );
+    assert!(harness.query_by_label("Faces (2)").is_some());
+    click_button(&mut harness, "+0");
+    assert_eq!(text_field_value(&harness, "Excluded grid cells"), "0");
+    assert_eq!(harness.state().editor.checksum(), palette_checksum);
+    assert_eq!(
+        harness.state().editor.history().entries.len(),
+        palette_history_len
+    );
+    assert!(harness.query_by_label("Faces (2)").is_some());
+    assert!(harness
+        .get_by_role_and_label(Role::Button, LBL_PLAY)
+        .accesskit_node()
+        .is_disabled());
+    assert_eq!(
+        harness
+            .get_by_label("I confirm replacing staged geometry with this grid")
+            .accesskit_node()
+            .toggled(),
+        Some(Toggled::True)
+    );
+    click_button(&mut harness, "-0");
+    assert_eq!(text_field_value(&harness, "Excluded grid cells"), "");
+    assert_eq!(harness.state().editor.checksum(), palette_checksum);
+    assert_eq!(
+        harness.state().editor.history().entries.len(),
+        palette_history_len
+    );
+    assert!(harness.query_by_label("Faces (2)").is_some());
+    click_button(&mut harness, "+0");
+    assert_eq!(text_field_value(&harness, "Excluded grid cells"), "0");
+    assert_eq!(harness.state().editor.checksum(), palette_checksum);
+    assert_eq!(
+        harness.state().editor.history().entries.len(),
+        palette_history_len
+    );
+    assert!(harness.query_by_label("Faces (2)").is_some());
+    let palette_roundtrip_preserved_host_and_confirmation = harness.state().editor.checksum()
+        == palette_checksum
+        && harness.state().editor.history().entries.len() == palette_history_len
+        && harness.query_by_label("Faces (2)").is_some()
+        && text_field_value(&harness, "Excluded grid cells") == "0"
+        && harness
+            .get_by_label("I confirm replacing staged geometry with this grid")
+            .accesskit_node()
+            .toggled()
+            == Some(Toggled::True)
+        && harness
+            .get_by_role_and_label(Role::Button, LBL_PLAY)
+            .accesskit_node()
+            .is_disabled();
+    assert!(palette_roundtrip_preserved_host_and_confirmation);
     type_field(&mut harness, "Grid origin X", "0");
     type_field(&mut harness, "Grid origin Y", "0");
     type_field(&mut harness, "Grid origin Z", "0");
@@ -1007,6 +1081,7 @@ fn mesh_grid_authoring_builds_hole_and_preserves_a_playable_mission() {
         "collectible_count":3,
         "invalid_zero_columns_preserved_host":true,
         "invalid_excluded_cell_preserved_host":true,
+        "palette_roundtrip_preserved_host_and_confirmation":palette_roundtrip_preserved_host_and_confirmation,
         "stage_preserved_host_and_history":stage_preserved_host_and_history,
         "local_geometry_undo_redo_verified":true,
         "mission_preview_and_apply_verified":true,

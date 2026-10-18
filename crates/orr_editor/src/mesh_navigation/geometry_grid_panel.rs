@@ -62,6 +62,7 @@ impl Panel {
                     &mut self.excluded_cells,
                     MAX_EXCLUDED_BYTES,
                 );
+                changed |= grid_palette(ui, self, stale);
                 let confirm = ui.checkbox(
                     &mut self.replace_confirmed,
                     "I confirm replacing staged geometry with this grid",
@@ -207,6 +208,88 @@ fn parse_excluded_cells(value: &str, columns: u32, rows: u32) -> Result<u64, Str
         mask |= bit;
     }
     Ok(mask)
+}
+
+fn grid_palette(ui: &mut Ui, panel: &mut Panel, stale: bool) -> bool {
+    let dimensions = parse_axis(&panel.columns, "columns")
+        .and_then(|columns| parse_axis(&panel.rows, "rows").map(|rows| (columns, rows)));
+    let (columns, rows) = match dimensions {
+        Ok(dimensions) => dimensions,
+        Err(error) => {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!("Grid palette unavailable: {error}"),
+            );
+            return false;
+        }
+    };
+    let excluded = match parse_excluded_cells(&panel.excluded_cells, columns, rows) {
+        Ok(mask) => mask,
+        Err(error) => {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!("Grid palette unavailable: {error}"),
+            );
+            return false;
+        }
+    };
+
+    ui.label("Grid cell palette (+ walkable, - excluded)");
+    let mut changed = false;
+    egui::Grid::new("walkable_grid_cell_palette")
+        .num_columns(columns as usize)
+        .spacing(egui::vec2(2.0, 2.0))
+        .show(ui, |ui| {
+            for index in 0..columns * rows {
+                let is_excluded = excluded & (1_u64 << index) != 0;
+                let label = format!("{}{index}", if is_excluded { '-' } else { '+' });
+                let response = ui
+                    .add_enabled(
+                        !stale,
+                        egui::Button::new(label).min_size(egui::vec2(34.0, 22.0)),
+                    )
+                    .on_hover_text(format!(
+                        "Cell {index}: {}. Click to toggle; excluded cells are holes, not walls.",
+                        if is_excluded { "excluded" } else { "walkable" }
+                    ));
+                if response.clicked() {
+                    match toggle_excluded_cell(&panel.excluded_cells, columns, rows, index) {
+                        Ok(value) => {
+                            panel.excluded_cells = value;
+                            panel.error = None;
+                            changed = true;
+                        }
+                        Err(error) => panel.error = Some(error),
+                    }
+                }
+                if (index + 1) % columns == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    changed
+}
+
+fn toggle_excluded_cell(
+    value: &str,
+    columns: u32,
+    rows: u32,
+    index: u32,
+) -> Result<String, String> {
+    if !(1..=MAX_GRID_AXIS).contains(&columns)
+        || !(1..=MAX_GRID_AXIS).contains(&rows)
+        || index >= columns * rows
+    {
+        return Err("grid palette cell is outside the configured grid".into());
+    }
+    let mut mask = parse_excluded_cells(value, columns, rows)?;
+    let bit = 1_u64 << index;
+    mask ^= bit;
+    Ok((0..columns * rows)
+        .filter(|cell| mask & (1_u64 << *cell) != 0)
+        .map(|cell| cell.to_string())
+        .collect::<Vec<_>>()
+        .join(","))
 }
 
 #[path = "geometry_grid_panel/tests.rs"]
