@@ -207,7 +207,7 @@ pub mod windows_export_panel;
 pub mod windows_project_panel;
 #[cfg(feature="room-authoring")]
 pub mod room_authoring_panel;
-#[cfg(feature="room-authoring")]
+#[cfg(all(feature="room-authoring", any(test, all(windows, target_arch="x86_64"))))]
 mod room_wall_stamp;
 #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))]
 mod room_wall_stamp_store;

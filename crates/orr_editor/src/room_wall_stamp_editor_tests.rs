@@ -1,6 +1,11 @@
 use super::*;
 use crate::{backend::HostSpec, game::EditorGame};
-use orr_sample::room_project::PreparedProject;
+use orr_model_bindings::model_bindings::{self, Binding, Document, LocalTransform};
+use orr_sample::{
+    room_game::{KEY, PLAYER, RoomActor, RoomConfig, RoomEscapeV1},
+    room_project::{self, PreparedProject, PreparedScene, SEED},
+};
+use std::{fs, path::Path};
 
 struct Fixture {
     _temporary: tempfile::TempDir,
@@ -9,11 +14,75 @@ struct Fixture {
     editor: Editor,
 }
 
+fn create_admitted_fixture(root: &Path) {
+    fs::create_dir(root).unwrap();
+    let sim = orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, SEED);
+    let text = orr_reflect::Scene::unbake(&room_project::types(), sim.frame(), None)
+        .unwrap()
+        .to_yaml();
+    fs::write(root.join("room.scene.yaml"), &text).unwrap();
+    fs::write(
+        root.join("room.camera.json"),
+        orr_sample::room_camera::Document::readable_default()
+            .to_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(root.join("orr.project.json"),serde_json::to_vec(&serde_json::json!({"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json","camera":"room.camera.json"}})).unwrap()).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/imported_scene_demo")
+        .canonicalize()
+        .unwrap();
+    orr_package::Project::open_for_install(
+        root,
+        orr_package::Runtime::content_only().engine_version,
+    )
+    .unwrap()
+    .install(&[source])
+    .unwrap();
+    let loaded =
+        model_bindings::load_asset(root, "sample-imported-scene", "foreground.glb").unwrap();
+    let binding = Binding::from_asset(
+        "sample-imported-scene".into(),
+        "foreground.glb".into(),
+        &loaded,
+        LocalTransform::default(),
+    )
+    .unwrap();
+    let scene = PreparedScene::parse(&text).unwrap();
+    let bindings = scene
+        .frame()
+        .entities()
+        .filter(|entity| {
+            scene
+                .frame()
+                .get::<RoomActor>(*entity)
+                .is_some_and(|actor| [PLAYER, KEY].contains(&actor.kind))
+        })
+        .map(|entity| {
+            (
+                scene.index().guid(entity).unwrap().to_string(),
+                binding.clone(),
+            )
+        })
+        .collect();
+    fs::write(
+        root.join("room.models.json"),
+        serde_json::to_vec(&Document {
+            version: 2,
+            scene: "room.scene.yaml".into(),
+            project: ".".into(),
+            bindings,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn fixture() -> Fixture {
     let temporary = tempfile::tempdir().expect("temporary Room project parent");
     let root = temporary.path().join("wall stamp project");
-    orr_sample::windows_project::create_room_project(&root, "room-wall-stamp-tests")
-        .expect("create admitted Room project");
+    create_admitted_fixture(&root);
     let (root, scene, prepared_scene, _) = PreparedProject::open(&root)
         .expect("admit Room test project")
         .into_parts();
