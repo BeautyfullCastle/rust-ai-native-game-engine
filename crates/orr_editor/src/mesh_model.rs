@@ -100,7 +100,7 @@ pub fn cook_model(model: &StaticModel, profile: AgentProfile) -> Result<StaticMe
             }
             vertices.push(point);
         }
-        for triangle in primitive.indices.chunks_exact(3) {
+        for triangle in primitive.indices.as_chunks::<3>().0 {
             let local_indices = [triangle[0], triangle[1], triangle[2]];
             if local_indices
                 .iter()

@@ -928,16 +928,20 @@ impl EditorApp {
         self.sync_mesh_presentation();
         egui::Panel::top("mesh_player_controls").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let playing = self.mesh_recorded_playback.active() || self.editor.timeline().is_some_and(|timeline| timeline.playing);
+                let playing = self.mesh_recorded_playback.running() || self.editor.timeline().is_some_and(|timeline| timeline.playing);
                 let available = self.editor.down().is_none() && self.editor.mode() == Mode::Play && !self.mesh_player_session.dialog_open();
                 let label = if playing { "Pause" } else { "Resume" };
                 if ui.add_enabled(available, egui::Button::new(label)).clicked() {
-                    if self.mesh_recorded_playback.active() {
+                    if self.mesh_recorded_playback.running() {
                         self.mesh_recorded_playback.pause(&mut self.editor);
                     } else if playing {
                         self.editor.pause();
-                    } else if self.editor.sim().head_tick < self.editor.sim().last_tick {
-                        self.mesh_recorded_playback.resume(&mut self.editor, now);
+                    } else if self.mesh_recorded_playback.active() || self.editor.sim().head_tick < self.editor.sim().last_tick {
+                        if !self.mesh_recorded_playback.resume(&mut self.editor, now)
+                            && self.mesh_recorded_playback.error().is_none()
+                            && self.editor.sim().head_tick >= self.editor.sim().last_tick {
+                            self.editor.play();
+                        }
                     } else {
                         self.editor.play();
                     }
@@ -954,17 +958,47 @@ impl EditorApp {
                     ui.label(format!("Tick {} · {}", timeline.tick, if timeline.playing { "Playing" } else { "Paused" }));
                 }
                 if self.mesh_recorded_playback.active() {
-                    ui.label("Replaying recorded timeline");
+                    ui.label(if self.mesh_recorded_playback.running() { "Replaying recorded timeline" } else { "Recorded timeline paused" });
                 }
                 if let Some(error) = self.editor.down() {
                     ui.colored_label(Color32::RED, &error.reason);
+                }
+            });
+            ui.horizontal(|ui| {
+                let sim = self.editor.sim();
+                let first = sim.first_tick;
+                let last = sim.last_tick;
+                let mut tick = sim.head_tick;
+                let seek_available = self.editor.down().is_none()
+                    && self.editor.mode() == Mode::Play
+                    && !sim.playing
+                    && !self.mesh_player_session.dialog_open()
+                    && first <= last;
+                if ui.add_enabled(seek_available,
+                    egui::Slider::new(&mut tick, first..=last.max(first))
+                        .text("Recorded tick").integer()).changed() {
+                    self.editor.set_mesh_play_input_enabled(false);
+                    self.mesh_recorded_playback.seek_recorded(&mut self.editor, tick, now);
+                }
+                let mut speed = self.mesh_recorded_playback.speed();
+                ui.add_enabled_ui(seek_available, |ui| {
+                    egui::ComboBox::from_id_salt("mesh_recorded_speed")
+                        .selected_text(speed.label())
+                        .show_ui(ui, |ui| {
+                            for candidate in mesh_recorded_playback::PlaybackSpeed::ALL {
+                                ui.selectable_value(&mut speed, candidate, candidate.label());
+                            }
+                        });
+                });
+                if speed != self.mesh_recorded_playback.speed() {
+                    self.mesh_recorded_playback.set_speed(&self.editor, speed, now);
                 }
             });
             if let Some(error) = self.mesh_recorded_playback.error() {
                 ui.colored_label(Color32::RED, error);
             }
             if self.mesh_player_input_allowed {
-                ui.add_enabled_ui(!self.mesh_player_session.dialog_open(), |ui| self.mesh_play_controls.show(ui, &mut self.editor));
+                ui.add_enabled_ui(!self.mesh_player_session.dialog_open() && !self.mesh_recorded_playback.active(), |ui| self.mesh_play_controls.show(ui, &mut self.editor));
             } else {
                 ui.label("Legacy replay-only mesh bundle · live goal input unavailable");
             }
@@ -1587,7 +1621,7 @@ impl EditorApp {
             let blocked = self.ui.dialog.is_some() || self.editor.previewing().is_some()
                 || ui.input(|input| !input.focused || input.key_pressed(Key::Escape));
             #[cfg(feature = "mesh-export")]
-            let blocked = blocked || !self.mesh_player_input_allowed || self.mesh_player_session.dialog_open();
+            let blocked = blocked || !self.mesh_player_input_allowed || self.mesh_player_session.dialog_open() || self.mesh_recorded_playback.active();
             if blocked { self.editor.set_mesh_play_input_enabled(false); }
             let click_blocked = blocked || ui.ctx().text_edit_focused();
             let keyboard_enabled = self.editor.mesh_play_input_enabled() && !blocked;

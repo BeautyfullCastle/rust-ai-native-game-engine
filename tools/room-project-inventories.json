@@ -125,6 +125,7 @@
   },
   "camera-editor-panel": {
     "names": [
+      "room_camera_panel::tests::dirty_tracks_staged_applied_undo_and_saved_camera_values",
       "room_camera_panel::tests::external_exact_byte_edits_and_nonregular_targets_refuse_save",
       "room_camera_panel::tests::failed_directory_sync_reports_uncertainty_and_advances_baseline_for_retry",
       "room_camera_panel::tests::failed_pre_persist_preserves_file_baseline_history_and_dirty_state",
@@ -138,7 +139,7 @@
     "ignored_names": [],
     "expected_summary_rows": [
       [
-        9,
+        10,
         0,
         0
       ]

@@ -55,6 +55,7 @@ pub struct Panel {
     source_identity: String,
     project_generation: u64,
     source_generation: u64,
+    model_filter: String,
     verified: Option<Lock>,
     preview: Option<PreviewedPlan>,
     model_request: Option<ModelRequest>,
@@ -209,7 +210,7 @@ impl Panel {
                     ui.label("Select an entity, then use a verified model; binding save is separate.");
                     model_asset_buttons(
                         ui,
-                        lock,
+                        ModelBrowser { lock, filter: &mut self.model_filter },
                         can_operate,
                         &mut self.model_request,
                         self.root.as_ref(),
@@ -237,6 +238,7 @@ impl Panel {
         if self.root != next_root {
             self.root = next_root;
             self.project_generation = self.project_generation.saturating_add(1);
+            self.model_filter.clear();
             self.verified = None;
             self.preview = None;
             self.model_request = None;
@@ -563,17 +565,45 @@ fn lock_table(ui: &mut egui::Ui, id: &str, lock: &Lock) {
     });
 }
 
+struct ModelBrowser<'a> {
+    lock: &'a Lock,
+    filter: &'a mut String,
+}
+
+fn model_matches_filter(package: &str, asset: &str, filter: &str) -> bool {
+    let identity = format!("{package}/{asset}").to_ascii_lowercase();
+    filter
+        .split_whitespace()
+        .all(|term| identity.contains(&term.to_ascii_lowercase()))
+}
+
 fn model_asset_buttons(
     ui: &mut egui::Ui,
-    lock: &Lock,
+    browser: ModelBrowser<'_>,
     enabled: bool,
     request: &mut Option<ModelRequest>,
     root: Option<&PathBuf>,
     source: &str,
     generations: (u64, u64),
 ) {
-    let mut found = false;
-    for (package_name, package) in &lock.packages {
+    let field_label = ui.label("Filter verified models");
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(browser.filter).char_limit(256))
+            .labelled_by(field_label.id);
+        if ui
+            .add_enabled(
+                !browser.filter.is_empty(),
+                egui::Button::new("Clear model filter"),
+            )
+            .clicked()
+        {
+            browser.filter.clear();
+        }
+    });
+    ui.label("Search package names and asset paths; all words must match (case-insensitive).");
+    let mut total = 0;
+    let mut shown = 0;
+    for (package_name, package) in &browser.lock.packages {
         for asset in &package.manifest.files {
             let supported = Path::new(asset)
                 .extension()
@@ -586,7 +616,11 @@ fn model_asset_buttons(
             if !supported {
                 continue;
             }
-            found = true;
+            total += 1;
+            if !model_matches_filter(package_name, asset, browser.filter) {
+                continue;
+            }
+            shown += 1;
             #[cfg(not(feature = "room-animated-models"))]
             let kinds = [ModelKind::Static];
             #[cfg(feature = "room-animated-models")]
@@ -618,8 +652,11 @@ fn model_asset_buttons(
             }
         }
     }
-    if !found {
+    ui.label(format!("Showing {shown} of {total} verified model assets"));
+    if total == 0 {
         ui.label("No verified GLB, glTF or Orrmodel assets are available.");
+    } else if shown == 0 {
+        ui.label("No verified models match this filter. Clear it to show all models.");
     }
 }
 
@@ -732,6 +769,184 @@ mod tests {
             }),
             ..Panel::default()
         }
+    }
+
+    fn model_lock() -> Lock {
+        let mut lock = empty_lock();
+        for (name, files) in [
+            (
+                "characters",
+                vec!["actors/Hero.GLB", "actors/villain.gltf", "LICENSE.txt"],
+            ),
+            ("scenery", vec!["props/tree.orrmodel", "tree.png"]),
+        ] {
+            let manifest = orr_package::Manifest {
+                schema: 1,
+                name: name.into(),
+                version: "1.0.0".into(),
+                engine: "*".into(),
+                capabilities: ["models".into()].into_iter().collect(),
+                dependencies: BTreeMap::new(),
+                files: files.into_iter().map(str::to_owned).collect(),
+            };
+            lock.packages.insert(
+                name.into(),
+                orr_package::LockedPackage {
+                    files: manifest
+                        .files
+                        .iter()
+                        .map(|file| (file.clone(), "a".repeat(64)))
+                        .collect(),
+                    manifest,
+                    digest: "b".repeat(64),
+                },
+            );
+        }
+        lock
+    }
+
+    #[test]
+    fn model_filter_matches_all_terms_across_package_and_path() {
+        assert!(model_matches_filter(
+            "characters",
+            "actors/Hero.GLB",
+            "  CHARACTERS hero  "
+        ));
+        assert!(model_matches_filter(
+            "characters",
+            "actors/Hero.GLB",
+            "characters/actors"
+        ));
+        assert!(model_matches_filter("characters", "actors/Hero.GLB", " \t"));
+        assert!(!model_matches_filter(
+            "characters",
+            "actors/Hero.GLB",
+            "hero scenery"
+        ));
+        assert!(!model_matches_filter(
+            "characters",
+            "actors/Hero.GLB",
+            "*.glb"
+        ));
+    }
+
+    #[test]
+    fn model_browser_widgets_filter_clear_and_select_without_changing_lock() {
+        use egui::accesskit::Role;
+        use egui_kittest::{
+            kittest::{NodeT, Queryable},
+            Harness,
+        };
+        let mut panel = panel_with_cached_state();
+        panel.verified = Some(model_lock());
+        panel.model_request = None;
+        let original_lock = panel.verified.clone();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_ui_state(
+                |ui, state: &mut (Panel, bool)| {
+                    let panel = &mut state.0;
+                    model_asset_buttons(
+                        ui,
+                        ModelBrowser {
+                            lock: panel.verified.as_ref().unwrap(),
+                            filter: &mut panel.model_filter,
+                        },
+                        state.1,
+                        &mut panel.model_request,
+                        panel.root.as_ref(),
+                        &panel.source,
+                        (panel.project_generation, panel.source_generation),
+                    );
+                },
+                (panel, true),
+            );
+        harness.run_steps(3);
+        assert!(harness
+            .query_by_label("Showing 3 of 3 verified model assets")
+            .is_some());
+        assert!(harness
+            .query_by_label("Use model scenery/tree.png")
+            .is_none());
+        harness
+            .get_by_role_and_label(Role::TextInput, "Filter verified models")
+            .focus();
+        harness.run_steps(2);
+        assert!(harness
+            .get_by_role_and_label(Role::TextInput, "Filter verified models")
+            .is_focused());
+        harness
+            .get_by_role_and_label(Role::TextInput, "Filter verified models")
+            .type_text("CHARACTERS hero");
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.model_filter, "CHARACTERS hero");
+        assert!(harness
+            .query_by_label("Showing 1 of 3 verified model assets")
+            .is_some());
+        assert!(harness
+            .query_by_label("Use model characters/actors/villain.gltf")
+            .is_none());
+        harness
+            .get_by_label("Use model characters/actors/Hero.GLB")
+            .click();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state_mut().0.take_model_asset_request(),
+            Some((
+                "characters".into(),
+                "actors/Hero.GLB".into(),
+                ModelKind::Static
+            ))
+        );
+        harness.get_by_label("Clear model filter").click();
+        harness.run_steps(3);
+        assert!(harness
+            .query_by_label("Showing 3 of 3 verified model assets")
+            .is_some());
+        assert!(harness
+            .get_by_label("Clear model filter")
+            .accesskit_node()
+            .is_disabled());
+        harness
+            .get_by_role_and_label(Role::TextInput, "Filter verified models")
+            .focus();
+        harness.run_steps(2);
+        assert!(harness
+            .get_by_role_and_label(Role::TextInput, "Filter verified models")
+            .is_focused());
+        harness
+            .get_by_role_and_label(Role::TextInput, "Filter verified models")
+            .type_text("no-such-model");
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.model_filter, "no-such-model");
+        assert!(harness
+            .query_by_label("No verified models match this filter. Clear it to show all models.")
+            .is_some());
+        harness.get_by_label("Clear model filter").click();
+        harness.state_mut().1 = false;
+        harness.run_steps(3);
+        assert!(harness
+            .get_by_label("Use model scenery/props/tree.orrmodel")
+            .accesskit_node()
+            .is_disabled());
+        assert!(harness.state().0.model_request.is_none());
+        assert_eq!(harness.state().0.verified, original_lock);
+    }
+
+    #[test]
+    fn model_filter_resets_only_on_project_change_and_never_authorizes_stale_requests() {
+        let mut panel = panel_with_cached_state();
+        panel.model_filter = "hero".into();
+        panel.select_project(Some(Path::new("C:/rooms/current")));
+        assert_eq!(panel.model_filter, "hero");
+        panel.source = "C:/packages/other".into();
+        panel.select_source();
+        assert_eq!(panel.model_filter, "hero");
+        assert!(panel.take_model_asset_request().is_none());
+        panel.select_project(Some(Path::new("C:/rooms/other")));
+        assert!(panel.model_filter.is_empty());
+        assert!(panel.verified.is_none());
+        assert!(panel.take_model_asset_request().is_none());
     }
 
     #[test]
