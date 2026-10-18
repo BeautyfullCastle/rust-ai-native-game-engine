@@ -1,5 +1,6 @@
 use super::{
-    export, open_bundle, validate_runtime, MANIFEST_FILENAME, PROPS_SUFFIX, RUNTIME_FILENAME,
+    export, export_interactive, open_bundle, validate_runtime, validate_runtime_profile,
+    InputProfile, MANIFEST_FILENAME, PROPS_SUFFIX, RUNTIME_FILENAME,
 };
 use crate::{
     mesh_art::Snapshot,
@@ -53,6 +54,21 @@ fn test_runtime() -> Vec<u8> {
     bytes[0x15c..0x160].copy_from_slice(&0x180u32.to_le_bytes());
     bytes[0x16c..0x170].copy_from_slice(&0x4000_0040u32.to_le_bytes());
     bytes[0x180..0x180 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
+    bytes
+}
+
+fn test_runtime_with_input() -> Vec<u8> {
+    let mut bytes = test_runtime();
+    bytes.resize(0x240, 0);
+    bytes[0x180..].fill(0);
+    bytes[0x15c..0x160].copy_from_slice(&0x1c0u32.to_le_bytes());
+    bytes[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
+    bytes[0x170..0x178].copy_from_slice(b".orrctrl");
+    bytes[0x180..0x184].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x184..0x188].copy_from_slice(&0x200u32.to_le_bytes());
+    bytes[0x194..0x198].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x1c0..0x1c0 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
+    bytes[0x200..0x200 + b"ORR_MESH_INPUT_V1".len()].copy_from_slice(b"ORR_MESH_INPUT_V1");
     bytes
 }
 
@@ -1039,6 +1055,89 @@ fn surface_marker_must_be_a_distinct_bounded_pe_section() {
         false,
     )
     .unwrap();
+}
+
+#[test]
+fn interactive_export_records_and_reopens_input_profile() {
+    let (temporary, scene, runtime, checksum) = fixture();
+    let destination = temporary.path().join("interactive-bundle");
+    fs::write(&runtime, test_runtime_with_input()).unwrap();
+
+    let receipt = export_interactive(&scene, checksum, &destination, &runtime).unwrap();
+    let prepared = open_bundle(&destination).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+
+    assert_eq!(receipt.input_profile, Some(InputProfile::MeshClickToMoveV1));
+    assert_eq!(
+        prepared.input_profile,
+        Some(InputProfile::MeshClickToMoveV1)
+    );
+    assert_eq!(
+        manifest["input_profile"],
+        serde_json::json!("mesh-click-to-move-v1")
+    );
+    let mut bundle_names = fs::read_dir(&destination)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    bundle_names.sort();
+    assert_eq!(
+        bundle_names,
+        ["orr.mesh-bundle.json", "orr_mesh_player.exe", "walk.scene.yaml"]
+    );
+}
+
+#[test]
+fn interactive_export_requires_marker_and_open_rejects_profile_mismatch() {
+    let (temporary, scene, runtime, checksum) = fixture();
+    let destination = temporary.path().join("interactive-bundle");
+    let error = export_interactive(&scene, checksum, &destination, &runtime).unwrap_err();
+    assert!(error.contains("mesh click-to-move input support"));
+    assert!(!destination.exists());
+
+    fs::write(&runtime, test_runtime_with_input()).unwrap();
+    let receipt = export_interactive(&scene, checksum, &destination, &runtime).unwrap();
+    let legacy_runtime = test_runtime();
+    fs::write(destination.join(RUNTIME_FILENAME), &legacy_runtime).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+    let mut manifest = manifest;
+    manifest["runtime"]["bytes"] = serde_json::json!(legacy_runtime.len());
+    manifest["runtime"]["sha256"] = serde_json::json!(super::digest(&legacy_runtime));
+    fs::write(&receipt.manifest, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let error = open_bundle(&destination).unwrap_err();
+    assert!(error.contains("mesh click-to-move input support"));
+}
+
+#[test]
+fn legacy_bundle_is_replay_only_and_unknown_profile_is_rejected() {
+    let (temporary, scene, runtime, checksum) = fixture();
+    let destination = temporary.path().join("legacy-bundle");
+    let receipt = export(&scene, checksum, &destination, &runtime).unwrap();
+    let prepared = open_bundle(&destination).unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+    assert!(manifest.get("input_profile").is_none());
+    assert_eq!(prepared.input_profile, None);
+
+    manifest["input_profile"] = serde_json::json!("unknown-input-profile");
+    fs::write(&receipt.manifest, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(open_bundle(&destination).is_err());
+}
+
+#[test]
+fn input_capability_marker_must_be_in_its_own_pe_section() {
+    validate_runtime_profile(
+        &test_runtime_with_input(),
+        Some(InputProfile::MeshClickToMoveV1),
+    )
+    .unwrap();
+
+    let mut bytes = test_runtime_with_input();
+    bytes[0x200..0x200 + b"ORR_MESH_INPUT_V1".len()].fill(0);
+    bytes[0x100..0x100 + b"ORR_MESH_INPUT_V1".len()].copy_from_slice(b"ORR_MESH_INPUT_V1");
+    assert!(validate_runtime_profile(&bytes, Some(InputProfile::MeshClickToMoveV1)).is_err());
 }
 
 #[test]

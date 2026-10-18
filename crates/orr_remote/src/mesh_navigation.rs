@@ -12,12 +12,18 @@ use std::{io::Read, path::PathBuf, sync::Arc};
 
 pub mod authoring;
 
+#[cfg(test)]
+#[path = "mesh_play_host_tests.rs"]
+mod mesh_play_host_tests;
+
 pub use crate::yard3d::{YARD_PLAYERS, YARD_SEED, YARD_TICK_RATE};
-pub use orr_games::mesh_navigation_game::{MeshNavigation, MeshScenePin, MeshStepStatus, PIN_NAME};
+pub use orr_games::mesh_navigation_game::{
+    MeshNavigation, MeshScenePin, MeshStepStatus, MESH_SET_GOAL, PIN_NAME,
+};
 pub use orr_navigation_runtime::mesh::AgentSpec as RuntimeAgentSpec;
 pub use orr_navigation_runtime::mesh::{decode_asset, AgentSpec};
 
-pub const MESH_NAVIGATION_BUILD_ID: u64 = 0x4d45_5348_0000_0001;
+pub const MESH_NAVIGATION_BUILD_ID: u64 = 0x4d45_5348_0000_0002;
 const MAX_SCENE_YAML_BYTES: u64 = 1 << 20;
 
 pub fn mesh_navigation_types() -> TypeRegistry {
@@ -136,12 +142,18 @@ pub fn spawn_mesh_navigation_scene_host(
     path: PathBuf,
     mut config: ServerConfig,
 ) -> Result<LocalHost, String> {
-    LocalHost::spawn::<MeshNavigation>(move || {
-        let document = mesh_doc_from_path(&path)?;
-        config.limits.scene_path = Some(path);
-        configure_mesh_navigation(&mut config.limits);
-        Ok((document, config))
-    })
+    LocalHost::spawn_configured::<MeshNavigation>(
+        move || {
+            let document = mesh_doc_from_path(&path)?;
+            config.limits.scene_path = Some(path);
+            configure_mesh_navigation(&mut config.limits);
+            Ok((document, config))
+        },
+        |server| {
+            server.set_structured_input::<MeshNavigation>("MeshGoalInput", YARD_PLAYERS, |_, _| Vec::new());
+            server.enable_managed_input();
+        },
+    )
 }
 
 struct MeshNavigationStream {

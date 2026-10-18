@@ -6,12 +6,14 @@ use orr_navigation_runtime::mesh::{
     decode_asset, AgentSpec, MeshRuntime, RuntimeState, WorldBinding,
 };
 use orr_reflect::{Reflect, TypeRegistry};
-use orr_sim::{Game, SimContext, System};
+use orr_sim::{Game, PlayerSlot, SimContext, System};
 
 use crate::yard3d_game::{NoCommand, NoEvent, YardInput};
 
 pub const PIN_NAME: &str = "MeshScenePin";
 pub const MAX_EMBEDDED_GRAPH_BYTES: usize = 8_192;
+pub const MESH_SET_GOAL: u32 = 1 << 31;
+const MAX_TARGET_COORDINATE_RAW: i64 = 256 * FP::SCALE;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
@@ -190,14 +192,73 @@ impl System<MeshNavigation> for MeshStep {
                 return;
             }
         }
-        let pin = *context.frame.singleton::<MeshScenePin>();
+        let mut pin = *context.frame.singleton::<MeshScenePin>();
         let result = validate_runtime(context.frame, pin).and_then(|()| {
+            apply_goal_input(context, &mut pin);
             MeshRuntime::step(context.frame, pin.binding()).map_err(|error| error.to_string())
         });
         if let Err(message) = result {
             record_failure(context.frame, context.tick, &message);
         }
     }
+}
+
+fn apply_goal_input(context: &mut SimContext<MeshNavigation>, pin: &mut MeshScenePin) {
+    let graph = match pin.graph() {
+        Ok(graph) => graph,
+        Err(_) => return,
+    };
+    let binding = pin.binding();
+    let initial_agent = match MeshRuntime::agent(context.frame, binding) {
+        Ok(agent) => agent,
+        Err(_) => return,
+    };
+    for player_index in 0..context.inputs.player_count() {
+        let slot = PlayerSlot(player_index);
+        if context.inputs.flags(slot).disconnected {
+            continue;
+        }
+        let Some(goal) = requested_goal(*context.inputs.input(slot)) else {
+            continue;
+        };
+        if goal == initial_agent.spec.goal
+            && initial_agent.status != orr_navigation::NavigationStatus::Stopped
+        {
+            return;
+        }
+        if MeshRuntime::replan(
+            context.frame,
+            &graph,
+            binding,
+            goal,
+            pin.max_vertical,
+            pin.distance_per_tick,
+        )
+        .is_ok()
+        {
+            pin.start = initial_agent.position;
+            pin.goal = goal;
+            context.frame.set_singleton(*pin);
+            return;
+        }
+    }
+}
+
+fn requested_goal(input: YardInput) -> Option<[FP; 3]> {
+    if input.buttons != MESH_SET_GOAL || input._pad != 0 || input.dir != [0; 3] {
+        return None;
+    }
+    if input.origin.iter().any(|coordinate| {
+        let raw = i64::from(*coordinate);
+        !(-MAX_TARGET_COORDINATE_RAW..=MAX_TARGET_COORDINATE_RAW).contains(&raw)
+    }) {
+        return None;
+    }
+    Some(
+        input
+            .origin
+            .map(|coordinate| FP::from_raw(i64::from(coordinate))),
+    )
 }
 
 fn ensure_scene_schema(frame: &Frame) -> Result<(), String> {
@@ -283,3 +344,7 @@ fn record_failure(frame: &mut Frame, tick: u64, message: &str) {
     status.error_len = length as u32;
     frame.set_singleton(status);
 }
+
+#[cfg(test)]
+#[path = "mesh_play_input_tests.rs"]
+mod mesh_play_input_tests;

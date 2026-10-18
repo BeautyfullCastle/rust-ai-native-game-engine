@@ -118,6 +118,8 @@ pub mod navigation_view;
 #[cfg(feature = "mesh-navigation")]
 pub mod mesh_navigation;
 #[cfg(feature = "mesh-navigation")]
+mod mesh_play_controls;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_art;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_art_import;

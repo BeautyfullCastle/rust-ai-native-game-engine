@@ -36,6 +36,7 @@ const MATERIAL_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MATERIAL_V1";
 const ANIMATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ANIMATION_V1";
 const SURFACE_RUNTIME_MARKER: &[u8] = b"ORR_MESH_SURFACE_V1";
 const LIGHTING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_LIGHTING_V1";
+const INPUT_RUNTIME_MARKER: &[u8] = b"ORR_MESH_INPUT_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
@@ -44,6 +45,13 @@ const MATERIAL_RUNTIME_SECTION: &[u8; 8] = b".orrmat\0";
 const ANIMATION_RUNTIME_SECTION: &[u8; 8] = b".orranim";
 const SURFACE_RUNTIME_SECTION: &[u8; 8] = b".orrsurf";
 const LIGHTING_RUNTIME_SECTION: &[u8; 8] = b".orrlit\0";
+const INPUT_RUNTIME_SECTION: &[u8; 8] = b".orrctrl";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum InputProfile {
+    MeshClickToMoveV1,
+}
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
@@ -64,6 +72,7 @@ pub(crate) struct Receipt {
     pub animation_sha256: Option<String>,
     pub lighting_sha256: Option<String>,
     pub runtime_sha256: String,
+    pub input_profile: Option<InputProfile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +81,7 @@ pub(crate) struct PreparedBundle {
     pub checksum: u64,
     pub graph_revision: [u8; 32],
     pub runtime_sha256: String,
+    pub input_profile: Option<InputProfile>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,6 +101,8 @@ struct BundleManifest {
     runtime: BundleFile,
     checksum: u64,
     graph_revision: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_profile: Option<InputProfile>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,11 +113,37 @@ struct BundleFile {
     sha256: String,
 }
 
+#[cfg(test)]
 pub(crate) fn export(
     scene: &Path,
     expected_checksum: u64,
     destination: &Path,
     runtime: &Path,
+) -> Result<Receipt, String> {
+    export_with_profile(scene, expected_checksum, destination, runtime, None)
+}
+
+pub(crate) fn export_interactive(
+    scene: &Path,
+    expected_checksum: u64,
+    destination: &Path,
+    runtime: &Path,
+) -> Result<Receipt, String> {
+    export_with_profile(
+        scene,
+        expected_checksum,
+        destination,
+        runtime,
+        Some(InputProfile::MeshClickToMoveV1),
+    )
+}
+
+fn export_with_profile(
+    scene: &Path,
+    expected_checksum: u64,
+    destination: &Path,
+    runtime: &Path,
+    input_profile: Option<InputProfile>,
 ) -> Result<Receipt, String> {
     let scene_path = checked_scene_path(scene)?;
     let scene_bytes = read_bounded(&scene_path, MAX_SCENE_BYTES, "mesh scene")?;
@@ -284,6 +322,7 @@ pub(crate) fn export(
             require_lighting: lighting_bytes.is_some(),
         },
     )?;
+    validate_runtime_profile(&runtime_bytes, input_profile)?;
     let runtime_hash = digest(&runtime_bytes);
     let scene_name = scene_path
         .file_name()
@@ -362,6 +401,7 @@ pub(crate) fn export(
         runtime: bundle_file(RUNTIME_FILENAME, &runtime_bytes),
         checksum,
         graph_revision,
+        input_profile,
     };
     let manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|error| format!("serialize mesh bundle manifest: {error}"))?;
@@ -455,6 +495,7 @@ pub(crate) fn export(
         animation_sha256,
         lighting_sha256,
         runtime_sha256: runtime_hash,
+        input_profile,
     })
 }
 
@@ -726,6 +767,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             require_lighting: manifest.lighting.is_some(),
         },
     )?;
+    validate_runtime_profile(&runtime_bytes, manifest.input_profile)?;
     let sidecar_unchanged = match &manifest.sidecar {
         Some(record) => {
             let bytes = read_bounded(
@@ -842,6 +884,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         checksum,
         graph_revision,
         runtime_sha256: digest(&runtime_bytes),
+        input_profile: manifest.input_profile,
     })
 }
 
@@ -1532,6 +1575,20 @@ fn validate_runtime_with_lighting(
             .is_none()
     {
         return Err("mesh player runtime does not advertise mesh-lighting bundle support".into());
+    }
+    Ok(())
+}
+
+fn validate_runtime_profile(
+    bytes: &[u8],
+    input_profile: Option<InputProfile>,
+) -> Result<(), String> {
+    if input_profile == Some(InputProfile::MeshClickToMoveV1)
+        && validate_runtime_section(bytes, INPUT_RUNTIME_SECTION, INPUT_RUNTIME_MARKER)?.is_none()
+    {
+        return Err(
+            "mesh player runtime does not advertise mesh click-to-move input support".into(),
+        );
     }
     Ok(())
 }

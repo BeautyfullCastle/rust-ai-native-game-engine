@@ -11,6 +11,7 @@ struct Request {
     graph_revision: [u8; 32],
     destination: PathBuf,
     runtime: PathBuf,
+    input_profile: crate::mesh_export::InputProfile,
 }
 
 struct Completion {
@@ -51,7 +52,7 @@ impl Panel {
             .default_width(560.0)
             .vscroll(true)
             .show(context, |ui| {
-                ui.label("Exports the saved MeshNavigation scene and optional camera, agent-art, mesh-props, and animated-model sidecars.");
+                ui.label("Exports the saved MeshNavigation scene and optional presentation sidecars with mesh click-to-move input support.");
                 ui.label("Choose a trusted local mesh player executable. The executable is validated and copied, never run by the editor.");
                 if let Some(reason) = blocked {
                     ui.label(reason);
@@ -88,6 +89,11 @@ impl Panel {
                     ui.label(format!("Bundle directory: {}", output.display()));
                 }
                 if let Some(receipt) = &self.last_receipt {
+                    if receipt.input_profile
+                        == Some(crate::mesh_export::InputProfile::MeshClickToMoveV1)
+                    {
+                        ui.label("Play input: mesh-click-to-move-v1");
+                    }
                     ui.label(format!("Scene checksum: {:016x}", receipt.checksum));
                     ui.label(format!(
                         "Graph revision: {}",
@@ -169,6 +175,7 @@ impl Panel {
             graph_revision: view.graph.revision(),
             destination: PathBuf::from(self.output.trim()),
             runtime: PathBuf::from(self.runtime.trim()),
+            input_profile: crate::mesh_export::InputProfile::MeshClickToMoveV1,
         };
         let worker_request = Request {
             scene: request.scene.clone(),
@@ -176,12 +183,13 @@ impl Panel {
             graph_revision: request.graph_revision,
             destination: request.destination.clone(),
             runtime: request.runtime.clone(),
+            input_profile: request.input_profile,
         };
         let (sender, receiver) = mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("orr-mesh-export".into())
             .spawn(move || {
-                let result = crate::mesh_export::export(
+                let result = crate::mesh_export::export_interactive(
                     &worker_request.scene,
                     worker_request.checksum,
                     &worker_request.destination,
@@ -328,6 +336,7 @@ fn completion_metadata_matches(
         && destination.trim() == expected_destination.as_ref()
         && receipt.checksum == request.checksum
         && receipt.graph_revision == request.graph_revision
+        && receipt.input_profile == Some(request.input_profile)
 }
 
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String) {

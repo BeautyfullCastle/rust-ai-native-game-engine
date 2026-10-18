@@ -185,6 +185,11 @@ fn invalid_or_conflicting_player_options_are_rejected() {
 }
 
 #[test]
+fn capabilities_report_replay_and_interactive_input_profiles() {
+    assert_eq!(super::CAPABILITIES, "ORR_MESH_PLAYER_V1\nORR_MESH_INPUT_V1");
+}
+
+#[test]
 fn screenshot_preflight_requires_existing_parent_and_outside_bundle() {
     let directory = TestDirectory::new();
     let bundle = directory.path().join("bundle");

@@ -331,6 +331,8 @@ impl Editor {
         let mut input = input::Input::new(backend.managed_input);
         input.collect_dodge = backend.game.is_collect();
         input.room_escape = backend.game.is_room();
+        #[cfg(feature = "mesh-navigation")]
+        { input.mesh_navigation = backend.game.is_mesh_navigation(); }
         let mut e = Self {
             input,
             backend,

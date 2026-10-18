@@ -357,7 +357,8 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         return Err(format!("{name} reflected schema mismatch: host descriptors differ from this editor"));
     }
     let own_client = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
-    let input = if game.has_keyboard() { erp.call("registry.input", J::Null).ok() } else { None };
+    let supports_input = game.has_keyboard() || game.is_mesh_navigation();
+    let input = if supports_input { erp.call("registry.input", J::Null).ok() } else { None };
     let mut input_types = orr_reflect::TypeRegistry::new();
     input_types.register_component::<orr_sample::arena_game::ArenaInput>("ArenaInput");
     let expected_input: J = serde_json::from_str(&input_types.type_json_schema("ArenaInput").expect("registered input")).expect("valid reflected schema");
@@ -373,7 +374,13 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         types.register_component::<orr_sample::room_game::RoomInput>("RoomInput");
         serde_json::from_str(&types.type_json_schema("RoomInput").expect("registered room input")).expect("reflected room JSON schema")
     } else { expected_input };
-    let managed_input = game.has_keyboard() && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
+    #[cfg(feature = "mesh-navigation")]
+    let expected_input = if game.is_mesh_navigation() {
+        let mut types = orr_reflect::TypeRegistry::new();
+        types.register_component::<orr_sample::yard3d_game::YardInput>("MeshGoalInput");
+        serde_json::from_str(&types.type_json_schema("MeshGoalInput").expect("registered mesh input")).expect("reflected mesh JSON schema")
+    } else { expected_input };
+    let managed_input = supports_input && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
     Ok((game, RemoteIdentity { game: name.to_string(), build_id, schema }, own_client, managed_input))
 }
 

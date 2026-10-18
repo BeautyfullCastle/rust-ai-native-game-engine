@@ -8,6 +8,7 @@ fn request() -> Request {
         graph_revision: [7; 32],
         destination: PathBuf::from(r"C:\exports\mesh-game"),
         runtime: PathBuf::from(r"C:\tools\orr_mesh_player.exe"),
+        input_profile: crate::mesh_export::InputProfile::MeshClickToMoveV1,
     }
 }
 
@@ -26,6 +27,7 @@ fn receipt(request: &Request) -> crate::mesh_export::Receipt {
         animation_sha256: None,
         lighting_sha256: None,
         runtime_sha256: "runtime-hash".into(),
+        input_profile: Some(crate::mesh_export::InputProfile::MeshClickToMoveV1),
     }
 }
 
@@ -113,6 +115,21 @@ fn matching_export_request_and_receipt_are_current() {
     let receipt = receipt(&request);
 
     assert!(completion_metadata_matches(
+        &request,
+        &request.runtime.display().to_string(),
+        &request.destination.display().to_string(),
+        None,
+        &receipt,
+    ));
+}
+
+#[test]
+fn completion_requires_the_interactive_input_profile() {
+    let request = request();
+    let mut receipt = receipt(&request);
+    receipt.input_profile = None;
+
+    assert!(!completion_metadata_matches(
         &request,
         &request.runtime.display().to_string(),
         &request.destination.display().to_string(),
