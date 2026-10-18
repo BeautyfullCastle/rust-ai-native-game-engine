@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 const MAX_GOAL_RAW: i128 = 256 * FP::SCALE as i128;
 
+mod keyboard;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Context {
     scene: PathBuf,
@@ -20,6 +22,8 @@ struct Context {
 #[derive(Default)]
 pub(crate) struct Panel {
     context: Option<Context>,
+    keyboard_focus_requested: bool,
+    last_keyboard_tick: Option<u64>,
     status: String,
 }
 
@@ -34,6 +38,8 @@ impl Panel {
                 if ui.button("Disable mesh goal input").clicked() {
                     editor.set_mesh_play_input_enabled(false);
                     self.context = None;
+                    self.keyboard_focus_requested = false;
+                    self.last_keyboard_tick = None;
                     self.status = "Mesh goal input released.".into();
                 }
             } else if ui
@@ -44,6 +50,8 @@ impl Panel {
                     match current_context(editor) {
                         Ok((context, _)) => {
                             self.context = Some(context);
+                            self.keyboard_focus_requested = true;
+                            self.last_keyboard_tick = None;
                             self.status = "Mesh goal input requested; waiting for managed control acknowledgement.".into();
                         }
                         Err(error) => {
@@ -59,11 +67,85 @@ impl Panel {
             ui.label(format!("Mesh input phase: {:?}", editor.mesh_play_input_phase()));
             if editor.mesh_play_input_enabled() {
                 ui.label("Click an admitted walkable surface in the viewport to set the live goal.");
+                ui.label("W/Up: -Z, S/Down: +Z, A/Left: -X, D/Right: +X. Each key press/repeat sets a half-unit goal step.");
+                ui.label("Keys require viewport focus. Releasing a key does not cancel the current point-agent route.");
+                if ui.memory(|memory| memory.focused())
+                    == Some(egui::Id::new("mesh_keyboard_viewport"))
+                {
+                    ui.label("Mesh keyboard controls focused");
+                } else {
+                    ui.label("Keyboard inactive · focus mesh gameplay viewport");
+                }
+                if ui
+                    .add_enabled(active_play, egui::Button::new("Focus mesh keyboard controls"))
+                    .clicked()
+                {
+                    self.keyboard_focus_requested = true;
+                }
             }
             if !self.status.is_empty() {
                 ui.label(&self.status);
             }
         });
+    }
+
+    pub(crate) fn take_keyboard_focus(&mut self) -> bool {
+        std::mem::take(&mut self.keyboard_focus_requested)
+    }
+
+    pub(crate) fn keyboard_input(
+        &mut self,
+        editor: &mut Editor,
+        direction: [i8; 2],
+        blocked: bool,
+    ) -> bool {
+        self.sync(editor);
+        if blocked || direction == [0, 0] || !editor.mesh_play_input_enabled() {
+            return false;
+        }
+        let (context, view) = match current_context(editor) {
+            Ok(value) => value,
+            Err(error) => {
+                editor.set_mesh_play_input_enabled(false);
+                self.context = None;
+                self.status = format!("Mesh keyboard input canceled: {error}");
+                return true;
+            }
+        };
+        if self.context.as_ref().is_some_and(|saved| saved != &context) {
+            editor.set_mesh_play_input_enabled(false);
+            self.context = None;
+            self.status =
+                "Mesh keyboard input canceled because the scene or walkable graph changed.".into();
+            return true;
+        }
+        self.context = Some(context);
+        let tick = editor.sim().head_tick;
+        if self.last_keyboard_tick == Some(tick) {
+            return true;
+        }
+        self.last_keyboard_tick = Some(tick);
+        match keyboard::goal(
+            &view.graph,
+            view.agent.position,
+            view.agent.spec.max_vertical,
+            direction,
+        ) {
+            Ok(goal) => match editor.queue_mesh_play_goal(goal) {
+                Ok(()) => {
+                    self.status = format!(
+                        "Queued keyboard mesh goal [{}, {}, {}]; it applies on the next simulation tick.",
+                        goal[0], goal[1], goal[2]
+                    );
+                }
+                Err(error) => self.status = format!("Keyboard mesh goal was not queued: {error}"),
+            },
+            Err(error) => {
+                self.status =
+                    format!("Keyboard mesh goal refused; current route unchanged: {error}");
+            }
+        }
+        true
     }
 
     pub(crate) fn viewport_click(
@@ -137,6 +219,8 @@ impl Panel {
     fn sync(&mut self, editor: &mut Editor) {
         if !editor.mesh_play_input_enabled() {
             self.context = None;
+            self.keyboard_focus_requested = false;
+            self.last_keyboard_tick = None;
             return;
         }
         match current_context(editor) {
@@ -156,6 +240,31 @@ impl Panel {
             }
         }
     }
+}
+
+pub(crate) fn keyboard_direction(input: &egui::InputState) -> [i8; 2] {
+    use egui::Key;
+    if ![
+        Key::W,
+        Key::A,
+        Key::S,
+        Key::D,
+        Key::ArrowUp,
+        Key::ArrowDown,
+        Key::ArrowLeft,
+        Key::ArrowRight,
+    ]
+    .into_iter()
+    .any(|key| input.key_pressed(key))
+    {
+        return [0, 0];
+    }
+    [
+        i8::from(input.key_down(Key::D) || input.key_down(Key::ArrowRight))
+            - i8::from(input.key_down(Key::A) || input.key_down(Key::ArrowLeft)),
+        i8::from(input.key_down(Key::S) || input.key_down(Key::ArrowDown))
+            - i8::from(input.key_down(Key::W) || input.key_down(Key::ArrowUp)),
+    ]
 }
 
 fn live_play_ready(editor: &Editor) -> Result<(), String> {

@@ -1,6 +1,6 @@
 # Mesh Play goal input
 
-Mesh Play goal input lets a local player retarget the admitted mesh agent by clicking a walkable surface while realtime MeshNavigation Play is running. It uses the existing managed game-input lease and the ordinary simulation input path; it does not issue editor patches or create edit-history entries.
+Mesh Play goal input lets a local player retarget the admitted mesh agent by clicking a walkable surface or using focused keyboard goal steps while realtime MeshNavigation Play is running. It uses the existing managed game-input lease and the ordinary simulation input path; it does not issue editor patches or create edit-history entries.
 
 ## Use
 
@@ -8,6 +8,8 @@ Mesh Play goal input lets a local player retarget the admitted mesh agent by cli
 2. Start realtime Play, then enable **Mesh Play input**.
 3. Click an in-bounds walkable surface in the game viewport. The click is projected against the current admitted mesh graph and queued for the next simulation tick.
 4. Disable input when finished, or stop Play. The managed input release is handled by the editor's input state machine.
+
+For keyboard input, choose **Enable mesh goal input**, then use **Focus mesh keyboard controls** or focus the **Mesh gameplay viewport**. WASD and arrow press/repeat events request exact half-unit world X/Z steps through the same managed path in both the editor and current standalone player. Text focus, modifier shortcuts, dialogs, pause, window-focus loss, Escape, and incompatible replay-only profiles block key goals. Releasing a key does not stop an existing route. See [mesh keyboard gameplay](editor-mesh-keyboard-play.md) for axes, connectivity checks, limits, and separate acceptance.
 
 Only live local Play at the current head accepts clicks. Paused/replay sessions, stale frames or graph revisions, UI focus/dialog input, non-finite/out-of-range coordinates, and misses are rejected without changing the goal. A valid click queues the existing one-shot mesh-goal input; the MeshStep runtime replans through the normal managed-input path. The graph bounds and managed raw-coordinate encoding are checked before enqueueing.
 
