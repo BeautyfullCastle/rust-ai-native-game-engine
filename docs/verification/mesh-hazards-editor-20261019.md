@@ -87,3 +87,20 @@ New Linux/Windows focused CPU and animated-path coverage plus Linux software-GPU
 UI acceptance are additive. Existing required CI remains mandatory. Publication,
 CI satisfaction, candidate-stack merge and shared-development integration are
 separate. Main and PR1 are excluded.
+
+## Focused CI follow-up
+
+The authoring workflow on PR206/207 failed after the model tests themselves
+passed: its configured suite prefix was `mesh_model::tests`, but libtest reports
+`mesh_navigation::mesh_model::tests`. The selector is corrected without reducing
+its expected count or weakening the validator. Nine validator self-tests pass;
+actual stdout from the four failed Ubuntu/Windows jobs is accepted by the corrected
+selector and rejected by the old one. These are preserved failed runs, not passes.
+
+Mesh hazards headless acceptance passed Ubuntu and failed two CLI fixtures on
+Windows. The positive parser fixture assumed `/tmp/...` was absolute, and a
+canonical Windows verbatim-path `join("../...")` normalized away the traversal
+being tested. Test-only fixes use platform-absolute paths and raw OsString path
+text, explicitly asserting that ParentDir survives before testing rejection.
+Production behavior is unchanged. Five focused Linux CLI tests pass; fresh
+Windows CI is still required to establish recovery.

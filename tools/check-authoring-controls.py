@@ -13,7 +13,7 @@ FEATURES = "mesh-export,mesh-mission,package-manager,mesh-animated-models"
 SUITES = (
     ("app::mesh_recorded_playback::tests", 13),
     ("package_manager_panel::tests", 6),
-    ("mesh_model::tests", 2),
+    ("mesh_navigation::mesh_model::tests", 2),
     ("mesh_navigation::geometry_import::tests", 10),
 )
 SUMMARY = re.compile(
@@ -102,6 +102,15 @@ class ValidatorTests(unittest.TestCase):
     def test_valid_and_windows_newlines(self):
         for output in (self.output(), self.output().replace("\n", "\r\n")):
             validate_tests(output, self.suite, 2)
+
+    def test_mesh_model_uses_fully_qualified_suite(self):
+        suite = "mesh_navigation::mesh_model::tests"
+        self.assertIn((suite, 2), SUITES)
+        self.assertNotIn(("mesh_model::tests", 2), SUITES)
+        output = self.output().replace(self.suite, suite)
+        validate_tests(output, suite, 2)
+        with self.assertRaises(ValueError):
+            validate_tests(output, "mesh_model::tests", 2)
 
     def test_empty_selection(self):
         with self.assertRaises(ValueError):
