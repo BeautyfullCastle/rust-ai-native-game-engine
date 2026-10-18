@@ -3216,3 +3216,7 @@ mod room_camera_capture_coherence_tests {
         assert!(!editor.room_camera_capture_coherent());
     }
 }
+
+#[cfg(feature = "models")]
+#[path = "editor/frame_selection.rs"]
+mod frame_selection;
