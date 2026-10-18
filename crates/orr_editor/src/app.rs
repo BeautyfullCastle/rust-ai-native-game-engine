@@ -839,8 +839,8 @@ impl eframe::App for EditorApp {
             // keyboard, AccessKit, scene/model/camera or history action dispatch.
             self.editor.release_control();
             let root = self.package_manager_root();
-            ui.label("Package removal is committing; authoring and playback are paused until it completes.");
-            self.package_manager.show(&ctx, root.as_deref(), Some("Wait for package removal completion before editing, saving or playing"));
+            ui.label("Package selection change is committing; authoring and playback are paused until it completes.");
+            self.package_manager.show(&ctx, root.as_deref(), Some("Wait for package selection change completion before editing, saving or playing"));
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
             return;
         }
@@ -1167,7 +1167,7 @@ impl EditorApp {
     // Modal pointer capture does not block accessibility actions. Check both widget
     // availability and the action entry point before starting or advancing playback.
     fn playback_start_blocker(&self) -> Option<String> {
-        if self.package_removal_pending() { return Some("Wait for package removal completion before Play or Step".into()); }
+        if self.package_removal_pending() { return Some("Wait for package selection change completion before Play or Step".into()); }
         if self.hazard_pick_busy() { return Some("Finish or cancel hazard center picking before Play or Step".into()); }
         if self.hazard_export_busy() { return Some("Wait for hazard export completion before Play or Step".into()); }
         #[cfg(feature="mesh-mission")]
@@ -1190,7 +1190,7 @@ impl EditorApp {
     }
 
     fn save(&mut self) {
-        if self.package_removal_pending() { self.editor.error("Wait for package removal completion before saving"); return; }
+        if self.package_removal_pending() { self.editor.error("Wait for package selection change completion before saving"); return; }
         if self.hazard_pick_busy() { self.editor.error("Finish or cancel hazard center picking before saving"); return; }
         if self.hazard_export_busy() { self.editor.error("Wait for hazard export completion before saving"); return; }
         #[cfg(feature="mesh-mission")]

@@ -52,9 +52,28 @@ jobs:
                   or len(cases) != 8 or len({name for name, _ in cases}) != 8
                   or any(not name.startswith("checked_remove_") or status != "ok" for name, status in cases)):
               raise RuntimeError("Expected all eight checked removal core tests to pass without skips")
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_package", "--test", "restore_removed", "--",
+               "--format=pretty", "--color=never", "--test-threads=1"], evidence / "restore-removed-core.log")
+          expected_restore_tests = {
+              "restores_root_and_orphaned_dependency_without_original_sources",
+              "restores_shared_dependency_and_retained_transitive_root_flags_exactly",
+              "stale_active_lock_cannot_be_overwritten_by_old_receipt",
+              "rejects_non_inverse_and_forged_identity_before_callback",
+              "missing_or_tampered_cache_refuses_preview_and_commit",
+              "callback_failure_and_competing_writer_preserve_current_lock",
+              "existing_writer_is_retained_and_preview_remains_read_only",
+          }
+          cases = helpers["CASE"].findall(output)
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (7, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["7"]
+                  or len(cases) != 7 or {name for name, _ in cases} != expected_restore_tests
+                  or any(status != "ok" for _, status in cases)):
+              raise RuntimeError("Expected all seven checked restoration core tests to pass without skips")
           for suite, count in (
-              ("package_manager::removal::tests", 12 if os.name == "nt" else 14),
-              ("package_manager_panel::tests", 11),
+              ("package_manager::removal::tests", 20 if os.name == "nt" else 22),
+              ("package_manager_panel::tests", 13),
           ):
               output = helpers["run_logged"](
                   ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "package-manager,room-animated-models",
@@ -123,6 +142,9 @@ jobs:
               "direct_to_retained_dependency": True, "explicit_preview_remove": True,
               "cache_sources_scene_models_camera_preserved": True, "checksum_history_unchanged": True,
               "inventory_refreshed": True, "reopen_play_stop": True,
+              "restored_exact_prior_lock": True, "restored_transitive_dependencies": True,
+              "source_hidden_during_restore_and_reopen": True,
+              "restored_model_assigned_and_saved": True, "sources_restored": True,
           }
           if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
                  for key, value in expected.items()):
@@ -130,7 +152,8 @@ jobs:
           if not isinstance(receipt.get("adapter"), str) or "llvmpipe" not in receipt["adapter"].lower():
               raise RuntimeError("Expected actual llvmpipe software Vulkan viewport adapter")
           for image in ("01-verified.png", "02-used-refused.png", "03-removal-preview.png",
-                        "04-inventory-refreshed.png", "05-reopened.png", "06-playing.png"):
+                        "04-inventory-refreshed.png", "05-restoration-preview.png", "06-restored.png",
+                        "07-restored-model-assigned.png", "08-reopened.png", "09-playing.png"):
               data = (capture / image).read_bytes()
               if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
                   raise RuntimeError(f"Missing or malformed fresh package removal capture: {image}")

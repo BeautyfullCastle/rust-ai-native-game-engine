@@ -50,7 +50,15 @@ fn source(root: &Path, name: &str, dependencies: &[&str]) -> PathBuf {
     let path = root.join(name);
     fs::create_dir(&path).unwrap();
     fs::write(path.join("LICENSE.txt"), "Owned QA fixture license").unwrap();
-    fs::write(path.join("orr.package.json"),serde_json::to_vec(&serde_json::json!({"schema":1,"name":name,"version":"1.0.0","engine":"*","capabilities":[],"dependencies":dependencies.iter().map(|name|((*name).to_owned(),"1.0.0")).collect::<BTreeMap<_,_>>(),"files":["LICENSE.txt"]})).unwrap()).unwrap();
+    if name == "unused" {
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/imported_scene_demo/foreground.glb"),
+            path.join("foreground.glb"),
+        )
+        .unwrap();
+    }
+    fs::write(path.join("orr.package.json"),serde_json::to_vec(&serde_json::json!({"schema":1,"name":name,"version":"1.0.0","engine":"*","capabilities":if name=="unused" {vec!["models"]} else {vec![]},"dependencies":dependencies.iter().map(|name|((*name).to_owned(),"1.0.0")).collect::<BTreeMap<_,_>>(),"files":if name=="unused" {vec!["LICENSE.txt","foreground.glb"]} else {vec!["LICENSE.txt"]}})).unwrap()).unwrap();
     path
 }
 fn fixture(root: &Path, sources: &Path) {
@@ -82,7 +90,8 @@ fn fixture(root: &Path, sources: &Path) {
         .canonicalize()
         .unwrap();
     let shared = source(sources, "shared", &[]);
-    let unused = source(sources, "unused", &["shared"]);
+    let leaf = source(sources, "leaf", &[]);
+    let unused = source(sources, "unused", &["shared", "leaf"]);
     let keeper = source(sources, "keeper", &["shared"]);
     Project::open_for_install(root, Runtime::content_only().engine_version)
         .unwrap()
@@ -90,9 +99,14 @@ fn fixture(root: &Path, sources: &Path) {
             assets.join("imported_scene_demo"),
             assets.join("animation_demo"),
             shared,
+            leaf,
             unused,
             keeper,
         ])
+        .unwrap();
+    Project::open(root, room_project::compiled_runtime())
+        .unwrap()
+        .remove("leaf")
         .unwrap();
     let loaded =
         model_bindings::load_asset(root, "sample-imported-scene", "foreground.glb").unwrap();
@@ -283,9 +297,12 @@ fn verified_room_package_removal_preserves_content_and_reopens_for_play() {
         .package_manager
         .status
         .contains("removal complete"));
+    let prior_lock = fs::read(root.join("orr.packages.lock.json")).unwrap();
+    let prior_packages = orr_editor::package_manager::inspect(&root).unwrap();
     preview(&mut h, "unused");
     assert!(h.query_by_label("Deactivate package: unused").is_some());
     assert!(h.query_by_label("Retained dependency: shared").is_some());
+    assert!(h.query_by_label("Deactivate package: leaf").is_some());
     shot(&mut h, &evidence, "03-removal-preview.png");
     click(&mut h, "Remove previewed package");
     wait(&mut h);
@@ -299,6 +316,7 @@ fn verified_room_package_removal_preserves_content_and_reopens_for_play() {
     shot(&mut h, &evidence, "04-inventory-refreshed.png");
     let lock = orr_editor::package_manager::inspect(&root).unwrap();
     assert!(!lock.packages.contains_key("unused"));
+    assert!(!lock.packages.contains_key("leaf"));
     assert!(lock.packages.contains_key("shared"));
     assert!(!lock.direct.contains_key("shared"));
     assert_eq!(h.state().editor.checksum(), checksum);
@@ -316,16 +334,125 @@ fn verified_room_package_removal_preserves_content_and_reopens_for_play() {
     for (path, bytes) in &source_bytes {
         assert_eq!(fs::read(sources.join(path)).unwrap(), *bytes);
     }
+    let hidden_sources = evidence.join("sources.hidden");
+    let all_source_bytes = files(&sources);
+    fs::rename(&sources, &hidden_sources).unwrap();
+    assert!(!sources.exists());
+    click(&mut h, "Preview restoration");
+    wait(&mut h);
+    assert!(h
+        .query_by_label("Reactivate cached package: unused")
+        .is_some());
+    assert!(h
+        .query_by_label("Reactivate cached package: leaf")
+        .is_some());
+    assert!(h
+        .query_by_label("Restore direct selection: unused")
+        .is_some());
+    h.get_by_label("Restore direct selection: unused")
+        .scroll_to_me();
+    h.run_steps(20);
+    shot(&mut h, &evidence, "05-restoration-preview.png");
+    click(&mut h, "Restore last removal");
+    wait(&mut h);
+    assert!(h
+        .state()
+        .package_manager
+        .status
+        .contains("restoration complete"));
+    assert_eq!(
+        fs::read(root.join("orr.packages.lock.json")).unwrap(),
+        prior_lock
+    );
+    assert_eq!(
+        orr_editor::package_manager::inspect(&root).unwrap(),
+        prior_packages
+    );
+    assert!(h
+        .get_by_role_and_label(Role::Button, "Preview restoration")
+        .accesskit_node()
+        .is_disabled());
+    assert_eq!(h.state().editor.checksum(), checksum);
+    assert_eq!(h.state().editor.history(), &history);
+    for (path, bytes) in &original {
+        if path != Path::new("orr.packages.lock.json") {
+            assert_eq!(fs::read(root.join(path)).unwrap(), *bytes);
+        }
+    }
+    assert_eq!(files(&hidden_sources), all_source_bytes);
+    shot(&mut h, &evidence, "06-restored.png");
+    let prepared = PreparedProject::open(&root).unwrap();
+    let scene = prepared.scene();
+    let player = scene
+        .frame()
+        .entities()
+        .find(|entity| {
+            scene
+                .frame()
+                .get::<RoomActor>(*entity)
+                .is_some_and(|actor| actor.kind == PLAYER)
+        })
+        .unwrap();
+    let guid = scene.index().guid(player).unwrap().clone();
+    h.state_mut()
+        .editor
+        .select(Some(orr_editor::Target::Guid(guid.clone())));
+    settle(&mut h);
+    click(&mut h, "Use model unused/foreground.glb");
+    assert_eq!(
+        h.state()
+            .models
+            .bindings
+            .as_ref()
+            .unwrap()
+            .document()
+            .bindings[&guid.to_string()]
+            .package,
+        "unused"
+    );
+    assert!(h.state().models.bindings.as_ref().unwrap().dirty());
+    h.state_mut().package_manager.open = false;
+    settle(&mut h);
+    if h.query_by_label("Save model bindings").is_none() {
+        h.get_by_label("Static model binding").click_accesskit();
+        settle(&mut h);
+    }
+    click(&mut h, "Save model bindings");
+    assert!(!h.state().models.bindings.as_ref().unwrap().dirty());
+    assert_eq!(h.state().editor.checksum(), checksum);
+    assert_eq!(
+        fs::read(root.join("room.scene.yaml")).unwrap(),
+        original[Path::new("room.scene.yaml")]
+    );
+    assert_eq!(
+        fs::read(root.join("room.camera.json")).unwrap(),
+        original[Path::new("room.camera.json")]
+    );
+    shot(&mut h, &evidence, "07-restored-model-assigned.png");
     drop(h);
     let mut h = harness(&root);
     settle(&mut h);
     assert_eq!(h.state().editor.checksum(), checksum);
-    shot(&mut h, &evidence, "05-reopened.png");
+    assert_eq!(
+        h.state()
+            .models
+            .bindings
+            .as_ref()
+            .unwrap()
+            .document()
+            .bindings[&guid.to_string()]
+            .package,
+        "unused"
+    );
+    assert!(!sources.exists());
+    shot(&mut h, &evidence, "08-reopened.png");
     click(&mut h, LBL_PLAY);
     assert_eq!(h.state().editor.mode(), Mode::Play);
-    shot(&mut h, &evidence, "06-playing.png");
+    shot(&mut h, &evidence, "09-playing.png");
     click(&mut h, LBL_STOP);
     assert_eq!(h.state().editor.checksum(), checksum);
+    fs::rename(&hidden_sources, &sources).unwrap();
+    assert_eq!(files(&sources), all_source_bytes);
     let adapter = h
         .state()
         .viewport3d_gpu()
@@ -337,5 +464,5 @@ fn verified_room_package_removal_preserves_content_and_reopens_for_play() {
         adapter.to_lowercase().contains("llvmpipe"),
         "software Vulkan acceptance"
     );
-    fs::write(evidence.join("acceptance.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"production_editor_app":true,"software_gpu":true,"adapter":adapter,"physical_os_input":false,"static_animated_used_refused":true,"stale_lock_refused":true,"direct_to_retained_dependency":true,"explicit_preview_remove":true,"cache_sources_scene_models_camera_preserved":true,"checksum_history_unchanged":true,"inventory_refreshed":true,"reopen_play_stop":true})).unwrap()).unwrap();
+    fs::write(evidence.join("acceptance.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"production_editor_app":true,"software_gpu":true,"adapter":adapter,"physical_os_input":false,"static_animated_used_refused":true,"stale_lock_refused":true,"direct_to_retained_dependency":true,"explicit_preview_remove":true,"cache_sources_scene_models_camera_preserved":true,"checksum_history_unchanged":true,"inventory_refreshed":true,"reopen_play_stop":true,"restored_exact_prior_lock":true,"restored_transitive_dependencies":true,"source_hidden_during_restore_and_reopen":true,"restored_model_assigned_and_saved":true,"sources_restored":true})).unwrap()).unwrap();
 }

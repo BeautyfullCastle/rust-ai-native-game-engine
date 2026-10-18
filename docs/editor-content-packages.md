@@ -80,3 +80,29 @@ No package code is executed, and existing rights acknowledgements are unchanged.
 The opt-in `package_removal_ui` acceptance uses owned Room fixtures and synthetic
 egui input; its receipt and screenshots distinguish executed Vulkan validation
 from physical-input or hardware-GPU claims.
+
+## Restore the last successful removal
+
+The current session retains one opaque receipt only after removal and its Room
+post-validation succeed. Choose **Preview restoration** to inspect the exact
+prior direct selections and cached dependency closure, then **Restore last
+removal** to commit it. This is bounded restoration of that one receipt, not a
+general rollback, cache browser or source-package reinstall. It works while the
+original package source directories are unavailable.
+
+The saved Room scene, model bindings, camera, project identity and current lock
+must still match the receipt. Changed files, replaced project roots, missing or
+tampered cache bytes, and intervening package changes are refused. Other package
+mutations, a fresh installed-package verification, project switching, authoring
+changes and a successful restoration
+clear the receipt. A failed restoration also consumes it; uncertain publication
+never triggers automatic rollback. Closing the editor loses the in-memory
+receipt. Preview alone does not modify files or history.
+
+Restoration uses the same whole-frame authoring/playback freeze as removal,
+including stale accessibility actions and the completion frame. After success,
+the verified model browser refreshes; choose a restored cached model and save
+its binding explicitly. The software-Vulkan fixture acceptance hides the source
+packages, restores exact prior lock bytes and dependency flags, assigns a
+restored model, saves, reopens and enters Play. Scene/camera/cache/source bytes
+and host history remain unchanged until the explicit binding assignment.

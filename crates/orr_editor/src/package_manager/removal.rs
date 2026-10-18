@@ -20,6 +20,27 @@ pub struct RemovalPlan {
     snapshot: Snapshot,
 }
 
+/// Same-session evidence of one successfully completed, re-admitted removal.
+/// This opaque receipt cannot choose a different revision or enumerate the cache.
+/// It is deliberately not Clone; restoring consumes it even when the attempt fails.
+pub struct RemovalReceipt {
+    root: PathBuf,
+    name: String,
+    previous: Lock,
+    removed: Lock,
+    snapshot: Snapshot,
+}
+
+impl RemovalReceipt {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
     root_identity: RootIdentity,
@@ -45,6 +66,12 @@ pub fn plan_remove(root: &Path, name: &str) -> Result<RemovalPlan, String> {
 }
 
 pub fn apply_remove(plan: &RemovalPlan) -> Result<Lock, String> {
+    apply_remove_with_receipt(plan).map(|(lock, _)| lock)
+}
+
+/// Issue a restoration receipt only after removal and post-publication Room
+/// re-admission both succeed. An uncertain/failed completion gives no receipt.
+pub fn apply_remove_with_receipt(plan: &RemovalPlan) -> Result<(Lock, RemovalReceipt), String> {
     let root = checked_directory(&plan.root, "Room project")?;
     if root != plan.root {
         return Err("Room project path identity changed since removal planning".into());
@@ -87,7 +114,73 @@ pub fn apply_remove(plan: &RemovalPlan) -> Result<Lock, String> {
             root.display()
         ));
     }
-    Ok(installed)
+    let receipt = RemovalReceipt {
+        root,
+        name: plan.name.clone(),
+        previous: plan.preview.previous.clone(),
+        removed: installed.clone(),
+        snapshot: after,
+    };
+    Ok((installed, receipt))
+}
+
+/// Preview the exact inverse of this receipt, with no generic revision selection.
+/// The UI must discard the receipt on project changes or other package mutations.
+pub fn plan_restore(receipt: &RemovalReceipt) -> Result<PackagePreview, String> {
+    let project = receipt_project(receipt)?;
+    let preview = project
+        .preview_restore_removed(&receipt.name, &receipt.removed, &receipt.previous)
+        .map_err(|error| error.to_string())?;
+    if preview.previous != receipt.removed || preview.candidate != receipt.previous {
+        return Err("restoration preview differs from the successful removal receipt".into());
+    }
+    unchanged_receipt_room(receipt)?;
+    Ok(preview)
+}
+
+/// Restore one exact successful removal. Consuming the receipt prevents a
+/// failed/stale request from being silently retained or reused as a rollback.
+pub fn apply_restore(receipt: RemovalReceipt) -> Result<Lock, String> {
+    let project = receipt_project(&receipt)?;
+    let restored = project
+        .restore_removed_checked(&receipt.name, &receipt.removed, &receipt.previous, || {
+            unchanged_receipt_room(&receipt)
+        })
+        .map_err(|error| error.to_string())?;
+    let after = admit_candidate(&receipt.root, &restored, &restored).map_err(|error| {
+        format!(
+            "package selection was restored at {} but Room re-admission failed; the published lock is retained: {error}",
+            receipt.root.display()
+        )
+    })?;
+    if after != receipt.snapshot {
+        return Err(format!(
+            "package selection was restored at {} but saved Room content changed after publication; the published lock is retained",
+            receipt.root.display()
+        ));
+    }
+    Ok(restored)
+}
+
+fn receipt_project(receipt: &RemovalReceipt) -> Result<Project, String> {
+    let root = checked_directory(&receipt.root, "Room project")?;
+    if root != receipt.root || root_identity(&root)? != receipt.snapshot.root_identity {
+        return Err(
+            "Room project identity changed since package removal; receipt discarded".into(),
+        );
+    }
+    Project::open(&root, room_runtime()).map_err(|error| error.to_string())
+}
+
+fn unchanged_receipt_room(receipt: &RemovalReceipt) -> Result<(), String> {
+    let current = admit_candidate(&receipt.root, &receipt.removed, &receipt.previous)?;
+    if current != receipt.snapshot {
+        return Err(
+            "saved Room project, scene, model bindings or camera changed since package removal; receipt discarded"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_removal(name: &str, previous: &Lock, candidate: &Lock) -> Result<(), String> {
@@ -795,6 +888,181 @@ mod tests {
         }
     }
 
+    #[test]
+    fn receipt_restores_exact_lock_without_source_cache_scene_or_history_mutation() {
+        let fixture = Fixture::new();
+        let plan = fixture.unused_plan();
+        let before = inventory(fixture.temp.path());
+        let prepared = PreparedProject::open(&fixture.root).unwrap();
+        let mut editor = crate::Editor::start(&crate::HostSpec::PreparedRoom {
+            scene: prepared.path().to_path_buf(),
+            text: prepared.scene().text().into(),
+            listen: None,
+            debug_hooks: false,
+        })
+        .unwrap();
+        editor.sync();
+        let checksum = editor.checksum();
+        let history = editor.history().entries.len();
+        let (removed, receipt) = apply_remove_with_receipt(&plan).unwrap();
+        assert_eq!(receipt.root(), fixture.root);
+        assert_eq!(receipt.name(), "unused");
+        let preview = plan_restore(&receipt).unwrap();
+        assert_eq!(preview.previous, removed);
+        assert_eq!(preview.candidate, plan.preview.previous);
+        assert_eq!(apply_restore(receipt).unwrap(), plan.preview.previous);
+        assert_eq!(inventory(fixture.temp.path()), before);
+        editor.sync();
+        assert_eq!(editor.checksum(), checksum);
+        assert_eq!(editor.history().entries.len(), history);
+        assert_eq!(
+            PreparedProject::open(&fixture.root)
+                .unwrap()
+                .scene()
+                .frame()
+                .to_bytes(),
+            prepared.scene().frame().to_bytes()
+        );
+    }
+
+    #[test]
+    fn receipt_restores_orphaned_dependencies_with_original_direct_flags_without_sources() {
+        let fixture = Fixture::new();
+        let leaf = fixture.source("leaf", &[]);
+        let wrapper = fixture.source("wrapper", &["leaf"]);
+        fixture
+            .project()
+            .install_with_dependencies(std::slice::from_ref(&wrapper), std::slice::from_ref(&leaf))
+            .unwrap();
+        let plan = plan_remove(&fixture.root, "wrapper").unwrap();
+        let (_, receipt) = apply_remove_with_receipt(&plan).unwrap();
+        fs::remove_dir_all(wrapper).unwrap();
+        fs::remove_dir_all(leaf).unwrap();
+        let objects = inventory(&fixture.root.join(".orr/packages/objects"));
+        let preview = plan_restore(&receipt).unwrap();
+        assert!(preview.candidate.direct.contains_key("wrapper"));
+        assert!(!preview.candidate.direct.contains_key("leaf"));
+        assert!(preview.candidate.packages.contains_key("leaf"));
+        assert_eq!(apply_restore(receipt).unwrap(), plan.preview.previous);
+        assert_eq!(
+            inventory(&fixture.root.join(".orr/packages/objects")),
+            objects
+        );
+    }
+
+    #[test]
+    fn receipt_restores_a_used_shared_dependency_to_its_original_direct_selection() {
+        let fixture = Fixture::new();
+        let wrapper = fixture.source("wrapper", &[USED]);
+        fixture.project().install(&[wrapper]).unwrap();
+        let plan = plan_remove(&fixture.root, USED).unwrap();
+        let before = inventory(fixture.temp.path());
+        let (_, receipt) = apply_remove_with_receipt(&plan).unwrap();
+        let preview = plan_restore(&receipt).unwrap();
+        assert!(preview.candidate.direct.contains_key(USED));
+        assert_eq!(preview.candidate.packages, preview.previous.packages);
+        assert_eq!(apply_restore(receipt).unwrap(), plan.preview.previous);
+        assert_eq!(inventory(fixture.temp.path()), before);
+    }
+
+    #[test]
+    fn restore_rejects_each_changed_saved_room_file_without_publishing() {
+        for name in [
+            "orr.project.json",
+            "room.scene.yaml",
+            "room.models.json",
+            "room.camera.json",
+        ] {
+            let fixture = Fixture::new();
+            let plan = fixture.unused_plan();
+            let (_, receipt) = apply_remove_with_receipt(&plan).unwrap();
+            let path = fixture.root.join(name);
+            let mut bytes = fs::read(&path).unwrap();
+            bytes.push(b'\n');
+            fs::write(path, bytes).unwrap();
+            let before = inventory(fixture.temp.path());
+            assert!(plan_restore(&receipt).is_err(), "{name}");
+            assert!(apply_restore(receipt).is_err(), "{name}");
+            assert_eq!(inventory(fixture.temp.path()), before);
+        }
+    }
+
+    #[test]
+    fn restore_rejects_a_different_current_lock_without_rolling_back_other_packages() {
+        let fixture = Fixture::new();
+        let plan = fixture.unused_plan();
+        let (_, receipt) = apply_remove_with_receipt(&plan).unwrap();
+        let other = fixture.source("other", &[]);
+        fixture.project().install(&[other]).unwrap();
+        let before = inventory(fixture.temp.path());
+        assert!(plan_restore(&receipt).is_err());
+        assert!(apply_restore(receipt).is_err());
+        assert_eq!(inventory(fixture.temp.path()), before);
+        assert!(fixture
+            .project()
+            .verify()
+            .unwrap()
+            .direct
+            .contains_key("other"));
+    }
+
+    #[test]
+    fn restore_rejects_missing_or_tampered_removed_cache_objects() {
+        for missing in [false, true] {
+            let fixture = Fixture::new();
+            let plan = fixture.unused_plan();
+            let (_, receipt) = apply_remove_with_receipt(&plan).unwrap();
+            let object = fixture
+                .root
+                .join(".orr/packages/objects")
+                .join(&plan.preview.previous.packages["unused"].digest);
+            if missing {
+                fs::remove_dir_all(object).unwrap();
+            } else {
+                fs::write(object.join("asset.dat"), b"tampered cached package").unwrap();
+            }
+            let before = inventory(fixture.temp.path());
+            assert!(plan_restore(&receipt).is_err());
+            assert!(apply_restore(receipt).is_err());
+            assert_eq!(inventory(fixture.temp.path()), before);
+        }
+    }
+
+    #[test]
+    fn restore_rejects_replaced_root_and_competing_writer_without_publishing() {
+        for replace_root in [false, true] {
+            let fixture = Fixture::new();
+            let plan = fixture.unused_plan();
+            let (_, receipt) = apply_remove_with_receipt(&plan).unwrap();
+            if replace_root {
+                let moved = fixture.temp.path().join("original-room");
+                fs::rename(&fixture.root, &moved).unwrap();
+                copy_tree(&moved, &fixture.root);
+                assert!(plan_restore(&receipt).is_err());
+            } else {
+                fs::write(
+                    fixture.root.join(".orr/packages/writer.lock"),
+                    b"another fixture writer",
+                )
+                .unwrap();
+            }
+            let before = inventory(fixture.temp.path());
+            assert!(apply_restore(receipt).is_err());
+            assert_eq!(inventory(fixture.temp.path()), before);
+        }
+    }
+
+    #[test]
+    fn failed_removal_does_not_return_a_restoration_receipt() {
+        let fixture = Fixture::new();
+        let plan = fixture.unused_plan();
+        let other = fixture.source("other", &[]);
+        fixture.project().install(&[other]).unwrap();
+        let before = inventory(fixture.temp.path());
+        assert!(apply_remove_with_receipt(&plan).is_err());
+        assert_eq!(inventory(fixture.temp.path()), before);
+    }
+
     #[cfg(feature = "room-animated-models")]
     #[test]
     fn animated_binding_is_protected_and_unused_removal_preserves_playback() {
@@ -834,12 +1102,20 @@ mod tests {
             .unwrap()
             .contains("requires deactivated package"));
         let plan = fixture.unused_plan();
-        apply_remove(&plan).unwrap();
+        let (_, receipt) = apply_remove_with_receipt(&plan).unwrap();
         let after = PreparedProject::open(&fixture.root).unwrap();
         assert_eq!(before.models().document, after.models().document);
         assert_eq!(
             before.scene().frame().to_bytes(),
             after.scene().frame().to_bytes()
+        );
+        plan_restore(&receipt).unwrap();
+        assert_eq!(apply_restore(receipt).unwrap(), plan.preview.previous);
+        let restored = PreparedProject::open(&fixture.root).unwrap();
+        assert_eq!(before.models().document, restored.models().document);
+        assert_eq!(
+            before.scene().frame().to_bytes(),
+            restored.scene().frame().to_bytes()
         );
     }
 }
