@@ -1,0 +1,156 @@
+name: Collect input map editor acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect-input-map-editor:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_COLLECT_MAP_CI: ${{ github.workspace }}/target/collect-map-editor-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-count guard self-tests
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Canonical document and widget CPU contracts and optional boundaries
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+          h = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_COLLECT_MAP_CI"])
+          evidence.mkdir(parents=True, exist_ok=False)
+          base = ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features",
+                  "--features", "collect-input-map-editor", "--test", "collect_input_map_authoring_ui"]
+          # The binary and integration include the same document module. Count it
+          # once through this canonical integration, not as two independent proofs.
+          # Two Unix-only state tests cover nonregular paths and symlink admission.
+          suite = "collect_input_map_authoring::tests"
+          output = h["run_logged"](base + [suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
+                                    evidence / "document-cpu.log")
+          h["validate_tests"](output, suite, 16 if os.name == "nt" else 18)
+          for name in (
+              "six_action_widgets_save_reopen_and_exact_undo_redo",
+              "conflicting_draft_blocks_navigation_and_save_preserves_it",
+              "empty_system_actions_warn_and_eight_keyboard_bindings_are_editable",
+              "saved_widget_map_drives_collect_loader_and_real_bridge_trace",
+          ):
+              output = h["run_logged"](base + [name, "--", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+                                        evidence / (name + ".log")).replace("\r\n", "\n")
+              summaries = h["SUMMARY"].findall(output)
+              if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                      or h["CASE"].findall(output) != [(name, "ok")]):
+                  raise RuntimeError("Expected exactly one passing widget CPU test: " + name)
+          for label, args in (
+              ("default-check", ["check", "--lib"]),
+              ("optional-lib-check", ["check", "--lib", "--features", "collect-input-map-editor"]),
+              ("optional-bin-build", ["build", "--bin", "orr_collect_input_map", "--features", "collect-input-map-editor"]),
+              ("optional-strict", ["clippy", "--lib", "--bin", "orr_collect_input_map", "--test", "collect_input_map_authoring_ui",
+                                   "--features", "collect-input-map-editor", "--", "-D", "warnings"]),
+          ):
+              h["run_logged"](["cargo", args[0], "--locked", "-p", "orr_editor", "--no-default-features", *args[1:]], evidence / (label + ".log"))
+      - name: Install explicit Linux software Vulkan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$ORR_COLLECT_MAP_CI/vulkan-install.log"
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 2>&1 | tee -a "$ORR_COLLECT_MAP_CI/vulkan-install.log"
+          mapfile -t drivers < <(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -type f)
+          test "${#drivers[@]}" -eq 1
+          runtime=$(mktemp -d "$RUNNER_TEMP/collect-map-xdg.XXXXXXXX")
+          chmod 700 "$runtime"
+          {
+            echo "VK_DRIVER_FILES=${drivers[0]}"
+            echo "VK_ICD_FILENAMES=${drivers[0]}"
+            echo "XDG_RUNTIME_DIR=$runtime"
+          } >> "$GITHUB_ENV"
+          printf 'Software Vulkan ICD: %s\n' "${drivers[0]}" | tee "$ORR_COLLECT_MAP_CI/vulkan-driver.log"
+      - name: Explicit production tool software GPU and saved map Bridge acceptance
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+          import struct
+          h = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_COLLECT_MAP_CI"]).resolve()
+          captures = evidence / "software-gpu"
+          captures.mkdir(exist_ok=False)
+          os.environ["ORR_COLLECT_INPUT_MAP_EVIDENCE"] = str(captures)
+          name = "collect_map_widgets_have_real_gpu_pixels"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features",
+               "--features", "collect-input-map-editor", "--test", "collect_input_map_authoring_ui",
+               name, "--", "--ignored", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "software-gpu.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or h["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected one executed software GPU acceptance with no skips")
+          receipt = json.loads((captures / "collect-input-map-acceptance.json").read_text())
+          if type(receipt.get("schema")) is not int or receipt["schema"] != 1 or receipt.get("window_pixels") != [720, 650]:
+              raise RuntimeError("Unexpected tool receipt schema or window size")
+          for flag in ("production_eframe_app", "six_actions_authored", "conflicts_refused", "exact_undo_redo",
+                       "save_reopen_no_overwrite", "real_collect_bindings_loader"):
+              if receipt.get(flag) is not True:
+                  raise RuntimeError("Missing verified tool predicate: " + flag)
+          # Public adapter + real Bridge proof does not claim private runtime Keys
+          # policy or physical/native window testing. Those scopes remain distinct.
+          for flag in ("native_os_window", "physical_keyboard_events", "private_runtime_keys_policy"):
+              if receipt.get(flag) is not False:
+                  raise RuntimeError("Incorrect execution scope: " + flag)
+          adapter = receipt.get("adapter")
+          if not isinstance(adapter, str) or "llvmpipe" not in adapter.lower() or "Cpu" not in adapter or "Vulkan" not in adapter:
+              raise RuntimeError("Explicit CPU Vulkan adapter required")
+          trace = receipt.get("real_bridge_movement_win_restart_trace")
+          if not isinstance(trace, list) or len(trace) != 24:
+              raise RuntimeError("Expected full 24-sample Bridge trace")
+          for sample in trace:
+              if (not isinstance(sample, dict) or any(type(sample.get(k)) is not int for k in ("tick", "phase", "score", "elapsed_ticks"))
+                      or not isinstance(sample.get("checksum"), str) or re.fullmatch(r"[0-9a-f]{16}", sample["checksum"]) is None):
+                  raise RuntimeError("Malformed Bridge sample")
+          if (trace[19]["phase"] != 1 or trace[19]["score"] != 1 or trace[20]["phase"] != 0
+                  or trace[20]["score"] != 0 or trace[20]["elapsed_ticks"] != 0 or trace[23]["elapsed_ticks"] <= 0):
+              raise RuntimeError("Missing movement/win/restart Bridge result")
+          saved = json.loads((captures / "collect-input-map-authored.json").read_text())
+          expected = {"version": 1, "actions": [
+              {"name": action, "bindings": [{"device": "Keyboard", "key": key}]}
+              for action, key in (("left", "j"), ("right", "l"), ("up", "i"), ("down", "k"), ("restart", "enter"), ("quit", "q"))]}
+          if saved != expected:
+              raise RuntimeError("UI-saved map differs from six authored keyboard actions")
+          for filename in ("collect-input-map-default.png", "collect-input-map-authored.png", "collect-input-map-conflict.png"):
+              raw = (captures / filename).read_bytes()
+              if raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR" or struct.unpack(">II", raw[16:24]) != (720, 650):
+                  raise RuntimeError("Invalid retained full-tool screenshot: " + filename)
+      - name: Retain counts, checks, full tool screenshots and public adapter trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collect-input-map-editor-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_COLLECT_MAP_CI }}
+          if-no-files-found: error

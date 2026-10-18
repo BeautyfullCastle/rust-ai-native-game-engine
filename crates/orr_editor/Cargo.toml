@@ -15,6 +15,8 @@ workspace = true
 [features]
 # Standalone optional Arena input-map authoring; no default runtime/UI wiring.
 input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/input-actions"]
+# Separate default-off standalone Collect authoring; reuses existing dependencies.
+collect-input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/collect-dodge", "orr_sample/input-actions"]
 # Optional new-project creator for explicit authoring and acceptance workflows.
 project-create = ["orr_sample/project-create"]
 room-project = ["models", "orr_remote/room-project", "orr_sample/room-project"]
@@ -110,3 +112,8 @@ path = "src/bin/orr_mesh_hazards_player.rs"
 required-features = ["mesh-hazards-export"]
 test = false
 bench = false
+
+[[bin]]
+name = "orr_collect_input_map"
+path = "src/bin/orr_collect_input_map.rs"
+required-features = ["collect-input-map-editor"]
