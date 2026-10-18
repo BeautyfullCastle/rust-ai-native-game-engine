@@ -1,0 +1,148 @@
+name: Collect UI screen preview acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect-ui-screen-preview:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_COLLECT_PREVIEW_CI: ${{ github.workspace }}/target/collect-ui-preview-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-count guard self-tests
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Focused preview state and unchanged panel and runtime contracts
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+          h = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_COLLECT_PREVIEW_CI"])
+          evidence.mkdir(parents=True, exist_ok=False)
+          for package, suite, count in (
+              ("orr_editor", "collect_ui_preview::tests", 16),
+              ("orr_editor", "collect_ui_panel::tests", 5 if os.name == "nt" else 6),
+              ("orr_sample", "collect_ui::tests", 12),
+              ("orr_sample", "collect_app::tests", 11),
+          ):
+              output = h["run_logged"](
+                  ["cargo", "test", "--locked", "-p", package, "--no-default-features", "--features", "collect-ui",
+                   "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1",
+                   *(["--skip", "app::collect_ui_preview::tests::"] if suite == "collect_ui_preview::tests" else [])],
+                  evidence / (package + "-" + suite.replace("::", "-") + ".log"))
+              h["validate_tests"](output, suite, count)
+          name = "app::collect_ui_preview::tests::actual_editor_preview_controls_preserve_host_and_scene_epoch"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--lib", name, "--", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "actual-editor-controls-cpu.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or h["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected exactly one passing actual EditorApp controls test")
+          for label, args in (
+              ("default-check", ["check", "--lib"]),
+              ("collect-ui-check", ["check", "--lib", "--features", "collect-ui"]),
+              ("collect-ui-strict", ["clippy", "--lib", "--features", "collect-ui", "--", "-D", "warnings"]),
+          ):
+              h["run_logged"](["cargo", args[0], "--locked", "-p", "orr_editor", "--no-default-features", *args[1:]], evidence / (label + ".log"))
+      - name: Install explicit Linux software Vulkan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$ORR_COLLECT_PREVIEW_CI/vulkan-install.log"
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 2>&1 | tee -a "$ORR_COLLECT_PREVIEW_CI/vulkan-install.log"
+          mapfile -t drivers < <(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -type f)
+          test "${#drivers[@]}" -eq 1
+          runtime=$(mktemp -d "$RUNNER_TEMP/collect-preview-xdg.XXXXXXXX")
+          chmod 700 "$runtime"
+          {
+            echo "VK_DRIVER_FILES=${drivers[0]}"
+            echo "VK_ICD_FILENAMES=${drivers[0]}"
+            echo "XDG_RUNTIME_DIR=$runtime"
+          } >> "$GITHUB_ENV"
+          printf 'Software Vulkan ICD: %s\n' "${drivers[0]}" | tee "$ORR_COLLECT_PREVIEW_CI/vulkan-driver.log"
+      - name: Actual EditorApp isolated preview and production renderer pixel parity
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import runpy
+          import struct
+          h = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_COLLECT_PREVIEW_CI"]).resolve()
+          captures = evidence / "software-gpu"
+          captures.mkdir(exist_ok=False)
+          os.environ["ORR_COLLECT_UI_PREVIEW_EVIDENCE"] = str(captures)
+          name = "app::collect_ui_preview::tests::actual_editor_preview_gpu_matches_production_and_never_dispatches"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--lib", name, "--", "--ignored", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "actual-preview-gpu.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or h["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected one executed software GPU test with no skips")
+          receipt = json.loads((captures / "collect-ui-preview-acceptance.json").read_text())
+          if (type(receipt.get("schema")) is not int or receipt["schema"] != 1
+                  or receipt.get("window_pixels") != [1800, 1200]
+                  or type(receipt.get("production_collect_ui_pixel_parity_cases")) is not int
+                  or receipt["production_collect_ui_pixel_parity_cases"] != 7):
+              raise RuntimeError("Unexpected preview receipt schema or parity inventory")
+          for flag in ("production_editor_app", "software_vulkan", "full_default_width_controls",
+                       "unsaved_label_and_button_visible", "landscape_and_portrait", "clipping_and_admitted_font",
+                       "observed_play_menu_restart_quit", "pointer_leave_cancelled", "host_checksum_history_mode_input_unchanged",
+                       "ui_undo_save_reopen", "scene_manifest_unchanged", "close_and_missing_panel_release_gpu"):
+              if receipt.get(flag) is not True:
+                  raise RuntimeError("Missing verified preview predicate: " + flag)
+          if receipt.get("native_os_window") is not False:
+              raise RuntimeError("Software-GPU synthetic input must not claim native window acceptance")
+          adapter = receipt.get("adapter")
+          if not isinstance(adapter, str) or "llvmpipe" not in adapter.lower() or "Cpu" not in adapter or "Vulkan" not in adapter:
+              raise RuntimeError("Explicit llvmpipe CPU Vulkan evidence required")
+          for name, size in (
+              ("title-default-landscape", (640, 360)),
+              ("title-unsaved-landscape", (640, 360)),
+              ("title-unsaved-portrait", (360, 640)),
+              ("playing-portrait", (360, 640)),
+              ("menu-portrait", (360, 640)),
+              ("terminal-landscape", (640, 360)),
+              ("title-saved-reopened", (640, 360)),
+          ):
+              for suffix, expected in (("canvas", size), ("editor", (1800, 1200))):
+                  filename = name + "-" + suffix + ".png"
+                  raw = (captures / filename).read_bytes()
+                  if raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR" or struct.unpack(">II", raw[16:24]) != expected:
+                      raise RuntimeError("Missing or wrong-sized preview screenshot: " + filename)
+      - name: Retain exact counts, production parity captures and full controls
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collect-ui-screen-preview-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_COLLECT_PREVIEW_CI }}
+          if-no-files-found: error

@@ -99,6 +99,7 @@ pub fn install_collect_presentation(app: &mut EditorApp, mut project: orr_sample
         fonts.font_data.insert("collect-authoring".into(), egui::FontData::from_owned(ui.font.clone()).into());
         for family in [egui::FontFamily::Proportional,egui::FontFamily::Monospace] { fonts.families.entry(family).or_default().insert(0,"collect-authoring".into()); }
         ctx.set_fonts(fonts);
+        app.install_collect_ui_preview(&ui);
         app.collect_ui = Some(crate::collect_ui_panel::Panel::new(ui));
     }
     if let Some(sprites) = project.take_sprites() {
