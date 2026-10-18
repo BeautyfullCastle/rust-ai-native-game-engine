@@ -54,7 +54,9 @@ on I/O failure), so inspect it before choosing another destination.
 
 **New mesh game…** retains its legacy profile. New hazard creation does not
 migrate existing scenes, enable legacy workspace operations for hazard scenes,
-or provide hazard asset editing, viewport picking or standalone hazard export.
+or provide hazard asset editing or composed-presentation export.
+The separate `mesh-hazards-export` feature supports scene-only standalone hazard
+bundles; see [the export guide](editor-mesh-hazards-export.md).
 Unsupported workflows remain unavailable rather than silently falling back to
 the legacy profile.
 
@@ -66,3 +68,24 @@ Creator tests additionally cover explicit profile selection, canonical optional
 hazards, no-overwrite/sidecar/path checks, cancellation and mode isolation,
 current-scene preservation, and Play through the collect/exit route with the
 optional sphere at minimum, default and maximum tested floor dimensions.
+
+
+## Pick a hazard center in the viewport
+
+Enable hazards and choose a sphere count, then choose **Pick hazard N center in
+viewport** in the Mesh hazards panel. Click the admitted walkable surface to
+stage that sphere's X/Y/Z. The existing radius text and every other sphere stay
+unchanged. The center lies on the clicked surface; numeric Y remains available
+after picking for centers above or below the surface.
+
+A successful hit changes draft fields only. Choose **Apply mesh hazards** to
+commit one undoable edit; the orange warning bands then show the applied center.
+Save explicitly to persist it. A miss leaves picking active so you can try again.
+**Cancel hazard center picking** or Escape preserves the existing draft.
+
+While armed, other authoring interactions, Play, Save, export and scene switches
+are blocked. Focus loss, text focus, a modal, preview or conflicting content work
+cancels picking. A scene-load epoch, graph, document checksum, sphere count or
+numeric draft change also invalidates the selection before a click is accepted.
+Picking is available only in idle local MeshHazardsV1 Edit mode; it does not
+change the legacy mesh profile or implement a second collision/raycaster system.

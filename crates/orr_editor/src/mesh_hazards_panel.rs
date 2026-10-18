@@ -9,6 +9,10 @@ use orr_fp::FP;
 use orr_remote::mesh_navigation::hazards::{self, HazardSphere, HazardsView, MeshHazards};
 use std::path::PathBuf;
 
+#[path = "mesh_hazards_panel/viewport_picking.rs"]
+mod viewport_picking;
+pub(crate) use viewport_picking::ViewInput;
+
 const MAX_HAZARDS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +47,7 @@ pub(crate) struct Panel {
     identity: Option<Identity>,
     status: String,
     error: Option<String>,
+    viewport_picking: viewport_picking::State,
 }
 
 impl Default for Panel {
@@ -57,16 +62,18 @@ impl Default for Panel {
             identity: None,
             status: String::new(),
             error: None,
+            viewport_picking: viewport_picking::State::default(),
         }
     }
 }
 
 impl Panel {
     pub(crate) fn dirty(&self) -> bool {
-        self.form_dirty || self.context_stale
+        self.form_dirty || self.context_stale || self.hazard_pick_busy()
     }
 
     pub(crate) fn sync(&mut self, editor: &Editor) {
+        self.sync_hazard_picking(editor);
         let Ok((context, view)) = current(editor) else {
             self.document_pending = true;
             return;
@@ -98,6 +105,9 @@ impl Panel {
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
         if !editor.game().is_mesh_hazards() {
             return None;
+        }
+        if self.hazard_pick_busy() {
+            return Some("Finish or cancel hazard center picking before Play".into());
         }
         if self.context_stale {
             return Some("Reload the stale hazard draft before Play".into());
@@ -139,6 +149,7 @@ impl Panel {
     }
 
     fn load(&mut self, identity: Identity, view: Option<&HazardsView>) {
+        self.cancel_hazard_pick();
         if let Some(view) = view {
             self.enabled = true;
             self.count = view.config.count.to_string();
@@ -173,7 +184,7 @@ impl Panel {
     }
 
     fn apply(&mut self, editor: &mut Editor) {
-        if !self.can_edit(editor) {
+        if !self.can_edit(editor) || self.hazard_pick_busy() {
             self.error = Some(
                 "Apply requires the matching editable local hazard scene; reload stale fields."
                     .into(),
@@ -249,7 +260,8 @@ impl Panel {
             ui.weak("Create a scene with File > New hazard game. File > Export hazard game supports scene-only bundles with enabled hazards; workspace copying and composed presentations remain unsupported.");
             #[cfg(not(feature="mesh-hazards-export"))]
             ui.weak("Create a scene with File > New hazard game. Enable mesh-hazards-export for scene-only standalone export; workspace copying remains unsupported.");
-            ui.add_enabled_ui(self.can_edit(editor), |ui| {
+            self.show_hazard_picking(ui, editor);
+            ui.add_enabled_ui(self.can_edit(editor) && !self.hazard_pick_busy(), |ui| {
                 let mut changed = ui.checkbox(&mut self.enabled, "Enable mesh hazards").changed();
                 changed |= text_field(ui, "Hazard count (1–8)", &mut self.count);
                 for index in 0..parse_count(&self.count).unwrap_or(0) {

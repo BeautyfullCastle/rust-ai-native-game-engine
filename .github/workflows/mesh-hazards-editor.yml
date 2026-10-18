@@ -45,6 +45,7 @@ jobs:
           evidence.mkdir(parents=True, exist_ok=False)
           suites = (
               ("mesh_hazards_panel::tests", 11),
+              ("mesh_hazards_panel::viewport_picking::tests", 11),
               ("game::mesh_hazards_identity_tests", 1),
               ("backend::mesh_hazards_profile_tests", 1),
               ("editor::input::mesh_hazards_control_tests", 4),
@@ -295,6 +296,54 @@ jobs:
           helpers["run_logged"](
               ["cargo", "clippy", "--locked", "-p", "orr_editor", "--features", "mesh-hazards",
                "--test", "mesh_hazards_ui", "--", "-D", "warnings"], evidence / "ui-test-lint.log")
+      - name: Explicit software-Vulkan hazard viewport picking acceptance
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_MESH_HAZARDS_ACCEPTANCE: '1'
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          capture = evidence / "viewport-picking-ui"
+          if capture.exists():
+              raise RuntimeError("Viewport picking acceptance requires an absent, fresh capture directory")
+          os.environ["ORR_HAZARD_PICK_CAPTURE_DIR"] = str(capture.resolve())
+          name = "hazard_center_viewport_pick_stages_only_selected_sphere_and_apply_undo_save_reopen"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "mesh-hazards-export,mesh-animated-models",
+               "--test", "mesh_hazards_ui", name, "--", "--exact", "--ignored",
+               "--format=pretty", "--color=never", "--test-threads=1"], evidence / (name + ".log"))
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError(f"{name}: expected exactly one executed passing ignored test")
+          receipt = json.loads((capture / "acceptance.json").read_text())
+          expected = {
+              "schema": 1, "profile": "MeshHazardsV1", "production_editor_app": True,
+              "software_gpu": True, "hardware_gpu": False, "physical_os_input": False,
+              "viewport_pointer_pick": True, "selected_sphere_only": True,
+              "radius_preserved": True, "staging_does_not_mutate_host": True,
+              "play_save_open_guards": True, "escape_cancel_preserves_selection": True,
+              "focus_loss_cancels": True, "no_selection_fallthrough": True,
+              "mission_and_agent_unchanged": True, "apply_undo_redo_save_reopen": True,
+              "viewport_authored_sphere_2_loss_tick_1": True, "stop_restores_authored_state": True,
+          }
+          if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                 for key, value in expected.items()):
+              raise RuntimeError("Fresh viewport picking acceptance receipt is incomplete or inconsistent")
+          for image in ("01-picking-guards.png", "02-picked-draft.png", "03-picked-applied.png",
+                        "04-picked-reopened.png", "05-picked-route-loss.png", "06-picked-stop-reset.png"):
+              data = (capture / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh viewport picking capture: {image}")
       - name: Explicit software-Vulkan hazard export UI with the real native Player
         if: runner.os == 'Linux'
         env:

@@ -575,3 +575,213 @@ fn hazard_creator_widgets_validate_create_preserve_and_reopen() {
     )
     .unwrap();
 }
+
+
+#[test]
+#[ignore = "opt-in software Vulkan hazard viewport picking; set ORR_HAZARD_PICK_CAPTURE_DIR"]
+fn hazard_center_viewport_pick_stages_only_selected_sphere_and_apply_undo_save_reopen() {
+    use egui::{Event, PointerButton};
+    assert_eq!(
+        std::env::var("ORR_MESH_HAZARDS_ACCEPTANCE").as_deref(),
+        Ok("1")
+    );
+    let root = PathBuf::from(std::env::var_os("ORR_HAZARD_PICK_CAPTURE_DIR").unwrap());
+    assert!(root.is_absolute());
+    fs::create_dir(&root).expect("fresh hazard picking evidence directory");
+    let scene = root.join("hazard-picking.scene.yaml");
+    fixture(&scene);
+    let mut h = harness(&scene);
+    settle(&mut h);
+    // Mesh scenes admit only their derived agent, so select that real frame entity.
+    let selected = orr_editor::Target::Entity(mesh_from_view(h.state().editor.snapshot().unwrap().predicted()).unwrap().agent.entity);
+    h.state_mut().editor.select(Some(selected.clone()));
+    settle(&mut h);
+    assert_eq!(h.state().editor.selection(), Some(&selected));
+
+    click(&mut h, "Mesh hazards");
+    click(&mut h, "Enable mesh hazards");
+    field(&mut h, "Hazard count (1–8)", "2");
+    for (label, value) in [
+        ("Hazard 1 X", "0.5"),
+        ("Hazard 1 Y", "0"),
+        ("Hazard 1 Z", "0.5"),
+        ("Hazard 1 radius", "0.2"),
+        ("Hazard 2 X", "0.75"),
+        ("Hazard 2 Y", "0"),
+        ("Hazard 2 Z", "0.75"),
+        ("Hazard 2 radius", "0.3"),
+    ] {
+        field(&mut h, label, value);
+    }
+    click(&mut h, "Apply mesh hazards");
+    menu(&mut h, "File", "Save Ctrl+S");
+    let baseline = view(&h).unwrap().config;
+    let checksum = h.state().editor.checksum();
+    let saved = fs::read(&scene).unwrap();
+    let mission_before = mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .unwrap()
+        .config;
+    let pin_before = orr_reflect::bytemuck::bytes_of(
+        &mesh_from_view(h.state().editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .pin,
+    )
+    .to_vec();
+    let history_before = h.state().editor.history().entries.len();
+    let selection_before = h.state().editor.selection().cloned();
+    assert!(selection_before.is_some(), "Escape regression requires a real selected mesh agent");
+
+    click(&mut h, "Pick hazard 2 center in viewport");
+    assert!(h.query_by_label("Cancel hazard center picking").is_some());
+    assert_disabled(&h, LBL_PLAY);
+    h.get_by_label("File").click_accesskit();
+    h.run_steps(2);
+    assert_disabled(&h, "Save Ctrl+S");
+    assert_disabled(&h, "Open scene…");
+    #[cfg(feature = "mesh-hazards-export")]
+    assert_disabled(&h, "Export hazard game…");
+    capture(&mut h, &root, "01-picking-guards.png");
+    h.key_press(Key::Escape);
+    settle(&mut h);
+    assert!(h.query_by_label("Cancel hazard center picking").is_none());
+    assert_eq!(h.state().editor.checksum(), checksum);
+    assert_eq!(h.state().editor.selection().cloned(), selection_before);
+    assert_eq!(fs::read(&scene).unwrap(), saved);
+
+    // Focus loss cancels an armed pick without touching the host or its selection.
+    click(&mut h, "Pick hazard 2 center in viewport");
+    h.input_mut().focused = false;
+    h.event(Event::WindowFocused(false));
+    settle(&mut h);
+    h.input_mut().focused = true;
+    h.event(Event::WindowFocused(true));
+    settle(&mut h);
+    assert!(h.query_by_label("Cancel hazard center picking").is_none());
+    assert_eq!(h.state().editor.checksum(), checksum);
+
+    click(&mut h, "Pick hazard 2 center in viewport");
+    // A real primary-pointer event hits the admitted floor through the camera.
+    let rect = h.state().ui.viewport_rect.unwrap();
+    let size = h.state().ui.viewport_px;
+    let camera = h.state().editor.presentation_camera3d(size).unwrap();
+    let pixel = camera.world_to_screen([1.0, 0.0, 2.5], size).unwrap();
+    let pointer = rect.min + egui::vec2(pixel[0], pixel[1]) * (rect.width() / size.0 as f32);
+    assert!(rect.contains(pointer));
+    h.event(Event::PointerMoved(pointer));
+    h.run_steps(2);
+    h.event(Event::PointerButton {
+        pos: pointer,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    h.step();
+    h.event(Event::PointerButton {
+        pos: pointer,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    settle(&mut h);
+    assert!(h.query_by_label("Cancel hazard center picking").is_none());
+    assert_eq!(
+        h.state().editor.checksum(),
+        checksum,
+        "picking only stages form values"
+    );
+    assert_eq!(h.state().editor.history().entries.len(), history_before);
+    assert_eq!(
+        h.state().editor.selection().cloned(),
+        selection_before,
+        "pick must not fall through into generic selection"
+    );
+    assert_eq!(view(&h).unwrap().config, baseline);
+    assert_eq!(fs::read(&scene).unwrap(), saved);
+    assert_disabled(&h, LBL_PLAY);
+    capture(&mut h, &root, "02-picked-draft.png");
+    click(&mut h, "Apply mesh hazards");
+    let applied = view(&h).unwrap().config;
+    assert_eq!(applied.spheres[0], baseline.spheres[0]);
+    assert_eq!(applied.spheres[1].radius, baseline.spheres[1].radius);
+    assert!((applied.spheres[1].center[0] - fp!(1)).abs() < fp!(0.01));
+    assert_eq!(applied.spheres[1].center[1], FP::ZERO);
+    assert!((applied.spheres[1].center[2] - fp!(2.5)).abs() < fp!(0.01));
+    assert_eq!(
+        mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .unwrap()
+            .config,
+        mission_before
+    );
+    assert_eq!(
+        orr_reflect::bytemuck::bytes_of(
+            &mesh_from_view(h.state().editor.snapshot().unwrap().predicted())
+                .unwrap()
+                .pin
+        ),
+        pin_before
+    );
+    let applied_checksum = h.state().editor.checksum();
+    assert_ne!(applied_checksum, checksum);
+    menu(&mut h, "Edit", "Undo Ctrl+Z");
+    assert_eq!(view(&h).unwrap().config, baseline);
+    menu(&mut h, "Edit", "Redo Ctrl+Y");
+    assert_eq!(view(&h).unwrap().config, applied);
+    menu(&mut h, "File", "Save Ctrl+S");
+    capture(&mut h, &root, "03-picked-applied.png");
+    drop(h);
+    let mut h = harness(&scene);
+    settle(&mut h);
+    assert_eq!(h.state().editor.checksum(), applied_checksum);
+    assert_eq!(view(&h).unwrap().config, applied);
+    click(&mut h, "Mesh hazards");
+    capture(&mut h, &root, "04-picked-reopened.png");
+    let authored_bytes = fs::read(&scene).unwrap();
+    let mesh = mesh_from_view(h.state().editor.snapshot().unwrap().predicted()).unwrap();
+    assert_eq!(mesh.pin.start, [fp!(1), FP::ZERO, fp!(2)]);
+    assert_eq!(mesh.pin.goal, [fp!(1), FP::ZERO, fp!(3)]);
+    click(&mut h, LBL_PLAY);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while view(&h).unwrap().run.lost == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "viewport-authored route sphere did not cause loss"
+        );
+        settle(&mut h);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(view(&h).unwrap().run.hit_index, 1);
+    assert_eq!(view(&h).unwrap().run.lost_tick, 1);
+    assert_eq!(
+        mesh_from_view(h.state().editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .agent
+            .status,
+        NavigationStatus::Stopped
+    );
+    assert_eq!(
+        mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .unwrap()
+            .run
+            .won,
+        0
+    );
+    capture(&mut h, &root, "05-picked-route-loss.png");
+    click(&mut h, LBL_STOP);
+    assert_eq!(h.state().editor.mode(), Mode::Edit);
+    assert_eq!(h.state().editor.checksum(), applied_checksum);
+    assert_eq!(view(&h).unwrap().config, applied);
+    assert_eq!(view(&h).unwrap().run, Default::default());
+    assert_eq!(fs::read(&scene).unwrap(), authored_bytes);
+    capture(&mut h, &root, "06-picked-stop-reset.png");
+
+    fs::write(root.join("acceptance.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "schema":1,"profile":"MeshHazardsV1","production_editor_app":true,"software_gpu":true,"hardware_gpu":false,"physical_os_input":false,
+        "viewport_pointer_pick":true,"selected_sphere_only":true,"radius_preserved":true,"staging_does_not_mutate_host":true,
+        "play_save_open_guards":true,"escape_cancel_preserves_selection":true,"focus_loss_cancels":true,
+        "no_selection_fallthrough":true,"mission_and_agent_unchanged":true,"apply_undo_redo_save_reopen":true,"viewport_authored_sphere_2_loss_tick_1":true,"stop_restores_authored_state":true,
+        "source_checksum":checksum,"applied_checksum":applied_checksum,
+    })).unwrap()).unwrap();
+}
