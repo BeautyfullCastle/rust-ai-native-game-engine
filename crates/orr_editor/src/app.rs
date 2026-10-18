@@ -465,7 +465,7 @@ impl EditorApp {
             return Some("Finish or cancel the viewport prop move before changing mesh workspaces or exporting".into());
         }
         if self.mesh_navigation.art_import_busy() {
-            return Some("Finish the raw agent-art import before changing mesh workspaces or exporting".into());
+            return Some("Finish model package imports before changing mesh workspaces or exporting".into());
         }
         if !matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
             || !self.editor.spec().is_local() || self.editor.mode() != Mode::Edit
@@ -957,7 +957,7 @@ impl EditorApp {
         #[cfg(feature="mesh-mission")]
         if self.mesh_game_creator.busy() { return; }
         #[cfg(feature="mesh-navigation")]
-        if self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() { return; }
+        if self.mesh_navigation.art_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() { return; }
         if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
@@ -996,7 +996,7 @@ impl EditorApp {
         #[cfg(feature="mesh-mission")]
         let mutable = mutable && !self.mesh_game_creator.busy();
         #[cfg(feature="mesh-navigation")]
-        let mutable = mutable && !self.mesh_navigation.prop_gesture_busy() && !self.mesh_navigation.agent_pick_busy() && !self.mesh_navigation.geometry_vertex_busy() && !self.mesh_mission_pick_busy();
+        let mutable = mutable && !self.mesh_navigation.art_import_busy() && !self.mesh_navigation.prop_gesture_busy() && !self.mesh_navigation.agent_pick_busy() && !self.mesh_navigation.geometry_vertex_busy() && !self.mesh_mission_pick_busy();
         let live = self.editor.down().is_none();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {

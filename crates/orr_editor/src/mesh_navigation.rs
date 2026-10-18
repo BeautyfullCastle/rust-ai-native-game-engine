@@ -86,6 +86,7 @@ pub struct Panel {
     props: crate::mesh_props_panel::Panel,
     agent_viewport: agent_viewport::State,
     geometry: geometry_panel::Panel,
+    surface_package: crate::mesh_surface_package_panel::Panel,
     geometry_staged: bool,
     geometry_host_context: Option<(u64, u64)>,
     geometry_presentation_pending: bool,
@@ -129,6 +130,7 @@ impl Default for Panel {
             props: crate::mesh_props_panel::Panel::default(),
             agent_viewport: agent_viewport::State::default(),
             geometry: geometry_panel::Panel::default(),
+            surface_package: crate::mesh_surface_package_panel::Panel::default(),
             geometry_staged: false,
             geometry_host_context: None,
             geometry_presentation_pending: false,
@@ -147,6 +149,13 @@ impl Default for Panel {
 
 impl Panel {
     pub fn sync(&mut self, editor: &Editor) {
+        self.sync_host(editor);
+        if let Some(report) = self.surface_package.poll(editor.path().as_deref(), editor.scene_load_epoch(), self.graph.as_ref().map(StaticMeshGraph::revision)) {
+            self.geometry.select_import_package(&report);
+        }
+    }
+
+    fn sync_host(&mut self, editor: &Editor) {
         self.sync_geometry_vertex(editor);
         self.geometry_preview_visible = self.geometry_staged
             && editor.game().is_mesh_navigation()
@@ -296,6 +305,9 @@ impl Panel {
     }
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.surface_package.busy() {
+            return Some("Wait for the walkable model package cook before saving the workspace".into());
+        }
         if self.geometry_vertex_busy() || self.agent_pick_busy() || self.prop_gesture_busy() {
             return Some("Finish or cancel mesh viewport authoring before saving the workspace".into());
         }
@@ -320,7 +332,7 @@ impl Panel {
     }
 
     pub(crate) fn has_unplaced_draft(&self) -> bool {
-        self.geometry_vertex_busy() || self.draft_dirty || self.geometry.dirty() || self.art_dirty()
+        self.surface_package.busy() || self.geometry_vertex_busy() || self.draft_dirty || self.geometry.dirty() || self.art_dirty()
     }
 
     pub(crate) fn art_model(&self, editor: &Editor) -> Option<crate::viewport3d::SceneModel> {
@@ -361,10 +373,11 @@ impl Panel {
     }
 
     pub(crate) fn art_import_busy(&self) -> bool {
-        self.art.import_busy()
+        self.art.import_busy() || self.surface_package.busy()
     }
 
     pub fn play_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.surface_package.busy() { return Some("Wait for the walkable model package cook before Play".into()); }
         if self.geometry_vertex_busy() { return Some("Finish or cancel viewport vertex editing before Play".into()); }
         if self.agent_pick_busy() {
             return Some("Finish or cancel viewport endpoint picking before Play".into());
@@ -592,8 +605,10 @@ impl Panel {
         }
         self.sync(editor);
         ui.collapsing("Static-mesh navigation", |ui| {
+            let can_cook = self.geometry_blocker(editor).is_none() && self.graph.is_some();
+            self.surface_package.show(ui, editor.path().as_deref(), editor.scene_load_epoch(), self.graph.as_ref().map(StaticMeshGraph::revision), can_cook);
             self.show_geometry_vertex(ui, editor);
-            let vertex_busy = self.geometry_vertex_busy();
+            let vertex_busy = self.geometry_vertex_busy() || self.surface_package.busy();
             ui.add_enabled_ui(!vertex_busy, |ui| {
             ui.weak(
                 "Point agent · canonical open-sky triangles · no physics or collision controller",
@@ -613,9 +628,11 @@ impl Panel {
                 {
                     let art = std::mem::take(&mut self.art);
                     let props = std::mem::take(&mut self.props);
+                    let surface_package = std::mem::take(&mut self.surface_package);
                     *self = Self {
                         art,
                         props,
+                        surface_package,
                         ..Self::default()
                     };
                     self.sync(editor);
@@ -1104,12 +1121,14 @@ impl Panel {
     fn reset_to_empty_pin(&mut self) {
         let art = std::mem::take(&mut self.art);
         let props = std::mem::take(&mut self.props);
+        let surface_package = std::mem::take(&mut self.surface_package);
         *self = Self {
             loaded_scene: self.loaded_scene.clone(),
             loaded_scene_epoch: self.loaded_scene_epoch,
             last_frame: self.last_frame,
             art,
             props,
+            surface_package,
             ..Self::default()
         };
     }

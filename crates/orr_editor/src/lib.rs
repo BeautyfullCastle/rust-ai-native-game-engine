@@ -126,6 +126,8 @@ mod mesh_art_import;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_art_import_panel;
 #[cfg(feature = "mesh-navigation")]
+mod mesh_surface_package_panel;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_art_panel;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_props;

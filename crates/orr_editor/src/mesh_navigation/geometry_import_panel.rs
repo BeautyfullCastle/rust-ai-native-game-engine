@@ -31,6 +31,16 @@ impl Default for Panel {
 }
 
 impl Panel {
+    pub(crate) fn select_package(&mut self, report: &crate::mesh_art_import::Report) {
+        self.package_root = report.root.display().to_string();
+        self.model_asset = report.asset.clone();
+        self.license_asset = report.license.clone();
+        self.license_acknowledged = false;
+        self.replace_confirmed = false;
+        self.dirty = true;
+        self.error = None;
+    }
+
     pub(crate) fn show(
         &mut self,
         ui: &mut Ui,

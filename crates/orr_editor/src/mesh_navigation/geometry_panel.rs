@@ -192,6 +192,10 @@ impl Panel {
         self.dirty || self.grid.dirty() || self.import.dirty()
     }
 
+    pub(crate) fn select_import_package(&mut self, report: &crate::mesh_art_import::Report) {
+        self.import.select_package(report);
+    }
+
     pub fn acknowledge(&mut self) {
         self.grid.acknowledge();
         self.import.acknowledge();
