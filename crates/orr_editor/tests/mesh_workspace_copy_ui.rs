@@ -1037,9 +1037,19 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
         type_field(&mut harness, label, value);
     }
     click_button(&mut harness, "Add prop");
+    type_field(&mut harness, "Prop name", "Material override prop");
+    type_field(&mut harness, "Prop position X", "6");
+    click_button(&mut harness, "Add prop");
     click_button(&mut harness, "Save props");
     let props_sidecar = sidecar_path(&fixture.scene, ".mesh-props.json");
     let props_bytes = fs::read(&props_sidecar).expect("props sidecar was explicitly saved");
+    let original_props_document: serde_json::Value = serde_json::from_slice(&props_bytes).unwrap();
+    assert_eq!(
+        original_props_document["props"].as_array().unwrap().len(),
+        2
+    );
+    let untouched_prop_art = original_props_document["props"][0]["art"].clone();
+    let selected_prop_original_art = original_props_document["props"][1]["art"].clone();
     let props_pixels = viewport_pixels(&mut harness, &fixture, "03-agent-art-and-prop");
     assert!(changed_pixel_count(&art_pixels, &props_pixels) > 20);
 
@@ -1315,8 +1325,28 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
     click_button(&mut harness, "Apply game camera");
     type_field(&mut harness, "Animation playback rate", "1.25");
     click_button(&mut harness, "Apply mesh animation");
+    if harness.query_by_label("Agent art offset X").is_some() {
+        click(&mut harness, "Mesh agent art");
+    }
+    if harness.query_by_label("Prop name").is_none() {
+        click(&mut harness, "Mesh props");
+    }
+    if harness.query_by_label("Material slot index").is_none() {
+        click(&mut harness, "Per-material-slot overrides");
+    }
+    type_field(&mut harness, "Material slot tint R", "0.5");
+    click_button(&mut harness, "Stage material overrides");
+    click_button(&mut harness, "Update selected prop");
+    assert_eq!(fs::read(&props_sidecar).unwrap(), props_bytes);
+    click_button(&mut harness, "Undo prop edit");
+    assert_eq!(fs::read(&props_sidecar).unwrap(), props_bytes);
+    click_button(&mut harness, "Redo prop edit");
+    assert_eq!(fs::read(&props_sidecar).unwrap(), props_bytes);
     type_field(&mut harness, "Prop name", "Workspace saved prop");
     click_button(&mut harness, "Update selected prop");
+    if harness.query_by_label("Agent art offset X").is_none() {
+        click(&mut harness, "Mesh agent art");
+    }
     type_field(&mut harness, "Agent art offset X", "0.375");
     click_button(&mut harness, "Apply agent art");
     assert_eq!(harness.state().editor.checksum(), scene_checksum);
@@ -1335,6 +1365,32 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
     menu_click(&mut harness, "File", "Save mesh workspace");
     let saved_art_bytes = fs::read(&art_sidecar).unwrap();
     let saved_props_bytes = fs::read(&props_sidecar).unwrap();
+    let saved_props_document: serde_json::Value =
+        serde_json::from_slice(&saved_props_bytes).unwrap();
+    let saved_props = saved_props_document["props"].as_array().unwrap();
+    assert_eq!(saved_props.len(), 2);
+    assert_eq!(saved_props[0]["art"], untouched_prop_art);
+    assert_eq!(saved_props[1]["name"], "Workspace saved prop");
+    let changed_prop_art = &saved_props[1]["art"];
+    assert_eq!(
+        changed_prop_art["model"],
+        selected_prop_original_art["model"]
+    );
+    assert_eq!(
+        changed_prop_art["asset_sha256"],
+        fixture.static_model_sha256
+    );
+    assert_eq!(
+        changed_prop_art["license_sha256"],
+        fixture.static_license_sha256
+    );
+    let slot_overrides = changed_prop_art["material_slots"].as_array().unwrap();
+    assert_eq!(slot_overrides.len(), 1);
+    assert_eq!(slot_overrides[0]["tint"][0].as_f64(), Some(0.5));
+    assert_eq!(
+        changed_prop_art["license_text"],
+        selected_prop_original_art["license_text"]
+    );
     let saved_camera_bytes = fs::read(&camera_sidecar).unwrap();
     let saved_animation_bytes = fs::read(&animation_sidecar).unwrap();
     let saved_lighting_bytes = fs::read(&lighting_sidecar).unwrap();
@@ -1367,6 +1423,8 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
         "graph_checksum_and_history_preserved": true,
         "play_blocked_before_save": workspace_play_blocked_before_save,
         "play_enabled_after_save": workspace_play_enabled_after_save,
+        "prop_material_slot_stage_update_undo_redo": true,
+        "untouched_prop_and_source_model_bytes_preserved": true,
     });
     let art_bytes = saved_art_bytes;
     let props_bytes = saved_props_bytes;

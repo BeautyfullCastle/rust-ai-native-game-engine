@@ -6,10 +6,11 @@ use crate::{
     backend::HostSpec,
     game::EditorGame,
     mesh_art::Snapshot,
+    mesh_material_slots::Settings,
     mesh_props::{Document, Prop},
     model::Mode,
 };
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 const GRAPH_REVISION: [u8; 32] = [0x53; 32];
 
@@ -32,6 +33,30 @@ fn document(count: usize) -> Document {
             })
             .collect(),
     }
+}
+
+fn material_override(snapshot: &Snapshot) -> Settings {
+    let model = snapshot.source_model_arc();
+    let material = model.source().primitives[0].material;
+    let source = &model.source().materials[material as usize];
+    let mut settings = Settings::identity(material, source);
+    settings.tint = [0.5, 1.0, 0.75, 1.0];
+    settings.linear_filter = !source.linear_filter;
+    settings
+}
+
+fn assert_slot_panel_matches_selected_model(panel: &mut Panel) {
+    let selected_model = panel
+        .selected_prop()
+        .unwrap()
+        .art
+        .source_model_arc()
+        .clone();
+    let context = egui::Context::default();
+    let _ = context.run_ui(egui::RawInput::default(), |ui| {
+        assert!(panel.material_slots.show(ui, &selected_model).is_none());
+    });
+    assert!(!panel.material_slots.dirty());
 }
 
 #[test]
@@ -275,6 +300,174 @@ fn prop_rotation_fields_round_trip_through_update_and_history() {
         .iter()
         .zip(expected_rotation)
         .all(|(actual, expected)| (*actual - expected).abs() < 1.0e-5));
+}
+
+#[test]
+fn staged_material_overrides_apply_to_added_prop_and_survive_history() {
+    let mut panel = Panel::default();
+    let candidate = snapshot();
+    let override_settings = material_override(&candidate);
+    panel.candidate = Some(candidate);
+    panel.material_slots_draft = vec![override_settings];
+    panel.graph_revision = Some(GRAPH_REVISION);
+
+    panel.add_prop();
+
+    assert_eq!(panel.document.props.len(), 1);
+    assert_eq!(
+        panel.document.props[0].art.material_slots(),
+        &[override_settings]
+    );
+    assert_eq!(panel.history.len(), 2);
+    panel.undo();
+    assert!(panel.document.props.is_empty());
+    panel.redo();
+    assert_eq!(
+        panel.document.props[0].art.material_slots(),
+        &[override_settings]
+    );
+}
+
+#[test]
+fn staged_material_overrides_update_selected_prop_as_one_history_entry() {
+    let mut panel = Panel::default();
+    panel.document = document(1);
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    let initial = panel.document.clone();
+    panel.reset_history(initial, Some(0));
+    let override_settings = material_override(&panel.document.props[0].art);
+    panel.material_slots_draft = vec![override_settings];
+
+    panel.update_selected();
+
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert_eq!(
+        panel.document.props[0].art.material_slots(),
+        &[override_settings]
+    );
+    assert_eq!(panel.history.len(), 2);
+    panel.undo();
+    assert!(panel.document.props[0].art.material_slots().is_empty());
+    panel.redo();
+    assert_eq!(
+        panel.document.props[0].art.material_slots(),
+        &[override_settings]
+    );
+}
+
+#[test]
+fn changed_material_slot_draft_blocks_workspace_save_until_prop_update() {
+    let mut panel = Panel::default();
+    panel.document = document(1);
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    panel.scene = Some(Path::new("mesh.scene.yaml").to_path_buf());
+    let initial = panel.document.clone();
+    panel.reset_history(initial, Some(0));
+    assert!(!panel.unapplied_form_dirty());
+
+    let override_settings = material_override(&panel.document.props[0].art);
+    panel.material_slots_draft = vec![override_settings];
+
+    assert!(panel.unapplied_form_dirty());
+    panel.update_selected();
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert!(!panel.material_slots.dirty());
+    assert!(!panel.unapplied_form_dirty());
+}
+
+#[test]
+fn prop_selection_clears_candidate_and_rebinds_material_slots_to_selected_arc() {
+    let first_snapshot = snapshot();
+    let second_snapshot = snapshot();
+    assert!(!Arc::ptr_eq(
+        first_snapshot.source_model_arc(),
+        second_snapshot.source_model_arc()
+    ));
+    let mut panel = Panel::default();
+    panel.document = Document {
+        props: vec![
+            Prop {
+                id: 1,
+                name: "First prop".into(),
+                art: first_snapshot,
+            },
+            Prop {
+                id: 2,
+                name: "Second prop".into(),
+                art: second_snapshot,
+            },
+        ],
+    };
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    panel.candidate = Some(snapshot());
+
+    panel.select_prop(2);
+
+    assert!(panel.candidate.is_none());
+    assert_eq!(panel.name, "Second prop");
+    assert_slot_panel_matches_selected_model(&mut panel);
+}
+
+#[test]
+fn prop_undo_and_redo_clear_candidates_before_rebinding_material_slots() {
+    let mut panel = Panel::default();
+    panel.document = Document {
+        props: vec![
+            Prop {
+                id: 1,
+                name: "First prop".into(),
+                art: snapshot(),
+            },
+            Prop {
+                id: 2,
+                name: "Second prop".into(),
+                art: snapshot(),
+            },
+        ],
+    };
+    panel.selected = Some(2);
+    panel.copy_selection_fields();
+    let initial = panel.document.clone();
+    panel.reset_history(initial, Some(0));
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.candidate = Some(snapshot());
+    panel.name = "Updated second prop".into();
+    panel.update_selected();
+    assert_eq!(panel.document.props[1].name, "Updated second prop");
+
+    panel.undo();
+
+    assert!(panel.candidate.is_none());
+    assert_eq!(panel.document.props[1].name, "Second prop");
+    assert_slot_panel_matches_selected_model(&mut panel);
+
+    panel.candidate = Some(snapshot());
+    panel.redo();
+
+    assert!(panel.candidate.is_none());
+    assert_eq!(panel.document.props[1].name, "Updated second prop");
+    assert_slot_panel_matches_selected_model(&mut panel);
+}
+
+#[test]
+fn duplicating_prop_clears_candidate_before_rebinding_material_slots() {
+    let mut panel = Panel::default();
+    panel.document = document(1);
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.candidate = Some(snapshot());
+
+    panel.duplicate_selected_prop();
+
+    assert!(panel.candidate.is_none());
+    assert_eq!(panel.document.props.len(), 2);
+    assert_slot_panel_matches_selected_model(&mut panel);
 }
 
 #[test]

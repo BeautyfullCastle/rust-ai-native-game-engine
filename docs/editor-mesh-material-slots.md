@@ -23,6 +23,14 @@ These controls do not edit texture images, texture coordinates, UV transforms, o
 
 Resetting a slot to its source tint and sampler settings removes that slot from the sparse override data. If all slots return to their source settings, no `material_slots` override is needed in the sidecar.
 
+## Placed props
+
+The **Mesh props** inspector uses the same slot controls for a selected prop or a newly loaded prop candidate. Choose **Stage material overrides**, then **Update selected prop** or **Add prop**. Staging alone does not change the applied prop document.
+
+Use **Undo prop edit** and **Redo prop edit** for the complete prop change. Choose **Save props** or **File → Save mesh workspace** to persist it. Pending slot edits block Play and saving until they are staged and applied; **Reset material overrides** also requires an explicit Add or Update. Selecting another prop, duplicating a prop, or changing history reloads the selected prop's exact model and slot settings instead of retaining a candidate from another source.
+
+Each prop keeps its own sparse overrides. Updating one prop does not rewrite another prop's embedded model or material settings. Saved prop sidecars and exported bundles retain the overrides without requiring the original package directory; the runtime capability requirement below applies to prop metadata too.
+
 ## Limits and compatibility
 
 The sidecar admits overrides only for material indices referenced by primitives in the embedded model. Duplicate, unused, or out-of-range indices are rejected. RGBA values must be finite and within `0..=1`; there may be at most 256 slot records, and derived render-model work is limited to 8 MiB. Invalid or excessive data is rejected before applying changes.

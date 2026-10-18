@@ -60,6 +60,8 @@ pub(crate) struct Panel {
     surface_uv_scale: [String; 2],
     surface_quarter_turns: String,
     surface_pivot: [String; 3],
+    material_slots: crate::mesh_material_slots_panel::Panel,
+    material_slots_draft: Vec<crate::mesh_material_slots::Settings>,
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -105,6 +107,8 @@ impl Default for Panel {
             surface_uv_scale: ["1".into(), "1".into()],
             surface_quarter_turns: "0".into(),
             surface_pivot: ["0".into(), "0".into(), "0".into()],
+            material_slots: crate::mesh_material_slots_panel::Panel::default(),
+            material_slots_draft: Vec::new(),
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -318,6 +322,23 @@ impl Panel {
                 {
                     field(ui, label, &mut self.tint[channel]);
                 }
+                ui.collapsing("Per-material-slot overrides", |ui| {
+                    let model = self
+                        .candidate
+                        .as_ref()
+                        .or_else(|| self.selected_prop().map(|prop| &prop.art))
+                        .map(|snapshot| std::sync::Arc::clone(snapshot.source_model_arc()));
+                    if let Some(model) = model {
+                        if let Some(settings) = self.material_slots.show(ui, &model) {
+                            self.material_slots_draft = settings;
+                        }
+                        ui.weak(
+                            "Stage overrides, then Update selected prop or Add prop. Source model and license bytes are preserved.",
+                        );
+                    } else {
+                        ui.weak("Load or select a mesh prop before editing material slots.");
+                    }
+                });
                 ui.checkbox(&mut self.surface_enabled, "Edit prop UV and pivot");
                 if self.surface_enabled {
                     field(ui, "Prop UV material index", &mut self.surface_material);
@@ -423,9 +444,7 @@ impl Panel {
                 }
             });
             if let Some(identifier) = selected_prop {
-                self.selected = Some(identifier);
-                self.copy_selection_fields();
-                self.confirm_remove = false;
+                self.select_prop(identifier);
             }
             ui.add_enabled_ui(editable, |ui| {
                 ui.checkbox(&mut self.confirm_remove, "I confirm removing this prop");
@@ -857,6 +876,7 @@ impl Panel {
     pub(crate) fn dirty(&self) -> bool {
         self.gesture.is_some()
             || self.placement.is_some()
+            || self.material_slots.dirty()
             || self.current_history_id() != self.saved_history_id
     }
 
@@ -902,6 +922,11 @@ impl Panel {
         }
         if self.unapplied_form_dirty() {
             return Some("Update or reset prop fields before saving the mesh workspace".into());
+        }
+        if self.material_slots.dirty() {
+            return Some(
+                "Update or reset prop material slots before saving the mesh workspace".into(),
+            );
         }
         None
     }
@@ -1138,6 +1163,11 @@ impl Panel {
     }
 
     fn add_prop(&mut self) {
+        if self.material_slots.dirty() && !self.material_slots.staged_matches_fields() {
+            self.error =
+                Some("Stage material slot overrides again after editing their fields".into());
+            return;
+        }
         let Some(candidate) = self.candidate.clone() else {
             self.error = Some("Load a verified package before adding a prop".into());
             return;
@@ -1179,6 +1209,7 @@ impl Panel {
             return;
         }
         self.push_document(document);
+        self.material_slots.acknowledge();
         self.next_prop_id = id.checked_add(1).unwrap_or(1);
         self.selected = Some(id);
         self.confirm_remove = false;
@@ -1187,6 +1218,11 @@ impl Panel {
     }
 
     fn update_selected(&mut self) {
+        if self.material_slots.dirty() && !self.material_slots.staged_matches_fields() {
+            self.error =
+                Some("Stage material slot overrides again after editing their fields".into());
+            return;
+        }
         let Some(selected) = self.selected else {
             self.error = Some("Select a mesh prop before updating it".into());
             return;
@@ -1241,6 +1277,7 @@ impl Panel {
             return;
         }
         self.push_document(document);
+        self.material_slots.acknowledge();
         self.error = None;
         self.status = "Updated mesh prop in memory; save explicitly to persist.".into();
     }
@@ -1266,6 +1303,10 @@ impl Panel {
     }
 
     fn save(&mut self, editor: &Editor) {
+        if self.material_slots.dirty() {
+            self.error = Some("Update or reset prop material slots before saving".into());
+            return;
+        }
         let Some((scene, revision)) = current_identity(editor) else {
             self.error = Some("Save props only for the matching admitted local mesh scene".into());
             return;
@@ -1511,7 +1552,8 @@ impl Panel {
                 &self.surface_uv_scale,
                 &self.surface_quarter_turns,
                 &self.surface_pivot,
-            )?)
+            )?)?
+            .with_material_slots(self.material_slots_draft.clone())
     }
 
     fn selected_prop(&self) -> Option<&Prop> {
@@ -1552,6 +1594,7 @@ impl Panel {
         if self.cursor > 0 {
             self.cursor -= 1;
             self.document = self.history[self.cursor].document.clone();
+            self.candidate = None;
             self.selected = self
                 .selected
                 .filter(|selected| self.document.props.iter().any(|prop| prop.id == *selected))
@@ -1566,6 +1609,7 @@ impl Panel {
         if self.cursor + 1 < self.history.len() {
             self.cursor += 1;
             self.document = self.history[self.cursor].document.clone();
+            self.candidate = None;
             self.selected = self
                 .selected
                 .filter(|selected| self.document.props.iter().any(|prop| prop.id == *selected))
@@ -1601,13 +1645,24 @@ impl Panel {
     }
 
     fn copy_selection_fields(&mut self) {
+        self.candidate = None;
         if let Some((name, snapshot)) = self
             .selected_prop()
             .map(|prop| (prop.name.clone(), prop.art.clone()))
         {
             self.name = name;
             self.copy_snapshot_fields(&snapshot);
+        } else {
+            self.material_slots = crate::mesh_material_slots_panel::Panel::default();
+            self.material_slots_draft.clear();
         }
+    }
+
+    fn select_prop(&mut self, identifier: u64) {
+        self.selected = Some(identifier);
+        self.candidate = None;
+        self.copy_selection_fields();
+        self.confirm_remove = false;
     }
 
     fn copy_snapshot_fields(&mut self, snapshot: &Snapshot) {
@@ -1617,6 +1672,13 @@ impl Panel {
             self.rotation = rotation.map(format_number);
         }
         self.tint = snapshot.tint().map(format_number);
+        self.material_slots_draft = snapshot.material_slots().to_vec();
+        if let Err(error) = self
+            .material_slots
+            .load(snapshot.source_model_arc(), snapshot.material_slots())
+        {
+            self.error = Some(error);
+        }
         if let Some(settings) = snapshot.surface() {
             self.surface_enabled = true;
             self.surface_material = settings.material.to_string();
