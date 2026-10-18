@@ -5,6 +5,7 @@
     feature = "mesh-mission",
     feature = "mesh-export"
 ))]
+#![recursion_limit = "256"]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
 use egui::{accesskit::Role, Key, Modifiers};
@@ -24,6 +25,7 @@ use orr_rhi::{Rhi, Wgpu, WgpuOptions};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -390,10 +392,65 @@ fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn directory_hashes(root: &Path) -> BTreeSet<(String, String)> {
+    fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            assert!(path.is_file());
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                sha256(&fs::read(path).unwrap()),
+            )
+        })
+        .collect()
+}
+
 fn sidecar_path(scene: &Path, suffix: &str) -> PathBuf {
     let mut path = scene.as_os_str().to_os_string();
     path.push(suffix);
     PathBuf::from(path)
+}
+
+fn copy_without_dense_prop_marker(source: &Path, destination: &Path) {
+    let source_bytes = fs::read(source).expect("read archived mesh player");
+    let mut copy_bytes = source_bytes.clone();
+    assert_eq!(&copy_bytes[..2], b"MZ");
+    let pe_offset = u32::from_le_bytes(copy_bytes[0x3c..0x40].try_into().unwrap()) as usize;
+    assert!(pe_offset + 24 <= copy_bytes.len());
+    assert_eq!(&copy_bytes[pe_offset..pe_offset + 4], b"PE\0\0");
+    let section_count =
+        u16::from_le_bytes(copy_bytes[pe_offset + 6..pe_offset + 8].try_into().unwrap()) as usize;
+    let optional_size = u16::from_le_bytes(
+        copy_bytes[pe_offset + 20..pe_offset + 22]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let section_table = pe_offset + 24 + optional_size;
+    assert!(section_table + section_count * 40 <= copy_bytes.len());
+    let mut dense_sections = Vec::new();
+    for index in 0..section_count {
+        let header = section_table + index * 40;
+        if &copy_bytes[header..header + 8] == b".orrdns\0" {
+            dense_sections.push(header);
+        }
+    }
+    assert_eq!(
+        dense_sections.len(),
+        1,
+        "runtime has one dense-prop marker section"
+    );
+    let header = dense_sections[0];
+    copy_bytes[header..header + 8].copy_from_slice(b".orrdnx\0");
+    fs::write(destination, &copy_bytes).expect("write only the mutated runtime copy");
+    assert_eq!(fs::read(source).unwrap(), source_bytes);
+    let mut expected_copy = source_bytes.clone();
+    expected_copy[header..header + 8].copy_from_slice(b".orrdnx\0");
+    assert_eq!(copy_bytes, expected_copy);
+    assert_eq!(
+        fs::metadata(source).unwrap().len(),
+        fs::metadata(destination).unwrap().len()
+    );
 }
 
 fn standard_local_path(path: &Path) -> String {
@@ -596,7 +653,7 @@ fn prop_prefab_rebinds_across_mesh_graphs_and_exports_source_free() {
         !target_props_path.exists(),
         "loading is a candidate, not an Add"
     );
-    assert!(harness.query_by_label("Props: 0/6").is_some());
+    assert!(harness.query_by_label("Props: 0/128").is_some());
 
     click_button(&mut harness, "Add prop");
     assert_eq!(harness.state().editor.checksum(), target_checksum);
@@ -608,14 +665,103 @@ fn prop_prefab_rebinds_across_mesh_graphs_and_exports_source_free() {
         !target_props_path.exists(),
         "Add remains an explicit sidecar save"
     );
-    assert!(harness.query_by_label("Props: 1/6").is_some());
+    assert!(harness.query_by_label("Props: 1/128").is_some());
+    let host_checksum_before_grid = harness.state().editor.checksum();
+    let host_history_before_grid = harness.state().editor.history().entries.len();
+    if harness.query_by_label("Prop grid columns").is_none() {
+        click(&mut harness, "Prop grid");
+    }
+    for (label, value) in [
+        ("Prop grid columns", "4"),
+        ("Prop grid rows", "3"),
+        ("Prop grid spacing X", "1.5"),
+        ("Prop grid spacing Z", "1.5"),
+    ] {
+        type_field(&mut harness, label, value);
+    }
+    click_button(&mut harness, "Stamp selected prop grid");
+    assert!(harness.query_by_label("Props: 12/128").is_some());
+    assert_eq!(harness.state().editor.checksum(), host_checksum_before_grid);
+    assert_eq!(
+        harness.state().editor.history().entries.len(),
+        host_history_before_grid
+    );
     click_button(&mut harness, "Undo prop edit");
-    assert!(harness.query_by_label("Props: 0/6").is_some());
+    assert!(harness.query_by_label("Props: 1/128").is_some());
+    assert_eq!(harness.state().editor.checksum(), host_checksum_before_grid);
     click_button(&mut harness, "Redo prop edit");
-    assert!(harness.query_by_label("Props: 1/6").is_some());
+    assert!(harness.query_by_label("Props: 12/128").is_some());
+    assert_eq!(harness.state().editor.checksum(), host_checksum_before_grid);
     click_button(&mut harness, "Save props");
     let target_props_bytes = fs::read(&target_props_path).expect("target prop sidecar saved");
+    assert_eq!(harness.state().editor.checksum(), target_checksum);
     let target_props: Value = serde_json::from_slice(&target_props_bytes).unwrap();
+    let saved_props = target_props["props"].as_array().unwrap();
+    assert_eq!(saved_props.len(), 12);
+    let prop_ids = saved_props
+        .iter()
+        .map(|prop| prop["id"].as_u64().unwrap())
+        .collect::<BTreeSet<_>>();
+    let prop_names = saved_props
+        .iter()
+        .map(|prop| prop["name"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(prop_ids.len(), 12);
+    assert!(prop_ids.iter().all(|id| *id != 0));
+    assert_eq!(prop_names.len(), 12);
+    let mut expected_cells = BTreeSet::new();
+    for row in 0_u32..3 {
+        for column in 0_u32..4 {
+            expected_cells.insert((column, row));
+        }
+    }
+    let mut actual_cells = BTreeSet::new();
+    let target_scene_filename = fixture
+        .target_scene
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    for prop in saved_props {
+        let art = &prop["art"];
+        let offset = art["offset"].as_array().unwrap();
+        assert_eq!(offset.len(), 3);
+        let x = offset[0].as_f64().unwrap();
+        let y = offset[1].as_f64().unwrap();
+        let z = offset[2].as_f64().unwrap();
+        assert_eq!(y, 0.25);
+        let column = (0_u32..4)
+            .find(|column| x == 2.25 + f64::from(*column) * 1.5)
+            .expect("prop X position belongs to a grid column");
+        let row = (0_u32..3)
+            .find(|row| z == 1.5 + f64::from(*row) * 1.5)
+            .expect("prop Z position belongs to a grid row");
+        actual_cells.insert((column, row));
+        for property in [
+            "asset",
+            "asset_sha256",
+            "cooked_sha256",
+            "license",
+            "license_sha256",
+            "license_text",
+            "manifest",
+            "model",
+            "scale",
+            "rotation",
+            "tint",
+            "material_slots",
+            "surface",
+        ] {
+            assert_eq!(art[property], prefab_art[property]);
+        }
+        assert_eq!(
+            art["scene_filename"].as_str(),
+            Some(target_scene_filename.as_str())
+        );
+        assert_eq!(art["graph_revision"], serde_json::json!(target_revision));
+    }
+    assert_eq!(actual_cells.len(), 12);
+    assert_eq!(actual_cells, expected_cells);
     let target_prop = &target_props["props"][0];
     assert_eq!(
         target_props["graph_revision"],
@@ -694,7 +840,18 @@ fn prop_prefab_rebinds_across_mesh_graphs_and_exports_source_free() {
     {
         click(&mut reopened, "Mesh props");
     }
-    assert!(reopened.query_by_label("Props: 1/6").is_some());
+    assert!(reopened.query_by_label("Props: 12/128").is_some());
+    let static_cache_groups = reopened
+        .state()
+        .viewport3d_gpu()
+        .unwrap()
+        .gpu()
+        .model_cache_counts();
+    assert_eq!(
+        static_cache_groups,
+        (2, 0),
+        "12 copies of one prop appearance share one static cache group plus the graph"
+    );
     assert!(!fixture.package.exists());
     assert!(!fixture.prefab.exists());
     assert_eq!(fs::read(&fixture.target_scene).unwrap(), scene_bytes);
@@ -781,11 +938,76 @@ fn prop_prefab_rebinds_across_mesh_graphs_and_exports_source_free() {
         reopened_history
     );
 
+    let legacy_runtime = fixture.root.join("legacy-mesh-player.exe");
+    copy_without_dense_prop_marker(&fixture.runtime, &legacy_runtime);
+    let legacy_export = fixture.root.parent().unwrap().join(format!(
+        "{}-legacy-runtime-export",
+        fixture.root.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(!legacy_export.exists());
+    let scene_before_legacy_export = fs::read(&fixture.target_scene).unwrap();
+    let props_before_legacy_export = fs::read(&target_props_path).unwrap();
+    let source_scene_before_legacy_export = fs::read(&fixture.source_scene).unwrap();
+    let source_props_before_legacy_export = fs::read(&source_props_path).unwrap();
+    let prefab_before_legacy_export = fs::read(&fixture.hidden_prefab).unwrap();
+    let runtime_before_legacy_export = fs::read(&fixture.runtime).unwrap();
+    let package_before_legacy_export = directory_hashes(&fixture.hidden_package);
     menu_click(&mut reopened, "File", "Export mesh game…");
     type_field(
         &mut reopened,
         "Mesh player executable",
-        &fixture.runtime.display().to_string(),
+        &standard_local_path(&legacy_runtime),
+    );
+    type_field(
+        &mut reopened,
+        "Mesh game output directory",
+        &standard_local_path(&legacy_export),
+    );
+    click(&mut reopened, "I trust this local mesh player executable");
+    click_button(&mut reopened, "Export mesh game");
+    wait_for_label(&mut reopened, "Mesh export failed:");
+    let legacy_failure_mentions_dense = reopened.query_by_label_contains("dense").is_some();
+    assert!(legacy_failure_mentions_dense);
+    assert!(!legacy_export.exists());
+    assert_eq!(
+        fs::read(&fixture.target_scene).unwrap(),
+        scene_before_legacy_export
+    );
+    assert_eq!(
+        fs::read(&target_props_path).unwrap(),
+        props_before_legacy_export
+    );
+    assert_eq!(
+        fs::read(&fixture.source_scene).unwrap(),
+        source_scene_before_legacy_export
+    );
+    assert_eq!(
+        fs::read(&source_props_path).unwrap(),
+        source_props_before_legacy_export
+    );
+    assert_eq!(
+        fs::read(&fixture.hidden_prefab).unwrap(),
+        prefab_before_legacy_export
+    );
+    assert_eq!(
+        fs::read(&fixture.runtime).unwrap(),
+        runtime_before_legacy_export
+    );
+    assert_eq!(
+        directory_hashes(&fixture.hidden_package),
+        package_before_legacy_export
+    );
+    assert_eq!(reopened.state().editor.checksum(), scene_checksum);
+    assert_eq!(
+        reopened.state().editor.history().entries.len(),
+        reopened_history
+    );
+
+    click(&mut reopened, "I trust this local mesh player executable");
+    type_field(
+        &mut reopened,
+        "Mesh player executable",
+        &standard_local_path(&fixture.runtime),
     );
     type_field(
         &mut reopened,
@@ -835,6 +1057,17 @@ fn prop_prefab_rebinds_across_mesh_graphs_and_exports_source_free() {
         sha256(&fs::read(fixture.package.join(LICENSE_ASSET)).unwrap()),
         fixture.license_sha256
     );
+    let legacy_original_runtime_unchanged =
+        fs::read(&fixture.runtime).unwrap() == runtime_before_legacy_export;
+    let legacy_refusal_preserved_inputs = fs::read(&fixture.target_scene).unwrap()
+        == scene_before_legacy_export
+        && fs::read(&target_props_path).unwrap() == props_before_legacy_export
+        && fs::read(&fixture.source_scene).unwrap() == source_scene_before_legacy_export
+        && fs::read(&source_props_path).unwrap() == source_props_before_legacy_export
+        && fs::read(&fixture.prefab).unwrap() == prefab_before_legacy_export
+        && directory_hashes(&fixture.package) == package_before_legacy_export;
+    assert!(legacy_original_runtime_unchanged);
+    assert!(legacy_refusal_preserved_inputs);
     let captures = capture_record(&fixture.root);
     assert_eq!(captures.len(), 5);
     let receipt = serde_json::json!({
@@ -857,6 +1090,22 @@ fn prop_prefab_rebinds_across_mesh_graphs_and_exports_source_free() {
         "explicit_add_undo_redo_save": true,
         "prefab_source_and_license_provenance_preserved": true,
         "prefab_transform_and_appearance_preserved": true,
+        "grid_columns": 4,
+        "grid_rows": 3,
+        "grid_spacing_x": 1.5,
+        "grid_spacing_z": 1.5,
+        "grid_skipped_original_cell": [0, 0],
+        "grid_prop_count": saved_props.len(),
+        "grid_expected_cells_verified": actual_cells == expected_cells,
+        "grid_undo_redo_one_entry": true,
+        "scene_checksum_unchanged_by_prop_edits": scene_checksum == target_checksum,
+        "reopened_prop_count": reopened_props["props"].as_array().unwrap().len(),
+        "reopened_static_asset_groups": static_cache_groups.0,
+        "animated_model_cache_groups": static_cache_groups.1,
+        "legacy_dense_runtime_refused": legacy_failure_mentions_dense,
+        "legacy_original_runtime_unchanged": legacy_original_runtime_unchanged,
+        "legacy_export_output_absent": !legacy_export.exists(),
+        "legacy_refusal_inputs_unchanged": legacy_refusal_preserved_inputs,
         "source_package_and_prefab_hidden_during_fresh_reopen": inputs_hidden_for_reopen,
         "mission_won_after_source_free_reopen": true,
         "win_tick": win_tick,

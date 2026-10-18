@@ -424,6 +424,28 @@ fn test_runtime_with_props() -> Vec<u8> {
     ]))
 }
 
+fn test_runtime_with_dense_props() -> Vec<u8> {
+    append_runtime_section(
+        test_runtime_with_props(),
+        *b".orrdns\0",
+        b"ORR_MESH_DENSE_PROPS_V1",
+    )
+}
+
+fn add_prop_count(scene: &std::path::Path, revision: [u8; 32], count: usize) {
+    let (mut document, expected_hash) = mesh_props::load(scene, revision).unwrap().unwrap();
+    let first_prop = document.props[0].clone();
+    document.props = (0..count)
+        .map(|index| {
+            let mut prop = first_prop.clone();
+            prop.id = index as u64 + 1;
+            prop.name = format!("crate-{index}");
+            prop
+        })
+        .collect();
+    mesh_props::save(scene, Some(&document), Some(&expected_hash), revision).unwrap();
+}
+
 fn graph_revision(yaml: &str) -> [u8; 32] {
     let document = orr_remote::mesh_navigation::mesh_doc_from_yaml(yaml).unwrap();
     orr_remote::mesh_navigation::mesh_from_view(orr_bridge::FrameView::of(document.frame()))
@@ -857,6 +879,77 @@ fn props_sidecar_is_admitted_and_requires_props_capable_runtime() {
     assert_eq!(fs::read(&bundle_props).unwrap(), props_before);
     assert_eq!(fs::read(&props_path).unwrap(), props_before);
     assert_eq!(prepared.graph_revision, revision);
+}
+
+#[test]
+fn dense_props_require_capability_and_new_runtime_reopens_source_free_bundle() {
+    let (temporary, scene, runtime, checksum) = fixture();
+    let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+    add_props(&scene, revision);
+    add_prop_count(&scene, revision, 7);
+    let props_path = mesh_props::sidecar_path(&scene).unwrap();
+    let props_before = fs::read(&props_path).unwrap();
+    let destination = temporary.path().join("dense-props-bundle");
+
+    fs::write(&runtime, test_runtime_with_props()).unwrap();
+    let error = export(&scene, checksum, &destination, &runtime).unwrap_err();
+    assert!(error.contains("dense mesh-props support"));
+    assert!(!destination.exists());
+
+    let dense_runtime = temporary.path().join("dense-props-player.exe");
+    fs::write(&dense_runtime, test_runtime_with_dense_props()).unwrap();
+    let receipt = export(&scene, checksum, &destination, &dense_runtime).unwrap();
+    assert_eq!(fs::read(&props_path).unwrap(), props_before);
+    assert_eq!(
+        fs::read(&receipt.root.join(format!("walk.scene.yaml{PROPS_SUFFIX}"))).unwrap(),
+        props_before
+    );
+    let prepared = open_bundle(&destination).unwrap();
+    assert_eq!(prepared.checksum, checksum);
+    assert_eq!(prepared.graph_revision, revision);
+    let bundle_props: serde_json::Value = serde_json::from_slice(&props_before).unwrap();
+    assert_eq!(bundle_props["props"].as_array().unwrap().len(), 7);
+
+    let legacy_runtime = test_runtime_with_props();
+    fs::write(destination.join(RUNTIME_FILENAME), &legacy_runtime).unwrap();
+    let manifest_path = destination.join(MANIFEST_FILENAME);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["runtime"]["bytes"] = serde_json::json!(legacy_runtime.len());
+    manifest["runtime"]["sha256"] = serde_json::json!(super::digest(&legacy_runtime));
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let error = open_bundle(&destination).unwrap_err();
+    assert!(error.contains("dense mesh-props support"));
+}
+
+#[test]
+fn dense_prop_marker_is_structural_and_legacy_runtime_remains_valid_at_six_props() {
+    let dense_runtime = test_runtime_with_dense_props();
+    super::validate_runtime_dense_props(&dense_runtime, true).unwrap();
+    super::validate_runtime_dense_props(&test_runtime_with_props(), false).unwrap();
+
+    let mut missing = test_runtime_with_props();
+    missing.extend_from_slice(b"ORR_MESH_DENSE_PROPS_V1");
+    assert!(super::validate_runtime_dense_props(&missing, true).is_err());
+
+    let mut wrong = dense_runtime.clone();
+    let payload = section_payload(&wrong, b".orrdns\0");
+    wrong[payload..payload + b"ORR_MESH_DENSE_PROPS_V1".len()].fill(0);
+    assert!(super::validate_runtime_dense_props(&wrong, true).is_err());
+
+    let duplicate =
+        append_runtime_section(dense_runtime, *b".orrdns\0", b"ORR_MESH_DENSE_PROPS_V1");
+    let error = super::validate_runtime_dense_props(&duplicate, true).unwrap_err();
+    assert!(error.contains("duplicate .orrdns"));
+
+    let (temporary, scene, runtime, checksum) = fixture();
+    let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+    add_props(&scene, revision);
+    add_prop_count(&scene, revision, 6);
+    fs::write(&runtime, test_runtime_with_props()).unwrap();
+    let destination = temporary.path().join("legacy-six-props");
+    export(&scene, checksum, &destination, &runtime).unwrap();
+    assert_eq!(open_bundle(&destination).unwrap().checksum, checksum);
 }
 
 #[test]

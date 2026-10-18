@@ -60,6 +60,106 @@ fn assert_slot_panel_matches_selected_model(panel: &mut Panel) {
 }
 
 #[test]
+fn prop_grid_stamps_twelve_instances_atomically_as_one_history_entry() {
+    let mut original = document(1);
+    original.props[0].art = original.props[0]
+        .art
+        .clone()
+        .with_transform([2.25, 0.25, 1.5], 0.5)
+        .unwrap()
+        .with_rotation(crate::mesh_rotation::from_degrees([17.0, 31.0, 53.0]).unwrap())
+        .unwrap()
+        .with_tint([0.75, 0.6, 0.85, 1.0])
+        .unwrap();
+    let identity = original.props[0].art.render_identity();
+    let mut panel = Panel::default();
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.scene = Some(Path::new("mesh.scene.yaml").to_path_buf());
+    panel.reset_history(original.clone(), Some(0));
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    panel.stamp_grid();
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert_eq!(panel.document.props.len(), 12);
+    assert_eq!(panel.history.len(), 2);
+    assert_eq!(panel.document.props[11].art.offset(), [6.75, 0.25, 4.5]);
+    let ids = panel
+        .document
+        .props
+        .iter()
+        .map(|prop| prop.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let names = panel
+        .document
+        .props
+        .iter()
+        .map(|prop| &prop.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), 12);
+    assert_eq!(names.len(), 12);
+    for prop in &panel.document.props {
+        assert_eq!(prop.art.render_identity(), identity);
+        assert_eq!(prop.art.rotation(), original.props[0].art.rotation());
+        assert_eq!(prop.art.tint(), original.props[0].art.tint());
+        assert_eq!(
+            prop.art.source_model_arc().to_bytes().unwrap(),
+            original.props[0].art.source_model_arc().to_bytes().unwrap()
+        );
+    }
+    panel.undo();
+    assert_eq!(panel.document.props.len(), 1);
+    assert!(!panel.dirty());
+    panel.redo();
+    assert_eq!(panel.document.props.len(), 12);
+    assert_eq!(panel.history.len(), 2);
+}
+
+#[test]
+fn prop_grid_rejects_invalid_capacity_spacing_and_drafts_without_mutating_document() {
+    let original = document(1);
+    assert!(super::stamp_prop_grid(&original, 1, 2, 16, 16, [1.5; 2], GRAPH_REVISION).is_err());
+    assert!(
+        super::stamp_prop_grid(&original, 1, 2, 4, 3, [f32::NAN, 1.5], GRAPH_REVISION).is_err()
+    );
+    assert!(super::stamp_prop_grid(&original, 1, 2, 1, 1, [1.5; 2], GRAPH_REVISION).is_err());
+    assert!(super::stamp_prop_grid(&original, 99, 2, 4, 3, [1.5; 2], GRAPH_REVISION).is_err());
+    let mut panel = Panel::default();
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.scene = Some(Path::new("mesh.scene.yaml").to_path_buf());
+    panel.reset_history(original, Some(0));
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    panel.position[0] = "42".into();
+    panel.stamp_grid();
+    assert!(panel.error.is_some());
+    assert_eq!(panel.document.props.len(), 1);
+    assert_eq!(panel.history.len(), 1);
+    for invalid in ["0", "17", "NaN", "-1"] {
+        assert!(super::parse_grid(invalid, "3", &["1.5".into(), "1.5".into()]).is_err());
+    }
+}
+
+#[test]
+fn prop_grid_uses_fresh_ids_across_wraparound_and_keeps_128_boundary() {
+    let original = document(1);
+    let stamped =
+        super::stamp_prop_grid(&original, 1, u64::MAX, 16, 8, [0.25; 2], GRAPH_REVISION).unwrap();
+    assert_eq!(stamped.props.len(), 128);
+    assert_eq!(stamped.props[1].id, u64::MAX);
+    assert_eq!(stamped.props[2].id, 2);
+    assert_eq!(
+        stamped
+            .props
+            .iter()
+            .map(|prop| prop.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        128
+    );
+    assert_eq!(original.props.len(), 1);
+}
+
+#[test]
 fn loaded_prefab_is_only_a_candidate_until_explicit_add_and_history_preserves_it() {
     let source = snapshot()
         .with_transform([2.0, 0.5, 3.0], 0.75)

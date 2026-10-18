@@ -24,7 +24,7 @@ MeshNavigation can save an applied static prop as a local reusable asset and loa
 
 ## Scope and verification
 
-Existing limits still apply: at most six cosmetic static props per mesh scene, bounded prop sidecar/derived model data, and point-agent navigation. Prefabs do not add collision, skinned characters, linked updates, dependency watching, or runtime instantiation. Existing linked-prefab tooling for CollectDodge is a different game-specific feature.
+Existing limits still apply: at most 128 cosmetic static props sharing six distinct appearances per mesh scene, bounded prop sidecar/derived model data, and point-agent navigation. See [prop level grids](editor-mesh-prop-grids.md) for grouped placement and player compatibility above six props. Prefabs do not add collision, skinned characters, linked updates, dependency watching, or runtime instantiation. Existing linked-prefab tooling for CollectDodge is a different game-specific feature.
 
 Acceptance covers strict codec/store/worker cases and the real editor path: save an applied prop asset, load into a different graph, explicit Add, Undo/Redo, save, reopen with prefab/package hidden, Play/mission replay, and source-free export/native execution. Implementation and validation evidence are recorded separately in PR205; this document alone is not a claim that every acceptance step or the whole engine is complete.
 

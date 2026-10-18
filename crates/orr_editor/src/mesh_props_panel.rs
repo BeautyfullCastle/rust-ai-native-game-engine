@@ -64,6 +64,9 @@ pub(crate) struct Panel {
     material_slots_draft: Vec<crate::mesh_material_slots::Settings>,
     prefab: crate::mesh_prop_prefab_panel::Panel,
     prefab_candidate: bool,
+    grid_columns: String,
+    grid_rows: String,
+    grid_spacing: [String; 2],
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -113,6 +116,9 @@ impl Default for Panel {
             material_slots_draft: Vec::new(),
             prefab: crate::mesh_prop_prefab_panel::Panel::default(),
             prefab_candidate: false,
+            grid_columns: "4".into(),
+            grid_rows: "3".into(),
+            grid_spacing: ["1.5".into(), "1.5".into()],
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -266,7 +272,7 @@ impl Panel {
         self.sync(editor);
         ui.collapsing("Mesh props", |ui| {
             ui.label("Static cosmetic props are saved in a separate scene sidecar and do not affect navigation physics.");
-            ui.weak("Up to six props reserve the remaining viewport asset slots for the graph and agent art.");
+            ui.weak("Up to 128 cosmetic props share at most six immutable appearances; graph and agent art keep their reserved GPU asset slots.");
             ui.add_enabled_ui(
                 self.can_edit(editor) && !self.pending_prefab(),
                 |ui| {
@@ -429,6 +435,20 @@ impl Panel {
                 }
             });
             let staged_position = self.placement.as_ref().and_then(|placement| placement.position);
+            ui.collapsing("Prop grid", |ui| {
+                let enabled = editable && !self.pending_prefab() && self.selected_prop().is_some()
+                    && !self.unapplied_form_dirty() && !self.material_slots.dirty();
+                ui.add_enabled_ui(enabled, |ui| {
+                    field(ui, "Prop grid columns", &mut self.grid_columns);
+                    field(ui, "Prop grid rows", &mut self.grid_rows);
+                    field(ui, "Prop grid spacing X", &mut self.grid_spacing[0]);
+                    field(ui, "Prop grid spacing Z", &mut self.grid_spacing[1]);
+                    ui.weak("Keep the selected prop as cell [0,0]; add the remaining cells as one undoable cosmetic edit. Nothing is saved automatically.");
+                    if ui.button("Stamp selected prop grid").clicked() {
+                        self.stamp_grid();
+                    }
+                });
+            });
             let can_apply_placement =
                 staged_position.is_some() && self.placement_context_matches(editor);
             if self.placement.is_some() {
@@ -1148,6 +1168,54 @@ impl Panel {
         self.copy_selection_fields();
         self.error = None;
         self.status = "Duplicated mesh prop in memory; save explicitly to persist.".into();
+    }
+
+    fn stamp_grid(&mut self) {
+        if self.prefab.busy()
+            || self.pending_prefab()
+            || self.gesture.is_some()
+            || self.placement.is_some()
+            || self.unapplied_form_dirty()
+            || self.material_slots.dirty()
+        {
+            self.error = Some("Apply or discard prop drafts before stamping a grid".into());
+            return;
+        }
+        let result = (|| {
+            let selected = self
+                .selected
+                .ok_or("Select an applied prop before stamping a grid")?;
+            let revision = self
+                .graph_revision
+                .ok_or("Wait for an admitted mesh graph")?;
+            let (columns, rows, spacing) =
+                parse_grid(&self.grid_columns, &self.grid_rows, &self.grid_spacing)?;
+            let identifier = self
+                .available_prop_id()
+                .ok_or("No fresh prop identifier is available")?;
+            let document = stamp_prop_grid(
+                &self.document,
+                selected,
+                identifier,
+                columns,
+                rows,
+                spacing,
+                revision,
+            )?;
+            Ok::<_, String>((document, columns * rows))
+        })();
+        match result {
+            Ok((document, cells)) => {
+                self.push_document(document);
+                self.recompute_next_prop_id();
+                self.copy_selection_fields();
+                self.error = None;
+                self.status = format!(
+                    "Stamped {cells} prop grid cells as one edit; save explicitly to persist."
+                );
+            }
+            Err(error) => self.error = Some(format!("Prop grid was not applied: {error}")),
+        }
     }
 
     fn begin_placement(&mut self, editor: &Editor, agent_pick_busy: bool) {
@@ -1942,7 +2010,22 @@ fn duplicate_prop_document(
         .iter()
         .find(|prop| prop.id == selected)
         .ok_or("The selected mesh prop is no longer present")?;
-    let preferred = format!("{} copy", source.name);
+    let name = duplicate_prop_name(document, &source.name, new_id)?;
+    let mut duplicated = document.clone();
+    duplicated.props.push(Prop {
+        id: new_id,
+        name,
+        art: source.art.clone(),
+    });
+    Ok(duplicated)
+}
+
+fn duplicate_prop_name(
+    document: &Document,
+    source_name: &str,
+    new_id: u64,
+) -> Result<String, String> {
+    let preferred = format!("{source_name} copy");
     let name = if preferred.len() <= 64 && document.props.iter().all(|prop| prop.name != preferred)
     {
         preferred
@@ -1957,13 +2040,113 @@ fn duplicate_prop_document(
                 .ok_or("No unique bounded name is available for the duplicate")?
         }
     };
-    let mut duplicated = document.clone();
-    duplicated.props.push(Prop {
-        id: new_id,
-        name: validate_name(&name)?,
-        art: source.art.clone(),
-    });
-    Ok(duplicated)
+    validate_name(&name)
+}
+
+fn parse_grid(
+    columns: &str,
+    rows: &str,
+    spacing: &[String; 2],
+) -> Result<(usize, usize, [f32; 2]), String> {
+    let columns = columns
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "Prop grid columns must be an integer from 1 through 16")?;
+    let rows = rows
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "Prop grid rows must be an integer from 1 through 16")?;
+    if !(1..=16).contains(&columns) || !(1..=16).contains(&rows) || columns * rows < 2 {
+        return Err("Prop grid dimensions must be 1..=16 and contain at least two cells".into());
+    }
+    let mut parsed_spacing = [0.0; 2];
+    for (axis, value) in spacing.iter().enumerate() {
+        parsed_spacing[axis] = value
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| "Prop grid spacing must be finite and positive")?;
+        if !parsed_spacing[axis].is_finite()
+            || parsed_spacing[axis] <= 0.0
+            || parsed_spacing[axis] > 1024.0
+        {
+            return Err("Prop grid spacing must be finite, positive and at most 1024".into());
+        }
+    }
+    Ok((columns, rows, parsed_spacing))
+}
+
+fn stamp_prop_grid(
+    document: &Document,
+    selected: u64,
+    first_id: u64,
+    columns: usize,
+    rows: usize,
+    spacing: [f32; 2],
+    graph_revision: [u8; 32],
+) -> Result<Document, String> {
+    if !(1..=16).contains(&columns)
+        || !(1..=16).contains(&rows)
+        || spacing
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0 || *value > 1024.0)
+    {
+        return Err("Invalid bounded prop grid dimensions or spacing".into());
+    }
+    let cells = columns
+        .checked_mul(rows)
+        .ok_or("Prop grid cell count overflow")?;
+    let additions = cells
+        .checked_sub(1)
+        .filter(|count| *count > 0)
+        .ok_or("Prop grid must add at least one prop")?;
+    if document
+        .props
+        .len()
+        .checked_add(additions)
+        .is_none_or(|count| count > MAX_PROPS)
+    {
+        return Err(format!(
+            "Prop grid would exceed the {MAX_PROPS}-prop scene limit"
+        ));
+    }
+    let source = document
+        .props
+        .iter()
+        .find(|prop| prop.id == selected)
+        .ok_or("The selected prop no longer exists")?;
+    let position = source.art.offset();
+    let mut stamped = document.clone();
+    let mut identifier = first_id.max(1);
+    for row in 0..rows {
+        for column in 0..columns {
+            if row == 0 && column == 0 {
+                continue;
+            }
+            for _ in 0..=MAX_PROPS {
+                if stamped.props.iter().all(|prop| prop.id != identifier) {
+                    break;
+                }
+                identifier = identifier.checked_add(1).unwrap_or(1);
+            }
+            let name = duplicate_prop_name(&stamped, &source.name, identifier)?;
+            let art = source.art.clone().with_transform(
+                [
+                    position[0] + column as f32 * spacing[0],
+                    position[1],
+                    position[2] + row as f32 * spacing[1],
+                ],
+                source.art.scale(),
+            )?;
+            stamped.props.push(Prop {
+                id: identifier,
+                name,
+                art,
+            });
+            identifier = identifier.checked_add(1).unwrap_or(1);
+        }
+    }
+    validate_document(&stamped, graph_revision)?;
+    Ok(stamped)
 }
 
 fn relocate_prop_document(
@@ -2125,7 +2308,7 @@ fn validate_document(document: &Document, graph_revision: [u8; 32]) -> Result<()
         }
         prop.art.placement([orr_fp::FP::ZERO; 3])?;
     }
-    Ok(())
+    document.validate("mesh.scene.yaml", graph_revision)
 }
 
 fn field(ui: &mut Ui, label: &str, value: &mut String) -> bool {

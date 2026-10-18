@@ -2,7 +2,7 @@ use crate::{mesh_art::Snapshot, viewport3d::SceneModel};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, Metadata, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -12,7 +12,9 @@ use std::{
 #[path = "mesh_props/tests.rs"]
 mod tests;
 
-pub(crate) const MAX_PROPS: usize = 6;
+pub(crate) const MAX_PROPS: usize = 128;
+const MAX_PROP_ASSETS: usize = 6;
+const MAX_PROP_DRAWS: usize = 3584;
 const SCHEMA: u32 = 1;
 const MAX_NAME_BYTES: usize = 64;
 const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
@@ -64,43 +66,28 @@ impl Document {
     }
 
     pub(crate) fn placements(&self) -> Result<Vec<SceneModel>, String> {
-        if self.props.len() > MAX_PROPS {
-            return Err("mesh props document exceeds the six-prop limit".into());
-        }
-        let mut ids = BTreeSet::new();
-        let mut names = BTreeSet::new();
+        validate_prop_collection(&self.props)?;
+        let mut models = BTreeMap::new();
+        let mut placements = Vec::with_capacity(self.props.len());
         for prop in &self.props {
-            validate_prop_name(&prop.name)?;
-            if !names.insert(prop.name.as_str()) {
-                return Err("mesh prop names must be unique".into());
+            let identity = prop.art.render_identity();
+            let mut placement = prop.art.placement([orr_fp::FP::ZERO; 3])?;
+            if let Some(model) = models.get(&identity) {
+                placement.model = std::sync::Arc::clone(model);
+            } else {
+                models.insert(identity, std::sync::Arc::clone(&placement.model));
             }
-            if prop.id == 0 || !ids.insert(prop.id) {
-                return Err("mesh prop IDs must be nonzero and unique".into());
-            }
+            placements.push(placement);
         }
-        self.props
-            .iter()
-            .map(|prop| prop.art.placement([orr_fp::FP::ZERO; 3]))
-            .collect()
+        Ok(placements)
     }
 
     fn encode(&self, scene_filename: &str, graph_revision: [u8; 32]) -> Result<Vec<u8>, String> {
         validate_scene_filename(scene_filename)?;
-        if self.props.len() > MAX_PROPS {
-            return Err("mesh props document exceeds the six-prop limit".into());
-        }
-        let mut ids = BTreeSet::new();
-        let mut names = BTreeSet::new();
+        validate_prop_collection(&self.props)?;
         let mut embedded_bytes = 0usize;
         let mut props = Vec::with_capacity(self.props.len());
         for prop in &self.props {
-            validate_prop_name(&prop.name)?;
-            if !names.insert(prop.name.as_str()) {
-                return Err("mesh prop names must be unique".into());
-            }
-            if prop.id == 0 || !ids.insert(prop.id) {
-                return Err("mesh prop IDs must be nonzero and unique".into());
-            }
             if prop.art.graph_revision() != graph_revision {
                 return Err("mesh prop art belongs to a different graph revision".into());
             }
@@ -149,7 +136,7 @@ impl Document {
             return Err("mesh props sidecar belongs to another scene or graph revision".into());
         }
         if sidecar.props.len() > MAX_PROPS {
-            return Err("mesh props sidecar exceeds the six-prop limit".into());
+            return Err("mesh props sidecar exceeds the 128-prop limit".into());
         }
         let props = sidecar
             .props
@@ -267,6 +254,40 @@ fn validate_prop_name(name: &str) -> Result<(), String> {
         || name.chars().any(char::is_control)
     {
         return Err("mesh prop names must be nonempty bounded printable text".into());
+    }
+    Ok(())
+}
+
+fn validate_prop_collection(props: &[Prop]) -> Result<(), String> {
+    if props.len() > MAX_PROPS {
+        return Err("mesh props document exceeds the 128-prop limit".into());
+    }
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    let mut identities = BTreeSet::new();
+    let mut draws = 0usize;
+    for prop in props {
+        validate_prop_name(&prop.name)?;
+        if !names.insert(prop.name.as_str()) {
+            return Err("mesh prop names must be unique".into());
+        }
+        if prop.id == 0 || !ids.insert(prop.id) {
+            return Err("mesh prop IDs must be nonzero and unique".into());
+        }
+        identities.insert(prop.art.render_identity());
+        draws = draws
+            .checked_add(prop.art.source_model_arc().source().primitives.len())
+            .ok_or("mesh props primitive-instance draw count overflow")?;
+    }
+    validate_render_budget(identities.len(), draws)
+}
+
+fn validate_render_budget(distinct_assets: usize, draws: usize) -> Result<(), String> {
+    if distinct_assets > MAX_PROP_ASSETS {
+        return Err("mesh props document exceeds the six-appearance limit".into());
+    }
+    if draws > MAX_PROP_DRAWS {
+        return Err("mesh props document exceeds the 3584 primitive-instance draw limit".into());
     }
     Ok(())
 }

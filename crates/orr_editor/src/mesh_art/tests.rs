@@ -43,6 +43,71 @@ fn revision() -> [u8; 32] {
 }
 
 #[test]
+fn cached_appearance_identity_survives_rebind_transform_and_embedded_reopen() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let original =
+        Snapshot::from_package(&package(&root), "model.glb", "LICENSE.txt", revision()).unwrap();
+    let original_identity = original.render_identity();
+    let moved = original
+        .clone()
+        .with_transform([3.25, 1.0, 7.5], 0.75)
+        .unwrap()
+        .with_rotation(crate::mesh_rotation::from_degrees([17.0, 31.0, 53.0]).unwrap())
+        .unwrap()
+        .with_facing(crate::mesh_facing::Facing::Route)
+        .unwrap()
+        .with_graph_revision([0x91; 32]);
+    assert_eq!(moved.render_identity(), original_identity);
+    let bytes = moved.encode_embedded("mesh.scene.yaml").unwrap();
+    let reopened = Snapshot::decode_embedded(&bytes, "mesh.scene.yaml", [0x91; 32]).unwrap();
+    assert_eq!(reopened.render_identity(), original_identity);
+    assert_eq!(
+        reopened.model.to_bytes().unwrap(),
+        original.model.to_bytes().unwrap()
+    );
+    assert_eq!(reopened.license_text, original.license_text);
+}
+
+#[test]
+fn cached_appearance_identity_changes_only_with_admitted_render_settings() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let original =
+        Snapshot::from_package(&package(&root), "model.glb", "LICENSE.txt", revision()).unwrap();
+    let tint = original.clone().with_tint([0.5, 1.0, 1.0, 1.0]).unwrap();
+    assert_ne!(tint.render_identity(), original.render_identity());
+    let surface = original
+        .clone()
+        .with_surface(Some(crate::mesh_surface::Settings {
+            material: original.material_choices()[0],
+            uv_offset: [0.25, 0.0],
+            uv_scale: [1.0, 1.0],
+            uv_quarter_turns: 0,
+            pivot: [0.0; 3],
+        }))
+        .unwrap();
+    assert_ne!(surface.render_identity(), original.render_identity());
+    let material = original.material_choices()[0];
+    let mut settings = crate::mesh_material_slots::Settings::identity(
+        material,
+        &original.model.source().materials[material as usize],
+    );
+    settings.tint = [0.75, 1.0, 1.0, 1.0];
+    let slots = original
+        .clone()
+        .with_material_slots(vec![settings])
+        .unwrap();
+    assert_ne!(slots.render_identity(), original.render_identity());
+    let restored = slots.with_material_slots(Vec::new()).unwrap();
+    assert_eq!(restored.render_identity(), original.render_identity());
+    assert_eq!(
+        tint.model.to_bytes().unwrap(),
+        original.model.to_bytes().unwrap()
+    );
+}
+
+#[test]
 fn surface_round_trips_from_embedded_original_and_survives_other_art_edits() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();

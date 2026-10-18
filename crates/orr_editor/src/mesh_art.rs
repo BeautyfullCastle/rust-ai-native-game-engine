@@ -39,6 +39,7 @@ pub(crate) struct Snapshot {
     license_text: String,
     model: Arc<StaticModel>,
     render_model: Arc<StaticModel>,
+    render_identity: [u8; 32],
     tint: [f32; 4],
     material_slots: Vec<crate::mesh_material_slots::Settings>,
     surface: Option<crate::mesh_surface::Settings>,
@@ -100,6 +101,14 @@ struct Provenance<'a> {
     license: &'a str,
     license_sha256: &'a str,
     license_text: &'a str,
+}
+
+#[derive(Serialize)]
+struct AppearanceIdentity<'a> {
+    cooked_sha256: &'a str,
+    tint: [f32; 4],
+    surface: Option<crate::mesh_surface::Settings>,
+    material_slots: &'a [crate::mesh_material_slots::Settings],
 }
 
 impl Snapshot {
@@ -176,17 +185,21 @@ impl Snapshot {
             return Err("model package root changed while its snapshot was prepared".into());
         }
         let model = Arc::new(model);
+        let cooked_sha256 = digest(&model_bytes);
+        let render_identity =
+            appearance_identity(&cooked_sha256, crate::mesh_material::identity(), None, &[])?;
         let snapshot = Self {
             graph_revision,
             manifest: locked.manifest,
             package_digest: locked.digest,
             asset: asset.to_owned(),
             asset_sha256,
-            cooked_sha256: digest(&model_bytes),
+            cooked_sha256,
             license: license.to_owned(),
             license_sha256,
             license_text: license_text.to_owned(),
             render_model: Arc::clone(&model),
+            render_identity,
             model,
             tint: crate::mesh_material::identity(),
             material_slots: Vec::new(),
@@ -240,6 +253,10 @@ impl Snapshot {
         &self.model
     }
 
+    pub(crate) fn render_identity(&self) -> [u8; 32] {
+        self.render_identity
+    }
+
     pub(crate) fn surface(&self) -> Option<crate::mesh_surface::Settings> {
         self.surface
     }
@@ -263,6 +280,7 @@ impl Snapshot {
         self.material_slots = material_slots;
         self.render_model =
             render_model(&self.model, self.tint, self.surface, &self.material_slots)?;
+        self.refresh_render_identity()?;
         self.placement([orr_fp::FP::ZERO; 3])?;
         Ok(self)
     }
@@ -276,6 +294,7 @@ impl Snapshot {
             .transpose()?;
         self.render_model =
             render_model(&self.model, self.tint, self.surface, &self.material_slots)?;
+        self.refresh_render_identity()?;
         self.placement([orr_fp::FP::ZERO; 3])?;
         Ok(self)
     }
@@ -284,8 +303,19 @@ impl Snapshot {
         self.tint = crate::mesh_material::validate(tint)?;
         self.render_model =
             render_model(&self.model, self.tint, self.surface, &self.material_slots)?;
+        self.refresh_render_identity()?;
         self.placement([orr_fp::FP::ZERO; 3])?;
         Ok(self)
+    }
+
+    fn refresh_render_identity(&mut self) -> Result<(), String> {
+        self.render_identity = appearance_identity(
+            &self.cooked_sha256,
+            self.tint,
+            self.surface,
+            &self.material_slots,
+        )?;
+        Ok(())
     }
 
     pub(crate) fn with_rotation(mut self, rotation: [f32; 4]) -> Result<Self, String> {
@@ -465,6 +495,8 @@ impl Snapshot {
         let material_slots = sidecar.material_slots;
         crate::mesh_material_slots::validate(&material_slots, &model)?;
         let render_model = render_model(&model, tint, surface, &material_slots)?;
+        let render_identity =
+            appearance_identity(&sidecar.cooked_sha256, tint, surface, &material_slots)?;
         let snapshot = Self {
             graph_revision: sidecar.graph_revision,
             manifest: sidecar.manifest,
@@ -476,6 +508,7 @@ impl Snapshot {
             license_sha256: sidecar.license_sha256,
             license_text: sidecar.license_text,
             render_model,
+            render_identity,
             model,
             tint,
             material_slots,
@@ -492,6 +525,24 @@ impl Snapshot {
             .with_rotation(rotation)?
             .with_transform(offset, scale)
     }
+}
+
+fn appearance_identity(
+    cooked_sha256: &str,
+    tint: [f32; 4],
+    surface: Option<crate::mesh_surface::Settings>,
+    material_slots: &[crate::mesh_material_slots::Settings],
+) -> Result<[u8; 32], String> {
+    let bytes = serde_json::to_vec(&AppearanceIdentity {
+        cooked_sha256,
+        tint,
+        surface,
+        material_slots,
+    })
+    .map_err(|error| format!("encode immutable model appearance identity: {error}"))?;
+    let mut identity = [0; 32];
+    identity.copy_from_slice(&Sha256::digest(&bytes));
+    Ok(identity)
 }
 
 fn identity_rotation() -> [f32; 4] {

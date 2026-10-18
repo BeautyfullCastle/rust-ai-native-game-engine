@@ -44,6 +44,7 @@ const CHARACTER_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CHARACTER_V1";
 const HUD_RUNTIME_MARKER: &[u8] = b"ORR_MESH_HUD_V1";
 const MISSION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MISSION_V1";
 const MATERIAL_SLOTS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MATERIAL_SLOTS_V1";
+const DENSE_PROPS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_DENSE_PROPS_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
@@ -58,6 +59,8 @@ const CHARACTER_RUNTIME_SECTION: &[u8; 8] = b".orrchar";
 const HUD_RUNTIME_SECTION: &[u8; 8] = b".orrhud\0";
 const MISSION_RUNTIME_SECTION: &[u8; 8] = b".orrmis\0";
 const MATERIAL_SLOTS_RUNTIME_SECTION: &[u8; 8] = b".orrmsl\0";
+const DENSE_PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrdns\0";
+const LEGACY_PROP_LIMIT: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -182,6 +185,7 @@ fn export_with_profile(
     let mut requires_surface = false;
     let mut requires_facing = false;
     let mut requires_character = false;
+    let mut requires_dense_props = false;
     let sidecar_bytes = match read_optional_bounded(
         &sidecar_path,
         orr_model::MAX_FILE_BYTES as u64,
@@ -224,6 +228,7 @@ fn export_with_profile(
                 else {
                     return Err("mesh props sidecar could not be admitted".into());
                 };
+                requires_dense_props = document.props.len() > LEGACY_PROP_LIMIT;
                 requires_rotation |= document
                     .props
                     .iter()
@@ -384,6 +389,7 @@ fn export_with_profile(
     requires_facing |= optional_facing_present(props_bytes.as_deref(), true)?
         || optional_facing_present(animation_bytes.as_deref(), false)?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
+    validate_runtime_dense_props(&runtime_bytes, requires_dense_props)?;
     validate_runtime_profile(&runtime_bytes, input_profile)?;
     validate_runtime_game_profile(&runtime_bytes, game_profile)?;
     let runtime_hash = digest(&runtime_bytes);
@@ -674,6 +680,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let mut requires_surface = false;
     let mut requires_facing = false;
     let mut requires_character = false;
+    let mut requires_dense_props = false;
     match (
         &manifest.sidecar,
         read_optional_bounded(
@@ -723,6 +730,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             else {
                 return Err("bundle mesh props sidecar could not be admitted".into());
             };
+            requires_dense_props = document.props.len() > LEGACY_PROP_LIMIT;
             requires_rotation |= document
                 .props
                 .iter()
@@ -899,6 +907,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         },
     )?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
+    validate_runtime_dense_props(&runtime_bytes, requires_dense_props)?;
     validate_runtime_profile(&runtime_bytes, manifest.input_profile)?;
     validate_runtime_game_profile(&runtime_bytes, manifest.game_profile)?;
     let sidecar_unchanged = match &manifest.sidecar {
@@ -1856,6 +1865,20 @@ fn validate_runtime_facing(bytes: &[u8], required: bool) -> Result<(), String> {
         && validate_runtime_section(bytes, FACING_RUNTIME_SECTION, FACING_RUNTIME_MARKER)?.is_none()
     {
         return Err("mesh player runtime does not advertise route-facing support".into());
+    }
+    Ok(())
+}
+
+fn validate_runtime_dense_props(bytes: &[u8], required: bool) -> Result<(), String> {
+    if required
+        && validate_runtime_section(
+            bytes,
+            DENSE_PROPS_RUNTIME_SECTION,
+            DENSE_PROPS_RUNTIME_MARKER,
+        )?
+        .is_none()
+    {
+        return Err("mesh player runtime does not advertise dense mesh-props support".into());
     }
     Ok(())
 }

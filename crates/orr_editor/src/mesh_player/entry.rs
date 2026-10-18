@@ -56,6 +56,10 @@ static MESH_HUD_MARKER: [u8; 15] = *b"ORR_MESH_HUD_V1";
 #[unsafe(link_section = ".orrmis")]
 static MESH_MISSION_MARKER: [u8; 19] = *b"ORR_MESH_MISSION_V1";
 
+#[used]
+#[unsafe(link_section = ".orrdns")]
+static MESH_DENSE_PROPS_MARKER: [u8; 23] = *b"ORR_MESH_DENSE_PROPS_V1";
+
 fn main() {
     std::hint::black_box(&MESH_PLAYER_MARKER);
     std::hint::black_box(&MESH_PROPS_MARKER);
@@ -73,6 +77,7 @@ fn main() {
     std::hint::black_box(&MESH_HUD_MARKER);
     #[cfg(feature = "mesh-mission")]
     std::hint::black_box(&MESH_MISSION_MARKER);
+    std::hint::black_box(&MESH_DENSE_PROPS_MARKER);
     if let Err(error) = orr_editor::mesh_player::run() {
         eprintln!("orr_mesh_player: {error}");
         std::process::exit(2);

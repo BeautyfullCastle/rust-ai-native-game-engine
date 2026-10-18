@@ -44,6 +44,95 @@ fn package(parent: &Path) -> PathBuf {
     root
 }
 
+fn cooked_package(root: &Path, model: &orr_model::StaticModel) -> PathBuf {
+    let package_root = root.join(format!(
+        "cooked-prop-package-{}",
+        model.source().primitives.len()
+    ));
+    fs::create_dir(&package_root).unwrap();
+    fs::write(
+        package_root.join("model.orrmodel"),
+        model.to_bytes().unwrap(),
+    )
+    .unwrap();
+    fs::write(package_root.join("LICENSE.txt"), LICENSE).unwrap();
+    let runtime = orr_package::Runtime::content_only();
+    let manifest = Manifest {
+        schema: 1,
+        name: "cooked-props".into(),
+        version: "1.0.0".into(),
+        engine: format!("={}", runtime.engine_version),
+        capabilities: BTreeSet::from(["models".into()]),
+        dependencies: BTreeMap::new(),
+        files: BTreeSet::from(["LICENSE.txt".into(), "model.orrmodel".into()]),
+    };
+    fs::write(
+        package_root.join("orr.package.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    package_root
+}
+
+fn snapshot_with_primitive_count(root: &Path, count: usize) -> Snapshot {
+    let asset_id = "model.orrmodel";
+    let transform = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let source = orr_model::ModelSource {
+        format: "orr_static_model".into(),
+        version: 1,
+        asset_id: asset_id.into(),
+        dependencies: vec![orr_model::Dependency {
+            uri: "$source".into(),
+            sha256: "0".repeat(64),
+        }],
+        primitives: (0..count)
+            .map(|index| orr_model::Primitive {
+                id: format!("{asset_id}#node=0/mesh=0/primitive={index}"),
+                vertices: vec![
+                    orr_model::Vertex {
+                        position: [0.0, 0.0, 0.0],
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [0.0, 0.0],
+                    },
+                    orr_model::Vertex {
+                        position: [1.0, 0.0, 0.0],
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [1.0, 0.0],
+                    },
+                    orr_model::Vertex {
+                        position: [0.0, 0.0, 1.0],
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [0.0, 1.0],
+                    },
+                ],
+                indices: vec![0, 1, 2],
+                material: 0,
+                transform,
+            })
+            .collect(),
+        materials: vec![orr_model::Material {
+            base_color: [1.0; 4],
+            image: 0,
+            linear_filter: false,
+            wrap_s: orr_model::Wrap::Clamp,
+            wrap_t: orr_model::Wrap::Clamp,
+        }],
+        images: vec![orr_model::Image {
+            width: 1,
+            height: 1,
+            rgba8: vec![255; 4],
+        }],
+    };
+    let model = orr_model::StaticModel::new(source).unwrap();
+    let package_root = cooked_package(root, &model);
+    Snapshot::from_package(&package_root, "model.orrmodel", "LICENSE.txt", REVISION).unwrap()
+}
+
 fn scene(root: &Path) -> PathBuf {
     let path = root.join("mesh.scene.yaml");
     fs::write(&path, b"mesh scene\n").unwrap();
@@ -102,7 +191,7 @@ fn roundtrips_embedded_props_after_package_source_is_removed() {
 }
 
 #[test]
-fn maximum_props_reopen_as_six_assets_with_two_viewport_slots_reserved() {
+fn maximum_props_reopen_as_one_interned_asset_with_reserved_draw_budget() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     let source = package(&root);
@@ -113,21 +202,162 @@ fn maximum_props_reopen_as_six_assets_with_two_viewport_slots_reserved() {
             .map(|index| Prop {
                 id: index as u64 + 1,
                 name: format!("Prop {index}"),
-                art: art.clone(),
+                art: art
+                    .clone()
+                    .with_transform([index as f32, 0.0, 0.0], 1.0)
+                    .unwrap(),
             })
             .collect(),
     };
+    assert_eq!(document.props.len(), 128);
+    let primitive_count = art.source_model_arc().source().primitives.len();
+    assert!(primitive_count * document.props.len() <= 3584);
+    let original_model_bytes = art.source_model_arc().to_bytes().unwrap();
+    let original_art: serde_json::Value =
+        serde_json::from_slice(&art.encode_embedded("mesh.scene.yaml").unwrap()).unwrap();
     save(&scene_path, Some(&document), None, REVISION).unwrap();
     fs::remove_dir_all(source).unwrap();
     let (loaded, _) = load(&scene_path, REVISION).unwrap().unwrap();
     let placements = loaded.placements().unwrap();
-    assert_eq!(placements.len(), 6);
-    assert_eq!(placements.len() + 2, 8);
+    assert_eq!(placements.len(), 128);
     for (index, placement) in placements.iter().enumerate() {
-        for other in &placements[index + 1..] {
+        assert!(
+            std::sync::Arc::ptr_eq(&placements[0].model, &placement.model),
+            "same-appearance prop model Arc is interned after reload"
+        );
+        assert_eq!(loaded.props[index].id, index as u64 + 1);
+        assert_eq!(loaded.props[index].name, format!("Prop {index}"));
+        assert_eq!(placement.instance.translation, [index as f32, 0.0, 0.0]);
+        assert_eq!(
+            placement.model.to_bytes().unwrap(),
+            original_model_bytes,
+            "interning preserves immutable source model bytes"
+        );
+    }
+    let first_loaded_art: serde_json::Value = serde_json::from_slice(
+        &loaded.props[0]
+            .art
+            .encode_embedded("mesh.scene.yaml")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first_loaded_art, original_art);
+}
+
+#[test]
+fn rejects_129_props_before_sidecar_creation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let scene_path = scene(&root);
+    let art = snapshot(&root);
+    let document = Document {
+        props: (0..=super::MAX_PROPS)
+            .map(|index| Prop {
+                id: index as u64 + 1,
+                name: format!("Prop {index}"),
+                art: art.clone(),
+            })
+            .collect(),
+    };
+    assert!(document.validate("mesh.scene.yaml", REVISION).is_err());
+    assert!(document.placements().is_err());
+    assert!(save(&scene_path, Some(&document), None, REVISION).is_err());
+    assert!(!sidecar_path(&scene_path).unwrap().exists());
+}
+
+#[test]
+fn rejects_seven_distinct_appearance_identities() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let art = snapshot(&root);
+    let appearances = (0..7)
+        .map(|index| {
+            art.clone()
+                .with_tint([0.2 + index as f32 * 0.1, 1.0, 1.0, 1.0])
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let six_appearances = Document {
+        props: appearances[..6]
+            .iter()
+            .enumerate()
+            .map(|(index, art)| Prop {
+                id: index as u64 + 1,
+                name: format!("Appearance {index}"),
+                art: art.clone(),
+            })
+            .collect(),
+    };
+    assert!(six_appearances
+        .validate("mesh.scene.yaml", REVISION)
+        .is_ok());
+    let six_placements = six_appearances.placements().unwrap();
+    for (index, placement) in six_placements.iter().enumerate() {
+        for other in &six_placements[index + 1..] {
             assert!(!std::sync::Arc::ptr_eq(&placement.model, &other.model));
         }
     }
+    let seven_appearances = Document {
+        props: appearances
+            .iter()
+            .enumerate()
+            .map(|(index, art)| Prop {
+                id: index as u64 + 1,
+                name: format!("Appearance {index}"),
+                art: art.clone(),
+            })
+            .collect(),
+    };
+    assert!(seven_appearances
+        .validate("mesh.scene.yaml", REVISION)
+        .is_err());
+    assert!(seven_appearances.placements().is_err());
+}
+
+#[test]
+fn render_budget_accepts_the_limit_and_rejects_one_extra_draw() {
+    assert!(super::validate_render_budget(6, 3584).is_ok());
+    assert!(super::validate_render_budget(6, 3585).is_err());
+    assert!(super::validate_render_budget(7, 3584).is_err());
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let scene_path = scene(&root);
+    let accepted_art = snapshot_with_primitive_count(&root, 28);
+    let accepted = Document {
+        props: (0..128)
+            .map(|index| Prop {
+                id: index + 1,
+                name: format!("Draw {index}"),
+                art: accepted_art.clone(),
+            })
+            .collect(),
+    };
+    assert_eq!(
+        accepted_art.source_model_arc().source().primitives.len(),
+        28
+    );
+    assert!(accepted.validate("mesh.scene.yaml", REVISION).is_ok());
+    assert_eq!(accepted.placements().unwrap().len(), 128);
+
+    let over_budget_art = snapshot_with_primitive_count(&root, 29);
+    let over_budget = Document {
+        props: (0..128)
+            .map(|index| Prop {
+                id: index + 1,
+                name: format!("Draw {index}"),
+                art: over_budget_art.clone(),
+            })
+            .collect(),
+    };
+    assert_eq!(
+        over_budget_art.source_model_arc().source().primitives.len(),
+        29
+    );
+    assert!(over_budget.validate("mesh.scene.yaml", REVISION).is_err());
+    assert!(over_budget.placements().is_err());
+    assert!(save(&scene_path, Some(&over_budget), None, REVISION).is_err());
+    assert!(!sidecar_path(&scene_path).unwrap().exists());
 }
 
 #[test]
