@@ -425,6 +425,8 @@ impl Editor {
         Ok(guid)
     }
 
+    // Retain the legacy numeric-edit entry point for existing callers and Windows regressions.
+    #[allow(dead_code)]
     pub(crate) fn update_room_wall(
         &mut self,
         guid: &str,
@@ -432,10 +434,42 @@ impl Editor {
         center: [FP; 2],
         half_extents: [FP; 2],
     ) -> Result<(), String> {
+        self.update_room_wall_impl(guid, name, center, half_extents, None)
+    }
+
+    pub(crate) fn update_room_wall_checked(
+        &mut self,
+        guid: &str,
+        name: &str,
+        center: [FP; 2],
+        half_extents: [FP; 2],
+        expected_checksum: u64,
+        expected_wall: &RoomWall,
+    ) -> Result<(), String> {
+        self.update_room_wall_impl(guid, name, center, half_extents, Some((expected_checksum, expected_wall)))
+    }
+
+    fn update_room_wall_impl(
+        &mut self,
+        guid: &str,
+        name: &str,
+        center: [FP; 2],
+        half_extents: [FP; 2],
+        expected_source: Option<(u64, &RoomWall)>,
+    ) -> Result<(), String> {
         validate_room_wall_name(name)?;
         validate_room_wall_extents(half_extents)?;
         self.room_authoring_transaction("Update Room wall", |editor| {
+            if let Some((expected, _)) = expected_source {
+                let state = editor.call("sim.state", J::Null)?;
+                if state.get("checksum").and_then(orr_remote::wire::parse_checksum) != Some(expected) {
+                    return Err("Room wall source changed; read the current wall before applying".into());
+                }
+            }
             let wall = editor.room_wall_row(guid)?;
+            if expected_source.is_some_and(|(_, expected)| &wall.wall != expected) {
+                return Err("Room wall source changed; read the current wall before applying".into());
+            }
             if wall.wall.name == name
                 && wall.wall.center == center
                 && wall.wall.half_extents == half_extents
@@ -689,3 +723,7 @@ fn validate_room_wall_extents(half_extents: [FP; 2]) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "room_wall_update_checked_tests.rs"]
+mod room_wall_update_checked_tests;

@@ -31,6 +31,8 @@ impl EditorApp {
         #[cfg(feature = "room-authoring")]
         if self.room_authoring.wall_footprint_busy()
             || self.room_authoring.actor_placement_busy()
+            || self.room_authoring.wall_placement_busy()
+            || self.room_wall_placement_pointer_owned
             || self.room_wall_pointer_owned
             || self.room_actor_pointer_owned
         {
