@@ -1,4 +1,4 @@
-use crate::package_manager::{self, Plan};
+use crate::package_manager::{self, Plan, RemovalPlan, RemovalReceipt};
 use egui::Context;
 use orr_model_bindings::model_bindings::ModelKind;
 use orr_package::{Lock, PackagePreview};
@@ -8,6 +8,30 @@ use std::{
 };
 
 enum Completion {
+    RestorationPreviewed {
+        generation: u64,
+        root: PathBuf,
+        project_generation: u64,
+        receipt: RemovalReceipt,
+        result: Result<PackagePreview, String>,
+    },
+    Restored {
+        root: PathBuf,
+        project_generation: u64,
+        result: Result<Lock, String>,
+    },
+    RemovalPreviewed {
+        root: PathBuf,
+        project_generation: u64,
+        name: String,
+        result: Result<RemovalPlan, String>,
+    },
+    Removed {
+        receipt: Option<RemovalReceipt>,
+        root: PathBuf,
+        project_generation: u64,
+        result: Result<Lock, String>,
+    },
     Verified {
         root: PathBuf,
         project_generation: u64,
@@ -58,12 +82,21 @@ pub struct Panel {
     model_filter: String,
     verified: Option<Lock>,
     preview: Option<PreviewedPlan>,
+    removal_name: String,
+    removal_preview: Option<RemovalPlan>,
+    last_removal: Option<RemovalReceipt>,
+    restoration_preview: Option<PackagePreview>,
+    restoration_generation: u64,
     model_request: Option<ModelRequest>,
     pending: Option<Receiver<Completion>>,
+    removing: bool,
     model_import: crate::model_package_import_panel::Panel,
 }
 
 impl Panel {
+    pub(crate) fn removal_busy(&self) -> bool {
+        self.removing && self.pending.is_some()
+    }
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.model_import.busy()
     }
@@ -99,7 +132,16 @@ impl Panel {
     ) {
         self.select_project(project);
         self.select_source();
+        let was_mutating = self.removal_busy();
         self.poll();
+        if blocked_reason.is_some() {
+            self.removal_preview = None;
+            self.restoration_preview = None;
+            if !was_mutating {
+                self.restoration_generation = self.restoration_generation.saturating_add(1);
+                self.last_removal = None;
+            }
+        }
         let import_was_busy = self.model_import.busy();
         let import_report = self.model_import.poll(
             self.root.as_deref(),
@@ -208,6 +250,14 @@ impl Panel {
                     ui.label("Installed package bytes verified from this project's lock:");
                     lock_table(ui, "verified-installed-packages", lock);
                     ui.label("Select an entity, then use a verified model; binding save is separate.");
+                    ui.separator();
+                    ui.label("Remove a direct package selection (cached bytes and source files are retained):");
+                    for name in lock.direct.keys() {
+                        if ui.add_enabled(can_operate, egui::Button::new(format!("Select removal {name}"))).clicked() {
+                            self.removal_name = name.clone();
+                            self.removal_preview = None;
+                        }
+                    }
                     model_asset_buttons(
                         ui,
                         ModelBrowser { lock, filter: &mut self.model_filter },
@@ -217,6 +267,32 @@ impl Panel {
                         self.source.trim(),
                         (self.project_generation, self.source_generation),
                     );
+                }
+                ui.horizontal(|ui| {
+                    ui.label(format!("Removal selection: {}", self.removal_name));
+                    if ui.add_enabled(can_operate && self.verified.as_ref().is_some_and(|lock| lock.direct.contains_key(&self.removal_name)), egui::Button::new("Preview package removal")).clicked() { self.start_removal_preview(); }
+                    if ui.add_enabled(can_operate && self.removal_preview.is_some(), egui::Button::new("Remove previewed package")).clicked() { self.start_remove(); }
+                });
+                if let Some(plan) = &self.removal_preview {
+                    ui.label("Removal preview only; nothing has been deactivated. Remove revalidates saved Room references and unchanged files.");
+                    for (name, change) in &plan.preview.changes {
+                        if change.after.is_none() { ui.label(format!("Deactivate package: {name}")); }
+                        else if change.before.as_ref().is_some_and(|before| before.direct) && change.after.as_ref().is_some_and(|after| !after.direct) { ui.label(format!("Remains active as a dependency: {name}")); }
+                    }
+                    for name in plan.preview.candidate.packages.keys().filter(|name| !plan.preview.candidate.direct.contains_key(*name)) {
+                        ui.label(format!("Retained dependency: {name}"));
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(can_operate && self.last_removal.is_some(), egui::Button::new("Preview restoration")).clicked() { self.start_restoration_preview(); }
+                    if ui.add_enabled(can_operate && self.last_removal.is_some() && self.restoration_preview.is_some(), egui::Button::new("Restore last removal")).clicked() { self.start_restore(); }
+                });
+                if let Some(preview) = &self.restoration_preview {
+                    ui.label("Restoration preview only: restore the exact prior lock from retained cache, including its direct selections and dependencies.");
+                    for (name, change) in &preview.changes {
+                        if change.before.is_none() && change.after.is_some() { ui.label(format!("Reactivate cached package: {name}")); }
+                        if change.after.as_ref().is_some_and(|after| after.direct) && change.before.as_ref().is_none_or(|before| !before.direct) { ui.label(format!("Restore direct selection: {name}")); }
+                    }
                 }
                 if let Some(plan) = &self.preview {
                     if matching_preview {
@@ -238,7 +314,11 @@ impl Panel {
         if self.root != next_root {
             self.root = next_root;
             self.project_generation = self.project_generation.saturating_add(1);
+            self.last_removal = None;
+            self.restoration_preview = None;
             self.model_filter.clear();
+            self.removal_name.clear();
+            self.removal_preview = None;
             self.verified = None;
             self.preview = None;
             self.model_request = None;
@@ -252,6 +332,7 @@ impl Panel {
     fn select_source(&mut self) {
         let next_source = self.source.trim().to_owned();
         if self.source_identity != next_source {
+            self.removal_preview = None;
             self.source_identity = next_source;
             self.source_generation = self.source_generation.saturating_add(1);
             self.model_request = None;
@@ -267,12 +348,128 @@ impl Panel {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
+                self.removing = false;
                 self.status = "Package worker disconnected before returning a result.".into();
                 return;
             }
         };
         self.pending = None;
+        self.removing = false;
         match completion {
+            Completion::RestorationPreviewed {
+                generation,
+                root,
+                project_generation,
+                receipt,
+                result,
+            } => {
+                self.restoration_preview = None;
+                self.last_removal = None;
+                if self.root.as_ref() == Some(&root)
+                    && self.project_generation == project_generation
+                    && self.restoration_generation == generation
+                {
+                    match result {
+                        Ok(preview) if receipt.root() == root => {
+                            self.last_removal = Some(receipt);
+                            self.restoration_preview = Some(preview);
+                            self.status = "Restoration preview ready. Nothing changed; explicitly Restore last removal to reactivate the exact cached selection.".into();
+                        }
+                        Ok(_) => {
+                            self.status = "Restoration identity changed; receipt discarded.".into()
+                        }
+                        Err(error) => {
+                            self.status =
+                                format!("Restoration preview failed; receipt discarded: {error}")
+                        }
+                    }
+                } else {
+                    self.status =
+                        "Restoration preview belongs to a prior project; receipt discarded.".into();
+                }
+            }
+            Completion::Restored {
+                root,
+                project_generation,
+                result,
+            } => {
+                self.invalidate_package_cache();
+                if self.root.as_ref() == Some(&root)
+                    && self.project_generation == project_generation
+                {
+                    match result {
+                        Ok(lock) => {
+                            self.verified = Some(lock);
+                            self.status = "Package restoration complete. Exact prior selections restored from cache; source files were not needed.".into();
+                        }
+                        Err(error) => {
+                            self.status =
+                                format!("Package restoration failed; receipt discarded: {error}")
+                        }
+                    }
+                } else {
+                    self.status = match result {
+                    Ok(_) => format!("Package restoration completed for prior project {}; current inventory was not reused.",root.display()),
+                    Err(error) => format!("Package restoration for prior project {} failed: {error}",root.display()),
+                };
+                }
+            }
+
+            Completion::RemovalPreviewed {
+                root,
+                project_generation,
+                name,
+                result,
+            } => {
+                if self.root.as_ref() != Some(&root)
+                    || self.project_generation != project_generation
+                    || self.removal_name != name
+                {
+                    self.status = "Removal preview completed for a prior project or selection; it was discarded.".into();
+                } else {
+                    match result {
+                        Ok(plan) if plan.root == root && plan.name == name => {
+                            self.removal_preview = Some(plan);
+                            self.status = "Removal preview ready. Review deactivated and retained packages before explicit removal.".into();
+                        }
+                        Ok(_) => {
+                            self.removal_preview = None;
+                            self.status = "Removal preview identity changed; discarded.".into();
+                        }
+                        Err(error) => {
+                            self.removal_preview = None;
+                            self.status = format!("Package removal preview failed: {error}");
+                        }
+                    }
+                }
+            }
+            Completion::Removed {
+                receipt,
+                root,
+                project_generation,
+                result,
+            } => {
+                self.invalidate_package_cache();
+                if self.root.as_ref() == Some(&root)
+                    && self.project_generation == project_generation
+                {
+                    match result {
+                        Ok(lock) => {
+                            self.verified = Some(lock);
+                            self.last_removal = receipt;
+                            self.removal_name.clear();
+                            self.status = "Package removal complete. Verified inventory refreshed; cached bytes and source files retained.".into();
+                        }
+                        Err(error) => self.status = format!("Package removal failed: {error}"),
+                    }
+                } else {
+                    self.status = match result {
+                    Ok(_) => format!("Package removal completed for prior project {}; current state was not reused. Cached bytes and sources remain.", root.display()),
+                    Err(error) => format!("Package removal for prior project {} failed: {error}", root.display()),
+                };
+                }
+            }
+
             Completion::Verified {
                 root,
                 project_generation,
@@ -282,6 +479,7 @@ impl Panel {
             {
                 match result {
                     Ok(lock) => {
+                        self.removal_preview = None;
                         self.verified = Some(lock);
                         self.status =
                             "Installed package bytes match the project's validated lock.".into();
@@ -378,6 +576,9 @@ impl Panel {
     }
 
     fn invalidate_package_cache(&mut self) {
+        self.last_removal = None;
+        self.restoration_preview = None;
+        self.removal_preview = None;
         self.verified = None;
         self.preview = None;
         self.model_request = None;
@@ -406,10 +607,165 @@ impl Panel {
             })
     }
 
-    fn start_verify(&mut self) {
+    fn start_removal_preview(&mut self) {
         if self.busy() {
             return;
         }
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        if !self
+            .verified
+            .as_ref()
+            .is_some_and(|lock| lock.direct.contains_key(&self.removal_name))
+        {
+            return;
+        }
+        let name = self.removal_name.clone();
+        let project_generation = self.project_generation;
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("orr-package-remove-preview".into())
+            .spawn(move || {
+                let result = package_manager::plan_remove(&root, &name);
+                let _ = sender.send(Completion::RemovalPreviewed {
+                    root,
+                    project_generation,
+                    name,
+                    result,
+                });
+            }) {
+            Ok(_) => {
+                self.removal_preview = None;
+                self.pending = Some(receiver);
+                self.status =
+                    "Checking saved Room references and previewing package removal…".into();
+            }
+            Err(error) => self.status = format!("Cannot start removal preview: {error}"),
+        }
+    }
+
+    fn start_remove(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let Some(plan) = self.removal_preview.take() else {
+            return;
+        };
+        if self.root.as_ref() != Some(&plan.root) || self.removal_name != plan.name {
+            self.status = "Project or selection changed; preview removal again.".into();
+            return;
+        }
+        self.model_request = None;
+        self.last_removal = None;
+        self.restoration_preview = None;
+        let project_generation = self.project_generation;
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("orr-package-remove".into())
+            .spawn(move || {
+                let (result, receipt) = match package_manager::apply_remove_with_receipt(&plan) {
+                    Ok((lock, receipt)) => (Ok(lock), Some(receipt)),
+                    Err(error) => (Err(error), None),
+                };
+                let root = plan.root;
+                let _ = sender.send(Completion::Removed {
+                    receipt,
+                    root,
+                    project_generation,
+                    result,
+                });
+            }) {
+            Ok(_) => {
+                self.pending = Some(receiver);
+                self.removing = true;
+                self.status =
+                    "Removing the previewed direct selection with locked revalidation…".into();
+            }
+            Err(error) => self.status = format!("Cannot start package removal: {error}"),
+        }
+    }
+
+    fn start_restoration_preview(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let Some(receipt) = self.last_removal.take() else {
+            return;
+        };
+        if self.root.as_deref() != Some(receipt.root()) {
+            self.restoration_preview = None;
+            return;
+        }
+        let root = receipt.root().to_path_buf();
+        let project_generation = self.project_generation;
+        let generation = self.restoration_generation;
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("orr-package-restore-preview".into())
+            .spawn(move || {
+                let result = package_manager::plan_restore(&receipt);
+                let _ = sender.send(Completion::RestorationPreviewed {
+                    generation,
+                    root,
+                    project_generation,
+                    receipt,
+                    result,
+                });
+            }) {
+            Ok(_) => {
+                self.restoration_preview = None;
+                self.pending = Some(receiver);
+                self.status = "Checking the successful removal receipt and retained cache…".into();
+            }
+            Err(error) => self.status = format!("Cannot start restoration preview: {error}"),
+        }
+    }
+
+    fn start_restore(&mut self) {
+        if self.busy() || self.restoration_preview.is_none() {
+            return;
+        }
+        let Some(receipt) = self.last_removal.take() else {
+            return;
+        };
+        self.restoration_preview = None;
+        if self.root.as_deref() != Some(receipt.root()) {
+            return;
+        }
+        self.model_request = None;
+        self.removal_preview = None;
+        let root = receipt.root().to_path_buf();
+        let project_generation = self.project_generation;
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("orr-package-restore".into())
+            .spawn(move || {
+                let result = package_manager::apply_restore(receipt);
+                let _ = sender.send(Completion::Restored {
+                    root,
+                    project_generation,
+                    result,
+                });
+            }) {
+            Ok(_) => {
+                self.pending = Some(receiver);
+                self.removing = true;
+                self.status =
+                    "Restoring the exact prior package selection with locked revalidation…".into();
+            }
+            Err(error) => self.status = format!("Cannot start package restoration: {error}"),
+        }
+    }
+
+    fn start_verify(&mut self) {
+        self.removal_preview = None;
+        if self.busy() {
+            return;
+        }
+        self.last_removal = None;
+        self.restoration_preview = None;
+        self.restoration_generation = self.restoration_generation.saturating_add(1);
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before verifying packages.".into();
             return;
@@ -471,6 +827,9 @@ impl Panel {
     }
 
     fn start_add(&mut self) {
+        self.last_removal = None;
+        self.restoration_preview = None;
+        self.removal_preview = None;
         if self.busy() {
             return;
         }
@@ -1031,5 +1390,236 @@ mod tests {
             panel.take_model_asset_request(),
             Some(("art".into(), "hero.glb".into(), ModelKind::Animated))
         );
+    }
+    #[test]
+    fn stale_removal_completion_never_installs_prior_project_inventory() {
+        let mut panel = panel_with_cached_state();
+        let (sender, receiver) = mpsc::channel();
+        panel.pending = Some(receiver);
+        sender
+            .send(Completion::Removed {
+                receipt: None,
+                root: panel.root.clone().unwrap(),
+                project_generation: panel.project_generation,
+                result: Ok(empty_lock()),
+            })
+            .unwrap();
+        panel.select_project(Some(Path::new("C:/rooms/new")));
+        panel.poll();
+        assert!(panel.verified.is_none());
+        assert!(panel.status.contains("prior project"));
+        assert!(!panel.busy());
+    }
+
+    #[test]
+    fn removal_dispatch_requires_idle_verified_direct_selection() {
+        let mut panel = panel_with_cached_state();
+        panel.removal_name = "not-direct".into();
+        panel.start_removal_preview();
+        assert!(!panel.busy());
+        let (_sender, receiver) = mpsc::channel();
+        panel.pending = Some(receiver);
+        panel.start_remove();
+        assert!(panel.busy());
+        assert!(panel.removal_preview.is_none());
+    }
+
+    #[test]
+    fn project_change_clears_removal_selection() {
+        let mut panel = panel_with_cached_state();
+        panel.removal_name = "old-package".into();
+        panel.select_project(Some(Path::new("C:/rooms/new")));
+        assert!(panel.removal_name.is_empty());
+        assert!(panel.removal_preview.is_none());
+        assert!(panel.verified.is_none());
+    }
+    #[test]
+    fn mutating_removal_freezes_editor_input_through_completion_frame() {
+        use crate::{Editor, EditorApp, HostSpec, Mode};
+        use egui_kittest::{kittest::Queryable, Harness};
+        use orr_sample::{
+            room_game::{RoomConfig, RoomEscapeV1},
+            room_project,
+        };
+        for restoring in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("room.scene.yaml");
+            let simulation =
+                orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, room_project::SEED);
+            let text = orr_reflect::Scene::unbake(&room_project::types(), simulation.frame(), None)
+                .unwrap()
+                .to_yaml();
+            std::fs::write(&path, &text).unwrap();
+            let mut editor = Editor::start(&HostSpec::PreparedRoom {
+                scene: path.clone(),
+                text,
+                listen: None,
+                debug_hooks: false,
+            })
+            .unwrap();
+            editor.sync();
+            let checksum = editor.checksum();
+            let history = editor.history().clone();
+            let before = std::fs::read(&path).unwrap();
+            let mut h = Harness::builder()
+                .with_size([1200.0, 800.0])
+                .build_eframe(move |_| EditorApp::new(editor, None));
+            h.run_steps(3);
+            // Queue a real stale accessibility action before activating the held worker.
+            h.get_by_label(crate::app::LBL_PLAY).click_accesskit();
+            let (sender, receiver) = mpsc::channel();
+            h.state_mut().package_manager.pending = Some(receiver);
+            h.state_mut().package_manager.removing = true;
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+            h.key_press(egui::Key::Delete);
+            h.run_steps(3);
+            assert!(h.query_by_label(crate::app::LBL_PLAY).is_none());
+            assert!(h.query_by_label(crate::app::LBL_STEP).is_none());
+            assert_eq!(h.state().editor.mode(), Mode::Edit);
+            assert_eq!(h.state().editor.checksum(), checksum);
+            assert_eq!(h.state().editor.history(), &history);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            sender
+                .send(if restoring {
+                    Completion::Restored {
+                        root: temp.path().into(),
+                        project_generation: 0,
+                        result: Err("held restore worker released".into()),
+                    }
+                } else {
+                    Completion::Removed {
+                        receipt: None,
+                        root: temp.path().into(),
+                        project_generation: 0,
+                        result: Err("held test worker released".into()),
+                    }
+                })
+                .unwrap();
+            h.run_steps(1);
+            assert!(!h.state().package_manager.removal_busy());
+            assert!(
+                h.query_by_label(crate::app::LBL_PLAY).is_none(),
+                "completion frame must remain frozen"
+            );
+            h.run_steps(2);
+            assert!(h.query_by_label(crate::app::LBL_PLAY).is_some());
+            assert_eq!(h.state().editor.mode(), Mode::Edit);
+            assert_eq!(h.state().editor.checksum(), checksum);
+        }
+    }
+    #[test]
+    fn restoration_dispatch_requires_successful_receipt_and_explicit_preview() {
+        let mut panel = panel_with_cached_state();
+        panel.start_restoration_preview();
+        panel.start_restore();
+        assert!(!panel.busy());
+        assert!(panel.last_removal.is_none());
+        assert!(panel.restoration_preview.is_none());
+    }
+    #[test]
+    fn fresh_verification_discards_real_removal_receipt_and_restoration_preview() {
+        use orr_sample::{
+            room_game::{RoomConfig, RoomEscapeV1},
+            room_project,
+        };
+        use std::{
+            fs,
+            time::{Duration, Instant},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("room");
+        let source = temp.path().join("source");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&source).unwrap();
+        let simulation =
+            orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, room_project::SEED);
+        let scene = orr_reflect::Scene::unbake(&room_project::types(), simulation.frame(), None)
+            .unwrap()
+            .to_yaml();
+        fs::write(root.join("room.scene.yaml"), scene).unwrap();
+        fs::write(root.join("orr.project.json"),r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json"}}"#).unwrap();
+        fs::write(
+            root.join("room.models.json"),
+            r#"{"version":2,"scene":"room.scene.yaml","project":".","bindings":{}}"#,
+        )
+        .unwrap();
+        fs::write(source.join("LICENSE.txt"), "Owned fixture").unwrap();
+        fs::write(source.join("orr.package.json"),r#"{"schema":1,"name":"unused","version":"1.0.0","engine":"*","capabilities":[],"dependencies":{},"files":["LICENSE.txt"]}"#).unwrap();
+        orr_package::Project::open_for_install(
+            &root,
+            orr_package::Runtime::content_only().engine_version,
+        )
+        .unwrap()
+        .install(&[
+            source,
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/imported_scene_demo")
+                .canonicalize()
+                .unwrap(),
+        ])
+        .unwrap();
+        let admitted = room_project::PreparedScene::parse(
+            &fs::read_to_string(root.join("room.scene.yaml")).unwrap(),
+        )
+        .unwrap();
+        let player = admitted
+            .frame()
+            .entities()
+            .find(|entity| {
+                admitted
+                    .frame()
+                    .get::<orr_sample::room_game::RoomActor>(*entity)
+                    .is_some_and(|actor| actor.kind == orr_sample::room_game::PLAYER)
+            })
+            .unwrap();
+        let guid = admitted.index().guid(player).unwrap().to_string();
+        let loaded = orr_model_bindings::model_bindings::load_asset(
+            &root,
+            "sample-imported-scene",
+            "foreground.glb",
+        )
+        .unwrap();
+        let binding = orr_model_bindings::model_bindings::Binding::from_asset(
+            "sample-imported-scene".into(),
+            "foreground.glb".into(),
+            &loaded,
+            orr_model_bindings::model_bindings::LocalTransform::default(),
+        )
+        .unwrap();
+        let document = orr_model_bindings::model_bindings::Document {
+            version: 2,
+            scene: "room.scene.yaml".into(),
+            project: ".".into(),
+            bindings: [(guid, binding)].into_iter().collect(),
+        };
+        fs::write(
+            root.join("room.models.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let plan = package_manager::plan_remove(&root, "unused").unwrap();
+        let (_, receipt) = package_manager::apply_remove_with_receipt(&plan).unwrap();
+        let preview = package_manager::plan_restore(&receipt).unwrap();
+        let mut panel = Panel {
+            root: Some(root),
+            last_removal: Some(receipt),
+            restoration_preview: Some(preview),
+            ..Panel::default()
+        };
+        let generation = panel.restoration_generation;
+        panel.start_verify();
+        assert!(panel.last_removal.is_none());
+        assert!(panel.restoration_preview.is_none());
+        assert!(panel.restoration_generation > generation);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while panel.busy() {
+            panel.poll();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(panel.last_removal.is_none());
+        assert!(panel.restoration_preview.is_none());
+        assert!(panel.verified.is_some());
     }
 }

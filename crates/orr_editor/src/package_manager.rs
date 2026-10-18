@@ -1,3 +1,9 @@
+mod removal;
+pub use removal::{
+    apply_remove, apply_remove_with_receipt, apply_restore, plan_remove, plan_restore, RemovalPlan,
+    RemovalReceipt,
+};
+
 use orr_package::{Lock, LockedPackage, PackagePreview, Project, Runtime};
 use std::{
     collections::BTreeSet,

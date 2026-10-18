@@ -381,6 +381,13 @@ impl EditorApp {
         { false }
     }
 
+    fn package_removal_pending(&self) -> bool {
+        #[cfg(feature="package-manager")]
+        { self.package_manager.removal_busy() }
+        #[cfg(not(feature="package-manager"))]
+        { false }
+    }
+
     fn package_work_pending(&self) -> bool {
         #[cfg(feature="package-manager")]
         { self.package_manager.busy() }
@@ -826,6 +833,17 @@ impl eframe::App for EditorApp {
         }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
         self.editor.pump();
+        #[cfg(feature="package-manager")]
+        if self.package_removal_pending() {
+            // Freeze the whole input frame, including the completion frame: no
+            // keyboard, AccessKit, scene/model/camera or history action dispatch.
+            self.editor.release_control();
+            let root = self.package_manager_root();
+            ui.label("Package selection change is committing; authoring and playback are paused until it completes.");
+            self.package_manager.show(&ctx, root.as_deref(), Some("Wait for package selection change completion before editing, saving or playing"));
+            ctx.request_repaint_after(std::time::Duration::from_millis(40));
+            return;
+        }
         #[cfg(feature="mesh-hazards")]
         {
             // Preserve ownership across sync/cancellation so this frame's pointer
@@ -926,6 +944,7 @@ impl eframe::App for EditorApp {
             let root = self.package_manager_root();
             let blocked = self.package_manager_blocker();
             self.package_manager.show(&ctx,root.as_deref(),blocked.as_deref());
+            if self.package_removal_pending() { ctx.request_repaint(); return; }
             self.package_model_request();
         }
         #[cfg(feature="room-authoring")]
@@ -1148,6 +1167,7 @@ impl EditorApp {
     // Modal pointer capture does not block accessibility actions. Check both widget
     // availability and the action entry point before starting or advancing playback.
     fn playback_start_blocker(&self) -> Option<String> {
+        if self.package_removal_pending() { return Some("Wait for package selection change completion before Play or Step".into()); }
         if self.hazard_pick_busy() { return Some("Finish or cancel hazard center picking before Play or Step".into()); }
         if self.hazard_export_busy() { return Some("Wait for hazard export completion before Play or Step".into()); }
         #[cfg(feature="mesh-mission")]
@@ -1170,6 +1190,7 @@ impl EditorApp {
     }
 
     fn save(&mut self) {
+        if self.package_removal_pending() { self.editor.error("Wait for package selection change completion before saving"); return; }
         if self.hazard_pick_busy() { self.editor.error("Finish or cancel hazard center picking before saving"); return; }
         if self.hazard_export_busy() { self.editor.error("Wait for hazard export completion before saving"); return; }
         #[cfg(feature="mesh-mission")]
