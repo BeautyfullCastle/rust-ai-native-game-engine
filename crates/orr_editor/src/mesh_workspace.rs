@@ -18,6 +18,10 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const BLANK_SCENE: &[u8] = b"schema: orr.scene/1\nsingletons: {}\nentities: {}\n";
 
+#[cfg(feature = "mesh-mission")]
+#[path = "mesh_workspace/mission.rs"]
+pub(crate) mod mission;
+
 #[cfg(all(windows, target_arch = "x86_64"))]
 #[path = "mesh_workspace/copy.rs"]
 pub(crate) mod copy;

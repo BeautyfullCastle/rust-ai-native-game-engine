@@ -235,6 +235,8 @@ pub struct EditorApp {
     mesh_hud: crate::mesh_hud_panel::Panel,
     #[cfg(feature="mesh-mission")]
     mesh_mission: crate::mesh_mission_panel::Panel,
+    #[cfg(feature="mesh-mission")]
+    mesh_game_creator: crate::mesh_game_creator::Panel,
     #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))]
     mesh_copy: crate::mesh_workspace::copy_panel::Panel,
     #[cfg(feature = "mesh-animated-models")]
@@ -275,7 +277,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -352,6 +354,13 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_workspace_blocker(&self) -> Option<String> {
+        #[cfg(feature="mesh-mission")]
+        if self.mesh_game_creator.busy() { return Some("Finish or cancel new mesh game creation before changing workspaces".into()); }
+        self.mesh_workspace_base_blocker()
+    }
+
+    #[cfg(feature="mesh-navigation")]
+    fn mesh_workspace_base_blocker(&self) -> Option<String> {
         #[cfg(all(windows,target_arch="x86_64"))]
         if self.mesh_copy.busy() { return Some("Finish the mesh workspace duplicate before switching workspaces".into()); }
         #[cfg(feature="mesh-export")]
@@ -534,8 +543,44 @@ impl EditorApp {
         }
     }
 
+    #[cfg(feature="mesh-mission")]
+    fn create_mesh_game(&mut self, path: &std::path::Path, settings: &crate::mesh_workspace::mission::Settings) -> bool {
+        let candidate = (|| -> Result<Self, String> {
+            if let Some(blocked) = self.mesh_workspace_base_blocker() { return Err(blocked); }
+            let original = self.editor.mesh_workspace_source_stamp()?;
+            let editor = crate::mesh_workspace::mission::prepare(path, settings)?;
+            let mut replacement = Self::new(editor, self.render_state.clone());
+            replacement.sync_mesh_presentation();
+            if let Some(blocked) = replacement.mesh_presentation_blocker() { return Err(blocked); }
+            replacement.viewport_hdr_disabled = self.viewport_hdr_disabled;
+            if let Some(blocked) = self.mesh_workspace_base_blocker() { return Err(blocked); }
+            if self.editor.mesh_workspace_source_stamp()? != original {
+                return Err("Current document changed during new game preparation; save it before retrying".into());
+            }
+            Ok(replacement)
+        })();
+        match candidate {
+            Ok(mut replacement) => {
+                self.mesh_game_creator.succeeded();
+                replacement.gpu = self.gpu.take();
+                replacement.gpu3d = self.gpu3d.take();
+                replacement.editor.info(format!("New mesh game ready: {}. Play follows the authored route; customize it in Mesh mission.", path.display()));
+                *self = replacement;
+                true
+            }
+            Err(error) => {
+                let message = format!("Current workspace retained; cannot create {}: {error}. Any fully created scene is retained.", path.display());
+                self.mesh_game_creator.failed(message.clone());
+                self.editor.error(message);
+                false
+            }
+        }
+    }
+
     #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
     fn windows_project_blocker(&self) -> Option<String> {
+        #[cfg(feature="mesh-mission")]
+        if self.mesh_game_creator.busy() { return Some("Finish or cancel new mesh game creation before changing projects".into()); }
         #[cfg(feature="package-manager")]
         if self.package_manager.busy() {
             return Some("Finish the content package operation before changing projects".into());
@@ -759,6 +804,14 @@ impl eframe::App for EditorApp {
             self.ui.body_drag = None;
         }
         self.dialogs(&ctx);
+        #[cfg(feature="mesh-mission")]
+        {
+            let blocked = self.mesh_workspace_base_blocker();
+            if let Some((path, settings)) = self.mesh_game_creator.show(&ctx, blocked.as_deref()) {
+                self.create_mesh_game(&path, &settings);
+                ctx.request_repaint();
+            }
+        }
         #[cfg(feature="package-manager")]
         if self.editor.game().is_room() {
             let root = self.package_manager_root();
@@ -897,6 +950,8 @@ impl EditorApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        #[cfg(feature="mesh-mission")]
+        if self.mesh_game_creator.busy() { return; }
         #[cfg(feature="mesh-navigation")]
         if self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() { return; }
         if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
@@ -934,12 +989,21 @@ impl EditorApp {
 
     fn top_bar(&mut self, ui: &mut Ui) {
         let mutable = self.editor.can_mutate() && self.editor.previewing().is_none();
+        #[cfg(feature="mesh-mission")]
+        let mutable = mutable && !self.mesh_game_creator.busy();
         #[cfg(feature="mesh-navigation")]
         let mutable = mutable && !self.mesh_navigation.prop_gesture_busy() && !self.mesh_navigation.agent_pick_busy() && !self.mesh_navigation.geometry_vertex_busy() && !self.mesh_mission_pick_busy();
         let live = self.editor.down().is_none();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if !(mutable) { ui.disable(); }
+                #[cfg(feature="mesh-mission")]
+                if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
+                    && ui.add_enabled(self.mesh_workspace_blocker().is_none(), egui::Button::new("New mesh game\u{2026}")).clicked() {
+                    self.mesh_game_creator.open();
+                    self.editor.release_control();
+                    ui.close();
+                }
                 #[cfg(feature="mesh-navigation")]
                 if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
                     && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("New mesh scene\u{2026}")).clicked() {
@@ -2389,6 +2453,10 @@ pub fn write_png(path: &std::path::Path, image: &egui::ColorImage) -> Result<(),
     let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
     writer.write_image_data(&bytes).map_err(|e| e.to_string())
 }
+
+#[cfg(all(test, feature="mesh-mission"))]
+#[path = "app/mesh_game_creator_tests.rs"]
+mod mesh_game_creator_tests;
 
 #[cfg(test)]
 mod screenshot_tests {
