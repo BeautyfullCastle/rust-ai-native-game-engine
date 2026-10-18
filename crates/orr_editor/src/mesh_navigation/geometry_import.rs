@@ -134,7 +134,7 @@ fn append_primitive(
         local_to_graph.push(index);
     }
 
-    for source_face in primitive.indices.chunks_exact(3) {
+    for source_face in primitive.indices.as_chunks::<3>().0 {
         let mut face = source_face
             .iter()
             .map(|index| {
