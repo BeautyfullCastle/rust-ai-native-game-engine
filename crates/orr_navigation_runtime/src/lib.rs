@@ -2,6 +2,8 @@
 #![deny(clippy::float_arithmetic)]
 #![deny(clippy::disallowed_types)]
 
+#[cfg(feature = "mesh-hazards")]
+pub mod hazards;
 pub mod mesh;
 
 use bytemuck::{Pod, Zeroable};

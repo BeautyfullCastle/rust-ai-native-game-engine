@@ -17,6 +17,7 @@ collect-dodge = ["sample-host", "orr_sample/collect-dodge"]
 navigation = ["sample-host", "dep:orr_games", "orr_games/navigation", "dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
 mesh-navigation = ["sample-host", "dep:orr_games", "orr_games/mesh-navigation", "dep:orr_navigation_runtime", "dep:orr_navigation"]
 mesh-mission = ["mesh-navigation", "orr_games/mesh-mission"]
+mesh-hazards = ["mesh-mission", "orr_games/mesh-hazards"]
 terrain-physics = ["sample-host", "dep:orr_games", "orr_games/terrain-physics", "dep:orr_terrain_physics3d", "dep:orr_terrain"]
 default = ["sample-host"]
 # The headless host binary `orr_remote_host` (PhysGame from `orr_sample`).
@@ -77,3 +78,8 @@ name = "orr_mesh"
 path = "src/bin/orr_mesh.rs"
 test = false
 required-features = ["mesh-navigation"]
+
+[[bin]]
+name = "orr_mesh_hazards"
+path = "src/bin/orr_mesh_hazards.rs"
+required-features = ["mesh-hazards"]

@@ -456,6 +456,47 @@ impl StaticMeshGraph {
             .ok_or(NavigationError::InvalidSegment)
     }
 
+    /// Returns the traversed portion of a path, retaining every crossed portal.
+    ///
+    /// Endpoints use the same fixed-point sampling as [`Self::point_at_distance`],
+    /// and segment boundaries use the same rounded-up lengths. Negative or
+    /// reversed distances are invalid; distances beyond the goal clamp to it.
+    /// Consecutive duplicate positions are omitted, so stationary movement is
+    /// represented by one point. The result has at most `path.points.len()`
+    /// points (and therefore stays bounded for callers with bounded paths).
+    pub fn movement_polyline(
+        &self,
+        path: &MeshPath,
+        from_distance: FP,
+        to_distance: FP,
+    ) -> Result<Vec<[FP; 3]>, NavigationError> {
+        self.validate_path(path)?;
+        if from_distance.raw() < 0 || to_distance < from_distance {
+            return Err(NavigationError::InvalidDistance);
+        }
+        let start = self.point_at_distance(path, from_distance)?;
+        let end = self.point_at_distance(path, to_distance)?;
+        let mut points = vec![start];
+        let from_raw = from_distance.raw() as u128;
+        let to_raw = to_distance.raw() as u128;
+        let mut traversed = 0u128;
+        for pair in path.points.windows(2) {
+            traversed = traversed
+                .checked_add(u128::from(distance_ceil(pair[0], pair[1])))
+                .ok_or(NavigationError::NumericLimit)?;
+            if traversed >= to_raw {
+                break;
+            }
+            if traversed > from_raw && points.last() != Some(&pair[1]) {
+                points.push(pair[1]);
+            }
+        }
+        if points.last() != Some(&end) {
+            points.push(end);
+        }
+        Ok(points)
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MESH_MAGIC);

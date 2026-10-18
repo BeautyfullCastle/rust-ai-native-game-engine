@@ -154,3 +154,26 @@ fn replaying_the_same_goal_input_sequence_has_identical_frame_checksums() {
         assert_eq!(first.checksum(), second.checksum());
     }
 }
+
+#[cfg(feature = "mesh-mission")]
+#[test]
+fn legacy_mesh_mission_checksum_is_unchanged_by_hazard_feature() {
+    let mut sim = simulation(53);
+    let mut actual = vec![sim.checksum()];
+    for goal in [
+        [FP::ZERO, FP::ZERO, FP::from_int(4)],
+        [FP::from_int(4), FP::ZERO, FP::ZERO],
+    ] {
+        tick(&mut sim, 1, &[(0, request(goal))]);
+        actual.push(sim.checksum());
+    }
+    // Captured from e1ba3ea with mesh-mission, before hazard implementation.
+    assert_eq!(
+        actual,
+        [
+            14079670917705819130,
+            15298626416119841259,
+            11243942499133049614
+        ]
+    );
+}

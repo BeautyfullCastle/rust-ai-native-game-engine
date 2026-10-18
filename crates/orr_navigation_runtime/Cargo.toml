@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 default = []
+mesh-hazards = []
 
 [dependencies]
 orr_ecs = { path = "../orr_ecs" }
