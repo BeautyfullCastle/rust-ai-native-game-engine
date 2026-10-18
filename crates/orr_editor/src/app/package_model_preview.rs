@@ -16,6 +16,12 @@ pub(super) struct PreviewWindow {
     texture: Option<egui::TextureId>,
     rendered_size: (u32, u32),
     render_error: Option<String>,
+    #[cfg(feature = "room-animated-models")]
+    clip_index: String,
+    #[cfg(feature = "room-animated-models")]
+    seconds: String,
+    #[cfg(feature = "room-animated-models")]
+    sample_error: Option<String>,
 }
 
 impl PreviewWindow {
@@ -27,16 +33,122 @@ impl PreviewWindow {
         self.render_error = None;
     }
 
+    #[cfg(feature = "room-animated-models")]
+    fn reset_animation_controls(&mut self) {
+        self.clip_index = "0".into();
+        self.seconds = "0".into();
+        self.sample_error = None;
+    }
+
     fn close(&mut self) {
         self.state.close();
+        #[cfg(feature = "room-animated-models")]
+        self.reset_animation_controls();
         self.release_gpu();
         self.camera.reset();
     }
 
     fn request(&mut self, request: PreviewRequest) {
+        #[cfg(feature = "room-animated-models")]
+        self.reset_animation_controls();
         self.release_gpu();
         self.camera.reset();
         self.state.request(request);
+    }
+
+    #[cfg(feature = "room-animated-models")]
+    fn animation_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        let Some(ready) = self.state.ready() else {
+            return false;
+        };
+        let Some(model) = ready.loaded.animated_model() else {
+            return false;
+        };
+        let clips: Vec<_> = model
+            .source()
+            .clips
+            .iter()
+            .enumerate()
+            .map(|(index, clip)| (index, clip.name.clone(), clip.duration()))
+            .collect();
+        let label = self
+            .clip_index
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| clips.get(index))
+            .map_or_else(
+                || "Choose a valid clip".to_owned(),
+                |(index, name, _)| format!("{index}: {name}"),
+            );
+        egui::ComboBox::from_label("Preview animation clip")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                for (index, name, duration) in &clips {
+                    ui.selectable_value(
+                        &mut self.clip_index,
+                        index.to_string(),
+                        format!("{index}: {name} ({duration:.2}s)"),
+                    );
+                }
+            });
+        ui.horizontal(|ui| {
+            let index_label = ui.label("Preview clip index");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.clip_index)
+                    .desired_width(60.0)
+                    .char_limit(10),
+            )
+            .labelled_by(index_label.id);
+            let time_label = ui.label("Preview seconds");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.seconds)
+                    .desired_width(90.0)
+                    .char_limit(40),
+            )
+            .labelled_by(time_label.id);
+        });
+        let mut changed = false;
+        if ui.button("Sample preview pose").clicked() {
+            let result = (|| {
+                let index = self
+                    .clip_index
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| "Clip index must be a nonnegative integer".to_owned())?;
+                let seconds = self
+                    .seconds
+                    .trim()
+                    .parse::<f32>()
+                    .map_err(|_| "Preview seconds must be a finite number".to_owned())?;
+                self.state.sample(index, seconds)
+            })();
+            match result {
+                Ok(()) => {
+                    self.sample_error = None;
+                    changed = true;
+                }
+                Err(error) => self.sample_error = Some(error),
+            }
+        }
+        if let Some(error) = &self.sample_error {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!("Preview sample refused: {error}"),
+            );
+        }
+        if let Some(accepted) = self
+            .state
+            .ready()
+            .and_then(|ready| ready.animation.as_ref())
+        {
+            ui.label(format!(
+                "Accepted preview pose: clip {} at {:.3}s",
+                accepted.clip_index, accepted.seconds
+            ));
+        }
+        ui.label("Pose sampling is explicit. The preview does not play or change model bindings.");
+        changed
     }
 
     fn show(&mut self, ctx: &egui::Context, render_state: Option<&egui_wgpu::RenderState>) {
@@ -47,9 +159,26 @@ impl PreviewWindow {
         if self.state.ready().is_none() {
             self.release_gpu();
         }
+        let animated = request.kind == crate::model_bindings::ModelKind::Animated;
+        let title = if animated {
+            "Animated package model preview"
+        } else {
+            "Static package model preview"
+        };
+        let close_label = if animated {
+            "Close animated preview"
+        } else {
+            "Close static preview"
+        };
+        let canvas_label = if animated {
+            "Animated package model preview canvas"
+        } else {
+            "Static package model preview canvas"
+        };
         let mut open = true;
         let mut close = false;
-        egui::Window::new("Static package model preview")
+        egui::Window::new(title)
+            .id(egui::Id::new("package-model-preview-window"))
             .open(&mut open)
             .default_pos(egui::pos2(1000.0, 70.0))
             .resizable(false)
@@ -67,23 +196,31 @@ impl PreviewWindow {
                     if ui.button("Reset preview view").clicked() {
                         changed |= self.camera.reset();
                     }
-                    close |= ui.button("Close static preview").clicked();
+                    close |= ui.button(close_label).clicked();
                 });
                 if close {
                     return;
+                }
+                #[cfg(feature = "room-animated-models")]
+                {
+                    changed |= self.animation_controls(ui);
                 }
                 let Some(ready) = self.state.ready() else {
                     return;
                 };
                 let Some(render_state) = render_state else {
-                    ui.label("A GPU is required to draw the static preview.");
-                    return;
-                };
-                let Some(model) = ready.loaded.static_model() else {
+                    ui.label("A GPU is required to draw the model preview.");
                     return;
                 };
                 let bounds = ready.bounds;
-                let model = model.clone();
+                let static_model = ready.loaded.static_model().cloned();
+                #[cfg(feature = "room-animated-models")]
+                let animated_model = ready.loaded.animated_model().cloned();
+                #[cfg(feature = "room-animated-models")]
+                let accepted_pose = ready
+                    .animation
+                    .as_ref()
+                    .map(|accepted| accepted.pose.clone());
                 let display_size = egui::vec2(448.0, 336.0);
                 let scale = ctx.pixels_per_point();
                 let size = bounded_size((
@@ -94,18 +231,41 @@ impl PreviewWindow {
                     let gpu = self
                         .gpu
                         .get_or_insert_with(|| GpuViewport3d::new(render_state, size));
-                    let placement = ModelPlacement {
-                        // Sentinel only: this empty preview scene has no host entity.
-                        entity: orr_ecs::Entity::NONE,
-                        model,
-                        instance: orr_render::StaticInstance::default(),
+                    let list = orr_render::RenderList3D::default();
+                    let camera = self.camera.camera(bounds, size);
+                    let result = if let Some(model) = static_model {
+                        let placement = ModelPlacement {
+                            // Sentinel only: this empty preview scene has no host entity.
+                            entity: orr_ecs::Entity::NONE,
+                            model,
+                            instance: orr_render::StaticInstance::default(),
+                        };
+                        gpu.render(size, &list, &camera, &[placement])
+                    } else {
+                        #[cfg(feature = "room-animated-models")]
+                        {
+                            match (animated_model, accepted_pose) {
+                                (Some(model), Some(pose)) => gpu.render_mixed(
+                                    size,
+                                    &list,
+                                    &camera,
+                                    &[],
+                                    &[crate::viewport3d::AnimatedPlacement {
+                                        entity: orr_ecs::Entity::NONE,
+                                        model,
+                                        instance: orr_render::math3::Mat4::IDENTITY.0,
+                                        pose,
+                                    }],
+                                ),
+                                _ => Err("No accepted animation pose is available".into()),
+                            }
+                        }
+                        #[cfg(not(feature = "room-animated-models"))]
+                        {
+                            Err("Animated preview requires room-animated-models".into())
+                        }
                     };
-                    match gpu.render(
-                        size,
-                        &orr_render::RenderList3D::default(),
-                        &self.camera.camera(bounds, size),
-                        &[placement],
-                    ) {
+                    match result {
                         Ok(texture) => {
                             self.texture = Some(texture);
                             self.rendered_size = size;
@@ -120,14 +280,14 @@ impl PreviewWindow {
                 if let Some(error) = &self.render_error {
                     ui.colored_label(
                         egui::Color32::YELLOW,
-                        format!("Static preview failed: {error}"),
+                        format!("Model preview failed: {error}"),
                     );
                 }
                 if let Some(texture) = self.texture {
                     let response = ui.add(
                         egui::Image::new((texture, display_size))
                             .sense(egui::Sense::drag())
-                            .alt_text("Static package model preview canvas"),
+                            .alt_text(canvas_label),
                     );
                     let mut moved = false;
                     if response.dragged_by(egui::PointerButton::Primary) {
@@ -155,6 +315,8 @@ impl PreviewWindow {
             // frame rather than invalidating an in-flight egui paint primitive.
             self.state.close();
             self.camera.reset();
+            #[cfg(feature = "room-animated-models")]
+            self.reset_animation_controls();
             ctx.request_repaint();
         }
     }
@@ -168,7 +330,7 @@ impl EditorApp {
             .package_model_preview
             .state
             .active_request()
-            .is_some_and(|request| !self.package_manager.static_preview_is_current(request))
+            .is_some_and(|request| !self.package_manager.preview_is_current(request))
         {
             self.package_model_preview.close();
         }
@@ -178,7 +340,7 @@ impl EditorApp {
     }
 
     pub(super) fn show_package_model_preview(&mut self, ctx: &egui::Context) {
-        if let Some(request) = self.package_manager.take_static_preview_request() {
+        if let Some(request) = self.package_manager.take_preview_request() {
             if self.package_manager_blocker().is_none() {
                 self.package_model_preview.request(request);
             }

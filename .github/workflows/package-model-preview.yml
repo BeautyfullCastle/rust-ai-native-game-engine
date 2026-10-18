@@ -43,7 +43,7 @@ jobs:
           evidence.mkdir(parents=True, exist_ok=False)
           # Unix symlink rejection test is excluded on Windows; all other tests are shared.
           for suite, count in (
-              ("package_model_preview", 19 if os.name == "nt" else 20),
+              ("package_model_preview", 20 if os.name == "nt" else 21),
           ):
               output = helpers["run_logged"](
                   ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "package-manager",

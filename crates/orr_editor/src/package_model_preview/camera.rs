@@ -1,4 +1,4 @@
-//! Finite static vertex bounds and view-only camera arithmetic.
+//! Finite model bounds and view-only camera arithmetic.
 use orr_model::StaticModel;
 use orr_render::{Camera3D, Projection};
 
@@ -31,6 +31,14 @@ impl PreviewBounds {
         }))
     }
 
+    #[cfg(feature = "room-animated-models")]
+    pub(super) fn from_animation(bounds: orr_model::animation::Bounds) -> Result<Self, String> {
+        if (0..3).any(|axis| bounds.min[axis] > bounds.max[axis]) {
+            return Err("animated preview bounds are inverted".into());
+        }
+        Self::from_points([bounds.min.map(f64::from), bounds.max.map(f64::from)])
+    }
+
     fn from_points(points: impl IntoIterator<Item = [f64; 3]>) -> Result<Self, String> {
         let mut minimum = [f64::INFINITY; 3];
         let mut maximum = [f64::NEG_INFINITY; 3];
@@ -40,11 +48,11 @@ impl PreviewBounds {
                 .iter()
                 .any(|value| !value.is_finite() || value.abs() > MAX_WORLD)
             {
-                return Err("static preview requires finite, bounded transformed vertices".into());
+                return Err("model preview requires finite, bounded transformed vertices".into());
             }
             count += 1;
             if count > orr_model::MAX_VERTICES {
-                return Err("static preview exceeds the admitted vertex limit".into());
+                return Err("model preview exceeds the admitted vertex limit".into());
             }
             for axis in 0..3 {
                 minimum[axis] = minimum[axis].min(point[axis]);
@@ -52,7 +60,7 @@ impl PreviewBounds {
             }
         }
         if count == 0 {
-            return Err("static preview has no vertices".into());
+            return Err("model preview has no vertices".into());
         }
         let center = std::array::from_fn(|axis| ((minimum[axis] + maximum[axis]) * 0.5) as f32);
         // The half-diagonal encloses the model at every orbit angle. Preserve a
