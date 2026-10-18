@@ -22,6 +22,10 @@ mod geometry;
 pub(crate) mod geometry_grid;
 #[path = "mesh_navigation/geometry_grid_panel.rs"]
 mod geometry_grid_panel;
+#[path = "mesh_navigation/geometry_import.rs"]
+mod geometry_import;
+#[path = "mesh_navigation/geometry_import_panel.rs"]
+mod geometry_import_panel;
 #[path = "mesh_navigation/geometry_panel.rs"]
 mod geometry_panel;
 #[path = "mesh_navigation/geometry_preview.rs"]
@@ -905,6 +909,10 @@ impl Panel {
         if let Some(reason) = self.geometry_blocker(editor) {
             return Err(reason);
         }
+        #[cfg(feature = "mesh-mission")]
+        if matches!(&action, geometry_panel::Action::ReplaceImportedSurface(_)) && self.mission_bound {
+            return Err("Remove the mesh mission before importing a replacement walkable surface; mission points are not silently rebound".into());
+        }
         self.geometry_bindings_blocker(editor, self.mission_reprojection_enabled())?;
         let profile = self.geometry_profile()?;
         if self.graph.as_ref().is_some_and(|graph| graph.profile() != profile) {
@@ -912,6 +920,12 @@ impl Panel {
         }
         let graph = match action {
             geometry_panel::Action::ReplaceGrid(grid) => geometry_grid::create(grid, profile)?,
+            geometry_panel::Action::ReplaceImportedSurface(graph) => {
+                if graph.profile() != profile {
+                    return Err("Imported walkable surface uses a different agent slope profile".into());
+                }
+                graph
+            }
             geometry_panel::Action::AppendQuad(quad) => geometry::append_quad(self.graph.as_ref(), profile, quad)?,
             geometry_panel::Action::MoveVertex { index, position } => geometry::move_vertex(self.graph.as_ref().ok_or("Create or open a mesh first")?, index, position)?,
             geometry_panel::Action::RemoveFace(index) => geometry::remove_face(self.graph.as_ref().ok_or("Create or open a mesh first")?, index)?,

@@ -1,4 +1,4 @@
-use super::{geometry_grid::Grid, geometry_grid_panel, parse_fixed};
+use super::{geometry_grid::Grid, geometry_grid_panel, geometry_import_panel, parse_fixed};
 use crate::mesh_navigation::geometry::{self, Quad};
 use egui::Ui;
 use orr_fp::FP;
@@ -7,9 +7,10 @@ use orr_navigation::{mesh::StaticMeshGraph, AgentProfile};
 const MAX_FIELD_BYTES: usize = 48;
 const MAX_VISIBLE_ROWS: usize = 128;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     ReplaceGrid(Grid),
+    ReplaceImportedSurface(StaticMeshGraph),
     AppendQuad(Quad),
     MoveVertex { index: u32, position: [FP; 3] },
     RemoveFace(u32),
@@ -24,6 +25,7 @@ pub struct Panel {
     pub vertex_position: [String; 3],
     pub face_index: String,
     grid: geometry_grid_panel::Panel,
+    import: geometry_import_panel::Panel,
     dirty: bool,
     observed_revision: Option<[u8; 32]>,
     revision_initialized: bool,
@@ -41,6 +43,7 @@ impl Default for Panel {
             vertex_position: ["0".into(), "0".into(), "0".into()],
             face_index: "0".into(),
             grid: geometry_grid_panel::Panel::default(),
+            import: geometry_import_panel::Panel::default(),
             dirty: false,
             observed_revision: None,
             revision_initialized: false,
@@ -66,6 +69,15 @@ impl Panel {
             .grid
             .show(ui, graph, profile, stale)
             .map(Action::ReplaceGrid);
+        if let Some(imported) = ui
+            .add_enabled_ui(!stale, |ui| {
+                self.import
+                    .show(ui, current_revision.unwrap_or([0; 32]), profile)
+            })
+            .inner
+        {
+            action = Some(Action::ReplaceImportedSurface(imported));
+        }
         if stale {
             ui.colored_label(
                 egui::Color32::YELLOW,
@@ -177,11 +189,12 @@ impl Panel {
     }
 
     pub fn dirty(&self) -> bool {
-        self.dirty || self.grid.dirty()
+        self.dirty || self.grid.dirty() || self.import.dirty()
     }
 
     pub fn acknowledge(&mut self) {
         self.grid.acknowledge();
+        self.import.acknowledge();
         self.dirty = false;
         self.observed_revision = None;
         self.revision_initialized = false;
