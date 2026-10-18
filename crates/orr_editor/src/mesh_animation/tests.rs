@@ -4,11 +4,15 @@ use std::path::Path;
 const GRAPH_REVISION: [u8; 32] = [0x5a; 32];
 
 fn fixture() -> Snapshot {
+    fixture_for_revision(GRAPH_REVISION)
+}
+
+fn fixture_for_revision(graph_revision: [u8; 32]) -> Snapshot {
     let package = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/animation_demo")
         .canonicalize()
         .unwrap();
-    Snapshot::from_package(&package, "animated.glb", "LICENSE.txt", GRAPH_REVISION).unwrap()
+    Snapshot::from_package(&package, "animated.glb", "LICENSE.txt", graph_revision).unwrap()
 }
 
 #[test]
@@ -19,8 +23,36 @@ fn animated_package_is_source_independent_and_scene_bound() {
     let reopened = Snapshot::decode_embedded(&bytes, "mesh.scene.yaml", GRAPH_REVISION).unwrap();
     assert_eq!(snapshot.clips(), reopened.clips());
     assert_eq!(snapshot.settings(), Settings::default());
+    let default_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(default_json["settings"].get("facing").is_none());
     assert!(Snapshot::decode_embedded(&bytes, "other.scene.yaml", GRAPH_REVISION).is_err());
     assert!(Snapshot::decode_embedded(&bytes, "mesh.scene.yaml", [0x13; 32]).is_err());
+}
+
+#[test]
+fn route_facing_roundtrips_and_old_sidecars_default_to_fixed() {
+    let snapshot = fixture();
+    let legacy_bytes = snapshot.encode_embedded("mesh.scene.yaml").unwrap();
+    let legacy =
+        Snapshot::decode_embedded(&legacy_bytes, "mesh.scene.yaml", GRAPH_REVISION).unwrap();
+    assert_eq!(legacy.settings().facing, crate::mesh_facing::Facing::Fixed);
+
+    let mut settings = snapshot.settings();
+    settings.facing = crate::mesh_facing::Facing::Route;
+    let route_facing = snapshot.clone().with_settings(settings).unwrap();
+    let bytes = route_facing.encode_embedded("mesh.scene.yaml").unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["settings"]["facing"], "route");
+    let reopened = Snapshot::decode_embedded(&bytes, "mesh.scene.yaml", GRAPH_REVISION).unwrap();
+    assert_eq!(
+        reopened.settings().facing,
+        crate::mesh_facing::Facing::Route
+    );
+
+    let mut unknown_value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    unknown_value["settings"]["facing"] = serde_json::json!("camera");
+    let unknown = serde_json::to_vec(&unknown_value).unwrap();
+    assert!(Snapshot::decode_embedded(&unknown, "mesh.scene.yaml", GRAPH_REVISION).is_err());
 }
 
 #[test]
@@ -71,6 +103,53 @@ fn animated_placement_is_deterministic_and_validates_pose() {
     assert_eq!(first.pose, second.pose);
     assert_eq!(first.instance, second.instance);
     assert_eq!(first.entity, entity);
+}
+
+#[test]
+fn route_facing_uses_current_validated_path_and_authored_rotation() {
+    use orr_navigation::{mesh::StaticMeshGraph, AgentProfile};
+    use orr_remote::mesh_navigation::{authoring::create_mesh_scene, mesh_from_view, AgentSpec};
+
+    let vertices = [
+        [orr_fp::FP::ZERO, orr_fp::FP::ZERO, orr_fp::FP::ZERO],
+        [orr_fp::FP::ZERO, orr_fp::FP::ZERO, orr_fp::FP::from_int(4)],
+        [orr_fp::FP::from_int(4), orr_fp::FP::ZERO, orr_fp::FP::ZERO],
+        [
+            orr_fp::FP::from_int(4),
+            orr_fp::FP::ZERO,
+            orr_fp::FP::from_int(4),
+        ],
+    ];
+    let graph =
+        StaticMeshGraph::bake(&vertices, &[[0, 1, 3], [0, 3, 2]], AgentProfile::default()).unwrap();
+    let spec = AgentSpec {
+        start: [orr_fp::FP::ONE, orr_fp::FP::ZERO, orr_fp::FP::ONE],
+        goal: [orr_fp::FP::from_int(3), orr_fp::FP::ZERO, orr_fp::FP::ONE],
+        max_vertical: orr_fp::FP::ZERO,
+        distance_per_tick: orr_fp::FP::from_ratio(1, 4),
+    };
+    let document = create_mesh_scene(&graph, spec).unwrap();
+    let view = mesh_from_view(orr_bridge::FrameView::of(document.frame())).unwrap();
+    let snapshot = fixture_for_revision(graph.revision());
+    let fixed = snapshot.placement_for_view(&view, 12).unwrap();
+    let mut settings = snapshot.settings();
+    settings.facing = crate::mesh_facing::Facing::Route;
+    settings.rotation = crate::mesh_rotation::from_degrees([0.0, 25.0, 0.0]).unwrap();
+    let route_snapshot = snapshot.clone().with_settings(settings).unwrap();
+    let route = route_snapshot.placement_for_view(&view, 12).unwrap();
+    let repeated = route_snapshot.placement_for_view(&view, 12).unwrap();
+    assert_ne!(route.instance, fixed.instance);
+    assert_eq!(route.instance, repeated.instance);
+    assert_eq!(route.pose, fixed.pose);
+    assert_eq!(route.entity, view.agent.entity);
+
+    let mismatched_snapshot = fixture_for_revision([0x23; 32]);
+    let mut mismatched_settings = mismatched_snapshot.settings();
+    mismatched_settings.facing = crate::mesh_facing::Facing::Route;
+    let mismatched = mismatched_snapshot
+        .with_settings(mismatched_settings)
+        .unwrap();
+    assert!(mismatched.placement_for_view(&view, 12).is_err());
 }
 
 #[test]

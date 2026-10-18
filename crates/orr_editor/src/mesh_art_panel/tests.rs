@@ -145,6 +145,48 @@ fn private_undo_redo_restores_agent_art_rotation_fields() {
 }
 
 #[test]
+fn route_facing_apply_undo_redo_and_sidecar_reopen_preserve_selection() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = static_package(&root);
+    let scene = root.join("facing.scene.yaml");
+    fs::write(&scene, b"scene\n").unwrap();
+    let fixed = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", [0x5a; 32]).unwrap();
+    let route = fixed
+        .clone()
+        .with_facing(crate::mesh_facing::Facing::Route)
+        .unwrap();
+    let mut panel = Panel::default();
+
+    panel.push_state(Some(fixed));
+    panel.saved_id = Some(panel.current_entry().unwrap().id);
+    assert!(!panel.dirty());
+    panel.face_route_direction = true;
+    assert!(panel.facing_form_dirty());
+    assert!(panel.dirty());
+    panel.face_route_direction = false;
+    assert!(!panel.facing_form_dirty());
+    assert!(!panel.dirty());
+    panel.push_state(Some(route.clone()));
+    assert!(panel.face_route_direction);
+    assert!(panel.dirty());
+    panel.undo();
+    assert!(!panel.face_route_direction);
+    panel.redo();
+    assert!(panel.face_route_direction);
+    assert_eq!(
+        panel.current_snapshot().unwrap().facing(),
+        crate::mesh_facing::Facing::Route
+    );
+
+    crate::mesh_art::save(&scene, Some(&route), None).unwrap();
+    fs::rename(&source, root.join("hidden-package-source")).unwrap();
+    let (reopened, _) = crate::mesh_art::load(&scene, [0x5a; 32]).unwrap().unwrap();
+    assert_eq!(reopened.facing(), crate::mesh_facing::Facing::Route);
+    assert!(reopened.encode_embedded("facing.scene.yaml").is_ok());
+}
+
+#[test]
 fn private_undo_redo_restores_agent_art_surface_settings() {
     let temporary = tempfile::tempdir().unwrap();
     let source = static_package(&temporary.path().canonicalize().unwrap());

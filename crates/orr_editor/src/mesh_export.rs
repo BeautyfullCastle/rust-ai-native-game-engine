@@ -37,6 +37,7 @@ const ANIMATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ANIMATION_V1";
 const SURFACE_RUNTIME_MARKER: &[u8] = b"ORR_MESH_SURFACE_V1";
 const LIGHTING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_LIGHTING_V1";
 const INPUT_RUNTIME_MARKER: &[u8] = b"ORR_MESH_INPUT_V1";
+const FACING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_FACING_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
@@ -46,6 +47,7 @@ const ANIMATION_RUNTIME_SECTION: &[u8; 8] = b".orranim";
 const SURFACE_RUNTIME_SECTION: &[u8; 8] = b".orrsurf";
 const LIGHTING_RUNTIME_SECTION: &[u8; 8] = b".orrlit\0";
 const INPUT_RUNTIME_SECTION: &[u8; 8] = b".orrctrl";
+const FACING_RUNTIME_SECTION: &[u8; 8] = b".orrface";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -155,6 +157,7 @@ fn export_with_profile(
     let mut requires_rotation = false;
     let mut requires_material = false;
     let mut requires_surface = false;
+    let mut requires_facing = false;
     let sidecar_bytes = match read_optional_bounded(
         &sidecar_path,
         orr_model::MAX_FILE_BYTES as u64,
@@ -170,6 +173,7 @@ fn export_with_profile(
                 art.tint() != [1.0, 1.0, 1.0, 1.0] || serialized_material_present(&bytes, false)?;
             requires_surface |=
                 art.surface().is_some() || serialized_surface_present(&bytes, false)?;
+            requires_facing |= serialized_facing_present(&bytes, false)?;
             if admitted_hash != digest(&bytes) {
                 return Err("mesh art sidecar changed during admission".into());
             }
@@ -322,6 +326,9 @@ fn export_with_profile(
             require_lighting: lighting_bytes.is_some(),
         },
     )?;
+    requires_facing |= optional_facing_present(props_bytes.as_deref(), true)?
+        || optional_facing_present(animation_bytes.as_deref(), false)?;
+    validate_runtime_facing(&runtime_bytes, requires_facing)?;
     validate_runtime_profile(&runtime_bytes, input_profile)?;
     let runtime_hash = digest(&runtime_bytes);
     let scene_name = scene_path
@@ -581,6 +588,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let mut requires_rotation = false;
     let mut requires_material = false;
     let mut requires_surface = false;
+    let mut requires_facing = false;
     match (
         &manifest.sidecar,
         read_optional_bounded(
@@ -600,6 +608,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
                 art.tint() != [1.0, 1.0, 1.0, 1.0] || serialized_material_present(&bytes, false)?;
             requires_surface |=
                 art.surface().is_some() || serialized_surface_present(&bytes, false)?;
+            requires_facing |= serialized_facing_present(&bytes, false)?;
             if admitted_hash != record.sha256 {
                 return Err("bundle art admission hash does not match its manifest".into());
             }
@@ -645,6 +654,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             if admitted_hash != record.sha256 {
                 return Err("bundle mesh props admission hash does not match its manifest".into());
             }
+            requires_facing |= serialized_facing_present(&bytes, true)?;
             if read_bounded(&props_path, 16 * 1024 * 1024, "bundle mesh props recheck")? != bytes {
                 return Err("bundle mesh props sidecar changed during admission".into());
             }
@@ -695,6 +705,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     ) {
         (Some(record), Some(bytes)) => {
             verify_file(record, &bytes, "bundle mesh animation sidecar")?;
+            requires_facing |= serialized_facing_present(&bytes, false)?;
             let Some((_, admitted_hash)) =
                 crate::mesh_animation_store::load(&scene_path, graph_revision)?
             else {
@@ -767,6 +778,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             require_lighting: manifest.lighting.is_some(),
         },
     )?;
+    validate_runtime_facing(&runtime_bytes, requires_facing)?;
     validate_runtime_profile(&runtime_bytes, manifest.input_profile)?;
     let sidecar_unchanged = match &manifest.sidecar {
         Some(record) => {
@@ -1575,6 +1587,42 @@ fn validate_runtime_with_lighting(
             .is_none()
     {
         return Err("mesh player runtime does not advertise mesh-lighting bundle support".into());
+    }
+    Ok(())
+}
+
+fn optional_facing_present(bytes: Option<&[u8]>, props: bool) -> Result<bool, String> {
+    bytes
+        .map(|bytes| serialized_facing_present(bytes, props))
+        .transpose()
+        .map(|present| present.unwrap_or(false))
+}
+
+fn serialized_facing_present(bytes: &[u8], props: bool) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("inspect serialized mesh facing: {error}"))?;
+    if props {
+        let records = value
+            .get("props")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("mesh props sidecar has no props inventory")?;
+        return Ok(records.iter().any(|record| {
+            record
+                .get("art")
+                .is_some_and(|art| art.get("facing").is_some())
+        }));
+    }
+    Ok(value.get("facing").is_some()
+        || value
+            .get("settings")
+            .is_some_and(|settings| settings.get("facing").is_some()))
+}
+
+fn validate_runtime_facing(bytes: &[u8], required: bool) -> Result<(), String> {
+    if required
+        && validate_runtime_section(bytes, FACING_RUNTIME_SECTION, FACING_RUNTIME_MARKER)?.is_none()
+    {
+        return Err("mesh player runtime does not advertise route-facing support".into());
     }
     Ok(())
 }

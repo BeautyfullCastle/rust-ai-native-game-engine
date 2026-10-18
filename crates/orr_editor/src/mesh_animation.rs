@@ -28,6 +28,8 @@ pub(crate) struct Settings {
     pub(crate) offset: [f32; 3],
     pub(crate) scale: f32,
     pub(crate) rotation: [f32; 4],
+    #[serde(default, skip_serializing_if = "crate::mesh_facing::is_fixed")]
+    pub(crate) facing: crate::mesh_facing::Facing,
     pub(crate) clip: u32,
     pub(crate) rate: f32,
     pub(crate) looped: bool,
@@ -39,6 +41,7 @@ impl Default for Settings {
             offset: [0.0; 3],
             scale: 1.0,
             rotation: [0.0, 0.0, 0.0, 1.0],
+            facing: crate::mesh_facing::Facing::Fixed,
             clip: 0,
             rate: 1.0,
             looped: true,
@@ -222,13 +225,39 @@ impl Snapshot {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn placement(
         &self,
         entity: orr_ecs::Entity,
         position: [orr_fp::FP; 3],
         tick: u64,
     ) -> Result<AnimatedPlacement, String> {
-        self.validate_settings(self.settings)?;
+        self.placement_with_rotation(entity, position, tick, self.settings.rotation)
+    }
+
+    pub(crate) fn placement_for_view(
+        &self,
+        view: &orr_remote::mesh_navigation::MeshView,
+        tick: u64,
+    ) -> Result<AnimatedPlacement, String> {
+        if view.graph.revision() != self.graph_revision {
+            return Err("mesh animation belongs to a different walkable graph revision".into());
+        }
+        let rotation =
+            crate::mesh_facing::rotation(self.settings.facing, self.settings.rotation, view)?;
+        self.placement_with_rotation(view.agent.entity, view.agent.position, tick, rotation)
+    }
+
+    fn placement_with_rotation(
+        &self,
+        entity: orr_ecs::Entity,
+        position: [orr_fp::FP; 3],
+        tick: u64,
+        rotation: [f32; 4],
+    ) -> Result<AnimatedPlacement, String> {
+        let mut settings = self.settings;
+        settings.rotation = rotation;
+        self.validate_settings(settings)?;
         let world_position = position.map(orr_fp::FP::to_f32);
         if world_position
             .iter()
@@ -275,7 +304,7 @@ impl Snapshot {
         }
         let transform = Trs {
             translation: [0.0; 3],
-            rotation: settings.rotation,
+            rotation,
             scale: [settings.scale; 3],
         }
         .matrix();

@@ -138,6 +138,8 @@ mod mesh_agent_view;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_rotation;
 #[cfg(feature = "mesh-navigation")]
+mod mesh_facing;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_camera;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_material;

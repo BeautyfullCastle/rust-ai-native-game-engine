@@ -146,11 +146,45 @@ fn legacy_sidecars_default_to_identity_without_adding_rotation_or_tint_fields() 
     assert!(encoded.get("rotation").is_none());
     assert!(encoded.get("tint").is_none());
     assert!(encoded.get("surface").is_none());
+    assert!(encoded.get("facing").is_none());
     let loaded = Snapshot::decode_embedded(&bytes, "legacy.scene.yaml", revision()).unwrap();
     assert_eq!(loaded.rotation(), [0.0, 0.0, 0.0, 1.0]);
     assert_eq!(loaded.tint(), [1.0; 4]);
     assert_eq!(loaded.surface(), None);
+    assert_eq!(loaded.facing(), crate::mesh_facing::Facing::Fixed);
     assert_eq!(loaded.encode_embedded("legacy.scene.yaml").unwrap(), bytes);
+}
+
+#[test]
+fn route_facing_is_sidecar_persisted_and_fixed_remains_legacy_default() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = package(&root);
+    let original = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", revision()).unwrap();
+    let route = original
+        .clone()
+        .with_facing(crate::mesh_facing::Facing::Route)
+        .unwrap();
+    assert_eq!(original.facing(), crate::mesh_facing::Facing::Fixed);
+    assert_eq!(route.facing(), crate::mesh_facing::Facing::Route);
+    let encoded = route.encode_embedded("facing.scene.yaml").unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(json["facing"], "route");
+    let reopened = Snapshot::decode_embedded(&encoded, "facing.scene.yaml", revision()).unwrap();
+    assert_eq!(reopened.facing(), crate::mesh_facing::Facing::Route);
+    assert_eq!(
+        reopened.encode_embedded("facing.scene.yaml").unwrap(),
+        encoded
+    );
+
+    let mut invalid = json;
+    invalid["facing"] = serde_json::json!("follow-agent");
+    assert!(Snapshot::decode_embedded(
+        &serde_json::to_vec(&invalid).unwrap(),
+        "facing.scene.yaml",
+        revision()
+    )
+    .is_err());
 }
 
 #[test]

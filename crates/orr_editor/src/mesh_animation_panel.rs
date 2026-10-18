@@ -22,6 +22,7 @@ pub(crate) struct Panel {
     clip: String,
     rate: String,
     looped: bool,
+    face_route: bool,
     form_dirty: bool,
     source_dirty: bool,
     license_acknowledged: bool,
@@ -56,6 +57,7 @@ impl Default for Panel {
             clip: "0".into(),
             rate: "1".into(),
             looped: true,
+            face_route: false,
             form_dirty: false,
             source_dirty: false,
             license_acknowledged: false,
@@ -211,6 +213,7 @@ impl Panel {
                 changed |= text_field(ui, "Animation clip index", &mut self.clip);
                 changed |= text_field(ui, "Animation playback rate", &mut self.rate);
                 changed |= ui.checkbox(&mut self.looped, "Loop mesh animation").changed();
+                changed |= ui.checkbox(&mut self.face_route, "Animation face route direction").changed();
                 self.form_dirty |= changed;
                 if let Some(snapshot) = self.candidate.as_ref().or_else(|| self.current_snapshot()) {
                     for (index, name, duration) in snapshot.clips() {
@@ -316,9 +319,7 @@ impl Panel {
             .ok_or_else(|| "Mesh animation requires a coherent Frame".to_owned())?
             .predicted();
         let view = mesh_from_view(frame)?;
-        snapshot
-            .placement(view.agent.entity, view.agent.position, frame.tick())
-            .map(Some)
+        snapshot.placement_for_view(&view, frame.tick()).map(Some)
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
@@ -421,6 +422,7 @@ impl Panel {
             &self.clip,
             &self.rate,
             self.looped,
+            self.face_route,
         ) {
             Ok(settings) => settings,
             Err(error) => {
@@ -718,6 +720,7 @@ impl Panel {
         self.clip = settings.clip.to_string();
         self.rate = format_number(settings.rate);
         self.looped = settings.looped;
+        self.face_route = settings.facing == crate::mesh_facing::Facing::Route;
     }
 
     fn copy_current_settings(&mut self) {
@@ -730,6 +733,7 @@ impl Panel {
             self.clip = "0".into();
             self.rate = "1".into();
             self.looped = true;
+            self.face_route = false;
         }
     }
 
@@ -818,6 +822,7 @@ fn parse_settings(
     clip: &str,
     rate: &str,
     looped: bool,
+    face_route: bool,
 ) -> Result<crate::mesh_animation::Settings, String> {
     let offset = [
         offset[0]
@@ -857,6 +862,11 @@ fn parse_settings(
         offset,
         scale,
         rotation,
+        facing: if face_route {
+            crate::mesh_facing::Facing::Route
+        } else {
+            crate::mesh_facing::Facing::Fixed
+        },
         clip,
         rate,
         looped,

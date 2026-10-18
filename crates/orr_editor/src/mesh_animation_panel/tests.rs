@@ -47,6 +47,7 @@ fn parses_finite_animation_settings_and_rejects_bad_values() {
         "1",
         "1.5",
         false,
+        false,
     )
     .unwrap();
     assert_eq!(settings.offset, [1.25, -2.0, 0.5]);
@@ -54,6 +55,18 @@ fn parses_finite_animation_settings_and_rejects_bad_values() {
     assert_eq!(settings.clip, 1);
     assert_eq!(settings.rate, 1.5);
     assert!(!settings.looped);
+    assert_eq!(settings.facing, crate::mesh_facing::Facing::Fixed);
+    let route_facing = parse_settings(
+        &["0".into(), "0".into(), "0".into()],
+        "1",
+        &["0".into(), "0".into(), "0".into()],
+        "0",
+        "1",
+        true,
+        true,
+    )
+    .unwrap();
+    assert_eq!(route_facing.facing, crate::mesh_facing::Facing::Route);
     let zeros = || std::array::from_fn(|_| "0".to_owned());
     assert!(parse_settings(
         &["NaN".into(), "0".into(), "0".into()],
@@ -61,12 +74,13 @@ fn parses_finite_animation_settings_and_rejects_bad_values() {
         &zeros(),
         "0",
         "1",
-        true
+        true,
+        false
     )
     .is_err());
-    assert!(parse_settings(&zeros(), "inf", &zeros(), "0", "1", true).is_err());
-    assert!(parse_settings(&zeros(), "1", &zeros(), "0", "inf", true).is_err());
-    assert!(parse_settings(&zeros(), "1", &zeros(), "-1", "1", true).is_err());
+    assert!(parse_settings(&zeros(), "inf", &zeros(), "0", "1", true, false).is_err());
+    assert!(parse_settings(&zeros(), "1", &zeros(), "0", "inf", true, false).is_err());
+    assert!(parse_settings(&zeros(), "1", &zeros(), "-1", "1", true, false).is_err());
 }
 
 #[test]
@@ -95,6 +109,7 @@ fn animated_snapshot_roundtrips_clip_settings_and_private_history() {
     assert_eq!(restored.clip, settings.clip);
     assert_eq!(restored.rate, settings.rate);
     assert_eq!(restored.looped, settings.looped);
+    assert_eq!(restored.facing, settings.facing);
     panel.redo();
     assert_eq!(panel.current_snapshot().unwrap().settings().offset[0], 1.0);
     for _ in 0..MAX_HISTORY + 2 {

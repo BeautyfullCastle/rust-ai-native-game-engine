@@ -43,6 +43,7 @@ pub(crate) struct Snapshot {
     offset: [f32; 3],
     scale: f32,
     rotation: [f32; 4],
+    facing: crate::mesh_facing::Facing,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -78,6 +79,8 @@ struct Sidecar {
         skip_serializing_if = "rotation_is_identity"
     )]
     rotation: [f32; 4],
+    #[serde(default, skip_serializing_if = "crate::mesh_facing::is_fixed")]
+    facing: crate::mesh_facing::Facing,
 }
 
 struct Provenance<'a> {
@@ -182,6 +185,7 @@ impl Snapshot {
             offset: [0.0; 3],
             scale: 1.0,
             rotation: identity_rotation(),
+            facing: crate::mesh_facing::Facing::Fixed,
         };
         snapshot.sidecar_bytes("room.scene.yaml")?;
         Ok(snapshot)
@@ -259,6 +263,19 @@ impl Snapshot {
         Ok(self)
     }
 
+    pub(crate) fn facing(&self) -> crate::mesh_facing::Facing {
+        self.facing
+    }
+
+    pub(crate) fn with_facing(
+        mut self,
+        facing: crate::mesh_facing::Facing,
+    ) -> Result<Self, String> {
+        self.facing = facing;
+        self.placement([orr_fp::FP::ZERO; 3])?;
+        Ok(self)
+    }
+
     pub(crate) fn graph_revision(&self) -> [u8; 32] {
         self.graph_revision
     }
@@ -269,10 +286,26 @@ impl Snapshot {
 
     pub(crate) fn placement(&self, position: [orr_fp::FP; 3]) -> Result<SceneModel, String> {
         let position = position.map(orr_fp::FP::to_f32);
+        self.placement_with_rotation(position, self.rotation)
+    }
+
+    pub(crate) fn placement_for_view(
+        &self,
+        view: &orr_remote::mesh_navigation::MeshView,
+    ) -> Result<SceneModel, String> {
+        let rotation = crate::mesh_facing::rotation(self.facing, self.rotation, view)?;
+        self.placement_with_rotation(view.agent.position.map(orr_fp::FP::to_f32), rotation)
+    }
+
+    fn placement_with_rotation(
+        &self,
+        position: [f32; 3],
+        rotation: [f32; 4],
+    ) -> Result<SceneModel, String> {
         let instance = StaticInstance {
             translation: std::array::from_fn(|axis| position[axis] + self.offset[axis]),
             scale: [self.scale; 3],
-            rotation: self.rotation,
+            rotation,
         };
         instance
             .validate_for(&self.render_model)
@@ -341,6 +374,7 @@ impl Snapshot {
             offset: self.offset,
             scale: self.scale,
             rotation: self.rotation,
+            facing: self.facing,
         })
         .map_err(|error| format!("serialize mesh art sidecar: {error}"))?;
         if bytes.len() > MAX_SIDE_CAR_BYTES {
@@ -408,6 +442,7 @@ impl Snapshot {
             offset: sidecar.offset,
             scale: sidecar.scale,
             rotation: sidecar.rotation,
+            facing: sidecar.facing,
         };
         let offset = snapshot.offset;
         let scale = snapshot.scale;

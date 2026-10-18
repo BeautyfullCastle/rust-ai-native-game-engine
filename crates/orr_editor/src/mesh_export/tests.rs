@@ -16,6 +16,9 @@ use std::fs;
 const STATIC_GLB: &[u8] = include_bytes!("../../../orr_model/tests/fixtures/model.glb");
 const LICENSE: &[u8] = b"Example license text\n";
 
+#[path = "facing_tests.rs"]
+mod facing_tests;
+
 fn admitted_scene() -> (String, [u8; 32], u64) {
     let graph = StaticMeshGraph::bake(
         &[

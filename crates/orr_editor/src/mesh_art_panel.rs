@@ -18,6 +18,7 @@ pub(crate) struct Panel {
     offset: [String; 3],
     scale: String,
     rotation: [String; 3],
+    face_route_direction: bool,
     tint: [String; 4],
     surface_enabled: bool,
     surface_material: String,
@@ -55,6 +56,7 @@ impl Default for Panel {
             offset: ["0".into(), "0".into(), "0".into()],
             scale: "1".into(),
             rotation: ["0".into(), "0".into(), "0".into()],
+            face_route_direction: false,
             tint: ["1".into(), "1".into(), "1".into(), "1".into()],
             surface_enabled: false,
             surface_material: "0".into(),
@@ -288,6 +290,7 @@ impl Panel {
                 {
                     text_field(ui, label, &mut self.rotation[axis]);
                 }
+                ui.checkbox(&mut self.face_route_direction, "Face route direction");
                 for (channel, label) in ["Art tint R", "Art tint G", "Art tint B", "Art tint A"]
                     .into_iter()
                     .enumerate()
@@ -319,7 +322,7 @@ impl Panel {
                     self.apply(editor);
                 }
                 if ui
-                    .add_enabled(self.dirty(), egui::Button::new("Save agent art"))
+                    .add_enabled(self.dirty() && !self.facing_form_dirty(), egui::Button::new("Save agent art"))
                     .clicked()
                 {
                     self.save(editor);
@@ -417,7 +420,7 @@ impl Panel {
         }
         let frame = editor.snapshot()?.predicted();
         let view = mesh_from_view(frame).ok()?;
-        snapshot.placement(view.agent.position).ok()
+        snapshot.placement_for_view(&view).ok()
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
@@ -451,6 +454,9 @@ impl Panel {
         if let Some(error) = &self.presentation_error {
             return Some(format!("Agent art cannot be presented: {error}"));
         }
+        if self.facing_form_dirty() {
+            return Some("Apply or reset the agent art facing option before Play".into());
+        }
         if self.dirty() {
             return Some("Save or undo agent art changes before Play".into());
         }
@@ -461,7 +467,13 @@ impl Panel {
     }
 
     pub(crate) fn dirty(&self) -> bool {
-        self.current_entry().map(|entry| entry.id) != self.saved_id
+        self.current_entry().map(|entry| entry.id) != self.saved_id || self.facing_form_dirty()
+    }
+
+    fn facing_form_dirty(&self) -> bool {
+        self.current_snapshot().is_some_and(|snapshot| {
+            (snapshot.facing() == crate::mesh_facing::Facing::Route) != self.face_route_direction
+        })
     }
 
     pub(crate) fn import_busy(&self) -> bool {
@@ -519,6 +531,14 @@ impl Panel {
             .and_then(|snapshot| {
                 parse_rotation(&self.rotation).and_then(|rotation| snapshot.with_rotation(rotation))
             })
+            .and_then(|snapshot| {
+                let facing = if self.face_route_direction {
+                    crate::mesh_facing::Facing::Route
+                } else {
+                    crate::mesh_facing::Facing::Fixed
+                };
+                snapshot.with_facing(facing)
+            })
             .and_then(|snapshot| parse_tint(&self.tint).and_then(|tint| snapshot.with_tint(tint)))
             .and_then(|snapshot| {
                 parse_surface(
@@ -547,6 +567,10 @@ impl Panel {
     }
 
     fn save(&mut self, editor: &Editor) {
+        if self.facing_form_dirty() {
+            self.error = Some("Apply the agent art facing option before saving".into());
+            return;
+        }
         if !self.can_edit(editor) {
             self.error = Some("Save agent art only for its matching editable local scene".into());
             return;
@@ -748,7 +772,7 @@ impl Panel {
     fn refresh_presentation_error(&mut self, view: Option<&orr_remote::mesh_navigation::MeshView>) {
         self.presentation_error = match (self.current_snapshot(), view) {
             (Some(art), Some(view)) if art.graph_revision() == view.graph.revision() => {
-                art.placement(view.agent.position).err()
+                art.placement_for_view(view).err()
             }
             (Some(_), Some(_)) => Some("Agent art belongs to a different mesh revision".into()),
             (Some(_), None) => {
@@ -797,6 +821,7 @@ impl Panel {
         self.rotation = crate::mesh_rotation::to_degrees(snapshot.rotation())
             .map(|angles| angles.map(format_number))
             .unwrap_or_else(|_| ["invalid".into(), "invalid".into(), "invalid".into()]);
+        self.face_route_direction = snapshot.facing() == crate::mesh_facing::Facing::Route;
         self.tint = snapshot.tint().map(format_number);
         self.copy_surface(snapshot);
     }
@@ -808,6 +833,7 @@ impl Panel {
             self.offset = ["0".into(), "0".into(), "0".into()];
             self.scale = "1".into();
             self.rotation = ["0".into(), "0".into(), "0".into()];
+            self.face_route_direction = false;
             self.tint = ["1".into(), "1".into(), "1".into(), "1".into()];
             self.surface_enabled = false;
             self.surface_material = "0".into();
