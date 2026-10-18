@@ -1,0 +1,114 @@
+name: Mesh hazards headless acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mesh-hazards:
+    # Additive headless checks; existing mandatory CI is unchanged.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Geometry, runtime, game, ERP and CLI contracts
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          evidence = Path("target/mesh-hazards-evidence")
+          evidence.mkdir(parents=True, exist_ok=True)
+
+          def run(label, args, expected=None):
+              command = ["cargo", args[0], "--locked", *args[1:]]
+              path = evidence / (label + ".log")
+              print("+ " + " ".join(command), flush=True)
+              with path.open("w", encoding="utf-8") as log:
+                  log.write("+ " + " ".join(command) + "\n")
+                  log.flush()
+                  try:
+                      result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
+                                              timeout=1800, check=False)
+                  except (OSError, subprocess.TimeoutExpired) as error:
+                      log.write(f"\nExecution failed: {error}\n")
+                      raise
+              output = path.read_text(encoding="utf-8", errors="replace")
+              print(output, end="", flush=True)
+              if result.returncode:
+                  raise RuntimeError(f"{label}: cargo exited {result.returncode}")
+              if expected is not None:
+                  # One selected lib/integration/bin harness; never accept a green empty run.
+                  summaries = re.findall(
+                      r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+                      r"(\d+) measured; \d+ filtered out; finished in .+$", output, re.M)
+                  running = re.findall(r"^running (\d+) tests?$", output, re.M)
+                  passed = re.findall(r"^test (\S+) \.\.\. ok$", output, re.M)
+                  if (summaries != [(str(expected), "0", "0", "0")]
+                          or running != [str(expected)] or len(passed) != expected
+                          or len(set(passed)) != expected):
+                      message = f"{label}: expected exactly {expected} distinct passing tests, no skips"
+                      with path.open("a", encoding="utf-8") as log:
+                          log.write("\n" + message + "\n")
+                      raise RuntimeError(message)
+
+          def test(label, crate, target, count, feature=None, selection=None):
+              args = ["test", "-p", crate, *target]
+              if feature:
+                  args += ["--features", feature]
+              if selection:
+                  args += [selection]
+              run(label, args + ["--", "--format=pretty", "--color=never", "--test-threads=1"], count)
+
+          test("movement-polyline", "orr_navigation", ["--test", "mesh_movement_polyline"], 6)
+          test("runtime-hazards", "orr_navigation_runtime", ["--lib"], 11,
+               "mesh-hazards", "hazards::tests::")
+          test("game-hazards", "orr_games", ["--lib"], 12,
+               "mesh-hazards", "mesh_navigation_game::hazards::tests::")
+          checksum = "mesh_navigation_game::mesh_play_input_tests::legacy_mesh_mission_checksum_is_unchanged_by_hazard_feature"
+          for feature in ("mesh-mission", "mesh-hazards"):
+              test("legacy-checksum-" + feature, "orr_games", ["--lib"], 1, feature, checksum)
+          # 5 hazards + 3 existing mission + 3 existing mesh-play host tests.
+          test("remote-mesh-library", "orr_remote", ["--lib"], 11,
+               "mesh-hazards", "mesh_navigation::")
+          test("remote-mesh-integration", "orr_remote", ["--test", "mesh_navigation"], 5,
+               "mesh-hazards")
+          # The fifth test uses Unix symlinks; it is intentionally not compiled on Windows.
+          test("hazards-cli", "orr_remote", ["--bin", "orr_mesh_hazards"],
+               4 if os.name == "nt" else 5, "mesh-hazards")
+
+          packages = ["-p", "orr_navigation", "-p", "orr_navigation_runtime",
+                      "-p", "orr_games", "-p", "orr_remote"]
+          run("feature-off-check", ["check", *packages, "--lib", "--no-default-features"])
+          run("legacy-mission-check", ["check", "-p", "orr_remote", "--lib", "--features", "mesh-mission"])
+          run("production-lint", ["clippy", *packages, "--lib", "--features",
+                                  "orr_remote/mesh-hazards", "--", "-D", "warnings"])
+          run("cli-lint", ["clippy", "-p", "orr_remote", "--bin", "orr_mesh_hazards",
+                           "--features", "mesh-hazards", "--", "-D", "warnings"])
+      - name: Preserve command and test evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesh-hazards-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/mesh-hazards-evidence/*.log
+          if-no-files-found: warn
+          retention-days: 7

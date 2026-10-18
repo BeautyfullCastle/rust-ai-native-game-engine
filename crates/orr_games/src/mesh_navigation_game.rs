@@ -10,6 +10,8 @@ use orr_sim::{Game, PlayerSlot, SimContext, System};
 
 use crate::yard3d_game::{NoCommand, NoEvent, YardInput};
 
+#[cfg(feature = "mesh-hazards")]
+pub mod hazards;
 #[cfg(feature = "mesh-mission")]
 pub mod mission;
 
@@ -222,21 +224,29 @@ impl System<MeshNavigation> for MeshStep {
 }
 
 fn apply_goal_input(context: &mut SimContext<MeshNavigation>, pin: &mut MeshScenePin) {
+    apply_goal_requests(context.frame, context.inputs, pin);
+}
+
+fn apply_goal_requests(
+    frame: &mut Frame,
+    inputs: &orr_sim::TickInputs<YardInput, NoCommand>,
+    pin: &mut MeshScenePin,
+) {
     let graph = match pin.graph() {
         Ok(graph) => graph,
         Err(_) => return,
     };
     let binding = pin.binding();
-    let initial_agent = match MeshRuntime::agent(context.frame, binding) {
+    let initial_agent = match MeshRuntime::agent(frame, binding) {
         Ok(agent) => agent,
         Err(_) => return,
     };
-    for player_index in 0..context.inputs.player_count() {
+    for player_index in 0..inputs.player_count() {
         let slot = PlayerSlot(player_index);
-        if context.inputs.flags(slot).disconnected {
+        if inputs.flags(slot).disconnected {
             continue;
         }
-        let Some(goal) = requested_goal(*context.inputs.input(slot)) else {
+        let Some(goal) = requested_goal(*inputs.input(slot)) else {
             continue;
         };
         if goal == initial_agent.spec.goal
@@ -245,7 +255,7 @@ fn apply_goal_input(context: &mut SimContext<MeshNavigation>, pin: &mut MeshScen
             return;
         }
         if MeshRuntime::replan(
-            context.frame,
+            frame,
             &graph,
             binding,
             goal,
@@ -256,7 +266,7 @@ fn apply_goal_input(context: &mut SimContext<MeshNavigation>, pin: &mut MeshScen
         {
             pin.start = initial_agent.position;
             pin.goal = goal;
-            context.frame.set_singleton(*pin);
+            frame.set_singleton(*pin);
             return;
         }
     }
@@ -296,12 +306,8 @@ fn ensure_scene_schema(frame: &Frame) -> Result<(), String> {
         return Err("MeshNavigation frame registry is missing required types".into());
     }
     #[cfg(feature = "mesh-mission")]
-    if registry
-        .singleton_id::<mission::MeshMission>()
-        .is_none()
-        || registry
-            .singleton_id::<mission::MeshMissionRun>()
-            .is_none()
+    if registry.singleton_id::<mission::MeshMission>().is_none()
+        || registry.singleton_id::<mission::MeshMissionRun>().is_none()
     {
         return Err("MeshNavigation frame registry is missing mission singletons".into());
     }

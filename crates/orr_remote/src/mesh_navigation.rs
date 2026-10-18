@@ -11,6 +11,8 @@ use orr_viewstream::{FrameMeta, Schema, StreamProducer};
 use std::{io::Read, path::PathBuf, sync::Arc};
 
 pub mod authoring;
+#[cfg(feature = "mesh-hazards")]
+pub mod hazards;
 #[cfg(feature = "mesh-mission")]
 pub mod mission;
 
@@ -94,6 +96,11 @@ pub fn mesh_doc_from_yaml(yaml: &str) -> Result<EditorDoc, EditError> {
 }
 
 pub fn mesh_doc_from_path(path: &std::path::Path) -> Result<EditorDoc, String> {
+    let yaml = read_scene_yaml(path)?;
+    mesh_doc_from_yaml(&yaml).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn read_scene_yaml(path: &std::path::Path) -> Result<String, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
     if !metadata.is_file() || metadata.len() > MAX_SCENE_YAML_BYTES {
@@ -138,7 +145,7 @@ pub fn mesh_doc_from_path(path: &std::path::Path) -> Result<EditorDoc, String> {
     }
     let yaml = String::from_utf8(bytes)
         .map_err(|error| format!("{} is not UTF-8: {error}", path.display()))?;
-    mesh_doc_from_yaml(&yaml).map_err(|error| format!("{}: {error}", path.display()))
+    Ok(yaml)
 }
 
 pub fn configure_mesh_navigation(limits: &mut HostLimits) {

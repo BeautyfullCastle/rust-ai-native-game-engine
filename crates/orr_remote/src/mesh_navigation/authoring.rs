@@ -151,3 +151,27 @@ fn is_reparse(metadata: &fs::Metadata) -> bool {
 fn is_reparse(_: &fs::Metadata) -> bool {
     false
 }
+
+/// Write caller-validated scene YAML to a new file, never replacing an existing
+/// path. Callers must validate admission and exact save/reopen before calling.
+/// This matches asset authoring's path checks and durability convention; a write
+/// error may leave a partial new file and does not promise crash-atomic visibility.
+pub fn create_new_scene_file(destination: &Path, yaml: &str) -> Result<(), String> {
+    check_path(destination)?;
+    if !destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".scene.yaml"))
+    {
+        return Err("destination must end in .scene.yaml".into());
+    }
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| format!("{}: {error}", destination.display()))?;
+    output
+        .write_all(yaml.as_bytes())
+        .and_then(|()| output.sync_all())
+        .map_err(|error| format!("{}: {error}", destination.display()))
+}
