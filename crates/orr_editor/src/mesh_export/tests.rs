@@ -56,6 +56,249 @@ fn test_runtime() -> Vec<u8> {
     bytes
 }
 
+fn test_runtime_with_lighting() -> Vec<u8> {
+    let mut bytes = test_runtime();
+    bytes.resize(0x240, 0);
+    bytes[0x180..].fill(0);
+    bytes[0x15c..0x160].copy_from_slice(&0x1c0u32.to_le_bytes());
+    bytes[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
+    bytes[0x170..0x178].copy_from_slice(b".orrlit\0");
+    bytes[0x180..0x184].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x184..0x188].copy_from_slice(&0x200u32.to_le_bytes());
+    bytes[0x194..0x198].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x1c0..0x1c0 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
+    bytes[0x200..0x200 + b"ORR_MESH_LIGHTING_V1".len()].copy_from_slice(b"ORR_MESH_LIGHTING_V1");
+    bytes
+}
+
+#[cfg(feature = "mesh-animated-models")]
+fn test_runtime_with_all_presentations() -> Vec<u8> {
+    let sections: [(&[u8; 8], &[u8]); 8] = [
+        (b".orrmesh", b"ORR_MESH_PLAYER_V1"),
+        (b".orrprop", b"ORR_MESH_PROPS_V1"),
+        (b".orrrot\0", b"ORR_MESH_ROTATION_V1"),
+        (b".orrcam\0", b"ORR_MESH_CAMERA_V1"),
+        (b".orrmat\0", b"ORR_MESH_MATERIAL_V1"),
+        (b".orranim", b"ORR_MESH_ANIMATION_V1"),
+        (b".orrsurf", b"ORR_MESH_SURFACE_V1"),
+        (b".orrlit\0", b"ORR_MESH_LIGHTING_V1"),
+    ];
+    let mut bytes = test_runtime();
+    bytes.resize(0x600, 0);
+    bytes[0x148..].fill(0);
+    bytes[0x46..0x48].copy_from_slice(&(sections.len() as u16).to_le_bytes());
+    for (index, (name, marker)) in sections.iter().enumerate() {
+        let header = 0x148 + index * 40;
+        let payload = 0x400 + index * 64;
+        bytes[header..header + 8].copy_from_slice(*name);
+        bytes[header + 16..header + 20].copy_from_slice(&64u32.to_le_bytes());
+        bytes[header + 20..header + 24].copy_from_slice(&(payload as u32).to_le_bytes());
+        bytes[header + 36..header + 40].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+        bytes[payload..payload + marker.len()].copy_from_slice(marker);
+    }
+    bytes
+}
+
+#[cfg(feature = "mesh-animated-models")]
+#[test]
+fn complete_presentation_bundles_admit_seven_and_eight_files_but_no_extra_inventory() {
+    for include_lighting in [false, true] {
+        let (temporary, scene, runtime, checksum) = fixture();
+        let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+        add_props(&scene, revision);
+        let props = crate::mesh_props::load(&scene, revision)
+            .unwrap()
+            .unwrap()
+            .0;
+        crate::mesh_art::save(&scene, Some(&props.props[0].art), None).unwrap();
+        add_camera(&scene, revision);
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/animation_demo")
+            .canonicalize()
+            .unwrap();
+        let animation = crate::mesh_animation::Snapshot::from_package(
+            &package,
+            "animated.glb",
+            "LICENSE.txt",
+            revision,
+        )
+        .unwrap();
+        crate::mesh_animation_store::save(&scene, Some(&animation), None, revision).unwrap();
+        if include_lighting {
+            add_lighting(&scene, revision);
+        }
+        fs::write(&runtime, test_runtime_with_all_presentations()).unwrap();
+        let destination = temporary.path().join("complete-presentation-bundle");
+        export(&scene, checksum, &destination, &runtime).unwrap();
+        assert_eq!(
+            fs::read_dir(&destination).unwrap().count(),
+            if include_lighting { 8 } else { 7 }
+        );
+        let reopened = open_bundle(&destination).unwrap();
+        assert_eq!(reopened.checksum, checksum);
+        assert_eq!(reopened.graph_revision, revision);
+        fs::write(destination.join("unlisted.bin"), b"unexpected").unwrap();
+        assert!(open_bundle(&destination).is_err());
+    }
+}
+
+fn add_lighting(scene: &std::path::Path, revision: [u8; 32]) -> Vec<u8> {
+    let document =
+        crate::mesh_lighting::Document::from_lighting(orr_render::Lighting::default()).unwrap();
+    crate::mesh_lighting_store::save(scene, Some(&document), None, revision)
+        .unwrap()
+        .unwrap();
+    fs::read(crate::mesh_lighting_store::sidecar_path(scene).unwrap()).unwrap()
+}
+
+#[test]
+fn lighting_bundle_requires_an_explicit_runtime_marker_and_preserves_source_free_bytes() {
+    let (temporary, scene, runtime, checksum) = fixture();
+    let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+    let lighting_bytes = add_lighting(&scene, revision);
+    let source_lighting = crate::mesh_lighting_store::sidecar_path(&scene).unwrap();
+    let destination = temporary.path().join("lighting-bundle");
+
+    let error = export(&scene, checksum, &destination, &runtime).unwrap_err();
+    assert!(error.contains("mesh-lighting"));
+    assert!(!destination.exists());
+    fs::write(&runtime, test_runtime_with_lighting()).unwrap();
+    let receipt = export(&scene, checksum, &destination, &runtime).unwrap();
+
+    assert_eq!(
+        receipt.lighting_sha256,
+        Some(super::digest(&lighting_bytes))
+    );
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), 4);
+    let copied_lighting = destination.join("walk.scene.yaml.mesh-lighting.json");
+    assert_eq!(fs::read(&copied_lighting).unwrap(), lighting_bytes);
+    let admitted = open_bundle(&destination).unwrap();
+    assert_eq!(admitted.checksum, checksum);
+    assert_eq!(admitted.graph_revision, revision);
+    fs::remove_file(source_lighting).unwrap();
+    fs::remove_file(&scene).unwrap();
+    let reopened = open_bundle(&destination).unwrap();
+    assert_eq!(reopened.checksum, checksum);
+    assert_eq!(fs::read(copied_lighting).unwrap(), lighting_bytes);
+    assert!(crate::mesh_lighting_store::load(&reopened.scene, revision)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn malformed_or_stale_lighting_never_creates_an_export_directory() {
+    for variant in [
+        "invalid-json",
+        "wrong-scene",
+        "wrong-graph",
+        "unknown-field",
+    ] {
+        let (temporary, scene, runtime, checksum) = fixture();
+        let scene_bytes = fs::read(&scene).unwrap();
+        let revision = graph_revision(std::str::from_utf8(&scene_bytes).unwrap());
+        let document =
+            crate::mesh_lighting::Document::from_lighting(orr_render::Lighting::default()).unwrap();
+        let mut bytes = match variant {
+            "invalid-json" => b"invalid lighting JSON".to_vec(),
+            "wrong-scene" => document.encode("different.scene.yaml", revision).unwrap(),
+            "wrong-graph" => document.encode("walk.scene.yaml", [255; 32]).unwrap(),
+            _ => document.encode("walk.scene.yaml", revision).unwrap(),
+        };
+        if variant == "unknown-field" {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["unexpected"] = true.into();
+            bytes = serde_json::to_vec(&value).unwrap();
+        }
+        fs::write(
+            crate::mesh_lighting_store::sidecar_path(&scene).unwrap(),
+            &bytes,
+        )
+        .unwrap();
+        fs::write(&runtime, test_runtime_with_lighting()).unwrap();
+        let destination = temporary.path().join("rejected-lighting-bundle");
+
+        assert!(
+            export(&scene, checksum, &destination, &runtime).is_err(),
+            "{variant}"
+        );
+        assert!(!destination.exists(), "{variant}");
+        assert_eq!(fs::read(&scene).unwrap(), scene_bytes);
+    }
+}
+
+#[test]
+fn lighting_bundle_refuses_missing_extra_tampered_and_graph_rebound_payloads() {
+    for variant in ["missing", "extra", "tampered", "rebound", "old-runtime"] {
+        let (temporary, scene, runtime, checksum) = fixture();
+        let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+        let lighting_bytes = add_lighting(&scene, revision);
+        fs::write(&runtime, test_runtime_with_lighting()).unwrap();
+        let destination = temporary.path().join("validated-lighting-bundle");
+        export(&scene, checksum, &destination, &runtime).unwrap();
+        let lighting_path = destination.join("walk.scene.yaml.mesh-lighting.json");
+        let manifest_path = destination.join(MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        match variant {
+            "missing" => fs::remove_file(&lighting_path).unwrap(),
+            "extra" => {
+                manifest.as_object_mut().unwrap().remove("lighting");
+                fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            }
+            "tampered" => {
+                let mut tampered = lighting_bytes;
+                tampered.push(b' ');
+                fs::write(&lighting_path, tampered).unwrap();
+            }
+            "rebound" => {
+                let mut lighting: serde_json::Value =
+                    serde_json::from_slice(&lighting_bytes).unwrap();
+                lighting["graph_revision"] = serde_json::json!(vec![255u8; 32]);
+                let rebound = serde_json::to_vec(&lighting).unwrap();
+                manifest["lighting"]["bytes"] = serde_json::json!(rebound.len());
+                manifest["lighting"]["sha256"] = super::digest(&rebound).into();
+                fs::write(&lighting_path, rebound).unwrap();
+                fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            }
+            "old-runtime" => {
+                let old_runtime = test_runtime();
+                manifest["runtime"]["bytes"] = serde_json::json!(old_runtime.len());
+                manifest["runtime"]["sha256"] = super::digest(&old_runtime).into();
+                fs::write(destination.join(RUNTIME_FILENAME), old_runtime).unwrap();
+                fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        assert!(open_bundle(&destination).is_err(), "{variant}");
+    }
+}
+
+#[test]
+fn lighting_capability_cannot_be_advertised_by_an_unsectioned_or_shifted_marker() {
+    for shifted in [false, true] {
+        let (temporary, scene, runtime, checksum) = fixture();
+        let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+        add_lighting(&scene, revision);
+        let bytes = if shifted {
+            let mut bytes = test_runtime_with_lighting();
+            bytes[0x200..0x240].fill(0);
+            bytes[0x201..0x201 + b"ORR_MESH_LIGHTING_V1".len()]
+                .copy_from_slice(b"ORR_MESH_LIGHTING_V1");
+            bytes
+        } else {
+            let mut bytes = test_runtime();
+            bytes.extend_from_slice(b"ORR_MESH_LIGHTING_V1");
+            bytes
+        };
+        fs::write(&runtime, bytes).unwrap();
+        let destination = temporary.path().join("false-capability-bundle");
+
+        assert!(export(&scene, checksum, &destination, &runtime).is_err());
+        assert!(!destination.exists());
+    }
+}
+
 fn test_runtime_with_props() -> Vec<u8> {
     let mut bytes = vec![0; 640];
     bytes[..2].copy_from_slice(b"MZ");

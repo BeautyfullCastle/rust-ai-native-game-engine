@@ -24,6 +24,11 @@ mod geometry_panel;
 mod geometry_preview;
 #[path = "mesh_navigation/geometry_history.rs"]
 mod geometry_history;
+#[path = "mesh_navigation/geometry_vertex_view.rs"]
+mod geometry_vertex_view;
+#[path = "mesh_navigation/geometry_vertex_viewport.rs"]
+mod geometry_vertex_viewport;
+pub(crate) use geometry_vertex_viewport::ViewInput as GeometryVertexViewInput;
 pub(crate) use agent_viewport::ViewInput as AgentViewInput;
 
 const MAX_ASSET_BYTES: usize = 8192;
@@ -74,6 +79,7 @@ pub struct Panel {
     geometry_origin: Option<GeometryOrigin>,
     geometry_preview: Option<Arc<StaticModel>>,
     geometry_preview_visible: bool,
+    geometry_vertex: geometry_vertex_viewport::State,
 }
 
 impl Default for Panel {
@@ -112,12 +118,14 @@ impl Default for Panel {
             geometry_origin: None,
             geometry_preview: None,
             geometry_preview_visible: false,
+            geometry_vertex: geometry_vertex_viewport::State::default(),
         }
     }
 }
 
 impl Panel {
     pub fn sync(&mut self, editor: &Editor) {
+        self.sync_geometry_vertex(editor);
         self.geometry_preview_visible = self.geometry_staged
             && editor.game().is_mesh_navigation()
             && editor.mode() == Mode::Edit
@@ -240,6 +248,7 @@ impl Panel {
     }
 
     pub fn model(&self) -> Option<Arc<StaticModel>> {
+        if let Some(model) = self.geometry_vertex.preview_model() { return Some(model); }
         if self.geometry_preview_active() {
             return self.geometry_preview.clone();
         }
@@ -247,7 +256,7 @@ impl Panel {
     }
 
     pub(crate) fn geometry_preview_active(&self) -> bool {
-        self.geometry_preview_visible && self.geometry_preview.is_some()
+        self.geometry_vertex.preview_active() || (self.geometry_preview_visible && self.geometry_preview.is_some())
     }
 
     pub(crate) fn set_geometry_presentation_pending(&mut self, pending: bool) {
@@ -255,7 +264,7 @@ impl Panel {
     }
 
     pub(crate) fn has_unplaced_draft(&self) -> bool {
-        self.draft_dirty || self.geometry.dirty() || self.art_dirty()
+        self.geometry_vertex_busy() || self.draft_dirty || self.geometry.dirty() || self.art_dirty()
     }
 
     pub(crate) fn art_model(&self, editor: &Editor) -> Option<crate::viewport3d::SceneModel> {
@@ -300,6 +309,7 @@ impl Panel {
     }
 
     pub fn play_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.geometry_vertex_busy() { return Some("Finish or cancel viewport vertex editing before Play".into()); }
         if self.agent_pick_busy() {
             return Some("Finish or cancel viewport endpoint picking before Play".into());
         }
@@ -459,6 +469,7 @@ impl Panel {
 
     pub fn place_agent(&mut self, editor: &mut Editor) -> Result<(), String> {
         let result = (|| {
+            if self.geometry_vertex_busy() { return Err("Finish or cancel viewport vertex editing before placing an agent".into()); }
             if self.geometry.dirty() {
                 return Err("Stage or reset mesh geometry fields before placing a mesh agent".into());
             }
@@ -517,6 +528,9 @@ impl Panel {
         }
         self.sync(editor);
         ui.collapsing("Static-mesh navigation", |ui| {
+            self.show_geometry_vertex(ui, editor);
+            let vertex_busy = self.geometry_vertex_busy();
+            ui.add_enabled_ui(!vertex_busy, |ui| {
             ui.weak(
                 "Point agent · canonical open-sky triangles · no physics or collision controller",
             );
@@ -666,13 +680,17 @@ impl Panel {
             if let Some(error) = self.error.as_ref() {
                 ui.colored_label(egui::Color32::RED, error);
             }
+            });
         });
-        self.art.show(ui, editor);
-        let agent_pick_busy = self.agent_pick_busy();
-        self.props.show(ui, editor, agent_pick_busy);
+        ui.add_enabled_ui(!self.geometry_vertex_busy(), |ui| {
+            self.art.show(ui, editor);
+            let agent_pick_busy = self.agent_pick_busy();
+            self.props.show(ui, editor, agent_pick_busy);
+        });
     }
 
     fn authoring_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.geometry_vertex_busy() { return Some("Finish or cancel viewport vertex editing before placing an agent".into()); }
         if self.geometry.dirty() {
             return Some("Stage or reset mesh geometry fields before placing a mesh agent".into());
         }
@@ -715,6 +733,7 @@ impl Panel {
     }
 
     fn geometry_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.geometry_vertex_busy() { return Some("Finish viewport vertex editing before using geometry forms".into()); }
         if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() || !editor.can_mutate() {
             return Some("Mesh geometry requires a writable local MeshNavigation host".into());
         }
@@ -746,7 +765,7 @@ impl Panel {
 
     fn geometry_bindings_blocker(&self, editor: &Editor) -> Result<(), String> {
         if self.geometry_presentation_pending {
-            return Err("Save or discard camera and animation edits before geometry".into());
+            return Err("Save or discard camera, lighting and animation edits before geometry".into());
         }
         if self.geometry_host_context.is_some() {
             let snapshot = editor.snapshot().ok_or("Wait for the staged geometry host Frame")?;
@@ -756,6 +775,9 @@ impl Panel {
             }
         }
         let scene = editor.path().ok_or("Save the mesh scene before editing geometry")?;
+        if crate::mesh_lighting_store::has_sidecar(&scene)? {
+            return Err("Remove and save existing scene-bound art, props, camera, lighting and animation before geometry edits; their graph revisions are not silently rebound".into());
+        }
         for path in [
             crate::mesh_art::sidecar_path(&scene)?,
             crate::mesh_props::sidecar_path(&scene)?,
@@ -763,7 +785,7 @@ impl Panel {
             crate::mesh_animation_store::sidecar_path(&scene)?,
         ] {
             match fs::symlink_metadata(&path) {
-                Ok(_) => return Err("Remove and save existing scene-bound art, props, camera and animation before geometry edits; their graph revisions are not silently rebound".into()),
+                Ok(_) => return Err("Remove and save existing scene-bound art, props, camera, lighting and animation before geometry edits; their graph revisions are not silently rebound".into()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
                 Err(error) => return Err(format!("Inspect mesh geometry presentation binding: {error}")),
             }
@@ -835,6 +857,7 @@ impl Panel {
     }
 
     fn geometry_replacement_blocker(&self) -> Result<(), String> {
+        if self.geometry_vertex_busy() { return Err("Finish or cancel viewport vertex editing before replacing the mesh source".into()); }
         if self.geometry_staged || self.geometry.dirty() {
             return Err("Discard unplaced geometry changes before creating or opening another mesh source".into());
         }
@@ -842,6 +865,7 @@ impl Panel {
     }
 
     fn clear_geometry_history(&mut self) {
+        self.geometry_vertex = geometry_vertex_viewport::State::default();
         self.geometry.reset();
         self.geometry_history = geometry_history::History::default();
         self.geometry_origin = None;

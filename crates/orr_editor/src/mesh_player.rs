@@ -328,6 +328,8 @@ fn launch(options: Options) -> Result<(), String> {
     panel.sync(&editor);
     let mut camera_panel = crate::mesh_camera_panel::Panel::default();
     camera_panel.sync(&mut editor);
+    let mut lighting_panel = crate::mesh_lighting_panel::Panel::default();
+    lighting_panel.sync(&editor);
     #[cfg(feature = "mesh-animated-models")]
     let mut animation_panel = crate::mesh_animation_panel::Panel::default();
     #[cfg(feature = "mesh-animated-models")]
@@ -346,6 +348,7 @@ fn launch(options: Options) -> Result<(), String> {
         panel
             .play_blocker(&editor)
             .or_else(|| camera_panel.play_blocker(&editor))
+            .or_else(|| lighting_panel.play_blocker(&editor))
             .or(animation_blocker),
     );
     start_playback(&mut editor, options.ticks, screenshot.is_some())?;

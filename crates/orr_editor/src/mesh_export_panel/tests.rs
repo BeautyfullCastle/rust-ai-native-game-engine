@@ -24,6 +24,7 @@ fn receipt(request: &Request) -> crate::mesh_export::Receipt {
         props_sha256: None,
         camera_sha256: None,
         animation_sha256: None,
+        lighting_sha256: None,
         runtime_sha256: "runtime-hash".into(),
     }
 }
@@ -71,6 +72,39 @@ fn completed_export_is_not_current_after_either_saved_sidecar_changes() {
     assert!(saved_sidecars_match(&scene, &receipt));
     #[cfg(not(feature = "mesh-animated-models"))]
     assert!(!saved_sidecars_match(&scene, &receipt));
+}
+
+#[test]
+fn completed_export_tracks_lighting_creation_change_and_removal() {
+    let temporary = tempfile::tempdir().unwrap();
+    let scene = temporary.path().join("mesh.scene.yaml");
+    std::fs::write(&scene, b"owned scene").unwrap();
+    let mut receipt = receipt(&request());
+    assert!(saved_sidecars_match(&scene, &receipt));
+    let document =
+        crate::mesh_lighting::Document::from_lighting(orr_render::Lighting::default()).unwrap();
+    let first_stamp = crate::mesh_lighting_store::save(&scene, Some(&document), None, [7; 32])
+        .unwrap()
+        .unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.lighting_sha256 = Some(first_stamp.clone());
+    assert!(saved_sidecars_match(&scene, &receipt));
+    let changed = crate::mesh_lighting::Document::from_lighting(orr_render::Lighting {
+        intensity: 2.0,
+        ..orr_render::Lighting::default()
+    })
+    .unwrap();
+    let second_stamp =
+        crate::mesh_lighting_store::save(&scene, Some(&changed), Some(&first_stamp), [7; 32])
+            .unwrap()
+            .unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.lighting_sha256 = Some(second_stamp.clone());
+    assert!(saved_sidecars_match(&scene, &receipt));
+    crate::mesh_lighting_store::save(&scene, None, Some(&second_stamp), [7; 32]).unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.lighting_sha256 = None;
+    assert!(saved_sidecars_match(&scene, &receipt));
 }
 
 #[test]

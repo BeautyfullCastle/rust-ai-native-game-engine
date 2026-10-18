@@ -79,15 +79,16 @@ fn presentation_sidecars_block_geometry_staging_without_mutating_the_host() {
         ".mesh-props.json",
         ".mesh-camera.json",
         ".mesh-animation.json",
+        ".mesh-lighting.json",
     ] {
         let sidecar = PathBuf::from(format!("{}{}", scene.path.display(), suffix));
         fs::write(&sidecar, b"opaque sidecar").unwrap();
         let error = navigation
             .stage_geometry(appended_quad(), &editor)
             .unwrap_err();
-        assert!(
-            error.contains("Remove and save existing scene-bound art, props, camera and animation")
-        );
+        assert!(error.contains(
+            "Remove and save existing scene-bound art, props, camera, lighting and animation"
+        ));
         fs::remove_file(sidecar).unwrap();
         assert_eq!(
             navigation.graph.as_ref().unwrap().revision(),
@@ -113,6 +114,7 @@ fn new_sidecars_or_pending_presentation_edits_block_place_after_geometry_is_stag
         ".mesh-props.json",
         ".mesh-camera.json",
         ".mesh-animation.json",
+        ".mesh-lighting.json",
     ] {
         let sidecar = PathBuf::from(format!("{}{}", scene.path.display(), suffix));
         fs::write(&sidecar, b"new binding after staging").unwrap();
@@ -130,7 +132,7 @@ fn new_sidecars_or_pending_presentation_edits_block_place_after_geometry_is_stag
     navigation.set_geometry_presentation_pending(true);
 
     let error = navigation.place_agent(&mut editor).unwrap_err();
-    assert!(error.contains("Save or discard camera and animation edits before geometry"));
+    assert!(error.contains("Save or discard camera, lighting and animation edits before geometry"));
     assert_eq!(
         navigation.graph.as_ref().unwrap().revision(),
         staged_revision

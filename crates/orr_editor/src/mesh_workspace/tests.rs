@@ -116,6 +116,7 @@ fn create_refuses_orphan_presentation_sidecars_without_creating_a_scene() {
         ".mesh-camera.json",
         ".mesh-props.json",
         ".mesh-animation.json",
+        ".mesh-lighting.json",
     ] {
         let scene = root.join(format!("blocked-{suffix}.scene.yaml"));
         let sidecar = scene.with_file_name(format!(

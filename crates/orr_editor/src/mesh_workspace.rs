@@ -18,6 +18,13 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const BLANK_SCENE: &[u8] = b"schema: orr.scene/1\nsingletons: {}\nentities: {}\n";
 
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[path = "mesh_workspace/copy.rs"]
+pub(crate) mod copy;
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[path = "mesh_workspace/copy_panel.rs"]
+pub(crate) mod copy_panel;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Intent {
     Create,
@@ -169,6 +176,7 @@ fn refuse_existing_sidecar(scene: &Path) -> Result<(), String> {
         ".mesh-props.json",
         ".mesh-camera.json",
         ".mesh-animation.json",
+        ".mesh-lighting.json",
     ] {
         let sidecar_name = format!("{filename}{suffix}");
         if sidecar_name.len() > 255 {

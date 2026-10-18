@@ -286,6 +286,7 @@ fn saved_sidecars_match(scene: &std::path::Path, receipt: &crate::mesh_export::R
     matches!(crate::mesh_art::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.sidecar_sha256)
         && matches!(crate::mesh_props::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.props_sha256)
         && matches!(crate::mesh_camera_store::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.camera_sha256)
+        && matches!(crate::mesh_lighting_store::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.lighting_sha256)
         && animation_sidecar_matches(scene, receipt)
 }
 
