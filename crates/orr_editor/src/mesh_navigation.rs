@@ -31,6 +31,9 @@ mod geometry_vertex_viewport;
 #[cfg(feature = "mesh-mission")]
 #[path = "mesh_navigation/mission_view.rs"]
 mod mission_view;
+#[cfg(feature = "mesh-mission")]
+#[path = "mesh_navigation/mission_geometry.rs"]
+mod mission_geometry;
 pub(crate) use geometry_vertex_viewport::ViewInput as GeometryVertexViewInput;
 pub(crate) use agent_viewport::ViewInput as AgentViewInput;
 
@@ -85,6 +88,8 @@ pub struct Panel {
     geometry_vertex: geometry_vertex_viewport::State,
     #[cfg(feature = "mesh-mission")]
     mission_bound: bool,
+    #[cfg(feature = "mesh-mission")]
+    mission_geometry: mission_geometry::State,
 }
 
 impl Default for Panel {
@@ -126,6 +131,8 @@ impl Default for Panel {
             geometry_vertex: geometry_vertex_viewport::State::default(),
             #[cfg(feature = "mesh-mission")]
             mission_bound: false,
+            #[cfg(feature = "mesh-mission")]
+            mission_geometry: mission_geometry::State::default(),
         }
     }
 }
@@ -491,7 +498,7 @@ impl Panel {
                 return Err("Stage or reset mesh geometry fields before placing a mesh agent".into());
             }
             if self.geometry_staged {
-                self.geometry_bindings_blocker(editor)?;
+                self.geometry_bindings_blocker(editor, false)?;
             }
             if self.agent_pick_busy() || self.props.gesture_busy() {
                 return Err("Finish or cancel active viewport picking or prop movement before placing an agent".into());
@@ -712,6 +719,45 @@ impl Panel {
             let agent_pick_busy = self.agent_pick_busy();
             self.props.show(ui, editor, agent_pick_busy);
         });
+        #[cfg(feature = "mesh-mission")]
+        self.show_mission_geometry(ui, editor);
+    }
+
+    #[cfg(feature = "mesh-mission")]
+    fn show_mission_geometry(&mut self, ui: &mut Ui, editor: &mut Editor) {
+        if !self.mission_bound && !self.mission_geometry.is_enabled() { return; }
+        let context = mission_geometry::Context::capture(self, editor);
+        if !self.mission_geometry.show(ui, context) { return; }
+        let result = mission_geometry::Context::capture(self, editor)
+            .and_then(|context| self.mission_geometry.apply(editor, context));
+        match result {
+            Ok(applied) => {
+                if let Some(status) = self.mission_geometry.status() { editor.info(status); }
+                self.graph = Some(applied.graph);
+                self.loaded_graph_revision = self.graph.as_ref().map(StaticMeshGraph::revision);
+                self.loaded_spec = Some(applied.spec);
+                self.start = applied.spec.start.map(format_fixed);
+                self.goal = applied.spec.goal.map(format_fixed);
+                self.max_vertical = format_fixed(applied.spec.max_vertical);
+                self.distance_per_tick = format_fixed(applied.spec.distance_per_tick);
+                if let Some(graph) = self.graph.as_ref() { self.max_slope = format_fixed(graph.profile().max_slope); }
+                self.draft_dirty = false;
+                self.geometry.acknowledge();
+                self.clear_geometry_history();
+                self.loaded_asset_source = None;
+                self.loaded_model_source = None;
+                self.error = None;
+                self.sync(editor);
+            }
+            Err(error) => self.error = Some(format!("Apply mission-preserving geometry failed: {error}")),
+        }
+    }
+
+    fn mission_reprojection_enabled(&self) -> bool {
+        #[cfg(feature = "mesh-mission")]
+        { self.mission_bound && self.mission_geometry.is_enabled() }
+        #[cfg(not(feature = "mesh-mission"))]
+        { false }
     }
 
     fn authoring_blocker(&self, editor: &Editor) -> Option<String> {
@@ -788,13 +834,16 @@ impl Panel {
         Ok(AgentProfile { max_slope, radius: FP::ZERO, headroom: FP::ZERO, max_step: FP::ZERO })
     }
 
-    fn geometry_bindings_blocker(&self, editor: &Editor) -> Result<(), String> {
+    fn geometry_bindings_blocker(&self, editor: &Editor, allow_mission_reprojection: bool) -> Result<(), String> {
+        if allow_mission_reprojection && !self.mission_reprojection_enabled() {
+            return Err("Explicitly enable mission-preserving geometry before staging changes to an active mission".into());
+        }
         if self.geometry_presentation_pending {
             return Err("Save or discard camera, lighting and animation edits before geometry; save or discard HUD changes too".into());
         }
         #[cfg(feature = "mesh-mission")]
         if let Some(snapshot) = editor.snapshot() {
-            if orr_remote::mesh_navigation::mission::from_view(snapshot.predicted())?.is_some() {
+            if orr_remote::mesh_navigation::mission::from_view(snapshot.predicted())?.is_some() && !allow_mission_reprojection {
                 return Err("Remove the mesh mission before changing its graph; mission points are not silently rebound".into());
             }
         }
@@ -828,7 +877,7 @@ impl Panel {
         if let Some(reason) = self.geometry_blocker(editor) {
             return Err(reason);
         }
-        self.geometry_bindings_blocker(editor)?;
+        self.geometry_bindings_blocker(editor, self.mission_reprojection_enabled())?;
         let profile = self.geometry_profile()?;
         if self.graph.as_ref().is_some_and(|graph| graph.profile() != profile) {
             return Err("Maximum slope differs from the open graph; create or reopen the mesh".into());
@@ -900,6 +949,8 @@ impl Panel {
     }
 
     fn clear_geometry_history(&mut self) {
+        #[cfg(feature = "mesh-mission")]
+        { self.mission_geometry = mission_geometry::State::default(); }
         self.geometry_vertex = geometry_vertex_viewport::State::default();
         self.geometry.reset();
         self.geometry_history = geometry_history::History::default();
@@ -917,7 +968,7 @@ impl Panel {
             || self.model_path.trim() != self.loaded_model_source.as_deref().unwrap_or_default() {
             return Err("Open or clear pending mesh source paths before local geometry Undo/Redo".into());
         }
-        self.geometry_bindings_blocker(editor)?;
+        self.geometry_bindings_blocker(editor, self.mission_reprojection_enabled())?;
         let mut history = self.geometry_history.clone();
         let graph = if redo { history.redo() } else { history.undo() }.ok_or("No local geometry history in that direction")?;
         let staged = !history.at_origin();
@@ -945,7 +996,7 @@ impl Panel {
 
     fn frame_staged_geometry(&self, editor: &mut Editor) -> Result<(), String> {
         if let Some(reason) = self.geometry_blocker(editor) { return Err(reason); }
-        self.geometry_bindings_blocker(editor)?;
+        self.geometry_bindings_blocker(editor, self.mission_reprojection_enabled())?;
         if !self.geometry_staged { return Err("Stage geometry before framing its preview".into()); }
         let graph = self.graph.as_ref().ok_or("Staged geometry has no graph")?;
         let mut low = [f32::INFINITY; 3];

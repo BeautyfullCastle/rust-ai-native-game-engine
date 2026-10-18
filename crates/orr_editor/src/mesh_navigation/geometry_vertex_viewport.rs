@@ -243,7 +243,7 @@ impl State {
         {
             return Err("vertex editing needs an idle local editable MeshNavigation scene".into());
         }
-        panel.geometry_bindings_blocker(editor)?;
+        panel.geometry_bindings_blocker(editor, panel.mission_reprojection_enabled())?;
         let scene = editor
             .path()
             .ok_or_else(|| "the admitted mesh scene has no local path".to_owned())?;

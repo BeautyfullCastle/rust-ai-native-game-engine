@@ -421,6 +421,10 @@ pub(crate) fn summarize(method: &str, params: &J, res: Option<&J>, verify: Optio
             format!("world.singleton.patch {} = {value}", dotted(sv(params, "name"), path))
         }
         "world.insert" | "world.remove" => format!("{method} {} {}", sv(params, "entity"), sv(params, "component")),
+        "mesh.geometry.reproject" => match arg("graph_revision").and_then(J::as_str) {
+            Some(revision) => format!("mesh.geometry.reproject → graph {revision}"),
+            None => "mesh.geometry.reproject".to_owned(),
+        },
         "world.despawn" => format!("world.despawn {}", sv(params, "entity")),
         "world.rename" => format!("world.rename {} {}", sv(params, "entity"), params.get("name").map_or_else(|| "?".to_string(), |v| compact(v, 40))),
         "world.spawn" => {
