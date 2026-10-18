@@ -3,7 +3,8 @@
 Build the editor with `--features collect-ui`, then open a saved Collect project
 whose manifest admits an authored UI document and font. In the inspector choose
 **Preview authored screens**. The existing **Collect UI document** panel remains
-the authoring surface.
+the authoring surface. For staged canvas movement, see
+[visual position editing](collect-ui-position-editing.md).
 
 ## Preview controls
 

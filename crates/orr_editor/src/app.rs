@@ -59,6 +59,9 @@ mod selection_outline;
 #[cfg(feature = "collect-ui")]
 #[path = "app/collect_ui_preview.rs"]
 mod collect_ui_preview;
+#[cfg(feature = "collect-ui")]
+#[path = "app/collect_ui_position.rs"]
+mod collect_ui_position;
 
 /// Button labels (tests click them by these texts).
 pub const LBL_PLAY: &str = "\u{25B6} Play";
