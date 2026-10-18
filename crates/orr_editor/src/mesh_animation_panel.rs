@@ -32,6 +32,7 @@ pub(crate) struct Panel {
     confirm_discard: bool,
     confirm_discard_invalid: bool,
     candidate: Option<Snapshot>,
+    candidate_generation: u64,
     scene: Option<PathBuf>,
     scene_epoch: Option<u64>,
     graph_revision: Option<[u8; 32]>,
@@ -70,6 +71,7 @@ impl Default for Panel {
             confirm_discard: false,
             confirm_discard_invalid: false,
             candidate: None,
+            candidate_generation: 0,
             scene: None,
             scene_epoch: None,
             graph_revision: None,
@@ -390,9 +392,9 @@ impl Panel {
         if let Some(error) = &self.sidecar_error {
             return Err(format!("Saved mesh animation is invalid: {error}"));
         }
-        let Some(snapshot) = self.current_snapshot() else {
+        if self.current_snapshot().is_none() && self.candidate.is_none() {
             return Ok(None);
-        };
+        }
         let Some((scene, revision)) = self.current_identity(editor) else {
             return Err(
                 "Wait for a coherent local Mesh Navigation frame before presenting animation"
@@ -401,7 +403,9 @@ impl Panel {
         };
         if self.scene.as_ref() != Some(&scene)
             || self.graph_revision != Some(revision)
-            || snapshot.graph_revision() != revision
+            || self
+                .current_snapshot()
+                .is_some_and(|snapshot| snapshot.graph_revision() != revision)
         {
             return Err("Mesh animation belongs to a different scene or graph revision".into());
         }
@@ -413,7 +417,9 @@ impl Panel {
         if let Some(placement) = self.preview.placement(self, editor, &view)? {
             return Ok(Some(placement));
         }
-        snapshot.placement_for_view(&view, frame.tick()).map(Some)
+        self.current_snapshot()
+            .map(|snapshot| snapshot.placement_for_view(&view, frame.tick()))
+            .transpose()
     }
 
     fn animation_state(&self, editor: &Editor) -> Option<(bool, u32)> {
@@ -467,6 +473,8 @@ impl Panel {
             self.error = Some("Review animation rights before loading the package".into());
             return;
         }
+        self.preview.reset();
+        self.candidate_generation = self.candidate_generation.wrapping_add(1);
         match Snapshot::from_package(
             Path::new(self.package_root.trim()),
             self.asset.trim(),
@@ -873,6 +881,9 @@ impl Panel {
         }
     }
 }
+
+#[path = "mesh_animation_panel/clip_choices.rs"]
+mod clip_choices;
 
 #[path = "mesh_animation_panel/preview.rs"]
 mod preview;

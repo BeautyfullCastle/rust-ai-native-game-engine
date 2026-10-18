@@ -9,7 +9,13 @@ struct Context {
     scene: PathBuf,
     epoch: u64,
     graph_revision: [u8; 32],
-    history_id: u64,
+    source: SourceKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceKey {
+    Applied(u64),
+    Candidate(u64),
 }
 
 #[derive(Clone)]
@@ -43,6 +49,7 @@ impl State {
     }
 
     fn request(&mut self, panel: &Panel, editor: &Editor, clip: &str, tick: &str) {
+        self.sync(panel, editor);
         match accept(panel, editor, clip, tick) {
             Ok(accepted) => {
                 self.accepted = Some(accepted);
@@ -62,6 +69,9 @@ impl State {
         ui.label("Animation pose preview");
         let enabled = preview_allowed(panel, editor) && self.context.is_some();
         ui.add_enabled_ui(enabled, |ui| {
+            if let Some(snapshot) = source_snapshot(panel) {
+                super::clip_choices::show(ui, &snapshot.clips(), &mut self.clip);
+            }
             text_field(ui, "Animation preview clip", &mut self.clip);
             text_field(ui, "Animation preview tick", &mut self.tick);
             if ui.button("Preview animation pose").clicked() {
@@ -157,12 +167,19 @@ pub(super) fn clear(panel: &mut Panel) {
     panel.preview.clear_accepted();
 }
 
+fn source_snapshot(panel: &Panel) -> Option<&Snapshot> {
+    panel
+        .candidate
+        .as_ref()
+        .or_else(|| panel.current_snapshot())
+}
+
 fn preview_allowed(panel: &Panel, editor: &Editor) -> bool {
     panel.can_edit(editor)
-        && panel.current_snapshot().is_some()
+        && panel.scene_epoch == Some(editor.scene_load_epoch())
+        && source_snapshot(panel).is_some()
         && !panel.form_dirty
         && !panel.source_dirty
-        && panel.candidate.is_none()
         && !panel.document_pending
         && !panel.context_stale
         && panel.sidecar_error.is_none()
@@ -177,7 +194,11 @@ fn context(panel: &Panel, editor: &Editor) -> Option<Context> {
         scene,
         epoch: editor.scene_load_epoch(),
         graph_revision,
-        history_id: panel.current_entry()?.id,
+        source: if panel.candidate.is_some() {
+            SourceKey::Candidate(panel.candidate_generation)
+        } else {
+            SourceKey::Applied(panel.current_entry()?.id)
+        },
     })
 }
 
@@ -213,24 +234,13 @@ fn accept(
     tick_text: &str,
 ) -> Result<Accepted, String> {
     if !preview_allowed(panel, editor) {
-        return Err("Animation preview requires a clean applied animation in its matching editable mesh scene".into());
+        return Err("Animation preview requires a clean admitted candidate or applied animation in its matching editable mesh scene".into());
     }
-    let snapshot = panel
-        .current_snapshot()
-        .ok_or("Apply a mesh animation before previewing a pose")?;
+    let snapshot =
+        source_snapshot(panel).ok_or("Load an admitted animation before previewing a pose")?;
     let (preview_snapshot, tick) = prepare_snapshot(snapshot, clip_text, tick_text)?;
-    let (scene, graph_revision) = panel
-        .current_identity(editor)
+    let context = context(panel, editor)
         .ok_or("Wait for a coherent local Mesh Navigation frame before previewing")?;
-    let context = Context {
-        scene,
-        epoch: editor.scene_load_epoch(),
-        graph_revision,
-        history_id: panel
-            .current_entry()
-            .ok_or("No applied animation history entry")?
-            .id,
-    };
     let frame = editor
         .snapshot()
         .ok_or("Animation preview requires a coherent Frame")?
@@ -257,7 +267,7 @@ fn parse_decimal(value: &str, label: &str) -> Result<u32, String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod decimal_tests {
     use super::parse_decimal;
 
     #[test]
@@ -269,3 +279,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "mesh-mission"))]
+#[path = "preview/tests.rs"]
+mod tests;
