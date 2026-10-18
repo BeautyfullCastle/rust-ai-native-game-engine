@@ -23,9 +23,11 @@ pub struct Panel {
     pub wall_half_extents: [String; 2],
     walls: Vec<RoomWall>,
     walls_current: bool,
-    wall_source_stamp: Option<(Option<PathBuf>, u64)>,
+    wall_source_stamp: Option<(Option<PathBuf>, u64, u64)>,
     selected_wall_guid: Option<String>,
     selected_wall_name: String,
+    selected_wall_center_y: String,
+    selected_wall_half_height: String,
     selected_wall_center: [String; 2],
     selected_wall_half_extents: [String; 2],
     duplicate_wall_name: String,
@@ -52,6 +54,8 @@ impl Default for Panel {
             wall_source_stamp: None,
             selected_wall_guid: None,
             selected_wall_name: String::new(),
+            selected_wall_center_y: "0.5".into(),
+            selected_wall_half_height: "1".into(),
             selected_wall_center: ["0".into(), "0".into()],
             selected_wall_half_extents: ["1".into(), "1".into()],
             duplicate_wall_name: "wall copy".into(),
@@ -66,7 +70,11 @@ impl Panel {
     pub fn show(&mut self, context: &Context, editor: &mut Editor, removal_blocker: Option<&str>) {
         self.sync_wall_footprint(editor);
         self.sync_actor_placement(editor);
-        let current_stamp = (editor.path(), editor.sim().checksum);
+        let current_stamp = (
+            editor.path(),
+            editor.scene_load_epoch(),
+            editor.sim().checksum,
+        );
         if self
             .wall_source_stamp
             .as_ref()
@@ -324,6 +332,42 @@ impl Panel {
                 }
             }
 
+            ui.separator();
+            ui.label("Wall vertical size (existing collision rules)");
+            text_field(
+                ui,
+                "Selected wall center Y",
+                &mut self.selected_wall_center_y,
+                48,
+            );
+            text_field(
+                ui,
+                "Selected wall half-height Y",
+                &mut self.selected_wall_half_height,
+                48,
+            );
+            ui.small("Center Y: -4..=4; half-height: 0.1..=8. Wall must span the full player height plus skin. Only Y changes.");
+            let vertical_valid = parse_fixed(&self.selected_wall_center_y).is_ok()
+                && parse_fixed(&self.selected_wall_half_height).is_ok();
+            if ui
+                .add_enabled(
+                    editable
+                        && self.walls_current
+                        && vertical_valid
+                        && !self.wall_footprint_busy()
+                        && !self.actor_placement_busy(),
+                    egui::Button::new("Apply wall height"),
+                )
+                .clicked()
+            {
+                self.status = match self.apply_wall_height(editor) {
+                    Ok(()) => format!(
+                        "Updated Room wall height {guid}. Read Room walls before another edit."
+                    ),
+                    Err(error) => error,
+                };
+            }
+
             text_field(ui, "Duplicate wall name", &mut self.duplicate_wall_name, 64);
             position_fields(
                 ui,
@@ -407,6 +451,36 @@ impl Panel {
         }
     }
 
+    fn apply_wall_height(&mut self, editor: &mut Editor) -> Result<(), String> {
+        let current = (
+            editor.path(),
+            editor.scene_load_epoch(),
+            editor.sim().checksum,
+        );
+        if !self.walls_current
+            || self.wall_source_stamp.as_ref() != Some(&current)
+            || self.wall_footprint_busy()
+            || self.actor_placement_busy()
+        {
+            return Err("Read the current Room wall before applying height.".into());
+        }
+        let guid = self
+            .selected_wall_guid
+            .clone()
+            .ok_or("Select a current Room wall first")?;
+        if !self.walls.iter().any(|wall| wall.guid == guid) {
+            return Err("Selected Room wall is not in the current wall list".into());
+        }
+        let center_y = parse_fixed(&self.selected_wall_center_y)?;
+        let half_height = parse_fixed(&self.selected_wall_half_height)?;
+        // Successful publication must not become a reported failure because a
+        // subsequent read races pending transaction-state replies. Keep the
+        // cache stale and require an explicit Read before the next edit.
+        self.walls_current = false;
+        editor.update_room_wall_vertical_checked(&guid, center_y, half_height, current.2)?;
+        Ok(())
+    }
+
     fn refresh_walls(&mut self, editor: &mut Editor) -> Result<usize, String> {
         match editor.read_room_walls() {
             Ok(walls) => {
@@ -423,7 +497,11 @@ impl Panel {
     fn cache_walls(&mut self, walls: Vec<RoomWall>, editor: &Editor) {
         self.walls = walls;
         self.walls_current = true;
-        self.wall_source_stamp = Some((editor.path(), editor.sim().checksum));
+        self.wall_source_stamp = Some((
+            editor.path(),
+            editor.scene_load_epoch(),
+            editor.sim().checksum,
+        ));
         if let Some(guid) = self.selected_wall_guid.clone() {
             if let Some(wall) = self.walls.iter().find(|wall| wall.guid == guid).cloned() {
                 self.select_wall(&wall);
@@ -437,6 +515,8 @@ impl Panel {
     fn select_wall(&mut self, wall: &RoomWall) {
         self.selected_wall_guid = Some(wall.guid.clone());
         self.selected_wall_name = wall.name.clone();
+        self.selected_wall_center_y = format_fixed(wall.center_y);
+        self.selected_wall_half_height = format_fixed(wall.half_height);
         self.selected_wall_center = [format_fixed(wall.center[0]), format_fixed(wall.center[1])];
         self.selected_wall_half_extents = [
             format_fixed(wall.half_extents[0]),
@@ -497,3 +577,7 @@ fn parse_fixed(text: &str) -> Result<FP, String> {
 fn format_fixed(value: FP) -> String {
     orr_reflect::decimal::fp_to_decimal(value)
 }
+
+#[cfg(test)]
+#[path = "room_authoring_panel/wall_height_tests.rs"]
+mod wall_height_tests;
