@@ -938,12 +938,131 @@ fn mesh_keyboard_controls_drive_mission_in_editor_and_source_free_player() {
         player.state().inner.editor.sim().branches,
         recorded_branches
     );
+    let recorded_end_checksum = player
+        .state()
+        .inner
+        .editor
+        .snapshot()
+        .unwrap()
+        .predicted()
+        .checksum();
     let player_recorded_timeline_future_preserved =
         player.state().inner.editor.sim().last_tick == recorded_last_tick;
     let player_recorded_timeline_branches_preserved =
         player.state().inner.editor.sim().branches == recorded_branches;
     assert!(player_recorded_timeline_future_preserved);
     assert!(player_recorded_timeline_branches_preserved);
+    click_live_player_button(&mut player, "Restart game…");
+    wait_for_label_player(
+        &mut player,
+        "restart confirmation dialog",
+        "Restart the current game?",
+    );
+    let player_restart_confirmation_capture =
+        capture_player(&fixture, &mut player, "player-restart-confirm.png");
+    click_live_player_button(&mut player, "Cancel restart");
+    assert!(player.query_by_label("Restart the current game?").is_none());
+    let player_restart_cancel_preserved_recording = player.state().inner.editor.sim().head_tick
+        == recorded_last_tick
+        && player.state().inner.editor.sim().last_tick == recorded_last_tick
+        && player.state().inner.editor.sim().branches == recorded_branches
+        && !player.state().inner.editor.sim().playing
+        && player_mission_view(player.state()).run.won == 1
+        && player
+            .state()
+            .inner
+            .editor
+            .snapshot()
+            .unwrap()
+            .predicted()
+            .checksum()
+            == recorded_end_checksum;
+    assert!(player_restart_cancel_preserved_recording);
+    let player_restart_cancel_preserved_bundle_bytes = fs::read(&bundle.scene).unwrap()
+        == saved_scene
+        && fs::read(fixture.export.join("orr.mesh-bundle.json")).unwrap() == export_manifest
+        && fs::read(fixture.export.join("orr_mesh_player.exe")).unwrap() == export_runtime;
+    assert!(player_restart_cancel_preserved_bundle_bytes);
+    click_live_player_button(&mut player, "Restart game…");
+    wait_for_label_player(
+        &mut player,
+        "restart confirmation dialog before confirming",
+        "Restart the current game?",
+    );
+    click_live_player_button(&mut player, "Restart game");
+    wait_for_player(&mut player, "confirmed fresh Player game state", |app| {
+        let view = player_mesh_view(app);
+        let mission = player_mission_view(app);
+        app.inner.editor.mode() == Mode::Play
+            && !app.inner.editor.sim().playing
+            && app.inner.editor.sim().head_tick == 0
+            && app.inner.editor.sim().last_tick == 0
+            && view.agent.position == initial_view.pin.start
+            && view.pin.goal == initial_view.pin.goal
+            && mission.run.collected == 0
+            && mission.run.won == 0
+            && !app.inner.editor.mesh_play_input_enabled()
+            && app.inner.editor.mesh_play_input_phase() == crate::editor::input::Phase::Off
+    });
+    let player_restart_reset_to_authored_state = {
+        let view = player_mesh_view(player.state());
+        let mission = player_mission_view(player.state());
+        view.agent.position == initial_view.pin.start
+            && view.pin.goal == initial_view.pin.goal
+            && mission.run.collected == 0
+            && mission.run.won == 0
+            && player.state().inner.editor.sim().head_tick == 0
+            && player.state().inner.editor.sim().last_tick == 0
+    };
+    assert!(player_restart_reset_to_authored_state);
+    let player_restart_released_input = !player.state().inner.editor.mesh_play_input_enabled()
+        && player.state().inner.editor.mesh_play_input_phase() == crate::editor::input::Phase::Off;
+    assert!(player_restart_released_input);
+    let stopped_recording = player
+        .state()
+        .inner
+        .editor
+        .last_stopped()
+        .expect("confirmed restart retains the stopped recording");
+    let stopped_recording_tick = stopped_recording.tick;
+    let stopped_recording_checksum = stopped_recording.checksum;
+    let stopped_recording_bytes = stopped_recording.replay.len();
+    let player_restart_preserved_last_stopped_recording = stopped_recording_tick
+        == recorded_last_tick
+        && stopped_recording_checksum == recorded_end_checksum
+        && stopped_recording_bytes > 0;
+    assert!(player_restart_preserved_last_stopped_recording);
+    let player_restart_capture = capture_player(&fixture, &mut player, "player-restart-ready.png");
+    click_live_player_button(&mut player, "Resume");
+    wait_for_player(&mut player, "resuming restarted Player game", |app| {
+        app.inner.editor.sim().playing
+    });
+    click_live_player(&mut player, "Enable mesh goal input");
+    click_live_player_button(&mut player, "Focus mesh keyboard controls");
+    wait_for_label_player(
+        &mut player,
+        "restart Player managed input lease",
+        "Managed player input active",
+    );
+    let player_restart_key_steps = drive_player_mission(&mut player);
+    let player_restart_win = player_mission_view(player.state());
+    assert_eq!(player_restart_win.run.collected, 0b111);
+    assert_eq!(player_restart_win.run.won, 1);
+    let player_restart_win_tick = player.state().inner.editor.timeline().unwrap().tick;
+    let player_restart_win_checksum = player
+        .state()
+        .inner
+        .editor
+        .snapshot()
+        .unwrap()
+        .predicted()
+        .checksum();
+    let player_restart_win_capture =
+        capture_player(&fixture, &mut player, "player-restart-keyboard-win.png");
+    let player_restart_preserved_bundle_bytes = fs::read(&bundle.scene).unwrap() == saved_scene
+        && fs::read(fixture.export.join("orr.mesh-bundle.json")).unwrap() == export_manifest
+        && fs::read(fixture.export.join("orr_mesh_player.exe")).unwrap() == export_runtime;
+    assert!(player_restart_preserved_bundle_bytes);
     let original_scene_hidden_during_player = !fixture.scene.exists();
     assert!(player
         .state()
@@ -994,13 +1113,28 @@ fn mesh_keyboard_controls_drive_mission_in_editor_and_source_free_player() {
         "player_recorded_playback_auto_paused_at_end":player_recorded_playback_auto_paused_at_end,
         "player_recorded_timeline_future_preserved":player_recorded_timeline_future_preserved,
         "player_recorded_timeline_branches_preserved":player_recorded_timeline_branches_preserved,
+        "restart":{
+            "cancel_preserved_recording":player_restart_cancel_preserved_recording,
+            "cancel_preserved_bundle_bytes":player_restart_cancel_preserved_bundle_bytes,
+            "reset_to_authored_state":player_restart_reset_to_authored_state,
+            "released_managed_input":player_restart_released_input,
+            "preserved_last_stopped_recording":player_restart_preserved_last_stopped_recording,
+            "last_stopped_tick":stopped_recording_tick,
+            "last_stopped_checksum":format!("0x{stopped_recording_checksum:016x}"),
+            "last_stopped_replay_bytes":stopped_recording_bytes,
+            "second_keyboard_mission_won":player_restart_win.run.won == 1,
+            "second_keyboard_goal_steps":player_restart_key_steps,
+            "second_win_tick":player_restart_win_tick,
+            "second_win_frame_checksum":format!("0x{player_restart_win_checksum:016x}"),
+            "bundle_bytes_unchanged":player_restart_preserved_bundle_bytes
+        },
         "player_recorded_last_tick":recorded_last_tick,
         "player_recorded_branches":recorded_branches,
         "player_win_tick":player_win_tick,
         "player_win_frame_checksum":format!("0x{player_win_checksum:016x}"),
         "original_scene_hidden_during_player":original_scene_hidden_during_player,
         "original_scene_restored_after_player":original_scene_restored_after_player,
-        "captures":[editor_initial_capture, keyboard_controls_capture, editor_win_capture, player_initial_capture, player_win_capture, player_replay_capture],
+        "captures":[editor_initial_capture, keyboard_controls_capture, editor_win_capture, player_initial_capture, player_win_capture, player_replay_capture, player_restart_confirmation_capture, player_restart_capture, player_restart_win_capture],
         "physical_os_input":false
     });
     fs::write(

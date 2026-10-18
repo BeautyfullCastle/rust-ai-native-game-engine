@@ -27,6 +27,10 @@ mod mesh_workspace_save;
 #[path = "app/mesh_recorded_playback.rs"]
 mod mesh_recorded_playback;
 
+#[cfg(feature = "mesh-export")]
+#[path = "app/mesh_player_session.rs"]
+mod mesh_player_session;
+
 /// Button labels (tests click them by these texts).
 pub const LBL_PLAY: &str = "\u{25B6} Play";
 /// See [`LBL_PLAY`].
@@ -237,6 +241,8 @@ pub struct EditorApp {
     mesh_player_input_allowed: bool,
     #[cfg(feature = "mesh-export")]
     mesh_recorded_playback: mesh_recorded_playback::State,
+    #[cfg(feature = "mesh-export")]
+    mesh_player_session: mesh_player_session::State,
     #[cfg(feature = "mesh-navigation")]
     mesh_camera: crate::mesh_camera_panel::Panel,
     #[cfg(feature = "mesh-navigation")]
@@ -287,7 +293,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -923,7 +929,7 @@ impl EditorApp {
         egui::Panel::top("mesh_player_controls").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let playing = self.mesh_recorded_playback.active() || self.editor.timeline().is_some_and(|timeline| timeline.playing);
-                let available = self.editor.down().is_none() && self.editor.mode() == Mode::Play;
+                let available = self.editor.down().is_none() && self.editor.mode() == Mode::Play && !self.mesh_player_session.dialog_open();
                 let label = if playing { "Pause" } else { "Resume" };
                 if ui.add_enabled(available, egui::Button::new(label)).clicked() {
                     if self.mesh_recorded_playback.active() {
@@ -939,6 +945,11 @@ impl EditorApp {
                 if ui.add_enabled(available, egui::Button::new("Replay")).clicked() {
                     self.mesh_recorded_playback.restart(&mut self.editor, now);
                 }
+                if self.mesh_player_session.show(ui, &mut self.editor, &mut self.mesh_recorded_playback) {
+                    self.mesh_play_controls = crate::mesh_play_controls::Panel::default();
+                    self.mesh_recorded_playback = mesh_recorded_playback::State::default();
+                    self.sync_mesh_presentation();
+                }
                 if let Some(timeline) = self.editor.timeline() {
                     ui.label(format!("Tick {} · {}", timeline.tick, if timeline.playing { "Playing" } else { "Paused" }));
                 }
@@ -953,7 +964,7 @@ impl EditorApp {
                 ui.colored_label(Color32::RED, error);
             }
             if self.mesh_player_input_allowed {
-                self.mesh_play_controls.show(ui, &mut self.editor);
+                ui.add_enabled_ui(!self.mesh_player_session.dialog_open(), |ui| self.mesh_play_controls.show(ui, &mut self.editor));
             } else {
                 ui.label("Legacy replay-only mesh bundle · live goal input unavailable");
             }
@@ -1576,7 +1587,7 @@ impl EditorApp {
             let blocked = self.ui.dialog.is_some() || self.editor.previewing().is_some()
                 || ui.input(|input| !input.focused || input.key_pressed(Key::Escape));
             #[cfg(feature = "mesh-export")]
-            let blocked = blocked || !self.mesh_player_input_allowed;
+            let blocked = blocked || !self.mesh_player_input_allowed || self.mesh_player_session.dialog_open();
             if blocked { self.editor.set_mesh_play_input_enabled(false); }
             let click_blocked = blocked || ui.ctx().text_edit_focused();
             let keyboard_enabled = self.editor.mesh_play_input_enabled() && !blocked;
