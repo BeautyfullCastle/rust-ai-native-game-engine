@@ -221,6 +221,8 @@ mod model_package_import;
 mod model_package_import_panel;
 #[cfg(feature="package-manager")]
 pub mod package_manager_panel;
+#[cfg(feature = "package-manager")]
+mod package_model_preview;
 
 #[cfg(feature = "project-ui")]
 pub mod project_ui;

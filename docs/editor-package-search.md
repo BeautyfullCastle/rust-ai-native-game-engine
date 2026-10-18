@@ -17,3 +17,7 @@ Choose a visible **Use model** action to assign through the existing selected
 entity workflow, then save model bindings separately. Filtering only changes
 the displayed list; it does not install, verify, modify or save content, or
 bypass the normal edit-mode and compiled-capability restrictions.
+
+To inspect an asset without selecting an entity, use its **Preview static model**
+action. The separate viewer offers orbit, zoom, Reset and Close without changing
+bindings or project files. See [Static package preview](editor-package-preview.md).

@@ -88,6 +88,7 @@ pub struct Panel {
     restoration_preview: Option<PackagePreview>,
     restoration_generation: u64,
     model_request: Option<ModelRequest>,
+    static_preview_request: Option<crate::package_model_preview::PreviewRequest>,
     pending: Option<Receiver<Completion>>,
     removing: bool,
     model_import: crate::model_package_import_panel::Panel,
@@ -109,6 +110,36 @@ impl Panel {
     pub(crate) fn take_model_asset_request(&mut self) -> Option<(String, String, ModelKind)> {
         let request = self.take_current_request()?;
         Some((request.package, request.asset, request.kind))
+    }
+
+    pub(crate) fn take_static_preview_request(
+        &mut self,
+    ) -> Option<crate::package_model_preview::PreviewRequest> {
+        let request = self.static_preview_request.take()?;
+        let package = self.verified.as_ref()?.packages.get(&request.package_id)?;
+        (self.root.as_ref() == Some(&request.project_root)
+            && self.project_generation == request.generation
+            && package.digest == request.digest
+            && package.manifest.files.contains(&request.asset_path)
+            && !self.busy())
+        .then_some(request)
+    }
+
+    pub(crate) fn static_preview_is_current(
+        &self,
+        request: &crate::package_model_preview::PreviewRequest,
+    ) -> bool {
+        self.root.as_ref() == Some(&request.project_root)
+            && self.project_generation == request.generation
+            && !self.busy()
+            && self
+                .verified
+                .as_ref()
+                .and_then(|lock| lock.packages.get(&request.package_id))
+                .is_some_and(|package| {
+                    package.digest == request.digest
+                        && package.manifest.files.contains(&request.asset_path)
+                })
     }
 
     fn take_current_request(&mut self) -> Option<ModelRequest> {
@@ -249,7 +280,7 @@ impl Panel {
                     ui.separator();
                     ui.label("Installed package bytes verified from this project's lock:");
                     lock_table(ui, "verified-installed-packages", lock);
-                    ui.label("Select an entity, then use a verified model; binding save is separate.");
+                    ui.label("Preview a static model without selecting an entity. Use model assigns to the selected entity; binding save is separate.");
                     ui.separator();
                     ui.label("Remove a direct package selection (cached bytes and source files are retained):");
                     for name in lock.direct.keys() {
@@ -260,7 +291,7 @@ impl Panel {
                     }
                     model_asset_buttons(
                         ui,
-                        ModelBrowser { lock, filter: &mut self.model_filter },
+                        ModelBrowser { lock, filter: &mut self.model_filter, preview_request: &mut self.static_preview_request },
                         can_operate,
                         &mut self.model_request,
                         self.root.as_ref(),
@@ -317,6 +348,7 @@ impl Panel {
             self.last_removal = None;
             self.restoration_preview = None;
             self.model_filter.clear();
+            self.static_preview_request = None;
             self.removal_name.clear();
             self.removal_preview = None;
             self.verified = None;
@@ -576,6 +608,7 @@ impl Panel {
     }
 
     fn invalidate_package_cache(&mut self) {
+        self.static_preview_request = None;
         self.last_removal = None;
         self.restoration_preview = None;
         self.removal_preview = None;
@@ -927,6 +960,7 @@ fn lock_table(ui: &mut egui::Ui, id: &str, lock: &Lock) {
 struct ModelBrowser<'a> {
     lock: &'a Lock,
     filter: &'a mut String,
+    preview_request: &'a mut Option<crate::package_model_preview::PreviewRequest>,
 }
 
 fn model_matches_filter(package: &str, asset: &str, filter: &str) -> bool {
@@ -980,6 +1014,23 @@ fn model_asset_buttons(
                 continue;
             }
             shown += 1;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(format!("Preview static model {package_name}/{asset}")),
+                )
+                .clicked()
+            {
+                if let Some(root) = root {
+                    *browser.preview_request = Some(crate::package_model_preview::PreviewRequest {
+                        project_root: root.clone(),
+                        package_id: package_name.clone(),
+                        asset_path: asset.clone(),
+                        digest: package.digest.clone(),
+                        generation: generations.0,
+                    });
+                }
+            }
             #[cfg(not(feature = "room-animated-models"))]
             let kinds = [ModelKind::Static];
             #[cfg(feature = "room-animated-models")]
@@ -1210,6 +1261,7 @@ mod tests {
                         ModelBrowser {
                             lock: panel.verified.as_ref().unwrap(),
                             filter: &mut panel.model_filter,
+                            preview_request: &mut panel.static_preview_request,
                         },
                         state.1,
                         &mut panel.model_request,
@@ -1257,6 +1309,15 @@ mod tests {
                 ModelKind::Static
             ))
         );
+        harness
+            .get_by_label("Preview static model characters/actors/Hero.GLB")
+            .click();
+        harness.run_steps(3);
+        let preview = harness.state_mut().0.take_static_preview_request().unwrap();
+        assert_eq!(preview.package_id, "characters");
+        assert_eq!(preview.asset_path, "actors/Hero.GLB");
+        assert_eq!(preview.digest, "b".repeat(64));
+        assert!(harness.state_mut().0.take_model_asset_request().is_none());
         harness.get_by_label("Clear model filter").click();
         harness.run_steps(3);
         assert!(harness
@@ -1288,6 +1349,11 @@ mod tests {
             .get_by_label("Use model scenery/props/tree.orrmodel")
             .accesskit_node()
             .is_disabled());
+        assert!(harness
+            .get_by_label("Preview static model scenery/props/tree.orrmodel")
+            .accesskit_node()
+            .is_disabled());
+        assert!(harness.state().0.static_preview_request.is_none());
         assert!(harness.state().0.model_request.is_none());
         assert_eq!(harness.state().0.verified, original_lock);
     }
