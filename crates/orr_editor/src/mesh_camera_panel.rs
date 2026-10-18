@@ -203,7 +203,7 @@ impl Panel {
                         changed |= text_field(ui, label, &mut self.follow_offset[axis]);
                     }
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     changed |= ui
                         .radio_value(
                             &mut self.projection,
@@ -224,7 +224,7 @@ impl Panel {
                     self.error = None;
                     self.status = "Game camera form changed; apply it before Play or save.".into();
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .button("Capture viewport as game camera")
                         .clicked()
@@ -242,7 +242,7 @@ impl Panel {
             });
 
             let history_enabled = self.can_change_history(editor);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(history_enabled && self.cursor > 0, egui::Button::new("Undo game camera"))
                     .clicked()
@@ -269,7 +269,7 @@ impl Panel {
                 }
             });
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
                         self.can_save(editor) && self.history_is_dirty(),

@@ -129,7 +129,7 @@ impl Panel {
             ui.add_enabled_ui(self.can_edit(editor) && !self.mission_pick_busy(), |ui| {
                 if ui
                     .add_enabled(
-                        self.current_mission_enabled() && !self.dirty(),
+                        self.can_stage_route_checkpoints(editor),
                         egui::Button::new("Stage mission route checkpoints"),
                     )
                     .clicked()
@@ -242,6 +242,13 @@ impl Panel {
         self.mission_present
     }
 
+    fn can_stage_route_checkpoints(&self, editor: &Editor) -> bool {
+        self.can_edit(editor)
+            && !self.mission_pick_busy()
+            && self.current_mission_enabled()
+            && !self.dirty()
+    }
+
     fn can_edit(&self, editor: &Editor) -> bool {
         editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
@@ -352,10 +359,8 @@ impl Panel {
             editor.host_call("world.singleton.patch", request)?;
             editor.mesh_navigation_mark_edited();
             editor.sync();
-            self.form_dirty = false;
-            self.context_stale = false;
+            self.refresh_after_apply(editor, config)?;
             self.error = None;
-            self.observed_checksum = Some(editor.checksum());
             self.status = if config.enabled == 1 {
                 "Mesh mission applied to the scene; save the scene explicitly.".into()
             } else {
@@ -367,6 +372,42 @@ impl Panel {
         if let Err(error) = result {
             self.error = Some(format!("Apply mesh mission failed: {error}"));
         }
+    }
+
+    fn refresh_after_apply(
+        &mut self,
+        editor: &Editor,
+        expected: MeshMission,
+    ) -> Result<(), String> {
+        let Some((scene, graph_revision, checksum, mission_view)) = current_identity(editor) else {
+            self.context_stale = true;
+            return Err(
+                "The applied mission is awaiting an authoritative mesh Frame readback".into(),
+            );
+        };
+        if self.graph_revision != Some(graph_revision)
+            || (expected.enabled == 1 && graph_revision != expected.graph_revision)
+        {
+            self.context_stale = true;
+            return Err("The applied mission readback belongs to another mesh graph".into());
+        }
+        let readback_matches = match (expected.enabled, mission_view.as_ref()) {
+            (1, Some(mission_view)) => mission_view.config == expected,
+            (0, None) => expected.disabled(),
+            _ => false,
+        };
+        if !readback_matches {
+            self.context_stale = true;
+            return Err(
+                "The authoritative mesh mission differs from the applied configuration".into(),
+            );
+        }
+        self.scene = Some(scene);
+        self.scene_epoch = Some(editor.scene_load_epoch());
+        self.graph_revision = Some(graph_revision);
+        self.observed_checksum = Some(checksum);
+        self.load_fields(mission_view.as_ref());
+        Ok(())
     }
 
     fn reload(&mut self, editor: &Editor) {

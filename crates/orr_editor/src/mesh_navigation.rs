@@ -570,7 +570,7 @@ impl Panel {
             ui.weak(
                 "Point agent · canonical open-sky triangles · no physics or collision controller",
             );
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Create ramp and bridge").clicked() {
                     if let Err(error) = self.create_ramp_and_bridge() {
                         self.error = Some(error);
@@ -629,7 +629,7 @@ impl Panel {
                 }
             });
             let asset_label = ui.label("Mesh asset (.orrmesh)");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let input_width = (ui.available_width() - 100.0).max(40.0);
                 if ui
                     .add(
@@ -647,7 +647,7 @@ impl Panel {
                 }
             });
             let model_label = ui.label("Model source (.glb, .gltf, .orrmodel)");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let input_width = (ui.available_width() - 100.0).max(40.0);
                 if ui
                     .add(
@@ -665,7 +665,7 @@ impl Panel {
                 }
             });
             let output_label = ui.label("Save mesh asset (.orrmesh)");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let input_width = (ui.available_width() - 100.0).max(40.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.mesh_output_path)

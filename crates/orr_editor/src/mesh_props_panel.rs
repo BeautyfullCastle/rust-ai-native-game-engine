@@ -340,7 +340,7 @@ impl Panel {
                     }
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
                         editable
@@ -393,7 +393,7 @@ impl Panel {
                     }
                     None => "Click an admitted walkable mesh triangle to stage this prop's placement.".into(),
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(
                             can_apply_placement,
@@ -469,7 +469,7 @@ impl Panel {
                     self.discard_changes_and_reload(editor);
                 }
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let history_enabled = self.can_change_history(editor);
                 if ui
                     .add_enabled(history_enabled && self.cursor > 0, egui::Button::new("Undo prop edit"))

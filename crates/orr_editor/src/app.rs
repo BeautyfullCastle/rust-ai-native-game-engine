@@ -2628,3 +2628,7 @@ mod screenshot_tests {
         assert_eq!(encode_png_bounded(&oversized), Err(CaptureError::Failed));
     }
 }
+
+#[cfg(all(test, feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[path = "app/mesh_panel_layout_tests.rs"]
+mod mesh_panel_layout_tests;

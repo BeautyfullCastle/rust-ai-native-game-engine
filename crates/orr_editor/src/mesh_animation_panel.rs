@@ -254,7 +254,7 @@ impl Panel {
                 }
             });
             let history_enabled = self.can_change_history(editor);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.add_enabled(history_enabled && !self.form_dirty && !self.source_dirty && self.candidate.is_none() && self.cursor > 0, egui::Button::new("Undo mesh animation")).clicked() { self.undo(); }
                 if ui.add_enabled(history_enabled && !self.form_dirty && !self.source_dirty && self.candidate.is_none() && self.cursor + 1 < self.history.len(), egui::Button::new("Redo mesh animation")).clicked() { self.redo(); }
                 if ui.add_enabled(history_enabled && !self.dirty(), egui::Button::new("Reload mesh animation")).clicked() { self.reload(editor); }

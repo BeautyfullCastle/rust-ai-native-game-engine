@@ -89,3 +89,94 @@ fn history_is_bounded_and_truncates_redo_after_new_apply() {
     panel.push_state(Some(document));
     assert_eq!(panel.cursor + 1, panel.history.len());
 }
+
+#[test]
+#[cfg(feature = "mesh-mission")]
+fn confirmation_and_remove_controls_fit_a_fixed_inspector() {
+    use egui_kittest::{
+        kittest::{NodeT, Queryable},
+        Harness,
+    };
+
+    struct UiState {
+        _directory: tempfile::TempDir,
+        editor: crate::editor::Editor,
+        panel: Panel,
+    }
+
+    for size in [[700.0, 900.0], [1000.0, 900.0]] {
+        let directory = tempfile::tempdir().unwrap();
+        let scene = directory.path().join("lighting.scene.yaml");
+        let editor = crate::mesh_workspace::mission::prepare(
+            &scene,
+            &crate::mesh_workspace::mission::Settings::default(),
+        )
+        .unwrap();
+        let mut panel = Panel::default();
+        panel.sync(&editor);
+        panel.push_initial(Some(
+            Document::from_lighting(orr_sample::yard3d_view::yard_lighting()).unwrap(),
+        ));
+
+        let mut harness = Harness::builder().with_size(size).build_ui_state(
+            |ui, state: &mut UiState| {
+                egui::Panel::right("inspector")
+                    .resizable(false)
+                    .exact_size(340.0)
+                    .show(ui, |panel_ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("inspector_scroll")
+                            .auto_shrink([false, false])
+                            .show(panel_ui, |scroll_ui| {
+                                scroll_ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                                state.panel.show(scroll_ui, &state.editor);
+                            });
+                    });
+            },
+            UiState {
+                _directory: directory,
+                editor,
+                panel,
+            },
+        );
+        harness.run_steps(5);
+        harness.get_by_label("Mesh game lighting").click();
+        harness.run_steps(4);
+        harness
+            .get_by_label("I confirm removing the saved game lighting")
+            .scroll_to_me();
+        harness.run_steps(3);
+        assert!(harness
+            .get_by_label("Remove game lighting")
+            .accesskit_node()
+            .is_disabled());
+        harness
+            .get_by_label("I confirm removing the saved game lighting")
+            .click_accesskit();
+        harness.run_steps(3);
+        assert!(!harness
+            .get_by_label("Remove game lighting")
+            .accesskit_node()
+            .is_disabled());
+
+        for label in [
+            "Save game lighting",
+            "Reload game lighting",
+            "I confirm removing the saved game lighting",
+            "Remove game lighting",
+        ] {
+            harness.get_by_label(label).scroll_to_me();
+            harness.run_steps(3);
+            let panel_state =
+                egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new("inspector"))
+                    .expect("fixed inspector panel state");
+            let screen_rect = harness.ctx.input(|input| input.viewport_rect());
+            assert!((panel_state.outer_rect.width() - 340.0).abs() < 0.5);
+            assert!(panel_state.outer_rect.min.x >= screen_rect.min.x - 0.5);
+            assert!(panel_state.outer_rect.max.x <= screen_rect.max.x + 0.5);
+            let control_rect = harness.get_by_label(label).rect();
+            assert!(control_rect.min.x >= panel_state.outer_rect.min.x - 0.5);
+            assert!(control_rect.max.x <= panel_state.outer_rect.max.x + 0.5);
+        }
+    }
+}

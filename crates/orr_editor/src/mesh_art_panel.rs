@@ -342,7 +342,7 @@ impl Panel {
                 }
             });
             let history_enabled = self.can_change_history(editor);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(history_enabled && self.cursor > 0, egui::Button::new("Undo agent art"))
                     .clicked()

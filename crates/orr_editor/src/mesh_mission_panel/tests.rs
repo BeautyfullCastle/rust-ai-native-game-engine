@@ -71,3 +71,159 @@ fn disabled_mission_is_canonical_zero_and_count_is_bounded() {
         assert!(parse_count(count).is_err());
     }
 }
+
+#[test]
+fn authoritative_apply_readback_refreshes_mission_presence_for_route_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("mission.scene.yaml");
+    let settings = crate::mesh_workspace::mission::Settings {
+        collectible_count: 1,
+        ..Default::default()
+    };
+    let mut editor = crate::mesh_workspace::mission::prepare(&scene, &settings).unwrap();
+    let original_mission = mission::from_view(editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .unwrap()
+        .config;
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    assert!(panel.current_mission_enabled());
+
+    panel.confirm_remove = true;
+    panel.remove(&mut editor);
+    assert!(panel.error.is_none());
+    assert!(!panel.current_mission_enabled());
+    assert!(!panel.can_stage_route_checkpoints(&editor));
+
+    panel.enabled = true;
+    panel.count = original_mission.count.to_string();
+    panel.points = original_mission.points.map(format_point);
+    panel.exit = format_point(original_mission.exit);
+    panel.form_dirty = true;
+    panel.apply(&mut editor);
+
+    let applied = mission::from_view(editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.config, original_mission);
+    assert!(panel.error.is_none());
+    assert!(panel.current_mission_enabled());
+    assert!(!panel.dirty());
+    assert!(panel.can_stage_route_checkpoints(&editor));
+
+    panel.enabled = false;
+    panel.form_dirty = true;
+    panel.apply(&mut editor);
+    assert!(panel.error.is_none());
+    assert!(!panel.current_mission_enabled());
+    assert!(!panel.can_stage_route_checkpoints(&editor));
+    assert!(mission::from_view(editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .is_none());
+
+    panel.enabled = true;
+    panel.count = original_mission.count.to_string();
+    panel.points = original_mission.points.map(format_point);
+    panel.exit = format_point(original_mission.exit);
+    panel.form_dirty = true;
+    panel.apply(&mut editor);
+    assert!(panel.error.is_none());
+    assert!(panel.current_mission_enabled());
+    assert!(panel.can_stage_route_checkpoints(&editor));
+
+    let checksum_before_draft = editor.checksum();
+    let history_before_draft = editor.history().entries.len();
+    panel.points[0][0] = "3.25".into();
+    panel.form_dirty = true;
+    assert_eq!(editor.checksum(), checksum_before_draft);
+    assert_eq!(editor.history().entries.len(), history_before_draft);
+    assert!(panel.current_mission_enabled());
+    assert!(!panel.can_stage_route_checkpoints(&editor));
+}
+
+#[test]
+fn route_checkpoint_widget_is_enabled_after_reenable_apply() {
+    use egui_kittest::{
+        kittest::{NodeT, Queryable},
+        Harness,
+    };
+
+    struct UiState {
+        _directory: tempfile::TempDir,
+        editor: crate::editor::Editor,
+        panel: Panel,
+        checksum: u64,
+        history_len: usize,
+        mission: MeshMission,
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("mission.scene.yaml");
+    let settings = crate::mesh_workspace::mission::Settings {
+        collectible_count: 1,
+        ..Default::default()
+    };
+    let mut editor = crate::mesh_workspace::mission::prepare(&scene, &settings).unwrap();
+    let mut original_mission = mission::from_view(editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .unwrap()
+        .config;
+    let admitted_view = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+    original_mission.points[0].position = admitted_view.pin.spec().start;
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    panel.confirm_remove = true;
+    panel.remove(&mut editor);
+    panel.enabled = true;
+    panel.count = original_mission.count.to_string();
+    panel.points = original_mission.points.map(format_point);
+    panel.exit = format_point(original_mission.exit);
+    panel.form_dirty = true;
+    panel.apply(&mut editor);
+    assert!(panel.error.is_none());
+    assert!(panel.current_mission_enabled());
+
+    let checksum = editor.checksum();
+    let history_len = editor.history().entries.len();
+    let mut harness = Harness::builder()
+        .with_size([1100.0, 1200.0])
+        .build_ui_state(
+            |ui, state: &mut UiState| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |scroll_ui| {
+                        state.panel.show(scroll_ui, &mut state.editor)
+                    });
+            },
+            UiState {
+                _directory: directory,
+                editor,
+                panel,
+                checksum,
+                history_len,
+                mission: original_mission,
+            },
+        );
+    harness.run_steps(3);
+    harness.get_by_label("Mesh mission").click();
+    harness.run_steps(3);
+
+    assert!(!harness
+        .get_by_label("Stage mission route checkpoints")
+        .accesskit_node()
+        .is_disabled());
+    harness
+        .get_by_label("Stage mission route checkpoints")
+        .click_accesskit();
+    harness.run_steps(3);
+
+    let state = harness.state();
+    assert!(state.panel.error.is_none());
+    assert!(state.panel.dirty());
+    assert_eq!(state.editor.checksum(), state.checksum);
+    assert_eq!(state.editor.history().entries.len(), state.history_len);
+    let authoritative = mission::from_view(state.editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .unwrap();
+    assert_eq!(authoritative.config, state.mission);
+}

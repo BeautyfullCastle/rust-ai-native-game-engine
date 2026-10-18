@@ -195,12 +195,12 @@ impl Panel {
                 if ui.add_enabled(self.can_reload(editor) && !self.dirty(), egui::Button::new("Reload game lighting")).clicked() {
                     self.reload(editor);
                 }
-                self.confirm_remove = self.confirm_remove && self.current_document().is_some();
-                ui.checkbox(&mut self.confirm_remove, "I confirm removing the saved game lighting");
-                if ui.add_enabled(self.can_edit(editor) && self.current_document().is_some() && self.confirm_remove, egui::Button::new("Remove game lighting")).clicked() {
-                    self.remove();
-                }
             });
+            self.confirm_remove = self.confirm_remove && self.current_document().is_some();
+            ui.checkbox(&mut self.confirm_remove, "I confirm removing the saved game lighting");
+            if ui.add_enabled(self.can_edit(editor) && self.current_document().is_some() && self.confirm_remove, egui::Button::new("Remove game lighting")).clicked() {
+                self.remove();
+            }
             if self.context_stale || self.dirty() {
                 ui.checkbox(&mut self.confirm_discard_changes, "I confirm discarding unsaved game lighting changes");
                 if ui.add_enabled(self.can_discard_changes(editor) && self.confirm_discard_changes, egui::Button::new("Discard game lighting changes and reload")).clicked() {
@@ -690,3 +690,7 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String) -> bool {
         .labelled_by(label_response.id)
         .changed()
 }
+
+#[cfg(test)]
+#[path = "mesh_lighting_panel/tests.rs"]
+mod tests;

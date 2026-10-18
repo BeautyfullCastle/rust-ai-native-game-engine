@@ -173,6 +173,8 @@ impl Panel {
                 if ui.add_enabled(self.can_reload(editor) && !self.dirty(), egui::Button::new("Reload game HUD")).clicked() {
                     self.reload(editor);
                 }
+            });
+            ui.vertical(|ui| {
                 self.confirm_remove = self.confirm_remove && self.current_document().is_some();
                 ui.checkbox(&mut self.confirm_remove, "I confirm removing the saved game HUD");
                 if ui.add_enabled(self.can_edit(editor) && self.current_document().is_some() && self.confirm_remove, egui::Button::new("Remove game HUD")).clicked() {
