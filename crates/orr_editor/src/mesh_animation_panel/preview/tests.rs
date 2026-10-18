@@ -167,3 +167,111 @@ fn candidate_play_transition_hides_and_clears_preview() {
     assert!(!has_preview(&panel));
     assert!(panel.current_snapshot().is_none());
 }
+
+#[test]
+fn live_candidate_clock_changes_only_pose_and_pause_preserves_pixels() {
+    let (_dir, editor, mut panel) = fixture();
+    let checksum = editor.checksum();
+    let tick = editor.snapshot().unwrap().predicted().tick();
+    let history = editor.history().entries.len();
+    let settings = panel.candidate.as_ref().unwrap().settings();
+    let bytes = std::fs::read(panel.scene.as_ref().unwrap()).unwrap();
+    let mut state = std::mem::take(&mut panel.preview);
+    state.clip = "1".into();
+    state.tick = "0".into();
+    state.play(&panel, &editor, 0.0, 0);
+    assert!(state.transport.running);
+    state.advance(0.25, 1, true);
+    assert_eq!(state.accepted.as_ref().unwrap().tick, 15);
+    panel.preview = state;
+    let animated = panel.placement(&editor).unwrap().unwrap().pose;
+    panel.preview.transport.pause();
+    panel.preview.advance(0.5, 2, true);
+    assert_eq!(panel.placement(&editor).unwrap().unwrap().pose, animated);
+    assert_eq!(editor.checksum(), checksum);
+    assert_eq!(editor.snapshot().unwrap().predicted().tick(), tick);
+    assert_eq!(editor.history().entries.len(), history);
+    assert_eq!(panel.candidate.as_ref().unwrap().settings(), settings);
+    assert_eq!(std::fs::read(panel.scene.as_ref().unwrap()).unwrap(), bytes);
+}
+#[test]
+fn live_invalid_tick_preserves_pose_and_clear_removes_transport() {
+    let (_dir, editor, mut panel) = fixture();
+    let mut state = std::mem::take(&mut panel.preview);
+    state.clip = "1".into();
+    state.tick = "0".into();
+    state.play(&panel, &editor, 0.0, 0);
+    state.advance(0.25, 1, true);
+    let accepted = state.accepted.as_ref().unwrap().tick;
+    state.tick = "not a tick".into();
+    state.play(&panel, &editor, 0.25, 1);
+    assert!(state.error.is_some());
+    assert!(!state.transport.running);
+    assert_eq!(state.accepted.as_ref().unwrap().tick, accepted);
+    state.clear_accepted();
+    assert!(state.accepted.is_none());
+    assert!(!state.transport.running);
+}
+#[test]
+fn live_play_and_candidate_generation_changes_clear_transport() {
+    let (_dir, mut editor, mut panel) = fixture();
+    let mut state = std::mem::take(&mut panel.preview);
+    state.clip = "1".into();
+    state.tick = "0".into();
+    state.play(&panel, &editor, 0.0, 0);
+    panel.preview = state;
+    panel.candidate_generation += 1;
+    sync(&mut panel, &editor);
+    assert!(panel.preview.accepted.is_none());
+    assert!(!panel.preview.transport.running);
+    let mut state = std::mem::take(&mut panel.preview);
+    state.play(&panel, &editor, 0.0, 0);
+    panel.preview = state;
+    assert!(editor.start_play());
+    editor.sync();
+    sync(&mut panel, &editor);
+    assert!(panel.preview.accepted.is_none());
+    assert!(!panel.preview.transport.running);
+}
+#[test]
+fn live_endpoint_uses_authored_rate_and_leaves_candidate_settings_unchanged() {
+    let (_dir, editor, mut panel) = fixture();
+    let mut candidate_settings = panel.candidate.as_ref().unwrap().settings();
+    candidate_settings.rate = 0.5;
+    panel.candidate = Some(
+        panel
+            .candidate
+            .take()
+            .unwrap()
+            .with_settings(candidate_settings)
+            .unwrap(),
+    );
+    let mut state = std::mem::take(&mut panel.preview);
+    state.request(&panel, &editor, "1", "0");
+    let duration = state
+        .accepted
+        .as_ref()
+        .unwrap()
+        .snapshot
+        .clips()
+        .into_iter()
+        .find(|(index, _, _)| *index == 1)
+        .unwrap()
+        .2;
+    assert_eq!(
+        state.end_tick(),
+        Some(
+            (f64::from(duration / 0.5) * f64::from(orr_sample::yard3d_game::TICK_RATE)).ceil()
+                as u64
+        )
+    );
+    state.transport.speed = Speed::Double;
+    assert_eq!(
+        state.accepted.as_ref().unwrap().snapshot.settings().rate,
+        0.5
+    );
+    assert_eq!(
+        panel.candidate.as_ref().unwrap().settings(),
+        candidate_settings
+    );
+}
