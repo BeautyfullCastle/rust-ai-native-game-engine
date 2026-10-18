@@ -18,7 +18,7 @@ const MAX_STARTUP_TICKS: u32 = 10_000;
 const MAX_CAPTURE_PIXELS: u64 = 1_048_576;
 const USAGE: &str = "orr_mesh_player [--bundle DIR] [--ticks N] [--screenshot PNG [--frames N]] [--size WxH]\n       orr_mesh_player --capabilities\n\nWithout --bundle, the validated bundle beside this executable is used.\n--ticks N starts Play and leaves the admitted simulation paused at tick N.\n--screenshot writes a bounded window PNG; --frames defaults to 30.\n--size sets the initial window dimensions in points (default 960x600).";
 
-const CAPABILITIES: &str = "ORR_MESH_PLAYER_V1\nORR_MESH_INPUT_V1";
+const CAPABILITIES: &str = "ORR_MESH_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_MATERIAL_SLOTS_V1";
 
 enum Request {
     Help,

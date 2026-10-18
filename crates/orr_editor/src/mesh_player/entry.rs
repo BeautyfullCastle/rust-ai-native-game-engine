@@ -18,6 +18,10 @@ static MESH_CAMERA_MARKER: [u8; 18] = *b"ORR_MESH_CAMERA_V1";
 #[unsafe(link_section = ".orrmat")]
 static MESH_MATERIAL_MARKER: [u8; 20] = *b"ORR_MESH_MATERIAL_V1";
 
+#[used]
+#[unsafe(link_section = ".orrmsl")]
+static MESH_MATERIAL_SLOTS_MARKER: [u8; 26] = *b"ORR_MESH_MATERIAL_SLOTS_V1";
+
 #[cfg(feature = "mesh-animated-models")]
 #[used]
 #[unsafe(link_section = ".orranim")]
@@ -58,6 +62,7 @@ fn main() {
     std::hint::black_box(&MESH_ROTATION_MARKER);
     std::hint::black_box(&MESH_CAMERA_MARKER);
     std::hint::black_box(&MESH_MATERIAL_MARKER);
+    std::hint::black_box(&MESH_MATERIAL_SLOTS_MARKER);
     #[cfg(feature = "mesh-animated-models")]
     std::hint::black_box(&MESH_ANIMATION_MARKER);
     std::hint::black_box(&MESH_SURFACE_MARKER);

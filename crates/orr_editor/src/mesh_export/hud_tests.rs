@@ -14,6 +14,7 @@ fn validate_hud_marker(bytes: &[u8]) -> Result<(), String> {
             require_rotation: false,
             require_camera: false,
             require_material: false,
+            require_material_slots: false,
             require_animation: false,
             require_surface: false,
             require_lighting: false,

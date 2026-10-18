@@ -2,6 +2,7 @@ use crate::viewport3d::SceneModel;
 use orr_model::{ModelSource, StaticModel};
 use orr_package::Manifest;
 use orr_render::StaticInstance;
+use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -39,6 +40,7 @@ pub(crate) struct Snapshot {
     model: Arc<StaticModel>,
     render_model: Arc<StaticModel>,
     tint: [f32; 4],
+    material_slots: Vec<crate::mesh_material_slots::Settings>,
     surface: Option<crate::mesh_surface::Settings>,
     offset: [f32; 3],
     scale: f32,
@@ -66,6 +68,12 @@ struct Sidecar {
         skip_serializing_if = "crate::mesh_material::is_identity"
     )]
     tint: [f32; 4],
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_material_slots"
+    )]
+    material_slots: Vec<crate::mesh_material_slots::Settings>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -181,6 +189,7 @@ impl Snapshot {
             render_model: Arc::clone(&model),
             model,
             tint: crate::mesh_material::identity(),
+            material_slots: Vec::new(),
             surface: None,
             offset: [0.0; 3],
             scale: 1.0,
@@ -223,6 +232,14 @@ impl Snapshot {
         self.tint
     }
 
+    pub(crate) fn material_slots(&self) -> &[crate::mesh_material_slots::Settings] {
+        &self.material_slots
+    }
+
+    pub(crate) fn source_model_arc(&self) -> &Arc<StaticModel> {
+        &self.model
+    }
+
     pub(crate) fn surface(&self) -> Option<crate::mesh_surface::Settings> {
         self.surface
     }
@@ -238,6 +255,18 @@ impl Snapshot {
             .collect()
     }
 
+    pub(crate) fn with_material_slots(
+        mut self,
+        material_slots: Vec<crate::mesh_material_slots::Settings>,
+    ) -> Result<Self, String> {
+        crate::mesh_material_slots::validate(&material_slots, &self.model)?;
+        self.material_slots = material_slots;
+        self.render_model =
+            render_model(&self.model, self.tint, self.surface, &self.material_slots)?;
+        self.placement([orr_fp::FP::ZERO; 3])?;
+        Ok(self)
+    }
+
     pub(crate) fn with_surface(
         mut self,
         surface: Option<crate::mesh_surface::Settings>,
@@ -245,14 +274,16 @@ impl Snapshot {
         self.surface = surface
             .map(|settings| crate::mesh_surface::validate(settings, &self.model))
             .transpose()?;
-        self.render_model = render_model(&self.model, self.tint, self.surface)?;
+        self.render_model =
+            render_model(&self.model, self.tint, self.surface, &self.material_slots)?;
         self.placement([orr_fp::FP::ZERO; 3])?;
         Ok(self)
     }
 
     pub(crate) fn with_tint(mut self, tint: [f32; 4]) -> Result<Self, String> {
         self.tint = crate::mesh_material::validate(tint)?;
-        self.render_model = render_model(&self.model, self.tint, self.surface)?;
+        self.render_model =
+            render_model(&self.model, self.tint, self.surface, &self.material_slots)?;
         self.placement([orr_fp::FP::ZERO; 3])?;
         Ok(self)
     }
@@ -338,6 +369,7 @@ impl Snapshot {
         validate_leaf(scene_filename, "scene filename")?;
         validate_source_budget(self.model.source())?;
         crate::mesh_material::validate(self.tint)?;
+        crate::mesh_material_slots::validate(&self.material_slots, &self.model)?;
         if let Some(settings) = self.surface {
             crate::mesh_surface::validate(settings, &self.model)?;
         }
@@ -370,6 +402,7 @@ impl Snapshot {
             license_text: self.license_text.clone(),
             model: self.model.source().clone(),
             tint: self.tint,
+            material_slots: self.material_slots.clone(),
             surface: self.surface,
             offset: self.offset,
             scale: self.scale,
@@ -424,7 +457,9 @@ impl Snapshot {
             .surface
             .map(|settings| crate::mesh_surface::validate(settings, &model))
             .transpose()?;
-        let render_model = render_model(&model, tint, surface)?;
+        let material_slots = sidecar.material_slots;
+        crate::mesh_material_slots::validate(&material_slots, &model)?;
+        let render_model = render_model(&model, tint, surface, &material_slots)?;
         let snapshot = Self {
             graph_revision: sidecar.graph_revision,
             manifest: sidecar.manifest,
@@ -438,6 +473,7 @@ impl Snapshot {
             render_model,
             model,
             tint,
+            material_slots,
             surface,
             offset: sidecar.offset,
             scale: sidecar.scale,
@@ -466,11 +502,51 @@ where
     crate::mesh_surface::Settings::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_material_slots<'de, Deserializer>(
+    deserializer: Deserializer,
+) -> Result<Vec<crate::mesh_material_slots::Settings>, Deserializer::Error>
+where
+    Deserializer: serde::Deserializer<'de>,
+{
+    struct SettingsVisitor;
+
+    impl<'de> Visitor<'de> for SettingsVisitor {
+        type Value = Vec<crate::mesh_material_slots::Settings>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("at most 256 material-slot settings")
+        }
+
+        fn visit_seq<Access>(self, mut access: Access) -> Result<Self::Value, Access::Error>
+        where
+            Access: SeqAccess<'de>,
+        {
+            let mut settings = Vec::new();
+            while let Some(setting) = access.next_element()? {
+                if settings.len() == 256 {
+                    return Err(de::Error::custom(
+                        "material slot settings exceed the 256-slot limit",
+                    ));
+                }
+                settings.push(setting);
+            }
+            Ok(settings)
+        }
+    }
+
+    deserializer.deserialize_seq(SettingsVisitor)
+}
+
 fn render_model(
     model: &Arc<StaticModel>,
     tint: [f32; 4],
     surface: Option<crate::mesh_surface::Settings>,
+    material_slots: &[crate::mesh_material_slots::Settings],
 ) -> Result<Arc<StaticModel>, String> {
+    if !material_slots.is_empty() {
+        let derived = Arc::new(crate::mesh_material_slots::apply(model, material_slots)?);
+        return render_model(&derived, tint, surface, &[]);
+    }
     match surface {
         Some(settings) => {
             let settings = crate::mesh_surface::validate(settings, model)?;

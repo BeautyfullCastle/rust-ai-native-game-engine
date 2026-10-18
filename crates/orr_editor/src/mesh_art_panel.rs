@@ -20,6 +20,8 @@ pub(crate) struct Panel {
     rotation: [String; 3],
     face_route_direction: bool,
     tint: [String; 4],
+    material_slots: crate::mesh_material_slots_panel::Panel,
+    material_slots_draft: Vec<crate::mesh_material_slots::Settings>,
     surface_enabled: bool,
     surface_material: String,
     surface_uv_offset: [String; 2],
@@ -58,6 +60,8 @@ impl Default for Panel {
             rotation: ["0".into(), "0".into(), "0".into()],
             face_route_direction: false,
             tint: ["1".into(), "1".into(), "1".into(), "1".into()],
+            material_slots: crate::mesh_material_slots_panel::Panel::default(),
+            material_slots_draft: Vec::new(),
             surface_enabled: false,
             surface_material: "0".into(),
             surface_uv_offset: ["0".into(), "0".into()],
@@ -298,6 +302,19 @@ impl Panel {
                     text_field(ui, label, &mut self.tint[channel]);
                 }
                 ui.checkbox(&mut self.surface_enabled, "Edit art UV and pivot");
+                ui.collapsing("Per-material-slot overrides", |ui| {
+                    let snapshot = self.candidate.as_ref().or_else(|| {
+                        self.history.get(self.cursor).and_then(|entry| entry.snapshot.as_ref())
+                    });
+                    if let Some(snapshot) = snapshot {
+                        if let Some(settings) = self.material_slots.show(ui, snapshot.source_model_arc()) {
+                            self.material_slots_draft = settings;
+                        }
+                        ui.weak("Stage overrides, then Apply agent art. Source model and license bytes are preserved.");
+                    } else {
+                        ui.weak("Load verified agent art before editing individual material slots.");
+                    }
+                });
                 if self.surface_enabled {
                     text_field(ui, "Art UV material index", &mut self.surface_material);
                     if let Some(snapshot) = self.candidate.as_ref().or_else(|| self.current_snapshot()) {
@@ -322,7 +339,7 @@ impl Panel {
                     self.apply(editor);
                 }
                 if ui
-                    .add_enabled(self.dirty() && !self.facing_form_dirty(), egui::Button::new("Save agent art"))
+                    .add_enabled(self.dirty() && !self.facing_form_dirty() && !self.material_slots.dirty(), egui::Button::new("Save agent art"))
                     .clicked()
                 {
                     self.save(editor);
@@ -336,6 +353,8 @@ impl Panel {
                     .clicked()
                 {
                     self.push_state(None);
+                    self.material_slots = crate::mesh_material_slots_panel::Panel::default();
+                    self.material_slots_draft.clear();
                     self.confirm_remove = false;
                     self.status = "Agent art removed in memory; save explicitly to persist.".into();
                     self.error = None;
@@ -457,6 +476,9 @@ impl Panel {
         if self.facing_form_dirty() {
             return Some("Apply or reset the agent art facing option before Play".into());
         }
+        if self.material_slots.dirty() {
+            return Some("Stage and apply or reset material slot overrides before Play".into());
+        }
         if self.dirty() {
             return Some("Save or undo agent art changes before Play".into());
         }
@@ -467,7 +489,9 @@ impl Panel {
     }
 
     pub(crate) fn dirty(&self) -> bool {
-        self.current_entry().map(|entry| entry.id) != self.saved_id || self.facing_form_dirty()
+        self.current_entry().map(|entry| entry.id) != self.saved_id
+            || self.facing_form_dirty()
+            || self.material_slots.dirty()
     }
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
@@ -528,6 +552,9 @@ impl Panel {
     }
 
     fn unapplied_form_dirty(&self) -> bool {
+        if self.material_slots.dirty() {
+            return true;
+        }
         let Some(current) = self.current_snapshot() else {
             return self.candidate.is_some();
         };
@@ -563,6 +590,9 @@ impl Panel {
                     &self.surface_pivot,
                 )
                 .and_then(|surface| snapshot.with_surface(surface))
+                .and_then(|snapshot| {
+                    snapshot.with_material_slots(self.material_slots_draft.clone())
+                })
             });
         let current_rotation = crate::mesh_rotation::to_degrees(current.rotation())
             .and_then(crate::mesh_rotation::from_degrees);
@@ -630,6 +660,11 @@ impl Panel {
     }
 
     fn apply(&mut self, editor: &Editor) {
+        if self.material_slots.dirty() && !self.material_slots.staged_matches_fields() {
+            self.error =
+                Some("Stage material slot overrides again after editing their fields".into());
+            return;
+        }
         if !self.can_edit(editor) {
             self.error = Some(
                 "Agent art can only be applied in the matching editable local mesh scene".into(),
@@ -669,11 +704,14 @@ impl Panel {
                     &self.surface_pivot,
                 )
                 .and_then(|settings| snapshot.with_surface(settings))
+                .and_then(|snapshot| {
+                    snapshot.with_material_slots(self.material_slots_draft.clone())
+                })
             });
         match result {
             Ok(snapshot) if Some(snapshot.graph_revision()) == self.graph_revision => {
-                self.push_state(Some(snapshot.clone()));
-                self.candidate = Some(snapshot);
+                self.push_state(Some(snapshot));
+                self.material_slots.acknowledge();
                 self.status = "Agent art applied in memory; save explicitly to persist.".into();
                 self.error = None;
             }
@@ -686,6 +724,10 @@ impl Panel {
     }
 
     fn save(&mut self, editor: &Editor) {
+        if self.material_slots.dirty() {
+            self.error = Some("Apply material slot overrides before saving agent art".into());
+            return;
+        }
         if self.facing_form_dirty() {
             self.error = Some("Apply the agent art facing option before saving".into());
             return;
@@ -813,6 +855,7 @@ impl Panel {
     fn undo(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
+            self.candidate = None;
             self.copy_current_transform();
             self.status = "Undid agent art edit; save explicitly to persist.".into();
             self.error = None;
@@ -822,6 +865,7 @@ impl Panel {
     fn redo(&mut self) {
         if self.cursor + 1 < self.history.len() {
             self.cursor += 1;
+            self.candidate = None;
             self.copy_current_transform();
             self.status = "Redid agent art edit; save explicitly to persist.".into();
             self.error = None;
@@ -902,6 +946,17 @@ impl Panel {
     }
 
     fn reset_history(&mut self, snapshot: Option<Snapshot>, saved_id: Option<u64>) {
+        self.material_slots = crate::mesh_material_slots_panel::Panel::default();
+        self.material_slots_draft.clear();
+        if let Some(snapshot) = snapshot.as_ref() {
+            self.material_slots_draft = snapshot.material_slots().to_vec();
+            if let Err(error) = self
+                .material_slots
+                .load(snapshot.source_model_arc(), snapshot.material_slots())
+            {
+                self.error = Some(error);
+            }
+        }
         self.history.clear();
         self.history.push(HistoryEntry { id: 0, snapshot });
         self.cursor = 0;
@@ -914,6 +969,7 @@ impl Panel {
     }
 
     fn push_state(&mut self, snapshot: Option<Snapshot>) {
+        self.candidate = None;
         self.history.truncate(self.cursor + 1);
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -942,6 +998,13 @@ impl Panel {
             .unwrap_or_else(|_| ["invalid".into(), "invalid".into(), "invalid".into()]);
         self.face_route_direction = snapshot.facing() == crate::mesh_facing::Facing::Route;
         self.tint = snapshot.tint().map(format_number);
+        self.material_slots_draft = snapshot.material_slots().to_vec();
+        if let Err(error) = self
+            .material_slots
+            .load(snapshot.source_model_arc(), snapshot.material_slots())
+        {
+            self.error = Some(error);
+        }
         self.copy_surface(snapshot);
     }
 
@@ -954,6 +1017,8 @@ impl Panel {
             self.rotation = ["0".into(), "0".into(), "0".into()];
             self.face_route_direction = false;
             self.tint = ["1".into(), "1".into(), "1".into(), "1".into()];
+            self.material_slots = crate::mesh_material_slots_panel::Panel::default();
+            self.material_slots_draft.clear();
             self.surface_enabled = false;
             self.surface_material = "0".into();
             self.surface_uv_offset = ["0".into(), "0".into()];

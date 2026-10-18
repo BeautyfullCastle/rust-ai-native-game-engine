@@ -145,14 +145,174 @@ fn legacy_sidecars_default_to_identity_without_adding_rotation_or_tint_fields() 
     let encoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(encoded.get("rotation").is_none());
     assert!(encoded.get("tint").is_none());
+    assert!(encoded.get("material_slots").is_none());
     assert!(encoded.get("surface").is_none());
     assert!(encoded.get("facing").is_none());
     let loaded = Snapshot::decode_embedded(&bytes, "legacy.scene.yaml", revision()).unwrap();
     assert_eq!(loaded.rotation(), [0.0, 0.0, 0.0, 1.0]);
     assert_eq!(loaded.tint(), [1.0; 4]);
+    assert!(loaded.material_slots().is_empty());
     assert_eq!(loaded.surface(), None);
     assert_eq!(loaded.facing(), crate::mesh_facing::Facing::Fixed);
     assert_eq!(loaded.encode_embedded("legacy.scene.yaml").unwrap(), bytes);
+}
+
+#[test]
+fn material_slot_overrides_round_trip_and_compose_with_surface_and_global_tint() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = package(&root);
+    let original = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", revision()).unwrap();
+    let original_model = original.model.to_bytes().unwrap();
+    let original_digest = original.cooked_sha256.clone();
+    let selected = original.material_choices()[0];
+    let material = &original.model.source().materials[selected as usize];
+    let mut slot = crate::mesh_material_slots::Settings::identity(selected, material);
+    slot.tint = [0.5, 0.75, 1.0, 0.5];
+    slot.linear_filter = !slot.linear_filter;
+    slot.wrap_s = orr_model::Wrap::Mirror;
+    slot.wrap_t = orr_model::Wrap::Repeat;
+    let surface = crate::mesh_surface::Settings {
+        material: selected,
+        uv_offset: [0.25, -0.125],
+        uv_scale: [1.5, 0.5],
+        uv_quarter_turns: 1,
+        pivot: [0.125, 0.25, -0.5],
+    };
+    let changed = original
+        .clone()
+        .with_material_slots(vec![slot])
+        .unwrap()
+        .with_surface(Some(surface))
+        .unwrap()
+        .with_tint([0.5, 0.25, 1.0, 0.5])
+        .unwrap();
+
+    assert_eq!(changed.material_slots(), &[slot]);
+    assert_eq!(changed.model.to_bytes().unwrap(), original_model);
+    assert_eq!(changed.cooked_sha256, original_digest);
+    assert_eq!(changed.package_digest, original.package_digest);
+    assert_eq!(changed.asset_sha256, original.asset_sha256);
+    assert_eq!(changed.license_sha256, original.license_sha256);
+    assert_eq!(changed.license_text, original.license_text);
+
+    let encoded = changed
+        .encode_embedded("material-slots.scene.yaml")
+        .unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(document["material_slots"].as_array().unwrap().len(), 1);
+    assert_eq!(document["material_slots"][0]["material"], selected);
+    assert_eq!(document["surface"]["material"], selected);
+    assert_eq!(document["tint"], serde_json::json!([0.5, 0.25, 1.0, 0.5]));
+    assert_eq!(
+        document["model"],
+        serde_json::to_value(original.model.source()).unwrap()
+    );
+    assert_eq!(
+        document["manifest"],
+        serde_json::to_value(&original.manifest).unwrap()
+    );
+    assert_eq!(document["package_digest"], original.package_digest);
+    assert_eq!(document["asset_sha256"], original.asset_sha256);
+    assert_eq!(document["license_sha256"], original.license_sha256);
+    assert_eq!(document["license_text"], original.license_text);
+
+    let reopened =
+        Snapshot::decode_embedded(&encoded, "material-slots.scene.yaml", revision()).unwrap();
+    assert_eq!(reopened.material_slots(), &[slot]);
+    assert_eq!(
+        reopened.render_model.to_bytes().unwrap(),
+        changed.render_model.to_bytes().unwrap()
+    );
+    assert_eq!(
+        reopened
+            .encode_embedded("material-slots.scene.yaml")
+            .unwrap(),
+        encoded
+    );
+
+    let original_color = original.model.source().materials[selected as usize].base_color;
+    let rendered_color = reopened.render_model.source().materials[selected as usize].base_color;
+    for component in 0..4 {
+        assert_eq!(
+            rendered_color[component],
+            original_color[component] * slot.tint[component] * reopened.tint[component]
+        );
+    }
+}
+
+#[test]
+fn material_slot_sidecars_reject_null_duplicate_unused_and_nonfinite_settings() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = package(&root);
+    let original = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", revision()).unwrap();
+    let selected = original.material_choices()[0];
+    let slot = crate::mesh_material_slots::Settings::identity(
+        selected,
+        &original.model.source().materials[selected as usize],
+    );
+    let encoded = original
+        .clone()
+        .with_material_slots(vec![slot])
+        .unwrap()
+        .encode_embedded("material-slots.scene.yaml")
+        .unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+
+    let mut null_slots = document.clone();
+    null_slots["material_slots"] = serde_json::Value::Null;
+    assert!(Snapshot::decode_embedded(
+        &serde_json::to_vec(&null_slots).unwrap(),
+        "material-slots.scene.yaml",
+        revision()
+    )
+    .is_err());
+
+    let mut duplicate_slots = document.clone();
+    duplicate_slots["material_slots"] = serde_json::json!([slot, slot]);
+    assert!(Snapshot::decode_embedded(
+        &serde_json::to_vec(&duplicate_slots).unwrap(),
+        "material-slots.scene.yaml",
+        revision()
+    )
+    .is_err());
+
+    let mut out_of_range = document.clone();
+    out_of_range["material_slots"][0]["material"] = serde_json::json!(u32::MAX);
+    assert!(Snapshot::decode_embedded(
+        &serde_json::to_vec(&out_of_range).unwrap(),
+        "material-slots.scene.yaml",
+        revision()
+    )
+    .is_err());
+
+    let mut nonfinite_tint = document.clone();
+    nonfinite_tint["material_slots"][0]["tint"][0] = serde_json::Value::Null;
+    assert!(Snapshot::decode_embedded(
+        &serde_json::to_vec(&nonfinite_tint).unwrap(),
+        "material-slots.scene.yaml",
+        revision()
+    )
+    .is_err());
+
+    assert!(original
+        .clone()
+        .with_material_slots(vec![slot, slot])
+        .is_err());
+    let mut invalid = slot;
+    invalid.tint[0] = f32::NAN;
+    assert!(original.with_material_slots(vec![invalid]).is_err());
+
+    let mut oversized_slots = document.clone();
+    oversized_slots["material_slots"] =
+        serde_json::Value::Array(vec![serde_json::to_value(slot).unwrap(); 257]);
+    assert!(Snapshot::decode_embedded(
+        &serde_json::to_vec(&oversized_slots).unwrap(),
+        "material-slots.scene.yaml",
+        revision()
+    )
+    .is_err());
 }
 
 #[test]

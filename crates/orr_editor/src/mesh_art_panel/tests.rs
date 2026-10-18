@@ -49,6 +49,123 @@ fn transform_parser_accepts_finite_values_and_rejects_invalid_values() {
 }
 
 #[test]
+fn loading_saved_material_slots_retains_clean_panel_baseline() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = static_package(temporary.path());
+    let original = Snapshot::from_package(&package, "model.glb", "LICENSE.txt", [7; 32]).unwrap();
+    let mut slot = crate::mesh_material_slots::Settings::identity(
+        0,
+        &original.source_model_arc().source().materials[0],
+    );
+    slot.tint = [0.25, 0.75, 1.0, 1.0];
+    let edited = original.with_material_slots(vec![slot]).unwrap();
+    let mut panel = Panel {
+        scene: Some(temporary.path().join("mesh.scene.yaml")),
+        graph_revision: Some([7; 32]),
+        ..Panel::default()
+    };
+    panel.copy_transform(&edited);
+    panel.push_initial(Some(edited));
+
+    assert_eq!(panel.material_slots_draft, vec![slot]);
+    assert!(!panel.material_slots.dirty());
+    assert!(!panel.dirty());
+    assert!(!panel.unapplied_form_dirty());
+}
+
+#[test]
+fn unapplied_material_slots_do_not_mutate_the_applied_snapshot() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = static_package(temporary.path());
+    let original = Snapshot::from_package(&package, "model.glb", "LICENSE.txt", [7; 32]).unwrap();
+    let bytes = original.encode_embedded("mesh.scene.yaml").unwrap();
+    let mut slot = crate::mesh_material_slots::Settings::identity(
+        0,
+        &original.source_model_arc().source().materials[0],
+    );
+    slot.tint = [0.25, 0.75, 1.0, 1.0];
+    let mut panel = Panel {
+        scene: Some(temporary.path().join("mesh.scene.yaml")),
+        graph_revision: Some([7; 32]),
+        ..Panel::default()
+    };
+    panel.copy_transform(&original);
+    panel.push_initial(Some(original));
+    panel.material_slots_draft = vec![slot];
+
+    assert!(panel.unapplied_form_dirty());
+    assert_eq!(
+        panel
+            .current_snapshot()
+            .unwrap()
+            .encode_embedded("mesh.scene.yaml")
+            .unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn material_slots_follow_art_history_without_leaving_unapplied_fields() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = static_package(temporary.path());
+    let original = Snapshot::from_package(&package, "model.glb", "LICENSE.txt", [7; 32]).unwrap();
+    let mut slot = crate::mesh_material_slots::Settings::identity(
+        0,
+        &original.source_model_arc().source().materials[0],
+    );
+    slot.tint = [0.25, 0.75, 1.0, 1.0];
+    let edited = original.clone().with_material_slots(vec![slot]).unwrap();
+    let mut panel = Panel {
+        scene: Some(temporary.path().join("mesh.scene.yaml")),
+        graph_revision: Some([7; 32]),
+        ..Panel::default()
+    };
+    panel.copy_transform(&original);
+    panel.push_initial(Some(original));
+    panel.push_state(Some(edited));
+    assert_eq!(panel.material_slots_draft, vec![slot]);
+    assert!(!panel.material_slots.dirty());
+    assert!(!panel.unapplied_form_dirty());
+    assert!(panel.dirty());
+
+    panel.undo();
+    assert!(panel.material_slots_draft.is_empty());
+    assert!(!panel.material_slots.dirty());
+    assert!(!panel.dirty());
+    panel.redo();
+    assert_eq!(panel.material_slots_draft, vec![slot]);
+    assert!(!panel.material_slots.dirty());
+    assert!(!panel.unapplied_form_dirty());
+}
+
+#[test]
+fn applied_art_history_clears_candidates_before_empty_undo_and_redo() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = static_package(temporary.path());
+    let snapshot = Snapshot::from_package(&package, "model.glb", "LICENSE.txt", [7; 32]).unwrap();
+    let mut panel = Panel {
+        scene: Some(temporary.path().join("mesh.scene.yaml")),
+        graph_revision: Some([7; 32]),
+        candidate: Some(snapshot.clone()),
+        ..Panel::default()
+    };
+    panel.push_state(Some(snapshot.clone()));
+    assert!(panel.candidate.is_none());
+    panel.candidate = Some(snapshot.clone());
+    panel.undo();
+    assert!(panel.candidate.is_none());
+    assert!(panel.current_snapshot().is_none());
+    assert!(!panel.material_slots.dirty());
+    assert!(!panel.dirty());
+    panel.candidate = Some(snapshot);
+    panel.redo();
+    assert!(panel.candidate.is_none());
+    assert!(panel.current_snapshot().is_some());
+    assert!(!panel.material_slots.dirty());
+    assert!(!panel.unapplied_form_dirty());
+}
+
+#[test]
 fn rotation_parser_accepts_intrinsic_xyz_degrees_and_rejects_invalid_values() {
     let quaternion = parse_rotation(&["90".into(), "0".into(), "0".into()]).unwrap();
     let expected = std::f32::consts::FRAC_1_SQRT_2;

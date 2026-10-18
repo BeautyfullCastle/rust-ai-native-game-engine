@@ -146,6 +146,10 @@ mod mesh_camera;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_material;
 #[cfg(feature = "mesh-navigation")]
+mod mesh_material_slots;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_material_slots_panel;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_surface;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_camera_store;

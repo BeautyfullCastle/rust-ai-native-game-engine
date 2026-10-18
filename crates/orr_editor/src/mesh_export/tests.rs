@@ -456,6 +456,14 @@ fn test_runtime_with_material() -> Vec<u8> {
     ))
 }
 
+fn test_runtime_with_material_slots() -> Vec<u8> {
+    runtime_with_mission_marker(append_runtime_section(
+        test_runtime_with_material(),
+        *b".orrmsl\0",
+        b"ORR_MESH_MATERIAL_SLOTS_V1",
+    ))
+}
+
 fn test_runtime_with_surface() -> Vec<u8> {
     runtime_with_mission_marker(append_runtime_section(
         test_runtime_with_material(),
@@ -693,6 +701,32 @@ fn add_props(scene: &std::path::Path, revision: [u8; 32]) {
         }],
     };
     mesh_props::save(scene, Some(&document), None, revision).unwrap();
+}
+
+fn add_explicit_material_slots(scene: &std::path::Path, revision: [u8; 32], art_only: bool) {
+    add_props(scene, revision);
+    if art_only {
+        let (document, _) = mesh_props::load(scene, revision).unwrap().unwrap();
+        let filename = scene.file_name().unwrap().to_str().unwrap();
+        let mut art: serde_json::Value =
+            serde_json::from_slice(&document.props[0].art.encode_embedded(filename).unwrap())
+                .unwrap();
+        art["material_slots"] = serde_json::json!([]);
+        fs::write(
+            crate::mesh_art::sidecar_path(scene).unwrap(),
+            serde_json::to_vec(&art).unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(mesh_props::sidecar_path(scene).unwrap()).unwrap();
+        crate::mesh_art::load(scene, revision).unwrap().unwrap();
+    } else {
+        let path = mesh_props::sidecar_path(scene).unwrap();
+        let mut props: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        props["props"][0]["art"]["material_slots"] = serde_json::json!([]);
+        fs::write(&path, serde_json::to_vec(&props).unwrap()).unwrap();
+        mesh_props::load(scene, revision).unwrap().unwrap();
+    }
 }
 
 fn fixture() -> (
@@ -1051,6 +1085,78 @@ fn material_runtime_marker_requires_its_own_bounded_pe_section() {
     assert!(super::validate_runtime_with_material(&bytes, false, false, false, true).is_err());
 
     super::validate_runtime_with_material(&test_runtime(), false, false, false, false).unwrap();
+}
+
+#[test]
+fn explicit_material_slots_presence_requires_its_own_runtime_marker_for_export_and_open() {
+    for art_only in [true, false] {
+        let (temporary, scene, runtime, checksum) = fixture();
+        let revision = graph_revision(&fs::read_to_string(&scene).unwrap());
+        add_explicit_material_slots(&scene, revision, art_only);
+        let source_sidecar = if art_only {
+            crate::mesh_art::sidecar_path(&scene).unwrap()
+        } else {
+            mesh_props::sidecar_path(&scene).unwrap()
+        };
+        let source_bytes = fs::read(&source_sidecar).unwrap();
+        assert!(super::serialized_material_slots_present(&source_bytes, !art_only).unwrap());
+
+        let destination = temporary.path().join("material-slots-bundle");
+        let old_runtime = test_runtime_with_material();
+        fs::write(&runtime, &old_runtime).unwrap();
+        assert!(export(&scene, checksum, &destination, &runtime).is_err());
+        assert!(!destination.exists());
+
+        let capable_runtime = temporary.path().join("material-slots-player.exe");
+        fs::write(&capable_runtime, test_runtime_with_material_slots()).unwrap();
+        let receipt = export(&scene, checksum, &destination, &capable_runtime).unwrap();
+        let bundled_sidecar = destination.join(if art_only {
+            format!("walk.scene.yaml{}", super::SIDECAR_SUFFIX)
+        } else {
+            format!("walk.scene.yaml{PROPS_SUFFIX}")
+        });
+        assert_eq!(fs::read(&bundled_sidecar).unwrap(), source_bytes);
+        assert_eq!(receipt.sidecar_sha256.is_some(), art_only);
+        assert_eq!(receipt.props_sha256.is_some(), !art_only);
+        open_bundle(&destination).unwrap();
+
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+        let legacy_runtime = old_runtime;
+        fs::write(destination.join(RUNTIME_FILENAME), &legacy_runtime).unwrap();
+        manifest["runtime"]["bytes"] = serde_json::json!(legacy_runtime.len());
+        manifest["runtime"]["sha256"] = serde_json::json!(super::digest(&legacy_runtime));
+        fs::write(&receipt.manifest, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(open_bundle(&destination).is_err());
+    }
+}
+
+#[test]
+fn material_slots_marker_must_be_a_distinct_bounded_pe_section() {
+    super::validate_runtime_with_material_slots(&test_runtime_with_material_slots(), true).unwrap();
+    assert!(super::validate_runtime_with_material_slots(&test_runtime(), true).is_err());
+
+    let mut bytes = test_runtime_with_material_slots();
+    let payload = section_payload(&bytes, b".orrmsl\0");
+    bytes[payload..payload + b"ORR_MESH_MATERIAL_SLOTS_V1".len()].fill(0);
+    let wrong_section_payload = section_payload(&bytes, b".orrmesh");
+    bytes[wrong_section_payload..wrong_section_payload + b"ORR_MESH_MATERIAL_SLOTS_V1".len()]
+        .copy_from_slice(b"ORR_MESH_MATERIAL_SLOTS_V1");
+    assert!(super::validate_runtime_with_material_slots(&bytes, true).is_err());
+
+    let bytes = append_runtime_section(
+        test_runtime_with_material_slots(),
+        *b".orrmsl\0",
+        b"ORR_MESH_MATERIAL_SLOTS_V1",
+    );
+    assert!(super::validate_runtime_with_material_slots(&bytes, true).is_err());
+
+    let mut bytes = test_runtime_with_material_slots();
+    let header = section_header(&bytes, b".orrmsl\0");
+    bytes[header + 20..header + 24].copy_from_slice(&0x100u32.to_le_bytes());
+    assert!(super::validate_runtime_with_material_slots(&bytes, true).is_err());
+
+    super::validate_runtime_with_material_slots(&test_runtime(), false).unwrap();
 }
 
 #[test]

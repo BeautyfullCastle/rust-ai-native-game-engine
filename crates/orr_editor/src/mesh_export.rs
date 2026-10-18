@@ -43,6 +43,7 @@ const FACING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_FACING_V1";
 const CHARACTER_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CHARACTER_V1";
 const HUD_RUNTIME_MARKER: &[u8] = b"ORR_MESH_HUD_V1";
 const MISSION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MISSION_V1";
+const MATERIAL_SLOTS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MATERIAL_SLOTS_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
@@ -56,6 +57,7 @@ const FACING_RUNTIME_SECTION: &[u8; 8] = b".orrface";
 const CHARACTER_RUNTIME_SECTION: &[u8; 8] = b".orrchar";
 const HUD_RUNTIME_SECTION: &[u8; 8] = b".orrhud\0";
 const MISSION_RUNTIME_SECTION: &[u8; 8] = b".orrmis\0";
+const MATERIAL_SLOTS_RUNTIME_SECTION: &[u8; 8] = b".orrmsl\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -176,6 +178,7 @@ fn export_with_profile(
     let sidecar_path = mesh_art::sidecar_path(&scene_path)?;
     let mut requires_rotation = false;
     let mut requires_material = false;
+    let mut requires_material_slots = false;
     let mut requires_surface = false;
     let mut requires_facing = false;
     let mut requires_character = false;
@@ -192,6 +195,8 @@ fn export_with_profile(
                 || serialized_rotation_present(&bytes, false)?;
             requires_material |=
                 art.tint() != [1.0, 1.0, 1.0, 1.0] || serialized_material_present(&bytes, false)?;
+            requires_material_slots |= !art.material_slots().is_empty()
+                || serialized_material_slots_present(&bytes, false)?;
             requires_surface |=
                 art.surface().is_some() || serialized_surface_present(&bytes, false)?;
             requires_facing |= serialized_facing_present(&bytes, false)?;
@@ -229,6 +234,11 @@ fn export_with_profile(
                     .iter()
                     .any(|prop| prop.art.tint() != [1.0, 1.0, 1.0, 1.0])
                     || serialized_material_present(&bytes, true)?;
+                requires_material_slots |= document
+                    .props
+                    .iter()
+                    .any(|prop| !prop.art.material_slots().is_empty())
+                    || serialized_material_slots_present(&bytes, true)?;
                 requires_surface |= document
                     .props
                     .iter()
@@ -363,6 +373,7 @@ fn export_with_profile(
             require_rotation: requires_rotation,
             require_camera: camera_bytes.is_some(),
             require_material: requires_material,
+            require_material_slots: requires_material_slots,
             require_animation: animation_bytes.is_some(),
             require_surface: requires_surface,
             require_lighting: lighting_bytes.is_some(),
@@ -659,6 +670,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let sidecar_path = mesh_art::sidecar_path(&scene_path)?;
     let mut requires_rotation = false;
     let mut requires_material = false;
+    let mut requires_material_slots = false;
     let mut requires_surface = false;
     let mut requires_facing = false;
     let mut requires_character = false;
@@ -679,6 +691,8 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
                 || serialized_rotation_present(&bytes, false)?;
             requires_material |=
                 art.tint() != [1.0, 1.0, 1.0, 1.0] || serialized_material_present(&bytes, false)?;
+            requires_material_slots |= !art.material_slots().is_empty()
+                || serialized_material_slots_present(&bytes, false)?;
             requires_surface |=
                 art.surface().is_some() || serialized_surface_present(&bytes, false)?;
             requires_facing |= serialized_facing_present(&bytes, false)?;
@@ -719,6 +733,11 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
                 .iter()
                 .any(|prop| prop.art.tint() != [1.0, 1.0, 1.0, 1.0])
                 || serialized_material_present(&bytes, true)?;
+            requires_material_slots |= document
+                .props
+                .iter()
+                .any(|prop| !prop.art.material_slots().is_empty())
+                || serialized_material_slots_present(&bytes, true)?;
             requires_surface |= document
                 .props
                 .iter()
@@ -871,6 +890,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             require_rotation: requires_rotation,
             require_camera: manifest.camera.is_some(),
             require_material: requires_material,
+            require_material_slots: requires_material_slots,
             require_animation: manifest.animation.is_some(),
             require_surface: requires_surface,
             require_lighting: manifest.lighting.is_some(),
@@ -1473,6 +1493,23 @@ fn serialized_material_present(bytes: &[u8], props: bool) -> Result<bool, String
     }))
 }
 
+fn serialized_material_slots_present(bytes: &[u8], props: bool) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("inspect serialized mesh material slots: {error}"))?;
+    if !props {
+        return Ok(value.get("material_slots").is_some());
+    }
+    let records = value
+        .get("props")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("mesh props sidecar has no props inventory")?;
+    Ok(records.iter().any(|record| {
+        record
+            .get("art")
+            .is_some_and(|art| art.get("material_slots").is_some())
+    }))
+}
+
 fn serialized_surface_present(bytes: &[u8], props: bool) -> Result<bool, String> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("inspect serialized mesh surface: {error}"))?;
@@ -1535,6 +1572,25 @@ fn validate_runtime_with_material(
 }
 
 #[cfg(test)]
+fn validate_runtime_with_material_slots(bytes: &[u8], required: bool) -> Result<(), String> {
+    validate_runtime_with_lighting(
+        bytes,
+        RuntimeRequirements {
+            require_props: false,
+            require_rotation: false,
+            require_camera: false,
+            require_material: false,
+            require_material_slots: required,
+            require_animation: false,
+            require_surface: false,
+            require_lighting: false,
+            require_character: false,
+            require_hud: false,
+        },
+    )
+}
+
+#[cfg(test)]
 fn validate_runtime_with_surface(bytes: &[u8], require_props: bool) -> Result<(), String> {
     validate_runtime_with_animation(bytes, require_props, false, false, false, false, true)
 }
@@ -1556,6 +1612,7 @@ fn validate_runtime_with_animation(
             require_rotation,
             require_camera,
             require_material,
+            require_material_slots: false,
             require_animation,
             require_surface,
             require_lighting: false,
@@ -1570,6 +1627,7 @@ struct RuntimeRequirements {
     require_rotation: bool,
     require_camera: bool,
     require_material: bool,
+    require_material_slots: bool,
     require_animation: bool,
     require_surface: bool,
     require_lighting: bool,
@@ -1586,6 +1644,7 @@ fn validate_runtime_with_lighting(
         require_rotation,
         require_camera,
         require_material,
+        require_material_slots,
         require_animation,
         require_surface,
         require_lighting,
@@ -1687,6 +1746,16 @@ fn validate_runtime_with_lighting(
     {
         return Err("mesh player runtime does not advertise mesh-material bundle support".into());
     }
+    if require_material_slots
+        && validate_runtime_section(
+            bytes,
+            MATERIAL_SLOTS_RUNTIME_SECTION,
+            MATERIAL_SLOTS_RUNTIME_MARKER,
+        )?
+        .is_none()
+    {
+        return Err("mesh player runtime does not advertise material-slot support".into());
+    }
     if require_animation
         && validate_runtime_section(bytes, ANIMATION_RUNTIME_SECTION, ANIMATION_RUNTIME_MARKER)?
             .is_none()
@@ -1772,6 +1841,7 @@ fn validate_runtime_with_character(bytes: &[u8], required: bool) -> Result<(), S
             require_rotation: false,
             require_camera: false,
             require_material: false,
+            require_material_slots: false,
             require_animation: false,
             require_surface: false,
             require_lighting: false,
