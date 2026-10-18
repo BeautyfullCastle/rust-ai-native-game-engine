@@ -20,6 +20,8 @@ pub(crate) struct Panel {
     scale: String,
     rotation: [String; 3],
     clip: String,
+    idle_clip_enabled: bool,
+    idle_clip: String,
     rate: String,
     looped: bool,
     face_route: bool,
@@ -55,6 +57,8 @@ impl Default for Panel {
             scale: "1".into(),
             rotation: ["0".into(), "0".into(), "0".into()],
             clip: "0".into(),
+            idle_clip_enabled: false,
+            idle_clip: "0".into(),
             rate: "1".into(),
             looped: true,
             face_route: false,
@@ -210,6 +214,10 @@ impl Panel {
                 for (axis, label) in ["Animation rotation X (degrees)", "Animation rotation Y (degrees)", "Animation rotation Z (degrees)"].into_iter().enumerate() {
                     changed |= text_field(ui, label, &mut self.rotation[axis]);
                 }
+                changed |= ui.checkbox(&mut self.idle_clip_enabled, "Use idle and moving clips").changed();
+                if self.idle_clip_enabled {
+                    changed |= text_field(ui, "Animation idle clip index", &mut self.idle_clip);
+                }
                 changed |= text_field(ui, "Animation clip index", &mut self.clip);
                 changed |= text_field(ui, "Animation playback rate", &mut self.rate);
                 changed |= ui.checkbox(&mut self.looped, "Loop mesh animation").changed();
@@ -219,6 +227,10 @@ impl Panel {
                     for (index, name, duration) in snapshot.clips() {
                         ui.label(format!("Clip {index}: {name} ({duration:.3}s)"));
                     }
+                }
+                if let Some((moving, clip)) = self.animation_state(editor) {
+                    let state = if moving { "moving" } else { "idle" };
+                    ui.label(format!("Mesh animation state: {state} (clip {clip})"));
                 }
                 if ui.button("Apply mesh animation").clicked() {
                     self.apply(editor);
@@ -322,6 +334,16 @@ impl Panel {
         snapshot.placement_for_view(&view, frame.tick()).map(Some)
     }
 
+    fn animation_state(&self, editor: &Editor) -> Option<(bool, u32)> {
+        let snapshot = self.current_snapshot()?;
+        snapshot.settings().idle_clip?;
+        let view = mesh_from_view(editor.snapshot()?.predicted()).ok()?;
+        if view.graph.revision() != snapshot.graph_revision() {
+            return None;
+        }
+        Some(snapshot.selected_clip_for_view(&view))
+    }
+
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
         if editor.game() != EditorGame::MeshNavigation {
             return None;
@@ -419,10 +441,13 @@ impl Panel {
             &self.offset,
             &self.scale,
             &self.rotation,
-            &self.clip,
-            &self.rate,
-            self.looped,
-            self.face_route,
+            PlaybackFields {
+                moving_clip: &self.clip,
+                idle_clip: self.idle_clip_enabled.then_some(self.idle_clip.as_str()),
+                rate: &self.rate,
+                looped: self.looped,
+                face_route: self.face_route,
+            },
         ) {
             Ok(settings) => settings,
             Err(error) => {
@@ -718,6 +743,8 @@ impl Panel {
             .map(|angles| angles.map(format_number))
             .unwrap_or_else(|_| ["invalid".into(), "invalid".into(), "invalid".into()]);
         self.clip = settings.clip.to_string();
+        self.idle_clip_enabled = settings.idle_clip.is_some();
+        self.idle_clip = settings.idle_clip.unwrap_or(0).to_string();
         self.rate = format_number(settings.rate);
         self.looped = settings.looped;
         self.face_route = settings.facing == crate::mesh_facing::Facing::Route;
@@ -731,6 +758,8 @@ impl Panel {
             self.scale = "1".into();
             self.rotation = ["0".into(), "0".into(), "0".into()];
             self.clip = "0".into();
+            self.idle_clip_enabled = false;
+            self.idle_clip = "0".into();
             self.rate = "1".into();
             self.looped = true;
             self.face_route = false;
@@ -815,14 +844,19 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String) -> bool {
         .changed()
 }
 
+struct PlaybackFields<'a> {
+    moving_clip: &'a str,
+    idle_clip: Option<&'a str>,
+    rate: &'a str,
+    looped: bool,
+    face_route: bool,
+}
+
 fn parse_settings(
     offset: &[String; 3],
     scale: &str,
     rotation: &[String; 3],
-    clip: &str,
-    rate: &str,
-    looped: bool,
-    face_route: bool,
+    playback: PlaybackFields<'_>,
 ) -> Result<crate::mesh_animation::Settings, String> {
     let offset = [
         offset[0]
@@ -848,11 +882,22 @@ fn parse_settings(
             .map_err(|_| "rotation Z must be a number")?,
     ];
     let rotation = crate::mesh_rotation::from_degrees(angles)?;
-    let clip = clip
+    let clip = playback
+        .moving_clip
         .trim()
         .parse::<u32>()
         .map_err(|_| "clip index must be a nonnegative integer")?;
-    let rate = rate
+    let idle_clip = playback
+        .idle_clip
+        .map(|idle_clip| {
+            idle_clip
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "idle clip index must be a nonnegative integer")
+        })
+        .transpose()?;
+    let rate = playback
+        .rate
         .parse::<f32>()
         .map_err(|_| "playback rate must be a number")?;
     if offset.iter().any(|value| !value.is_finite()) || !scale.is_finite() || !rate.is_finite() {
@@ -862,14 +907,15 @@ fn parse_settings(
         offset,
         scale,
         rotation,
-        facing: if face_route {
+        facing: if playback.face_route {
             crate::mesh_facing::Facing::Route
         } else {
             crate::mesh_facing::Facing::Fixed
         },
         clip,
+        idle_clip,
         rate,
-        looped,
+        looped: playback.looped,
     })
 }
 

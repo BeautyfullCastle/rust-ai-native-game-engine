@@ -14,6 +14,8 @@ pub(crate) enum Projection {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Document {
     pub(crate) target: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) follow_offset: Option<[f32; 3]>,
     pub(crate) yaw: f32,
     pub(crate) pitch: f32,
     pub(crate) distance: f32,
@@ -82,6 +84,8 @@ impl<'de> Deserialize<'de> for Document {
         #[serde(deny_unknown_fields)]
         struct Wire {
             target: [f32; 3],
+            #[serde(default, deserialize_with = "present_vector")]
+            follow_offset: Option<[f32; 3]>,
             yaw: f32,
             pitch: f32,
             distance: f32,
@@ -94,6 +98,7 @@ impl<'de> Deserialize<'de> for Document {
         let wire: Wire = deserialize_object(deserializer)?;
         Ok(Self {
             target: wire.target,
+            follow_offset: wire.follow_offset,
             yaw: wire.yaw,
             pitch: wire.pitch,
             distance: wire.distance,
@@ -117,6 +122,7 @@ impl Document {
     pub(crate) fn from_orbit(orbit: OrbitCamera) -> Result<Self, String> {
         let document = Self {
             target: orbit.target,
+            follow_offset: None,
             yaw: orbit.yaw,
             pitch: orbit.pitch,
             distance: orbit.distance,
@@ -138,6 +144,20 @@ impl Document {
         self.projection = projection;
         self.near = near;
         self.far = far;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) fn with_follow_offset(
+        mut self,
+        follow_offset: Option<[f32; 3]>,
+    ) -> Result<Self, String> {
+        if let Some(offset) = follow_offset {
+            for coordinate in offset {
+                bounded("follow offset", coordinate, -1_000_000.0, 1_000_000.0)?;
+            }
+        }
+        self.follow_offset = follow_offset;
         self.validate()?;
         Ok(self)
     }
@@ -254,6 +274,35 @@ impl Document {
         Ok(camera)
     }
 
+    pub(crate) fn camera_for_view(
+        &self,
+        orbit: &OrbitCamera,
+        size: (u32, u32),
+        view: &orr_remote::mesh_navigation::MeshView,
+    ) -> Result<Camera3D, String> {
+        let Some(follow_offset) = self.follow_offset else {
+            return self.camera(orbit, size);
+        };
+        let agent_position = view.agent.position.map(orr_fp::FP::to_f32);
+        self.camera_at_position(orbit, size, agent_position, follow_offset)
+    }
+
+    fn camera_at_position(
+        &self,
+        orbit: &OrbitCamera,
+        size: (u32, u32),
+        agent_position: [f32; 3],
+        follow_offset: [f32; 3],
+    ) -> Result<Camera3D, String> {
+        let mut followed_orbit = *orbit;
+        for axis in 0..3 {
+            followed_orbit.target[axis] = agent_position[axis]
+                + follow_offset[axis]
+                + (orbit.target[axis] - self.target[axis]);
+        }
+        self.camera(&followed_orbit, size)
+    }
+
     pub(crate) fn encode(
         &self,
         scene_filename: &str,
@@ -310,6 +359,11 @@ impl Document {
 
     fn validate(&self) -> Result<(), String> {
         validate_pose(self.target, self.yaw, self.pitch, self.distance)?;
+        if let Some(offset) = self.follow_offset {
+            for coordinate in offset {
+                bounded("follow offset", coordinate, -1_000_000.0, 1_000_000.0)?;
+            }
+        }
         bounded("fov_y_degrees", self.fov_y_degrees, 5.0, 150.0)?;
         bounded("near", self.near, 0.001, 100.0)?;
         bounded("far", self.far, 0.001, 1_000_000.0)?;
@@ -321,6 +375,12 @@ impl Document {
         }
         Ok(())
     }
+}
+
+fn present_vector<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<[f32; 3]>, D::Error> {
+    <[f32; 3]>::deserialize(deserializer).map(Some)
 }
 
 fn validate_scene_filename(filename: &str) -> Result<(), String> {

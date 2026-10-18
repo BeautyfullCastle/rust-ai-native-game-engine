@@ -25,6 +25,8 @@ struct HistoryEntry {
 
 pub(crate) struct Panel {
     target: [String; 3],
+    follow_agent: bool,
+    follow_offset: [String; 3],
     yaw_degrees: String,
     pitch_degrees: String,
     distance: String,
@@ -56,6 +58,8 @@ impl Default for Panel {
     fn default() -> Self {
         Self {
             target: ["0".into(), "2".into(), "0".into()],
+            follow_agent: false,
+            follow_offset: ["0".into(), "0".into(), "0".into()],
             yaw_degrees: "31.51268".into(),
             pitch_degrees: "28.64789".into(),
             distance: "16".into(),
@@ -186,6 +190,19 @@ impl Panel {
                     "Game camera orthographic half height",
                     &mut self.half_height,
                 );
+                changed |= ui.checkbox(&mut self.follow_agent, "Follow mesh agent").changed();
+                if self.follow_agent {
+                    for (axis, label) in [
+                        "Camera follow offset X",
+                        "Camera follow offset Y",
+                        "Camera follow offset Z",
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        changed |= text_field(ui, label, &mut self.follow_offset[axis]);
+                    }
+                }
                 ui.horizontal(|ui| {
                     changed |= ui
                         .radio_value(
@@ -742,6 +759,15 @@ impl Panel {
                 half_height: parse_number(&self.half_height, "orthographic half height")?,
             },
         };
+        let follow_offset = if self.follow_agent {
+            Some([
+                parse_number(&self.follow_offset[0], "follow offset X")?,
+                parse_number(&self.follow_offset[1], "follow offset Y")?,
+                parse_number(&self.follow_offset[2], "follow offset Z")?,
+            ])
+        } else {
+            None
+        };
         let document = Document::from_orbit(orr_render::OrbitCamera {
             target,
             yaw: yaw_degrees.to_radians(),
@@ -749,7 +775,8 @@ impl Panel {
             distance,
             fov_y_degrees,
         })?
-        .with_projection(projection, near, far)?;
+        .with_projection(projection, near, far)?
+        .with_follow_offset(follow_offset)?;
         let filename = scene
             .file_name()
             .and_then(|value| value.to_str())
@@ -763,6 +790,11 @@ impl Panel {
 
     fn copy_document_fields(&mut self, document: &Document) {
         self.target = document.target.map(format_number);
+        self.follow_agent = document.follow_offset.is_some();
+        self.follow_offset = document
+            .follow_offset
+            .unwrap_or([0.0; 3])
+            .map(format_number);
         self.yaw_degrees = format_number(document.yaw.to_degrees());
         self.pitch_degrees = format_number(document.pitch.to_degrees());
         self.distance = format_number(document.distance);
@@ -781,6 +813,8 @@ impl Panel {
 
     fn copy_orbit_fields(&mut self, orbit: &orr_render::OrbitCamera) {
         self.target = orbit.target.map(format_number);
+        self.follow_agent = false;
+        self.follow_offset = ["0".into(), "0".into(), "0".into()];
         self.yaw_degrees = format_number(orbit.yaw.to_degrees());
         self.pitch_degrees = format_number(orbit.pitch.to_degrees());
         self.distance = format_number(orbit.distance);
@@ -794,6 +828,8 @@ impl Panel {
             self.copy_document_fields(&document);
         } else {
             self.target = ["0".into(), "2".into(), "0".into()];
+            self.follow_agent = false;
+            self.follow_offset = ["0".into(), "0".into(), "0".into()];
             self.yaw_degrees = "31.51268".into();
             self.pitch_degrees = "28.64789".into();
             self.distance = "16".into();
@@ -848,7 +884,14 @@ fn capture_document(
         },
         (projection, _) => projection,
     };
-    Document::from_orbit(orbit)?.with_projection(projection, near, far)
+    let follow_offset = current.and_then(|document| {
+        document.follow_offset.map(|offset| {
+            std::array::from_fn(|axis| offset[axis] + orbit.target[axis] - document.target[axis])
+        })
+    });
+    Document::from_orbit(orbit)?
+        .with_projection(projection, near, far)?
+        .with_follow_offset(follow_offset)
 }
 
 fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {

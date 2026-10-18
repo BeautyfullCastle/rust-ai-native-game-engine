@@ -19,6 +19,9 @@ const LICENSE: &[u8] = b"Example license text\n";
 #[path = "facing_tests.rs"]
 mod facing_tests;
 
+#[path = "character_tests.rs"]
+mod character_tests;
+
 fn admitted_scene() -> (String, [u8; 32], u64) {
     let graph = StaticMeshGraph::bake(
         &[
@@ -115,6 +118,18 @@ fn test_runtime_with_all_presentations() -> Vec<u8> {
         bytes[header + 36..header + 40].copy_from_slice(&0x4000_0040u32.to_le_bytes());
         bytes[payload..payload + marker.len()].copy_from_slice(marker);
     }
+    bytes
+}
+
+fn test_runtime_with_character_presentation() -> Vec<u8> {
+    let mut bytes = test_runtime_with_all_presentations();
+    bytes.resize(0x640, 0);
+    bytes[0x46..0x48].copy_from_slice(&9u16.to_le_bytes());
+    bytes[0x288..0x290].copy_from_slice(b".orrchar");
+    bytes[0x298..0x29c].copy_from_slice(&64u32.to_le_bytes());
+    bytes[0x29c..0x2a0].copy_from_slice(&0x600u32.to_le_bytes());
+    bytes[0x2a8..0x2ac].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    bytes[0x600..0x600 + b"ORR_MESH_CHARACTER_V1".len()].copy_from_slice(b"ORR_MESH_CHARACTER_V1");
     bytes
 }
 
@@ -1087,7 +1102,11 @@ fn interactive_export_records_and_reopens_input_profile() {
     bundle_names.sort();
     assert_eq!(
         bundle_names,
-        ["orr.mesh-bundle.json", "orr_mesh_player.exe", "walk.scene.yaml"]
+        [
+            "orr.mesh-bundle.json",
+            "orr_mesh_player.exe",
+            "walk.scene.yaml"
+        ]
     );
 }
 

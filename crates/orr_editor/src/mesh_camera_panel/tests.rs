@@ -1,5 +1,6 @@
 use super::{capture_document, parse_number, HistoryEntry, Panel, ProjectionMode, MAX_HISTORY};
 use crate::mesh_camera::{Document, Projection};
+use orr_fp::FP;
 use orr_render::camera3d::OrbitCamera;
 use std::path::Path;
 
@@ -34,6 +35,25 @@ fn camera_form_parses_degrees_and_validates_projection_before_application() {
     panel.distance = "0.1".into();
     assert!(panel.parse_form(Path::new("scene.yaml"), [7; 32]).is_err());
     assert!(parse_number(&"1".repeat(49), "target").is_err());
+}
+
+#[test]
+fn follow_form_is_applied_only_as_a_validated_offset() {
+    let mut panel = Panel::default();
+    panel.follow_agent = true;
+    panel.follow_offset = ["1.5".into(), "2".into(), "-3".into()];
+    let document = panel.parse_form(Path::new("scene.yaml"), [7; 32]).unwrap();
+    assert_eq!(document.follow_offset, Some([1.5, 2.0, -3.0]));
+
+    panel.follow_offset[1] = "NaN".into();
+    assert!(panel.parse_form(Path::new("scene.yaml"), [7; 32]).is_err());
+    panel.follow_offset[1] = "2".into();
+    panel.follow_offset[2] = "1".repeat(49);
+    assert!(panel.parse_form(Path::new("scene.yaml"), [7; 32]).is_err());
+
+    panel.follow_agent = false;
+    let fixed = panel.parse_form(Path::new("scene.yaml"), [7; 32]).unwrap();
+    assert_eq!(fixed.follow_offset, None);
 }
 
 #[test]
@@ -118,4 +138,59 @@ fn capturing_after_orthographic_zoom_preserves_view_framing() {
     assert_eq!(after_capture.eye, before_capture.eye);
     assert_eq!(after_capture.target, before_capture.target);
     assert_eq!(after_capture.projection, before_capture.projection);
+}
+
+#[test]
+fn capturing_viewport_preserves_the_follow_offset_setting() {
+    let saved = Document::from_orbit(OrbitCamera::new([1.0, 2.0, 3.0], 0.4, 0.3, 16.0))
+        .unwrap()
+        .with_follow_offset(Some([0.5, 1.0, -2.0]))
+        .unwrap();
+    let captured = capture_document(saved.orbit(), Some(&saved)).unwrap();
+    assert_eq!(captured.follow_offset, saved.follow_offset);
+}
+
+#[test]
+fn capturing_a_panned_follow_camera_preserves_its_effective_view() {
+    use orr_navigation::{mesh::StaticMeshGraph, AgentProfile};
+    use orr_remote::mesh_navigation::{authoring::create_mesh_scene, mesh_from_view, AgentSpec};
+
+    let saved = Document::from_orbit(OrbitCamera::new([1.0, 2.0, 3.0], 0.4, 0.3, 16.0))
+        .unwrap()
+        .with_projection(Projection::Orthographic { half_height: 7.0 }, 0.2, 600.0)
+        .unwrap()
+        .with_follow_offset(Some([0.5, 1.0, -2.0]))
+        .unwrap();
+    let panned_orbit = OrbitCamera::new([3.0, 4.0, 8.0], 0.4, 0.3, 16.0);
+    let graph = StaticMeshGraph::bake(
+        &[
+            [FP::from_int(0), FP::ZERO, FP::from_int(0)],
+            [FP::from_int(0), FP::ZERO, FP::from_int(1)],
+            [FP::from_int(1), FP::ZERO, FP::from_int(0)],
+            [FP::from_int(1), FP::ZERO, FP::from_int(1)],
+        ],
+        &[[0, 1, 3], [0, 3, 2]],
+        AgentProfile::default(),
+    )
+    .unwrap();
+    let spec = AgentSpec {
+        start: [FP::ZERO; 3],
+        goal: [FP::from_int(1), FP::ZERO, FP::from_int(1)],
+        max_vertical: FP::ZERO,
+        distance_per_tick: FP::ONE,
+    };
+    let document = create_mesh_scene(&graph, spec).unwrap();
+    let view = mesh_from_view(orr_bridge::FrameView::of(document.frame())).unwrap();
+
+    let before_capture = saved
+        .camera_for_view(&panned_orbit, (1280, 720), &view)
+        .unwrap();
+    let captured = capture_document(panned_orbit, Some(&saved)).unwrap();
+    let after_capture = captured
+        .camera_for_view(&panned_orbit, (1280, 720), &view)
+        .unwrap();
+
+    assert_eq!(captured.follow_offset, Some([2.5, 3.0, 3.0]));
+    assert_eq!(after_capture, before_capture);
+    assert_eq!(after_capture.view(), before_capture.view());
 }

@@ -33,6 +33,12 @@ pub(crate) struct Settings {
     pub(crate) clip: u32,
     pub(crate) rate: f32,
     pub(crate) looped: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_idle_clip"
+    )]
+    pub(crate) idle_clip: Option<u32>,
 }
 
 impl Default for Settings {
@@ -45,6 +51,7 @@ impl Default for Settings {
             clip: 0,
             rate: 1.0,
             looped: true,
+            idle_clip: None,
         }
     }
 }
@@ -245,9 +252,31 @@ impl Snapshot {
         }
         let rotation =
             crate::mesh_facing::rotation(self.settings.facing, self.settings.rotation, view)?;
-        self.placement_with_rotation(view.agent.entity, view.agent.position, tick, rotation)
+        let (_, clip) = self.selected_clip_for_view(view);
+        self.placement_with_rotation_and_clip(
+            view.agent.entity,
+            view.agent.position,
+            tick,
+            rotation,
+            clip,
+        )
     }
 
+    pub(crate) fn selected_clip_for_view(
+        &self,
+        view: &orr_remote::mesh_navigation::MeshView,
+    ) -> (bool, u32) {
+        let moving = matches!(view.agent.status, orr_navigation::NavigationStatus::Moving)
+            && view.agent.spec.distance_per_tick.raw() > 0;
+        let clip = if moving {
+            self.settings.clip
+        } else {
+            self.settings.idle_clip.unwrap_or(self.settings.clip)
+        };
+        (moving, clip)
+    }
+
+    #[cfg(test)]
     fn placement_with_rotation(
         &self,
         entity: orr_ecs::Entity,
@@ -255,9 +284,21 @@ impl Snapshot {
         tick: u64,
         rotation: [f32; 4],
     ) -> Result<AnimatedPlacement, String> {
+        self.placement_with_rotation_and_clip(entity, position, tick, rotation, self.settings.clip)
+    }
+
+    fn placement_with_rotation_and_clip(
+        &self,
+        entity: orr_ecs::Entity,
+        position: [orr_fp::FP; 3],
+        tick: u64,
+        rotation: [f32; 4],
+        clip_index: u32,
+    ) -> Result<AnimatedPlacement, String> {
         let mut settings = self.settings;
         settings.rotation = rotation;
-        self.validate_settings(settings)?;
+        settings.clip = clip_index;
+        let settings = self.validate_settings(settings)?;
         let world_position = position.map(orr_fp::FP::to_f32);
         if world_position
             .iter()
@@ -265,7 +306,6 @@ impl Snapshot {
         {
             return Err("mesh agent position is outside the animation placement bound".into());
         }
-        let settings = self.settings;
         let duration = self.model.source().clips[settings.clip as usize].duration();
         let adjusted_duration = duration / settings.rate;
         let playback = if settings.looped {
@@ -596,10 +636,27 @@ fn validate_settings(settings: Settings, model: &AnimatedModel) -> Result<Settin
     if clip.duration() > MAX_DURATION_SECONDS {
         return Err("animation clip exceeds the duration bound".into());
     }
+    if let Some(idle_clip_index) = settings.idle_clip {
+        let idle_clip = model
+            .source()
+            .clips
+            .get(idle_clip_index as usize)
+            .ok_or_else(|| format!("idle animation clip {idle_clip_index} does not exist"))?;
+        if idle_clip.duration() > MAX_DURATION_SECONDS {
+            return Err("idle animation clip exceeds the duration bound".into());
+        }
+    }
     Ok(Settings {
         rotation,
         ..settings
     })
+}
+
+fn deserialize_idle_clip<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u32::deserialize(deserializer).map(Some)
 }
 
 fn validate_provenance_fields(provenance: &Provenance<'_>) -> Result<(), String> {

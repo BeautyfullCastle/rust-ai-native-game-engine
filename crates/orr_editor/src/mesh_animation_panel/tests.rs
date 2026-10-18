@@ -1,4 +1,4 @@
-use super::{frame_gate, parse_settings, Panel, MAX_HISTORY};
+use super::{frame_gate, parse_settings, Panel, PlaybackFields, MAX_HISTORY};
 use crate::{backend::HostSpec, game::EditorGame, mesh_animation::Snapshot, model::Mode};
 use std::path::{Path, PathBuf};
 
@@ -38,16 +38,29 @@ fn animated_package(root: &Path) -> PathBuf {
     package
 }
 
+fn playback_fields<'fields>(
+    moving_clip: &'fields str,
+    idle_clip: Option<&'fields str>,
+    rate: &'fields str,
+    looped: bool,
+    face_route: bool,
+) -> PlaybackFields<'fields> {
+    PlaybackFields {
+        moving_clip,
+        idle_clip,
+        rate,
+        looped,
+        face_route,
+    }
+}
+
 #[test]
 fn parses_finite_animation_settings_and_rejects_bad_values() {
     let settings = parse_settings(
         &["1.25".into(), "-2".into(), "0.5".into()],
         "0.75",
         &["90".into(), "0".into(), "0".into()],
-        "1",
-        "1.5",
-        false,
-        false,
+        playback_fields("1", None, "1.5", false, false),
     )
     .unwrap();
     assert_eq!(settings.offset, [1.25, -2.0, 0.5]);
@@ -60,10 +73,7 @@ fn parses_finite_animation_settings_and_rejects_bad_values() {
         &["0".into(), "0".into(), "0".into()],
         "1",
         &["0".into(), "0".into(), "0".into()],
-        "0",
-        "1",
-        true,
-        true,
+        playback_fields("0", None, "1", true, true),
     )
     .unwrap();
     assert_eq!(route_facing.facing, crate::mesh_facing::Facing::Route);
@@ -72,15 +82,59 @@ fn parses_finite_animation_settings_and_rejects_bad_values() {
         &["NaN".into(), "0".into(), "0".into()],
         "1",
         &zeros(),
-        "0",
-        "1",
-        true,
-        false
+        playback_fields("0", None, "1", true, false)
     )
     .is_err());
-    assert!(parse_settings(&zeros(), "inf", &zeros(), "0", "1", true, false).is_err());
-    assert!(parse_settings(&zeros(), "1", &zeros(), "0", "inf", true, false).is_err());
-    assert!(parse_settings(&zeros(), "1", &zeros(), "-1", "1", true, false).is_err());
+    assert!(parse_settings(
+        &zeros(),
+        "inf",
+        &zeros(),
+        playback_fields("0", None, "1", true, false)
+    )
+    .is_err());
+    assert!(parse_settings(
+        &zeros(),
+        "1",
+        &zeros(),
+        playback_fields("0", None, "inf", true, false)
+    )
+    .is_err());
+    assert!(parse_settings(
+        &zeros(),
+        "1",
+        &zeros(),
+        playback_fields("-1", None, "1", true, false)
+    )
+    .is_err());
+}
+
+#[test]
+fn idle_clip_form_is_optional_and_validated() {
+    let zeros = || std::array::from_fn(|_| "0".to_owned());
+    let moving_only = parse_settings(
+        &zeros(),
+        "1",
+        &zeros(),
+        playback_fields("1", None, "1", true, false),
+    )
+    .unwrap();
+    assert_eq!(moving_only.idle_clip, None);
+
+    let idle = parse_settings(
+        &zeros(),
+        "1",
+        &zeros(),
+        playback_fields("1", Some("0"), "1", true, false),
+    )
+    .unwrap();
+    assert_eq!(idle.idle_clip, Some(0));
+    assert!(parse_settings(
+        &zeros(),
+        "1",
+        &zeros(),
+        playback_fields("1", Some("invalid"), "1", true, false)
+    )
+    .is_err());
 }
 
 #[test]
@@ -94,6 +148,7 @@ fn animated_snapshot_roundtrips_clip_settings_and_private_history() {
     assert!(clips.len() >= 2);
     let mut settings = initial.settings();
     settings.clip = clips[1].0;
+    settings.idle_clip = Some(clips[0].0);
     settings.rate = 1.5;
     settings.looped = false;
     let first = initial.with_settings(settings).unwrap();
@@ -107,6 +162,7 @@ fn animated_snapshot_roundtrips_clip_settings_and_private_history() {
     panel.undo();
     let restored = panel.current_snapshot().unwrap().settings();
     assert_eq!(restored.clip, settings.clip);
+    assert_eq!(restored.idle_clip, settings.idle_clip);
     assert_eq!(restored.rate, settings.rate);
     assert_eq!(restored.looped, settings.looped);
     assert_eq!(restored.facing, settings.facing);

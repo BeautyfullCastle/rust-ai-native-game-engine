@@ -38,6 +38,7 @@ const SURFACE_RUNTIME_MARKER: &[u8] = b"ORR_MESH_SURFACE_V1";
 const LIGHTING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_LIGHTING_V1";
 const INPUT_RUNTIME_MARKER: &[u8] = b"ORR_MESH_INPUT_V1";
 const FACING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_FACING_V1";
+const CHARACTER_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CHARACTER_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
@@ -48,6 +49,7 @@ const SURFACE_RUNTIME_SECTION: &[u8; 8] = b".orrsurf";
 const LIGHTING_RUNTIME_SECTION: &[u8; 8] = b".orrlit\0";
 const INPUT_RUNTIME_SECTION: &[u8; 8] = b".orrctrl";
 const FACING_RUNTIME_SECTION: &[u8; 8] = b".orrface";
+const CHARACTER_RUNTIME_SECTION: &[u8; 8] = b".orrchar";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -158,6 +160,7 @@ fn export_with_profile(
     let mut requires_material = false;
     let mut requires_surface = false;
     let mut requires_facing = false;
+    let mut requires_character = false;
     let sidecar_bytes = match read_optional_bounded(
         &sidecar_path,
         orr_model::MAX_FILE_BYTES as u64,
@@ -230,11 +233,13 @@ fn export_with_profile(
         "mesh camera sidecar",
     )? {
         Some(bytes) => {
-            let Some((_, admitted_hash)) =
+            let Some((camera, admitted_hash)) =
                 crate::mesh_camera_store::load(&scene_path, graph_revision)?
             else {
                 return Err("mesh camera sidecar could not be admitted".into());
             };
+            requires_character |=
+                camera.follow_offset.is_some() || serialized_camera_follow_present(&bytes)?;
             if admitted_hash != digest(&bytes)
                 || read_bounded(
                     &camera_path,
@@ -256,11 +261,13 @@ fn export_with_profile(
         "mesh animation sidecar",
     )? {
         Some(bytes) => {
-            let Some((_, admitted_hash)) =
+            let Some((animation, admitted_hash)) =
                 crate::mesh_animation_store::load(&scene_path, graph_revision)?
             else {
                 return Err("mesh animation sidecar could not be admitted".into());
             };
+            requires_character |= animation.settings().idle_clip.is_some()
+                || serialized_animation_idle_present(&bytes)?;
             if admitted_hash != digest(&bytes)
                 || read_bounded(
                     &animation_path,
@@ -324,6 +331,7 @@ fn export_with_profile(
             require_animation: animation_bytes.is_some(),
             require_surface: requires_surface,
             require_lighting: lighting_bytes.is_some(),
+            require_character: requires_character,
         },
     )?;
     requires_facing |= optional_facing_present(props_bytes.as_deref(), true)?
@@ -589,6 +597,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let mut requires_material = false;
     let mut requires_surface = false;
     let mut requires_facing = false;
+    let mut requires_character = false;
     match (
         &manifest.sidecar,
         read_optional_bounded(
@@ -673,11 +682,13 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     ) {
         (Some(record), Some(bytes)) => {
             verify_file(record, &bytes, "bundle mesh camera sidecar")?;
-            let Some((_, admitted_hash)) =
+            let Some((camera, admitted_hash)) =
                 crate::mesh_camera_store::load(&scene_path, graph_revision)?
             else {
                 return Err("bundle mesh camera sidecar could not be admitted".into());
             };
+            requires_character |=
+                camera.follow_offset.is_some() || serialized_camera_follow_present(&bytes)?;
             if admitted_hash != record.sha256 {
                 return Err("bundle mesh camera admission hash does not match its manifest".into());
             }
@@ -706,11 +717,13 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         (Some(record), Some(bytes)) => {
             verify_file(record, &bytes, "bundle mesh animation sidecar")?;
             requires_facing |= serialized_facing_present(&bytes, false)?;
-            let Some((_, admitted_hash)) =
+            let Some((animation, admitted_hash)) =
                 crate::mesh_animation_store::load(&scene_path, graph_revision)?
             else {
                 return Err("bundle mesh animation sidecar could not be admitted".into());
             };
+            requires_character |= animation.settings().idle_clip.is_some()
+                || serialized_animation_idle_present(&bytes)?;
             if admitted_hash != record.sha256
                 || read_bounded(
                     &animation_path,
@@ -776,6 +789,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             require_animation: manifest.animation.is_some(),
             require_surface: requires_surface,
             require_lighting: manifest.lighting.is_some(),
+            require_character: requires_character,
         },
     )?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
@@ -1448,6 +1462,7 @@ fn validate_runtime_with_animation(
             require_animation,
             require_surface,
             require_lighting: false,
+            require_character: false,
         },
     )
 }
@@ -1460,6 +1475,7 @@ struct RuntimeRequirements {
     require_animation: bool,
     require_surface: bool,
     require_lighting: bool,
+    require_character: bool,
 }
 
 fn validate_runtime_with_lighting(
@@ -1474,6 +1490,7 @@ fn validate_runtime_with_lighting(
         require_animation,
         require_surface,
         require_lighting,
+        require_character,
     } = requirements;
     if bytes.len() < 0x40 || &bytes[..2] != b"MZ" {
         return Err("mesh player runtime is missing its DOS executable header".into());
@@ -1588,6 +1605,12 @@ fn validate_runtime_with_lighting(
     {
         return Err("mesh player runtime does not advertise mesh-lighting bundle support".into());
     }
+    if require_character
+        && validate_runtime_section(bytes, CHARACTER_RUNTIME_SECTION, CHARACTER_RUNTIME_MARKER)?
+            .is_none()
+    {
+        return Err("mesh player runtime does not advertise character-follow support".into());
+    }
     Ok(())
 }
 
@@ -1616,6 +1639,40 @@ fn serialized_facing_present(bytes: &[u8], props: bool) -> Result<bool, String> 
         || value
             .get("settings")
             .is_some_and(|settings| settings.get("facing").is_some()))
+}
+
+fn serialized_camera_follow_present(bytes: &[u8]) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("inspect serialized mesh camera follow: {error}"))?;
+    Ok(value
+        .get("camera")
+        .is_some_and(|camera| camera.get("follow_offset").is_some()))
+}
+
+#[cfg(feature = "mesh-animated-models")]
+fn serialized_animation_idle_present(bytes: &[u8]) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("inspect serialized mesh animation idle clip: {error}"))?;
+    Ok(value
+        .get("settings")
+        .is_some_and(|settings| settings.get("idle_clip").is_some()))
+}
+
+#[cfg(test)]
+fn validate_runtime_with_character(bytes: &[u8], required: bool) -> Result<(), String> {
+    validate_runtime_with_lighting(
+        bytes,
+        RuntimeRequirements {
+            require_props: false,
+            require_rotation: false,
+            require_camera: false,
+            require_material: false,
+            require_animation: false,
+            require_surface: false,
+            require_lighting: false,
+            require_character: required,
+        },
+    )
 }
 
 fn validate_runtime_facing(bytes: &[u8], required: bool) -> Result<(), String> {

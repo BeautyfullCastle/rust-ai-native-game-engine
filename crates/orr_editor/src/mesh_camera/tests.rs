@@ -60,6 +60,61 @@ fn scene_and_graph_binding_roundtrips_and_rejects_other_identity() {
 }
 
 #[test]
+fn legacy_camera_omits_follow_and_followed_camera_tracks_agent_with_pan_offset() {
+    let saved = Document::from_orbit(orbit()).unwrap();
+    let legacy = saved.encode("room.scene.yaml", [9; 32]).unwrap();
+    assert!(!String::from_utf8(legacy.clone())
+        .unwrap()
+        .contains("follow_offset"));
+    assert_eq!(
+        Document::decode(&legacy, "room.scene.yaml", [9; 32])
+            .unwrap()
+            .follow_offset,
+        None
+    );
+
+    let followed = saved
+        .clone()
+        .with_follow_offset(Some([0.0, 2.0, -1.0]))
+        .unwrap();
+    let mut orbit_with_pan = saved.orbit();
+    orbit_with_pan.target = [2.0, 4.0, 4.0];
+    let camera = followed
+        .camera_at_position(
+            &orbit_with_pan,
+            (800, 600),
+            [10.0, 20.0, 30.0],
+            [0.0, 2.0, -1.0],
+        )
+        .unwrap();
+    let baseline = saved.camera(&orbit_with_pan, (800, 600)).unwrap();
+    assert_eq!(camera.target, [11.0, 24.0, 30.0]);
+    for axis in 0..3 {
+        assert!(
+            ((camera.eye[axis] - camera.target[axis])
+                - (baseline.eye[axis] - baseline.target[axis]))
+                .abs()
+                < 1.0e-5
+        );
+    }
+}
+
+#[test]
+fn follow_offset_is_strictly_optional_and_bounded() {
+    let saved = Document::from_orbit(orbit()).unwrap();
+    let encoded = String::from_utf8(saved.encode("room.scene.yaml", [9; 32]).unwrap()).unwrap();
+    let with_null = encoded.replace("\"target\": [", "\"follow_offset\": null,\n  \"target\": [");
+    assert!(Document::decode(with_null.as_bytes(), "room.scene.yaml", [9; 32]).is_err());
+    assert!(saved
+        .clone()
+        .with_follow_offset(Some([0.0, f32::NAN, 0.0]))
+        .is_err());
+    assert!(saved
+        .with_follow_offset(Some([0.0, 1_000_001.0, 0.0]))
+        .is_err());
+}
+
+#[test]
 fn strict_schema_rejects_duplicate_unknown_wrong_shaped_and_oversize_json() {
     let saved = Document::from_orbit(orbit()).unwrap();
     let bytes = saved.encode("room.scene.yaml", [9; 32]).unwrap();

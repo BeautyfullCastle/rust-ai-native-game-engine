@@ -25,6 +25,7 @@ fn animated_package_is_source_independent_and_scene_bound() {
     assert_eq!(snapshot.settings(), Settings::default());
     let default_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(default_json["settings"].get("facing").is_none());
+    assert!(default_json["settings"].get("idle_clip").is_none());
     assert!(Snapshot::decode_embedded(&bytes, "other.scene.yaml", GRAPH_REVISION).is_err());
     assert!(Snapshot::decode_embedded(&bytes, "mesh.scene.yaml", [0x13; 32]).is_err());
 }
@@ -48,6 +49,27 @@ fn route_facing_roundtrips_and_old_sidecars_default_to_fixed() {
         reopened.settings().facing,
         crate::mesh_facing::Facing::Route
     );
+
+    let mut idle_settings = route_facing.settings();
+    idle_settings.idle_clip = Some(route_facing.clips()[0].0);
+    let idle_snapshot = route_facing.clone().with_settings(idle_settings).unwrap();
+    let idle_bytes = idle_snapshot.encode_embedded("mesh.scene.yaml").unwrap();
+    let idle_value: serde_json::Value = serde_json::from_slice(&idle_bytes).unwrap();
+    assert_eq!(
+        idle_value["settings"]["idle_clip"],
+        idle_settings.idle_clip.unwrap()
+    );
+    assert_eq!(
+        Snapshot::decode_embedded(&idle_bytes, "mesh.scene.yaml", GRAPH_REVISION)
+            .unwrap()
+            .settings()
+            .idle_clip,
+        idle_settings.idle_clip
+    );
+    let mut null_idle_value: serde_json::Value = serde_json::from_slice(&idle_bytes).unwrap();
+    null_idle_value["settings"]["idle_clip"] = serde_json::Value::Null;
+    let null_idle = serde_json::to_vec(&null_idle_value).unwrap();
+    assert!(Snapshot::decode_embedded(&null_idle, "mesh.scene.yaml", GRAPH_REVISION).is_err());
 
     let mut unknown_value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     unknown_value["settings"]["facing"] = serde_json::json!("camera");
@@ -78,6 +100,10 @@ fn settings_reject_invalid_transform_rate_and_clip_without_mutation() {
         },
         Settings {
             clip: u32::MAX,
+            ..snapshot.settings()
+        },
+        Settings {
+            idle_clip: Some(u32::MAX),
             ..snapshot.settings()
         },
     ];
@@ -150,6 +176,88 @@ fn route_facing_uses_current_validated_path_and_authored_rotation() {
         .with_settings(mismatched_settings)
         .unwrap();
     assert!(mismatched.placement_for_view(&view, 12).is_err());
+}
+
+#[test]
+fn idle_clip_selection_follows_frame_status_and_zero_speed() {
+    use orr_navigation::{mesh::StaticMeshGraph, AgentProfile, NavigationStatus};
+    use orr_remote::mesh_navigation::{authoring::create_mesh_scene, mesh_from_view, AgentSpec};
+
+    let vertices = [
+        [orr_fp::FP::ZERO, orr_fp::FP::ZERO, orr_fp::FP::ZERO],
+        [orr_fp::FP::ZERO, orr_fp::FP::ZERO, orr_fp::FP::from_int(4)],
+        [orr_fp::FP::from_int(4), orr_fp::FP::ZERO, orr_fp::FP::ZERO],
+        [
+            orr_fp::FP::from_int(4),
+            orr_fp::FP::ZERO,
+            orr_fp::FP::from_int(4),
+        ],
+    ];
+    let graph =
+        StaticMeshGraph::bake(&vertices, &[[0, 1, 3], [0, 3, 2]], AgentProfile::default()).unwrap();
+    let spec = AgentSpec {
+        start: [orr_fp::FP::ONE, orr_fp::FP::ZERO, orr_fp::FP::ONE],
+        goal: [orr_fp::FP::from_int(3), orr_fp::FP::ZERO, orr_fp::FP::ONE],
+        max_vertical: orr_fp::FP::ZERO,
+        distance_per_tick: orr_fp::FP::from_ratio(1, 4),
+    };
+    let document = create_mesh_scene(&graph, spec).unwrap();
+    let mut view = mesh_from_view(orr_bridge::FrameView::of(document.frame())).unwrap();
+    let snapshot = fixture_for_revision(graph.revision());
+    let clips = snapshot.clips();
+    assert!(clips.len() >= 2);
+    let moving_clip = clips[1].0;
+    let idle_clip = clips[0].0;
+    let configured = snapshot
+        .clone()
+        .with_settings(Settings {
+            clip: moving_clip,
+            idle_clip: Some(idle_clip),
+            ..snapshot.settings()
+        })
+        .unwrap();
+
+    view.agent.status = NavigationStatus::Moving;
+    assert_eq!(
+        configured.selected_clip_for_view(&view),
+        (true, moving_clip)
+    );
+    let moving_pose = configured.placement_for_view(&view, 12).unwrap().pose;
+    let moving_only = snapshot
+        .clone()
+        .with_settings(Settings {
+            clip: moving_clip,
+            ..snapshot.settings()
+        })
+        .unwrap();
+    assert_eq!(
+        moving_pose,
+        moving_only.placement_for_view(&view, 12).unwrap().pose
+    );
+
+    view.agent.status = NavigationStatus::Stopped;
+    assert_eq!(configured.selected_clip_for_view(&view), (false, idle_clip));
+    let idle_pose = configured.placement_for_view(&view, 12).unwrap().pose;
+    let idle_only = snapshot
+        .clone()
+        .with_settings(Settings {
+            clip: idle_clip,
+            ..snapshot.settings()
+        })
+        .unwrap();
+    assert_eq!(
+        idle_pose,
+        idle_only.placement_for_view(&view, 12).unwrap().pose
+    );
+    assert_ne!(moving_pose, idle_pose);
+
+    view.agent.status = NavigationStatus::Moving;
+    view.agent.spec.distance_per_tick = orr_fp::FP::ZERO;
+    assert_eq!(configured.selected_clip_for_view(&view), (false, idle_clip));
+    assert_eq!(
+        configured.placement_for_view(&view, 12).unwrap().pose,
+        idle_pose
+    );
 }
 
 #[test]

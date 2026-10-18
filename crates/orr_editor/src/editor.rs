@@ -2167,7 +2167,11 @@ impl Editor {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { return self.room_camera.as_ref().unwrap().camera(&self.camera3d,size); }
         #[cfg(feature = "mesh-navigation")]
-        if self.has_mesh_camera() { return self.mesh_camera.as_ref().unwrap().document.camera(&self.camera3d, size); }
+        if self.has_mesh_camera() {
+            let snapshot = self.snapshot().ok_or("Mesh game camera requires an authoritative Frame")?;
+            let view = orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted())?;
+            return self.mesh_camera.as_ref().unwrap().document.camera_for_view(&self.camera3d, size, &view);
+        }
         let _ = size;
         Ok(self.camera3d.camera())
     }
