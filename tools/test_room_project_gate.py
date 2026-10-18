@@ -157,6 +157,39 @@ def unified_log(mode):
     return '\n'.join(pieces) + '\n'
 
 
+def room_view_source_tests(source, *, animated):
+    """Read the bounded Room test-attribute syntax, rejecting unknown cfg forms.
+
+    This is a source guard, not a Rust parser or evidence of test execution.
+    Keep the static inventory separate from the opt-in animated tests.
+    """
+    # Attribute blocks may contain blank lines and comments. Capture multiline
+    # attributes too so unsupported cfg syntax cannot disappear before #[test].
+    assert not re.search(r'/\*(?:(?!\*/).)*?/\*', source, re.S), 'unsupported nested block comment'
+    trivia = r'(?:\s|//[^\n]*(?:\n|$)|/\*.*?\*/)'
+    pattern = r'((?:^[ \t]*#\[[^\]]*\]' + trivia + r'*)+)fn\s+(\w+)\s*\('
+    rows = []
+    seen = 0
+    test_names = set()
+    for attributes, name in re.findall(pattern, source, re.M | re.S):
+        attributes = re.findall(r'#\[[^\]]*\]', attributes)
+        if '#[test]' not in attributes:
+            continue
+        seen += attributes.count('#[test]')
+        assert name not in test_names, ('duplicate Room test names', name)
+        test_names.add(name)
+        assert attributes.count('#[test]') == 1, ('duplicate test attribute', name)
+        allowed = {'#[test]', '#[cfg(feature = "room-animated-models")]'}
+        assert all(attribute in allowed for attribute in attributes), ('unsupported Room test attributes', name, attributes)
+        assert len(attributes) == len(set(attributes)), ('duplicate Room test attributes', name)
+        gated = '#[cfg(feature = "room-animated-models")]' in attributes
+        if animated or not gated:
+            rows.append(('room_view::tests::' + name, False))
+    assert seen == len(re.findall(r'#\[test\]', source)), 'unparsed Room test attributes'
+    assert len(rows) == len(set(rows)), 'duplicate Room test names'
+    return rows
+
+
 class RoomProjectGateTests(unittest.TestCase):
     def test_source_inventories_and_cfg_scopes(self):
         sources = [('room-simulation', 'orr_games/src/room_escape_game.rs', 'room_escape_game::tests::'),
@@ -169,8 +202,16 @@ class RoomProjectGateTests(unittest.TestCase):
                    ('editor-model-admission', 'orr_editor/tests/room_model_admission.rs', '')]
         for lane, path, prefix in sources:
             source = (ROOT / 'crates' / path).read_text()
-            names = [(prefix + name, '#[ignore' in attributes)
-                     for attributes, name in re.findall(r'#\[test\]\s*((?:#\[[^\n]*\]\s*)*)fn\s+(\w+)\s*\(', source)]
+            if lane == 'room-view-contracts':
+                names = room_view_source_tests(source, animated=False)
+                animated_names = room_view_source_tests(source, animated=True)
+                self.assertEqual(sorted(set(animated_names) - set(names)), [
+                    ('room_view::tests::animated_sampling_uses_fixed_room_ticks_and_once_loop_policies', False),
+                    ('room_view::tests::animated_world_matrix_composes_body_before_binding_local_transform', False),
+                ])
+            else:
+                names = [(prefix + name, '#[ignore' in attributes)
+                         for attributes, name in re.findall(r'#\[test\]\s*((?:#\[[^\n]*\]\s*)*)fn\s+(\w+)\s*\(', source)]
             self.assertEqual(INVENTORIES[lane]['names'], sorted(name for name, _ in names), lane)
             self.assertEqual(INVENTORIES[lane]['ignored_names'], sorted(name for name, ignored in names if ignored), lane)
         source = (ROOT / 'crates/orr_sample/tests/new_room_project.rs').read_text()
@@ -184,6 +225,36 @@ class RoomProjectGateTests(unittest.TestCase):
         self.assertEqual(INVENTORIES['camera-schema-unified']['harness_rows'], [
             {'package': 'orr_editor', 'names': [], 'summary': [0, 0, 0]},
             {'package': 'orr_sample', 'names': INVENTORIES['camera-schema']['names'], 'summary': [9, 0, 0]}])
+
+    def test_room_view_source_reader_keeps_feature_boundaries_and_fails_closed(self):
+        static = '#[test]\nfn static_case() {}\n'
+        cfg = '#[cfg(feature = "room-animated-models")]\n'
+        animated = cfg + '#[test]\nfn animated_case() {}\n'
+        for gated in (animated, '#[test]\n' + cfg + 'fn animated_case() {}\n',
+                      animated.replace(cfg, cfg + '\n// boundary comment\n/* comment */\n')):
+            self.assertEqual(room_view_source_tests(static + gated, animated=False),
+                             [('room_view::tests::static_case', False)])
+            self.assertEqual(room_view_source_tests(static + gated, animated=True), [
+                ('room_view::tests::static_case', False),
+                ('room_view::tests::animated_case', False),
+            ])
+        for invalid in (
+            animated.replace('room-animated-models', 'unknown-feature'),
+            animated.replace(cfg, '#[cfg(feature = "unknown-feature")]\n\n'),
+            animated.replace(cfg, '#[cfg(\nfeature = "unknown-feature"\n)]\n'),
+            animated.replace(cfg, '#[cfg(feature = "unknown-feature")]\n// comment\n'),
+            animated.replace(cfg, '#[cfg(feature = "unknown-feature")]\n/* comment */\n'),
+            animated.replace(cfg, cfg + '/* outer /* nested */ comment */\n'),
+            animated.replace(cfg, '#[cfg(not(feature = "room-animated-models"))]\n'),
+            animated.replace(cfg, '#[cfg(any(feature = "room-animated-models", test))]\n'),
+            animated.replace('#[test]', '#[test]\n#[ignore]'),
+            animated.replace('fn animated_case', 'async fn animated_case'),
+            animated.replace('#[test]', '#[test]\n#[test]'),
+            animated + animated,
+        ):
+            for enabled in (False, True):
+                with self.subTest(source=invalid, animated=enabled), self.assertRaises(AssertionError):
+                    room_view_source_tests(invalid, animated=enabled)
 
     def test_every_lane_requires_exact_lists_outcomes_and_complete_summaries(self):
         for lane, expected in INVENTORIES.items():

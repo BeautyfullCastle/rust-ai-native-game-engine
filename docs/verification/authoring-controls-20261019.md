@@ -29,3 +29,26 @@ Common feature set: `mesh-export,mesh-mission,package-manager,mesh-animated-mode
 - Package UI test is headless egui interaction. Player controls have source and local-host controller tests, not new GPU/native UI acceptance. No native Windows result, hardware performance, whole-workspace pass, whole-PR205 readiness or new required-CI success is claimed.
 - Original logs and reruns are retained locally, not uploaded or represented as remotely available artifacts.
 - Publication, required CI, candidate-stack integration and shared development integration remain separate stages. Main/PR1 are excluded.
+
+## Inherited CI gate repairs and additive coverage
+
+Exact PR205 head `e1ba3ea` was observed with 20 successful, three failed and five
+running checks at 2026-10-18 16:39 UTC. This is a snapshot, not a final result.
+The linked-prefab failure was the triangle Clippy issue fixed above. The blockout
+gate omitted an existing sixth dependency test. The Room source guard counted
+animated-only tests against its static inventory, and its camera inventory
+omitted the new unconditional dirty-state test. The repairs retain exact test
+lists and counts; they do not relax execution/ignored/error checks.
+
+- Actual editor dependency tests: 6 passed; the embedded blockout auditor accepted
+  that result and rejected missing/extra-name mutations.
+- Room checker: 10 passed. Independent review found unsupported cfg separated by
+  whitespace or multiline attributes could escape the new source scanner. The
+  corrected bounded parser rejects these forms and nested block comments, with
+  negative regressions; both affected tests passed again and were independently
+  checked. Original failed parser attempts are retained locally.
+- New additive Linux/Windows CPU workflow explicitly enables the four-feature
+  profile above, checks focused nonzero 13/6/2/10 suite results, strict library
+  lint and production feature boundaries. Eight evidence-parser unit tests pass.
+  Hosted execution of this new workflow is pending; it is not a replacement for
+  existing required CI, native/GPU validation or whole-PR205 review.
