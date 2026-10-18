@@ -44,6 +44,7 @@ impl Fixture {
             asset_path: ASSET.into(),
             digest: lock.packages[PACKAGE].digest.clone(),
             generation: 7,
+            kind: ModelKind::Static,
         };
         Self {
             _temporary: temporary,
@@ -426,4 +427,15 @@ impl<T> ErrorMessage for Result<T, String> {
             Err(error) => error,
         }
     }
+}
+
+#[cfg(not(feature = "room-animated-models"))]
+#[test]
+fn animated_preview_requires_explicit_room_feature_even_with_unified_animation_support() {
+    let fixture = Fixture::new();
+    let mut request = fixture.request.clone();
+    request.kind = ModelKind::Animated;
+    assert!(load(&request)
+        .unwrap_err_message()
+        .contains("requires room-animated-models"));
 }

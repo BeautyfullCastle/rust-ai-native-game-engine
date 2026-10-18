@@ -88,7 +88,7 @@ pub struct Panel {
     restoration_preview: Option<PackagePreview>,
     restoration_generation: u64,
     model_request: Option<ModelRequest>,
-    static_preview_request: Option<crate::package_model_preview::PreviewRequest>,
+    preview_request: Option<crate::package_model_preview::PreviewRequest>,
     pending: Option<Receiver<Completion>>,
     removing: bool,
     model_import: crate::model_package_import_panel::Panel,
@@ -112,20 +112,25 @@ impl Panel {
         Some((request.package, request.asset, request.kind))
     }
 
-    pub(crate) fn take_static_preview_request(
+    pub(crate) fn take_preview_request(
         &mut self,
     ) -> Option<crate::package_model_preview::PreviewRequest> {
-        let request = self.static_preview_request.take()?;
+        let request = self.preview_request.take()?;
         let package = self.verified.as_ref()?.packages.get(&request.package_id)?;
         (self.root.as_ref() == Some(&request.project_root)
             && self.project_generation == request.generation
             && package.digest == request.digest
             && package.manifest.files.contains(&request.asset_path)
+            && preview_kind_allowed(
+                request.kind,
+                &package.manifest.capabilities,
+                &request.asset_path,
+            )
             && !self.busy())
         .then_some(request)
     }
 
-    pub(crate) fn static_preview_is_current(
+    pub(crate) fn preview_is_current(
         &self,
         request: &crate::package_model_preview::PreviewRequest,
     ) -> bool {
@@ -139,6 +144,11 @@ impl Panel {
                 .is_some_and(|package| {
                     package.digest == request.digest
                         && package.manifest.files.contains(&request.asset_path)
+                        && preview_kind_allowed(
+                            request.kind,
+                            &package.manifest.capabilities,
+                            &request.asset_path,
+                        )
                 })
     }
 
@@ -291,7 +301,7 @@ impl Panel {
                     }
                     model_asset_buttons(
                         ui,
-                        ModelBrowser { lock, filter: &mut self.model_filter, preview_request: &mut self.static_preview_request },
+                        ModelBrowser { lock, filter: &mut self.model_filter, preview_request: &mut self.preview_request },
                         can_operate,
                         &mut self.model_request,
                         self.root.as_ref(),
@@ -348,7 +358,7 @@ impl Panel {
             self.last_removal = None;
             self.restoration_preview = None;
             self.model_filter.clear();
-            self.static_preview_request = None;
+            self.preview_request = None;
             self.removal_name.clear();
             self.removal_preview = None;
             self.verified = None;
@@ -608,7 +618,7 @@ impl Panel {
     }
 
     fn invalidate_package_cache(&mut self) {
-        self.static_preview_request = None;
+        self.preview_request = None;
         self.last_removal = None;
         self.restoration_preview = None;
         self.removal_preview = None;
@@ -963,6 +973,27 @@ struct ModelBrowser<'a> {
     preview_request: &'a mut Option<crate::package_model_preview::PreviewRequest>,
 }
 
+fn preview_kind_allowed(
+    kind: ModelKind,
+    capabilities: &std::collections::BTreeSet<String>,
+    asset: &str,
+) -> bool {
+    match kind {
+        ModelKind::Static => capabilities.contains("models"),
+        ModelKind::Animated => {
+            cfg!(feature = "room-animated-models")
+                && capabilities.contains("animation")
+                && Path::new(asset)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        extension.eq_ignore_ascii_case("glb")
+                            || extension.eq_ignore_ascii_case("gltf")
+                    })
+        }
+    }
+}
+
 fn model_matches_filter(package: &str, asset: &str, filter: &str) -> bool {
     let identity = format!("{package}/{asset}").to_ascii_lowercase();
     filter
@@ -1014,23 +1045,6 @@ fn model_asset_buttons(
                 continue;
             }
             shown += 1;
-            if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::new(format!("Preview static model {package_name}/{asset}")),
-                )
-                .clicked()
-            {
-                if let Some(root) = root {
-                    *browser.preview_request = Some(crate::package_model_preview::PreviewRequest {
-                        project_root: root.clone(),
-                        package_id: package_name.clone(),
-                        asset_path: asset.clone(),
-                        digest: package.digest.clone(),
-                        generation: generations.0,
-                    });
-                }
-            }
             #[cfg(not(feature = "room-animated-models"))]
             let kinds = [ModelKind::Static];
             #[cfg(feature = "room-animated-models")]
@@ -1041,6 +1055,31 @@ fn model_asset_buttons(
                         || asset.to_ascii_lowercase().ends_with(".orrmodel"))
                 {
                     continue;
+                }
+                let preview_supported = match kind {
+                    ModelKind::Static => package.manifest.capabilities.contains("models"),
+                    ModelKind::Animated => true, // gated by feature, capability and format above
+                };
+                if preview_supported {
+                    let label = match kind {
+                        ModelKind::Static => format!("Preview static model {package_name}/{asset}"),
+                        ModelKind::Animated => {
+                            format!("Preview animated model {package_name}/{asset}")
+                        }
+                    };
+                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        if let Some(root) = root {
+                            *browser.preview_request =
+                                Some(crate::package_model_preview::PreviewRequest {
+                                    project_root: root.clone(),
+                                    package_id: package_name.clone(),
+                                    asset_path: asset.clone(),
+                                    digest: package.digest.clone(),
+                                    generation: generations.0,
+                                    kind,
+                                });
+                        }
+                    }
                 }
                 let label = match kind {
                     ModelKind::Static => format!("Use model {package_name}/{asset}"),
@@ -1216,6 +1255,32 @@ mod tests {
     }
 
     #[test]
+    fn preview_kind_requires_its_declared_capability_and_animation_feature() {
+        let models = ["models".to_owned()].into_iter().collect();
+        let animation = ["animation".to_owned()].into_iter().collect();
+        assert!(preview_kind_allowed(ModelKind::Static, &models, "hero.glb"));
+        assert!(!preview_kind_allowed(
+            ModelKind::Animated,
+            &models,
+            "hero.glb"
+        ));
+        assert!(!preview_kind_allowed(
+            ModelKind::Static,
+            &animation,
+            "hero.glb"
+        ));
+        assert_eq!(
+            preview_kind_allowed(ModelKind::Animated, &animation, "hero.GLB"),
+            cfg!(feature = "room-animated-models")
+        );
+        assert!(!preview_kind_allowed(
+            ModelKind::Animated,
+            &animation,
+            "hero.orrmodel"
+        ));
+    }
+
+    #[test]
     fn model_filter_matches_all_terms_across_package_and_path() {
         assert!(model_matches_filter(
             "characters",
@@ -1261,7 +1326,7 @@ mod tests {
                         ModelBrowser {
                             lock: panel.verified.as_ref().unwrap(),
                             filter: &mut panel.model_filter,
-                            preview_request: &mut panel.static_preview_request,
+                            preview_request: &mut panel.preview_request,
                         },
                         state.1,
                         &mut panel.model_request,
@@ -1313,10 +1378,11 @@ mod tests {
             .get_by_label("Preview static model characters/actors/Hero.GLB")
             .click();
         harness.run_steps(3);
-        let preview = harness.state_mut().0.take_static_preview_request().unwrap();
+        let preview = harness.state_mut().0.take_preview_request().unwrap();
         assert_eq!(preview.package_id, "characters");
         assert_eq!(preview.asset_path, "actors/Hero.GLB");
         assert_eq!(preview.digest, "b".repeat(64));
+        assert_eq!(preview.kind, ModelKind::Static);
         assert!(harness.state_mut().0.take_model_asset_request().is_none());
         harness.get_by_label("Clear model filter").click();
         harness.run_steps(3);
@@ -1353,7 +1419,7 @@ mod tests {
             .get_by_label("Preview static model scenery/props/tree.orrmodel")
             .accesskit_node()
             .is_disabled());
-        assert!(harness.state().0.static_preview_request.is_none());
+        assert!(harness.state().0.preview_request.is_none());
         assert!(harness.state().0.model_request.is_none());
         assert_eq!(harness.state().0.verified, original_lock);
     }

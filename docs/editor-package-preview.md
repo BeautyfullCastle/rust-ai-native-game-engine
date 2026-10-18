@@ -55,3 +55,7 @@ canvas pixels, exercises orbit/zoom/Reset/Close, refuses tampered fixture bytes,
 and separately checks Use model → Save model bindings → reopen. PNG captures and
 `receipt.json` record the run. CPU tests cover request identity, stale completion,
 bounds, finite camera input and bounded target sizes.
+
+With `room-animated-models`, animation-capable packages also support explicit
+[indexed clip pose inspection](editor-package-animation-preview.md) before
+assignment. Static and animated previews share one resource slot.

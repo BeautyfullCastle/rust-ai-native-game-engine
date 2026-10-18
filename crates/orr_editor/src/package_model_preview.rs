@@ -1,13 +1,15 @@
-//! Read-only, editor-owned inspection of one verified installed static model.
+//! Read-only, editor-owned inspection of one verified installed model.
 //!
 //! Importing and byte verification run on at most one worker. A single latest
-//! request may wait behind it; closing never spawns another worker or retains a
-//! decoded result. No scene, binding, package, or save operation is exposed here.
+//! request may wait behind it; closing never spawns another worker and releases
+//! the accepted decoded result. No scene, binding, package, or save operation is exposed here.
 //! Package verification has the package store's trusted-directory concurrency
 //! limits: the final worker check is not an atomic filesystem snapshot. A small
 //! metadata pin rejects ordinary replacement between verification and delivery,
 //! but cannot detect adversarial same-size, same-timestamp rewrites.
 
+#[cfg(feature = "room-animated-models")]
+mod animation;
 mod camera;
 pub(crate) use camera::{bounded_size, PreviewBounds, PreviewCamera};
 
@@ -30,11 +32,14 @@ pub(crate) struct PreviewRequest {
     pub asset_path: String,
     pub digest: String,
     pub generation: u64,
+    pub kind: ModelKind,
 }
 
 pub(crate) struct Ready {
     pub loaded: LoadedAsset,
     pub bounds: PreviewBounds,
+    #[cfg(feature = "room-animated-models")]
+    pub animation: Option<animation::AcceptedPose>,
     pin: FreshnessPin,
 }
 
@@ -66,7 +71,10 @@ impl State {
             epoch: Arc::clone(&epoch),
         });
         self.active = Some(Job { request, epoch });
-        self.status = "Loading and verifying static model preview…".into();
+        self.status = format!(
+            "Loading and verifying {} model preview…",
+            kind_label(request_kind(&self.active)).to_ascii_lowercase()
+        );
         self.start_queued();
     }
 
@@ -107,7 +115,10 @@ impl State {
             Some(Err(TryRecvError::Disconnected)) => {
                 self.pending = None;
                 if self.active.is_some() && self.queued.is_none() {
-                    self.status = "Static preview worker stopped before completing.".into();
+                    self.status = format!(
+                        "{} preview worker stopped before completing.",
+                        kind_label(request_kind(&self.active))
+                    );
                 }
             }
             Some(Err(TryRecvError::Empty)) | None => {}
@@ -128,15 +139,44 @@ impl State {
         });
         match result {
             Ok(ready) => {
-                self.status =
-                    "Verified static model preview. Drag to orbit; scroll to zoom.".into();
+                self.status = match active.request.kind {
+                    ModelKind::Static => {
+                        "Verified static model preview. Drag to orbit; scroll to zoom."
+                    }
+                    ModelKind::Animated => {
+                        "Verified animated model preview. Choose a clip and sample time."
+                    }
+                }
+                .into();
                 self.ready = Some(ready);
             }
             Err(error) => {
                 self.ready = None;
-                self.status = format!("Static preview unavailable: {error}");
+                self.status = format!(
+                    "{} preview unavailable: {error}",
+                    kind_label(active.request.kind)
+                );
             }
         }
+    }
+
+    /// Sampling is an explicit, bounded presentation operation. Invalid draft
+    /// controls never replace the last accepted pose, bounds, or status.
+    #[cfg(feature = "room-animated-models")]
+    pub fn sample(&mut self, clip_index: u32, seconds: f32) -> Result<(), String> {
+        let ready = self
+            .ready
+            .as_mut()
+            .ok_or("wait for a verified animated preview")?;
+        let model = ready
+            .loaded
+            .animated_model()
+            .ok_or("preview asset is not animated")?;
+        ready.pin.check()?;
+        let accepted = animation::sample(model, clip_index, seconds)?;
+        ready.bounds = accepted.bounds;
+        ready.animation = Some(accepted);
+        Ok(())
     }
 
     fn start_queued(&mut self) {
@@ -148,18 +188,34 @@ impl State {
         };
         let (sender, receiver) = mpsc::sync_channel(1);
         match std::thread::Builder::new()
-            .name("package-static-preview".into())
+            .name("package-model-preview".into())
             .spawn(move || {
                 let result = load(&job.request);
                 let _ = sender.send(Completion { job, result });
             }) {
             Ok(_) => self.pending = Some(receiver),
-            Err(error) => self.status = format!("Could not start static preview: {error}"),
+            Err(error) => self.status = format!("Could not start model preview: {error}"),
         }
     }
 }
 
+fn kind_label(kind: ModelKind) -> &'static str {
+    match kind {
+        ModelKind::Static => "Static",
+        ModelKind::Animated => "Animated",
+    }
+}
+
+fn request_kind(active: &Option<Job>) -> ModelKind {
+    active
+        .as_ref()
+        .map_or(ModelKind::Static, |job| job.request.kind)
+}
+
 fn open(request: &PreviewRequest) -> Result<Project, String> {
+    if request.kind == ModelKind::Animated && !cfg!(feature = "room-animated-models") {
+        return Err("animated package preview requires room-animated-models".into());
+    }
     if request.project_root.as_os_str().as_encoded_bytes().len() > 4096
         || !request.project_root.is_absolute()
         || request.package_id.len() > 128
@@ -167,7 +223,7 @@ fn open(request: &PreviewRequest) -> Result<Project, String> {
         || request.digest.len() != 64
         || !request.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err("invalid bounded static preview request".into());
+        return Err("invalid bounded model preview request".into());
     }
     let project = Project::open(
         &request.project_root,
@@ -188,23 +244,34 @@ fn check_identity(request: &PreviewRequest, lock: &Lock) -> Result<(), String> {
     if package.digest != request.digest {
         return Err("preview package digest changed; verify packages again".into());
     }
-    if !package.manifest.capabilities.contains("models")
+    let capability = match request.kind {
+        ModelKind::Static => "models",
+        ModelKind::Animated => "animation",
+    };
+    if !package.manifest.capabilities.contains(capability)
         || !package.manifest.files.contains(&request.asset_path)
     {
-        return Err("preview requires a declared model asset in a models package".into());
+        return Err(format!(
+            "preview requires a declared model asset in a {capability} package"
+        ));
     }
+    let extensions: &[&str] = match request.kind {
+        ModelKind::Static => &["orrmodel", "glb", "gltf"],
+        ModelKind::Animated => &["glb", "gltf"],
+    };
     if !Path::new(&request.asset_path)
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            ["orrmodel", "glb", "gltf"]
+            extensions
                 .iter()
                 .any(|allowed| extension.eq_ignore_ascii_case(allowed))
         })
     {
-        return Err(
-            "preview supports declared static .orrmodel, .glb, or .gltf assets only".into(),
-        );
+        return Err(format!(
+            "{} preview requires a declared supported model asset",
+            kind_label(request.kind)
+        ));
     }
     Ok(())
 }
@@ -217,14 +284,38 @@ fn load(request: &PreviewRequest) -> Result<Ready, String> {
         &project,
         &request.package_id,
         &request.asset_path,
-        ModelKind::Static,
+        request.kind,
     )?;
-    let model = loaded.static_model().ok_or("preview asset is not static")?;
-    let bounds = PreviewBounds::from_model(model)?;
+    #[cfg(feature = "room-animated-models")]
+    let mut animation = None;
+    let bounds = match request.kind {
+        ModelKind::Static => {
+            PreviewBounds::from_model(loaded.static_model().ok_or("preview asset is not static")?)?
+        }
+        ModelKind::Animated => {
+            #[cfg(feature = "room-animated-models")]
+            {
+                let accepted = animation::sample(
+                    loaded
+                        .animated_model()
+                        .ok_or("preview asset is not animated")?,
+                    0,
+                    0.0,
+                )?;
+                let bounds = accepted.bounds;
+                animation = Some(accepted);
+                bounds
+            }
+            #[cfg(not(feature = "room-animated-models"))]
+            return Err("animated package preview requires room-animated-models".into());
+        }
+    };
     let pin = verify_loaded(request, &loaded)?;
     Ok(Ready {
         loaded,
         bounds,
+        #[cfg(feature = "room-animated-models")]
+        animation,
         pin,
     })
 }
@@ -233,7 +324,7 @@ fn load(request: &PreviewRequest) -> Result<Ready, String> {
 /// to the exact requested package and the loaded source hash. This also covers
 /// glTF external resources through whole-project package verification.
 fn verify_loaded(request: &PreviewRequest, loaded: &LoadedAsset) -> Result<FreshnessPin, String> {
-    if loaded.kind() != ModelKind::Static
+    if loaded.kind() != request.kind
         || loaded.package() != request.package_id
         || loaded.asset() != request.asset_path
         || loaded.package_digest() != request.digest
