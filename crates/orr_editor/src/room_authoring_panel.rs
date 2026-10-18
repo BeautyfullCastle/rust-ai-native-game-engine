@@ -1,3 +1,4 @@
+mod actor_placement;
 mod wall_footprint;
 pub(crate) use wall_footprint::ViewInput;
 
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 
 pub struct Panel {
     pub open: bool,
+    actor_placement: actor_placement::State,
     footprint: wall_footprint::State,
     footprint_grid: wall_footprint::GridStep,
     pub player: [String; 2],
@@ -36,6 +38,7 @@ impl Default for Panel {
     fn default() -> Self {
         Self {
             open: false,
+            actor_placement: Default::default(),
             footprint: Default::default(),
             footprint_grid: Default::default(),
             player: ["0".into(), "0".into()],
@@ -62,6 +65,7 @@ impl Default for Panel {
 impl Panel {
     pub fn show(&mut self, context: &Context, editor: &mut Editor, removal_blocker: Option<&str>) {
         self.sync_wall_footprint(editor);
+        self.sync_actor_placement(editor);
         let current_stamp = (editor.path(), editor.sim().checksum);
         if self
             .wall_source_stamp
@@ -91,15 +95,10 @@ impl Panel {
                 ui.add_enabled_ui(editable, |ui| {
                     ui.horizontal(|ui| {
                         if ui.button("Read Room layout").clicked() {
-                            match editor.read_room_layout() {
-                                Ok([[player_x, player_z], [key_x, key_z], [exit_x, exit_z]]) => {
-                                    self.player = [format_fixed(player_x), format_fixed(player_z)];
-                                    self.key = [format_fixed(key_x), format_fixed(key_z)];
-                                    self.exit = [format_fixed(exit_x), format_fixed(exit_z)];
-                                    self.status = "Read PLAYER, KEY and EXIT positions.".into();
-                                }
-                                Err(error) => self.status = error,
-                            }
+                            self.status = match self.read_actor_layout(editor) {
+                                Ok(()) => "Read PLAYER, KEY and EXIT positions.".into(),
+                                Err(error) => error,
+                            };
                         }
                         let positions = [
                             parse_position(&self.player),
@@ -109,7 +108,7 @@ impl Panel {
                         let parsed = positions.into_iter().collect::<Result<Vec<_>, _>>();
                         if ui
                             .add_enabled(
-                                parsed.is_ok(),
+                                parsed.is_ok() && self.layout_apply_ready(editor),
                                 egui::Button::new("Apply Room layout"),
                             )
                             .clicked()
@@ -117,7 +116,7 @@ impl Panel {
                             match &parsed {
                                 Ok(positions) => {
                                     let positions = [positions[0], positions[1], positions[2]];
-                                    self.status = match editor.apply_room_layout(positions) {
+                                    self.status = match self.apply_actor_layout(editor, positions) {
                                         Ok(()) => "Applied all three positions as one edit.".into(),
                                         Err(error) => error,
                                     };
@@ -134,6 +133,7 @@ impl Panel {
                     position_fields(ui, "Player X", "Player Z", &mut self.player);
                     position_fields(ui, "Key X", "Key Z", &mut self.key);
                     position_fields(ui, "Exit X", "Exit Z", &mut self.exit);
+                    self.show_actor_placement(ui, editor);
                     ui.separator();
                     ui.label("Add Room wall");
                     text_field(ui, "Room wall name", &mut self.wall_name, 64);
@@ -144,7 +144,7 @@ impl Panel {
                         "Wall half-depth Z",
                         &mut self.wall_half_extents,
                     );
-                    self.show_wall_footprint(ui, editor);
+                    ui.add_enabled_ui(!self.actor_placement_busy(), |ui| self.show_wall_footprint(ui, editor));
                     let center = parse_position(&self.wall_center);
                     let half_extents = parse_position(&self.wall_half_extents);
                     let can_add_wall = !self.wall_name.trim().is_empty()
@@ -161,7 +161,7 @@ impl Panel {
                         ui.label("Room wall name must contain 1..=64 bytes.");
                     }
                     if ui
-                        .add_enabled(can_add_wall && !self.wall_footprint_busy(), egui::Button::new("Create Room wall"))
+                        .add_enabled(can_add_wall && !self.wall_footprint_busy() && !self.actor_placement_busy(), egui::Button::new("Create Room wall"))
                         .clicked()
                     {
                         match (center, half_extents) {

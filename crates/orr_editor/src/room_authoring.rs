@@ -348,8 +348,33 @@ impl Editor {
         }
     }
 
+    // Retained for existing internal numeric callers; viewport drafts use the
+    // checked variant with their explicit Read provenance.
+    #[allow(dead_code)]
     pub(crate) fn apply_room_layout(&mut self, positions: [[FP; 2]; 3]) -> Result<(), String> {
         self.room_authoring_transaction("Room PLAYER KEY EXIT layout", |editor| {
+            let actors = editor.room_layout_actors()?;
+            for ((target, previous), [position_x, position_z]) in actors.into_iter().zip(positions) {
+                let position = FPVec3::new(position_x, previous.y, position_z);
+                editor.call(
+                    "world.patch",
+                    json!({"entity":target.param(),"component":BODY,"path":"pos","value":value_to_json(&Value::Vec3(position))}),
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn apply_room_layout_checked(
+        &mut self,
+        positions: [[FP; 2]; 3],
+        expected_checksum: u64,
+    ) -> Result<(), String> {
+        self.room_authoring_transaction("Room PLAYER KEY EXIT layout", |editor| {
+            let state = editor.call("sim.state", J::Null)?;
+            if state.get("checksum").and_then(orr_remote::wire::parse_checksum) != Some(expected_checksum) {
+                return Err("Room layout source changed; Read Room layout again before Apply".into());
+            }
             let actors = editor.room_layout_actors()?;
             for ((target, previous), [position_x, position_z]) in actors.into_iter().zip(positions) {
                 let position = FPVec3::new(position_x, previous.y, position_z);
