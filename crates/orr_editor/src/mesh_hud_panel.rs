@@ -208,6 +208,47 @@ impl Panel {
         self.form_dirty || self.context_stale || self.history_is_dirty()
     }
 
+    pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.form_dirty {
+            return Some("Apply game HUD changes before Save mesh workspace".into());
+        }
+        if self.context_stale {
+            return Some("Resolve stale game HUD before Save mesh workspace".into());
+        }
+        if self.document_pending {
+            return Some("Wait for game HUD to load before Save mesh workspace".into());
+        }
+        if let Some(error) = &self.sidecar_error {
+            return Some(format!(
+                "Resolve the invalid game HUD sidecar first: {error}"
+            ));
+        }
+        if !self.can_save(editor) {
+            return Some(
+                "Save mesh workspace requires the matching editable local mesh scene".into(),
+            );
+        }
+        None
+    }
+
+    pub(crate) fn save_workspace_changes(&mut self, editor: &Editor) -> Result<bool, String> {
+        if let Some(blocker) = self.workspace_save_blocker(editor) {
+            return Err(blocker);
+        }
+        if !self.dirty() {
+            return Ok(false);
+        }
+        self.save();
+        if self.dirty() {
+            Err(self
+                .error
+                .clone()
+                .unwrap_or_else(|| "Game HUD workspace save did not clear its dirty state".into()))
+        } else {
+            Ok(true)
+        }
+    }
+
     pub(crate) fn applied_document(&self, editor: &Editor) -> Option<Document> {
         if self.document_pending
             || self.context_stale

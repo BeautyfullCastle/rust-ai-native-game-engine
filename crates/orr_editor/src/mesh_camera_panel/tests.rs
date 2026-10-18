@@ -4,6 +4,50 @@ use orr_fp::FP;
 use orr_render::camera3d::OrbitCamera;
 use std::path::Path;
 
+#[cfg(feature = "mesh-mission")]
+#[test]
+fn workspace_save_is_explicit_and_preserves_external_conflicts() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("camera-workspace.scene.yaml");
+    let mut editor = crate::mesh_workspace::mission::prepare(
+        &scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+    )
+    .unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&mut editor);
+    let sidecar = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
+
+    assert!(!panel.save_workspace_changes(&editor).unwrap());
+    assert!(!sidecar.exists());
+
+    panel.form_dirty = true;
+    assert!(panel.workspace_save_blocker(&editor).is_some());
+    assert!(panel.save_workspace_changes(&editor).is_err());
+    assert!(!sidecar.exists());
+    panel.form_dirty = false;
+
+    let initial = document([1.0, 2.0, 3.0], 0.4);
+    panel.push_initial(Some(initial.clone()));
+    panel.push_state(Some(
+        initial
+            .clone()
+            .with_follow_offset(Some([1.0, 0.0, 0.0]))
+            .unwrap(),
+    ));
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    assert!(!panel.dirty());
+    let saved_bytes = std::fs::read(&sidecar).unwrap();
+    assert!(!saved_bytes.is_empty());
+
+    panel.push_state(Some(document([3.0, 2.0, 1.0], 0.8)));
+    let external_bytes = b"external camera sidecar update";
+    std::fs::write(&sidecar, external_bytes).unwrap();
+    assert!(panel.save_workspace_changes(&editor).is_err());
+    assert!(panel.dirty());
+    assert_eq!(std::fs::read(&sidecar).unwrap(), external_bytes);
+}
+
 fn document(target: [f32; 3], yaw: f32) -> Document {
     Document::from_orbit(OrbitCamera::new(target, yaw, 0.4, 12.0)).unwrap()
 }

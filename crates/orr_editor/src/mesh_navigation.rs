@@ -291,6 +291,30 @@ impl Panel {
         self.geometry_presentation_pending = pending;
     }
 
+    pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.geometry_vertex_busy() || self.agent_pick_busy() || self.prop_gesture_busy() {
+            return Some("Finish or cancel mesh viewport authoring before saving the workspace".into());
+        }
+        if self.draft_dirty || self.geometry.dirty() || self.draft_is_stale() {
+            return Some("Place or explicitly discard mesh geometry and agent drafts before saving the workspace".into());
+        }
+        if self.loaded_graph_revision.is_none() || self.loaded_spec.is_none()
+            || self.host_status.is_none() || self.view_model.is_none()
+        {
+            return Some("Wait for an admitted mesh agent Frame before saving the workspace".into());
+        }
+        self.art.workspace_save_blocker(editor)
+            .or_else(|| self.props.workspace_save_blocker(editor))
+    }
+
+    pub(crate) fn save_workspace_agent_art_changes(&mut self, editor: &Editor) -> Result<bool, String> {
+        self.art.save_workspace_changes(editor)
+    }
+
+    pub(crate) fn save_workspace_prop_changes(&mut self, editor: &Editor) -> Result<bool, String> {
+        self.props.save_workspace_changes(editor)
+    }
+
     pub(crate) fn has_unplaced_draft(&self) -> bool {
         self.geometry_vertex_busy() || self.draft_dirty || self.geometry.dirty() || self.art_dirty()
     }

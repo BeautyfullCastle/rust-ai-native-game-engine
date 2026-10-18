@@ -1,4 +1,47 @@
 use super::*;
+
+#[cfg(feature = "mesh-mission")]
+#[test]
+fn workspace_save_is_explicit_and_preserves_external_conflicts() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("hud-workspace.scene.yaml");
+    let editor = crate::mesh_workspace::mission::prepare(
+        &scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+    )
+    .unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    let sidecar = crate::mesh_hud_store::sidecar_path(&scene).unwrap();
+
+    assert!(!panel.save_workspace_changes(&editor).unwrap());
+    assert!(!sidecar.exists());
+
+    panel.form_dirty = true;
+    assert!(panel.workspace_save_blocker(&editor).is_some());
+    assert!(panel.save_workspace_changes(&editor).is_err());
+    assert!(!sidecar.exists());
+    panel.form_dirty = false;
+
+    let initial = Document::default();
+    panel.push_initial(Some(initial.clone()));
+    let mut changed = initial;
+    changed.title.push_str(" saved");
+    panel.push_state(Some(changed));
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    assert!(!panel.dirty());
+    let saved_bytes = std::fs::read(&sidecar).unwrap();
+    assert!(!saved_bytes.is_empty());
+
+    let mut next = panel.current_document().unwrap().clone();
+    next.title.push_str(" changed");
+    panel.push_state(Some(next));
+    let external_bytes = b"external HUD sidecar update";
+    std::fs::write(&sidecar, external_bytes).unwrap();
+    assert!(panel.save_workspace_changes(&editor).is_err());
+    assert!(panel.dirty());
+    assert_eq!(std::fs::read(&sidecar).unwrap(), external_bytes);
+}
 #[cfg(feature = "mesh-mission")]
 use egui_kittest::{
     kittest::{NodeT, Queryable},

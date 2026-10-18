@@ -69,6 +69,56 @@ fn prop_names_are_trimmed_bounded_and_printable() {
 }
 
 #[test]
+fn workspace_save_detects_unapplied_prop_fields_and_candidate_only_drafts() {
+    let mut panel = Panel::default();
+    panel.document = document(1);
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    panel.scene = Some(Path::new("mesh.scene.yaml").to_path_buf());
+    let document = panel.document.clone();
+    panel.reset_history(document, Some(0));
+
+    assert!(!panel.unapplied_form_dirty());
+    panel.name = "Renamed but not applied".into();
+    assert!(panel.unapplied_form_dirty());
+    panel.name = "Prop 0".into();
+    panel.position[0] = "invalid".into();
+    assert!(panel.unapplied_form_dirty());
+    panel.copy_selection_fields();
+    let same_candidate = panel.selected_prop().unwrap().art.clone();
+    panel.candidate = Some(same_candidate);
+    assert!(!panel.unapplied_form_dirty());
+
+    let mut candidate_only = Panel::default();
+    candidate_only.candidate = Some(snapshot());
+    assert!(candidate_only.unapplied_form_dirty());
+
+    for angles in [[17.0, 31.0, 53.0], [0.0, 90.0, 0.0], [0.0, -90.0, 0.0]] {
+        let rotated_art = snapshot()
+            .with_rotation(crate::mesh_rotation::from_degrees(angles).unwrap())
+            .unwrap();
+        let mut rotated_panel = Panel::default();
+        rotated_panel.document = Document {
+            props: vec![Prop {
+                id: 1,
+                name: "Rotated prop".into(),
+                art: rotated_art.clone(),
+            }],
+        };
+        rotated_panel.selected = Some(1);
+        rotated_panel.copy_selection_fields();
+        let document = rotated_panel.document.clone();
+        rotated_panel.reset_history(document, Some(0));
+        rotated_panel.scene = Some(Path::new("rotated-prop.scene.yaml").to_path_buf());
+        rotated_panel.rotation = angles.map(|angle| angle.to_string());
+        rotated_panel.candidate = Some(rotated_art.clone());
+        assert!(!rotated_panel.unapplied_form_dirty());
+        rotated_panel.rotation[0] = (angles[0] + 0.25).to_string();
+        assert!(rotated_panel.unapplied_form_dirty());
+    }
+}
+
+#[test]
 fn document_validation_checks_prop_count_ids_names_and_graph_revision() {
     let valid = document(2);
     validate_document(&valid, GRAPH_REVISION).unwrap();

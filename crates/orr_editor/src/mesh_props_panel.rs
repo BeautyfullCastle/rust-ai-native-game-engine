@@ -860,6 +860,116 @@ impl Panel {
             || self.current_history_id() != self.saved_history_id
     }
 
+    pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
+        if editor.game() != EditorGame::MeshNavigation {
+            return None;
+        }
+        if self.document_pending {
+            return Some("Wait for the requested admitted mesh scene before saving props".into());
+        }
+        if self.context_stale {
+            return Some(
+                "Resolve mesh props from the prior scene or graph revision before saving".into(),
+            );
+        }
+        if let Some(error) = &self.sidecar_error {
+            return Some(format!(
+                "Resolve the invalid mesh props sidecar before saving: {error}"
+            ));
+        }
+        if self.gesture.is_some() || self.placement.is_some() {
+            return Some(
+                "Finish or cancel prop viewport authoring before saving the workspace".into(),
+            );
+        }
+        if !self.can_edit(editor) || self.scene.as_ref() != editor.path().as_ref() {
+            return Some("Save props only for the matching editable local mesh scene".into());
+        }
+        let Some((scene, revision)) = current_identity(editor) else {
+            return Some("Wait for the admitted mesh graph before saving props".into());
+        };
+        if self.scene.as_ref() != Some(&scene)
+            || self.scene_epoch != Some(editor.scene_load_epoch())
+            || self.graph_revision != Some(revision)
+        {
+            return Some("Mesh props no longer match the current scene or graph revision".into());
+        }
+        if let Err(error) = validate_document(&self.document, revision) {
+            return Some(format!("Mesh props cannot be saved: {error}"));
+        }
+        if self.document.placements().is_err() {
+            return Some("Mesh props cannot be presented for the current graph".into());
+        }
+        if self.unapplied_form_dirty() {
+            return Some("Update or reset prop fields before saving the mesh workspace".into());
+        }
+        None
+    }
+
+    pub(crate) fn save_workspace_changes(&mut self, editor: &Editor) -> Result<bool, String> {
+        if let Some(blocker) = self.workspace_save_blocker(editor) {
+            return Err(blocker);
+        }
+        if !self.dirty() {
+            return Ok(false);
+        }
+        self.error = None;
+        self.save(editor);
+        match self.error.clone() {
+            Some(error) => Err(error),
+            None if self.dirty() => Err("Mesh props did not reach a saved state".into()),
+            None => Ok(true),
+        }
+    }
+
+    fn unapplied_form_dirty(&self) -> bool {
+        let Some(selected) = self.selected_prop() else {
+            return self.candidate.is_some();
+        };
+        if match validate_name(&self.name) {
+            Ok(name) => name != selected.name,
+            Err(_) => true,
+        } {
+            return true;
+        }
+        let Some(filename) = self
+            .scene
+            .as_deref()
+            .and_then(|scene| scene.file_name())
+            .and_then(|filename| filename.to_str())
+        else {
+            return true;
+        };
+        let base = self.candidate.as_ref().unwrap_or(&selected.art).clone();
+        let baseline = crate::mesh_rotation::to_degrees(selected.art.rotation())
+            .and_then(crate::mesh_rotation::from_degrees)
+            .and_then(|rotation| {
+                selected
+                    .art
+                    .clone()
+                    .with_transform(selected.art.offset(), selected.art.scale())
+                    .and_then(|snapshot| snapshot.with_rotation(rotation))
+                    .and_then(|snapshot| snapshot.with_tint(selected.art.tint()))
+                    .and_then(|snapshot| snapshot.with_surface(selected.art.surface()))
+            });
+        match (
+            self.transformed(base),
+            selected.art.encode_embedded(filename),
+            baseline,
+        ) {
+            (Ok(proposed), Ok(current_bytes), Ok(baseline)) => match (
+                proposed.encode_embedded(filename),
+                baseline.encode_embedded(filename),
+            ) {
+                (Ok(proposed_bytes), Ok(baseline_bytes)) => {
+                    proposed_bytes != current_bytes && proposed_bytes != baseline_bytes
+                }
+                _ => true,
+            },
+            _ => true,
+        }
+    }
+
     fn load_candidate(&mut self) {
         let Some(graph_revision) = self.graph_revision else {
             self.error = Some("Wait for an admitted mesh graph before loading a prop".into());

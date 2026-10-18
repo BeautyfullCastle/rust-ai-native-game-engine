@@ -19,6 +19,10 @@ use crate::inspector::{show_component, InspEvent};
 use crate::model::{EntityRow, Target};
 use crate::viewport::{self, GpuViewport};
 
+#[cfg(feature = "mesh-navigation")]
+#[path = "app/mesh_workspace_save.rs"]
+mod mesh_workspace_save;
+
 /// Button labels (tests click them by these texts).
 pub const LBL_PLAY: &str = "\u{25B6} Play";
 /// See [`LBL_PLAY`].
@@ -1024,6 +1028,16 @@ impl EditorApp {
                 if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
                     self.save();
                     ui.close();
+                }
+                #[cfg(feature="mesh-navigation")]
+                if self.editor.game().is_mesh_navigation() {
+                    let blocker = self.mesh_workspace_save_blocker();
+                    if ui.add_enabled(blocker.is_none(), egui::Button::new("Save mesh workspace"))
+                        .on_disabled_hover_text(blocker.as_deref().unwrap_or("Save the scene and all applied mesh presentation changes; unapplied forms are not applied"))
+                        .clicked() {
+                        self.save_mesh_workspace();
+                        ui.close();
+                    }
                 }
                 if ui.add_enabled(!self.package_work_pending(), egui::Button::new("Save As\u{2026}")).clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();

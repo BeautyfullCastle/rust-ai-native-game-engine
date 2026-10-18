@@ -470,6 +470,125 @@ impl Panel {
         self.current_entry().map(|entry| entry.id) != self.saved_id || self.facing_form_dirty()
     }
 
+    pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
+        if editor.game() != EditorGame::MeshNavigation {
+            return None;
+        }
+        if self.import_busy() {
+            return Some(
+                "Wait for agent art import to finish before saving the mesh workspace".into(),
+            );
+        }
+        if self.document_pending {
+            return Some("Wait for the requested mesh scene before saving agent art".into());
+        }
+        if self.context_stale {
+            return Some(
+                "Resolve agent art from the prior scene or graph revision before saving".into(),
+            );
+        }
+        if let Some(error) = &self.sidecar_error {
+            return Some(format!(
+                "Resolve the invalid agent art sidecar before saving: {error}"
+            ));
+        }
+        if let Some(error) = &self.presentation_error {
+            return Some(format!(
+                "Resolve agent art presentation before saving: {error}"
+            ));
+        }
+        if editor.in_gesture() || editor.screenshot_gesture_busy() {
+            return Some(
+                "Finish or cancel the active editor gesture before saving agent art".into(),
+            );
+        }
+        if !self.can_edit_context(editor) {
+            return Some("Save agent art only for its matching editable local mesh scene".into());
+        }
+        if self.unapplied_form_dirty() {
+            return Some("Apply or reset agent art fields before saving the mesh workspace".into());
+        }
+        None
+    }
+
+    pub(crate) fn save_workspace_changes(&mut self, editor: &Editor) -> Result<bool, String> {
+        if let Some(blocker) = self.workspace_save_blocker(editor) {
+            return Err(blocker);
+        }
+        if !self.dirty() {
+            return Ok(false);
+        }
+        self.error = None;
+        self.save(editor);
+        match self.error.clone() {
+            Some(error) => Err(error),
+            None if self.dirty() => Err("Agent art did not reach a saved state".into()),
+            None => Ok(true),
+        }
+    }
+
+    fn unapplied_form_dirty(&self) -> bool {
+        let Some(current) = self.current_snapshot() else {
+            return self.candidate.is_some();
+        };
+        let Some(filename) = self
+            .scene
+            .as_deref()
+            .and_then(|scene| scene.file_name())
+            .and_then(|filename| filename.to_str())
+        else {
+            return true;
+        };
+        let base = self.candidate.as_ref().unwrap_or(current).clone();
+        let proposed = parse_transform(&self.offset, &self.scale)
+            .and_then(|(offset, scale)| base.with_transform(offset, scale))
+            .and_then(|snapshot| {
+                parse_rotation(&self.rotation).and_then(|rotation| snapshot.with_rotation(rotation))
+            })
+            .and_then(|snapshot| {
+                snapshot.with_facing(if self.face_route_direction {
+                    crate::mesh_facing::Facing::Route
+                } else {
+                    crate::mesh_facing::Facing::Fixed
+                })
+            })
+            .and_then(|snapshot| parse_tint(&self.tint).and_then(|tint| snapshot.with_tint(tint)))
+            .and_then(|snapshot| {
+                parse_surface(
+                    self.surface_enabled,
+                    &self.surface_material,
+                    &self.surface_uv_offset,
+                    &self.surface_uv_scale,
+                    &self.surface_quarter_turns,
+                    &self.surface_pivot,
+                )
+                .and_then(|surface| snapshot.with_surface(surface))
+            });
+        let current_rotation = crate::mesh_rotation::to_degrees(current.rotation())
+            .and_then(crate::mesh_rotation::from_degrees);
+        let baseline = current_rotation.and_then(|rotation| {
+            current
+                .clone()
+                .with_transform(current.offset(), current.scale())
+                .and_then(|snapshot| snapshot.with_rotation(rotation))
+                .and_then(|snapshot| snapshot.with_facing(current.facing()))
+                .and_then(|snapshot| snapshot.with_tint(current.tint()))
+                .and_then(|snapshot| snapshot.with_surface(current.surface()))
+        });
+        match (proposed, current.encode_embedded(filename), baseline) {
+            (Ok(proposed), Ok(current_bytes), Ok(baseline)) => match (
+                proposed.encode_embedded(filename),
+                baseline.encode_embedded(filename),
+            ) {
+                (Ok(proposed_bytes), Ok(baseline_bytes)) => {
+                    proposed_bytes != current_bytes && proposed_bytes != baseline_bytes
+                }
+                _ => true,
+            },
+            _ => true,
+        }
+    }
+
     fn facing_form_dirty(&self) -> bool {
         self.current_snapshot().is_some_and(|snapshot| {
             (snapshot.facing() == crate::mesh_facing::Facing::Route) != self.face_route_direction

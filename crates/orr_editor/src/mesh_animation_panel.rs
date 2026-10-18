@@ -289,6 +289,77 @@ impl Panel {
             || self.context_stale
     }
 
+    pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
+        if editor.game() != EditorGame::MeshNavigation {
+            return None;
+        }
+        if self.document_pending {
+            return Some("Wait for the requested mesh scene before saving animation".into());
+        }
+        if self.context_stale {
+            return Some(
+                "Resolve animation changes from the prior scene or graph revision before saving"
+                    .into(),
+            );
+        }
+        if let Some(error) = &self.sidecar_error {
+            return Some(format!(
+                "Resolve the invalid mesh animation sidecar before saving: {error}"
+            ));
+        }
+        if self.form_dirty || self.source_dirty || self.candidate.is_some() {
+            return Some(
+                "Apply or reset animation form changes before saving the workspace".into(),
+            );
+        }
+        if self
+            .scene_epoch
+            .is_some_and(|epoch| epoch != editor.scene_load_epoch())
+        {
+            return Some("Animation belongs to a prior scene load; reload it before saving".into());
+        }
+        if !self.history_is_dirty() {
+            return None;
+        }
+        if !self.can_save(editor) {
+            return Some("Save animation only from its matching editable local mesh scene".into());
+        }
+        let (Some(scene), Some(revision)) = (self.scene.as_deref(), self.graph_revision) else {
+            return Some("Save the mesh scene before saving animation".into());
+        };
+        if self
+            .current_identity(editor)
+            .is_none_or(|(current_scene, current_revision)| {
+                current_scene != scene || current_revision != revision
+            })
+        {
+            return Some("Animation no longer matches the current scene or graph revision".into());
+        }
+        if self
+            .current_snapshot()
+            .is_some_and(|snapshot| snapshot.graph_revision() != revision)
+        {
+            return Some("Mesh animation is stale for the current graph revision".into());
+        }
+        None
+    }
+
+    pub(crate) fn save_workspace_changes(&mut self, editor: &Editor) -> Result<bool, String> {
+        if let Some(blocker) = self.workspace_save_blocker(editor) {
+            return Err(blocker);
+        }
+        if !self.history_is_dirty() {
+            return Ok(false);
+        }
+        self.error = None;
+        self.save(editor);
+        match self.error.clone() {
+            Some(error) => Err(error),
+            None if self.dirty() => Err("Mesh animation did not reach a saved state".into()),
+            None => Ok(true),
+        }
+    }
+
     pub(crate) fn active(&self, editor: &Editor) -> bool {
         if self.document_pending || self.sidecar_error.is_some() || self.context_stale {
             return false;

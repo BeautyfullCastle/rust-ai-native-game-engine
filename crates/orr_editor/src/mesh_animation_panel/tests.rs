@@ -216,3 +216,39 @@ fn frame_gate_rejects_incoherent_scene_and_edit_frame() {
         1
     ));
 }
+
+#[cfg(feature = "mesh-mission")]
+#[test]
+fn workspace_save_persists_only_applied_animation_and_blocks_form_drafts() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("animation-workspace.scene.yaml");
+    let editor = crate::mesh_workspace::mission::prepare(
+        &scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+    )
+    .unwrap();
+    let frame = editor.snapshot().unwrap().predicted();
+    let revision = orr_remote::mesh_navigation::mesh_from_view(frame)
+        .unwrap()
+        .graph
+        .revision();
+    let package = animated_package(directory.path());
+    let snapshot =
+        Snapshot::from_package(&package, "animated.glb", "LICENSE.txt", revision).unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    panel.push_state(Some(snapshot.clone()));
+    assert!(panel.workspace_save_blocker(&editor).is_none());
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    let sidecar = crate::mesh_animation_store::sidecar_path(&scene).unwrap();
+    let saved_bytes = std::fs::read(&sidecar).unwrap();
+    let mut form_panel = Panel::default();
+    form_panel.sync(&editor);
+    form_panel.candidate = Some(snapshot.clone());
+    assert!(form_panel.workspace_save_blocker(&editor).is_some());
+    form_panel.candidate = None;
+    form_panel.form_dirty = true;
+    assert!(form_panel.workspace_save_blocker(&editor).is_some());
+    assert!(form_panel.save_workspace_changes(&editor).is_err());
+    assert_eq!(std::fs::read(sidecar).unwrap(), saved_bytes);
+}

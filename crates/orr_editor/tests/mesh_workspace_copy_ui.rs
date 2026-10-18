@@ -1054,7 +1054,6 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
     click_button(&mut harness, "Save game camera");
     let camera_sidecar = sidecar_path(&fixture.scene, ".mesh-camera.json");
     let camera_bytes = fs::read(&camera_sidecar).expect("camera sidecar was explicitly saved");
-    let camera_sidecar_sha256 = sha256_hex(&camera_bytes);
     let camera_document: serde_json::Value = serde_json::from_slice(&camera_bytes).unwrap();
     assert!(camera_document["camera"].is_object());
     let camera_pixels = viewport_pixels(&mut harness, &fixture, "04-camera");
@@ -1190,6 +1189,106 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
         .is_some());
     click_button(&mut harness, LBL_STOP);
     assert_eq!(harness.state().editor.checksum(), scene_checksum);
+
+    type_field(&mut harness, "Light intensity", "1.55");
+    let workspace_play_blocked_before_save = harness
+        .get_by_role_and_label(Role::Button, LBL_PLAY)
+        .accesskit_node()
+        .is_disabled();
+    assert!(workspace_play_blocked_before_save);
+    click(&mut harness, "File");
+    assert!(harness
+        .get_by_role_and_label(Role::Button, "Save mesh workspace")
+        .accesskit_node()
+        .is_disabled());
+    for path_and_bytes in [
+        (&art_sidecar, &art_bytes),
+        (&props_sidecar, &props_bytes),
+        (&camera_sidecar, &camera_bytes),
+        (&animation_sidecar, &animation_bytes),
+        (&lighting_sidecar, &lighting_bytes),
+        (&hud_sidecar, &hud_bytes),
+    ] {
+        let observed_bytes = fs::read(path_and_bytes.0).unwrap();
+        assert_eq!(observed_bytes.as_slice(), path_and_bytes.1.as_slice());
+    }
+    harness.key_press(Key::Escape);
+    settle(&mut harness);
+
+    let history_before_workspace_save = harness.state().editor.history().clone();
+    click_button(&mut harness, "Apply game lighting");
+    type_field(
+        &mut harness,
+        "HUD moving text",
+        "SAVED MESH WORKSPACE ROUTE",
+    );
+    click_button(&mut harness, "Apply game HUD");
+    type_field(&mut harness, "Game camera near plane", "0.125");
+    click_button(&mut harness, "Apply game camera");
+    type_field(&mut harness, "Animation playback rate", "1.25");
+    click_button(&mut harness, "Apply mesh animation");
+    type_field(&mut harness, "Prop name", "Workspace saved prop");
+    click_button(&mut harness, "Update selected prop");
+    type_field(&mut harness, "Agent art offset X", "0.375");
+    click_button(&mut harness, "Apply agent art");
+    assert_eq!(harness.state().editor.checksum(), scene_checksum);
+    assert_eq!(
+        harness.state().editor.history(),
+        &history_before_workspace_save
+    );
+
+    click(&mut harness, "File");
+    assert!(!harness
+        .get_by_role_and_label(Role::Button, "Save mesh workspace")
+        .accesskit_node()
+        .is_disabled());
+    harness.key_press(Key::Escape);
+    settle(&mut harness);
+    menu_click(&mut harness, "File", "Save mesh workspace");
+    let saved_art_bytes = fs::read(&art_sidecar).unwrap();
+    let saved_props_bytes = fs::read(&props_sidecar).unwrap();
+    let saved_camera_bytes = fs::read(&camera_sidecar).unwrap();
+    let saved_animation_bytes = fs::read(&animation_sidecar).unwrap();
+    let saved_lighting_bytes = fs::read(&lighting_sidecar).unwrap();
+    let saved_hud_bytes = fs::read(&hud_sidecar).unwrap();
+    for (old_bytes, new_bytes) in [
+        (&art_bytes, &saved_art_bytes),
+        (&props_bytes, &saved_props_bytes),
+        (&camera_bytes, &saved_camera_bytes),
+        (&animation_bytes, &saved_animation_bytes),
+        (&lighting_bytes, &saved_lighting_bytes),
+        (&hud_bytes, &saved_hud_bytes),
+    ] {
+        assert_ne!(sha256_hex(old_bytes), sha256_hex(new_bytes));
+    }
+    assert_eq!(harness.state().editor.checksum(), scene_checksum);
+    assert_eq!(
+        harness.state().editor.history(),
+        &history_before_workspace_save
+    );
+    let workspace_play_enabled_after_save = !harness
+        .get_by_role_and_label(Role::Button, LBL_PLAY)
+        .accesskit_node()
+        .is_disabled();
+    assert!(workspace_play_enabled_after_save);
+    let workspace_save_receipt = serde_json::json!({
+        "unapplied_form_disabled_save": true,
+        "unapplied_form_left_all_six_sidecars_unchanged": true,
+        "six_applied_panels_saved_in_one_file_action": true,
+        "all_six_sidecar_sha256_values_changed": true,
+        "graph_checksum_and_history_preserved": true,
+        "play_blocked_before_save": workspace_play_blocked_before_save,
+        "play_enabled_after_save": workspace_play_enabled_after_save,
+    });
+    let art_bytes = saved_art_bytes;
+    let props_bytes = saved_props_bytes;
+    let camera_bytes = saved_camera_bytes;
+    let camera_sidecar_sha256 = sha256_hex(&camera_bytes);
+    let camera_document: serde_json::Value = serde_json::from_slice(&camera_bytes).unwrap();
+    let animation_bytes = saved_animation_bytes;
+    let animation_document: serde_json::Value = serde_json::from_slice(&animation_bytes).unwrap();
+    let lighting_bytes = saved_lighting_bytes;
+    let hud_bytes = saved_hud_bytes;
 
     let all_presentations_pixels = viewport_pixels(&mut harness, &fixture, "05-all-presentations");
     assert!(changed_pixel_count(&camera_pixels, &all_presentations_pixels) > 20);
@@ -1350,7 +1449,7 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
     let win_agent_status = format!("{:?}", won_agent.status);
     let expected_hud_status = match won_agent.status {
         NavigationStatus::Stopped => "Choose a destination",
-        NavigationStatus::Moving => "Crossing the authored route",
+        NavigationStatus::Moving => "SAVED MESH WORKSPACE ROUTE",
         NavigationStatus::Arrived => "Route endpoint reached",
     };
     assert!(reopened.query_by_label(expected_hud_status).is_some());
@@ -1474,6 +1573,7 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
         "source_roots_hidden_during_fresh_open": [fixture.workspace_source, fixture.static_source, fixture.animation_source],
         "source_roots_restored": fixture.sources_restored,
         "source_sidecars": all_sidecars.iter().map(|(path, bytes)| serde_json::json!({"path": path, "bytes": bytes.len(), "sha256": sha256_hex(bytes)})).collect::<Vec<_>>(),
+        "workspace_save": workspace_save_receipt,
         "duplicate_directory": fixture.duplicate_directory,
         "duplicate_scene": fixture.duplicate_scene,
         "duplicate_scene_sha256": duplicate_hash,

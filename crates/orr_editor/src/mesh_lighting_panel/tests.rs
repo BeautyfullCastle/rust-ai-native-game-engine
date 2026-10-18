@@ -1,5 +1,48 @@
 use super::*;
 
+#[cfg(feature = "mesh-mission")]
+#[test]
+fn workspace_save_is_explicit_and_preserves_external_conflicts() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("lighting-workspace.scene.yaml");
+    let editor = crate::mesh_workspace::mission::prepare(
+        &scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+    )
+    .unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    let sidecar = crate::mesh_lighting_store::sidecar_path(&scene).unwrap();
+
+    assert!(!panel.save_workspace_changes(&editor).unwrap());
+    assert!(!sidecar.exists());
+
+    panel.form_dirty = true;
+    assert!(panel.workspace_save_blocker(&editor).is_some());
+    assert!(panel.save_workspace_changes(&editor).is_err());
+    assert!(!sidecar.exists());
+    panel.form_dirty = false;
+
+    let initial = Document::from_lighting(orr_sample::yard3d_view::yard_lighting()).unwrap();
+    panel.push_initial(Some(initial.clone()));
+    let mut changed_lighting = initial.lighting().unwrap();
+    changed_lighting.intensity += 1.0;
+    panel.push_state(Some(Document::from_lighting(changed_lighting).unwrap()));
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    assert!(!panel.dirty());
+    let saved_bytes = std::fs::read(&sidecar).unwrap();
+    assert!(!saved_bytes.is_empty());
+
+    changed_lighting = panel.current_document().unwrap().lighting().unwrap();
+    changed_lighting.intensity += 1.0;
+    panel.push_state(Some(Document::from_lighting(changed_lighting).unwrap()));
+    let external_bytes = b"external lighting sidecar update";
+    std::fs::write(&sidecar, external_bytes).unwrap();
+    assert!(panel.save_workspace_changes(&editor).is_err());
+    assert!(panel.dirty());
+    assert_eq!(std::fs::read(&sidecar).unwrap(), external_bytes);
+}
+
 fn panel_with_scene(scene: &Path) -> Panel {
     let mut panel = Panel::default();
     panel.scene = Some(scene.to_path_buf());

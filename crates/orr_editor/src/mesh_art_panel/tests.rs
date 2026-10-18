@@ -187,6 +187,62 @@ fn route_facing_apply_undo_redo_and_sidecar_reopen_preserve_selection() {
 }
 
 #[test]
+fn workspace_save_detects_unapplied_art_fields_and_different_candidates() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = static_package(&root);
+    let snapshot = Snapshot::from_package(&source, "model.glb", "LICENSE.txt", [0x5a; 32]).unwrap();
+    let mut panel = Panel::default();
+    panel.push_state(Some(snapshot.clone()));
+    panel.saved_id = Some(panel.current_entry().unwrap().id);
+    panel.scene = Some(root.join("workspace-art.scene.yaml"));
+    panel.copy_transform(&snapshot);
+
+    assert!(!panel.unapplied_form_dirty());
+    panel.offset[0] = "0.5".into();
+    assert!(panel.unapplied_form_dirty());
+    panel.copy_transform(&snapshot);
+    panel.candidate = Some(snapshot.clone());
+    assert!(!panel.unapplied_form_dirty());
+    panel.candidate = None;
+    panel.tint[0] = "invalid".into();
+    assert!(panel.unapplied_form_dirty());
+    panel.copy_transform(&snapshot);
+    panel.candidate =
+        Some(Snapshot::from_package(&source, "model.glb", "LICENSE.txt", [0x5b; 32]).unwrap());
+    assert!(panel.unapplied_form_dirty());
+
+    for angles in [[17.0, 31.0, 53.0], [0.0, 90.0, 0.0], [0.0, -90.0, 0.0]] {
+        let rotated = snapshot
+            .clone()
+            .with_rotation(crate::mesh_rotation::from_degrees(angles).unwrap())
+            .unwrap();
+        let mut rotated_panel = Panel::default();
+        rotated_panel.push_state(Some(rotated.clone()));
+        rotated_panel.saved_id = Some(rotated_panel.current_entry().unwrap().id);
+        rotated_panel.scene = Some(root.join("rotated-art.scene.yaml"));
+        rotated_panel.copy_transform(&rotated);
+        rotated_panel.candidate = Some(rotated);
+        assert!(!rotated_panel.unapplied_form_dirty());
+
+        let applied_from_original_angles = snapshot
+            .clone()
+            .with_rotation(crate::mesh_rotation::from_degrees(angles).unwrap())
+            .unwrap();
+        let mut applied_panel = Panel::default();
+        applied_panel.push_state(Some(applied_from_original_angles.clone()));
+        applied_panel.saved_id = Some(applied_panel.current_entry().unwrap().id);
+        applied_panel.scene = Some(root.join("applied-rotation.scene.yaml"));
+        applied_panel.copy_transform(&applied_from_original_angles);
+        applied_panel.rotation = angles.map(|angle| angle.to_string());
+        applied_panel.candidate = Some(applied_from_original_angles);
+        assert!(!applied_panel.unapplied_form_dirty());
+        applied_panel.rotation[0] = (angles[0] + 0.25).to_string();
+        assert!(applied_panel.unapplied_form_dirty());
+    }
+}
+
+#[test]
 fn private_undo_redo_restores_agent_art_surface_settings() {
     let temporary = tempfile::tempdir().unwrap();
     let source = static_package(&temporary.path().canonicalize().unwrap());
