@@ -19,8 +19,8 @@ capabilities after verification.
 before/after lock changes. It does not add or activate content and does not
 reserve a permanent lock. **Add previewed package** requires a preview for the
 current project and source path; the backend revalidates it while applying. The
-initial operation adds a new package only; it does not update or remove an
-existing package identity.
+addition operation adds a new package only; it does not update an existing
+package identity. Removal uses the separate explicit preview below.
 Only one new direct package is added at a time; its dependencies must already
 resolve from the installed lock. Existing selections, manifests, digests and
 file identities stay unchanged. New packages must declare `LICENSE.txt`.
@@ -52,3 +52,31 @@ writer locks automatically. Post-publication validation failures explicitly
 retain the installed lock and require fresh verification. Filesystem checks do
 not isolate hostile concurrent edits. No code-package/plugin installation,
 dependency downloads, update/removal or all-game package readiness is claimed.
+
+## Remove a direct package selection
+
+After **Verify installed packages**, choose **Select removal {package}** for a
+verified direct selection, then **Preview package removal**. Review the packages
+that will be deactivated and those retained as dependencies. A removed direct
+selection can remain active when another selected package requires it; the panel
+labels this **Remains active as a dependency**. Only **Remove previewed package**
+commits the preview. Preview itself changes no project files.
+
+Removal re-admits the saved Room scene and every static and animated model
+binding. It refuses to deactivate any referenced package, including a removed
+selection's dependencies. Scene, model and camera edits must first be saved.
+Changed project files or package locks invalidate an earlier preview; preview
+again. Project changes discard prior inspection and preview state, and package
+workers block project switching. While a removal commit is running, the editor
+pauses all user authoring and playback input, including keyboard and accessibility
+actions, through the completion frame. External host/ERP writers are not isolated.
+Worker completion never installs another
+project's inventory into the current panel.
+
+This deactivates a lock selection, not a file-deletion operation. Package cache
+objects, original source directories, scene/model/camera files and document
+history are preserved. Successful removal refreshes the verified inventory.
+No package code is executed, and existing rights acknowledgements are unchanged.
+The opt-in `package_removal_ui` acceptance uses owned Room fixtures and synthetic
+egui input; its receipt and screenshots distinguish executed Vulkan validation
+from physical-input or hardware-GPU claims.
