@@ -44,6 +44,8 @@ mod room_actor_placement;
 #[cfg(feature="models")]
 #[path="app/frame_selection.rs"]
 mod frame_selection;
+#[path="app/selection_outline.rs"]
+mod selection_outline;
 
 /// Button labels (tests click them by these texts).
 pub const LBL_PLAY: &str = "\u{25B6} Play";
@@ -1978,7 +1980,10 @@ impl EditorApp {
         let hidden:Vec<_>=placements.iter().map(|p|p.entity).collect();
         #[cfg(not(feature="models"))]
         let hidden=Vec::new();
-        let list=self.editor.yard_frame().list(&hidden,selected);
+        let mut list=self.editor.yard_frame().list(&hidden,None);
+        if let Some(item) = self.editor.yard_frame().items.iter().find(|item| Some(item.entity) == selected) {
+            selection_outline::append(&mut list, item);
+        }
         #[cfg(feature="mesh-navigation")]
         let list = {
             let mut list = list;

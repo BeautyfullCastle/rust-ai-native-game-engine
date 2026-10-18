@@ -44,6 +44,7 @@ jobs:
           # Existing camera regressions remain required in room-camera-capture.yml.
           for suite, count in (
               ("editor::frame_selection::tests", 6),
+              ("app::selection_outline::tests", 7),
           ):
               output = helpers["run_logged"](
                   ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "room-authoring",
@@ -113,13 +114,64 @@ jobs:
               "viewport_f_frames": True, "unfocused_f_ignored": True, "held_pointer_f_ignored": True,
               "no_selection_and_play_disabled": True, "yaw_pitch_preserved": True,
               "authoring_frame_history_selection_files_unchanged": True,
+              "accurate_collider_outline": True,
           }
           if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
                  for key, value in expected.items()):
               raise RuntimeError("Fresh Selected collider framing receipt is incomplete or inconsistent")
           if not isinstance(receipt.get("adapter"), str) or "llvmpipe" not in receipt["adapter"].lower():
               raise RuntimeError("Expected actual llvmpipe software Vulkan viewport adapter")
+          yellow = receipt.get("yellow_outline_pixels")
+          if type(yellow) is not int or yellow <= 30:
+              raise RuntimeError("Expected more than 30 verified yellow collider outline pixels")
           for image in ("01-offscreen-selected.png", "02-button-framed.png", "03-keyboard-framed.png"):
+              data = (capture / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh selected collider capture: {image}")
+      - name: Explicit ignored production EditorApp Yard collider outline acceptance
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_FRAME_SELECTION_EVIDENCE"])
+          capture = evidence / "yard-outline-ui"
+          if capture.exists():
+              raise RuntimeError("Collider framing acceptance requires an absent, fresh capture directory")
+          os.environ["ORR_YARD_SELECTION_OUTLINE_DIR"] = str(capture.resolve())
+          name = "yard_rotated_box_and_capsule_outlines_follow_colliders"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "room-authoring",
+               "--test", "frame_selection_ui", name, "--", "--exact", "--ignored",
+               "--format=pretty", "--color=never", "--test-threads=1"], evidence / "yard-outline-ui.log")
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError(f"{name}: expected exactly one executed passing ignored test")
+          receipt = json.loads((capture / "acceptance.json").read_text())
+          expected = {
+              "schema": 1, "production_editor_app": True, "software_gpu": True,
+              "physical_os_input": False, "rotated_box_outline": True, "capsule_outline": True,
+              "frame_history_selection_scene_unchanged": True,
+          }
+          if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                 for key, value in expected.items()):
+              raise RuntimeError("Fresh Selected collider framing receipt is incomplete or inconsistent")
+          if not isinstance(receipt.get("adapter"), str) or "llvmpipe" not in receipt["adapter"].lower():
+              raise RuntimeError("Expected actual llvmpipe software Vulkan viewport adapter")
+          counts = receipt.get("yellow_pixel_counts")
+          if (type(counts) is not list or len(counts) != 2
+                  or any(type(value) is not int or value <= 30 for value in counts)):
+              raise RuntimeError("Both Yard colliders require more than 30 verified outline pixels")
+          for image in ("01-rotated-box.png", "02-capsule.png"):
               data = (capture / image).read_bytes()
               if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
                   raise RuntimeError(f"Missing or malformed fresh selected collider capture: {image}")
