@@ -34,6 +34,7 @@ mesh-navigation = ["models", "orr_remote/mesh-navigation", "dep:orr_navigation"]
 mesh-mission = ["mesh-navigation", "orr_remote/mesh-mission"]
 mesh-hazards = ["mesh-mission", "orr_remote/mesh-hazards"]
 mesh-export = ["mesh-navigation"]
+mesh-hazards-export = ["mesh-hazards", "mesh-export"]
 mesh-animated-models = ["mesh-navigation", "animated-models"]
 terrain-physics = ["terrain", "orr_remote/terrain-physics"]
 default = []
@@ -102,3 +103,10 @@ bench = false
 name = "orr_input_map"
 path = "src/bin/orr_input_map.rs"
 required-features = ["input-map-editor"]
+
+[[bin]]
+name = "orr_mesh_hazards_player"
+path = "src/bin/orr_mesh_hazards_player.rs"
+required-features = ["mesh-hazards-export"]
+test = false
+bench = false

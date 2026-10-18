@@ -233,3 +233,10 @@ pub mod linked_prefab_panel;
 
 #[cfg(feature="room-project")]
 pub mod room_camera_panel;
+
+#[cfg(feature = "mesh-hazards-export")]
+pub mod mesh_hazards_player;
+#[cfg(feature = "mesh-hazards-export")]
+mod mesh_hazards_export;
+#[cfg(feature = "mesh-hazards-export")]
+mod mesh_hazards_export_panel;

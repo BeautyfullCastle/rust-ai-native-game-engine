@@ -261,6 +261,8 @@ pub struct EditorApp {
     mesh_animation: crate::mesh_animation_panel::Panel,
     #[cfg(feature="mesh-export")]
     mesh_export: crate::mesh_export_panel::Panel,
+    #[cfg(feature="mesh-hazards-export")]
+    mesh_hazards_export: crate::mesh_hazards_export_panel::Panel,
     #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
     pub windows_export: crate::windows_export_panel::Panel,
     #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
@@ -295,7 +297,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -363,6 +365,13 @@ impl EditorApp {
         };
     }
 
+    fn hazard_export_busy(&self) -> bool {
+        #[cfg(feature="mesh-hazards-export")]
+        { self.mesh_hazards_export.busy() }
+        #[cfg(not(feature="mesh-hazards-export"))]
+        { false }
+    }
+
     fn package_work_pending(&self) -> bool {
         #[cfg(feature="package-manager")]
         { self.package_manager.busy() }
@@ -387,6 +396,7 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_creation_base_blocker(&self) -> Option<String> {
+        if self.hazard_export_busy() { return Some("Wait for hazard export completion before changing workspaces".into()); }
         #[cfg(all(windows,target_arch="x86_64"))]
         if self.mesh_copy.busy() { return Some("Finish the mesh workspace duplicate before switching workspaces".into()); }
         #[cfg(feature="mesh-export")]
@@ -915,6 +925,11 @@ impl eframe::App for EditorApp {
                 || self.room_camera.as_ref().is_some_and(|camera| camera.dirty());
             self.windows_export.show(&ctx, &mut self.editor, presentation_dirty);
         }
+        #[cfg(feature="mesh-hazards-export")]
+        {
+            let blocked = self.mesh_creation_authoring_blocker().or_else(|| self.mesh_presentation_blocker());
+            self.mesh_hazards_export.show(&ctx, &mut self.editor, blocked.as_deref());
+        }
         #[cfg(feature="mesh-export")]
         {
             let blocked = self.mesh_authoring_blocker().or_else(|| self.mesh_presentation_blocker());
@@ -1107,6 +1122,7 @@ impl EditorApp {
     // Modal pointer capture does not block accessibility actions. Check both widget
     // availability and the action entry point before starting or advancing playback.
     fn playback_start_blocker(&self) -> Option<String> {
+        if self.hazard_export_busy() { return Some("Wait for hazard export completion before Play or Step".into()); }
         #[cfg(feature="mesh-mission")]
         if self.mesh_game_creator.busy() {
             return Some("Finish or cancel new game creation before Play or Step".into());
@@ -1127,6 +1143,7 @@ impl EditorApp {
     }
 
     fn save(&mut self) {
+        if self.hazard_export_busy() { self.editor.error("Wait for hazard export completion before saving"); return; }
         #[cfg(feature="mesh-mission")]
         if self.editor.game().has_mesh_view() {
             self.mesh_mission.sync(&self.editor);
@@ -1188,7 +1205,7 @@ impl EditorApp {
                     self.ui.dialog = Some(Dialog { kind: DialogKind::OpenMesh, text: String::new() });
                     ui.close();
                 }
-                if ui.add_enabled(!self.package_work_pending(), egui::Button::new("Open scene\u{2026}")).clicked() {
+                if ui.add_enabled(!self.package_work_pending() && !self.hazard_export_busy(), egui::Button::new("Open scene\u{2026}")).clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::Open, text });
                     ui.close();
@@ -1209,9 +1226,9 @@ impl EditorApp {
                 }
                 #[cfg(feature="mesh-hazards")]
                 if self.editor.game().is_mesh_hazards() {
-                    ui.weak("MeshHazardsV1 uses scene Save; workspace creation/copy/save and source-free export are not supported.");
+                    ui.weak("MeshHazardsV1 uses scene Save; legacy workspace copy/save and legacy export are not supported.");
                 }
-                if ui.add_enabled(!self.package_work_pending(), egui::Button::new("Save As\u{2026}")).clicked() {
+                if ui.add_enabled(!self.package_work_pending() && !self.hazard_export_busy(), egui::Button::new("Save As\u{2026}")).clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::SaveAs, text });
                     ui.close();
@@ -1229,6 +1246,11 @@ impl EditorApp {
                 #[cfg(feature="package-manager")]
                 if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Content packages\u{2026}")).clicked() {
                     self.package_manager.open = true;
+                    ui.close();
+                }
+                #[cfg(feature="mesh-hazards-export")]
+                if self.editor.game().is_mesh_hazards() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Export hazard game\u{2026}")).clicked() {
+                    self.mesh_hazards_export.open = true;
                     ui.close();
                 }
                 #[cfg(feature="mesh-export")]
@@ -2284,6 +2306,11 @@ impl EditorApp {
             });
         });
         if accept && !dialog.text.trim().is_empty() {
+            if self.hazard_export_busy() {
+                self.editor.error("Wait for hazard export completion before saving or opening a scene");
+                self.ui.dialog = Some(dialog);
+                return;
+            }
             let path = PathBuf::from(dialog.text.trim());
             #[cfg(feature="mesh-mission")]
             if self.editor.game().has_mesh_view() {
@@ -2889,3 +2916,7 @@ mod mesh_panel_layout_tests;
 #[cfg(all(test, windows, target_arch = "x86_64", feature = "mesh-export", feature = "mesh-mission"))]
 #[path = "app/mesh_keyboard_play_tests.rs"]
 mod mesh_keyboard_play_tests;
+
+#[cfg(feature = "mesh-hazards-export")]
+#[path = "app/mesh_hazards_player.rs"]
+pub(crate) mod mesh_hazards_player;
