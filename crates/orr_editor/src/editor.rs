@@ -230,7 +230,7 @@ pub struct Editor {
     navigation_blocker: Option<String>,
     #[cfg(feature = "mesh-navigation")]
     mesh_navigation_blocker: Option<String>,
-    #[cfg(any(feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     scene_load_epoch: u64,
     status: Option<Message>,
     log: Vec<Message>,
@@ -276,7 +276,7 @@ pub struct Editor {
     script_owner: BTreeMap<String, String>,
 }
 
-#[cfg(any(feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+#[cfg(any(feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
 fn next_scene_load_epoch() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -358,7 +358,7 @@ impl Editor {
             navigation_blocker: None,
             #[cfg(feature = "mesh-navigation")]
             mesh_navigation_blocker: None,
-            #[cfg(any(feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+            #[cfg(any(feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
             scene_load_epoch: next_scene_load_epoch(),
             status: None,
             log: Vec::new(),
@@ -546,6 +546,26 @@ impl Editor {
         }
         if self.preview.as_ref().is_some_and(|p| p.seq == 0 || p.rows_dirty) { return Some("proposal snapshot"); }
         None
+    }
+
+    /// Camera staging must survive periodic read-only inspector/client polling.
+    /// Mutation requests and uncertain authoring caches still fail closed.
+    #[cfg(feature = "room-project")]
+    pub(crate) fn room_camera_capture_coherent(&self) -> bool {
+        self.yard_rows_coherent()
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.timeline().is_none() && snapshot.predicted().checksum() == self.sim.checksum
+            })
+            && self.checksum == self.sim.checksum
+            && !self.batch_uncertain && !self.gesture.busy()
+            && self.input_phase() == input::Phase::Off
+            && !self.dirty.rows && !self.dirty.state && !self.dirty.history
+            && !self.refit && self.refit_checksum.is_none()
+            && self.pending.values().all(|pending| match &pending.kind {
+                Pend::Input(..) | Pend::Gesture(..) => false,
+                Pend::Rows(..) | Pend::Inspect(..) | Pend::Singletons | Pend::History
+                | Pend::State(..) | Pend::Clients | Pend::Detail(..) | Pend::PreviewRows(..) => true,
+            })
     }
 
     /// Takes the next editor-owned screenshot request from the local host.
@@ -1783,7 +1803,7 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
-                #[cfg(any(feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+                #[cfg(any(feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
                 { self.scene_load_epoch = next_scene_load_epoch(); }
                 self.clear_room_camera();
                 self.select(None);
@@ -2117,7 +2137,7 @@ impl Editor {
     pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
     #[cfg(feature = "mesh-navigation")]
     pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
-    #[cfg(any(feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
 
     #[cfg(feature="room-project")]
@@ -3155,5 +3175,44 @@ mod screenshot_poll_tests {
         let busy = agent.call_err("view.screenshot", json!({"target":"app_framebuffer"}));
         assert_eq!(busy.kind(), Some("view_busy"));
         deliver_screenshot(&mut harness, ticket);
+    }
+}
+
+#[cfg(all(test, feature = "room-project"))]
+mod room_camera_capture_coherence_tests {
+    use super::*;
+    #[test]
+    fn staged_capture_survives_read_polls_but_rejects_mutations() {
+        let mut editor = Editor::open(&default_scene_path()).unwrap();
+        editor.sync();
+        assert!(editor.room_camera_capture_coherent());
+        let context = crate::room_camera_capture::Context {
+            scene: default_scene_path(), epoch: editor.scene_load_epoch(),
+            checksum: editor.checksum(), applied: orr_sample::room_camera::Document::readable_default(),
+        };
+        let mut staged = crate::room_camera_capture::State::default();
+        staged.stage(context.clone(), &editor.camera3d).unwrap();
+        for kind in [Pend::Clients, Pend::State(editor.state_generation), Pend::History, Pend::Singletons] {
+            editor.pending.insert(u64::MAX, Pending { kind, posted_at: Instant::now() });
+            assert!(editor.room_camera_capture_coherent());
+            staged.sync(editor.room_camera_capture_coherent().then_some(&context));
+            assert!(staged.busy());
+        }
+        for kind in [Pend::Input(0, input::Op::Value), Pend::Gesture(0, gestures::Reply::Begin)] {
+            editor.pending.insert(u64::MAX, Pending { kind, posted_at: Instant::now() });
+            assert!(!editor.room_camera_capture_coherent());
+            staged.sync(editor.room_camera_capture_coherent().then_some(&context));
+            assert!(!staged.busy());
+            staged.stage(context.clone(), &editor.camera3d).unwrap();
+        }
+        editor.pending.remove(&u64::MAX);
+        editor.batch_uncertain = true;
+        assert!(!editor.room_camera_capture_coherent());
+        editor.batch_uncertain = false;
+        editor.input.phase = input::Phase::Active;
+        assert!(!editor.room_camera_capture_coherent());
+        editor.input.phase = input::Phase::Off;
+        editor.sim.checksum ^= 1;
+        assert!(!editor.room_camera_capture_coherent());
     }
 }
