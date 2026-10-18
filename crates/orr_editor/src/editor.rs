@@ -1583,8 +1583,16 @@ impl Editor {
     pub(crate) fn mesh_workspace_source_stamp(
         &mut self,
     ) -> Result<(EditorGame, PathBuf, u64), String> {
+        if !matches!(self.game(), EditorGame::PhysGame | EditorGame::MeshNavigation) {
+            return Err("Mesh workspace changes require a Physics or legacy MeshNavigation profile".into());
+        }
+        self.mesh_creation_source_stamp()
+    }
+
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_creation_source_stamp(&mut self) -> Result<(EditorGame, PathBuf, u64), String> {
         let game = self.game();
-        if !matches!(game, EditorGame::PhysGame | EditorGame::MeshNavigation)
+        if !(game == EditorGame::PhysGame || game.has_mesh_view())
             || !self.spec().is_local()
             || self.erp_status().is_some()
             || !self.can_mutate()

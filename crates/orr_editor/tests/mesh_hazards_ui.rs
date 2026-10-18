@@ -333,3 +333,245 @@ fn hazards_widgets_apply_undo_save_reopen_swept_loss_and_stop_reset() {
     )
     .unwrap();
 }
+
+fn assert_disabled(h: &Harness<'_, EditorApp>, label: &str) {
+    assert!(
+        h.get_by_role_and_label(Role::Button, label)
+            .accesskit_node()
+            .is_disabled(),
+        "{label} must be disabled"
+    );
+}
+
+#[test]
+#[ignore = "opt-in software Vulkan EditorApp creator acceptance; set ORR_MESH_HAZARDS_CAPTURE_DIR"]
+fn hazard_creator_widgets_validate_create_preserve_and_reopen() {
+    assert_eq!(
+        std::env::var("ORR_MESH_HAZARDS_ACCEPTANCE").as_deref(),
+        Ok("1")
+    );
+    let base = PathBuf::from(std::env::var_os("ORR_MESH_HAZARDS_CAPTURE_DIR").unwrap());
+    assert!(base.is_absolute());
+    let root = base.with_file_name(format!(
+        "{}-creator",
+        base.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir(&root).expect("fresh creator evidence directory");
+    let original_path = root.join("original.scene.yaml");
+    fixture(&original_path);
+    let original_bytes = fs::read(&original_path).unwrap();
+    let mut h = harness(&original_path);
+    settle(&mut h);
+    let original_checksum = h.state().editor.checksum();
+    let destination = root.join("created.scene.yaml");
+
+    menu(&mut h, "File", "New hazard game…");
+    assert_disabled(&h, "Create hazard game");
+    // Attempt an accessibility action as well: a modal must guard the transport itself.
+    if let Some(play) = h.query_by_role_and_label(Role::Button, LBL_PLAY) {
+        play.click_accesskit();
+    }
+    settle(&mut h);
+    capture(&mut h, &root, "creator-modal-play-guard.png");
+    assert_eq!(
+        h.state().editor.mode(),
+        Mode::Edit,
+        "creator modal must block Play action"
+    );
+    field(
+        &mut h,
+        "New hazard game scene path",
+        &destination.display().to_string(),
+    );
+    click(&mut h, "Cancel new hazard game");
+    assert!(!destination.exists());
+    assert_eq!(h.state().editor.checksum(), original_checksum);
+    assert_eq!(
+        h.state().editor.path().as_deref(),
+        Some(original_path.as_path())
+    );
+
+    menu(&mut h, "File", "New hazard game…");
+    field(&mut h, "Game floor width", "invalid");
+    assert_disabled(&h, "Create hazard game");
+    field(&mut h, "Game floor width", "1");
+    click(&mut h, "Create hazard game");
+    assert!(!destination.exists());
+    assert_eq!(h.state().editor.checksum(), original_checksum);
+    assert!(h
+        .query_all_by_label_contains("Current workspace retained;")
+        .next()
+        .is_some());
+    capture(&mut h, &root, "creator-invalid-input.png");
+    field(&mut h, "Game floor width", "6");
+    field(&mut h, "Game floor depth", "4");
+    field(&mut h, "Game collectible count", "1");
+    field(&mut h, "Game distance per tick", "0.125");
+    assert_eq!(
+        h.get_by_label("Include starter hazard sphere")
+            .accesskit_node()
+            .toggled(),
+        Some(egui::accesskit::Toggled::False)
+    );
+    capture(&mut h, &root, "creator-ready-default-off.png");
+    click(&mut h, "Create hazard game");
+    assert!(h.query_by_label("Create hazard game").is_none());
+    assert_eq!(h.state().editor.game(), EditorGame::MeshHazardsV1);
+    assert_eq!(
+        h.state().editor.path().as_deref(),
+        Some(destination.as_path())
+    );
+    assert!(view(&h).is_none(), "starter hazards must default off");
+    assert!(
+        mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(fs::read(&original_path).unwrap(), original_bytes);
+    let created_checksum = h.state().editor.checksum();
+    let created_bytes = fs::read(&destination).unwrap();
+    click(&mut h, "Mesh hazards");
+    capture(&mut h, &root, "creator-default-off-created.png");
+
+    // Existing destination must be rejected without replacing scene or active host.
+    menu(&mut h, "File", "New hazard game…");
+    field(
+        &mut h,
+        "New hazard game scene path",
+        &destination.display().to_string(),
+    );
+    click(&mut h, "Create hazard game");
+    assert!(h
+        .query_all_by_label_contains("Current workspace retained;")
+        .next()
+        .is_some());
+    assert_eq!(h.state().editor.checksum(), created_checksum);
+    assert_eq!(
+        h.state().editor.path().as_deref(),
+        Some(destination.as_path())
+    );
+    assert_eq!(fs::read(&destination).unwrap(), created_bytes);
+    capture(&mut h, &root, "creator-overwrite-refused.png");
+    click(&mut h, "Cancel new hazard game");
+
+    // Dirty drafts guard both Play and another creator before any file mutation.
+    click(&mut h, "Enable mesh hazards");
+    field(&mut h, "Hazard 1 X", "2");
+    field(&mut h, "Hazard 1 Y", "0");
+    field(&mut h, "Hazard 1 Z", "2");
+    field(&mut h, "Hazard 1 radius", "0.25");
+    assert_disabled(&h, LBL_PLAY);
+    click(&mut h, "File");
+    assert_disabled(&h, "New hazard game…");
+    h.key_press(Key::Escape);
+    settle(&mut h);
+    assert_eq!(h.state().editor.checksum(), created_checksum);
+    assert_eq!(fs::read(&destination).unwrap(), created_bytes);
+    click(&mut h, "Apply mesh hazards");
+    let authored = view(&h).unwrap().config;
+    assert_eq!(authored.spheres[0].center, [fp!(2), FP::ZERO, fp!(2)]);
+    assert_eq!(authored.spheres[0].radius, fp!(0.25));
+    click(&mut h, "Mesh hazards");
+    click(&mut h, "Mesh mission");
+    let original_mission = mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .unwrap()
+        .config;
+    field(&mut h, "Collectible 1 radius", "0.25");
+    field(&mut h, "Mission exit radius", "0.75");
+    assert_disabled(&h, LBL_PLAY);
+    click(&mut h, "Apply mesh mission");
+    let authored_mission = mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .unwrap()
+        .config;
+    assert_eq!(authored_mission.points[0].radius, fp!(0.25));
+    assert_eq!(authored_mission.exit.radius, fp!(0.75));
+    menu(&mut h, "Edit", "Undo Ctrl+Z");
+    assert_eq!(
+        mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .unwrap()
+            .config,
+        original_mission
+    );
+    menu(&mut h, "Edit", "Redo Ctrl+Y");
+    assert_eq!(
+        mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .unwrap()
+            .config,
+        authored_mission
+    );
+    assert_eq!(view(&h).unwrap().config, authored);
+    capture(&mut h, &root, "creator-mission-numeric-edited.png");
+    menu(&mut h, "File", "Save Ctrl+S");
+    let authored_checksum = h.state().editor.checksum();
+    let authored_bytes = fs::read(&destination).unwrap();
+    menu(&mut h, "File", "Open scene…");
+    field(&mut h, "Scene path", &destination.display().to_string());
+    click(&mut h, "OK");
+    assert_eq!(h.state().editor.game(), EditorGame::MeshHazardsV1);
+    assert_eq!(h.state().editor.checksum(), authored_checksum);
+    assert_eq!(view(&h).unwrap().config, authored);
+    assert_eq!(
+        mission::from_view(h.state().editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .unwrap()
+            .config,
+        authored_mission
+    );
+    capture(&mut h, &root, "creator-authored-reopened.png");
+
+    click(&mut h, LBL_PLAY);
+    assert_eq!(h.state().editor.mode(), Mode::Play);
+    click(&mut h, "File");
+    assert_disabled(&h, "New hazard game…");
+    h.key_press(Key::Escape);
+    settle(&mut h);
+    click(&mut h, LBL_STOP);
+    assert_eq!(h.state().editor.checksum(), authored_checksum);
+    assert_eq!(fs::read(&destination).unwrap(), authored_bytes);
+
+    // A second small scene exercises the explicit optional starter sphere.
+    let with_starter = root.join("with-starter.scene.yaml");
+    menu(&mut h, "File", "New hazard game…");
+    field(
+        &mut h,
+        "New hazard game scene path",
+        &with_starter.display().to_string(),
+    );
+    click(&mut h, "Include starter hazard sphere");
+    click(&mut h, "Create hazard game");
+    assert_eq!(h.state().editor.game(), EditorGame::MeshHazardsV1);
+    assert_eq!(
+        h.state().editor.path().as_deref(),
+        Some(with_starter.as_path())
+    );
+    assert_eq!(view(&h).unwrap().config.count, 1);
+    assert_eq!(view(&h).unwrap().run, Default::default());
+    assert_eq!(fs::read(&original_path).unwrap(), original_bytes);
+    assert_eq!(fs::read(&destination).unwrap(), authored_bytes);
+    click(&mut h, "Mesh hazards");
+    capture(&mut h, &root, "creator-optional-starter.png");
+    drop(h);
+    let mut h = harness(&destination);
+    settle(&mut h);
+    assert_eq!(h.state().editor.checksum(), authored_checksum);
+    assert_eq!(view(&h).unwrap().config, authored);
+    fs::write(
+        root.join("acceptance.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "profile":"MeshHazardsV1", "production_editor_app":true,
+            "software_gpu":true, "hardware_gpu":false, "physical_os_input":false,
+            "creator_cancel_untouched":true, "invalid_inputs_rejected":true,
+            "default_hazards_off":true, "optional_starter_sphere":true,
+            "original_scene_unchanged":true, "overwrite_refused":true,
+            "draft_play_modal_guards":true, "authored_save_reopen":true,
+        "numeric_mission_edit_undo_redo_save_reopen":true,
+            "authored_checksum":authored_checksum,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}

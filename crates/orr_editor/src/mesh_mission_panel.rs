@@ -5,16 +5,16 @@ use orr_remote::mesh_navigation::{
     mesh_from_view,
     mission::{self, MeshMission, MissionPoint, MissionView},
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const MAX_MISSION_POINTS: usize = 8;
 const MAX_COORDINATE_RAW: i64 = 256 * FP::SCALE;
 const MAX_RADIUS_RAW: i64 = 4 * FP::SCALE;
 
-#[path = "mesh_mission_panel/viewport_picking.rs"]
-mod viewport_picking;
 #[path = "mesh_mission_panel/route_checkpoints.rs"]
 mod route_checkpoints;
+#[path = "mesh_mission_panel/viewport_picking.rs"]
+mod viewport_picking;
 pub(crate) use viewport_picking::ViewInput;
 
 pub(crate) struct Panel {
@@ -27,6 +27,7 @@ pub(crate) struct Panel {
     context_stale: bool,
     document_pending: bool,
     confirm_remove: bool,
+    game: Option<EditorGame>,
     scene: Option<PathBuf>,
     scene_epoch: Option<u64>,
     graph_revision: Option<[u8; 32]>,
@@ -48,6 +49,7 @@ impl Default for Panel {
             context_stale: false,
             document_pending: true,
             confirm_remove: false,
+            game: None,
             scene: None,
             scene_epoch: None,
             graph_revision: None,
@@ -62,7 +64,7 @@ impl Default for Panel {
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
         self.sync_mission_picking(editor);
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        if !editor.game().has_mesh_view() || !editor.spec().is_local() {
             self.document_pending = true;
             return;
         }
@@ -73,7 +75,8 @@ impl Panel {
         };
         self.document_pending = false;
         let scene_epoch = editor.scene_load_epoch();
-        let same_context = self.scene.as_ref() == Some(&scene)
+        let same_context = self.game == Some(editor.game())
+            && self.scene.as_ref() == Some(&scene)
             && self.scene_epoch == Some(scene_epoch)
             && self.graph_revision == Some(graph_revision);
         if same_context {
@@ -99,6 +102,7 @@ impl Panel {
             self.status = "Unsaved mesh mission belongs to another scene or graph; reload or discard it before continuing.".into();
             return;
         }
+        self.game = Some(editor.game());
         self.scene = Some(scene);
         self.scene_epoch = Some(scene_epoch);
         self.graph_revision = Some(graph_revision);
@@ -115,13 +119,16 @@ impl Panel {
     }
 
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &mut Editor) {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !editor.game().has_mesh_view() {
             return;
         }
         self.sync(editor);
         ui.collapsing("Mesh mission", |ui| {
             ui.weak("Collectibles and an exit are scene gameplay state. Reaching the route endpoint alone never declares a win.");
             self.show_mission_picking(ui, editor);
+            if !editor.game().is_mesh_navigation() {
+                ui.weak("This profile supports numeric mission fields; viewport picking and route checkpoint staging are unavailable.");
+            }
             if self.document_pending {
                 ui.label("Waiting for the requested local mesh scene and admitted graph.");
             }
@@ -220,7 +227,7 @@ impl Panel {
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !editor.game().has_mesh_view() {
             return None;
         }
         if self.mission_pick_busy() {
@@ -243,14 +250,15 @@ impl Panel {
     }
 
     fn can_stage_route_checkpoints(&self, editor: &Editor) -> bool {
-        self.can_edit(editor)
+        editor.game() == EditorGame::MeshNavigation
+            && self.can_edit(editor)
             && !self.mission_pick_busy()
             && self.current_mission_enabled()
             && !self.dirty()
     }
 
     fn can_edit(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        editor.game().has_mesh_view()
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -264,7 +272,7 @@ impl Panel {
     }
 
     fn can_reload(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        editor.game().has_mesh_view()
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -276,8 +284,10 @@ impl Panel {
     }
 
     fn identity_matches(&self, editor: &Editor) -> bool {
-        current_identity(editor).is_some_and(|(scene, revision, _, _)| {
-            self.scene.as_ref() == Some(&scene)
+        current_identity(editor).is_some_and(|(scene, revision, checksum, _)| {
+            self.game == Some(editor.game())
+                && self.observed_checksum == Some(checksum)
+                && self.scene.as_ref() == Some(&scene)
                 && self.scene_epoch == Some(editor.scene_load_epoch())
                 && self.graph_revision == Some(revision)
         })
@@ -385,7 +395,10 @@ impl Panel {
                 "The applied mission is awaiting an authoritative mesh Frame readback".into(),
             );
         };
-        if self.graph_revision != Some(graph_revision)
+        if self.game != Some(editor.game())
+            || self.scene.as_ref() != Some(&scene)
+            || self.scene_epoch != Some(editor.scene_load_epoch())
+            || self.graph_revision != Some(graph_revision)
             || (expected.enabled == 1 && graph_revision != expected.graph_revision)
         {
             self.context_stale = true;
@@ -402,6 +415,7 @@ impl Panel {
                 "The authoritative mesh mission differs from the applied configuration".into(),
             );
         }
+        self.game = Some(editor.game());
         self.scene = Some(scene);
         self.scene_epoch = Some(editor.scene_load_epoch());
         self.graph_revision = Some(graph_revision);
@@ -416,6 +430,7 @@ impl Panel {
             return;
         }
         if let Some((scene, revision, checksum, view)) = current_identity(editor) {
+            self.game = Some(editor.game());
             self.scene = Some(scene);
             self.scene_epoch = Some(editor.scene_load_epoch());
             self.graph_revision = Some(revision);
@@ -439,8 +454,7 @@ impl Panel {
             editor.host_call("world.singleton.patch", request)?;
             editor.mesh_navigation_mark_edited();
             editor.sync();
-            self.load_fields(None);
-            self.observed_checksum = Some(editor.checksum());
+            self.refresh_after_apply(editor, config)?;
             self.error = None;
             self.status = "Mesh mission removed using the canonical all-zero configuration; save the scene explicitly.".into();
             Ok(())
@@ -479,39 +493,15 @@ impl Panel {
 }
 
 fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32], u64, Option<MissionView>)> {
-    if editor.game() != EditorGame::MeshNavigation
-        || !editor.spec().is_local()
-        || editor.down().is_some()
-    {
-        return None;
-    }
-    let scene = editor.path()?;
-    if !reported_scene_matches_request(editor.spec(), &scene) {
-        return None;
-    }
+    let context = crate::mesh_context::current(editor).ok()?;
     let frame = editor.snapshot()?.predicted();
-    if editor.mode() != Mode::Play && frame.checksum() != editor.sim().checksum {
-        return None;
-    }
-    let view = mesh_from_view(frame).ok()?;
     let mission_view = mission::from_view(frame).ok()?;
-    Some((scene, view.graph.revision(), frame.checksum(), mission_view))
-}
-
-fn reported_scene_matches_request(spec: &crate::backend::HostSpec, reported: &Path) -> bool {
-    let requested = match spec {
-        crate::backend::HostSpec::Local { scene, .. } => scene.as_path(),
-        crate::backend::HostSpec::LocalGame {
-            scene,
-            game: EditorGame::MeshNavigation,
-            ..
-        } => scene.as_path(),
-        _ => return false,
-    };
-    if requested == reported {
-        return true;
-    }
-    matches!((std::fs::canonicalize(requested), std::fs::canonicalize(reported)), (Ok(requested), Ok(reported)) if requested == reported)
+    Some((
+        context.scene,
+        context.graph_revision,
+        context.checksum,
+        mission_view,
+    ))
 }
 
 fn default_points() -> [[String; 4]; MAX_MISSION_POINTS] {

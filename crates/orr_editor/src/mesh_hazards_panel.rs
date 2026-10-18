@@ -245,7 +245,7 @@ impl Panel {
         self.sync(editor);
         ui.collapsing("Mesh hazards", |ui| {
             ui.weak("Spherical hazards use exact fixed-point coordinates. Runtime loss state is read-only.");
-            ui.weak("Hazard workspace creation and standalone export are unsupported in this slice.");
+            ui.weak("Create a scene with File > New hazard game. Workspace copying and standalone export are not supported.");
             ui.add_enabled_ui(self.can_edit(editor), |ui| {
                 let mut changed = ui.checkbox(&mut self.enabled, "Enable mesh hazards").changed();
                 changed |= text_field(ui, "Hazard count (1–8)", &mut self.count);

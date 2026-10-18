@@ -379,13 +379,21 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_workspace_base_blocker(&self) -> Option<String> {
+        if !matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation) {
+            return Some("Legacy workspace changes require Physics or MeshNavigation".into());
+        }
+        self.mesh_creation_base_blocker()
+    }
+
+    #[cfg(feature="mesh-navigation")]
+    fn mesh_creation_base_blocker(&self) -> Option<String> {
         #[cfg(all(windows,target_arch="x86_64"))]
         if self.mesh_copy.busy() { return Some("Finish the mesh workspace duplicate before switching workspaces".into()); }
         #[cfg(feature="mesh-export")]
         if self.mesh_export.busy() {
             return Some("Finish the mesh game export before changing mesh workspaces".into());
         }
-        self.mesh_authoring_blocker()
+        self.mesh_creation_authoring_blocker()
     }
 
     #[cfg(feature="mesh-navigation")]
@@ -489,8 +497,16 @@ impl EditorApp {
         self.editor.set_mesh_navigation_blocker(blocker);
     }
 
-    #[cfg(feature="mesh-navigation")]
+    #[cfg(all(feature="mesh-navigation", any(feature="mesh-export", all(windows,target_arch="x86_64"))))]
     fn mesh_authoring_blocker(&self) -> Option<String> {
+        if !matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation) {
+            return Some("Legacy mesh authoring requires Physics or MeshNavigation".into());
+        }
+        self.mesh_creation_authoring_blocker()
+    }
+
+    #[cfg(feature="mesh-navigation")]
+    fn mesh_creation_authoring_blocker(&self) -> Option<String> {
         if self.mesh_navigation.agent_pick_busy() || self.mesh_mission_pick_busy() {
             return Some("Finish or cancel viewport endpoint picking before changing workspaces or exporting".into());
         }
@@ -500,7 +516,7 @@ impl EditorApp {
         if self.mesh_navigation.art_import_busy() {
             return Some("Finish model package imports before changing mesh workspaces or exporting".into());
         }
-        if !matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
+        if !(self.editor.game() == crate::game::EditorGame::PhysGame || self.editor.game().has_mesh_view())
             || !self.editor.spec().is_local() || self.editor.mode() != Mode::Edit
             || !self.editor.can_mutate() || self.editor.previewing().is_some()
             || self.editor.in_gesture() || self.editor.erp_status().is_some() {
@@ -581,17 +597,32 @@ impl EditorApp {
     }
 
     #[cfg(feature="mesh-mission")]
+    fn mesh_game_creation_blocker(&self) -> Option<String> {
+        #[cfg(feature="mesh-hazards")]
+        if self.mesh_game_creator.hazard_request().is_some() {
+            return self.mesh_creation_base_blocker();
+        }
+        self.mesh_workspace_base_blocker()
+    }
+
+    #[cfg(feature="mesh-mission")]
     fn create_mesh_game(&mut self, path: &std::path::Path, settings: &crate::mesh_workspace::mission::Settings) -> bool {
         let candidate = (|| -> Result<Self, String> {
-            if let Some(blocked) = self.mesh_workspace_base_blocker() { return Err(blocked); }
-            let original = self.editor.mesh_workspace_source_stamp()?;
+            if let Some(blocked) = self.mesh_game_creation_blocker() { return Err(blocked); }
+            let original = self.editor.mesh_creation_source_stamp()?;
+            #[cfg(feature="mesh-hazards")]
+            let editor = match self.mesh_game_creator.hazard_request() {
+                Some(include_hazard) => crate::mesh_hazards_creator::prepare(path, settings, include_hazard)?,
+                None => crate::mesh_workspace::mission::prepare(path, settings)?,
+            };
+            #[cfg(not(feature="mesh-hazards"))]
             let editor = crate::mesh_workspace::mission::prepare(path, settings)?;
             let mut replacement = Self::new(editor, self.render_state.clone());
             replacement.sync_mesh_presentation();
             if let Some(blocked) = replacement.mesh_presentation_blocker() { return Err(blocked); }
             replacement.viewport_hdr_disabled = self.viewport_hdr_disabled;
-            if let Some(blocked) = self.mesh_workspace_base_blocker() { return Err(blocked); }
-            if self.editor.mesh_workspace_source_stamp()? != original {
+            if let Some(blocked) = self.mesh_game_creation_blocker() { return Err(blocked); }
+            if self.editor.mesh_creation_source_stamp()? != original {
                 return Err("Current document changed during new game preparation; save it before retrying".into());
             }
             Ok(replacement)
@@ -601,7 +632,12 @@ impl EditorApp {
                 self.mesh_game_creator.succeeded();
                 replacement.gpu = self.gpu.take();
                 replacement.gpu3d = self.gpu3d.take();
-                replacement.editor.info(format!("New mesh game ready: {}. Play follows the authored route; customize it in Mesh mission.", path.display()));
+                let ready = if replacement.editor.game().is_mesh_hazards() {
+                    format!("New hazard game ready: {}. Customize objectives in Mesh mission and spheres in Mesh hazards.", path.display())
+                } else {
+                    format!("New mesh game ready: {}. Play follows the authored route; customize it in Mesh mission.", path.display())
+                };
+                replacement.editor.info(ready);
                 *self = replacement;
                 true
             }
@@ -843,7 +879,7 @@ impl eframe::App for EditorApp {
         self.dialogs(&ctx);
         #[cfg(feature="mesh-mission")]
         {
-            let blocked = self.mesh_workspace_base_blocker();
+            let blocked = self.mesh_game_creation_blocker();
             if let Some((path, settings)) = self.mesh_game_creator.show(&ctx, blocked.as_deref()) {
                 self.create_mesh_game(&path, &settings);
                 ctx.request_repaint();
@@ -1068,7 +1104,37 @@ impl EditorApp {
         }
     }
 
+    // Modal pointer capture does not block accessibility actions. Check both widget
+    // availability and the action entry point before starting or advancing playback.
+    fn playback_start_blocker(&self) -> Option<String> {
+        #[cfg(feature="mesh-mission")]
+        if self.mesh_game_creator.busy() {
+            return Some("Finish or cancel new game creation before Play or Step".into());
+        }
+        #[cfg(feature="mesh-navigation")]
+        if self.editor.mode() != Mode::Play {
+            return self.mesh_presentation_blocker();
+        }
+        None
+    }
+
+    fn play_from_ui(&mut self) {
+        if self.playback_start_blocker().is_none() { self.editor.play(); }
+    }
+
+    fn step_from_ui(&mut self) {
+        if self.playback_start_blocker().is_none() { self.editor.step(1); }
+    }
+
     fn save(&mut self) {
+        #[cfg(feature="mesh-mission")]
+        if self.editor.game().has_mesh_view() {
+            self.mesh_mission.sync(&self.editor);
+            if self.mesh_mission_dirty() {
+                self.editor.error("Apply or reload mission fields before saving the scene");
+                return;
+            }
+        }
         #[cfg(feature="mesh-hazards")]
         if self.editor.game().is_mesh_hazards() {
             self.mesh_hazards.sync(&self.editor);
@@ -1100,6 +1166,13 @@ impl EditorApp {
                 if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
                     && ui.add_enabled(self.mesh_workspace_blocker().is_none(), egui::Button::new("New mesh game\u{2026}")).clicked() {
                     self.mesh_game_creator.open();
+                    self.editor.release_control();
+                    ui.close();
+                }
+                #[cfg(feature="mesh-hazards")]
+                if (self.editor.game() == crate::game::EditorGame::PhysGame || self.editor.game().has_mesh_view())
+                    && ui.add_enabled(self.mesh_creation_base_blocker().is_none(), egui::Button::new("New hazard game\u{2026}")).clicked() {
+                    self.mesh_game_creator.open_hazards();
                     self.editor.release_control();
                     ui.close();
                 }
@@ -1197,18 +1270,15 @@ impl EditorApp {
             });
             ui.separator();
             let playing = self.editor.timeline().is_some_and(|t| t.playing);
-            #[cfg(feature="mesh-navigation")]
-            let start_blocker = if self.editor.mode() != Mode::Play { self.mesh_presentation_blocker() } else { None };
-            #[cfg(not(feature="mesh-navigation"))]
-            let start_blocker: Option<String> = None;
+            let start_blocker = self.playback_start_blocker();
             if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_PLAY)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable")).clicked() {
-                self.editor.play();
+                self.play_from_ui();
             }
             if ui.add_enabled(live && playing, egui::Button::new(LBL_PAUSE)).clicked() {
                 self.editor.pause();
             }
             if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_STEP)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Pause playback or reconnect the host before stepping")).clicked() {
-                self.editor.step(1);
+                self.step_from_ui();
             }
             if ui.add_enabled(live && self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
                 self.editor.stop();
@@ -2114,19 +2184,20 @@ impl EditorApp {
             ui.weak("Edit mode. Press Play to bake the scene and start a session; Step runs one tick.");
             return;
         };
+        let start_allowed = self.playback_start_blocker().is_none();
         ui.horizontal(|ui| {
             if !(self.editor.down().is_none()) { ui.disable(); }
             if ui.button("\u{23EE}").on_hover_text("Rewind to the first tick").clicked() {
                 self.editor.seek(tl.first_tick);
             }
-            if ui.add_enabled(!tl.playing, egui::Button::new("\u{25B6}")).on_hover_text(if self.editor.is_viewer() { "Play recorded ticks only" } else { "Play by the clock (from a rewound tick this branches)" }).clicked() {
-                self.editor.play();
+            if ui.add_enabled(start_allowed && !tl.playing, egui::Button::new("\u{25B6}")).on_hover_text(if self.editor.is_viewer() { "Play recorded ticks only" } else { "Play by the clock (from a rewound tick this branches)" }).clicked() {
+                self.play_from_ui();
             }
             if ui.add_enabled(tl.playing, egui::Button::new("\u{23F8}")).on_hover_text("Pause").clicked() {
                 self.editor.pause();
             }
-            if ui.add_enabled(!tl.playing, egui::Button::new("\u{23ED}")).on_hover_text("Step one tick").clicked() {
-                self.editor.step(1);
+            if ui.add_enabled(start_allowed && !tl.playing, egui::Button::new("\u{23ED}")).on_hover_text("Step one tick").clicked() {
+                self.step_from_ui();
             }
             ui.separator();
             ui.label("speed");
@@ -2214,6 +2285,15 @@ impl EditorApp {
         });
         if accept && !dialog.text.trim().is_empty() {
             let path = PathBuf::from(dialog.text.trim());
+            #[cfg(feature="mesh-mission")]
+            if self.editor.game().has_mesh_view() {
+                self.mesh_mission.sync(&self.editor);
+                if self.mesh_mission_dirty() {
+                    self.editor.error("Apply or reload mission fields before saving or opening a scene");
+                    self.ui.dialog = Some(dialog);
+                    return;
+                }
+            }
             #[cfg(feature="mesh-hazards")]
             if self.editor.game().is_mesh_hazards() {
                 self.mesh_hazards.sync(&self.editor);

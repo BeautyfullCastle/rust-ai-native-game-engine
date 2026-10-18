@@ -227,3 +227,7 @@ fn route_checkpoint_widget_is_enabled_after_reenable_apply() {
         .unwrap();
     assert_eq!(authoritative.config, state.mission);
 }
+
+#[cfg(feature = "mesh-hazards")]
+#[path = "hazards_tests.rs"]
+mod hazards;

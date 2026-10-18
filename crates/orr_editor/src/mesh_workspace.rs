@@ -80,7 +80,7 @@ fn validate_admitted_frame(frame: FrameView<'_>) -> Result<(), String> {
     Ok(())
 }
 
-fn checked_scene_path(path: &Path, must_exist: bool) -> Result<PathBuf, String> {
+pub(crate) fn checked_scene_path(path: &Path, must_exist: bool) -> Result<PathBuf, String> {
     let text = path.to_str().ok_or("mesh scene path must be Unicode")?;
     let components: Vec<_> = path.components().collect();
     if !path.is_absolute()
@@ -170,7 +170,7 @@ fn check_parent_chain(parent: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn refuse_existing_sidecar(scene: &Path) -> Result<(), String> {
+pub(crate) fn refuse_existing_sidecar(scene: &Path) -> Result<(), String> {
     let filename = scene
         .file_name()
         .and_then(|value| value.to_str())
@@ -201,7 +201,7 @@ fn refuse_existing_sidecar(scene: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn read_scene(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_scene(path: &Path) -> Result<Vec<u8>, String> {
     recheck_parent(path)?;
     let before =
         fs::symlink_metadata(path).map_err(|error| format!("mesh scene metadata: {error}"))?;

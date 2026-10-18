@@ -36,6 +36,10 @@ fn wizard_defaults_match_workspace_settings() {
 fn failure_keeps_the_wizard_open_and_preserves_entered_values() {
     let mut panel = Panel {
         open: true,
+        #[cfg(feature = "mesh-hazards")]
+        hazards: false,
+        #[cfg(feature = "mesh-hazards")]
+        include_hazard: false,
         scene_path: "C:\\games\\starter.scene.yaml".into(),
         width: "11".into(),
         depth: "9".into(),
@@ -53,4 +57,43 @@ fn failure_keeps_the_wizard_open_and_preserves_entered_values() {
     assert_eq!(panel.collectible_count, "4");
     assert_eq!(panel.distance_per_tick, "0.25");
     assert_eq!(panel.error.as_deref(), Some("destination already exists"));
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazard_mode_is_explicit_and_repeated_open_does_not_switch_it() {
+    let mut panel = Panel::default();
+    panel.open_hazards();
+    assert_eq!(panel.hazard_request(), Some(false));
+    panel.open();
+    assert_eq!(panel.hazard_request(), Some(false));
+    panel.succeeded();
+    panel.open();
+    assert_eq!(panel.hazard_request(), None);
+    panel.open_hazards();
+    assert_eq!(panel.hazard_request(), None);
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn escape_cancels_hazard_creation_without_emitting_request() {
+    let mut panel = Panel::default();
+    panel.open_hazards();
+    panel.scene_path = "/tmp/never-created.scene.yaml".into();
+    let context = egui::Context::default();
+    let input = egui::RawInput {
+        events: vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        ..Default::default()
+    };
+    let mut output = context.run_ui(input, |ui| assert!(panel.show(ui.ctx(), None).is_none()));
+    output.textures_delta.clear();
+    assert!(!panel.busy());
+    panel.open();
+    assert_eq!(panel.hazard_request(), None);
 }

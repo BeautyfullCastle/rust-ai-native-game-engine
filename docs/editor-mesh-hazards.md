@@ -30,11 +30,39 @@ identity again at action time, including checksum, even before the next UI sync.
 Play, preview, pending proposals, gestures, disconnected or non-local hosts,
 and missing/unadmitted snapshots cannot apply or reload authoring fields.
 
-This slice does not add hazard workspace creation, hazard asset editing,
-viewport picking or standalone hazard export. Use an explicitly selected local
-hazard scene; unsupported workflows remain unavailable rather than silently
-falling back to the legacy profile.
+## Create a new hazard game
+
+With `mesh-hazards` enabled, **File → New hazard game…** is available from an
+idle local Physics, legacy MeshNavigation, or MeshHazardsV1 editor. Enter a new
+absolute `*.scene.yaml` path in an existing directory, floor dimensions,
+collectible count and fixed-point distance per tick, then choose **Create hazard
+game**. The shared mission generator builds the walkable floor and collect/exit
+mission, and the new file opens explicitly as `MeshHazardsV1`.
+
+Hazards start disabled with a canonical all-zero configuration. The optional
+**Include starter hazard sphere** checkbox adds a radius-0.5 sphere at
+`(width/2, 0, 0.5)`, away from the authored centerline route. Customize it in
+**Mesh hazards** after creation. Runtime mission/hazard progress starts at zero.
+
+Creation validates exact save/reopen and host readback, refuses existing scene
+paths and orphan presentation sidecars, and uses the no-overwrite scene writer.
+Dirty scenes and presentation drafts, Play, gestures, pending path dialogs and
+other in-progress operations block creation. Cancel or Escape emits no request;
+repeated creation cannot replace an existing file. A write/startup failure keeps
+the current editor and may retain a newly created file (including a partial file
+on I/O failure), so inspect it before choosing another destination.
+
+**New mesh game…** retains its legacy profile. New hazard creation does not
+migrate existing scenes, enable legacy workspace operations for hazard scenes,
+or provide hazard asset editing, viewport picking or standalone hazard export.
+Unsupported workflows remain unavailable rather than silently falling back to
+the legacy profile.
 
 Headless tests cover decimal/count validation, bounded geometry, canonical
 zero disable, exact readback, Undo/Redo, checksum/epoch/graph stale-draft guards,
 Play rejection, legacy-profile isolation, and actual egui Apply/Reload actions.
+
+Creator tests additionally cover explicit profile selection, canonical optional
+hazards, no-overwrite/sidecar/path checks, cancellation and mode isolation,
+current-scene preservation, and Play through the collect/exit route with the
+optional sphere at minimum, default and maximum tested floor dimensions.

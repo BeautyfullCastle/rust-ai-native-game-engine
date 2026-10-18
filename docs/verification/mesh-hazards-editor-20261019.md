@@ -104,3 +104,42 @@ being tested. Test-only fixes use platform-absolute paths and raw OsString path
 text, explicitly asserting that ParentDir survives before testing rejection.
 Production behavior is unchanged. Five focused Linux CLI tests pass; fresh
 Windows CI is still required to establish recovery.
+
+## New-game wizard and numeric mission editing
+
+The next bounded slice adds File → New hazard game. Existing mission settings
+create a walkable starter, default hazards are disabled, and an optional sphere
+is separated from the starter route. The new scene opens explicitly as
+MeshHazardsV1, without overwriting an existing file or silently migrating the
+current scene. Numeric collectible/exit authoring now supports this profile;
+viewport picking, route staging, geometry reprojection, workspace copying and
+standalone export remain outside this slice.
+
+- Creator-focused CPU tests: 19 passed across the actual full module prefixes
+  (7 app creator, 5 generator, 7 wizard tests). Safe-route Play tests cover small,
+  default and large floors with the optional sphere: win and no loss.
+- Complete mission-panel focused suite: 19 passed, including six hazard-profile
+  cases for numeric editing, invalid/stale/identity rejection and persistence.
+- Actual creator EditorApp UI: one explicitly invoked ignored test passed on
+  software llvmpipe after fixing a real modal Play bypass. Widget and action-entry
+  guards now block Play/Step while creation is open; Pause/Stop remain available.
+  Cancel, invalid width, default-off creation, optional sphere, overwrite refusal,
+  draft/Play/modal protections, sphere editing, numeric mission edits, Undo/Redo,
+  Save/Open and a fresh local host reopen were verified. Original files retained.
+- Eight fresh creator PNGs and matching before/after production source manifests
+  were retained. Manifest SHA256:
+  `611dc3c4094356b8506388b6c5676d111f5d9589864b2e8d2475fce8bf2d80cf`.
+  Parent and independent worker reviewed the images. Later two wording-only
+  changes clarify scene creation versus workspace copying and mission objectives
+  versus route tools; that receipt is not relabelled as exact-current-source proof.
+- Strict UI-test Clippy, default library and mesh-export-only checks passed.
+  The earlier swept-loss test also passed with the developmental creator app
+  before the subsequent modal guard fix. Both exact UI cases are separately
+  required by the updated workflow; no final two-case local cohort is invented.
+
+Original failures retained: an input-only Escape fixture dropped egui texture
+output (fixed through the documented rendererless disposal API); the first real
+creator UI exposed actual Play-through-modal behavior (fixed in production);
+one fixture used an unavailable AccessKit checkbox API (corrected). No wait,
+collision tolerance, validator or success assertion was weakened. CPU results
+were not summed into a whole-engine completion percentage.
