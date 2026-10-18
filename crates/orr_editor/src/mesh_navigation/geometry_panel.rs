@@ -1,4 +1,4 @@
-use super::parse_fixed;
+use super::{geometry_grid::Grid, geometry_grid_panel, parse_fixed};
 use crate::mesh_navigation::geometry::{self, Quad};
 use egui::Ui;
 use orr_fp::FP;
@@ -8,7 +8,8 @@ const MAX_FIELD_BYTES: usize = 48;
 const MAX_VISIBLE_ROWS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
+pub(crate) enum Action {
+    ReplaceGrid(Grid),
     AppendQuad(Quad),
     MoveVertex { index: u32, position: [FP; 3] },
     RemoveFace(u32),
@@ -22,6 +23,7 @@ pub struct Panel {
     pub vertex_index: String,
     pub vertex_position: [String; 3],
     pub face_index: String,
+    grid: geometry_grid_panel::Panel,
     dirty: bool,
     observed_revision: Option<[u8; 32]>,
     revision_initialized: bool,
@@ -38,6 +40,7 @@ impl Default for Panel {
             vertex_index: "0".into(),
             vertex_position: ["0".into(), "0".into(), "0".into()],
             face_index: "0".into(),
+            grid: geometry_grid_panel::Panel::default(),
             dirty: false,
             observed_revision: None,
             revision_initialized: false,
@@ -59,6 +62,10 @@ impl Panel {
             self.revision_initialized = true;
         }
         let stale = self.observed_revision != current_revision;
+        let mut action = self
+            .grid
+            .show(ui, graph, profile, stale)
+            .map(Action::ReplaceGrid);
         if stale {
             ui.colored_label(
                 egui::Color32::YELLOW,
@@ -110,7 +117,6 @@ impl Panel {
         changed |= field(ui, "Quad width", &mut self.quad_width);
         changed |= field(ui, "Quad depth", &mut self.quad_depth);
         changed |= field(ui, "Quad rise", &mut self.quad_rise);
-        let mut action = None;
         if ui
             .add_enabled(!stale, egui::Button::new("Stage walkable quad"))
             .clicked()
@@ -171,10 +177,11 @@ impl Panel {
     }
 
     pub fn dirty(&self) -> bool {
-        self.dirty
+        self.dirty || self.grid.dirty()
     }
 
     pub fn acknowledge(&mut self) {
+        self.grid.acknowledge();
         self.dirty = false;
         self.observed_revision = None;
         self.revision_initialized = false;

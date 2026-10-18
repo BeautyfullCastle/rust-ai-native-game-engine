@@ -1,0 +1,11 @@
+# Mesh Walkable Grid Authoring
+
+The optional `mesh-navigation` editor workflow creates a walkable navigation surface from a bounded rectangular grid. The editor exposes grid origin, width, depth, row and column counts, and excluded cell indices. Cell indices are zero-based and row-major (`row * columns + column`). Each included cell contributes two triangles over shared grid vertices; excluded cells remain holes in the walkable surface. The current editor bound is seven rows and seven columns.
+
+Grid construction is explicit. Invalid dimensions, cell indices, graph/profile combinations, or a candidate that cannot preserve and route the active mission are rejected without changing the host scene. With an active mission, enable **Preserve and reproject the active mesh mission**, confirm replacing staged geometry with the grid, stage and inspect the local graph, then review and confirm the mission projection before applying. Local staged-geometry undo/redo is separate from the single host undo entry used to apply the graph and mission together. Save remains explicit.
+
+Preserving and reprojecting an existing mission does not guarantee that a moving agent will visit its existing collectibles along a newly triangulated route. **Stage mission route checkpoints** is a separate explicit draft action: it places distinct collectibles at existing interior points on the canonical route, keeps their radii/count, and sets the exit to the agent goal. Review and **Apply mesh mission** to commit that layout as its own undoable entry; only then save. This action requires enough distinct interior route points and refuses to change the host until Apply.
+
+Without an active mission, stage the grid, provide a valid agent start and goal on the resulting surface, place the agent, and save through the existing mesh workflow. A staged grid alone does not replace the host graph.
+
+The generated triangles describe only a navigation surface. They do not create collision geometry, a physics floor, or a physical controller. Mission projection and reachability use the existing bounded MeshNavigation graph and mission profile; they do not imply general-purpose physics or arbitrary level-editor behavior. The grid is stored in the existing mesh graph representation and adds no scene schema or sidecar.

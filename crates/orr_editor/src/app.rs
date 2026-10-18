@@ -1177,11 +1177,13 @@ impl EditorApp {
 
     fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            match self.editor.status() {
-                Some(Message { text, error: true }) => ui.colored_label(ui.visuals().error_fg_color, text),
-                Some(Message { text, error: false }) => ui.label(text),
-                None => ui.weak("ready"),
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            let status = match self.editor.status() {
+                Some(Message { text, error: true }) => RichText::new(text).color(ui.visuals().error_fg_color),
+                Some(Message { text, error: false }) => RichText::new(text),
+                None => RichText::new("ready").weak(),
             };
+            ui.add_sized([ui.available_width() * 0.4, ui.text_style_height(&egui::TextStyle::Body)], egui::Label::new(status).truncate());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gpu = self.gpu3d.as_ref().map(|g|g.gpu().adapter_name()).or_else(||self.gpu.as_ref().map(|g|g.gpu().adapter_name())).unwrap_or_else(||"no GPU".to_string());
                 ui.weak(gpu);
@@ -2461,6 +2463,37 @@ mod mesh_game_creator_tests;
 #[cfg(test)]
 mod screenshot_tests {
     use super::*;
+
+    #[test]
+    fn long_status_messages_preserve_the_available_viewport_rect() {
+        let editor = Editor::open(&crate::editor::default_scene_path()).unwrap();
+        let mut app = EditorApp::new(editor, None);
+        app.editor.sync();
+        let checksum = app.editor.checksum();
+        let history_count = app.editor.history().entries.len();
+        let long_message = "Mesh mission checkpoint authoring status ".repeat(256);
+        for width in [480.0, 900.0, 1500.0] {
+            let context = egui::Context::default();
+            let mut baseline = None;
+            for (message, error) in [("ready", false), (long_message.as_str(), false), (long_message.as_str(), true)] {
+                if error { app.editor.error(message); } else { app.editor.info(message); }
+                let mut available = None;
+                let _output = context.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 400.0))),
+                    ..Default::default()
+                }, |ui| {
+                    egui::Panel::bottom("status").show(ui, |ui| app.status_bar(ui));
+                    egui::Panel::right("inspector").exact_size(120.0).show(ui, |_| {});
+                    available = Some(ui.available_rect_before_wrap());
+                });
+                let available = available.unwrap();
+                assert!((available.max.x - (width - 120.0)).abs() < 0.5, "status expanded viewport at width {width}: {available:?}");
+                if let Some(baseline) = baseline { assert_eq!(available, baseline); } else { baseline = Some(available); }
+            }
+        }
+        assert_eq!(app.editor.checksum(), checksum);
+        assert_eq!(app.editor.history().entries.len(), history_count);
+    }
 
     #[cfg(all(feature="mesh-navigation", not(feature="mesh-animated-models")))]
     #[test]

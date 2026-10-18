@@ -18,6 +18,10 @@ mod mesh_model;
 mod agent_viewport;
 #[path = "mesh_navigation/geometry.rs"]
 mod geometry;
+#[path = "mesh_navigation/geometry_grid.rs"]
+pub(crate) mod geometry_grid;
+#[path = "mesh_navigation/geometry_grid_panel.rs"]
+mod geometry_grid_panel;
 #[path = "mesh_navigation/geometry_panel.rs"]
 mod geometry_panel;
 #[path = "mesh_navigation/geometry_preview.rs"]
@@ -883,6 +887,7 @@ impl Panel {
             return Err("Maximum slope differs from the open graph; create or reopen the mesh".into());
         }
         let graph = match action {
+            geometry_panel::Action::ReplaceGrid(grid) => geometry_grid::create(grid, profile)?,
             geometry_panel::Action::AppendQuad(quad) => geometry::append_quad(self.graph.as_ref(), profile, quad)?,
             geometry_panel::Action::MoveVertex { index, position } => geometry::move_vertex(self.graph.as_ref().ok_or("Create or open a mesh first")?, index, position)?,
             geometry_panel::Action::RemoveFace(index) => geometry::remove_face(self.graph.as_ref().ok_or("Create or open a mesh first")?, index)?,

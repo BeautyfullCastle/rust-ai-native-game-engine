@@ -13,6 +13,8 @@ const MAX_RADIUS_RAW: i64 = 4 * FP::SCALE;
 
 #[path = "mesh_mission_panel/viewport_picking.rs"]
 mod viewport_picking;
+#[path = "mesh_mission_panel/route_checkpoints.rs"]
+mod route_checkpoints;
 pub(crate) use viewport_picking::ViewInput;
 
 pub(crate) struct Panel {
@@ -125,6 +127,16 @@ impl Panel {
             }
             let mut changed = false;
             ui.add_enabled_ui(self.can_edit(editor) && !self.mission_pick_busy(), |ui| {
+                if ui
+                    .add_enabled(
+                        self.current_mission_enabled() && !self.dirty(),
+                        egui::Button::new("Stage mission route checkpoints"),
+                    )
+                    .clicked()
+                {
+                    self.stage_route_checkpoints(editor);
+                }
+                ui.weak("Stage distinct existing route checkpoints without changing the host; review the fields and Apply explicitly. Count and radii are preserved.");
                 changed |= ui.checkbox(&mut self.enabled, "Enable mesh mission").changed();
                 changed |= text_field(ui, "Mission collectible count", &mut self.count);
                 let point_count = parse_count(&self.count).unwrap_or(0);
@@ -163,7 +175,7 @@ impl Panel {
                     self.apply(editor);
                 }
             });
-            ui.horizontal(|ui| {
+            ui.vertical(|ui| {
                 if ui
                     .add_enabled(
                         self.can_reload(editor) && !self.mission_pick_busy(),
