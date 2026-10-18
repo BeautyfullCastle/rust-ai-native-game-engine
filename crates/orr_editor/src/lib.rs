@@ -88,6 +88,8 @@ pub mod model_panel;
 pub mod blockout;
 #[cfg(feature = "models")]
 pub mod blockout_panel;
+#[cfg(feature = "models")]
+pub mod blockout_uv_density;
 
 #[cfg(feature = "animated-models")]
 pub mod yard_animation;
