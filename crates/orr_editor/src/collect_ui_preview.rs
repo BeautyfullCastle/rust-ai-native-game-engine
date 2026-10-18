@@ -110,6 +110,9 @@ pub struct State {
     last_action: Option<Action>,
     generation: u64,
     error: Option<String>,
+    // A position candidate is presentation-only; admission remains the accepted
+    // panel document until its existing atomic Apply path commits it.
+    staged: Option<Document>,
 }
 
 impl State {
@@ -145,6 +148,7 @@ impl State {
             return Ok(());
         }
         self.active = None;
+        self.staged = None;
         self.last_action = None;
         self.error = None;
         self.admission = Some(Admission {
@@ -179,6 +183,7 @@ impl State {
             return self.error.clone().map_or(Ok(()), Err);
         }
         let reopen = self.active.take().is_some();
+        self.staged = None;
         self.last_action = None;
         admission.prepared.document = document.clone();
         if let Err(error) = validate_document(&admission.prepared) {
@@ -221,10 +226,16 @@ impl State {
             .ok_or("Open a Collect project with an admitted UI document first")?;
         validate_document(&admission.prepared)?;
         self.settings.validate(&admission.prepared.font)?;
-        let mut active = CollectUi::new(
-            admission.prepared.document.clone(),
-            admission.prepared.font.clone(),
-        )?;
+        self.build_document(&admission.prepared.document)
+    }
+
+    fn build_document(&self, document: &Document) -> Result<CollectUi, String> {
+        let admission = self
+            .admission
+            .as_ref()
+            .ok_or("No admitted Collect UI is available")?;
+        document.to_bytes()?;
+        let mut active = CollectUi::new(document.clone(), admission.prepared.font.clone())?;
         // Use only public production transitions. Terminal is entered by the
         // synthetic nonzero phase on its first show, before processing input.
         match self.settings.screen {
@@ -235,9 +246,38 @@ impl State {
         Ok(active)
     }
 
+    /// Validate and render one released candidate without changing admission.
+    /// Call only at release, never for each pointer-move event.
+    pub fn stage_document(&mut self, document: &Document) -> Result<(), String> {
+        if !self.is_open() {
+            return Err("Collect UI preview is closed".into());
+        }
+        let active = self.build_document(document)?;
+        self.active = Some(active);
+        self.staged = Some(document.clone());
+        self.last_action = None;
+        self.generation = self.generation.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Restore the accepted renderer after Cancel, stale input, or interruption.
+    pub fn cancel_staged(&mut self) -> Result<(), String> {
+        self.cancel_pointer();
+        if self.staged.take().is_some() && self.is_open() {
+            self.active = None;
+            self.open()?;
+        }
+        Ok(())
+    }
+
+    pub fn rendered_document(&self) -> Option<&Document> {
+        self.active.as_ref().map(CollectUi::document)
+    }
+
     /// Closing releases all active UI state, retaining only admission/settings.
     pub fn close(&mut self) {
         self.active = None;
+        self.staged = None;
         self.last_action = None;
     }
 
@@ -294,6 +334,7 @@ impl State {
         if settings == self.settings {
             return Ok(());
         }
+        self.cancel_staged()?;
         let rebuild = settings.screen != self.settings.screen && self.is_open();
         self.settings = settings;
         self.last_action = None;
@@ -512,6 +553,53 @@ mod tests {
             .unwrap();
         assert!(state.generation() > second);
         assert_eq!(state.document(), Some(&original));
+    }
+
+    #[test]
+    fn released_position_preview_keeps_admission_until_apply_and_cancel_restores() {
+        let mut state = opened();
+        let original = state.document().unwrap().clone();
+        let mut candidate = original.clone();
+        candidate.nodes[1].offset[0] += 40;
+        let generation = state.generation();
+        state.stage_document(&candidate).unwrap();
+        assert_eq!(state.generation(), generation + 1);
+        assert_eq!(state.document(), Some(&original));
+        assert_eq!(state.rendered_document(), Some(&candidate));
+        state
+            .synchronize(Some(scene()), 9, Some(&original))
+            .unwrap();
+        assert_eq!(state.generation(), generation + 1);
+        assert_eq!(state.rendered_document(), Some(&candidate));
+        state.cancel_staged().unwrap();
+        assert_eq!(state.rendered_document(), Some(&original));
+        let restored = state.generation();
+        state.cancel_staged().unwrap();
+        assert_eq!(state.generation(), restored);
+    }
+
+    #[test]
+    fn invalid_position_preview_is_atomic_and_accepted_changes_replace_candidate() {
+        let mut state = opened();
+        let original = state.document().unwrap().clone();
+        let mut invalid = original.clone();
+        invalid.nodes[0].offset = [5000, 0];
+        let generation = state.generation();
+        assert!(state.stage_document(&invalid).is_err());
+        assert_eq!(state.generation(), generation);
+        assert_eq!(state.rendered_document(), Some(&original));
+        let mut candidate = original.clone();
+        candidate.nodes[1].offset[0] += 40;
+        state.stage_document(&candidate).unwrap();
+        let mut accepted = original;
+        accepted.nodes[0].offset[1] += 10;
+        state
+            .synchronize(Some(scene()), 9, Some(&accepted))
+            .unwrap();
+        assert_eq!(state.document(), Some(&accepted));
+        assert_eq!(state.rendered_document(), Some(&accepted));
+        state.cancel_staged().unwrap();
+        assert_eq!(state.rendered_document(), Some(&accepted));
     }
 
     #[test]

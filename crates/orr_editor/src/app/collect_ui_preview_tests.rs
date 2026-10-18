@@ -1,6 +1,9 @@
 use super::*;
 use egui::accesskit::Role;
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 use orr_sample::{
     authored_ui::{Action, Document, Kind, Node},
     collect_project::{PreparedProject, ProgressSupport, SpriteSupport},
@@ -285,17 +288,23 @@ fn write_png(path: &Path, size: [u32; 2], bytes: &[u8]) {
         .unwrap();
 }
 fn parity(h: &mut Harness<'_, EditorApp>, font: &[u8], evidence: &Path, name: &str) {
+    let document = h.state().collect_ui.as_ref().unwrap().document().clone();
+    parity_document(h, font, evidence, name, &document);
+}
+fn parity_document(
+    h: &mut Harness<'_, EditorApp>,
+    font: &[u8],
+    evidence: &Path,
+    name: &str,
+    document: &Document,
+) {
     // Clear transient hover; the oracle starts with no pointer and a fresh UI.
     h.event(egui::Event::PointerGone);
     h.run_steps(20);
     let preview = &h.state().collect_ui_preview;
     let settings = preview.state.settings().clone();
     let actual = pixels(preview.gpu.as_ref().unwrap());
-    let mut production = CollectUi::new(
-        h.state().collect_ui.as_ref().unwrap().document().clone(),
-        font.to_vec(),
-    )
-    .unwrap();
+    let mut production = CollectUi::new(document.clone(), font.to_vec()).unwrap();
     match settings.screen {
         Screen::Title => {}
         Screen::Playing | Screen::Terminal => production.apply(Action::Play),
@@ -382,6 +391,12 @@ fn parity(h: &mut Harness<'_, EditorApp>, font: &[u8], evidence: &Path, name: &s
         "Sample score",
         "Sample best",
         "Close screen preview",
+        "Move UI position",
+        "Move node ID",
+        "Apply position",
+        "Cancel position",
+        "100%",
+        "75%",
     ] {
         assert!(
             screen.contains_rect(h.get_by_label(label).rect()),
@@ -539,5 +554,407 @@ fn actual_editor_preview_gpu_matches_production_and_never_dispatches() {
         "pointer_leave_cancelled":true, "host_checksum_history_mode_input_unchanged":true,
         "ui_undo_save_reopen":true, "scene_manifest_unchanged":true,
         "close_and_missing_panel_release_gpu":true, "native_os_window":false
+    })).unwrap()).unwrap();
+}
+
+fn select_move_node(h: &mut Harness<'_, EditorApp>, id: &str) {
+    h.get_by_role_and_label(Role::ComboBox, "Move node ID")
+        .click();
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::Button, id).click();
+    h.run_steps(3);
+}
+fn move_pointer(h: &mut Harness<'_, EditorApp>, point: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(point));
+    h.run_steps(3);
+}
+fn position_drag(h: &mut Harness<'_, EditorApp>, delta: [f32; 2]) {
+    let rect = h.state().collect_ui_preview.canvas.unwrap();
+    let start = rect.min + rect.size() * 0.5;
+    pointer(h, start, true);
+    assert!(h.state().collect_ui_preview.position.state.is_dragging());
+    let generation = h.state().collect_ui_preview.state.generation();
+    let end = start + egui::vec2(delta[0], delta[1]);
+    move_pointer(h, end);
+    assert_eq!(
+        h.state().collect_ui_preview.canvas,
+        Some(rect),
+        "status must not move canvas"
+    );
+    assert_eq!(
+        h.state().collect_ui_preview.state.generation(),
+        generation,
+        "motion retains font/context"
+    );
+    pointer(h, end, false);
+    assert!(h.state().collect_ui_preview.position.state.is_ready());
+    assert_eq!(
+        h.state().collect_ui_preview.state.generation(),
+        generation + 1,
+        "release builds candidate once"
+    );
+}
+#[track_caller]
+fn assert_no_position_draft(h: &Harness<'_, EditorApp>) {
+    let preview = &h.state().collect_ui_preview;
+    assert!(!preview.position.state.is_dragging());
+    assert!(!preview.position.state.is_ready());
+    if preview.state.is_open() {
+        assert_eq!(
+            preview.state.rendered_document(),
+            h.state().collect_ui.as_ref().map(|panel| panel.document())
+        );
+    }
+}
+
+#[test]
+fn actual_editor_position_controls_keep_explicit_selection_separate() {
+    let root = fixture();
+    let project = prepared(root.path());
+    let initial = project.ui().unwrap().document.clone();
+    let mut h = Harness::builder()
+        .with_size([1800.0, 1200.0])
+        .renderer(egui_kittest::LazyRenderer::Uninitialized {
+            textures_delta: Default::default(),
+            builder: None,
+        })
+        .build_eframe(|cc| app(project, cc));
+    h.run_steps(4);
+    let stamp = host_stamp(&h);
+    click(&mut h, "Collect UI document");
+    select_node(&mut h, "title");
+    click(&mut h, "Preview authored screens");
+    select_move_node(&mut h, "play");
+    click(&mut h, "Move UI position");
+    assert!(h.state().collect_ui_preview.position.moving);
+    assert!(h
+        .get_by_label("Apply position")
+        .accesskit_node()
+        .is_disabled());
+    assert!(h
+        .get_by_label("Cancel position")
+        .accesskit_node()
+        .is_disabled());
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &initial);
+    assert_eq!(host_stamp(&h), stamp);
+    // The reserved inspector's selected title remains independently editable.
+    edit_text(
+        &mut h,
+        "Collect and Dodge · 플레이",
+        "Independent title selection",
+    );
+    assert!(
+        matches!(&h.state().collect_ui.as_ref().unwrap().document().nodes[0].kind, Kind::Label { text, .. } if text == "Independent title selection")
+    );
+    assert_eq!(
+        h.state().collect_ui.as_ref().unwrap().document().nodes[2],
+        initial.nodes[2]
+    );
+}
+
+#[test]
+#[ignore = "mandatory explicit software Vulkan actual EditorApp position acceptance"]
+fn actual_editor_position_gpu_stages_applies_and_cancels_offsets() {
+    let evidence = PathBuf::from(
+        std::env::var_os("ORR_COLLECT_UI_POSITION_EVIDENCE")
+            .expect("retained evidence directory required"),
+    );
+    assert!(evidence.is_absolute() && evidence.is_dir());
+    let root = fixture();
+    let project = prepared(root.path());
+    let font = project.ui().unwrap().font.clone();
+    let initial = project.ui().unwrap().document.clone();
+    let original_file = fs::read(root.path().join("ui.json")).unwrap();
+    let scene = fs::read(root.path().join("scene.yaml")).unwrap();
+    let manifest = fs::read(root.path().join("orr.project.json")).unwrap();
+    let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
+    setup.native_adapter_selector = Some(Arc::new(|adapters, _| {
+        adapters
+            .iter()
+            .find(|adapter| {
+                let info = adapter.get_info();
+                info.backend == wgpu::Backend::Vulkan && info.device_type == wgpu::DeviceType::Cpu
+            })
+            .cloned()
+            .ok_or_else(|| "software Vulkan adapter required".into())
+    }));
+    let mut h = Harness::builder()
+        .with_size([1800.0, 1200.0])
+        .wgpu_setup(setup.into())
+        .build_eframe(|cc| app(project, cc));
+    h.run_steps(5);
+    let stamp = host_stamp(&h);
+    let adapter = format!(
+        "{:?}",
+        h.state().render_state.as_ref().unwrap().adapter.get_info()
+    );
+    click(&mut h, "Collect UI document");
+    click(&mut h, "Preview authored screens");
+    select_move_node(&mut h, "play");
+    click(&mut h, "Move UI position");
+    parity(&mut h, &font, &evidence, "position-initial-title");
+    let initial_pixels = pixels(h.state().collect_ui_preview.gpu.as_ref().unwrap());
+    let rect = h.state().collect_ui_preview.canvas.unwrap();
+    let start = rect.min + egui::vec2(320.0, 180.0);
+    pointer(&mut h, start, true);
+    let generation = h.state().collect_ui_preview.state.generation();
+    move_pointer(&mut h, start + egui::vec2(32.0, 32.0));
+    move_pointer(&mut h, start + egui::vec2(64.0, 64.0));
+    assert!(h.state().collect_ui_preview.position.state.is_dragging());
+    assert_eq!(h.state().collect_ui_preview.canvas, Some(rect));
+    assert_eq!(h.state().collect_ui_preview.state.generation(), generation);
+    assert_eq!(
+        pixels(h.state().collect_ui_preview.gpu.as_ref().unwrap()),
+        initial_pixels
+    );
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &initial);
+    assert_eq!(host_stamp(&h), stamp);
+    h.render()
+        .unwrap()
+        .save(evidence.join("position-drag-ghost-editor.png"))
+        .unwrap();
+    pointer(&mut h, start + egui::vec2(64.0, 64.0), false);
+    assert_eq!(
+        h.state().collect_ui_preview.state.generation(),
+        generation + 1
+    );
+    let mut moved = initial.clone();
+    let play = moved
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "play")
+        .unwrap();
+    play.offset[0] += 64;
+    play.offset[1] += 64;
+    assert_eq!(
+        h.state().collect_ui_preview.position.state.document(),
+        Some(&moved)
+    );
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &initial);
+    assert_eq!(h.state().collect_ui_preview.state.last_action(), None);
+    assert_eq!(
+        fs::read(root.path().join("ui.json")).unwrap(),
+        original_file
+    );
+    parity_document(&mut h, &font, &evidence, "position-staged-title", &moved);
+    assert_ne!(
+        pixels(h.state().collect_ui_preview.gpu.as_ref().unwrap()),
+        initial_pixels
+    );
+    click(&mut h, "Cancel position");
+    assert_no_position_draft(&h);
+    parity(&mut h, &font, &evidence, "position-cancelled-title");
+    assert_eq!(
+        pixels(h.state().collect_ui_preview.gpu.as_ref().unwrap()),
+        initial_pixels
+    );
+    assert!(h
+        .get_by_label("Undo UI edit")
+        .accesskit_node()
+        .is_disabled());
+
+    // Every interruption cancels an uncommitted candidate and restores accepted
+    // pixels; no stale release or Apply can resurrect it.
+    for interruption in 0..5 {
+        position_drag(&mut h, [64.0, 64.0]);
+        match interruption {
+            0 => {
+                h.key_press(egui::Key::Escape);
+                h.run_steps(3);
+            }
+            1 => {
+                h.event(egui::Event::WindowFocused(false));
+                h.run_steps(3);
+                h.event(egui::Event::WindowFocused(true));
+                h.run_steps(3);
+            }
+            2 => {
+                click(&mut h, "Menu");
+                click(&mut h, "Title");
+            }
+            3 => {
+                click(&mut h, "75%");
+                click(&mut h, "100%");
+            }
+            _ => {
+                click(&mut h, "Close screen preview");
+                click(&mut h, "Preview authored screens");
+                if !h.state().collect_ui_preview.position.moving {
+                    click(&mut h, "Move UI position");
+                }
+            }
+        }
+        assert!(
+            !h.state().collect_ui_preview.position.state.is_ready(),
+            "interruption {interruption} must cancel the released candidate"
+        );
+        assert_no_position_draft(&h);
+        assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &initial);
+        assert!(h
+            .get_by_label("Undo UI edit")
+            .accesskit_node()
+            .is_disabled());
+    }
+    let rect = h.state().collect_ui_preview.canvas.unwrap();
+    let start = rect.center();
+    pointer(&mut h, start, true);
+    assert!(h.state().collect_ui_preview.position.state.is_dragging());
+    move_pointer(&mut h, rect.min - egui::vec2(2.0, 2.0));
+    assert_no_position_draft(&h);
+    pointer(&mut h, start, false);
+    assert_no_position_draft(&h);
+    assert!(h
+        .get_by_label("Undo UI edit")
+        .accesskit_node()
+        .is_disabled());
+    // A concurrent accepted edit cancels the full-document pin, even if the
+    // selected node itself was not changed.
+    position_drag(&mut h, [64.0, 64.0]);
+    let mut changed = initial.clone();
+    changed.nodes[0].offset[0] += 1;
+    h.state_mut()
+        .collect_ui
+        .as_mut()
+        .unwrap()
+        .apply_document(changed.clone())
+        .unwrap();
+    h.run_steps(3);
+    assert_no_position_draft(&h);
+    assert_eq!(
+        h.state().collect_ui_preview.state.rendered_document(),
+        Some(&changed)
+    );
+    click(&mut h, "Undo UI edit");
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &initial);
+
+    position_drag(&mut h, [64.0, 64.0]);
+    click(&mut h, "Apply position");
+    assert_no_position_draft(&h);
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &moved);
+    parity(&mut h, &font, &evidence, "position-applied-title");
+    click(&mut h, "Move UI position");
+    canvas_click(&mut h, [320.0, 180.0]);
+    assert_eq!(
+        h.state().collect_ui_preview.state.last_action(),
+        None,
+        "old button location must not act"
+    );
+    canvas_click(&mut h, [384.0, 250.0]);
+    assert_eq!(
+        h.state().collect_ui_preview.state.last_action(),
+        Some(Action::Play)
+    );
+    assert_eq!(host_stamp(&h), stamp);
+    click(&mut h, "Undo UI edit");
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &initial);
+    assert!(
+        h.get_by_label("Undo UI edit")
+            .accesskit_node()
+            .is_disabled(),
+        "one Apply adds exactly one undo entry"
+    );
+
+    click(&mut h, "Portrait 360 × 640");
+    click(&mut h, "75%");
+    select_move_node(&mut h, "clip_panel");
+    click(&mut h, "Move UI position");
+    position_drag(&mut h, [30.0, 15.0]);
+    let mut nested = initial.clone();
+    let container = nested
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "clip_panel")
+        .unwrap();
+    container.offset[0] += 40;
+    container.offset[1] += 20;
+    assert_eq!(
+        h.state().collect_ui_preview.position.state.document(),
+        Some(&nested)
+    );
+    parity_document(
+        &mut h,
+        &font,
+        &evidence,
+        "position-portrait-container",
+        &nested,
+    );
+    click(&mut h, "Apply position");
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &nested);
+    assert_eq!(
+        fs::read(root.path().join("ui.json")).unwrap(),
+        original_file
+    );
+    click(&mut h, "Save UI document");
+    let saved = prepared(root.path());
+    assert_eq!(saved.ui().unwrap().document, nested);
+    assert_eq!(saved.ui().unwrap().font, font);
+    assert_eq!(fs::read(root.path().join("scene.yaml")).unwrap(), scene);
+    assert_eq!(
+        fs::read(root.path().join("orr.project.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(host_stamp(&h), stamp);
+    click(&mut h, "Close screen preview");
+    let context = h.ctx.clone();
+    crate::project::install_collect_presentation(h.state_mut(), saved, &context);
+    h.run_steps(4);
+    click(&mut h, "Preview authored screens");
+    parity(&mut h, &font, &evidence, "position-saved-reopened");
+    // Reopening the same path with a new scene-load epoch invalidates a staged
+    // transaction before any late Apply can reach the replacement editor.
+    select_move_node(&mut h, "play");
+    if !h.state().collect_ui_preview.position.moving {
+        click(&mut h, "Move UI position");
+    }
+    position_drag(&mut h, [20.0, 20.0]);
+    let replacement = prepared(root.path());
+    let mut editor = crate::Editor::start(&crate::HostSpec::PreparedCollect {
+        scene: replacement.path().to_owned(),
+        text: replacement.scene().text().into(),
+        listen: None,
+        debug_hooks: false,
+    })
+    .unwrap();
+    editor.sync();
+    h.state_mut().editor = editor;
+    h.run_steps(3);
+    assert_no_position_draft(&h);
+    assert!(!h.state().collect_ui_preview.state.is_available());
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &nested);
+    let context = h.ctx.clone();
+    crate::project::install_collect_presentation(h.state_mut(), replacement, &context);
+    h.run_steps(4);
+    click(&mut h, "Preview authored screens");
+    // Explicit Play and absent-panel lifecycle boundaries.
+    select_move_node(&mut h, "play");
+    if !h.state().collect_ui_preview.position.moving {
+        click(&mut h, "Move UI position");
+    }
+    position_drag(&mut h, [20.0, 20.0]);
+    assert!(h.state_mut().editor.start_play());
+    h.run_steps(3);
+    assert_no_position_draft(&h);
+    assert!(!h.state().collect_ui_preview.position.moving);
+    assert!(h
+        .get_by_label("Move UI position")
+        .accesskit_node()
+        .is_disabled());
+    assert_eq!(h.state().collect_ui.as_ref().unwrap().document(), &nested);
+    h.state_mut().collect_ui = None;
+    h.run_steps(3);
+    assert!(!h.state().collect_ui_preview.state.is_available());
+    assert_no_position_draft(&h);
+    fs::write(evidence.join("collect-ui-position-acceptance.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "schema":1, "production_editor_app":true, "software_vulkan":true, "adapter":adapter, "window_pixels":[1800,1200],
+        "position_ghost_without_context_rebuild":true, "release_candidate_build_once":true,
+        "staging_changes_pixels_only":true, "cancel_restores_exact_pixels":true,
+        "apply_one_undo":true, "old_and_new_action_hit_locations":true,
+        "portrait_display_scale":0.75, "parent_moves_descendants_without_rewriting_them":true,
+        "escape_focus_screen_resize_close_stale_document_play_cancel":true,
+        "pointer_leave_late_release_cancel":true, "same_path_scene_epoch_cancel":true,
+        "host_unchanged_during_authoring":true, "save_reopen":true,
+        "production_collect_ui_pixel_parity_cases":6, "full_visible_controls":true,
+        "native_os_window":false
     })).unwrap()).unwrap();
 }

@@ -39,16 +39,52 @@ jobs:
           h = runpy.run_path("tools/check-authoring-controls.py")
           evidence = Path(os.environ["ORR_COLLECT_PREVIEW_CI"])
           evidence.mkdir(parents=True, exist_ok=False)
+          # Exact core names prevent substring overlap with app tests. The app
+          # CPU and GPU gates below remain independently mandatory.
+          core_names = {
+              'collect_ui_preview::tests::accepted_unsaved_document_and_undo_rebuild_context',
+              'collect_ui_preview::tests::admission_uses_cloned_bytes_without_reading_paths',
+              'collect_ui_preview::tests::all_actions_are_observed_without_changing_selected_screen_or_document',
+              'collect_ui_preview::tests::all_four_screens_render_authored_labels_and_explicit_selection',
+              'collect_ui_preview::tests::authored_parent_clipping_and_overlap_use_production_hit_testing',
+              'collect_ui_preview::tests::bounded_viewport_overrides_external_size_and_scale',
+              'collect_ui_preview::tests::cancellation_resize_screen_and_document_change_drop_pointer_capture',
+              'collect_ui_preview::tests::changed_valid_font_rebuilds_context_even_for_identical_document',
+              'collect_ui_preview::tests::close_releases_active_context_and_reopens_retained_admission',
+              'collect_ui_preview::tests::invalid_current_document_fails_closed_until_corrected',
+              'collect_ui_preview::tests::invalid_font_admission_drops_previous_preview_and_cannot_reopen',
+              'collect_ui_preview::tests::invalid_position_preview_is_atomic_and_accepted_changes_replace_candidate',
+              'collect_ui_preview::tests::readmission_at_new_path_or_epoch_resets_settings_and_closes',
+              'collect_ui_preview::tests::released_position_preview_keeps_admission_until_apply_and_cancel_restores',
+              'collect_ui_preview::tests::same_identity_and_document_keep_active_context',
+              'collect_ui_preview::tests::scene_epoch_and_missing_panel_clear_all_admission',
+              'collect_ui_preview::tests::terminal_variants_and_playing_phase_use_bounded_synthetic_hud',
+              'collect_ui_preview::tests::viewport_and_sample_bounds_are_atomic_and_font_checked',
+          }
+          base = ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features",
+                  "--features", "collect-ui", "--lib"]
+          inventory = h["run_logged"](base + ["--", "--list", "--format=pretty", "--color=never"],
+                                       evidence / "compiled-libtest-inventory.log")
+          compiled_core = [line.removesuffix(": test") for line in inventory.splitlines()
+                           if line.startswith("collect_ui_preview::tests::") and line.endswith(": test")]
+          if len(compiled_core) != 18 or set(compiled_core) != core_names:
+              raise RuntimeError("Compiled core preview inventory differs from the 18 mandatory cases")
+          for name in sorted(core_names):
+              output = h["run_logged"](
+                  base + [name, "--", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+                  evidence / (name.replace("::", "-") + ".log")).replace("\r\n", "\n")
+              summaries = h["SUMMARY"].findall(output)
+              if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                      or h["CASE"].findall(output) != [(name, "ok")]):
+                  raise RuntimeError("Mandatory exact preview case did not pass: " + name)
           for package, suite, count in (
-              ("orr_editor", "collect_ui_preview::tests", 16),
               ("orr_editor", "collect_ui_panel::tests", 5 if os.name == "nt" else 6),
               ("orr_sample", "collect_ui::tests", 12),
               ("orr_sample", "collect_app::tests", 11),
           ):
               output = h["run_logged"](
                   ["cargo", "test", "--locked", "-p", package, "--no-default-features", "--features", "collect-ui",
-                   "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1",
-                   *(["--skip", "app::collect_ui_preview::tests::"] if suite == "collect_ui_preview::tests" else [])],
+                   "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
                   evidence / (package + "-" + suite.replace("::", "-") + ".log"))
               h["validate_tests"](output, suite, count)
           name = "app::collect_ui_preview::tests::actual_editor_preview_controls_preserve_host_and_scene_epoch"
