@@ -1,8 +1,11 @@
-use super::{text_field, Panel};
+#[path = "preview/transport.rs"]
+mod transport;
+use super::{Panel, text_field};
 use crate::{editor::Editor, mesh_animation::Snapshot, model::Mode};
 use egui::{Button, Ui};
-use orr_remote::mesh_navigation::{mesh_from_view, MeshView};
+use orr_remote::mesh_navigation::{MeshView, mesh_from_view};
 use std::path::PathBuf;
+use transport::{Speed, Transport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Context {
@@ -22,7 +25,7 @@ enum SourceKey {
 struct Accepted {
     context: Context,
     snapshot: Snapshot,
-    tick: u32,
+    tick: u64,
 }
 
 #[derive(Default)]
@@ -32,6 +35,9 @@ pub(super) struct State {
     context: Option<Context>,
     accepted: Option<Accepted>,
     error: Option<String>,
+    transport: Transport,
+    looped: bool,
+    accepted_fields: Option<(String, String)>,
 }
 
 impl State {
@@ -41,17 +47,25 @@ impl State {
         self.context = None;
         self.accepted = None;
         self.error = None;
+        self.transport = Transport::default();
+        self.looped = false;
+        self.accepted_fields = None;
     }
 
     fn clear_accepted(&mut self) {
+        self.transport = Transport::default();
         self.accepted = None;
         self.error = None;
     }
 
     fn request(&mut self, panel: &Panel, editor: &Editor, clip: &str, tick: &str) {
         self.sync(panel, editor);
+        self.transport.pause();
         match accept(panel, editor, clip, tick) {
             Ok(accepted) => {
+                self.accepted_fields = Some((clip.to_owned(), tick.to_owned()));
+                self.transport.seek(accepted.tick);
+                self.looped = accepted.snapshot.settings().looped;
                 self.accepted = Some(accepted);
                 self.error = None;
             }
@@ -65,20 +79,80 @@ impl State {
             self.reset();
             self.context = current_context;
         }
+        let now = ui.input(|input| input.time);
+        let frame = ui.ctx().cumulative_frame_nr();
+        let focused = ui.input(|input| input.focused);
+        self.advance(now, frame, focused);
         ui.separator();
         ui.label("Animation pose preview");
         let enabled = preview_allowed(panel, editor) && self.context.is_some();
         ui.add_enabled_ui(enabled, |ui| {
+            let previous_fields = (self.clip.clone(), self.tick.clone());
             if let Some(snapshot) = source_snapshot(panel) {
                 super::clip_choices::show(ui, &snapshot.clips(), &mut self.clip);
             }
             text_field(ui, "Animation preview clip", &mut self.clip);
             text_field(ui, "Animation preview tick", &mut self.tick);
+            if previous_fields != (self.clip.clone(), self.tick.clone()) {
+                self.transport.pause();
+            }
             if ui.button("Preview animation pose").clicked() {
                 let clip = self.clip.clone();
                 let tick = self.tick.clone();
                 self.request(panel, editor, &clip, &tick);
             }
+            if ui
+                .button(if self.transport.running {
+                    "Pause animation preview"
+                } else {
+                    "Play animation preview"
+                })
+                .clicked()
+            {
+                if self.transport.running {
+                    self.transport.pause();
+                } else {
+                    self.play(panel, editor, now, frame);
+                }
+            }
+            if ui
+                .add_enabled(
+                    self.accepted.is_some(),
+                    Button::new("Restart animation preview"),
+                )
+                .clicked()
+            {
+                if let Some(end) = self.end_tick() {
+                    self.transport.restart(now, frame, end, self.looped);
+                    if let Some(accepted) = &mut self.accepted {
+                        accepted.tick = self.transport.tick;
+                    }
+                }
+            }
+            if ui
+                .add_enabled(
+                    self.accepted.is_some(),
+                    egui::Checkbox::new(&mut self.looped, "Loop animation preview"),
+                )
+                .changed()
+            {
+                self.transport.pause();
+                if let Some(accepted) = &mut self.accepted {
+                    let mut settings = accepted.snapshot.settings();
+                    settings.looped = self.looped;
+                    match accepted.snapshot.clone().with_settings(settings) {
+                        Ok(snapshot) => accepted.snapshot = snapshot,
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            }
+            egui::ComboBox::from_label("Animation preview speed")
+                .selected_text(self.transport.speed.label())
+                .show_ui(ui, |ui| {
+                    for speed in Speed::ALL {
+                        ui.selectable_value(&mut self.transport.speed, speed, speed.label());
+                    }
+                });
             if ui
                 .add_enabled(
                     self.accepted.is_some(),
@@ -89,6 +163,9 @@ impl State {
                 self.clear_accepted();
             }
         });
+        if self.transport.running {
+            ui.ctx().request_repaint();
+        }
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
         }
@@ -98,6 +175,55 @@ impl State {
                 accepted.snapshot.settings().clip,
                 accepted.tick
             ));
+        }
+    }
+
+    fn end_tick(&self) -> Option<u64> {
+        let accepted = self.accepted.as_ref()?;
+        let settings = accepted.snapshot.settings();
+        let duration = accepted
+            .snapshot
+            .clips()
+            .into_iter()
+            .find(|(index, _, _)| *index == settings.clip)?
+            .2;
+        // Match the sampler's f32 rate-adjusted duration, then ceil to its first
+        // endpoint tick. Transport never changes the authored playback rate.
+        let ticks =
+            f64::from(duration / settings.rate) * f64::from(orr_sample::yard3d_game::TICK_RATE);
+        (ticks.is_finite() && ticks >= 0.0 && ticks < u64::MAX as f64).then(|| ticks.ceil() as u64)
+    }
+    fn advance(&mut self, now: f64, frame: u64, focused: bool) {
+        let Some(end) = self.end_tick() else {
+            self.transport.pause();
+            return;
+        };
+        self.transport.advance(
+            now,
+            frame,
+            focused,
+            orr_sample::yard3d_game::TICK_RATE,
+            end,
+            self.looped,
+        );
+        if let Some(accepted) = &mut self.accepted {
+            accepted.tick = self.transport.tick;
+        }
+    }
+    fn play(&mut self, panel: &Panel, editor: &Editor, now: f64, frame: u64) {
+        // Revalidate edited fields before resuming; invalid input keeps the last pose.
+        let accepted_matches = self.accepted.is_some()
+            && self.accepted_fields.as_ref() == Some(&(self.clip.clone(), self.tick.clone()));
+        if !accepted_matches || self.error.is_some() {
+            let clip = self.clip.clone();
+            let tick = self.tick.clone();
+            self.request(panel, editor, &clip, &tick);
+            if self.error.is_some() {
+                return;
+            }
+        }
+        if let Some(end) = self.end_tick() {
+            self.transport.play(now, frame, end, self.looped);
         }
     }
 
@@ -133,7 +259,7 @@ impl State {
         }
         accepted
             .snapshot
-            .placement_for_view(view, u64::from(accepted.tick))
+            .placement_for_view(view, accepted.tick)
             .map(Some)
     }
 }
@@ -252,7 +378,7 @@ fn accept(
     Ok(Accepted {
         context,
         snapshot: preview_snapshot,
-        tick,
+        tick: u64::from(tick),
     })
 }
 

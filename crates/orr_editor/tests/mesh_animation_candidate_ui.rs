@@ -343,3 +343,196 @@ fn loaded_candidate_named_clip_previews_without_applying_and_preserves_authoring
         "rights_acknowledgement_required": true, "scene_sha256": sha256_hex(&scene_bytes)
     })).unwrap()).unwrap();
 }
+
+#[test]
+#[ignore = "requires software Vulkan and fresh ORR_ANIMATION_CANDIDATE_CAPTURE_DIR"]
+fn live_candidate_audition_advances_pauses_and_preserves_authoring() {
+    let root = PathBuf::from(
+        std::env::var_os("ORR_ANIMATION_CANDIDATE_CAPTURE_DIR")
+            .expect("fresh capture directory required"),
+    );
+    assert!(root.is_absolute());
+    fs::create_dir(&root).expect("fresh directory");
+    let rhi = orr_rhi::Wgpu::headless(orr_rhi::WgpuOptions::default()).unwrap();
+    let software = rhi.is_software();
+    let adapter = rhi.adapter_name().to_owned();
+    drop(rhi);
+    let package = root.join("animation package");
+    fs::create_dir(&package).unwrap();
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/animation_demo");
+    let mut originals = Vec::new();
+    for name in ["orr.package.json", "animated.glb", "LICENSE.txt"] {
+        let bytes = fs::read(assets.join(name)).unwrap();
+        fs::write(package.join(name), &bytes).unwrap();
+        originals.push((name, bytes));
+    }
+    let scene = root.join("candidate.scene.yaml");
+    // Start from the shipped mesh scene, then use the real authoring controls.
+    fs::copy(EditorGame::MeshNavigation.default_scene_path(), &scene).unwrap();
+    let mut h = harness(&scene);
+    settle(&mut h);
+    click(&mut h, "Static-mesh navigation");
+    click_button(&mut h, "Create ramp and bridge");
+    click_button(&mut h, "Place mesh agent");
+    menu_click(&mut h, "File", "Save Ctrl+S");
+    let scene_bytes = fs::read(&scene).unwrap();
+    let checksum = h.state().editor.checksum();
+    let frame_tick = h.state().editor.snapshot().unwrap().predicted().tick();
+    let history = h.state().editor.history().clone();
+    let sidecar = sidecar_path(&scene, ".mesh-animation.json");
+    let baseline = viewport_pixels(&mut h, "01-baseline.png");
+    click(&mut h, "Mesh agent animation");
+    type_field(
+        &mut h,
+        "Animation package source directory",
+        &package.display().to_string(),
+    );
+    type_field(&mut h, "Animation model asset", "animated.glb");
+    type_field(&mut h, "Animation license asset", "LICENSE.txt");
+    assert!(h
+        .get_by_role_and_label(Role::Button, "Load mesh animation")
+        .accesskit_node()
+        .is_disabled());
+    click(&mut h, "I have reviewed rights to use this animation");
+    click_button(&mut h, "Load mesh animation");
+    let loaded = viewport_pixels(&mut h, "02-loaded.png");
+    assert_eq!(changed_pixel_count(&baseline, &loaded), 0);
+    // Select the nonzero named clip through the actual ComboBox, not the numeric fallback.
+    h.get_by_role_and_label(Role::ComboBox, "Animation preview clip choice")
+        .scroll_to_me();
+    h.run_steps(30);
+    h.get_by_role_and_label(Role::ComboBox, "Animation preview clip choice")
+        .click();
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::Button, "Clip 1: pulse (1.000s)")
+        .click_accesskit();
+    settle(&mut h);
+    type_field(&mut h, "Animation preview tick", "0");
+    click_button(&mut h, "Preview animation pose");
+    let pose0 = viewport_pixels(&mut h, "03-candidate-pulse-0.png");
+    assert!(changed_pixel_count(&baseline, &pose0) > 20);
+
+    fn quick(h: &mut Harness<'_, EditorApp>, label: &str) {
+        h.get_by_role_and_label(Role::Button, label).scroll_to_me();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, label)
+            .click_accesskit();
+        h.run_steps(2);
+    }
+    quick(&mut h, "Play animation preview");
+    h.run_steps(17);
+    quick(&mut h, "Pause animation preview");
+    let paused = viewport_pixels(&mut h, "04-live-paused.png");
+    let changed = changed_pixel_count(&pose0, &paused);
+    assert!(
+        changed > 20,
+        "live candidate must visibly advance: {changed}"
+    );
+    h.run_steps(90);
+    assert_eq!(
+        changed_pixel_count(&paused, &viewport_pixels(&mut h, "05-pause-frozen.png")),
+        0
+    );
+    quick(&mut h, "Restart animation preview");
+    assert_eq!(
+        changed_pixel_count(&pose0, &viewport_pixels(&mut h, "06-restarted.png")),
+        0
+    );
+    h.get_by_role_and_label(Role::ComboBox, "Animation preview speed")
+        .click();
+    h.run_steps(2);
+    h.get_by_label("2×").click();
+    settle(&mut h);
+    if h.get_by_label("Loop animation preview")
+        .accesskit_node()
+        .toggled()
+        != Some(egui::accesskit::Toggled::True)
+    {
+        click(&mut h, "Loop animation preview");
+    }
+    assert_eq!(
+        h.get_by_label("Loop animation preview")
+            .accesskit_node()
+            .toggled(),
+        Some(egui::accesskit::Toggled::True)
+    );
+    quick(&mut h, "Play animation preview");
+    h.run_steps(150);
+    assert!(!h
+        .get_by_role_and_label(Role::Button, "Pause animation preview")
+        .accesskit_node()
+        .is_disabled());
+    quick(&mut h, "Pause animation preview");
+    let looped = viewport_pixels(&mut h, "07-speed-loop.png");
+    h.run_steps(60);
+    assert_eq!(
+        changed_pixel_count(&looped, &viewport_pixels(&mut h, "08-speed-paused.png")),
+        0
+    );
+    quick(&mut h, "Play animation preview");
+    h.run_steps(7);
+    h.input_mut().focused = false;
+    h.event(egui::Event::WindowFocused(false));
+    h.run_steps(3);
+    let unfocused = viewport_pixels(&mut h, "09-focus-paused.png");
+    h.run_steps(60);
+    assert_eq!(
+        changed_pixel_count(&unfocused, &viewport_pixels(&mut h, "10-focus-frozen.png")),
+        0
+    );
+    h.input_mut().focused = true;
+    h.event(egui::Event::WindowFocused(true));
+    settle(&mut h);
+    type_field(&mut h, "Animation preview tick", "-1");
+    click_button(&mut h, "Preview animation pose");
+    assert_eq!(
+        changed_pixel_count(
+            &unfocused,
+            &viewport_pixels(&mut h, "11-invalid-retained.png")
+        ),
+        0
+    );
+    assert_eq!(h.state().editor.checksum(), checksum);
+    assert_eq!(
+        h.state().editor.snapshot().unwrap().predicted().tick(),
+        frame_tick
+    );
+    assert_eq!(h.state().editor.history(), &history);
+    assert!(!sidecar.exists());
+    assert_eq!(fs::read(&scene).unwrap(), scene_bytes);
+    click_button(&mut h, "Clear animation preview");
+    assert_eq!(
+        changed_pixel_count(
+            &baseline,
+            &viewport_pixels(&mut h, "12-clear-candidate.png")
+        ),
+        0
+    );
+    // Apply only after all candidate-transport invariants have been checked.
+    type_field(&mut h, "Animation preview tick", "0");
+    type_field(&mut h, "Animation clip index", "1");
+    click_button(&mut h, "Apply mesh animation");
+    click_button(&mut h, "Save mesh animation");
+    let saved = fs::read(&sidecar).unwrap();
+    let applied = viewport_pixels(&mut h, "13-applied-baseline.png");
+    quick(&mut h, "Play animation preview");
+    h.run_steps(17);
+    quick(&mut h, "Pause animation preview");
+    assert!(
+        changed_pixel_count(
+            &applied,
+            &viewport_pixels(&mut h, "14-applied-audition.png")
+        ) > 20
+    );
+    click_button(&mut h, "Clear animation preview");
+    assert_eq!(
+        changed_pixel_count(&applied, &viewport_pixels(&mut h, "15-clear-applied.png")),
+        0
+    );
+    assert_eq!(fs::read(&sidecar).unwrap(), saved);
+    assert_eq!(fs::read(&scene).unwrap(), scene_bytes);
+    for (name, bytes) in originals {
+        assert_eq!(fs::read(package.join(name)).unwrap(), bytes);
+    }
+    fs::write(root.join("acceptance.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"production_editor_app":true,"software_gpu":software,"adapter":adapter,"physical_os_input":false,"named_nonzero_candidate_clip":"pulse","live_changed_pixels":changed,"pause_exact_freeze":true,"restart_restores_zero":true,"speed_loop_controls":true,"focus_loss_pauses":true,"invalid_input_retains_pose":true,"candidate_frame_history_files_unchanged":true,"clear_restores_applied":true})).unwrap()).unwrap();
+}
