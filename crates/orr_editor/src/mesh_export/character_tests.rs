@@ -8,17 +8,20 @@ fn character_capability_requires_a_dedicated_bounded_marker_section() {
     assert!(super::super::validate_runtime_with_character(&test_runtime(), true).is_err());
 
     let mut shifted = capable.clone();
-    shifted[0x600..0x600 + b"ORR_MESH_CHARACTER_V1".len()].fill(0);
+    let payload = super::section_payload(&shifted, b".orrchar");
+    shifted[payload..payload + b"ORR_MESH_CHARACTER_V1".len()].fill(0);
     shifted[0x100..0x100 + b"ORR_MESH_CHARACTER_V1".len()]
         .copy_from_slice(b"ORR_MESH_CHARACTER_V1");
     assert!(super::super::validate_runtime_with_character(&shifted, true).is_err());
 
     let mut wrong_section = capable.clone();
-    wrong_section[0x288..0x290].copy_from_slice(b".orrlit\0");
+    let header = super::section_header(&wrong_section, b".orrchar");
+    wrong_section[header..header + 8].copy_from_slice(b".orrlit\0");
     assert!(super::super::validate_runtime_with_character(&wrong_section, true).is_err());
 
     let mut corrupt = capable;
-    corrupt[0x600] ^= 1;
+    let payload = super::section_payload(&corrupt, b".orrchar");
+    corrupt[payload] ^= 1;
     assert!(super::super::validate_runtime_with_character(&corrupt, true).is_err());
 }
 
@@ -82,7 +85,8 @@ fn follow_camera_and_explicit_idle_clip_require_character_runtime_for_export_and
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     let mut corrupted_runtime = capable_runtime.clone();
-    corrupted_runtime[0x600] ^= 1;
+    let payload = super::section_payload(&corrupted_runtime, b".orrchar");
+    corrupted_runtime[payload] ^= 1;
     fs::write(&receipt.runtime, &corrupted_runtime).unwrap();
     assert!(open_bundle(&destination).is_err());
 

@@ -42,6 +42,7 @@ const INPUT_RUNTIME_MARKER: &[u8] = b"ORR_MESH_INPUT_V1";
 const FACING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_FACING_V1";
 const CHARACTER_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CHARACTER_V1";
 const HUD_RUNTIME_MARKER: &[u8] = b"ORR_MESH_HUD_V1";
+const MISSION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MISSION_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
@@ -54,11 +55,18 @@ const INPUT_RUNTIME_SECTION: &[u8; 8] = b".orrctrl";
 const FACING_RUNTIME_SECTION: &[u8; 8] = b".orrface";
 const CHARACTER_RUNTIME_SECTION: &[u8; 8] = b".orrchar";
 const HUD_RUNTIME_SECTION: &[u8; 8] = b".orrhud\0";
+const MISSION_RUNTIME_SECTION: &[u8; 8] = b".orrmis\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum InputProfile {
     MeshClickToMoveV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum GameProfile {
+    MeshMissionV1,
 }
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
@@ -114,6 +122,8 @@ struct BundleManifest {
     graph_revision: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input_profile: Option<InputProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    game_profile: Option<GameProfile>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,6 +166,7 @@ fn export_with_profile(
     runtime: &Path,
     input_profile: Option<InputProfile>,
 ) -> Result<Receipt, String> {
+    let game_profile = compiled_game_profile();
     let scene_path = checked_scene_path(scene)?;
     let scene_bytes = read_bounded(&scene_path, MAX_SCENE_BYTES, "mesh scene")?;
     let (checksum, graph_revision) = admit_scene_bytes(&scene_bytes)?;
@@ -363,6 +374,7 @@ fn export_with_profile(
         || optional_facing_present(animation_bytes.as_deref(), false)?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
     validate_runtime_profile(&runtime_bytes, input_profile)?;
+    validate_runtime_game_profile(&runtime_bytes, game_profile)?;
     let runtime_hash = digest(&runtime_bytes);
     let scene_name = scene_path
         .file_name()
@@ -452,6 +464,7 @@ fn export_with_profile(
         checksum,
         graph_revision,
         input_profile,
+        game_profile,
     };
     let manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|error| format!("serialize mesh bundle manifest: {error}"))?;
@@ -565,6 +578,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let manifest_bytes = read_bounded(&manifest_path, MAX_MANIFEST_BYTES, "bundle manifest")?;
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("invalid mesh bundle manifest: {error}"))?;
+    validate_game_profile(manifest.game_profile)?;
     if manifest.schema != 1 {
         return Err("unsupported mesh bundle manifest schema".into());
     }
@@ -866,6 +880,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     )?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
     validate_runtime_profile(&runtime_bytes, manifest.input_profile)?;
+    validate_runtime_game_profile(&runtime_bytes, manifest.game_profile)?;
     let sidecar_unchanged = match &manifest.sidecar {
         Some(record) => {
             let bytes = read_bounded(
@@ -1785,6 +1800,38 @@ fn validate_runtime_profile(
         return Err(
             "mesh player runtime does not advertise mesh click-to-move input support".into(),
         );
+    }
+    Ok(())
+}
+
+fn compiled_game_profile() -> Option<GameProfile> {
+    #[cfg(feature = "mesh-mission")]
+    {
+        Some(GameProfile::MeshMissionV1)
+    }
+    #[cfg(not(feature = "mesh-mission"))]
+    {
+        None
+    }
+}
+
+fn validate_game_profile(profile: Option<GameProfile>) -> Result<(), String> {
+    if profile != compiled_game_profile() {
+        #[cfg(feature = "mesh-mission")]
+        return Err("mesh bundle is missing the mesh-mission-v1 game profile".into());
+        #[cfg(not(feature = "mesh-mission"))]
+        return Err("mesh-mission bundle requires rebuilding with mesh-mission support".into());
+    }
+    Ok(())
+}
+
+fn validate_runtime_game_profile(bytes: &[u8], profile: Option<GameProfile>) -> Result<(), String> {
+    validate_game_profile(profile)?;
+    if profile == Some(GameProfile::MeshMissionV1)
+        && validate_runtime_section(bytes, MISSION_RUNTIME_SECTION, MISSION_RUNTIME_MARKER)?
+            .is_none()
+    {
+        return Err("mesh player runtime does not advertise MeshMission support".into());
     }
     Ok(())
 }

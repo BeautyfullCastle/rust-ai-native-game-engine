@@ -10,7 +10,11 @@ use orr_sim::{Game, PlayerSlot, SimContext, System};
 
 use crate::yard3d_game::{NoCommand, NoEvent, YardInput};
 
+#[cfg(feature = "mesh-mission")]
+pub mod mission;
+
 pub const PIN_NAME: &str = "MeshScenePin";
+pub const MESH_MISSION_ENABLED: bool = cfg!(feature = "mesh-mission");
 pub const MAX_EMBEDDED_GRAPH_BYTES: usize = 8_192;
 pub const MESH_SET_GOAL: u32 = 1 << 31;
 const MAX_TARGET_COORDINATE_RAW: i64 = 256 * FP::SCALE;
@@ -128,6 +132,8 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     orr_physics3d::register_reflect(types);
     types.register_singleton::<MeshScenePin>(PIN_NAME);
     types.register_singleton::<MeshStepStatus>("MeshStepStatus");
+    #[cfg(feature = "mesh-mission")]
+    mission::register_reflect(types);
 }
 
 impl Game for MeshNavigation {
@@ -141,12 +147,21 @@ impl Game for MeshNavigation {
         MeshRuntime::register(builder);
         builder.register_singleton::<MeshScenePin>(PIN_NAME);
         builder.register_singleton::<MeshStepStatus>("MeshStepStatus");
+        #[cfg(feature = "mesh-mission")]
+        mission::register(builder);
     }
 
     fn setup(_: &mut Frame, _: &()) {}
 
     fn systems() -> Vec<Box<dyn System<Self>>> {
-        vec![Box::new(MeshStep)]
+        #[cfg(feature = "mesh-mission")]
+        {
+            vec![Box::new(MeshStep), Box::new(mission::MissionStep)]
+        }
+        #[cfg(not(feature = "mesh-mission"))]
+        {
+            vec![Box::new(MeshStep)]
+        }
     }
 }
 
@@ -168,7 +183,10 @@ pub fn validate_scene_frame(frame: &Frame) -> Result<(), String> {
             status.message()
         ));
     }
-    validate_runtime(frame, *frame.singleton::<MeshScenePin>())
+    validate_runtime(frame, *frame.singleton::<MeshScenePin>())?;
+    #[cfg(feature = "mesh-mission")]
+    mission::validate_frame(frame, *frame.singleton::<MeshScenePin>())?;
+    Ok(())
 }
 
 struct MeshStep;
@@ -276,6 +294,16 @@ fn ensure_scene_schema(frame: &Frame) -> Result<(), String> {
             .is_none()
     {
         return Err("MeshNavigation frame registry is missing required types".into());
+    }
+    #[cfg(feature = "mesh-mission")]
+    if registry
+        .singleton_id::<mission::MeshMission>()
+        .is_none()
+        || registry
+            .singleton_id::<mission::MeshMissionRun>()
+            .is_none()
+    {
+        return Err("MeshNavigation frame registry is missing mission singletons".into());
     }
     Ok(())
 }

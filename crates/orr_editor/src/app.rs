@@ -233,6 +233,8 @@ pub struct EditorApp {
     mesh_lighting: crate::mesh_lighting_panel::Panel,
     #[cfg(feature="mesh-navigation")]
     mesh_hud: crate::mesh_hud_panel::Panel,
+    #[cfg(feature="mesh-mission")]
+    mesh_mission: crate::mesh_mission_panel::Panel,
     #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))]
     mesh_copy: crate::mesh_workspace::copy_panel::Panel,
     #[cfg(feature = "mesh-animated-models")]
@@ -273,7 +275,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -392,11 +394,36 @@ impl EditorApp {
     }
 
     #[cfg(feature="mesh-navigation")]
+    fn mesh_mission_dirty(&self) -> bool {
+        #[cfg(feature="mesh-mission")]
+        { self.mesh_mission.dirty() || self.mesh_mission.mission_pick_busy() }
+        #[cfg(not(feature="mesh-mission"))]
+        { false }
+    }
+
+    #[cfg(feature="mesh-navigation")]
+    fn mesh_mission_pick_busy(&self) -> bool {
+        #[cfg(feature="mesh-mission")]
+        { self.mesh_mission.mission_pick_busy() }
+        #[cfg(not(feature="mesh-mission"))]
+        { false }
+    }
+
+    #[cfg(feature="mesh-navigation")]
+    fn mesh_mission_blocker(&self) -> Option<String> {
+        #[cfg(feature="mesh-mission")]
+        { self.mesh_mission.play_blocker(&self.editor) }
+        #[cfg(not(feature="mesh-mission"))]
+        { None }
+    }
+
+    #[cfg(feature="mesh-navigation")]
     fn mesh_presentation_blocker(&self) -> Option<String> {
         self.mesh_navigation.play_blocker(&self.editor)
             .or_else(|| self.mesh_camera.play_blocker(&self.editor))
             .or_else(|| self.mesh_lighting.play_blocker(&self.editor))
             .or_else(|| self.mesh_hud.play_blocker(&self.editor))
+            .or_else(|| self.mesh_mission_blocker())
             .or_else(|| self.mesh_animation_blocker())
     }
 
@@ -405,9 +432,11 @@ impl EditorApp {
         self.mesh_camera.sync(&mut self.editor);
         self.mesh_lighting.sync(&self.editor);
         self.mesh_hud.sync(&self.editor);
+        #[cfg(feature="mesh-mission")]
+        self.mesh_mission.sync(&self.editor);
         #[cfg(feature="mesh-animated-models")]
         self.mesh_animation.sync(&self.editor);
-        let geometry_pending = self.mesh_camera.dirty() || self.mesh_lighting.dirty() || self.mesh_hud.dirty() || self.mesh_animation_dirty();
+        let geometry_pending = self.mesh_camera.dirty() || self.mesh_lighting.dirty() || self.mesh_hud.dirty() || self.mesh_mission_dirty() || self.mesh_animation_dirty();
         self.mesh_navigation.set_geometry_presentation_pending(geometry_pending);
         self.mesh_navigation.sync(&self.editor);
         let blocker = self.mesh_presentation_blocker();
@@ -416,7 +445,7 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_authoring_blocker(&self) -> Option<String> {
-        if self.mesh_navigation.agent_pick_busy() {
+        if self.mesh_navigation.agent_pick_busy() || self.mesh_mission_pick_busy() {
             return Some("Finish or cancel viewport endpoint picking before changing workspaces or exporting".into());
         }
         if self.mesh_navigation.prop_gesture_busy() {
@@ -431,8 +460,8 @@ impl EditorApp {
             || self.editor.in_gesture() || self.editor.erp_status().is_some() {
             return Some("Mesh workspace changes require an idle local Physics or MeshNavigation editor without an ERP listener".into());
         }
-        if self.editor.is_dirty() || self.mesh_navigation.has_unplaced_draft() || self.mesh_camera.dirty() || self.mesh_lighting.dirty() || self.mesh_hud.dirty() || self.mesh_animation_dirty() {
-            return Some("Save or explicitly undo/discard scene, unplaced mesh, camera, lighting, HUD, animation, agent art and prop changes before changing mesh workspaces".into());
+        if self.editor.is_dirty() || self.mesh_navigation.has_unplaced_draft() || self.mesh_camera.dirty() || self.mesh_lighting.dirty() || self.mesh_hud.dirty() || self.mesh_mission_dirty() || self.mesh_animation_dirty() {
+            return Some("Save or explicitly undo/discard scene, unplaced mesh, mission, camera, lighting, HUD, animation, agent art and prop changes before changing mesh workspaces".into());
         }
         if self.package_work_pending() || self.shot.is_some() || self.remote_capture.is_some()
             || self.encoder.is_some() || self.ui.dialog.is_some() {
@@ -512,8 +541,8 @@ impl EditorApp {
             return Some("Finish the content package operation before changing projects".into());
         }
         #[cfg(feature="mesh-navigation")]
-        if self.mesh_navigation.art_dirty() || self.mesh_camera.dirty() || self.mesh_lighting.dirty() || self.mesh_hud.dirty() || self.mesh_animation_dirty() {
-            return Some("Save or explicitly discard camera, lighting, HUD, animation, agent art and prop changes before changing projects".into());
+        if self.mesh_navigation.art_dirty() || self.mesh_camera.dirty() || self.mesh_lighting.dirty() || self.mesh_hud.dirty() || self.mesh_mission_dirty() || self.mesh_animation_dirty() {
+            return Some("Save or explicitly discard mission, camera, lighting, HUD, animation, agent art and prop changes before changing projects".into());
         }
         if (!self.editor.game().is_room() && self.editor.game() != crate::game::EditorGame::PhysGame) || !self.editor.spec().is_local()
             || self.editor.mode() != Mode::Edit || !self.editor.can_mutate()
@@ -690,9 +719,11 @@ impl eframe::App for EditorApp {
             let cancelling_gesture = self.editor.in_gesture();
             #[cfg(feature="mesh-navigation")]
             let cancelling_gesture = {
-                let moving = self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy();
+                let moving = self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy();
                 self.mesh_navigation.cancel_prop_gesture();
                 self.mesh_navigation.cancel_agent_pick();
+                #[cfg(feature="mesh-mission")]
+                self.mesh_mission.cancel_mission_pick();
                 if self.mesh_navigation.geometry_vertex_busy() { self.mesh_navigation.cancel_geometry_vertex(); }
                 cancelling_gesture || moving
             };
@@ -867,7 +898,7 @@ impl EditorApp {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         #[cfg(feature="mesh-navigation")]
-        if self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() { return; }
+        if self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() { return; }
         if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
@@ -904,7 +935,7 @@ impl EditorApp {
     fn top_bar(&mut self, ui: &mut Ui) {
         let mutable = self.editor.can_mutate() && self.editor.previewing().is_none();
         #[cfg(feature="mesh-navigation")]
-        let mutable = mutable && !self.mesh_navigation.prop_gesture_busy() && !self.mesh_navigation.agent_pick_busy() && !self.mesh_navigation.geometry_vertex_busy();
+        let mutable = mutable && !self.mesh_navigation.prop_gesture_busy() && !self.mesh_navigation.agent_pick_busy() && !self.mesh_navigation.geometry_vertex_busy() && !self.mesh_mission_pick_busy();
         let live = self.editor.down().is_none();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -1163,6 +1194,8 @@ impl EditorApp {
                 self.mesh_camera.show(ui, &mut self.editor);
                 ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_lighting.show(ui, &self.editor));
                 ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_hud.show(ui, &self.editor));
+                #[cfg(feature="mesh-mission")]
+                ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_mission.show(ui, &mut self.editor));
                 #[cfg(feature="mesh-animated-models")]
                 self.mesh_animation.show(ui, &self.editor);
                 #[cfg(not(feature="mesh-animated-models"))]
@@ -1407,6 +1440,32 @@ impl EditorApp {
         };
         let mut frame_drawn = false;
         #[cfg(feature = "mesh-navigation")]
+        let mission_pointer_consumed = {
+            let active = self.mesh_mission_pick_busy();
+            #[cfg(feature="mesh-mission")]
+            let consumed = {
+                if active {
+                    self.mesh_navigation.cancel_agent_pick();
+                    self.mesh_navigation.cancel_prop_gesture();
+                    if self.mesh_navigation.geometry_vertex_busy() { self.mesh_navigation.cancel_geometry_vertex(); }
+                }
+                let to_pixel = |position: Pos2| [(position.x - rect.min.x) * ppp, (position.y - rect.min.y) * ppp];
+                let content_busy = self.mesh_navigation.art_import_busy();
+                #[cfg(feature="mesh-export")]
+                let content_busy = content_busy || self.mesh_export.busy();
+                self.mesh_mission.mission_viewport_input(&self.editor, &camera, px, crate::mesh_mission_panel::ViewInput {
+                    pixel: resp.interact_pointer_pos().or_else(|| resp.hover_pos()).map(to_pixel),
+                    clicked: resp.clicked_by(PointerButton::Primary),
+                    cancel: ui.input(|input| !input.focused || input.key_pressed(Key::Escape)) || self.ui.dialog.is_some() || content_busy || self.mesh_navigation.has_unplaced_draft(),
+                })
+            };
+            #[cfg(not(feature="mesh-mission"))]
+            let consumed = active;
+            consumed
+        };
+        #[cfg(not(feature="mesh-navigation"))]
+        let mission_pointer_consumed = false;
+        #[cfg(feature="mesh-navigation")]
         let mesh_play_pointer_consumed = {
             let blocked = self.ui.dialog.is_some() || self.editor.previewing().is_some()
                 || ui.input(|input| !input.focused || input.key_pressed(Key::Escape));
@@ -1435,8 +1494,8 @@ impl EditorApp {
                 started: resp.drag_started_by(PointerButton::Primary),
                 dragging: resp.dragged_by(PointerButton::Primary),
                 released: (resp.drag_stopped() || moving) && !pointer_down,
-                clicked: resp.clicked_by(PointerButton::Primary),
-                cancel: ui.input(|input| !input.focused || input.key_pressed(Key::Escape)) || self.ui.dialog.is_some() || content_busy,
+                clicked: !mission_pointer_consumed && resp.clicked_by(PointerButton::Primary),
+                cancel: mission_pointer_consumed || ui.input(|input| !input.focused || input.key_pressed(Key::Escape)) || self.ui.dialog.is_some() || content_busy,
             })
         };
         #[cfg(feature="mesh-navigation")]
@@ -1448,7 +1507,7 @@ impl EditorApp {
             self.mesh_navigation.agent_viewport_input(&self.editor, &camera, px, crate::mesh_navigation::AgentViewInput {
                 pixel: resp.interact_pointer_pos().or_else(|| resp.hover_pos()).map(to_pixel),
                 clicked: !vertex_pointer_consumed && resp.clicked_by(PointerButton::Primary),
-                cancel: vertex_pointer_consumed || ui.input(|input| !input.focused || input.key_pressed(Key::Escape)) || self.ui.dialog.is_some() || content_busy,
+                cancel: mission_pointer_consumed || vertex_pointer_consumed || ui.input(|input| !input.focused || input.key_pressed(Key::Escape)) || self.ui.dialog.is_some() || content_busy,
             })
         };
         #[cfg(not(feature="mesh-navigation"))]
@@ -1461,7 +1520,7 @@ impl EditorApp {
             let content_busy = self.mesh_navigation.art_import_busy();
             #[cfg(feature="mesh-export")]
             let content_busy = content_busy || self.mesh_export.busy();
-            !vertex_pointer_consumed && !agent_pointer_consumed && self.mesh_navigation.prop_viewport(&self.editor, &camera, px, crate::mesh_props_panel::ViewInput {
+            !mission_pointer_consumed && !vertex_pointer_consumed && !agent_pointer_consumed && self.mesh_navigation.prop_viewport(&self.editor, &camera, px, crate::mesh_props_panel::ViewInput {
                 pixel: resp.interact_pointer_pos().or_else(|| resp.hover_pos()).map(to_pixel),
                 press_pixel: ui.input(|input| input.pointer.press_origin()).map(to_pixel),
                 started: resp.drag_started_by(PointerButton::Primary),
@@ -1600,7 +1659,7 @@ impl EditorApp {
             ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
         }
-        if !mesh_play_pointer_consumed && !agent_pointer_consumed && !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
+        if !mission_pointer_consumed && !mesh_play_pointer_consumed && !agent_pointer_consumed && !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
             if let Some(at) = resp.interact_pointer_pos() {
                 let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
                 #[cfg(feature="terrain")]
@@ -1612,6 +1671,14 @@ impl EditorApp {
         }
         #[cfg(feature="terrain")]
         if frame_drawn || !self.editor.has_room_camera() { self.terrain.paint_selection(&self.editor, ui.painter(), &camera, rect); }
+        #[cfg(feature="mesh-mission")]
+        if self.editor.game().is_mesh_navigation() && frame_drawn && !self.mesh_navigation.geometry_preview_active() {
+            if let Some(snapshot) = self.editor.snapshot() {
+                if let Ok(Some(mission)) = orr_remote::mesh_navigation::mission::from_view(snapshot.predicted()) {
+                    crate::mesh_mission_overlay::draw(ui, rect, &mission);
+                }
+            }
+        }
         let viewport_hint = if self.editor.game().is_mesh_navigation() { "Static mesh · point agent · right-drag orbit · middle-drag pan" } else { "Yard3D · collider-proxy picking · right-drag orbit · middle-drag pan" };
         #[cfg(feature="mesh-navigation")]
         let mesh_hud_visible = if self.editor.game().is_mesh_navigation() && frame_drawn && !self.mesh_navigation.geometry_preview_active() {
@@ -1919,14 +1986,14 @@ impl EditorApp {
         if accept && !dialog.text.trim().is_empty() {
             let path = PathBuf::from(dialog.text.trim());
             #[cfg(feature="mesh-navigation")]
-            if self.mesh_navigation.art_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() {
+            if self.mesh_navigation.art_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_mission_pick_busy() {
                 self.editor.error("Finish content imports, viewport moves or endpoint picking before changing the scene path");
                 self.ui.dialog = Some(dialog);
                 return;
             }
             #[cfg(feature="mesh-navigation")]
-            if dialog.kind != DialogKind::SaveAs && (self.mesh_navigation.has_unplaced_draft() || self.mesh_camera.dirty() || self.mesh_lighting.dirty() || self.mesh_hud.dirty() || self.mesh_animation_dirty()) {
-                self.editor.error("Apply, save or explicitly discard mesh drafts, camera, lighting, HUD, animation, agent art and prop changes before changing scenes");
+            if dialog.kind != DialogKind::SaveAs && (self.mesh_navigation.has_unplaced_draft() || self.mesh_camera.dirty() || self.mesh_lighting.dirty() || self.mesh_hud.dirty() || self.mesh_mission_dirty() || self.mesh_animation_dirty()) {
+                self.editor.error("Apply, save or explicitly discard mesh drafts, mission, camera, lighting, HUD, animation, agent art and prop changes before changing scenes");
                 self.ui.dialog = Some(dialog);
                 return;
             }

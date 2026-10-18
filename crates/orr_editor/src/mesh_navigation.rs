@@ -28,6 +28,9 @@ mod geometry_history;
 mod geometry_vertex_view;
 #[path = "mesh_navigation/geometry_vertex_viewport.rs"]
 mod geometry_vertex_viewport;
+#[cfg(feature = "mesh-mission")]
+#[path = "mesh_navigation/mission_view.rs"]
+mod mission_view;
 pub(crate) use geometry_vertex_viewport::ViewInput as GeometryVertexViewInput;
 pub(crate) use agent_viewport::ViewInput as AgentViewInput;
 
@@ -80,6 +83,8 @@ pub struct Panel {
     geometry_preview: Option<Arc<StaticModel>>,
     geometry_preview_visible: bool,
     geometry_vertex: geometry_vertex_viewport::State,
+    #[cfg(feature = "mesh-mission")]
+    mission_bound: bool,
 }
 
 impl Default for Panel {
@@ -119,6 +124,8 @@ impl Default for Panel {
             geometry_preview: None,
             geometry_preview_visible: false,
             geometry_vertex: geometry_vertex_viewport::State::default(),
+            #[cfg(feature = "mesh-mission")]
+            mission_bound: false,
         }
     }
 }
@@ -148,6 +155,12 @@ impl Panel {
             return;
         };
         let frame = snapshot.predicted();
+        #[cfg(feature = "mesh-mission")]
+        {
+            self.mission_bound = !frame
+                .singleton::<orr_remote::mesh_navigation::mission::MeshMission>()
+                .disabled();
+        }
         let frame_identity = (frame.tick(), frame.checksum());
         let new_document = self.loaded_scene_epoch != Some(scene_epoch);
         let scene_path_changed = self.loaded_scene != scene;
@@ -223,8 +236,12 @@ impl Panel {
                         self.error = None;
                     }
                 }
-                self.view_model =
-                    build_view_model(&view.graph, &view.agent.path, view.agent.position)
+                #[cfg(feature = "mesh-mission")]
+                let model = orr_remote::mesh_navigation::mission::from_view(frame)
+                    .and_then(|mission| mission_view::build(&view, mission.as_ref()));
+                #[cfg(not(feature = "mesh-mission"))]
+                let model = build_view_model(&view.graph, &view.agent.path, view.agent.position);
+                self.view_model = model
                         .map(Arc::new)
                         .map_err(|error| self.error = Some(error))
                         .ok();
@@ -504,6 +521,14 @@ impl Panel {
             }
             validate_route(graph, spec)?;
             validate_display_bounds(graph, &spec)?;
+            #[cfg(feature = "mesh-mission")]
+            if let Some(snapshot) = editor.snapshot() {
+                if let Some(mission) = orr_remote::mesh_navigation::mission::from_view(snapshot.predicted())? {
+                    if mission.config.graph_revision != graph.revision() {
+                        return Err("Remove the mesh mission before replacing its graph; mission points are not silently rebound".into());
+                    }
+                }
+            }
             let pin = MeshScenePin::new(graph, spec)?;
             editor.host_call("world.singleton.patch", pin_patch(&pin))?;
             editor.mesh_navigation_mark_edited();
@@ -767,6 +792,12 @@ impl Panel {
         if self.geometry_presentation_pending {
             return Err("Save or discard camera, lighting and animation edits before geometry; save or discard HUD changes too".into());
         }
+        #[cfg(feature = "mesh-mission")]
+        if let Some(snapshot) = editor.snapshot() {
+            if orr_remote::mesh_navigation::mission::from_view(snapshot.predicted())?.is_some() {
+                return Err("Remove the mesh mission before changing its graph; mission points are not silently rebound".into());
+            }
+        }
         if self.geometry_host_context.is_some() {
             let snapshot = editor.snapshot().ok_or("Wait for the staged geometry host Frame")?;
             let frame = snapshot.predicted();
@@ -857,6 +888,10 @@ impl Panel {
     }
 
     fn geometry_replacement_blocker(&self) -> Result<(), String> {
+        #[cfg(feature = "mesh-mission")]
+        if self.mission_bound {
+            return Err("Remove the mesh mission before replacing its graph; mission points are not silently rebound".into());
+        }
         if self.geometry_vertex_busy() { return Err("Finish or cancel viewport vertex editing before replacing the mesh source".into()); }
         if self.geometry_staged || self.geometry.dirty() {
             return Err("Discard unplaced geometry changes before creating or opening another mesh source".into());

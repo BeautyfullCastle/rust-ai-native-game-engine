@@ -161,6 +161,10 @@ mod mesh_hud;
 mod mesh_hud_store;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_hud_panel;
+#[cfg(feature = "mesh-mission")]
+mod mesh_mission_panel;
+#[cfg(feature = "mesh-mission")]
+mod mesh_mission_overlay;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_animation_store;
 #[cfg(feature = "mesh-animated-models")]

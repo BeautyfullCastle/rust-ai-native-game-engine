@@ -16,6 +16,7 @@ linked-prefabs = ["orr_edit/linked-prefabs", "orr_reflect/linked-prefabs", "orr_
 collect-dodge = ["sample-host", "orr_sample/collect-dodge"]
 navigation = ["sample-host", "dep:orr_games", "orr_games/navigation", "dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
 mesh-navigation = ["sample-host", "dep:orr_games", "orr_games/mesh-navigation", "dep:orr_navigation_runtime", "dep:orr_navigation"]
+mesh-mission = ["mesh-navigation", "orr_games/mesh-mission"]
 terrain-physics = ["sample-host", "dep:orr_games", "orr_games/terrain-physics", "dep:orr_terrain_physics3d", "dep:orr_terrain"]
 default = ["sample-host"]
 # The headless host binary `orr_remote_host` (PhysGame from `orr_sample`).

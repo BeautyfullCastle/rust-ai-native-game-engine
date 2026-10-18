@@ -3,18 +3,7 @@ use crate::{mesh_hud::Document, mesh_hud_store};
 use std::fs;
 
 fn runtime_with_hud() -> Vec<u8> {
-    let mut bytes = test_runtime();
-    bytes.resize(0x240, 0);
-    bytes[0x180..].fill(0);
-    bytes[0x15c..0x160].copy_from_slice(&0x1c0u32.to_le_bytes());
-    bytes[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
-    bytes[0x170..0x178].copy_from_slice(b".orrhud\0");
-    bytes[0x180..0x184].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x184..0x188].copy_from_slice(&0x200u32.to_le_bytes());
-    bytes[0x194..0x198].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x1c0..0x1c0 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
-    bytes[0x200..0x200 + b"ORR_MESH_HUD_V1".len()].copy_from_slice(b"ORR_MESH_HUD_V1");
-    bytes
+    super::append_runtime_section(test_runtime(), *b".orrhud\0", b"ORR_MESH_HUD_V1")
 }
 
 fn validate_hud_marker(bytes: &[u8]) -> Result<(), String> {
@@ -114,8 +103,10 @@ fn hud_marker_must_be_at_the_start_of_its_dedicated_section() {
     validate_hud_marker(&runtime_with_hud()).unwrap();
     assert!(validate_hud_marker(&test_runtime()).is_err());
     let mut misplaced = runtime_with_hud();
-    misplaced[0x200..0x200 + b"ORR_MESH_HUD_V1".len()].fill(0);
-    misplaced[0x210..0x210 + b"ORR_MESH_HUD_V1".len()].copy_from_slice(b"ORR_MESH_HUD_V1");
+    let payload = super::section_payload(&misplaced, b".orrhud\0");
+    misplaced[payload..payload + b"ORR_MESH_HUD_V1".len()].fill(0);
+    misplaced[payload + 16..payload + 16 + b"ORR_MESH_HUD_V1".len()]
+        .copy_from_slice(b"ORR_MESH_HUD_V1");
     assert!(validate_hud_marker(&misplaced).is_err());
     let mut unsectioned = test_runtime();
     unsectioned[0x100..0x100 + b"ORR_MESH_HUD_V1".len()].copy_from_slice(b"ORR_MESH_HUD_V1");

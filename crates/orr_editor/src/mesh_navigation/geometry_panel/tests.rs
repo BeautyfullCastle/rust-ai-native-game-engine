@@ -66,6 +66,84 @@ fn appended_quad() -> super::Action {
     })
 }
 
+#[cfg(feature = "mesh-mission")]
+#[test]
+fn graph_bound_mission_blocks_geometry_without_mutating_scene_or_history() {
+    use orr_remote::mesh_navigation::{mesh_from_view, mission};
+
+    let scene = TestScene::create();
+    let (mut editor, mut navigation) = placed_editor(&scene);
+    let view = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+    let mut config = mission::MeshMission {
+        enabled: 1,
+        count: 1,
+        graph_revision: view.graph.revision(),
+        ..mission::MeshMission::default()
+    };
+    config.points[0] = mission::MissionPoint {
+        position: view.agent.spec.start,
+        radius: fp!(0.5),
+    };
+    config.exit = mission::MissionPoint {
+        position: view.agent.spec.goal,
+        radius: fp!(0.5),
+    };
+    editor
+        .host_call("world.singleton.patch", mission::patch_request(&config, &view).unwrap())
+        .unwrap();
+    editor.sync();
+    navigation.sync(&editor);
+    assert!(mission::from_view(editor.snapshot().unwrap().predicted())
+        .unwrap()
+        .is_some());
+    let checksum = editor.checksum();
+    let history_len = editor.history().entries.len();
+    let revision = navigation.graph.as_ref().unwrap().revision();
+    let error = navigation
+        .stage_geometry(appended_quad(), &editor)
+        .unwrap_err();
+    assert!(error.contains("Remove the mesh mission"));
+    assert_eq!(editor.checksum(), checksum);
+    assert_eq!(editor.history().entries.len(), history_len);
+    assert_eq!(navigation.graph.as_ref().unwrap().revision(), revision);
+    assert!(!navigation.geometry_staged);
+    for replacement in [
+        navigation.create_ramp_and_bridge(),
+        navigation.open_mesh_asset(),
+        navigation.open_model(),
+    ] {
+        assert!(replacement.unwrap_err().contains("Remove the mesh mission"));
+        assert_eq!(editor.checksum(), checksum);
+        assert_eq!(editor.history().entries.len(), history_len);
+        assert_eq!(navigation.graph.as_ref().unwrap().revision(), revision);
+    }
+    let super::Action::AppendQuad(quad) = appended_quad() else {
+        panic!("fixture must append a quad");
+    };
+    navigation.graph = Some(
+        crate::mesh_navigation::geometry::append_quad(
+            navigation.graph.as_ref(),
+            navigation.geometry_profile().unwrap(),
+            quad,
+        )
+        .unwrap(),
+    );
+    navigation.draft_dirty = true;
+    navigation.mission_bound = false;
+    assert!(!navigation.geometry_staged);
+    assert!(navigation
+        .place_agent(&mut editor)
+        .unwrap_err()
+        .contains("Remove the mesh mission"));
+    assert_eq!(editor.checksum(), checksum);
+    assert_eq!(editor.history().entries.len(), history_len);
+    editor.undo();
+    editor.sync();
+    navigation.sync(&editor);
+    assert!(!navigation.mission_bound);
+    assert!(navigation.create_ramp_and_bridge().is_ok());
+}
+
 #[test]
 fn presentation_sidecars_block_geometry_staging_without_mutating_the_host() {
     let scene = TestScene::create();

@@ -25,6 +25,9 @@ mod character_tests;
 #[path = "hud_tests.rs"]
 mod hud_tests;
 
+#[path = "mission_tests.rs"]
+mod mission_tests;
+
 fn admitted_scene() -> (String, [u8; 32], u64) {
     let graph = StaticMeshGraph::bake(
         &[
@@ -49,6 +52,10 @@ fn admitted_scene() -> (String, [u8; 32], u64) {
 }
 
 fn test_runtime() -> Vec<u8> {
+    runtime_with_mission_marker(legacy_test_runtime())
+}
+
+fn legacy_test_runtime() -> Vec<u8> {
     let mut bytes = vec![0; 512];
     bytes[..2].copy_from_slice(b"MZ");
     bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
@@ -66,34 +73,118 @@ fn test_runtime() -> Vec<u8> {
     bytes
 }
 
+fn runtime_with_mission_marker(bytes: Vec<u8>) -> Vec<u8> {
+    #[cfg(not(feature = "mesh-mission"))]
+    {
+        bytes
+    }
+    #[cfg(feature = "mesh-mission")]
+    {
+        let mut sections = read_test_runtime_sections(&bytes);
+        if sections.iter().any(|(name, _)| name == b".orrmis\0") {
+            return bytes;
+        }
+        sections.push((*b".orrmis\0", marker_payload(b"ORR_MESH_MISSION_V1")));
+        build_test_runtime_sections(&bytes, sections)
+    }
+}
+
 fn test_runtime_with_input() -> Vec<u8> {
-    let mut bytes = test_runtime();
-    bytes.resize(0x240, 0);
-    bytes[0x180..].fill(0);
-    bytes[0x15c..0x160].copy_from_slice(&0x1c0u32.to_le_bytes());
-    bytes[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
-    bytes[0x170..0x178].copy_from_slice(b".orrctrl");
-    bytes[0x180..0x184].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x184..0x188].copy_from_slice(&0x200u32.to_le_bytes());
-    bytes[0x194..0x198].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x1c0..0x1c0 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
-    bytes[0x200..0x200 + b"ORR_MESH_INPUT_V1".len()].copy_from_slice(b"ORR_MESH_INPUT_V1");
-    bytes
+    let bytes = test_runtime_with_sections(&[
+        (b".orrmesh", b"ORR_MESH_PLAYER_V1"),
+        (b".orrctrl", b"ORR_MESH_INPUT_V1"),
+    ]);
+    runtime_with_mission_marker(bytes)
 }
 
 fn test_runtime_with_lighting() -> Vec<u8> {
-    let mut bytes = test_runtime();
-    bytes.resize(0x240, 0);
-    bytes[0x180..].fill(0);
-    bytes[0x15c..0x160].copy_from_slice(&0x1c0u32.to_le_bytes());
-    bytes[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
-    bytes[0x170..0x178].copy_from_slice(b".orrlit\0");
-    bytes[0x180..0x184].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x184..0x188].copy_from_slice(&0x200u32.to_le_bytes());
-    bytes[0x194..0x198].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x1c0..0x1c0 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
-    bytes[0x200..0x200 + b"ORR_MESH_LIGHTING_V1".len()].copy_from_slice(b"ORR_MESH_LIGHTING_V1");
+    let bytes = test_runtime_with_sections(&[
+        (b".orrmesh", b"ORR_MESH_PLAYER_V1"),
+        (b".orrlit\0", b"ORR_MESH_LIGHTING_V1"),
+    ]);
+    runtime_with_mission_marker(bytes)
+}
+
+fn marker_payload(marker: &[u8]) -> Vec<u8> {
+    assert!(marker.len() <= 64);
+    let mut payload = vec![0; 64];
+    payload[..marker.len()].copy_from_slice(marker);
+    payload
+}
+
+fn test_runtime_with_sections(sections: &[(&[u8; 8], &[u8])]) -> Vec<u8> {
+    let mut owned_sections = Vec::with_capacity(sections.len());
+    for (name, marker) in sections {
+        owned_sections.push((**name, marker_payload(marker)));
+    }
+    build_test_runtime_sections(&legacy_test_runtime(), owned_sections)
+}
+
+fn read_test_runtime_sections(bytes: &[u8]) -> Vec<([u8; 8], Vec<u8>)> {
+    let pe_offset = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+    let section_count =
+        u16::from_le_bytes(bytes[pe_offset + 6..pe_offset + 8].try_into().unwrap()) as usize;
+    let optional_size =
+        u16::from_le_bytes(bytes[pe_offset + 20..pe_offset + 22].try_into().unwrap()) as usize;
+    let section_table = pe_offset + 24 + optional_size;
+    let mut sections = Vec::with_capacity(section_count);
+    for index in 0..section_count {
+        let header = section_table + index * 40;
+        let name = bytes[header..header + 8].try_into().unwrap();
+        let raw_size =
+            u32::from_le_bytes(bytes[header + 16..header + 20].try_into().unwrap()) as usize;
+        let raw_offset =
+            u32::from_le_bytes(bytes[header + 20..header + 24].try_into().unwrap()) as usize;
+        let raw_end = raw_offset.checked_add(raw_size).unwrap();
+        assert!(raw_end <= bytes.len());
+        sections.push((name, bytes[raw_offset..raw_end].to_vec()));
+    }
+    sections
+}
+
+fn build_test_runtime_sections(template: &[u8], sections: Vec<([u8; 8], Vec<u8>)>) -> Vec<u8> {
+    let pe_offset = u32::from_le_bytes(template[0x3c..0x40].try_into().unwrap()) as usize;
+    let optional_size =
+        u16::from_le_bytes(template[pe_offset + 20..pe_offset + 22].try_into().unwrap()) as usize;
+    let section_table = pe_offset + 24 + optional_size;
+    let table_end = section_table + sections.len() * 40;
+    let payload_start = (table_end.max(0x400) + 0x1ff) & !0x1ff;
+    let mut bytes = vec![0; payload_start + sections.len() * 64];
+    bytes[..section_table].copy_from_slice(&template[..section_table]);
+    bytes[pe_offset + 6..pe_offset + 8]
+        .copy_from_slice(&u16::try_from(sections.len()).unwrap().to_le_bytes());
+    let size_of_headers = u32::try_from(payload_start).unwrap();
+    bytes[pe_offset + 24 + 60..pe_offset + 24 + 64].copy_from_slice(&size_of_headers.to_le_bytes());
+    for (index, (name, payload)) in sections.iter().enumerate() {
+        assert_eq!(payload.len(), 64);
+        let header = section_table + index * 40;
+        let raw_offset = payload_start + index * 64;
+        bytes[header..header + 8].copy_from_slice(name);
+        bytes[header + 16..header + 20].copy_from_slice(&64u32.to_le_bytes());
+        bytes[header + 20..header + 24]
+            .copy_from_slice(&u32::try_from(raw_offset).unwrap().to_le_bytes());
+        bytes[header + 36..header + 40].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+        bytes[raw_offset..raw_offset + 64].copy_from_slice(payload);
+    }
     bytes
+}
+
+fn section_header(bytes: &[u8], name: &[u8; 8]) -> usize {
+    let pe_offset = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+    let section_count =
+        u16::from_le_bytes(bytes[pe_offset + 6..pe_offset + 8].try_into().unwrap()) as usize;
+    let optional_size =
+        u16::from_le_bytes(bytes[pe_offset + 20..pe_offset + 22].try_into().unwrap()) as usize;
+    let section_table = pe_offset + 24 + optional_size;
+    (0..section_count)
+        .map(|index| section_table + index * 40)
+        .find(|header| &bytes[*header..*header + 8] == name)
+        .unwrap()
+}
+
+fn section_payload(bytes: &[u8], name: &[u8; 8]) -> usize {
+    let header = section_header(bytes, name);
+    u32::from_le_bytes(bytes[header + 20..header + 24].try_into().unwrap()) as usize
 }
 
 #[cfg(feature = "mesh-animated-models")]
@@ -108,32 +199,21 @@ fn test_runtime_with_all_presentations() -> Vec<u8> {
         (b".orrsurf", b"ORR_MESH_SURFACE_V1"),
         (b".orrlit\0", b"ORR_MESH_LIGHTING_V1"),
     ];
-    let mut bytes = test_runtime();
-    bytes.resize(0x600, 0);
-    bytes[0x148..].fill(0);
-    bytes[0x46..0x48].copy_from_slice(&(sections.len() as u16).to_le_bytes());
-    for (index, (name, marker)) in sections.iter().enumerate() {
-        let header = 0x148 + index * 40;
-        let payload = 0x400 + index * 64;
-        bytes[header..header + 8].copy_from_slice(*name);
-        bytes[header + 16..header + 20].copy_from_slice(&64u32.to_le_bytes());
-        bytes[header + 20..header + 24].copy_from_slice(&(payload as u32).to_le_bytes());
-        bytes[header + 36..header + 40].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-        bytes[payload..payload + marker.len()].copy_from_slice(marker);
-    }
-    bytes
+    runtime_with_mission_marker(test_runtime_with_sections(&sections))
 }
 
 fn test_runtime_with_character_presentation() -> Vec<u8> {
-    let mut bytes = test_runtime_with_all_presentations();
-    bytes.resize(0x640, 0);
-    bytes[0x46..0x48].copy_from_slice(&9u16.to_le_bytes());
-    bytes[0x288..0x290].copy_from_slice(b".orrchar");
-    bytes[0x298..0x29c].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x29c..0x2a0].copy_from_slice(&0x600u32.to_le_bytes());
-    bytes[0x2a8..0x2ac].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x600..0x600 + b"ORR_MESH_CHARACTER_V1".len()].copy_from_slice(b"ORR_MESH_CHARACTER_V1");
-    bytes
+    append_runtime_section(
+        test_runtime_with_all_presentations(),
+        *b".orrchar",
+        b"ORR_MESH_CHARACTER_V1",
+    )
+}
+
+fn append_runtime_section(bytes: Vec<u8>, name: [u8; 8], marker: &[u8]) -> Vec<u8> {
+    let mut sections = read_test_runtime_sections(&bytes);
+    sections.push((name, marker_payload(marker)));
+    build_test_runtime_sections(&bytes, sections)
 }
 
 #[cfg(feature = "mesh-animated-models")]
@@ -319,8 +399,9 @@ fn lighting_capability_cannot_be_advertised_by_an_unsectioned_or_shifted_marker(
         add_lighting(&scene, revision);
         let bytes = if shifted {
             let mut bytes = test_runtime_with_lighting();
-            bytes[0x200..0x240].fill(0);
-            bytes[0x201..0x201 + b"ORR_MESH_LIGHTING_V1".len()]
+            let payload = section_payload(&bytes, b".orrlit\0");
+            bytes[payload..payload + b"ORR_MESH_LIGHTING_V1".len()].fill(0);
+            bytes[payload + 1..payload + 1 + b"ORR_MESH_LIGHTING_V1".len()]
                 .copy_from_slice(b"ORR_MESH_LIGHTING_V1");
             bytes
         } else {
@@ -337,26 +418,10 @@ fn lighting_capability_cannot_be_advertised_by_an_unsectioned_or_shifted_marker(
 }
 
 fn test_runtime_with_props() -> Vec<u8> {
-    let mut bytes = vec![0; 640];
-    bytes[..2].copy_from_slice(b"MZ");
-    bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
-    bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
-    bytes[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
-    bytes[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
-    bytes[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
-    bytes[0x56..0x58].copy_from_slice(&0x0002u16.to_le_bytes());
-    bytes[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
-    bytes[0x148..0x150].copy_from_slice(b".orrmesh");
-    bytes[0x158..0x15c].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x15c..0x160].copy_from_slice(&0x1c0u32.to_le_bytes());
-    bytes[0x16c..0x170].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x170..0x178].copy_from_slice(b".orrprop");
-    bytes[0x180..0x184].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x184..0x188].copy_from_slice(&0x200u32.to_le_bytes());
-    bytes[0x198..0x19c].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x1c0..0x1c0 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
-    bytes[0x200..0x200 + b"ORR_MESH_PROPS_V1".len()].copy_from_slice(b"ORR_MESH_PROPS_V1");
-    bytes
+    runtime_with_mission_marker(test_runtime_with_sections(&[
+        (b".orrmesh", b"ORR_MESH_PLAYER_V1"),
+        (b".orrprop", b"ORR_MESH_PROPS_V1"),
+    ]))
 }
 
 fn graph_revision(yaml: &str) -> [u8; 32] {
@@ -368,59 +433,35 @@ fn graph_revision(yaml: &str) -> [u8; 32] {
 }
 
 fn test_runtime_with_rotation() -> Vec<u8> {
-    let mut bytes = test_runtime_with_props();
-    bytes.resize(768, 0);
-    bytes[0x46..0x48].copy_from_slice(&3u16.to_le_bytes());
-    bytes[0x15c..0x160].copy_from_slice(&0x200u32.to_le_bytes());
-    bytes[0x184..0x188].copy_from_slice(&0x240u32.to_le_bytes());
-    bytes[0x198..0x1a0].copy_from_slice(b".orrrot\0");
-    bytes[0x1a8..0x1ac].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x1ac..0x1b0].copy_from_slice(&0x280u32.to_le_bytes());
-    bytes[0x1bc..0x1c0].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x1c0..].fill(0);
-    bytes[0x200..0x200 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
-    bytes[0x240..0x240 + b"ORR_MESH_PROPS_V1".len()].copy_from_slice(b"ORR_MESH_PROPS_V1");
-    bytes[0x280..0x280 + b"ORR_MESH_ROTATION_V1".len()].copy_from_slice(b"ORR_MESH_ROTATION_V1");
-    bytes
+    runtime_with_mission_marker(append_runtime_section(
+        test_runtime_with_props(),
+        *b".orrrot\0",
+        b"ORR_MESH_ROTATION_V1",
+    ))
 }
 
 fn test_runtime_with_camera() -> Vec<u8> {
-    let mut bytes = test_runtime_with_rotation();
-    bytes[0x46..0x48].copy_from_slice(&4u16.to_le_bytes());
-    bytes[0x1c0..0x1c8].copy_from_slice(b".orrcam\0");
-    bytes[0x1d0..0x1d4].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x1d4..0x1d8].copy_from_slice(&0x2c0u32.to_le_bytes());
-    bytes[0x1e4..0x1e8].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x2c0..0x2c0 + b"ORR_MESH_CAMERA_V1".len()].copy_from_slice(b"ORR_MESH_CAMERA_V1");
-    bytes
+    runtime_with_mission_marker(append_runtime_section(
+        test_runtime_with_rotation(),
+        *b".orrcam\0",
+        b"ORR_MESH_CAMERA_V1",
+    ))
 }
 
 fn test_runtime_with_material() -> Vec<u8> {
-    let mut bytes = test_runtime_with_camera();
-    bytes.resize(1024, 0);
-    bytes[0x200..0x240].fill(0);
-    bytes[0x46..0x48].copy_from_slice(&5u16.to_le_bytes());
-    bytes[0x15c..0x160].copy_from_slice(&0x340u32.to_le_bytes());
-    bytes[0x1e8..0x1f0].copy_from_slice(b".orrmat\0");
-    bytes[0x1f0..0x1f4].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x1f8..0x1fc].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x1fc..0x200].copy_from_slice(&0x300u32.to_le_bytes());
-    bytes[0x20c..0x210].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x300..0x300 + b"ORR_MESH_MATERIAL_V1".len()].copy_from_slice(b"ORR_MESH_MATERIAL_V1");
-    bytes[0x340..0x340 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
-    bytes
+    runtime_with_mission_marker(append_runtime_section(
+        test_runtime_with_camera(),
+        *b".orrmat\0",
+        b"ORR_MESH_MATERIAL_V1",
+    ))
 }
 
 fn test_runtime_with_surface() -> Vec<u8> {
-    let mut bytes = test_runtime_with_material();
-    bytes.resize(1088, 0);
-    bytes[0x46..0x48].copy_from_slice(&6u16.to_le_bytes());
-    bytes[0x210..0x218].copy_from_slice(b".orrsurf");
-    bytes[0x220..0x224].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x224..0x228].copy_from_slice(&0x380u32.to_le_bytes());
-    bytes[0x234..0x238].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x380..0x380 + b"ORR_MESH_SURFACE_V1".len()].copy_from_slice(b"ORR_MESH_SURFACE_V1");
-    bytes
+    runtime_with_mission_marker(append_runtime_section(
+        test_runtime_with_material(),
+        *b".orrsurf",
+        b"ORR_MESH_SURFACE_V1",
+    ))
 }
 
 fn surface_settings(uv_offset: [f32; 2]) -> crate::mesh_surface::Settings {
@@ -435,16 +476,11 @@ fn surface_settings(uv_offset: [f32; 2]) -> crate::mesh_surface::Settings {
 
 #[cfg(feature = "mesh-animated-models")]
 fn test_runtime_with_animation() -> Vec<u8> {
-    let mut bytes = test_runtime_with_material();
-    bytes.resize(1088, 0);
-    bytes[0x46..0x48].copy_from_slice(&6u16.to_le_bytes());
-    bytes[0x210..0x218].copy_from_slice(b".orranim");
-    bytes[0x218..0x21c].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x220..0x224].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x224..0x228].copy_from_slice(&0x380u32.to_le_bytes());
-    bytes[0x234..0x238].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x380..0x380 + b"ORR_MESH_ANIMATION_V1".len()].copy_from_slice(b"ORR_MESH_ANIMATION_V1");
-    bytes
+    runtime_with_mission_marker(append_runtime_section(
+        test_runtime_with_material(),
+        *b".orranim",
+        b"ORR_MESH_ANIMATION_V1",
+    ))
 }
 
 fn set_art_tint(scene: &std::path::Path, revision: [u8; 32], tint: [f32; 4]) {
@@ -511,15 +547,15 @@ fn rotation_capability_requires_a_dedicated_bounded_marker_section() {
     super::validate_runtime_for(&test_runtime_with_rotation(), true, true).unwrap();
     assert!(super::validate_runtime_for(&test_runtime_with_props(), true, true).is_err());
     let mut bytes = test_runtime_with_rotation();
-    bytes[0x280..0x280 + b"ORR_MESH_ROTATION_V1".len()].fill(0);
+    let payload = section_payload(&bytes, b".orrrot\0");
+    bytes[payload..payload + b"ORR_MESH_ROTATION_V1".len()].fill(0);
     bytes[0x100..0x100 + b"ORR_MESH_ROTATION_V1".len()].copy_from_slice(b"ORR_MESH_ROTATION_V1");
     assert!(super::validate_runtime_for(&bytes, true, true).is_err());
     let mut bytes = test_runtime_with_rotation();
-    bytes[0x1ac..0x1b0].copy_from_slice(&0x100u32.to_le_bytes());
+    let header = section_header(&bytes, b".orrrot\0");
+    bytes[header + 20..header + 24].copy_from_slice(&0x100u32.to_le_bytes());
     assert!(super::validate_runtime_for(&bytes, true, true).is_err());
-    let mut bytes = test_runtime_with_rotation();
-    bytes[0x46..0x48].copy_from_slice(&4u16.to_le_bytes());
-    bytes[0x1c0..0x1c8].copy_from_slice(b".orrrot\0");
+    let bytes = append_runtime_section(test_runtime_with_rotation(), *b".orrrot\0", b"");
     assert!(super::validate_runtime_for(&bytes, true, true).is_err());
     super::validate_runtime_for(&test_runtime(), false, false).unwrap();
     super::validate_runtime_for(&test_runtime_with_props(), true, false).unwrap();
@@ -747,7 +783,8 @@ fn runtime_validation_requires_x64_pe32_plus_and_marker() {
 fn runtime_marker_outside_executable_section_is_not_accepted() {
     let mut runtime = test_runtime();
     runtime[0x100..0x100 + b"ORR_MESH_PLAYER_V1".len()].copy_from_slice(b"ORR_MESH_PLAYER_V1");
-    runtime[0x180..0x180 + b"ORR_MESH_PLAYER_V1".len()].fill(0);
+    let payload = section_payload(&runtime, b".orrmesh");
+    runtime[payload..payload + b"ORR_MESH_PLAYER_V1".len()].fill(0);
 
     assert!(validate_runtime(&runtime, false).is_err());
 }
@@ -811,7 +848,8 @@ fn props_runtime_marker_must_be_in_a_distinct_pe_section() {
     validate_runtime(&test_runtime_with_props(), true).unwrap();
     assert!(validate_runtime(&test_runtime(), true).is_err());
     let mut bytes = test_runtime_with_props();
-    bytes[0x200..0x200 + b"ORR_MESH_PROPS_V1".len()].fill(0);
+    let payload = section_payload(&bytes, b".orrprop");
+    bytes[payload..payload + b"ORR_MESH_PROPS_V1".len()].fill(0);
     bytes[0x100..0x100 + b"ORR_MESH_PROPS_V1".len()].copy_from_slice(b"ORR_MESH_PROPS_V1");
     assert!(validate_runtime(&bytes, true).is_err());
     validate_runtime(&test_runtime(), false).unwrap();
@@ -914,14 +952,17 @@ fn camera_runtime_marker_must_be_in_a_distinct_bounded_pe_section() {
             .is_err()
     );
     let mut bytes = test_runtime_with_camera();
-    bytes[0x2c0..0x2c0 + b"ORR_MESH_CAMERA_V1".len()].fill(0);
+    let payload = section_payload(&bytes, b".orrcam\0");
+    bytes[payload..payload + b"ORR_MESH_CAMERA_V1".len()].fill(0);
     bytes[0x100..0x100 + b"ORR_MESH_CAMERA_V1".len()].copy_from_slice(b"ORR_MESH_CAMERA_V1");
     assert!(super::validate_runtime_with_camera(&bytes, false, false, true).is_err());
     let mut bytes = test_runtime_with_camera();
-    bytes[0x1d4..0x1d8].copy_from_slice(&0x100u32.to_le_bytes());
+    let header = section_header(&bytes, b".orrcam\0");
+    bytes[header + 20..header + 24].copy_from_slice(&0x100u32.to_le_bytes());
     assert!(super::validate_runtime_with_camera(&bytes, false, false, true).is_err());
     let mut bytes = test_runtime_with_camera();
-    bytes[0x1c0..0x1c8].copy_from_slice(b".orrrot\0");
+    let header = section_header(&bytes, b".orrcam\0");
+    bytes[header..header + 8].copy_from_slice(b".orrrot\0");
     assert!(super::validate_runtime_with_camera(&bytes, false, false, true).is_err());
     super::validate_runtime_with_camera(&test_runtime(), false, false, false).unwrap();
 }
@@ -994,16 +1035,19 @@ fn material_runtime_marker_requires_its_own_bounded_pe_section() {
     .is_err());
 
     let mut bytes = test_runtime_with_material();
-    bytes[0x300..0x300 + b"ORR_MESH_MATERIAL_V1".len()].fill(0);
+    let payload = section_payload(&bytes, b".orrmat\0");
+    bytes[payload..payload + b"ORR_MESH_MATERIAL_V1".len()].fill(0);
     bytes[0x100..0x100 + b"ORR_MESH_MATERIAL_V1".len()].copy_from_slice(b"ORR_MESH_MATERIAL_V1");
     assert!(super::validate_runtime_with_material(&bytes, false, false, false, true).is_err());
 
     let mut bytes = test_runtime_with_material();
-    bytes[0x1fc..0x200].copy_from_slice(&0x100u32.to_le_bytes());
+    let header = section_header(&bytes, b".orrmat\0");
+    bytes[header + 20..header + 24].copy_from_slice(&0x100u32.to_le_bytes());
     assert!(super::validate_runtime_with_material(&bytes, false, false, false, true).is_err());
 
     let mut bytes = test_runtime_with_material();
-    bytes[0x1f8..0x1fc].copy_from_slice(&8u32.to_le_bytes());
+    let header = section_header(&bytes, b".orrmat\0");
+    bytes[header + 16..header + 20].copy_from_slice(&8u32.to_le_bytes());
     assert!(super::validate_runtime_with_material(&bytes, false, false, false, true).is_err());
 
     super::validate_runtime_with_material(&test_runtime(), false, false, false, false).unwrap();
@@ -1061,12 +1105,14 @@ fn surface_marker_must_be_a_distinct_bounded_pe_section() {
     assert!(super::validate_runtime_with_surface(&test_runtime_with_material(), false).is_err());
 
     let mut bytes = test_runtime_with_surface();
-    bytes[0x380..0x380 + b"ORR_MESH_SURFACE_V1".len()].fill(0);
+    let payload = section_payload(&bytes, b".orrsurf");
+    bytes[payload..payload + b"ORR_MESH_SURFACE_V1".len()].fill(0);
     bytes[0x100..0x100 + b"ORR_MESH_SURFACE_V1".len()].copy_from_slice(b"ORR_MESH_SURFACE_V1");
     assert!(super::validate_runtime_with_surface(&bytes, false).is_err());
 
     let mut bytes = test_runtime_with_surface();
-    bytes[0x224..0x228].copy_from_slice(&0x100u32.to_le_bytes());
+    let header = section_header(&bytes, b".orrsurf");
+    bytes[header + 20..header + 24].copy_from_slice(&0x100u32.to_le_bytes());
     assert!(super::validate_runtime_with_surface(&bytes, false).is_err());
     super::validate_runtime_with_material(
         &test_runtime_with_material(),
@@ -1160,7 +1206,8 @@ fn input_capability_marker_must_be_in_its_own_pe_section() {
     .unwrap();
 
     let mut bytes = test_runtime_with_input();
-    bytes[0x200..0x200 + b"ORR_MESH_INPUT_V1".len()].fill(0);
+    let payload = section_payload(&bytes, b".orrctrl");
+    bytes[payload..payload + b"ORR_MESH_INPUT_V1".len()].fill(0);
     bytes[0x100..0x100 + b"ORR_MESH_INPUT_V1".len()].copy_from_slice(b"ORR_MESH_INPUT_V1");
     assert!(validate_runtime_profile(&bytes, Some(InputProfile::MeshClickToMoveV1)).is_err());
 }
@@ -1244,7 +1291,8 @@ fn animation_bundle_rejects_wrong_marker_and_revision_before_publish() {
     let destination = temporary.path().join("animation-bundle");
 
     let mut wrong_marker = test_runtime_with_animation();
-    wrong_marker[0x380..0x380 + b"ORR_MESH_ANIMATION_V1".len()].fill(0);
+    let payload = section_payload(&wrong_marker, b".orranim");
+    wrong_marker[payload..payload + b"ORR_MESH_ANIMATION_V1".len()].fill(0);
     wrong_marker[0x100..0x100 + b"ORR_MESH_ANIMATION_V1".len()]
         .copy_from_slice(b"ORR_MESH_ANIMATION_V1");
     let incapable_runtime = temporary.path().join("incapable-player.exe");
@@ -1297,17 +1345,11 @@ fn animation_sidecars_fail_closed_without_feature_support() {
 
 #[cfg(feature = "mesh-animated-models")]
 fn test_runtime_with_animation_and_surface() -> Vec<u8> {
-    let mut bytes = test_runtime_with_animation();
-    bytes.resize(1216, 0);
-    bytes[0x46..0x48].copy_from_slice(&7u16.to_le_bytes());
-    bytes[0x184..0x188].copy_from_slice(&0x400u32.to_le_bytes());
-    bytes[0x238..0x240].copy_from_slice(b".orrsurf");
-    bytes[0x248..0x24c].copy_from_slice(&64u32.to_le_bytes());
-    bytes[0x24c..0x250].copy_from_slice(&0x3c0u32.to_le_bytes());
-    bytes[0x25c..0x260].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-    bytes[0x3c0..0x3c0 + b"ORR_MESH_SURFACE_V1".len()].copy_from_slice(b"ORR_MESH_SURFACE_V1");
-    bytes[0x400..0x400 + b"ORR_MESH_PROPS_V1".len()].copy_from_slice(b"ORR_MESH_PROPS_V1");
-    bytes
+    append_runtime_section(
+        test_runtime_with_animation(),
+        *b".orrsurf",
+        b"ORR_MESH_SURFACE_V1",
+    )
 }
 
 #[cfg(feature = "mesh-animated-models")]

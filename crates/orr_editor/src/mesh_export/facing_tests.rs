@@ -14,27 +14,11 @@ fn facing_runtime() -> Vec<u8> {
         (b".orrctrl", b"ORR_MESH_INPUT_V1"),
         (b".orrface", b"ORR_MESH_FACING_V1"),
     ];
-    let mut bytes = test_runtime();
-    bytes.resize(0x680, 0);
-    bytes[0x148..].fill(0);
-    bytes[0x46..0x48].copy_from_slice(&(sections.len() as u16).to_le_bytes());
-    for (index, (name, marker)) in sections.iter().enumerate() {
-        let header = 0x148 + index * 40;
-        let payload = 0x400 + index * 64;
-        bytes[header..header + 8].copy_from_slice(*name);
-        bytes[header + 16..header + 20].copy_from_slice(&64u32.to_le_bytes());
-        bytes[header + 20..header + 24].copy_from_slice(&(payload as u32).to_le_bytes());
-        bytes[header + 36..header + 40].copy_from_slice(&0x4000_0040u32.to_le_bytes());
-        bytes[payload..payload + marker.len()].copy_from_slice(marker);
-    }
-    bytes
+    runtime_with_mission_marker(super::test_runtime_with_sections(&sections))
 }
 
 fn without_facing_marker(mut bytes: Vec<u8>) -> Vec<u8> {
-    let position = bytes
-        .windows(b".orrface".len())
-        .position(|window| window == b".orrface")
-        .unwrap();
+    let position = super::section_header(&bytes, b".orrface");
     bytes[position] = b'X';
     bytes
 }

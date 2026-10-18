@@ -11,6 +11,8 @@ use orr_viewstream::{FrameMeta, Schema, StreamProducer};
 use std::{io::Read, path::PathBuf, sync::Arc};
 
 pub mod authoring;
+#[cfg(feature = "mesh-mission")]
+pub mod mission;
 
 #[cfg(test)]
 #[path = "mesh_play_host_tests.rs"]
@@ -20,10 +22,17 @@ pub use crate::yard3d::{YARD_PLAYERS, YARD_SEED, YARD_TICK_RATE};
 pub use orr_games::mesh_navigation_game::{
     MeshNavigation, MeshScenePin, MeshStepStatus, MESH_SET_GOAL, PIN_NAME,
 };
+#[cfg(feature = "mesh-mission")]
+pub use mission::{
+    MeshMission, MeshMissionRun, MissionPoint, MissionView, MISSION_NAME, RUN_NAME,
+};
 pub use orr_navigation_runtime::mesh::AgentSpec as RuntimeAgentSpec;
 pub use orr_navigation_runtime::mesh::{decode_asset, AgentSpec};
 
+#[cfg(not(feature = "mesh-mission"))]
 pub const MESH_NAVIGATION_BUILD_ID: u64 = 0x4d45_5348_0000_0002;
+#[cfg(feature = "mesh-mission")]
+pub const MESH_NAVIGATION_BUILD_ID: u64 = 0x4d45_5348_0000_0003;
 const MAX_SCENE_YAML_BYTES: u64 = 1 << 20;
 
 pub fn mesh_navigation_types() -> TypeRegistry {
@@ -37,6 +46,9 @@ pub struct MeshNavigationAdmission;
 
 impl BakeAdmission for MeshNavigationAdmission {
     fn admit(&self, scene: &Scene, frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
+        if orr_games::mesh_navigation_game::MESH_MISSION_ENABLED != cfg!(feature = "mesh-mission") {
+            return Err(EditError::Invalid("MeshNavigation mission feature profile differs between game and host; rebuild with coherent mesh-mission features".into()));
+        }
         let fail =
             |message: String| EditError::Invalid(format!("mesh navigation admission: {message}"));
         if !scene.entities.is_empty() || frame.alive_count() != 0 {
@@ -54,6 +66,8 @@ impl BakeAdmission for MeshNavigationAdmission {
         }
 
         let pin = *frame.singleton::<MeshScenePin>();
+        #[cfg(feature = "mesh-mission")]
+        orr_games::mesh_navigation_game::mission::admit(frame, pin).map_err(fail)?;
         if pin.is_empty() {
             return Ok(());
         }
