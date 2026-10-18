@@ -5,6 +5,9 @@ use egui::Ui;
 use orr_remote::mesh_navigation::mesh_from_view;
 use std::path::{Path, PathBuf};
 
+#[path = "mesh_lighting_panel/presets.rs"]
+mod presets;
+
 const MAX_HISTORY: usize = 16;
 
 #[derive(Clone)]
@@ -26,6 +29,7 @@ pub(crate) struct Panel {
     tonemap: bool,
     exposure: String,
     form_dirty: bool,
+    presets: presets::Controls,
     confirm_remove: bool,
     confirm_discard_changes: bool,
     confirm_discard_invalid: bool,
@@ -60,6 +64,7 @@ impl Default for Panel {
             tonemap: defaults.tonemap,
             exposure: format_number(defaults.exposure),
             form_dirty: false,
+            presets: presets::Controls::default(),
             confirm_remove: false,
             confirm_discard_changes: false,
             confirm_discard_invalid: false,
@@ -178,6 +183,8 @@ impl Panel {
                     self.apply(editor);
                 }
             });
+
+            self.show_preset_controls(ui, editor);
 
             let history_enabled = self.can_change_history(editor);
             ui.horizontal(|ui| {
