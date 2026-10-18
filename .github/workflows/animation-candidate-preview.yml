@@ -1,0 +1,134 @@
+name: Animation candidate preview acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  animation-candidate-preview:
+    # Additive optional-feature coverage; no existing mandatory gate is replaced.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_ANIMATION_EVIDENCE: ${{ github.workspace }}/target/animation-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-count guard self-tests
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Focused CPU preview contracts and optional feature boundaries
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_ANIMATION_EVIDENCE"])
+          evidence.mkdir(parents=True, exist_ok=False)
+          suite = "mesh_animation_panel"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "mesh-animated-models,mesh-mission",
+               "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "animation-panel-cpu.log")
+          helpers["validate_tests"](output, suite, 17)
+          for name, args in (
+              ("without-animation-check", ["check", "--lib", "--features", "mesh-navigation"]),
+              ("animated-check", ["check", "--lib", "--features", "mesh-animated-models"]),
+              ("animated-lint", ["clippy", "--lib", "--features", "mesh-animated-models", "--", "-D", "warnings"]),
+              ("candidate-ui-lint", ["clippy", "--test", "mesh_animation_candidate_ui", "--features", "mesh-animated-models", "--", "-D", "warnings"]),
+          ):
+              helpers["run_logged"](["cargo", args[0], "--locked", "-p", "orr_editor", *args[1:]],
+                                    evidence / (name + ".log"))
+      - name: Install explicit Linux software Vulkan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$ORR_ANIMATION_EVIDENCE/vulkan-install.log"
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 2>&1 | tee -a "$ORR_ANIMATION_EVIDENCE/vulkan-install.log"
+          mapfile -t drivers < <(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -type f)
+          test "${#drivers[@]}" -eq 1
+          runtime=$(mktemp -d "$RUNNER_TEMP/animation-candidate-xdg.XXXXXXXX")
+          chmod 700 "$runtime"
+          {
+            echo "VK_DRIVER_FILES=${drivers[0]}"
+            echo "VK_ICD_FILENAMES=${drivers[0]}"
+            echo "XDG_RUNTIME_DIR=$runtime"
+          } >> "$GITHUB_ENV"
+          printf 'Software Vulkan ICD: %s\n' "${drivers[0]}" | tee "$ORR_ANIMATION_EVIDENCE/vulkan-driver.log"
+      - name: Explicit ignored production EditorApp candidate preview acceptance
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_ANIMATION_EVIDENCE"])
+          capture = evidence / "candidate-ui"
+          if capture.exists():
+              raise RuntimeError("Candidate UI acceptance requires an absent, fresh capture directory")
+          os.environ["ORR_ANIMATION_CANDIDATE_CAPTURE_DIR"] = str(capture.resolve())
+          name = "loaded_candidate_named_clip_previews_without_applying_and_preserves_authoring"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "mesh-animated-models",
+               "--test", "mesh_animation_candidate_ui", name, "--", "--exact", "--ignored",
+               "--format=pretty", "--color=never", "--test-threads=1"], evidence / "candidate-ui.log")
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError(f"{name}: expected exactly one executed passing ignored test")
+          receipt = json.loads((capture / "acceptance.json").read_text())
+          expected = {
+              "schema": 1, "production_editor_app": True, "software_gpu": True,
+              "physical_os_input": False, "named_nonzero_candidate_clip": "pulse",
+              "frame_history_files_unchanged_before_apply": True, "invalid_tick_clip_retains_pose": True,
+              "clear_restores": True, "replacement_clears": True, "apply_undo_redo_save_reopen": True,
+              "play_stop_clears": True, "rights_acknowledgement_required": True,
+          }
+          if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                 for key, value in expected.items()):
+              raise RuntimeError("Fresh candidate preview receipt is incomplete or inconsistent")
+          pixels = receipt.get("candidate_pose_changed_pixels")
+          if type(pixels) is not int or pixels <= 20:
+              raise RuntimeError("Candidate named clip must visibly change more than 20 pixels")
+          if not isinstance(receipt.get("adapter"), str) or "llvmpipe" not in receipt["adapter"].lower():
+              raise RuntimeError("Expected explicit llvmpipe software Vulkan adapter")
+          if not isinstance(receipt.get("scene_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", receipt["scene_sha256"]):
+              raise RuntimeError("Missing scene SHA256 provenance")
+          for image in ("01-baseline.png", "02-loaded.png", "03-candidate-pulse-0.png",
+                        "04-candidate-pulse-16.png", "05-invalid-retains-pose.png", "06-clear.png",
+                        "07-replacement-cleared.png", "08-applied.png", "09-undo.png", "10-redo.png",
+                        "11-reopened.png", "12-applied-preview.png", "13-play-stop-cleared.png"):
+              data = (capture / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh candidate capture: {image}")
+      - name: Retain receipts, screenshots and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: animation-candidate-preview-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_ANIMATION_EVIDENCE }}
+          if-no-files-found: error
