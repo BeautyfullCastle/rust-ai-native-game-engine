@@ -17,6 +17,8 @@ pub(crate) struct RoomWall {
     pub name: String,
     pub center: [FP; 2],
     pub half_extents: [FP; 2],
+    pub center_y: FP,
+    pub half_height: FP,
 }
 
 struct RoomWallRow {
@@ -194,6 +196,8 @@ impl Editor {
                 name,
                 center: [position.x, position.z],
                 half_extents: [half_extents.x, half_extents.z],
+                center_y: position.y,
+                half_height: half_extents.y,
             };
             walls.push(RoomWallRow {
                 wall,
@@ -449,6 +453,36 @@ impl Editor {
                 "world.patch",
                 json!({"entity":wall.target.param(),"component":COLLIDER,"path":"shape.half_extents","value":value_to_json(&Value::Vec3(half_extents))}),
             )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn update_room_wall_vertical_checked(
+        &mut self,
+        guid: &str,
+        center_y: FP,
+        half_height: FP,
+        expected_checksum: u64,
+    ) -> Result<(), String> {
+        self.room_authoring_transaction("Update Room wall height", |editor| {
+            let state = editor.call("sim.state", J::Null)?;
+            if state.get("checksum").and_then(orr_remote::wire::parse_checksum) != Some(expected_checksum) {
+                return Err("Room wall source changed; read the current wall before applying height".into());
+            }
+            let wall = editor.room_wall_row(guid)?;
+            let center_patch = json!({"entity":wall.target.param(),"component":BODY,"path":"pos.y","value":value_to_json(&Value::Fixed(center_y))});
+            let height_patch = json!({"entity":wall.target.param(),"component":COLLIDER,"path":"shape.half_extents.y","value":value_to_json(&Value::Fixed(half_height))});
+            // world.patch also admits each intermediate Room. Expand before
+            // moving the center; when shrinking, move within the old larger
+            // interval first. Both valid intervals cover the player span.
+            let patches = if half_height >= wall.half_extents.y {
+                [height_patch, center_patch]
+            } else {
+                [center_patch, height_patch]
+            };
+            for patch in patches { editor.call("world.patch", patch)?; }
+            // The existing transaction re-admits the entire Room before commit,
+            // including the numeric envelope and full player-height coverage.
             Ok(())
         })
     }
