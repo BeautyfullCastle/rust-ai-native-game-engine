@@ -45,6 +45,7 @@ pub(crate) struct Panel {
     saved_id: Option<u64>,
     status: String,
     error: Option<String>,
+    preview: preview::State,
 }
 
 impl Default for Panel {
@@ -85,12 +86,14 @@ impl Default for Panel {
             saved_id: Some(0),
             status: String::new(),
             error: None,
+            preview: preview::State::default(),
         }
     }
 }
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
+        preview::sync(self, editor);
         if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
             return;
         }
@@ -187,6 +190,7 @@ impl Panel {
                     | text_field(ui, "Animation model asset", &mut self.asset)
                     | text_field(ui, "Animation license asset", &mut self.license);
                 if source_changed {
+                    self.preview.reset();
                     self.source_dirty = true;
                     self.candidate = None;
                     self.license_acknowledged = false;
@@ -223,6 +227,9 @@ impl Panel {
                 changed |= ui.checkbox(&mut self.looped, "Loop mesh animation").changed();
                 changed |= ui.checkbox(&mut self.face_route, "Animation face route direction").changed();
                 self.form_dirty |= changed;
+                if changed {
+                    self.preview.reset();
+                }
                 if let Some(snapshot) = self.candidate.as_ref().or_else(|| self.current_snapshot()) {
                     for (index, name, duration) in snapshot.clips() {
                         ui.label(format!("Clip {index}: {name} ({duration:.3}s)"));
@@ -232,6 +239,7 @@ impl Panel {
                     let state = if moving { "moving" } else { "idle" };
                     ui.label(format!("Mesh animation state: {state} (clip {clip})"));
                 }
+                preview::show(ui, self, editor);
                 if ui.button("Apply mesh animation").clicked() {
                     self.apply(editor);
                 }
@@ -402,6 +410,9 @@ impl Panel {
             .ok_or_else(|| "Mesh animation requires a coherent Frame".to_owned())?
             .predicted();
         let view = mesh_from_view(frame)?;
+        if let Some(placement) = self.preview.placement(self, editor, &view)? {
+            return Ok(Some(placement));
+        }
         snapshot.placement_for_view(&view, frame.tick()).map(Some)
     }
 
@@ -463,6 +474,7 @@ impl Panel {
             revision,
         ) {
             Ok(snapshot) => {
+                self.preview.reset();
                 self.copy_settings(&snapshot);
                 self.candidate = Some(snapshot.clone());
                 self.form_dirty = false;
@@ -778,6 +790,7 @@ impl Panel {
     }
 
     fn reset_history(&mut self, snapshot: Option<Snapshot>, saved_id: Option<u64>) {
+        self.preview.reset();
         self.history.clear();
         self.history.push(HistoryEntry { id: 0, snapshot });
         self.cursor = 0;
@@ -786,6 +799,7 @@ impl Panel {
     }
 
     fn push_state(&mut self, snapshot: Option<Snapshot>) {
+        self.preview.reset();
         self.history.truncate(self.cursor + 1);
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -839,6 +853,7 @@ impl Panel {
 
     fn undo(&mut self) {
         if self.cursor > 0 {
+            self.preview.reset();
             self.cursor -= 1;
             self.copy_current_settings();
             self.candidate = None;
@@ -849,6 +864,7 @@ impl Panel {
 
     fn redo(&mut self) {
         if self.cursor + 1 < self.history.len() {
+            self.preview.reset();
             self.cursor += 1;
             self.copy_current_settings();
             self.candidate = None;
@@ -857,6 +873,9 @@ impl Panel {
         }
     }
 }
+
+#[path = "mesh_animation_panel/preview.rs"]
+mod preview;
 
 fn reported_scene_matches_request(
     game: EditorGame,

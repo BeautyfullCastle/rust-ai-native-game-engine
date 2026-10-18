@@ -488,6 +488,18 @@ fn viewport_pixels(
     pixels
 }
 
+fn preview_viewport_pixels(harness: &mut Harness<'_, EditorApp>) -> Vec<u8> {
+    settle(harness);
+    harness
+        .render()
+        .expect("render the current animation preview");
+    let viewport = harness.state().viewport3d_gpu().unwrap();
+    assert_eq!(viewport.gpu().target().size(), (900, 850));
+    let pixels = viewport.gpu().read_rgba8();
+    assert_eq!(pixels.len(), 900 * 850 * 4);
+    pixels
+}
+
 fn changed_pixel_count(first: &[u8], second: &[u8]) -> usize {
     assert_eq!(first.len(), second.len());
     first
@@ -1101,6 +1113,82 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
     );
     assert!(skeletal_pose_difference(&animation_document, 16) > 0);
 
+    let history_before_animation_preview = harness.state().editor.history().clone();
+    let scene_before_animation_preview = fs::read(&fixture.scene).unwrap();
+    let authored_tick_before_preview = harness
+        .state()
+        .editor
+        .snapshot()
+        .unwrap()
+        .predicted()
+        .tick();
+    assert!(!harness.state().editor.is_dirty());
+    type_field(&mut harness, "Animation preview clip", "1");
+    type_field(&mut harness, "Animation preview tick", "0");
+    click_button(&mut harness, "Preview animation pose");
+    let preview_zero_pixels =
+        viewport_pixels(&mut harness, &fixture, "17-animation-preview-tick-zero");
+    type_field(&mut harness, "Animation preview tick", "16");
+    click_button(&mut harness, "Preview animation pose");
+    let preview_sixteen_pixels =
+        viewport_pixels(&mut harness, &fixture, "18-animation-preview-tick-sixteen");
+    let animation_preview_pixel_difference =
+        changed_pixel_count(&preview_zero_pixels, &preview_sixteen_pixels);
+    assert!(animation_preview_pixel_difference > 20);
+    assert_eq!(harness.state().editor.checksum(), scene_checksum);
+    assert_eq!(
+        harness.state().editor.history(),
+        &history_before_animation_preview
+    );
+    assert_eq!(
+        harness
+            .state()
+            .editor
+            .snapshot()
+            .unwrap()
+            .predicted()
+            .tick(),
+        authored_tick_before_preview
+    );
+    assert!(!harness.state().editor.is_dirty());
+    assert_eq!(
+        fs::read(&fixture.scene).unwrap(),
+        scene_before_animation_preview
+    );
+    assert_eq!(fs::read(&animation_sidecar).unwrap(), animation_bytes);
+    assert!(!harness
+        .get_by_role_and_label(Role::Button, LBL_PLAY)
+        .accesskit_node()
+        .is_disabled());
+
+    type_field(&mut harness, "Animation preview tick", "-1");
+    click_button(&mut harness, "Preview animation pose");
+    assert_eq!(
+        preview_viewport_pixels(&mut harness),
+        preview_sixteen_pixels
+    );
+    click_button(&mut harness, "Clear animation preview");
+    assert_eq!(preview_viewport_pixels(&mut harness), preview_zero_pixels);
+    assert_eq!(harness.state().editor.checksum(), scene_checksum);
+    assert_eq!(
+        harness.state().editor.history(),
+        &history_before_animation_preview
+    );
+    assert_eq!(
+        fs::read(&fixture.scene).unwrap(),
+        scene_before_animation_preview
+    );
+    assert_eq!(fs::read(&animation_sidecar).unwrap(), animation_bytes);
+    let animation_preview_receipt = serde_json::json!({
+        "applied_clip": 1,
+        "preview_ticks": [0, 16],
+        "pose_pixel_difference": animation_preview_pixel_difference,
+        "simulation_checksum_history_and_files_unchanged": true,
+        "invalid_tick_preserved_accepted_pose": true,
+        "clear_restored_authored_pose": true,
+        "transient_preview_did_not_block_play": true,
+    });
+
     if harness.query_by_label("Lighting direction X").is_none() {
         click(&mut harness, "Mesh game lighting");
     }
@@ -1560,7 +1648,7 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
         assert_eq!(fs::read(original_path).unwrap(), *original_bytes);
     }
     let captures = capture_inventory(&fixture);
-    assert_eq!(captures.len(), 16);
+    assert_eq!(captures.len(), 18);
     let receipt = serde_json::json!({
         "artifact_root": fixture.root,
         "hardware_vulkan_adapter": adapter,
@@ -1574,6 +1662,7 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
         "source_roots_restored": fixture.sources_restored,
         "source_sidecars": all_sidecars.iter().map(|(path, bytes)| serde_json::json!({"path": path, "bytes": bytes.len(), "sha256": sha256_hex(bytes)})).collect::<Vec<_>>(),
         "workspace_save": workspace_save_receipt,
+        "animation_preview": animation_preview_receipt,
         "duplicate_directory": fixture.duplicate_directory,
         "duplicate_scene": fixture.duplicate_scene,
         "duplicate_scene_sha256": duplicate_hash,

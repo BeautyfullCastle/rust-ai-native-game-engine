@@ -252,3 +252,188 @@ fn workspace_save_persists_only_applied_animation_and_blocks_form_drafts() {
     assert!(form_panel.save_workspace_changes(&editor).is_err());
     assert_eq!(std::fs::read(sidecar).unwrap(), saved_bytes);
 }
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+fn preview_fixture() -> (
+    tempfile::TempDir,
+    crate::Editor,
+    Panel,
+    Snapshot,
+    Vec<u8>,
+    Vec<u8>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let scene = root.join("animation-preview.scene.yaml");
+    let editor = crate::mesh_workspace::mission::prepare(
+        &scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+    )
+    .unwrap();
+    let frame = editor.snapshot().unwrap().predicted();
+    let revision = orr_remote::mesh_navigation::mesh_from_view(frame)
+        .unwrap()
+        .graph
+        .revision();
+    let package = animated_package(&root);
+    let initial =
+        Snapshot::from_package(&package, "animated.glb", "LICENSE.txt", revision).unwrap();
+    let clips = initial.clips();
+    assert!(clips.len() > 1);
+    let mut settings = initial.settings();
+    settings.clip = clips[1].0;
+    settings.idle_clip = Some(clips[0].0);
+    let snapshot = initial.with_settings(settings).unwrap();
+    crate::mesh_animation_store::save(&scene, Some(&snapshot), None, revision).unwrap();
+    let sidecar = crate::mesh_animation_store::sidecar_path(&scene).unwrap();
+    let sidecar_bytes = std::fs::read(sidecar).unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    panel.sync(&editor);
+    let scene_bytes = std::fs::read(scene).unwrap();
+    (
+        directory,
+        editor,
+        panel,
+        snapshot,
+        scene_bytes,
+        sidecar_bytes,
+    )
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn animation_preview_validates_clip_and_tick_without_clamping() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let package = animated_package(&root);
+    let snapshot =
+        Snapshot::from_package(&package, "animated.glb", "LICENSE.txt", [0x73; 32]).unwrap();
+    let clips = snapshot.clips();
+    let (preview_snapshot, tick) =
+        super::preview::prepare_snapshot(&snapshot, &clips[1].0.to_string(), "3600").unwrap();
+    assert_eq!(tick, 3600);
+    assert_eq!(preview_snapshot.settings().clip, clips[1].0);
+    assert_eq!(preview_snapshot.settings().idle_clip, None);
+    for (clip, requested_tick) in [
+        ("-1", "0"),
+        ("+1", "0"),
+        ("99", "0"),
+        ("1", "-1"),
+        ("1", "3601"),
+        ("1", "1.5"),
+    ] {
+        assert!(
+            super::preview::prepare_snapshot(&snapshot, clip, requested_tick).is_err(),
+            "clip {clip:?}, tick {requested_tick:?}"
+        );
+    }
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn animation_preview_changes_pose_without_mutating_editor_history_or_saved_bytes() {
+    let (_directory, editor, mut panel, snapshot, scene_bytes, sidecar_bytes) = preview_fixture();
+    let before_checksum = editor.checksum();
+    let before_tick = editor.snapshot().unwrap().predicted().tick();
+    let before_cursor = panel.cursor;
+    let before_history_id = panel.current_entry().unwrap().id;
+    let before_dirty = panel.dirty();
+    let frame = editor.snapshot().unwrap().predicted();
+    let view = orr_remote::mesh_navigation::mesh_from_view(frame).unwrap();
+    let original = snapshot.placement_for_view(&view, frame.tick()).unwrap();
+
+    super::preview::request(&mut panel, &editor, "1", "16");
+    assert!(super::preview::has_preview(&panel));
+    let accepted = panel.placement(&editor).unwrap().unwrap();
+    assert_ne!(accepted.pose, original.pose);
+    let accepted_pose = accepted.pose;
+    super::preview::request(&mut panel, &editor, "1", "-1");
+    assert!(super::preview::has_preview(&panel));
+    assert_eq!(
+        panel.placement(&editor).unwrap().unwrap().pose,
+        accepted_pose
+    );
+
+    assert_eq!(editor.checksum(), before_checksum);
+    assert_eq!(editor.snapshot().unwrap().predicted().tick(), before_tick);
+    assert_eq!(panel.cursor, before_cursor);
+    assert_eq!(panel.current_entry().unwrap().id, before_history_id);
+    assert_eq!(panel.dirty(), before_dirty);
+    assert_eq!(
+        std::fs::read(panel.scene.as_ref().unwrap()).unwrap(),
+        scene_bytes
+    );
+    let sidecar = crate::mesh_animation_store::sidecar_path(panel.scene.as_ref().unwrap()).unwrap();
+    assert_eq!(std::fs::read(sidecar).unwrap(), sidecar_bytes);
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn animation_preview_clear_and_play_restore_authoritative_frame_pose() {
+    let (_directory, mut editor, mut panel, snapshot, _scene_bytes, _sidecar_bytes) =
+        preview_fixture();
+    let frame = editor.snapshot().unwrap().predicted();
+    let view = orr_remote::mesh_navigation::mesh_from_view(frame).unwrap();
+    let original = snapshot.placement_for_view(&view, frame.tick()).unwrap();
+    super::preview::request(&mut panel, &editor, "1", "16");
+    assert_ne!(
+        panel.placement(&editor).unwrap().unwrap().pose,
+        original.pose
+    );
+
+    super::preview::clear(&mut panel);
+    assert!(!super::preview::has_preview(&panel));
+    assert_eq!(
+        panel.placement(&editor).unwrap().unwrap().pose,
+        original.pose
+    );
+
+    super::preview::request(&mut panel, &editor, "1", "16");
+    assert!(editor.start_play());
+    panel.sync(&editor);
+    assert!(!super::preview::has_preview(&panel));
+    let play_frame = editor.snapshot().unwrap().predicted();
+    let play_view = orr_remote::mesh_navigation::mesh_from_view(play_frame).unwrap();
+    let authoritative = snapshot
+        .placement_for_view(&play_view, play_frame.tick())
+        .unwrap();
+    assert_eq!(
+        panel.placement(&editor).unwrap().unwrap().pose,
+        authoritative.pose
+    );
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn animation_preview_clears_when_applied_history_changes() {
+    let (_directory, editor, mut panel, snapshot, _scene_bytes, _sidecar_bytes) = preview_fixture();
+    super::preview::request(&mut panel, &editor, "1", "16");
+    assert!(super::preview::has_preview(&panel));
+    let mut settings = snapshot.settings();
+    settings.offset[0] = 0.5;
+    panel.push_state(Some(snapshot.with_settings(settings).unwrap()));
+    assert!(!super::preview::has_preview(&panel));
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn animation_preview_clears_when_scene_context_changes() {
+    let (directory, editor, mut panel, _snapshot, _scene_bytes, _sidecar_bytes) = preview_fixture();
+    super::preview::request(&mut panel, &editor, "1", "16");
+    assert!(super::preview::has_preview(&panel));
+
+    let second_scene = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("another-animation-preview.scene.yaml");
+    let second_editor = crate::mesh_workspace::mission::prepare(
+        &second_scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+    )
+    .unwrap();
+    panel.sync(&second_editor);
+    assert!(!super::preview::has_preview(&panel));
+    assert_eq!(panel.scene.as_deref(), Some(second_scene.as_path()));
+}
