@@ -111,10 +111,22 @@ pub fn status(run: &CollectRun) -> &'static str {
         _ => "INVALID",
     }
 }
+pub const DEFAULT_CONTROLS_HINT: &str = "WASD/arrows move | Space restart | Esc quit";
+
 pub fn title(frame: FrameView<'_>) -> String {
+    title_with_controls(frame, DEFAULT_CONTROLS_HINT)
+}
+
+/// Read-only title using the controls admitted by the standalone player.
+pub fn title_with_controls(frame: FrameView<'_>, controls_hint: &str) -> String {
     let run = frame.singleton::<CollectRun>();
-    format!("CollectDodgeV1 | {} | score {}/{} | time {:.1}s | WASD/arrows move | Space restart | Esc quit",
-        status(run), run.score, run.goal, run.time_limit_ticks.saturating_sub(run.elapsed_ticks) as f32 / 60.0)
+    format!(
+        "CollectDodgeV1 | {} | score {}/{} | time {:.1}s | {controls_hint}",
+        status(run),
+        run.score,
+        run.goal,
+        run.time_limit_ticks.saturating_sub(run.elapsed_ticks) as f32 / 60.0
+    )
 }
 
 #[cfg(test)]
@@ -155,6 +167,16 @@ mod tests {
         assert_eq!(editor_drawables(frame).len(), 2);
         assert_eq!(render_items(frame).len(), 3);
         assert!(title(frame).contains("WON | score 1/1"));
+        assert!(title(frame).ends_with(DEFAULT_CONTROLS_HINT));
+        assert_eq!(
+            title(frame),
+            title_with_controls(frame, DEFAULT_CONTROLS_HINT)
+        );
+        let checksum = simulation.frame().checksum();
+        let custom = title_with_controls(frame, "IJKL move | Enter restart | Q quit");
+        assert!(custom.ends_with("IJKL move | Enter restart | Q quit"));
+        assert!(!custom.contains("Space"));
+        assert_eq!(simulation.frame().checksum(), checksum);
     }
 }
 
