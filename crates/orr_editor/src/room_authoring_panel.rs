@@ -1,4 +1,5 @@
 mod actor_placement;
+mod wall_placement;
 mod wall_footprint;
 pub(crate) use wall_footprint::ViewInput;
 
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 pub struct Panel {
     pub open: bool,
     actor_placement: actor_placement::State,
+    wall_placement: wall_placement::State,
     footprint: wall_footprint::State,
     footprint_grid: wall_footprint::GridStep,
     pub player: [String; 2],
@@ -41,6 +43,7 @@ impl Default for Panel {
         Self {
             open: false,
             actor_placement: Default::default(),
+            wall_placement: Default::default(),
             footprint: Default::default(),
             footprint_grid: Default::default(),
             player: ["0".into(), "0".into()],
@@ -70,6 +73,7 @@ impl Panel {
     pub fn show(&mut self, context: &Context, editor: &mut Editor, removal_blocker: Option<&str>) {
         self.sync_wall_footprint(editor);
         self.sync_actor_placement(editor);
+        self.sync_wall_placement(editor);
         let current_stamp = (
             editor.path(),
             editor.scene_load_epoch(),
@@ -141,7 +145,7 @@ impl Panel {
                     position_fields(ui, "Player X", "Player Z", &mut self.player);
                     position_fields(ui, "Key X", "Key Z", &mut self.key);
                     position_fields(ui, "Exit X", "Exit Z", &mut self.exit);
-                    self.show_actor_placement(ui, editor);
+                    ui.add_enabled_ui(!self.wall_placement_busy(), |ui| self.show_actor_placement(ui, editor));
                     ui.separator();
                     ui.label("Add Room wall");
                     text_field(ui, "Room wall name", &mut self.wall_name, 64);
@@ -152,7 +156,7 @@ impl Panel {
                         "Wall half-depth Z",
                         &mut self.wall_half_extents,
                     );
-                    ui.add_enabled_ui(!self.actor_placement_busy(), |ui| self.show_wall_footprint(ui, editor));
+                    ui.add_enabled_ui(!self.actor_placement_busy() && !self.wall_placement_busy(), |ui| self.show_wall_footprint(ui, editor));
                     let center = parse_position(&self.wall_center);
                     let half_extents = parse_position(&self.wall_half_extents);
                     let can_add_wall = !self.wall_name.trim().is_empty()
@@ -169,7 +173,7 @@ impl Panel {
                         ui.label("Room wall name must contain 1..=64 bytes.");
                     }
                     if ui
-                        .add_enabled(can_add_wall && !self.wall_footprint_busy() && !self.actor_placement_busy(), egui::Button::new("Create Room wall"))
+                        .add_enabled(can_add_wall && !self.wall_footprint_busy() && !self.actor_placement_busy() && !self.wall_placement_busy(), egui::Button::new("Create Room wall"))
                         .clicked()
                     {
                         match (center, half_extents) {
@@ -289,11 +293,12 @@ impl Panel {
                 "Selected wall half-depth Z",
                 &mut self.selected_wall_half_extents,
             );
+            self.show_wall_placement(ui, editor);
             let selected_center = parse_position(&self.selected_wall_center);
             let selected_half_extents = parse_position(&self.selected_wall_half_extents);
             let selected_name_valid = valid_wall_name(&self.selected_wall_name);
             let can_update = editable
-                && self.walls_current
+                && self.wall_apply_ready(editor)
                 && selected_name_valid
                 && selected_center.is_ok()
                 && selected_half_extents.is_ok();
@@ -310,26 +315,10 @@ impl Panel {
                 .add_enabled(can_update, egui::Button::new("Apply Room wall"))
                 .clicked()
             {
-                self.walls_current = false;
-                match (selected_center, selected_half_extents) {
-                    (Ok(center), Ok(half_extents)) => match editor.update_room_wall(
-                        &guid,
-                        self.selected_wall_name.trim(),
-                        center,
-                        half_extents,
-                    ) {
-                        Ok(()) => {
-                            self.status = match self.refresh_walls(editor) {
-                                Ok(_) => format!("Updated Room wall {guid}."),
-                                Err(error) => format!(
-                                    "Updated Room wall {guid}, but could not refresh the wall list: {error}"
-                                ),
-                            };
-                        }
-                        Err(error) => self.status = error,
-                    },
-                    (Err(error), _) | (_, Err(error)) => self.status = error,
-                }
+                self.status = match self.apply_selected_wall(editor) {
+                    Ok(()) => format!("Updated Room wall {guid}. Read Room walls before another edit."),
+                    Err(error) => error,
+                };
             }
 
             ui.separator();
@@ -355,7 +344,7 @@ impl Panel {
                         && self.walls_current
                         && vertical_valid
                         && !self.wall_footprint_busy()
-                        && !self.actor_placement_busy(),
+                        && !self.actor_placement_busy() && !self.wall_placement_busy(),
                     egui::Button::new("Apply wall height"),
                 )
                 .clicked()
@@ -495,6 +484,7 @@ impl Panel {
     }
 
     fn cache_walls(&mut self, walls: Vec<RoomWall>, editor: &Editor) {
+        self.wall_placement = Default::default();
         self.walls = walls;
         self.walls_current = true;
         self.wall_source_stamp = Some((
@@ -513,6 +503,7 @@ impl Panel {
     }
 
     fn select_wall(&mut self, wall: &RoomWall) {
+        self.wall_placement = Default::default();
         self.selected_wall_guid = Some(wall.guid.clone());
         self.selected_wall_name = wall.name.clone();
         self.selected_wall_center_y = format_fixed(wall.center_y);

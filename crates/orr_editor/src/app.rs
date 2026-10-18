@@ -41,6 +41,9 @@ mod room_wall_footprint;
 #[cfg(feature = "room-authoring")]
 #[path = "app/room_actor_placement.rs"]
 mod room_actor_placement;
+#[cfg(feature="room-authoring")]
+#[path="app/room_wall_placement.rs"]
+mod room_wall_placement;
 #[cfg(feature="models")]
 #[path="app/frame_selection.rs"]
 mod frame_selection;
@@ -291,6 +294,8 @@ pub struct EditorApp {
     room_wall_pointer_owned: bool,
     #[cfg(feature="room-authoring")]
     room_actor_pointer_owned: bool,
+    #[cfg(feature="room-authoring")]
+    room_wall_placement_pointer_owned: bool,
     #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))]
     room_wall_stamps: crate::room_wall_stamp_panel::Panel,
     #[cfg(feature="package-manager")]
@@ -321,7 +326,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -863,7 +868,7 @@ impl eframe::App for EditorApp {
             // keyboard, AccessKit, scene/model/camera or history action dispatch.
             self.editor.release_control();
             #[cfg(feature="room-authoring")]
-            { self.room_authoring.cancel_wall_footprint(); self.room_authoring.cancel_actor_placement(); }
+            { self.room_authoring.cancel_wall_footprint(); self.room_authoring.cancel_actor_placement(); self.room_authoring.cancel_wall_placement(); }
             let root = self.package_manager_root();
             ui.label("Package selection change is committing; authoring and playback are paused until it completes.");
             self.package_manager.show(&ctx, root.as_deref(), Some("Wait for package selection change completion before editing, saving or playing"));
@@ -871,7 +876,7 @@ impl eframe::App for EditorApp {
             return;
         }
         #[cfg(feature="room-authoring")]
-        { self.sync_room_wall_footprint(&ctx); self.sync_room_actor_placement(&ctx); }
+        { self.sync_room_wall_footprint(&ctx); self.sync_room_actor_placement(&ctx); self.sync_room_wall_placement(&ctx); }
         #[cfg(feature="mesh-hazards")]
         {
             // Preserve ownership across sync/cancellation so this frame's pointer
@@ -914,7 +919,7 @@ impl eframe::App for EditorApp {
             // target. With no gesture, Escape clears the GUID selection.
             let cancelling_gesture = self.editor.in_gesture();
             #[cfg(feature="room-authoring")]
-            let cancelling_gesture = cancelling_gesture || self.room_wall_pointer_owned || self.room_actor_pointer_owned;
+            let cancelling_gesture = cancelling_gesture || self.room_wall_pointer_owned || self.room_actor_pointer_owned || self.room_wall_placement_pointer_owned;
             #[cfg(feature="mesh-navigation")]
             let cancelling_gesture = {
                 let moving = self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy();
@@ -1799,14 +1804,14 @@ impl EditorApp {
             Ok(camera) => camera,
             Err(error) => {
                 #[cfg(feature="room-authoring")]
-                { self.room_authoring.cancel_wall_footprint(); self.room_authoring.cancel_actor_placement(); }
+                { self.room_authoring.cancel_wall_footprint(); self.room_authoring.cancel_actor_placement(); self.room_authoring.cancel_wall_placement(); }
                 if let Some(tex)=self.gpu3d.as_ref().and_then(|gpu|gpu.last_texture()) { ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE); }
                 ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED); return;
             }
         };
         let mut frame_drawn = false;
         #[cfg(feature="room-authoring")]
-        let wall_pointer_consumed = self.room_wall_pointer_owned || self.room_authoring.wall_footprint_busy() || self.room_actor_pointer_owned || self.room_authoring.actor_placement_busy();
+        let wall_pointer_consumed = self.room_wall_pointer_owned || self.room_authoring.wall_footprint_busy() || self.room_actor_pointer_owned || self.room_authoring.actor_placement_busy() || self.room_wall_placement_pointer_owned || self.room_authoring.wall_placement_busy();
         #[cfg(not(feature="room-authoring"))]
         let wall_pointer_consumed = false;
         #[cfg(feature="mesh-hazards")]
@@ -2080,6 +2085,8 @@ impl EditorApp {
         self.room_wall_footprint_input(ui, &resp, &camera, px, rect, ppp, frame_drawn);
         #[cfg(feature="room-authoring")]
         self.room_actor_placement_input(ui, &resp, &camera, px, rect, ppp, frame_drawn);
+        #[cfg(feature="room-authoring")]
+        self.room_wall_placement_input(ui, &resp, &camera, px, rect, ppp, frame_drawn);
         if !hazard_pointer_consumed && !mission_pointer_consumed && !mesh_play_pointer_consumed && !agent_pointer_consumed && !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
             if let Some(at) = resp.interact_pointer_pos() {
                 let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
