@@ -274,16 +274,23 @@ mod tests {
     }
     #[test]
     fn rejects_bad_flags_and_nonlocal_unauthenticated_serve() {
-        assert!(parse_args(&["inspect", "--scene", "/tmp/a.scene.yaml"]));
+        let directory = std::env::temp_dir();
+        let scene = directory.join("a.scene.yaml");
+        let output = directory.join("b.scene.yaml");
+        assert!(scene.is_absolute());
+        assert!(output.is_absolute());
+        let scene = scene.to_str().expect("test temp path must be UTF-8");
+        let output = output.to_str().expect("test temp path must be UTF-8");
+        assert!(parse_args(&["inspect", "--scene", scene]));
         for args in [
             vec!["inspect", "--scene", "relative"],
-            vec!["inspect", "--scene", "/tmp/a", "--scene", "/tmp/b"],
+            vec!["inspect", "--scene", scene, "--scene", output],
             vec!["inspect", "--scene", "--unknown"],
-            vec!["serve", "--scene", "/tmp/a"],
+            vec!["serve", "--scene", scene],
             vec![
                 "serve",
                 "--scene",
-                "/tmp/a",
+                scene,
                 "--dev-no-auth",
                 "--bind",
                 "0.0.0.0:7777",
@@ -291,19 +298,19 @@ mod tests {
             vec![
                 "serve",
                 "--scene",
-                "/tmp/a",
+                scene,
                 "--dev-no-auth",
                 "--stop-after-ms",
                 "0",
             ],
-            vec!["upgrade", "--scene", "/tmp/a", "--output", "/tmp/b"],
+            vec!["upgrade", "--scene", scene, "--output", output],
         ] {
             assert!(!parse_args(&args), "{args:?}");
         }
         assert!(parse_args(&[
             "serve",
             "--scene",
-            "/tmp/a",
+            scene,
             "--dev-no-auth",
             "--bind",
             "[::1]:7777"
@@ -432,10 +439,15 @@ mod tests {
     #[test]
     fn safe_output_rejects_wrong_extension_and_parent_traversal() {
         let fixture = Fixture::new();
-        for output in [
-            fixture.0.join("bad.yaml"),
-            fixture.0.join("../bad.scene.yaml"),
-        ] {
+        // PathBuf::join normalizes `..` for Windows verbatim paths returned
+        // by canonicalize. Append raw path text so validation sees traversal.
+        let mut traversal = fixture.0.as_os_str().to_os_string();
+        traversal.push(format!("{0}..{0}bad.scene.yaml", std::path::MAIN_SEPARATOR));
+        let traversal = PathBuf::from(traversal);
+        assert!(traversal
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir)));
+        for output in [fixture.0.join("bad.yaml"), traversal] {
             assert!(
                 orr_remote::mesh_navigation::authoring::create_new_scene_file(&output, "").is_err()
             );

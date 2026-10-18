@@ -1,0 +1,526 @@
+name: Mesh hazard editor acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mesh-hazards-editor:
+    # Additive coverage; existing mandatory CI and acceptance thresholds remain unchanged.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_MESH_EDITOR_EVIDENCE: ${{ github.workspace }}/target/mesh-hazards-editor-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-count guard self-tests
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Focused CPU controls, profile isolation and feature boundaries
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          run = helpers["run_logged"]
+          validate = helpers["validate_tests"]
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          evidence.mkdir(parents=True, exist_ok=False)
+          suites = (
+              ("mesh_hazards_panel::tests", 11),
+              ("mesh_hazards_panel::viewport_picking::tests", 11),
+              ("game::mesh_hazards_identity_tests", 1),
+              ("backend::mesh_hazards_profile_tests", 1),
+              ("editor::input::mesh_hazards_control_tests", 4),
+              ("mesh_context::tests", 1),
+              ("mesh_navigation::hazards_view::tests", 6),
+              ("mesh_play_controls", 14),
+              ("mesh_game_creator::tests", 7),
+              ("mesh_hazards_creator::tests", 5),
+              ("app::mesh_game_creator_tests", 7),
+              ("mesh_mission_panel", 19),
+          )
+          for suite, count in suites:
+              path = evidence / (suite.replace("::", "-") + ".log")
+              output = run(["cargo", "test", "--locked", "-p", "orr_editor", "--lib",
+                            "--features", "mesh-hazards", suite + "::", "--",
+                            "--format=pretty", "--color=never", "--test-threads=1"], path)
+              try:
+                  validate(output, suite, count)
+              except ValueError as error:
+                  with path.open("a", encoding="utf-8") as log:
+                      log.write(f"\nEvidence validation failed: {error}\n")
+                  raise
+          for name, args in (
+              ("default-check", ["check", "--lib"]),
+              ("export-only-check", ["check", "--lib", "--features", "mesh-export"]),
+              ("hazards-lint", ["clippy", "--lib", "--features", "mesh-hazards", "--", "-D", "warnings"]),
+              ("export-only-lint", ["clippy", "--lib", "--features", "mesh-export", "--", "-D", "warnings"]),
+          ):
+              run(["cargo", args[0], "--locked", "-p", "orr_editor", *args[1:]], evidence / (name + ".log"))
+      - name: Animated binding relative-path regression guards
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          suite = "animated_bindings"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_model_bindings", "--features", "animated-models",
+               "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "animated-bindings-library.log")
+          helpers["validate_tests"](output, suite, 3)
+          for name in (
+              "sidecar_parser_rejects_oversize_unknown_version_unknown_fields_and_bad_values",
+              "assignment_history_is_bounded_and_invalid_paths_are_rejected",
+          ):
+              output = helpers["run_logged"](
+                  ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "animated-models",
+                   "--test", "animated_bindings", name, "--", "--exact", "--format=pretty",
+                   "--color=never", "--test-threads=1"], evidence / (name + ".log"))
+              summaries = helpers["SUMMARY"].findall(output)
+              if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                      or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                      or helpers["CASE"].findall(output) != [(name, "ok")]):
+                  raise RuntimeError(f"{name}: expected exactly one passing regression test, no skips")
+      - name: Focused hazard export and Player CPU contracts
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          # The legacy mesh_export test module requires animated models. This does
+          # not claim minimal-feature lib tests pass; production boundaries are
+          # checked separately below without that test-only compatibility feature.
+          features = "mesh-hazards-export,mesh-animated-models"
+          suites = (
+              ("mesh_hazards_export::runtime::tests", 12),
+              ("mesh_hazards_export::tests", 13 if os.name != "nt" else 11),
+              ("mesh_hazards_player::tests", 10),
+              ("app::mesh_hazards_player::tests", 10 if os.name != "nt" else 9),
+              ("mesh_hazards_export_panel::tests", 8 if os.name != "nt" else 6),
+          )
+          for suite, count in suites:
+              path = evidence / (suite.replace("::", "-") + ".log")
+              # Libtest filters are substrings: the root Player prefix also
+              # occurs inside app::mesh_hazards_player::tests. Select it once.
+              disjoint = (["--skip", "app::mesh_hazards_player::tests::"]
+                          if suite == "mesh_hazards_player::tests" else [])
+              output = helpers["run_logged"](
+                  ["cargo", "test", "--locked", "-p", "orr_editor", "--lib",
+                   "--features", features, suite + "::", "--", "--format=pretty",
+                   "--color=never", "--test-threads=1", "--skip",
+                   "actual_native_runtime_is_admitted", "--skip",
+                   "actual_editor_ui_exports_real_hazard_player_without_launching_it", *disjoint], path)
+              try:
+                  helpers["validate_tests"](output, suite, count)
+              except ValueError as error:
+                  with path.open("a", encoding="utf-8") as log:
+                      log.write(f"\nEvidence validation failed: {error}\n")
+                  raise
+          for name, arguments in (
+              ("hazards-export-minimal-check", ["check", "--lib"]),
+              ("hazards-export-minimal-lint", ["clippy", "--lib", "--", "-D", "warnings"]),
+              ("hazard-player-minimal-lint", ["clippy", "--bin", "orr_mesh_hazards_player", "--", "-D", "warnings"]),
+          ):
+              helpers["run_logged"](
+                  ["cargo", arguments[0], "--locked", "-p", "orr_editor",
+                   "--features", "mesh-hazards-export", *arguments[1:]], evidence / (name + ".log"))
+      - name: Build and admit the real native hazard Player
+        shell: python {0}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+          import shutil
+          import subprocess
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          # Strip only the final binary's debug information. Full debug executables
+          # can exceed the format's fixed 256 MiB admission cap; never raise it.
+          helpers["run_logged"](
+              ["cargo", "rustc", "--locked", "-p", "orr_editor", "--features", "mesh-hazards-export",
+               "--bin", "orr_mesh_hazards_player", "--", "-C", "strip=debuginfo"], evidence / "hazard-player-build.log")
+          metadata = json.loads(subprocess.check_output(
+              ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"], text=True))
+          filename = "orr_mesh_hazards_player" + (".exe" if os.name == "nt" else "")
+          binary = Path(metadata["target_directory"]) / "debug" / filename
+          if not binary.is_file() or not 0 < binary.stat().st_size <= 256 * 1024 * 1024:
+              raise RuntimeError("Fresh native Player must fit the unchanged runtime admission cap")
+          runtime_dir = evidence / "native-runtime"
+          runtime_dir.mkdir(exist_ok=False)
+          artifact = runtime_dir / filename
+          shutil.copy2(binary, artifact)
+          artifact = artifact.resolve()
+          capabilities = helpers["run_logged"]([str(artifact), "--capabilities"], evidence / "hazard-player-capabilities.log")
+          lines = capabilities.splitlines()[1:]  # run_logged records the command first.
+          if lines != ["ORR_MESH_HAZARDS_PLAYER_V1", "ORR_MESH_INPUT_V1"]:
+              raise RuntimeError("Native hazard Player capability output differs from its contract")
+          os.environ["ORR_MESH_HAZARDS_RUNTIME"] = str(artifact)
+          digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          os.environ["ORR_MESH_HAZARDS_RUNTIME_SHA256"] = digest
+          name = "mesh_hazards_export::runtime::tests::actual_native_runtime_is_admitted"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--lib",
+               "--features", "mesh-hazards-export,mesh-animated-models", name, "--", "--exact",
+               "--ignored", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "hazard-player-native-format.log")
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected exactly one native binary parser acceptance, without skips")
+          if hashlib.sha256(artifact.read_bytes()).hexdigest() != digest:
+              raise RuntimeError("Native runtime changed during parser admission")
+          (runtime_dir / "receipt.json").write_text(json.dumps({
+              "source_sha": os.environ["GITHUB_SHA"], "filename": filename,
+              "platform": os.environ["RUNNER_OS"], "bytes": artifact.stat().st_size,
+              "sha256": digest, "capabilities_verified": True, "native_format_admitted": True,
+              "production_features": "mesh-hazards-export", "gui_execution": False,
+          }, indent=2) + "\n", encoding="utf-8")
+      - name: Install and select Linux software Vulkan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$ORR_MESH_EDITOR_EVIDENCE/vulkan-install.log"
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 bubblewrap 2>&1 | tee -a "$ORR_MESH_EDITOR_EVIDENCE/vulkan-install.log"
+          mapfile -t drivers < <(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -type f)
+          test "${#drivers[@]}" -eq 1
+          runtime=$(mktemp -d "$RUNNER_TEMP/mesh-hazards-xdg.XXXXXXXX")
+          chmod 700 "$runtime"
+          {
+            echo "VK_DRIVER_FILES=${drivers[0]}"
+            echo "VK_ICD_FILENAMES=${drivers[0]}"
+            echo "XDG_RUNTIME_DIR=$runtime"
+          } >> "$GITHUB_ENV"
+          printf 'Software Vulkan ICD: %s\n' "${drivers[0]}" | tee "$ORR_MESH_EDITOR_EVIDENCE/vulkan-driver.log"
+      - name: Explicit ignored software-GPU EditorApp acceptance and fresh receipts
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_MESH_HAZARDS_ACCEPTANCE: '1'
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          capture = evidence / "ui"
+          creator_capture = capture.with_name(capture.name + "-creator")
+          if capture.exists() or creator_capture.exists():
+              raise RuntimeError("Both UI acceptances require absent, fresh capture directories")
+          os.environ["ORR_MESH_HAZARDS_CAPTURE_DIR"] = str(capture.resolve())
+          for name in (
+              "hazards_widgets_apply_undo_save_reopen_swept_loss_and_stop_reset",
+              "hazard_creator_widgets_validate_create_preserve_and_reopen",
+          ):
+              output = helpers["run_logged"](
+                  ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "mesh-hazards",
+                   "--test", "mesh_hazards_ui", name, "--", "--exact", "--ignored",
+                   "--format=pretty", "--color=never", "--test-threads=1"], evidence / (name + ".log"))
+              # Standalone integration tests have no module prefix for validate_tests.
+              summaries = helpers["SUMMARY"].findall(output)
+              if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                      or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                      or helpers["CASE"].findall(output) != [(name, "ok")]):
+                  raise RuntimeError(f"{name}: expected exactly one executed passing ignored test")
+          receipt = json.loads((capture / "acceptance.json").read_text())
+          expected = {
+              "profile": "MeshHazardsV1", "software_gpu": True, "hardware_gpu": False,
+              "physical_os_input": False, "production_editor_app": True,
+              "invalid_radius_rejected_atomically": True, "widget_apply_undo_redo_save_reopen": True,
+              "swept_loss_tick": 1, "endpoint_overlap": False,
+              "mission_win_suppressed": True, "stop_restores_authored_checksum": True,
+          }
+          if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                 for key, value in expected.items()):
+              raise RuntimeError("Fresh UI acceptance receipt is incomplete or inconsistent")
+          for image in ("invalid-radius-warning.png", "authored-hazard.png", "reopened-hazard.png",
+                        "after-play-diagnostic.png", "swept-hazard-loss.png", "stop-reset.png"):
+              data = (capture / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh UI capture: {image}")
+          creator_receipt = json.loads((creator_capture / "acceptance.json").read_text())
+          creator_expected = {
+              "profile": "MeshHazardsV1", "production_editor_app": True,
+              "software_gpu": True, "hardware_gpu": False, "physical_os_input": False,
+              "creator_cancel_untouched": True, "invalid_inputs_rejected": True,
+              "default_hazards_off": True, "optional_starter_sphere": True,
+              "original_scene_unchanged": True, "overwrite_refused": True,
+              "draft_play_modal_guards": True, "authored_save_reopen": True,
+              "numeric_mission_edit_undo_redo_save_reopen": True,
+          }
+          if any(type(creator_receipt.get(key)) is not type(value) or creator_receipt.get(key) != value
+                 for key, value in creator_expected.items()):
+              raise RuntimeError("Fresh creator acceptance receipt is incomplete or inconsistent")
+          for image in ("creator-modal-play-guard.png", "creator-invalid-input.png",
+                        "creator-ready-default-off.png", "creator-default-off-created.png",
+                        "creator-overwrite-refused.png", "creator-mission-numeric-edited.png",
+                        "creator-authored-reopened.png", "creator-optional-starter.png"):
+              data = (creator_capture / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh creator capture: {image}")
+          helpers["run_logged"](
+              ["cargo", "clippy", "--locked", "-p", "orr_editor", "--features", "mesh-hazards",
+               "--test", "mesh_hazards_ui", "--", "-D", "warnings"], evidence / "ui-test-lint.log")
+      - name: Explicit software-Vulkan hazard viewport picking acceptance
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_MESH_HAZARDS_ACCEPTANCE: '1'
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          capture = evidence / "viewport-picking-ui"
+          if capture.exists():
+              raise RuntimeError("Viewport picking acceptance requires an absent, fresh capture directory")
+          os.environ["ORR_HAZARD_PICK_CAPTURE_DIR"] = str(capture.resolve())
+          name = "hazard_center_viewport_pick_stages_only_selected_sphere_and_apply_undo_save_reopen"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "mesh-hazards-export,mesh-animated-models",
+               "--test", "mesh_hazards_ui", name, "--", "--exact", "--ignored",
+               "--format=pretty", "--color=never", "--test-threads=1"], evidence / (name + ".log"))
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError(f"{name}: expected exactly one executed passing ignored test")
+          receipt = json.loads((capture / "acceptance.json").read_text())
+          expected = {
+              "schema": 1, "profile": "MeshHazardsV1", "production_editor_app": True,
+              "software_gpu": True, "hardware_gpu": False, "physical_os_input": False,
+              "viewport_pointer_pick": True, "selected_sphere_only": True,
+              "radius_preserved": True, "staging_does_not_mutate_host": True,
+              "play_save_open_guards": True, "escape_cancel_preserves_selection": True,
+              "focus_loss_cancels": True, "no_selection_fallthrough": True,
+              "mission_and_agent_unchanged": True, "apply_undo_redo_save_reopen": True,
+              "viewport_authored_sphere_2_loss_tick_1": True, "stop_restores_authored_state": True,
+          }
+          if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                 for key, value in expected.items()):
+              raise RuntimeError("Fresh viewport picking acceptance receipt is incomplete or inconsistent")
+          for image in ("01-picking-guards.png", "02-picked-draft.png", "03-picked-applied.png",
+                        "04-picked-reopened.png", "05-picked-route-loss.png", "06-picked-stop-reset.png"):
+              data = (capture / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh viewport picking capture: {image}")
+      - name: Explicit software-Vulkan hazard export UI with the real native Player
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        shell: python {0}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          capture = evidence / "export-ui"
+          if capture.exists():
+              raise RuntimeError("Export UI evidence requires a fresh absent directory")
+          runtime = (evidence / "native-runtime" / "orr_mesh_hazards_player").resolve()
+          os.environ["ORR_HAZARD_EXPORT_UI_DIR"] = str(capture.resolve())
+          os.environ["ORR_HAZARD_EXPORT_RUNTIME"] = str(runtime)
+          name = "mesh_hazards_export_panel::tests::actual_editor_ui_exports_real_hazard_player_without_launching_it"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--lib",
+               "--features", "mesh-hazards-export,mesh-animated-models", name, "--", "--exact",
+               "--ignored", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "hazard-export-real-ui.log")
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected exactly one executed passing export UI acceptance")
+          receipt = json.loads((capture / "receipt.json").read_text())
+          expected = {"schema": 1, "inventory_files": 3, "overwrite_refused": True,
+                      "dirty_scene_blocked": True, "runtime_executed": False}
+          if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                 for key, value in expected.items()):
+              raise RuntimeError("Fresh export UI receipt is incomplete or inconsistent")
+          digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+          if receipt.get("runtime_sha256_before") != digest or receipt.get("runtime_sha256_after") != digest:
+              raise RuntimeError("Export UI did not preserve the freshly built native runtime")
+          if (not receipt.get("source_scene_sha256_before") or receipt.get("source_scene_sha256_before")
+                  != receipt.get("source_scene_sha256_after")):
+              raise RuntimeError("Export UI changed its saved source scene")
+          for image in ("01-export-ready.png", "02-export-complete.png",
+                        "03-overwrite-refused.png", "04-dirty-scene-blocked.png"):
+              data = (capture / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh export UI capture: {image}")
+          # This executes synthetic egui input on software Vulkan, never the
+          # exported player's GUI. Windows GPU/native interaction is unverified.
+      - name: Relocated production PlayerApp software-Vulkan lifecycle acceptance
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+          LP_NUM_THREADS: '2'
+          MESA_SHADER_CACHE_DISABLE: 'true'
+        shell: python {0}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+          import shutil
+          import tempfile
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_MESH_EDITOR_EVIDENCE"])
+          repo = Path.cwd().resolve()
+          scratch = Path(tempfile.mkdtemp(prefix="hazard-player-acceptance-", dir=os.environ["RUNNER_TEMP"])).resolve()
+          if scratch.is_relative_to(repo):
+              raise RuntimeError("Source-masked acceptance must stage outside the repository")
+          # Compile before masking; copy the exact test executable outside the repo.
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--lib", "--no-run",
+               "--features", "mesh-hazards-export,mesh-animated-models", "--message-format=json"],
+              evidence / "hazard-player-ui-build.log")
+          executables = []
+          for line in output.splitlines():
+              try:
+                  item = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if (item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "orr_editor"
+                      and item.get("profile", {}).get("test") and item.get("executable")):
+                  executables.append(Path(item["executable"]))
+          if len(executables) != 1:
+              raise RuntimeError("Expected one freshly compiled editor libtest executable")
+          def file_digest(path):
+              with path.open("rb") as source:
+                  return hashlib.file_digest(source, "sha256").hexdigest()
+          executable = scratch / "player-app-acceptance"
+          shutil.copy2(executables[0], executable)
+          test_digest = file_digest(executable)
+          if test_digest != file_digest(executables[0]):
+              raise RuntimeError("Copied libtest executable differs from the compiled executable")
+          (evidence / "player-ui-producer.json").write_text(json.dumps({
+              "source_sha": os.environ["GITHUB_SHA"], "libtest_sha256": test_digest,
+              "repository_mask": str(repo), "staging_directory": str(scratch),
+              "test_features": "mesh-hazards-export,mesh-animated-models",
+          }, indent=2) + "\n", encoding="utf-8")
+          exported = json.loads((evidence / "export-ui" / "receipt.json").read_text())
+          staged = scratch / "staged-bundle"
+          relocated = scratch / "relocated hazard game"
+          shutil.copytree(exported["bundle"], staged)
+          staged.rename(relocated)
+          capture = scratch / "captures"
+          xdg = scratch / "xdg"
+          xdg.mkdir(mode=0o700)
+          empty_cwd = scratch / "empty-cwd"
+          empty_cwd.mkdir()
+          sources = [Path(exported["source_scene"]).resolve(), Path(exported["source_runtime"]).resolve()]
+          if any(not source.is_relative_to(repo) for source in sources):
+              raise RuntimeError("Unexpected source location outside the repository mask")
+          os.environ.update({
+              "ORR_HAZARDS_PLAYER_ACCEPTANCE": "1", "ORR_HAZARDS_PLAYER_BUNDLE": str(relocated),
+              "ORR_HAZARDS_PLAYER_CAPTURE_DIR": str(capture),
+              "ORR_HAZARDS_PLAYER_SOURCE_SCENE": str(sources[0]),
+              "ORR_HAZARDS_PLAYER_SOURCE_RUNTIME": str(sources[1]),
+              "ORR_HAZARDS_PLAYER_SOURCE_REPO": str(repo),
+              "ORR_HAZARDS_PLAYER_EXPECTED_RUNTIME_SHA256": exported["runtime_sha256_after"],
+              "XDG_RUNTIME_DIR": str(xdg), "MESA_SHADER_CACHE_DISABLE": "true",
+              "HOME": str(scratch / "profile"), "XDG_DATA_HOME": str(scratch / "profile" / "data"),
+          })
+          (scratch / "profile" / "data").mkdir(parents=True)
+          for display in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+              os.environ.pop(display, None)
+          guard = scratch / "masked-run.py"
+          guard.write_text(
+              "import os, pathlib, sys\n"
+              "repo=pathlib.Path(os.environ['ORR_HAZARDS_PLAYER_SOURCE_REPO'])\n"
+              "assert repo.is_dir() and not any(repo.iterdir()), 'repository mask must be empty'\n"
+              "for key in ('ORR_HAZARDS_PLAYER_SOURCE_SCENE','ORR_HAZARDS_PLAYER_SOURCE_RUNTIME'):\n"
+              "    assert not pathlib.Path(os.environ[key]).exists(), 'original source is still accessible'\n"
+              "os.execv(sys.argv[1], sys.argv[1:])\n", encoding="utf-8")
+          name = "mesh_hazards_player::acceptance::relocated_bundle_player_ui_pause_loss_cancel_escape_restart"
+          try:
+              output = helpers["run_logged"](
+                  ["bwrap", "--die-with-parent", "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
+                   "--proc", "/proc", "--tmpfs", "/tmp", "--bind", str(scratch), str(scratch),
+                   "--ro-bind", str(relocated), str(relocated), "--tmpfs", str(repo), "--chdir", str(empty_cwd),
+                   "python3", str(guard), str(executable), name, "--exact", "--ignored",
+                   "--format=pretty", "--color=never", "--test-threads=1"], evidence / "hazard-player-relocated-ui.log")
+          finally:
+              if capture.exists():
+                  shutil.copytree(capture, evidence / "player-ui")
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected one executed passing source-masked PlayerApp acceptance")
+          receipt = json.loads((evidence / "player-ui" / "receipt.json").read_text())
+          expected = {"schema": 1, "native_window": False, "standalone_executable_ui": False,
+                      "hardware_gpu": False, "test_only_wall_clock_speed_permille": 250,
+                      "pause_resume": True, "actual_live_goal_loss": True,
+                      "cancel_preserves_loss": True, "escape_preserves_loss": True,
+                      "confirmed_restart_resets": True, "repeated_restart": True}
+          if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                 for key, value in expected.items()):
+              raise RuntimeError("Fresh PlayerApp receipt is incomplete or inconsistent")
+          if (receipt.get("runtime_sha256") != exported["runtime_sha256_after"]
+                  or len(receipt.get("bundle_hashes_before", {})) != 3
+                  or receipt.get("bundle_hashes_before") != receipt.get("bundle_hashes_after")
+                  or "llvmpipe" not in receipt.get("adapter", "").lower()):
+              raise RuntimeError("PlayerApp receipt does not prove unchanged relocated bundle and software rendering")
+          for image in ("01-relocated-paused.png", "02-paused-after-resume.png", "03-live-input-loss.png",
+                        "04-restart-confirmation.png", "05-restarted-tick-zero.png"):
+              data = (evidence / "player-ui" / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh PlayerApp capture: {image}")
+      - name: Preserve failure logs, fresh screenshots and acceptance receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesh-hazards-editor-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_MESH_EDITOR_EVIDENCE }}
+          if-no-files-found: warn
+          retention-days: 7

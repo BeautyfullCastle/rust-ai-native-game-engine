@@ -3,6 +3,10 @@ use std::path::PathBuf;
 
 pub(crate) struct Panel {
     open: bool,
+    #[cfg(feature = "mesh-hazards")]
+    hazards: bool,
+    #[cfg(feature = "mesh-hazards")]
+    include_hazard: bool,
     scene_path: String,
     width: String,
     depth: String,
@@ -16,6 +20,10 @@ impl Default for Panel {
         let settings = Settings::default();
         Self {
             open: false,
+            #[cfg(feature = "mesh-hazards")]
+            hazards: false,
+            #[cfg(feature = "mesh-hazards")]
+            include_hazard: false,
             scene_path: String::new(),
             width: settings.width.to_string(),
             depth: settings.depth.to_string(),
@@ -28,7 +36,30 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn open(&mut self) {
+        if self.open {
+            return;
+        }
+        #[cfg(feature = "mesh-hazards")]
+        {
+            self.hazards = false;
+        }
+        self.error = None;
         self.open = true;
+    }
+
+    #[cfg(feature = "mesh-hazards")]
+    pub(crate) fn open_hazards(&mut self) {
+        if self.open {
+            return;
+        }
+        self.open();
+        self.hazards = true;
+        self.include_hazard = false;
+    }
+
+    #[cfg(feature = "mesh-hazards")]
+    pub(crate) fn hazard_request(&self) -> Option<bool> {
+        self.hazards.then_some(self.include_hazard)
     }
 
     pub(crate) fn busy(&self) -> bool {
@@ -44,11 +75,15 @@ impl Panel {
             return None;
         }
 
+        #[cfg(feature = "mesh-hazards")]
+        let hazard_mode = self.hazards;
+        #[cfg(not(feature = "mesh-hazards"))]
+        let hazard_mode = false;
         let mut request = None;
         let mut canceled = false;
         egui::Modal::new(egui::Id::new("new-mesh-game-modal")).show(context, |ui| {
                 ui.set_min_width(500.0);
-                ui.heading("New mesh game");
+                ui.heading(if hazard_mode { "New hazard game" } else { "New mesh game" });
                 ui.label("Create a new local mesh scene with a walkable floor and point-navigation collectibles.");
                 ui.label("This starter uses deterministic point navigation; it does not add physics or collision.");
                 if let Some(reason) = blocked {
@@ -56,7 +91,13 @@ impl Panel {
                 }
 
                 let mut changed = false;
-                changed |= field(ui, "New mesh game scene path", &mut self.scene_path);
+                changed |= field(ui, if hazard_mode { "New hazard game scene path" } else { "New mesh game scene path" }, &mut self.scene_path);
+                #[cfg(feature = "mesh-hazards")]
+                if hazard_mode {
+                    ui.label("Explicit MeshHazardsV1 scene. Customize spheres in Mesh hazards after creation.");
+                    changed |= ui.checkbox(&mut self.include_hazard, "Include starter hazard sphere").changed();
+                    ui.weak("The optional sphere sits off the starter route; moving into it loses the run.");
+                }
                 changed |= field(ui, "Game floor width", &mut self.width);
                 changed |= field(ui, "Game floor depth", &mut self.depth);
                 changed |= field(ui, "Game collectible count", &mut self.collectible_count);
@@ -83,7 +124,7 @@ impl Panel {
 
                 let can_create = blocked.is_none() && path_valid && parsed.is_ok();
                 if ui
-                    .add_enabled(can_create, egui::Button::new("Create mesh game"))
+                    .add_enabled(can_create, egui::Button::new(if hazard_mode { "Create hazard game" } else { "Create mesh game" }))
                     .clicked()
                 {
                     if let Ok(settings) = parsed {
@@ -91,7 +132,7 @@ impl Panel {
                         request = Some((PathBuf::from(path), settings));
                     }
                 }
-                canceled = ui.button("Cancel new mesh game").clicked();
+                canceled = ui.button(if hazard_mode { "Cancel new hazard game" } else { "Cancel new mesh game" }).clicked();
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::RED, error);
                 }

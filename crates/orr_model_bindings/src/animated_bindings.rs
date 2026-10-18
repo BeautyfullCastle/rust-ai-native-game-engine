@@ -564,6 +564,9 @@ fn relative_hint(path: &str) -> bool {
         && !path.contains('\\')
         && !path.contains(':')
         && !path.contains('\0')
+        // A slash-rooted path without a drive is not absolute on Windows.
+        // Serialized hints must remain relative on every supported platform.
+        && !path.starts_with('/')
         && !Path::new(path).is_absolute()
 }
 
@@ -611,5 +614,66 @@ mod integrity_tests {
             verify_expected_hash(&expected, b"replacement bytes from another lock generation"),
             Err(())
         );
+    }
+}
+
+#[cfg(test)]
+mod relative_path_tests {
+    use super::{relative_hint, resolve_project, Document};
+    use std::{collections::BTreeMap, path::Path};
+
+    #[test]
+    fn portable_relative_hints_reject_rooted_drive_and_backslash_forms() {
+        for path in [
+            "/",
+            "/remote",
+            "/remote/scene.yaml",
+            "//server/share",
+            r"\remote",
+            r"\\server\share",
+            "C:/remote",
+            "C:remote",
+            r"C:\remote",
+            r"..\scene.yaml",
+            "",
+            "bad\0path",
+        ] {
+            assert!(!relative_hint(path), "unexpectedly accepted {path:?}");
+            for (scene, project) in [(path, "."), ("scene.yaml", path)] {
+                let document = Document {
+                    version: 1,
+                    scene: scene.into(),
+                    project: project.into(),
+                    bindings: BTreeMap::new(),
+                };
+                assert!(document.validate().is_err(), "accepted {path:?}");
+            }
+            // Rejection precedes any filesystem access, including on Windows.
+            assert_eq!(
+                resolve_project(Path::new("unused-base"), path).unwrap_err(),
+                "project path must be relative",
+            );
+        }
+    }
+
+    #[test]
+    fn portable_relative_hints_preserve_parent_and_current_directory_forms() {
+        for path in [
+            ".",
+            "..",
+            "scene.yaml",
+            "./scene.yaml",
+            "../scene.yaml",
+            "../project/assets",
+        ] {
+            assert!(relative_hint(path), "unexpectedly rejected {path:?}");
+            let document = Document {
+                version: 1,
+                scene: path.into(),
+                project: path.into(),
+                bindings: BTreeMap::new(),
+            };
+            assert!(document.validate().is_ok(), "rejected {path:?}");
+        }
     }
 }

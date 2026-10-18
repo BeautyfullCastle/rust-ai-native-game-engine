@@ -1,10 +1,7 @@
-use crate::{
-    editor::{Editor, Mode},
-    game::EditorGame,
-};
+use crate::editor::{Editor, Mode};
 use egui::Ui;
 use orr_fp::FP;
-use orr_remote::mesh_navigation::{mesh_from_view, MeshView};
+use orr_remote::mesh_navigation::MeshView;
 use orr_render::Camera3D;
 use std::path::PathBuf;
 
@@ -268,35 +265,31 @@ pub(crate) fn keyboard_direction(input: &egui::InputState) -> [i8; 2] {
 }
 
 fn live_play_ready(editor: &Editor) -> Result<(), String> {
-    if editor.game() != EditorGame::MeshNavigation
+    if !editor.game().has_mesh_view()
         || !editor.spec().is_local()
         || editor.mode() != Mode::Play
         || !editor.sim().playing
         || editor.sim().head_tick != editor.sim().last_tick
         || editor.previewing().is_some()
+        || !editor.can_take_control()
     {
-        return Err("live local MeshNavigation Play is required".into());
+        return Err("live local mesh Play is required".into());
     }
     Ok(())
 }
 
 fn current_context(editor: &Editor) -> Result<(Context, MeshView), String> {
     live_play_ready(editor)?;
-    let scene = editor
-        .path()
-        .ok_or_else(|| "the running mesh scene has no local path".to_owned())?;
-    let snapshot = editor
-        .snapshot()
-        .ok_or_else(|| "wait for the current MeshNavigation frame".to_owned())?;
-    let frame = snapshot.predicted();
-    if frame.checksum() != editor.checksum() {
-        return Err("wait for the current live MeshNavigation frame".into());
+    let current = crate::mesh_context::current(editor)?;
+    if current.game != editor.game() || current.checksum != editor.checksum() {
+        return Err("wait for the current live mesh frame".into());
     }
-    let view = mesh_from_view(frame)?;
+    let scene = current.scene;
+    let view = current.mesh;
     let context = Context {
         scene,
-        epoch: editor.scene_load_epoch(),
-        graph_revision: view.graph.revision(),
+        epoch: current.scene_epoch,
+        graph_revision: current.graph_revision,
     };
     Ok((context, view))
 }

@@ -118,6 +118,10 @@ pub mod navigation_view;
 #[cfg(feature = "mesh-navigation")]
 pub mod mesh_navigation;
 #[cfg(feature = "mesh-navigation")]
+pub(crate) mod mesh_context;
+#[cfg(feature = "mesh-hazards")]
+pub(crate) mod mesh_hazards_panel;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_play_controls;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_art;
@@ -179,6 +183,8 @@ mod mesh_mission_panel;
 mod mesh_mission_overlay;
 #[cfg(feature = "mesh-mission")]
 mod mesh_game_creator;
+#[cfg(feature = "mesh-hazards")]
+mod mesh_hazards_creator;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_animation_store;
 #[cfg(feature = "mesh-animated-models")]
@@ -227,3 +233,10 @@ pub mod linked_prefab_panel;
 
 #[cfg(feature="room-project")]
 pub mod room_camera_panel;
+
+#[cfg(feature = "mesh-hazards-export")]
+pub mod mesh_hazards_player;
+#[cfg(feature = "mesh-hazards-export")]
+mod mesh_hazards_export;
+#[cfg(feature = "mesh-hazards-export")]
+mod mesh_hazards_export_panel;

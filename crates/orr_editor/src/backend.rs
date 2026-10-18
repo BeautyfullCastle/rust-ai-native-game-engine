@@ -271,6 +271,8 @@ impl Backend {
             EditorGame::NavigationYard3D => orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.to_path_buf(), cfg)?,
             #[cfg(feature = "mesh-navigation")]
             EditorGame::MeshNavigation => orr_remote::mesh_navigation::spawn_mesh_navigation_scene_host(scene.to_path_buf(), cfg)?,
+            #[cfg(feature = "mesh-hazards")]
+            EditorGame::MeshHazardsV1 => orr_remote::mesh_navigation::hazards::spawn_mesh_hazards_scene_host(scene.to_path_buf(), cfg)?,
         };
         let connector = host.connector();
         let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
@@ -357,7 +359,7 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         return Err(format!("{name} reflected schema mismatch: host descriptors differ from this editor"));
     }
     let own_client = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
-    let supports_input = game.has_keyboard() || game.is_mesh_navigation();
+    let supports_input = game.has_keyboard() || game.has_mesh_view();
     let input = if supports_input { erp.call("registry.input", J::Null).ok() } else { None };
     let mut input_types = orr_reflect::TypeRegistry::new();
     input_types.register_component::<orr_sample::arena_game::ArenaInput>("ArenaInput");
@@ -375,7 +377,7 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         serde_json::from_str(&types.type_json_schema("RoomInput").expect("registered room input")).expect("reflected room JSON schema")
     } else { expected_input };
     #[cfg(feature = "mesh-navigation")]
-    let expected_input = if game.is_mesh_navigation() {
+    let expected_input = if game.has_mesh_view() {
         let mut types = orr_reflect::TypeRegistry::new();
         types.register_component::<orr_sample::yard3d_game::YardInput>("MeshGoalInput");
         serde_json::from_str(&types.type_json_schema("MeshGoalInput").expect("registered mesh input")).expect("reflected mesh JSON schema")
@@ -409,5 +411,38 @@ mod linked_unified_tests {
         let result = backend.erp.call("registry.schema", J::Null).unwrap();
         assert_eq!(result["schema"]["properties"]["schema"]["const"], "orr.scene/1");
         assert!(result["schema"]["properties"].get("prefabs").is_none());
+    }
+}
+
+#[cfg(all(test, feature = "mesh-hazards"))]
+mod mesh_hazards_profile_tests {
+    use super::*;
+    use orr_remote::mesh_navigation::hazards::{MeshHazardRun, MeshHazards, HAZARDS_NAME};
+
+    #[test]
+    fn explicit_hazards_profile_uses_distinct_schema_and_typed_stream() {
+        let directory = tempfile::tempdir().unwrap();
+        let scene = directory.path().join("blank.scene.yaml");
+        std::fs::write(&scene, "schema: orr.scene/1\nsingletons: {}\nentities: {}\n").unwrap();
+        let mut backend = Backend::connect(&HostSpec::local_game(&scene, EditorGame::MeshHazardsV1)).unwrap();
+        assert_eq!(backend.game, EditorGame::MeshHazardsV1);
+        assert_eq!(backend.identity.game, "MeshHazardsV1");
+        assert!(backend.managed_input);
+        assert!(matches!(backend.bridge, EditorStream::MeshHazards(_)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let snapshot = loop {
+            backend.bridge.poll_view();
+            if let Some(snapshot) = backend.bridge.snapshot() { break snapshot; }
+            assert!(std::time::Instant::now() < deadline, "hazard typed snapshot missing");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(*snapshot.predicted().singleton::<MeshHazards>(), MeshHazards::default());
+        assert_eq!(*snapshot.predicted().singleton::<MeshHazardRun>(), MeshHazardRun::default());
+        assert!(backend.game.types().get(HAZARDS_NAME).is_some());
+        drop(backend);
+        let legacy = Backend::connect(&HostSpec::local_game(&scene, EditorGame::MeshNavigation)).unwrap();
+        assert_eq!(legacy.identity.game, "MeshNavigation");
+        assert!(matches!(legacy.bridge, EditorStream::MeshNavigation(_)));
+        assert!(legacy.game.types().get(HAZARDS_NAME).is_none());
     }
 }

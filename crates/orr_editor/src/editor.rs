@@ -332,7 +332,7 @@ impl Editor {
         input.collect_dodge = backend.game.is_collect();
         input.room_escape = backend.game.is_room();
         #[cfg(feature = "mesh-navigation")]
-        { input.mesh_navigation = backend.game.is_mesh_navigation(); }
+        { input.mesh_navigation = backend.game.has_mesh_view(); }
         let mut e = Self {
             input,
             backend,
@@ -894,7 +894,7 @@ impl Editor {
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
         #[cfg(feature = "mesh-navigation")]
-        if self.game().is_mesh_navigation() {
+        if self.game().has_mesh_view() {
             if let Some(view) = self.snapshot.as_ref().and_then(|snapshot| {
                 orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).ok()
             }) {
@@ -1366,7 +1366,7 @@ impl Editor {
         let frame = s.predicted();
         self.bodies = self.backend.game.drawables(frame);
         if self.game().is_3d() {
-            self.yard_frame = if self.game().is_mesh_navigation() {
+            self.yard_frame = if self.game().has_mesh_view() {
                 crate::viewport3d::YardFrame::default()
             } else {
                 crate::viewport3d::YardFrame::extract(frame)
@@ -1409,7 +1409,7 @@ impl Editor {
         }
         if self.initial_camera_fit {
             self.initial_camera_fit = false;
-            if self.game().has_keyboard() || self.game().is_mesh_navigation() { self.fit_camera(); }
+            if self.game().has_keyboard() || self.game().has_mesh_view() { self.fit_camera(); }
         }
     }
 
@@ -1583,8 +1583,16 @@ impl Editor {
     pub(crate) fn mesh_workspace_source_stamp(
         &mut self,
     ) -> Result<(EditorGame, PathBuf, u64), String> {
+        if !matches!(self.game(), EditorGame::PhysGame | EditorGame::MeshNavigation) {
+            return Err("Mesh workspace changes require a Physics or legacy MeshNavigation profile".into());
+        }
+        self.mesh_creation_source_stamp()
+    }
+
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_creation_source_stamp(&mut self) -> Result<(EditorGame, PathBuf, u64), String> {
         let game = self.game();
-        if !matches!(game, EditorGame::PhysGame | EditorGame::MeshNavigation)
+        if !(game == EditorGame::PhysGame || game.has_mesh_view())
             || !self.spec().is_local()
             || self.erp_status().is_some()
             || !self.can_mutate()
@@ -1780,7 +1788,7 @@ impl Editor {
                 self.clear_room_camera();
                 self.select(None);
                 self.refit = true;
-                if self.game() == EditorGame::Arena || self.game().is_mesh_navigation() {
+                if self.game() == EditorGame::Arena || self.game().has_mesh_view() {
                     self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
                 }
                 self.backend.spec.set_local_scene_path(path.to_path_buf());
@@ -2124,7 +2132,7 @@ impl Editor {
     }
     #[cfg(feature = "mesh-navigation")]
     pub(crate) fn install_mesh_camera(&mut self, document: crate::mesh_camera::Document) -> Result<(), String> {
-        if self.game() != EditorGame::MeshNavigation || !self.spec().is_local() {
+        if !self.game().has_mesh_view() || !self.spec().is_local() {
             return Err("game camera requires a local MeshNavigation scene".into());
         }
         let scene = self.path().ok_or("the mesh scene has no local path")?;
@@ -2145,14 +2153,14 @@ impl Editor {
     #[cfg(feature = "mesh-navigation")]
     pub(crate) fn has_mesh_camera(&self) -> bool {
         let Some(camera) = self.mesh_camera.as_ref() else { return false; };
-        self.game() == EditorGame::MeshNavigation && self.spec().is_local()
+        self.game().has_mesh_view() && self.spec().is_local()
             && self.path().as_ref() == Some(&camera.scene) && self.scene_load_epoch() == camera.epoch
             && self.snapshot().and_then(|snapshot| orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).ok())
                 .is_some_and(|view| view.graph.revision() == camera.graph_revision)
     }
     #[cfg(feature = "mesh-navigation")]
     pub(crate) fn clear_mesh_camera(&mut self) {
-        if self.mesh_camera.take().is_some() && self.game() == EditorGame::MeshNavigation {
+        if self.mesh_camera.take().is_some() && self.game().has_mesh_view() {
             self.fit_camera();
         }
     }
@@ -2218,7 +2226,7 @@ impl Editor {
 
     /// Creates a persisted Yard3D box, or a sphere in the admitted terrain game.
     pub fn spawn_yard_body(&mut self, pos: orr_fp::FPVec3) -> bool {
-        if self.game().is_navigation() || self.game().is_mesh_navigation() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
+        if self.game().is_navigation() || self.game().has_mesh_view() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
         if !self.game().is_3d() || self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
             self.error("Yard bodies require editable Yard3D scene mode"); return false;
         }
@@ -2652,7 +2660,7 @@ impl Editor {
     /// if one already runs.
     pub fn start_play(&mut self) -> bool {
         #[cfg(feature = "mesh-navigation")]
-        if self.game().is_mesh_navigation() && self.sim.mode != Mode::Play {
+        if self.game().has_mesh_view() && self.sim.mode != Mode::Play {
             let blocker = self.mesh_navigation_blocker.clone().or_else(|| {
                 if !self.proposals().is_empty() {
                     return Some("Resolve open proposals before Play".into());

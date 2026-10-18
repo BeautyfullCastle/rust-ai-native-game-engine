@@ -132,7 +132,7 @@ fn scene_yaml(settings: &Settings) -> Result<String, String> {
     Ok(yaml)
 }
 
-fn configured_scene(
+pub(crate) fn configured_scene(
     settings: &Settings,
 ) -> Result<(StaticMeshGraph, MeshScenePin, MeshMission), String> {
     if !(6..=64).contains(&settings.width) || !(4..=64).contains(&settings.depth) {
