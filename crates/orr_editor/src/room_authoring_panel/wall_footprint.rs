@@ -2,6 +2,38 @@
 use super::{Editor, FP, Mode, Panel, PathBuf, format_fixed};
 use orr_render::Camera3D;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum GridStep {
+    #[default]
+    Off,
+    Quarter,
+    Half,
+    One,
+    Two,
+}
+impl GridStep {
+    const ALL: [Self; 5] = [Self::Off, Self::Quarter, Self::Half, Self::One, Self::Two];
+    fn raw(self) -> Option<i128> {
+        let scale = i128::from(FP::SCALE);
+        match self {
+            Self::Off => None,
+            Self::Quarter => Some(scale / 4),
+            Self::Half => Some(scale / 2),
+            Self::One => Some(scale),
+            Self::Two => Some(scale * 2),
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Quarter => "0.25 units",
+            Self::Half => "0.5 units",
+            Self::One => "1 unit",
+            Self::Two => "2 units",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ViewInput {
     pub pixel: Option<[f32; 2]>,
@@ -13,6 +45,7 @@ struct Context {
     scene: PathBuf,
     epoch: u64,
     checksum: u64,
+    grid: GridStep,
     name: String,
     center: [String; 2],
     half: [String; 2],
@@ -54,6 +87,20 @@ impl Panel {
     }
     pub(super) fn show_wall_footprint(&mut self, ui: &mut egui::Ui, editor: &Editor) {
         self.sync_wall_footprint(editor);
+        let previous = self.footprint_grid;
+        egui::ComboBox::from_label("Wall footprint grid")
+            .selected_text(self.footprint_grid.label())
+            .show_ui(ui, |ui| {
+                for step in GridStep::ALL {
+                    ui.selectable_value(&mut self.footprint_grid, step, step.label());
+                }
+            });
+        if previous != self.footprint_grid {
+            self.cancel_wall_footprint();
+        }
+        if self.footprint_grid != GridStep::Off {
+            ui.small("Corners snap to the nearest grid line; exact ties go away from zero. Collapsed footprints are rejected.");
+        }
         if ui
             .add_enabled(
                 !self.wall_footprint_busy() && context(self, editor).is_some(),
@@ -100,10 +147,14 @@ impl Panel {
     }
     fn accept_corner(&mut self, point: [f64; 2]) -> Result<(), String> {
         for value in point {
-            checked_fixed(value)?;
+            snap_fixed(checked_fixed(value)?, self.footprint_grid)?;
         }
         if let Some(first) = self.footprint.first {
-            let (center, half) = rectangle(first, point)?;
+            let (center, half) = if self.footprint_grid == GridStep::Off {
+                rectangle(first, point)?
+            } else {
+                snapped_rectangle(first, point, self.footprint_grid)?
+            };
             self.wall_center = center.map(format_fixed);
             self.wall_half_extents = half.map(format_fixed);
             self.footprint = State::default();
@@ -132,6 +183,7 @@ fn context(panel: &Panel, editor: &Editor) -> Option<Context> {
         scene: editor.path()?,
         epoch: editor.scene_load_epoch(),
         checksum: editor.sim().checksum,
+        grid: panel.footprint_grid,
         name: panel.wall_name.clone(),
         center: panel.wall_center.clone(),
         half: panel.wall_half_extents.clone(),
@@ -182,6 +234,45 @@ fn rectangle(a: [f64; 2], b: [f64; 2]) -> Result<([FP; 2], [FP; 2]), String> {
                 "Wall footprint needs positive width and depth after fixed-point conversion."
                     .into(),
             );
+        }
+    }
+    Ok((center, half))
+}
+// Work in wide raw integers so negative values, i64::MIN and carry at the
+// upper bound cannot wrap. Float conversion happens once before this boundary.
+fn snap_fixed(value: FP, grid: GridStep) -> Result<FP, String> {
+    let Some(step) = grid.raw() else {
+        return Ok(value);
+    };
+    let raw = i128::from(value.raw());
+    let magnitude = raw.abs();
+    let quotient = magnitude / step;
+    let remainder = magnitude % step;
+    let rounded = (quotient + i128::from(remainder * 2 >= step)) * step * raw.signum();
+    i64::try_from(rounded)
+        .map(FP::from_raw)
+        .map_err(|_| "Snapped wall corner exceeds fixed-point bounds.".into())
+}
+fn snapped_rectangle(
+    a: [f64; 2],
+    b: [f64; 2],
+    grid: GridStep,
+) -> Result<([FP; 2], [FP; 2]), String> {
+    let mut center = [FP::ZERO; 2];
+    let mut half = center;
+    for axis in 0..2 {
+        let a = i128::from(snap_fixed(checked_fixed(a[axis])?, grid)?.raw());
+        let b = i128::from(snap_fixed(checked_fixed(b[axis])?, grid)?.raw());
+        // All admitted grid steps have even raw values, so these halves are exact.
+        center[axis] = FP::from_raw(
+            i64::try_from((a + b) / 2).map_err(|_| "Wall center exceeds fixed-point bounds.")?,
+        );
+        half[axis] = FP::from_raw(
+            i64::try_from((a - b).abs() / 2)
+                .map_err(|_| "Wall extent exceeds fixed-point bounds.")?,
+        );
+        if half[axis] <= FP::ZERO {
+            return Err("Snapping collapsed the wall footprint; choose corners on different grid lines on both axes.".into());
         }
     }
     Ok((center, half))

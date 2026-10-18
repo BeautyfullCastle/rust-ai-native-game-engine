@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub struct Panel {
     pub open: bool,
     footprint: wall_footprint::State,
+    footprint_grid: wall_footprint::GridStep,
     pub player: [String; 2],
     pub key: [String; 2],
     pub exit: [String; 2],
@@ -36,6 +37,7 @@ impl Default for Panel {
         Self {
             open: false,
             footprint: Default::default(),
+            footprint_grid: Default::default(),
             player: ["0".into(), "0".into()],
             key: ["0".into(), "0".into()],
             exit: ["0".into(), "0".into()],

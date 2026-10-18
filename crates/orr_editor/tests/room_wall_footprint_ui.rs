@@ -210,9 +210,24 @@ fn player_position(h: &Harness<'_, EditorApp>) -> [f32; 3] {
 #[test]
 #[ignore = "requires software Vulkan and fresh ORR_ROOM_WALL_FOOTPRINT_DIR"]
 fn two_corner_wall_stages_creates_persists_and_blocks_player() {
-    let evidence = PathBuf::from(
-        std::env::var_os("ORR_ROOM_WALL_FOOTPRINT_DIR").expect("fresh evidence directory"),
-    );
+    run_wall_case(false, "ORR_ROOM_WALL_FOOTPRINT_DIR");
+}
+
+#[test]
+#[ignore = "requires software Vulkan and fresh ORR_ROOM_WALL_GRID_DIR"]
+fn snapped_wall_cancels_grid_changes_and_preserves_gameplay() {
+    run_wall_case(true, "ORR_ROOM_WALL_GRID_DIR");
+}
+
+fn choose_grid(h: &mut Harness<'_, EditorApp>, label: &str) {
+    h.get_by_label("Wall footprint grid").click();
+    h.run_steps(2);
+    h.get_by_label(label).click();
+    settle(h);
+}
+
+fn run_wall_case(snapped: bool, environment: &str) {
+    let evidence = PathBuf::from(std::env::var_os(environment).expect("fresh evidence directory"));
     assert!(!evidence.exists());
     fs::create_dir(&evidence).unwrap();
     let root = evidence.join("Room fixture");
@@ -287,11 +302,47 @@ fn two_corner_wall_stages_creates_persists_and_blocks_player() {
         h.state().editor.selection(),
         Some(&orr_editor::Target::Guid(selected.clone()))
     );
+    let first = if snapped {
+        [1.63, 0.0, -1.13]
+    } else {
+        [position[0] + 1.7, 0.0, position[2] - 1.0]
+    };
+    let second = if snapped {
+        [2.13, 0.0, 1.13]
+    } else {
+        [position[0] + 2.0, 0.0, position[2] + 1.0]
+    };
+    if snapped {
+        let fields_before = (
+            h.state().room_authoring.wall_center.clone(),
+            h.state().room_authoring.wall_half_extents.clone(),
+        );
+        choose_grid(&mut h, "0.25 units");
+        click(&mut h, "Draw Room wall footprint");
+        corner(&mut h, first);
+        assert!(h.query_by_label("Cancel wall footprint").is_some());
+        choose_grid(&mut h, "0.5 units");
+        assert!(h.query_by_label("Cancel wall footprint").is_none());
+        assert_eq!(
+            (
+                h.state().room_authoring.wall_center.clone(),
+                h.state().room_authoring.wall_half_extents.clone()
+            ),
+            fields_before
+        );
+        assert_eq!(h.state().editor.checksum(), checksum);
+        assert_eq!(h.state().editor.history(), &history);
+        assert_eq!(
+            fs::read(root.join("room.scene.yaml")).unwrap(),
+            scene_before
+        );
+        shot(&mut h, &evidence, "00-grid-change-canceled.png");
+    }
     click(&mut h, "Draw Room wall footprint");
-    corner(&mut h, [position[0] + 1.7, 0.0, position[2] - 1.0]);
+    corner(&mut h, first);
     assert!(h.query_by_label("Cancel wall footprint").is_some());
     shot(&mut h, &evidence, "01-first-corner.png");
-    corner(&mut h, [position[0] + 2.0, 0.0, position[2] + 1.0]);
+    corner(&mut h, second);
     assert!(h.query_by_label("Cancel wall footprint").is_none());
     assert_eq!(h.state().editor.checksum(), checksum);
     assert_eq!(h.state().editor.history(), &history);
@@ -315,10 +366,15 @@ fn two_corner_wall_stages_creates_persists_and_blocks_player() {
         .wall_half_extents
         .clone()
         .map(|v| v.parse::<f32>().unwrap());
-    assert!((center[0] - position[0] - 1.85).abs() < 0.002);
-    assert!((center[1] - position[2]).abs() < 0.002);
-    assert!((half[0] - 0.15).abs() < 0.002);
-    assert!((half[1] - 1.0).abs() < 0.002);
+    if snapped {
+        assert_eq!(center, [1.75, 0.0]);
+        assert_eq!(half, [0.25, 1.0]);
+    } else {
+        assert!((center[0] - position[0] - 1.85).abs() < 0.002);
+        assert!((center[1] - position[2]).abs() < 0.002);
+        assert!((half[0] - 0.15).abs() < 0.002);
+        assert!((half[1] - 1.0).abs() < 0.002);
+    }
     shot(&mut h, &evidence, "02-staged-footprint.png");
     click(&mut h, "Create Room wall");
     let wall = h
@@ -418,5 +474,5 @@ fn two_corner_wall_stages_creates_persists_and_blocks_player() {
         .adapter_name()
         .to_owned();
     assert!(adapter.to_lowercase().contains("llvmpipe"));
-    fs::write(evidence.join("acceptance.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"production_editor_app":true,"software_gpu":true,"adapter":adapter,"physical_os_input":false,"two_corner_staging_only":true,"escape_preserves_selection":true,"fresh_wall_guid":wall.to_string(),"undo_redo_save_reopen":true,"play_collision":true,"actors_models_camera_preserved":true})).unwrap()).unwrap();
+    fs::write(evidence.join("acceptance.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"production_editor_app":true,"software_gpu":true,"adapter":adapter,"physical_os_input":false,"two_corner_staging_only":true,"escape_preserves_selection":true,"fresh_wall_guid":wall.to_string(),"undo_redo_save_reopen":true,"play_collision":true,"actors_models_camera_preserved":true,"grid_snapping":snapped,"grid_change_cancels_without_mutation":snapped,"exact_snapped_values":snapped})).unwrap()).unwrap();
 }
