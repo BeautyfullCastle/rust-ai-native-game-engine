@@ -43,6 +43,10 @@ static MESH_FACING_MARKER: [u8; 18] = *b"ORR_MESH_FACING_V1";
 #[unsafe(link_section = ".orrchar")]
 static MESH_CHARACTER_MARKER: [u8; 21] = *b"ORR_MESH_CHARACTER_V1";
 
+#[used]
+#[unsafe(link_section = ".orrhud")]
+static MESH_HUD_MARKER: [u8; 15] = *b"ORR_MESH_HUD_V1";
+
 fn main() {
     std::hint::black_box(&MESH_PLAYER_MARKER);
     std::hint::black_box(&MESH_PROPS_MARKER);
@@ -56,6 +60,7 @@ fn main() {
     std::hint::black_box(&MESH_INPUT_MARKER);
     std::hint::black_box(&MESH_FACING_MARKER);
     std::hint::black_box(&MESH_CHARACTER_MARKER);
+    std::hint::black_box(&MESH_HUD_MARKER);
     if let Err(error) = orr_editor::mesh_player::run() {
         eprintln!("orr_mesh_player: {error}");
         std::process::exit(2);

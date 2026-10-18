@@ -26,6 +26,7 @@ fn receipt(request: &Request) -> crate::mesh_export::Receipt {
         camera_sha256: None,
         animation_sha256: None,
         lighting_sha256: None,
+        hud_sha256: None,
         runtime_sha256: "runtime-hash".into(),
         input_profile: Some(crate::mesh_export::InputProfile::MeshClickToMoveV1),
     }
@@ -106,6 +107,37 @@ fn completed_export_tracks_lighting_creation_change_and_removal() {
     crate::mesh_lighting_store::save(&scene, None, Some(&second_stamp), [7; 32]).unwrap();
     assert!(!saved_sidecars_match(&scene, &receipt));
     receipt.lighting_sha256 = None;
+    assert!(saved_sidecars_match(&scene, &receipt));
+}
+
+#[test]
+fn completed_export_tracks_hud_creation_change_and_removal() {
+    let temporary = tempfile::tempdir().unwrap();
+    let scene = temporary.path().join("mesh.scene.yaml");
+    std::fs::write(&scene, b"owned scene").unwrap();
+    let mut receipt = receipt(&request());
+    assert!(saved_sidecars_match(&scene, &receipt));
+    let document = crate::mesh_hud::Document::default();
+    let first_stamp = crate::mesh_hud_store::save(&scene, Some(&document), None, [7; 32])
+        .unwrap()
+        .unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.hud_sha256 = Some(first_stamp.clone());
+    assert!(saved_sidecars_match(&scene, &receipt));
+    let changed = crate::mesh_hud::Document {
+        title: "Changed game title".into(),
+        ..document
+    };
+    let second_stamp =
+        crate::mesh_hud_store::save(&scene, Some(&changed), Some(&first_stamp), [7; 32])
+            .unwrap()
+            .unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.hud_sha256 = Some(second_stamp.clone());
+    assert!(saved_sidecars_match(&scene, &receipt));
+    crate::mesh_hud_store::save(&scene, None, Some(&second_stamp), [7; 32]).unwrap();
+    assert!(!saved_sidecars_match(&scene, &receipt));
+    receipt.hud_sha256 = None;
     assert!(saved_sidecars_match(&scene, &receipt));
 }
 

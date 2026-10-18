@@ -106,6 +106,9 @@ impl Panel {
                     if let Some(props_sha256) = &receipt.props_sha256 {
                         ui.label(format!("Mesh props sidecar SHA-256: {props_sha256}"));
                     }
+                    if let Some(hud_sha256) = &receipt.hud_sha256 {
+                        ui.label(format!("Mesh HUD sidecar SHA-256: {hud_sha256}"));
+                    }
                     if let Some(camera_sha256) = &receipt.camera_sha256 {
                         ui.label(format!("Mesh camera sidecar SHA-256: {camera_sha256}"));
                     }
@@ -295,6 +298,7 @@ fn saved_sidecars_match(scene: &std::path::Path, receipt: &crate::mesh_export::R
         && matches!(crate::mesh_props::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.props_sha256)
         && matches!(crate::mesh_camera_store::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.camera_sha256)
         && matches!(crate::mesh_lighting_store::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.lighting_sha256)
+        && matches!(crate::mesh_hud_store::sidecar_stamp(scene), Ok(stamp) if stamp == receipt.hud_sha256)
         && animation_sidecar_matches(scene, receipt)
 }
 

@@ -15,12 +15,13 @@ const MAX_CAMERA_BYTES: u64 = 16 * 1024;
 const MAX_ANIMATION_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-const SIDECAR_SUFFIXES: [&str; 5] = [
+const SIDECAR_SUFFIXES: [&str; 6] = [
     ".mesh-art.json",
     ".mesh-props.json",
     ".mesh-camera.json",
     ".mesh-animation.json",
     ".mesh-lighting.json",
+    ".mesh-hud.json",
 ];
 
 struct SourceFile {
@@ -71,6 +72,7 @@ impl Plan {
             MAX_CAMERA_BYTES,
             MAX_ANIMATION_BYTES,
             crate::mesh_lighting::MAX_BYTES as u64,
+            crate::mesh_hud::MAX_BYTES as u64,
         ]) {
             let name = format!("{scene_name}{suffix}");
             let path = source_scene.with_file_name(&name);
@@ -226,6 +228,11 @@ fn validate_sidecars(
         let (_document, observed_digest) = crate::mesh_lighting_store::load(scene, graph_revision)?
             .ok_or("mesh lighting sidecar disappeared during validation")?;
         require_captured_digest(&files[5], &observed_digest)?;
+    }
+    if files[6].bytes.is_some() {
+        let (_document, observed_digest) = crate::mesh_hud_store::load(scene, graph_revision)?
+            .ok_or("mesh HUD sidecar disappeared during validation")?;
+        require_captured_digest(&files[6], &observed_digest)?;
     }
     Ok(())
 }

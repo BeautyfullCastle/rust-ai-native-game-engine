@@ -28,6 +28,8 @@ const CAMERA_SUFFIX: &str = ".mesh-camera.json";
 const ANIMATION_SUFFIX: &str = ".mesh-animation.json";
 const MAX_ANIMATION_BYTES: u64 = 32 * 1024 * 1024;
 const LIGHTING_SUFFIX: &str = ".mesh-lighting.json";
+const HUD_SUFFIX: &str = ".mesh-hud.json";
+const MAX_HUD_BYTES: u64 = 16 * 1024;
 const RUNTIME_MARKER: &[u8] = b"ORR_MESH_PLAYER_V1";
 const PROPS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_PROPS_V1";
 const ROTATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ROTATION_V1";
@@ -39,6 +41,7 @@ const LIGHTING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_LIGHTING_V1";
 const INPUT_RUNTIME_MARKER: &[u8] = b"ORR_MESH_INPUT_V1";
 const FACING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_FACING_V1";
 const CHARACTER_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CHARACTER_V1";
+const HUD_RUNTIME_MARKER: &[u8] = b"ORR_MESH_HUD_V1";
 const RUNTIME_SECTION: &[u8; 8] = b".orrmesh";
 const PROPS_RUNTIME_SECTION: &[u8; 8] = b".orrprop";
 const ROTATION_RUNTIME_SECTION: &[u8; 8] = b".orrrot\0";
@@ -50,6 +53,7 @@ const LIGHTING_RUNTIME_SECTION: &[u8; 8] = b".orrlit\0";
 const INPUT_RUNTIME_SECTION: &[u8; 8] = b".orrctrl";
 const FACING_RUNTIME_SECTION: &[u8; 8] = b".orrface";
 const CHARACTER_RUNTIME_SECTION: &[u8; 8] = b".orrchar";
+const HUD_RUNTIME_SECTION: &[u8; 8] = b".orrhud\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -75,6 +79,7 @@ pub(crate) struct Receipt {
     pub camera_sha256: Option<String>,
     pub animation_sha256: Option<String>,
     pub lighting_sha256: Option<String>,
+    pub hud_sha256: Option<String>,
     pub runtime_sha256: String,
     pub input_profile: Option<InputProfile>,
 }
@@ -102,6 +107,8 @@ struct BundleManifest {
     animation: Option<BundleFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lighting: Option<BundleFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hud: Option<BundleFile>,
     runtime: BundleFile,
     checksum: u64,
     graph_revision: [u8; 32],
@@ -320,6 +327,23 @@ fn export_with_profile(
         }
         None => None,
     };
+    let hud_path = crate::mesh_hud_store::sidecar_path(&scene_path)?;
+    let hud_bytes = match read_optional_bounded(&hud_path, MAX_HUD_BYTES, "mesh HUD sidecar")? {
+        Some(bytes) => {
+            let Some((_, admitted_hash)) =
+                crate::mesh_hud_store::load(&scene_path, graph_revision)?
+            else {
+                return Err("mesh HUD sidecar could not be admitted".into());
+            };
+            if admitted_hash != digest(&bytes)
+                || read_bounded(&hud_path, MAX_HUD_BYTES, "mesh HUD sidecar recheck")? != bytes
+            {
+                return Err("mesh HUD sidecar changed during admission".into());
+            }
+            Some(bytes)
+        }
+        None => None,
+    };
     let runtime_bytes = read_bounded(runtime, MAX_RUNTIME_BYTES, "mesh player runtime")?;
     validate_runtime_with_lighting(
         &runtime_bytes,
@@ -332,6 +356,7 @@ fn export_with_profile(
             require_surface: requires_surface,
             require_lighting: lighting_bytes.is_some(),
             require_character: requires_character,
+            require_hud: hud_bytes.is_some(),
         },
     )?;
     requires_facing |= optional_facing_present(props_bytes.as_deref(), true)?
@@ -359,6 +384,9 @@ fn export_with_profile(
     let lighting_name = lighting_bytes
         .as_ref()
         .map(|_| format!("{scene_name}{LIGHTING_SUFFIX}"));
+    let hud_name = hud_bytes
+        .as_ref()
+        .map(|_| format!("{scene_name}{HUD_SUFFIX}"));
     let parent = checked_output_parent(destination)?;
     let output_name = checked_leaf(
         destination
@@ -389,6 +417,9 @@ fn export_with_profile(
     if let (Some(name), Some(bytes)) = (&lighting_name, &lighting_bytes) {
         write_new_file(&stage.path().join(name), bytes)?;
     }
+    if let (Some(name), Some(bytes)) = (&hud_name, &hud_bytes) {
+        write_new_file(&stage.path().join(name), bytes)?;
+    }
     write_new_file(&stage.path().join(RUNTIME_FILENAME), &runtime_bytes)?;
     let manifest = BundleManifest {
         schema: 1,
@@ -412,6 +443,10 @@ fn export_with_profile(
         lighting: lighting_name
             .as_ref()
             .zip(lighting_bytes.as_deref())
+            .map(|(name, bytes)| bundle_file(name, bytes)),
+        hud: hud_name
+            .as_ref()
+            .zip(hud_bytes.as_deref())
             .map(|(name, bytes)| bundle_file(name, bytes)),
         runtime: bundle_file(RUNTIME_FILENAME, &runtime_bytes),
         checksum,
@@ -482,6 +517,14 @@ fn export_with_profile(
             (None, None) => false,
             _ => true,
         }
+        || match (
+            &hud_bytes,
+            read_optional_bounded(&hud_path, MAX_HUD_BYTES, "mesh HUD sidecar recheck")?,
+        ) {
+            (Some(before), Some(after)) => before != &after,
+            (None, None) => false,
+            _ => true,
+        }
     {
         return Err("mesh bundle inputs changed before publication".into());
     }
@@ -496,6 +539,7 @@ fn export_with_profile(
     let camera_sha256 = camera_bytes.as_deref().map(digest);
     let animation_sha256 = animation_bytes.as_deref().map(digest);
     let lighting_sha256 = lighting_bytes.as_deref().map(digest);
+    let hud_sha256 = hud_bytes.as_deref().map(digest);
     Ok(Receipt {
         root: output.clone(),
         scene: output.join(scene_name),
@@ -509,6 +553,7 @@ fn export_with_profile(
         camera_sha256,
         animation_sha256,
         lighting_sha256,
+        hud_sha256,
         runtime_sha256: runtime_hash,
         input_profile,
     })
@@ -542,6 +587,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     }
     let animation_name = format!("{}{}", manifest.scene.name, ANIMATION_SUFFIX);
     let lighting_name = format!("{}{}", manifest.scene.name, LIGHTING_SUFFIX);
+    let hud_name = format!("{}{}", manifest.scene.name, HUD_SUFFIX);
     #[cfg(feature = "mesh-animated-models")]
     if let Some(animation) = &manifest.animation {
         validate_bundle_file(animation, &animation_name, MAX_ANIMATION_BYTES)?;
@@ -566,6 +612,9 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             crate::mesh_lighting::MAX_BYTES as u64,
         )?;
     }
+    if let Some(hud) = &manifest.hud {
+        validate_bundle_file(hud, &hud_name, MAX_HUD_BYTES)?;
+    }
     let expected_names: BTreeSet<String> = [
         MANIFEST_FILENAME.to_owned(),
         manifest.scene.name.clone(),
@@ -577,6 +626,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     .chain(manifest.camera.as_ref().map(|entry| entry.name.clone()))
     .chain(manifest.animation.as_ref().map(|entry| entry.name.clone()))
     .chain(manifest.lighting.as_ref().map(|entry| entry.name.clone()))
+    .chain(manifest.hud.as_ref().map(|entry| entry.name.clone()))
     .collect();
     let actual_names = inventory_names(&canonical_root, expected_names.len())?;
     if actual_names != expected_names {
@@ -776,6 +826,27 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             return Err("bundle mesh lighting sidecar inventory does not match its manifest".into())
         }
     }
+    let hud_path = canonical_root.join(&hud_name);
+    match (
+        &manifest.hud,
+        read_optional_bounded(&hud_path, MAX_HUD_BYTES, "bundle mesh HUD sidecar")?,
+    ) {
+        (Some(record), Some(bytes)) => {
+            verify_file(record, &bytes, "bundle mesh HUD sidecar")?;
+            let Some((_, admitted_hash)) =
+                crate::mesh_hud_store::load(&scene_path, graph_revision)?
+            else {
+                return Err("bundle mesh HUD sidecar could not be admitted".into());
+            };
+            if admitted_hash != record.sha256
+                || read_bounded(&hud_path, MAX_HUD_BYTES, "bundle mesh HUD recheck")? != bytes
+            {
+                return Err("bundle mesh HUD admission hash does not match its manifest".into());
+            }
+        }
+        (None, None) => {}
+        _ => return Err("bundle mesh HUD sidecar inventory does not match its manifest".into()),
+    }
     let runtime_path = canonical_root.join(RUNTIME_FILENAME);
     let runtime_bytes = read_bounded(&runtime_path, MAX_RUNTIME_BYTES, "bundle runtime")?;
     verify_file(&manifest.runtime, &runtime_bytes, "bundle runtime")?;
@@ -790,6 +861,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             require_surface: requires_surface,
             require_lighting: manifest.lighting.is_some(),
             require_character: requires_character,
+            require_hud: manifest.hud.is_some(),
         },
     )?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
@@ -887,6 +959,15 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         )?
         .is_none(),
     };
+    let hud_unchanged = match &manifest.hud {
+        Some(record) => {
+            let bytes = read_bounded(&hud_path, MAX_HUD_BYTES, "bundle mesh HUD final recheck")?;
+            verify_file(record, &bytes, "bundle mesh HUD sidecar")?;
+            true
+        }
+        None => read_optional_bounded(&hud_path, MAX_HUD_BYTES, "bundle mesh HUD final recheck")?
+            .is_none(),
+    };
     if checked_directory(root)? != canonical_root
         || read_bounded(
             &manifest_path,
@@ -902,6 +983,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         || !camera_unchanged
         || !animation_unchanged
         || !lighting_unchanged
+        || !hud_unchanged
     {
         return Err("mesh bundle changed while it was being opened".into());
     }
@@ -1463,6 +1545,7 @@ fn validate_runtime_with_animation(
             require_surface,
             require_lighting: false,
             require_character: false,
+            require_hud: false,
         },
     )
 }
@@ -1476,6 +1559,7 @@ struct RuntimeRequirements {
     require_surface: bool,
     require_lighting: bool,
     require_character: bool,
+    require_hud: bool,
 }
 
 fn validate_runtime_with_lighting(
@@ -1491,6 +1575,7 @@ fn validate_runtime_with_lighting(
         require_surface,
         require_lighting,
         require_character,
+        require_hud,
     } = requirements;
     if bytes.len() < 0x40 || &bytes[..2] != b"MZ" {
         return Err("mesh player runtime is missing its DOS executable header".into());
@@ -1611,6 +1696,11 @@ fn validate_runtime_with_lighting(
     {
         return Err("mesh player runtime does not advertise character-follow support".into());
     }
+    if require_hud
+        && validate_runtime_section(bytes, HUD_RUNTIME_SECTION, HUD_RUNTIME_MARKER)?.is_none()
+    {
+        return Err("mesh player runtime does not advertise Mesh HUD support".into());
+    }
     Ok(())
 }
 
@@ -1671,6 +1761,7 @@ fn validate_runtime_with_character(bytes: &[u8], required: bool) -> Result<(), S
             require_surface: false,
             require_lighting: false,
             require_character: required,
+            require_hud: false,
         },
     )
 }

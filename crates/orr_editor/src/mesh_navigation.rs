@@ -765,7 +765,7 @@ impl Panel {
 
     fn geometry_bindings_blocker(&self, editor: &Editor) -> Result<(), String> {
         if self.geometry_presentation_pending {
-            return Err("Save or discard camera, lighting and animation edits before geometry".into());
+            return Err("Save or discard camera, lighting and animation edits before geometry; save or discard HUD changes too".into());
         }
         if self.geometry_host_context.is_some() {
             let snapshot = editor.snapshot().ok_or("Wait for the staged geometry host Frame")?;
@@ -775,8 +775,8 @@ impl Panel {
             }
         }
         let scene = editor.path().ok_or("Save the mesh scene before editing geometry")?;
-        if crate::mesh_lighting_store::has_sidecar(&scene)? {
-            return Err("Remove and save existing scene-bound art, props, camera, lighting and animation before geometry edits; their graph revisions are not silently rebound".into());
+        if crate::mesh_lighting_store::has_sidecar(&scene)? || crate::mesh_hud_store::has_sidecar(&scene)? {
+            return Err("Remove and save existing scene-bound art, props, camera, lighting and animation before geometry edits; remove and save HUD too; graph revisions are not silently rebound".into());
         }
         for path in [
             crate::mesh_art::sidecar_path(&scene)?,
@@ -785,7 +785,7 @@ impl Panel {
             crate::mesh_animation_store::sidecar_path(&scene)?,
         ] {
             match fs::symlink_metadata(&path) {
-                Ok(_) => return Err("Remove and save existing scene-bound art, props, camera, lighting and animation before geometry edits; their graph revisions are not silently rebound".into()),
+                Ok(_) => return Err("Remove and save existing scene-bound art, props, camera, lighting and animation before geometry edits; remove and save HUD too; graph revisions are not silently rebound".into()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
                 Err(error) => return Err(format!("Inspect mesh geometry presentation binding: {error}")),
             }

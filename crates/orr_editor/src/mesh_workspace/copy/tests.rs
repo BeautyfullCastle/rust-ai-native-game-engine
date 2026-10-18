@@ -315,3 +315,39 @@ fn staged_file_tampering_and_extra_entries_refuse_publication() {
     assert!(!destination.exists());
     assert_eq!(fs::read(&scene).unwrap(), original);
 }
+
+#[test]
+fn copy_preserves_hud_and_rejects_invalid_or_changed_hud_before_publication() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let (scene, scene_bytes) = put_scene(&root);
+    let revision = graph().revision();
+    let document = crate::mesh_hud::Document {
+        title: "Harbor route".into(),
+        ..Default::default()
+    };
+    let bytes = document.encode("copied.scene.yaml", revision).unwrap();
+    let sidecar = crate::mesh_hud_store::sidecar_path(&scene).unwrap();
+    fs::write(&sidecar, &bytes).unwrap();
+    let destination = root.join("hud-copy");
+    let copied = Plan::prepare(&scene, &destination)
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert_eq!(fs::read(&copied).unwrap(), scene_bytes);
+    assert_eq!(
+        fs::read(destination.join("copied.scene.yaml.mesh-hud.json")).unwrap(),
+        bytes
+    );
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), 2);
+
+    let stale_destination = root.join("hud-stale");
+    let stale = Plan::prepare(&scene, &stale_destination).unwrap();
+    fs::write(&sidecar, b"invalid replacement").unwrap();
+    assert!(stale.publish().is_err());
+    assert!(!stale_destination.exists());
+    let invalid_destination = root.join("hud-invalid");
+    assert!(Plan::prepare(&scene, &invalid_destination).is_err());
+    assert!(!invalid_destination.exists());
+    assert_eq!(fs::read(&scene).unwrap(), scene_bytes);
+}

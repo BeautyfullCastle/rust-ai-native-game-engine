@@ -156,6 +156,12 @@ mod mesh_lighting_store;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_lighting_panel;
 #[cfg(feature = "mesh-navigation")]
+mod mesh_hud;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_hud_store;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_hud_panel;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_animation_store;
 #[cfg(feature = "mesh-animated-models")]
 mod mesh_animation;

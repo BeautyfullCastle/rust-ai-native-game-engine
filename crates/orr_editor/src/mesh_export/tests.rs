@@ -22,6 +22,9 @@ mod facing_tests;
 #[path = "character_tests.rs"]
 mod character_tests;
 
+#[path = "hud_tests.rs"]
+mod hud_tests;
+
 fn admitted_scene() -> (String, [u8; 32], u64) {
     let graph = StaticMeshGraph::bake(
         &[

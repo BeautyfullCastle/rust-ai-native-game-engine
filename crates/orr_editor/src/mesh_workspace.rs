@@ -177,6 +177,7 @@ fn refuse_existing_sidecar(scene: &Path) -> Result<(), String> {
         ".mesh-camera.json",
         ".mesh-animation.json",
         ".mesh-lighting.json",
+        ".mesh-hud.json",
     ] {
         let sidecar_name = format!("{filename}{suffix}");
         if sidecar_name.len() > 255 {

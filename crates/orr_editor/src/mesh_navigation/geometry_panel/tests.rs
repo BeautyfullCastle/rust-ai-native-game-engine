@@ -80,6 +80,7 @@ fn presentation_sidecars_block_geometry_staging_without_mutating_the_host() {
         ".mesh-camera.json",
         ".mesh-animation.json",
         ".mesh-lighting.json",
+        ".mesh-hud.json",
     ] {
         let sidecar = PathBuf::from(format!("{}{}", scene.path.display(), suffix));
         fs::write(&sidecar, b"opaque sidecar").unwrap();
@@ -115,6 +116,7 @@ fn new_sidecars_or_pending_presentation_edits_block_place_after_geometry_is_stag
         ".mesh-camera.json",
         ".mesh-animation.json",
         ".mesh-lighting.json",
+        ".mesh-hud.json",
     ] {
         let sidecar = PathBuf::from(format!("{}{}", scene.path.display(), suffix));
         fs::write(&sidecar, b"new binding after staging").unwrap();
