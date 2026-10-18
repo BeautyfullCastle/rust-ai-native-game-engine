@@ -3,7 +3,7 @@ use orr_fp::{FPVec3, FP};
 use orr_reflect::Value;
 use orr_remote::json::value_to_json;
 use serde_json::json;
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 const ACTOR: &str = orr_sample::room_project::ACTOR;
 const BODY: &str = "orr_physics3d::Body";
@@ -472,7 +472,146 @@ impl Editor {
             Ok(())
         })
     }
+
+    pub(crate) fn capture_room_wall_stamp(
+        &mut self,
+        guids: &[String],
+    ) -> Result<crate::room_wall_stamp::Template, String> {
+        self.room_authoring_ready()?;
+        if guids.is_empty() || guids.len() > orr_sample::room_game::MAX_WALLS {
+            return Err("select 1..=64 Room walls to capture".into());
+        }
+        let mut selected = BTreeSet::new();
+        for guid in guids {
+            let target = Target::parse(guid)
+                .filter(|target| matches!(target, Target::Guid(_)))
+                .ok_or("Room wall stamp selection requires persistent GUIDs")?;
+            let Target::Guid(parsed) = target else {
+                return Err("Room wall stamp selection requires persistent GUIDs".into());
+            };
+            if !selected.insert(parsed.to_string()) {
+                return Err("Room wall stamp selection contains a duplicate GUID".into());
+            }
+        }
+        let rows = self.room_wall_rows()?;
+        let by_guid = rows
+            .into_iter()
+            .map(|row| (row.wall.guid.clone(), row))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut captured = Vec::with_capacity(guids.len());
+        for guid in guids {
+            let target = Target::parse(guid)
+                .filter(|target| matches!(target, Target::Guid(_)))
+                .ok_or("Room wall stamp selection requires persistent GUIDs")?;
+            let Target::Guid(parsed) = target else {
+                return Err("Room wall stamp selection requires persistent GUIDs".into());
+            };
+            let normalized_guid = parsed.to_string();
+            let row = by_guid
+                .get(&normalized_guid)
+                .ok_or("selected GUID is not a current Room wall")?;
+            captured.push((row.wall.name.clone(), row.components.clone()));
+        }
+        crate::room_wall_stamp::Template::capture(captured)
+    }
+
+    pub(crate) fn instantiate_room_wall_stamp(
+        &mut self,
+        template: &crate::room_wall_stamp::Template,
+        offset: [FP; 2],
+    ) -> Result<Vec<String>, String> {
+        template.encode()?;
+        self.room_authoring_transaction("Instantiate Room wall stamp", |editor| {
+            let current_walls = editor.room_wall_rows()?;
+            if current_walls.len() + template.walls().len() > orr_sample::room_game::MAX_WALLS {
+                return Err("wall stamp would exceed the Room wall limit".into());
+            }
+            let actor_query = editor.call(
+                "world.query",
+                json!({"components":[ACTOR],"values":false,"limit":69}),
+            )?;
+            let actor_entities = actor_query
+                .get("entities")
+                .and_then(J::as_array)
+                .ok_or("Room actor query returned no entities")?;
+            if actor_query.get("truncated").and_then(J::as_bool) != Some(false)
+                || actor_query.get("total").and_then(J::as_u64) != Some(actor_entities.len() as u64)
+                || actor_entities.len() > 68
+            {
+                return Err(
+                    "Room actor query is incomplete or exceeds the admitted actor limit".into(),
+                );
+            }
+            let mut actor_guids = BTreeSet::new();
+            for entity in actor_entities {
+                let guid = entity
+                    .get("guid")
+                    .and_then(J::as_str)
+                    .and_then(Target::parse)
+                    .filter(|target| matches!(target, Target::Guid(_)))
+                    .ok_or("Room actor has no persistent GUID")?;
+                let Target::Guid(guid) = guid else {
+                    return Err("Room actor GUID is invalid".into());
+                };
+                actor_guids.insert(guid.to_string());
+            }
+            let mut created_guids = BTreeSet::new();
+            let mut result = Vec::with_capacity(template.walls().len());
+            for wall in template.walls() {
+                let mut components = wall
+                    .components
+                    .as_object()
+                    .cloned()
+                    .map(J::Object)
+                    .ok_or("wall stamp components must be an object")?;
+                let raw_position = components
+                    .get(BODY)
+                    .and_then(|body| body.get("pos"))
+                    .ok_or("wall stamp Body.pos is missing")?;
+                let Value::Vec3(mut position) = editor.decode_field(BODY, "pos", raw_position)?
+                else {
+                    return Err("wall stamp Body.pos is not an exact Vec3".into());
+                };
+                position.x = position
+                    .x
+                    .checked_add(offset[0])
+                    .ok_or("wall stamp X offset exceeds fixed-point bounds")?;
+                position.z = position
+                    .z
+                    .checked_add(offset[1])
+                    .ok_or("wall stamp Z offset exceeds fixed-point bounds")?;
+                let body = components
+                    .get_mut(BODY)
+                    .and_then(J::as_object_mut)
+                    .ok_or("wall stamp Body must be an object")?;
+                body.insert("pos".into(), value_to_json(&Value::Vec3(position)));
+                let spawned = editor.call(
+                    "world.spawn",
+                    json!({"name":&wall.name,"components":components}),
+                )?;
+                let target = spawned
+                    .get("guid")
+                    .and_then(J::as_str)
+                    .and_then(Target::parse)
+                    .filter(|target| matches!(target, Target::Guid(_)))
+                    .ok_or("Room wall stamp spawn returned no persistent GUID")?;
+                let Target::Guid(guid) = target else {
+                    return Err("Room wall stamp spawn returned an invalid GUID".into());
+                };
+                let guid = guid.to_string();
+                if actor_guids.contains(&guid) || !created_guids.insert(guid.clone()) {
+                    return Err("Room wall stamp spawn returned a duplicate GUID".into());
+                }
+                result.push(guid);
+            }
+            Ok(result)
+        })
+    }
 }
+
+#[cfg(test)]
+#[path = "room_wall_stamp_editor_tests.rs"]
+mod room_wall_stamp_editor_tests;
 
 fn validate_room_wall_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
