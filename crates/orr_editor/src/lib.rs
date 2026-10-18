@@ -132,6 +132,12 @@ mod mesh_art_panel;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_props;
 #[cfg(feature = "mesh-navigation")]
+mod mesh_prop_prefab;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_prop_prefab_store;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_prop_prefab_panel;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_props_panel;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_prop_view;

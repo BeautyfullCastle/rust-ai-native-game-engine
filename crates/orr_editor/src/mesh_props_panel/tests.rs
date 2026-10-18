@@ -60,6 +60,92 @@ fn assert_slot_panel_matches_selected_model(panel: &mut Panel) {
 }
 
 #[test]
+fn loaded_prefab_is_only_a_candidate_until_explicit_add_and_history_preserves_it() {
+    let source = snapshot()
+        .with_transform([2.0, 0.5, 3.0], 0.75)
+        .unwrap()
+        .with_rotation(crate::mesh_rotation::from_degrees([17.0, 31.0, 53.0]).unwrap())
+        .unwrap();
+    let source_bytes = source.encode_embedded("mesh.scene.yaml").unwrap();
+    let template = crate::mesh_prop_prefab::Template::capture("Reusable", &source).unwrap();
+    let mut panel = Panel::default();
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.stage_prefab(template).unwrap();
+    assert!(panel.document.props.is_empty());
+    assert_eq!(panel.history.len(), 1);
+    assert!(panel.pending_prefab());
+    assert!(panel.dirty());
+    panel.add_prop();
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert!(!panel.pending_prefab());
+    assert_eq!(panel.document.props.len(), 1);
+    assert_eq!(panel.document.props[0].id, 1);
+    assert_eq!(
+        panel.document.props[0]
+            .art
+            .encode_embedded("mesh.scene.yaml")
+            .unwrap(),
+        source_bytes
+    );
+    panel.undo();
+    assert!(panel.document.props.is_empty());
+    assert!(!panel.dirty());
+    panel.redo();
+    assert_eq!(panel.document.props.len(), 1);
+    assert_eq!(
+        panel.document.props[0]
+            .art
+            .encode_embedded("mesh.scene.yaml")
+            .unwrap(),
+        source_bytes
+    );
+}
+
+#[test]
+fn prefab_discard_restores_applied_fields_and_graph_mismatch_is_rejected() {
+    let mut panel = Panel::default();
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.reset_history(document(1), Some(0));
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    let template = crate::mesh_prop_prefab::Template::capture("Prop 0", &snapshot()).unwrap();
+    panel.stage_prefab(template.clone()).unwrap();
+    assert_eq!(panel.name, "Prefab 1");
+    assert!(panel.pending_prefab());
+    panel.copy_selection_fields();
+    assert!(!panel.pending_prefab());
+    assert!(!panel.dirty());
+    assert_eq!(panel.name, "Prop 0");
+    panel.graph_revision = Some([0x82; 32]);
+    assert!(panel.stage_prefab(template).is_err());
+    assert!(!panel.pending_prefab());
+    assert_eq!(panel.history.len(), 1);
+}
+
+#[test]
+fn updating_from_prefab_keeps_prop_identity_and_clears_pending_candidate() {
+    let source = snapshot().with_transform([4.0, 1.0, 2.0], 1.25).unwrap();
+    let template = crate::mesh_prop_prefab::Template::capture("Updated", &source).unwrap();
+    let mut panel = Panel::default();
+    panel.graph_revision = Some(GRAPH_REVISION);
+    panel.reset_history(document(1), Some(0));
+    panel.selected = Some(1);
+    panel.copy_selection_fields();
+    panel.stage_prefab(template).unwrap();
+    panel.update_selected();
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert!(!panel.pending_prefab());
+    assert_eq!(panel.document.props.len(), 1);
+    assert_eq!(panel.document.props[0].id, 1);
+    assert_eq!(panel.document.props[0].name, "Updated");
+    assert_eq!(panel.document.props[0].art.offset(), [4.0, 1.0, 2.0]);
+    panel.undo();
+    assert_eq!(panel.document.props[0].art.offset(), [0.0; 3]);
+    panel.redo();
+    assert_eq!(panel.document.props[0].art.offset(), [4.0, 1.0, 2.0]);
+}
+
+#[test]
 fn prop_transform_parser_accepts_finite_positions_and_rejects_invalid_values() {
     assert_eq!(
         parse_transform(

@@ -311,6 +311,11 @@ impl Snapshot {
         self.graph_revision
     }
 
+    pub(crate) fn with_graph_revision(mut self, revision: [u8; 32]) -> Self {
+        self.graph_revision = revision;
+        self
+    }
+
     pub(crate) fn label(&self) -> String {
         format!("{}/{}", self.manifest.name, self.asset)
     }

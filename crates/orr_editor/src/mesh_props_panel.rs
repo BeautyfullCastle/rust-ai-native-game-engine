@@ -62,6 +62,8 @@ pub(crate) struct Panel {
     surface_pivot: [String; 3],
     material_slots: crate::mesh_material_slots_panel::Panel,
     material_slots_draft: Vec<crate::mesh_material_slots::Settings>,
+    prefab: crate::mesh_prop_prefab_panel::Panel,
+    prefab_candidate: bool,
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -109,6 +111,8 @@ impl Default for Panel {
             surface_pivot: ["0".into(), "0".into(), "0".into()],
             material_slots: crate::mesh_material_slots_panel::Panel::default(),
             material_slots_draft: Vec::new(),
+            prefab: crate::mesh_prop_prefab_panel::Panel::default(),
+            prefab_candidate: false,
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -144,6 +148,9 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
+        if let Some(template) = self.prefab.poll(prefab_context(editor)) {
+            self.accept_prefab(editor, template);
+        }
         if self.placement.is_some() && !self.placement_context_matches(editor) {
             self.cancel_placement();
         }
@@ -261,7 +268,7 @@ impl Panel {
             ui.label("Static cosmetic props are saved in a separate scene sidecar and do not affect navigation physics.");
             ui.weak("Up to six props reserve the remaining viewport asset slots for the graph and agent art.");
             ui.add_enabled_ui(
-                self.matching_edit_context(editor) && editor.spec().is_local(),
+                self.can_edit(editor) && !self.pending_prefab(),
                 |ui| {
                     ui.checkbox(&mut self.move_enabled, "Move props in viewport");
                     if self.move_enabled {
@@ -274,7 +281,27 @@ impl Panel {
                 self.cancel_gesture();
             }
             let editable = self.can_edit(editor) && self.gesture.is_none();
-            ui.add_enabled_ui(editable, |ui| {
+            let selected = self
+                .selected_prop()
+                .map(|prop| (prop.name.clone(), prop.art.clone()));
+            let prefab_editable = editable && !self.pending_prefab() && !self.unapplied_form_dirty();
+            if let Some(template) = self.prefab.show(
+                ui,
+                prefab_context(editor),
+                selected.as_ref().map(|(name, art)| (name.as_str(), art)),
+                prefab_editable,
+            ) {
+                self.accept_prefab(editor, template);
+            }
+            if self.pending_prefab()
+                && ui.button("Discard loaded prop prefab").clicked()
+            {
+                self.copy_selection_fields();
+                self.error = None;
+                self.status = "Loaded prop prefab discarded; applied props are unchanged.".into();
+            }
+            let editable = self.can_edit(editor) && self.gesture.is_none();
+            ui.add_enabled_ui(editable && !self.pending_prefab(), |ui| {
                 let package_changed = field(ui, "Prop package source directory", &mut self.package_root);
                 let asset_changed = field(ui, "Prop model asset", &mut self.asset);
                 let license_changed = field(ui, "Prop license asset", &mut self.license);
@@ -382,6 +409,7 @@ impl Panel {
                 if ui
                     .add_enabled(
                         editable
+                            && !self.pending_prefab()
                             && self.selected_prop().is_some()
                             && self.document.props.len() < MAX_PROPS,
                         egui::Button::new("Duplicate selected prop"),
@@ -392,7 +420,7 @@ impl Panel {
                 }
                 if ui
                     .add_enabled(
-                        editable && self.selected_prop().is_some() && !agent_pick_busy,
+                        editable && !self.pending_prefab() && self.selected_prop().is_some() && !agent_pick_busy,
                         egui::Button::new("Place selected prop on mesh"),
                     )
                     .clicked()
@@ -432,7 +460,7 @@ impl Panel {
 
             ui.label(format!("Props: {}/{}", self.document.props.len(), MAX_PROPS));
             let mut selected_prop = None;
-            ui.add_enabled_ui(self.placement.is_none(), |ui| {
+            ui.add_enabled_ui(editable && !self.pending_prefab(), |ui| {
                 for prop in &self.document.props {
                     let label = format!("{} · prop-{:016x}", prop.name, prop.id);
                     if ui
@@ -451,7 +479,7 @@ impl Panel {
             });
             if ui
                 .add_enabled(
-                    editable && self.confirm_remove && self.selected_prop().is_some(),
+                    editable && !self.pending_prefab() && self.confirm_remove && self.selected_prop().is_some(),
                     egui::Button::new("Remove selected prop"),
                 )
                 .clicked()
@@ -506,7 +534,7 @@ impl Panel {
                     self.redo();
                 }
                 if ui
-                    .add_enabled(editable && self.dirty(), egui::Button::new("Save props"))
+                    .add_enabled(editable && !self.pending_prefab() && self.dirty(), egui::Button::new("Save props"))
                     .clicked()
                 {
                     self.save(editor);
@@ -586,6 +614,9 @@ impl Panel {
         size: (u32, u32),
         input: ViewInput,
     ) -> bool {
+        if self.prefab.busy() || self.pending_prefab() {
+            return false;
+        }
         if self.placement.is_some() && !self.placement_context_matches(editor) {
             self.cancel_placement();
             return true;
@@ -755,7 +786,10 @@ impl Panel {
     }
 
     pub(crate) fn gesture_busy(&self) -> bool {
-        self.gesture.is_some() || self.placement.is_some()
+        self.gesture.is_some()
+            || self.placement.is_some()
+            || self.prefab.busy()
+            || self.pending_prefab()
     }
 
     fn viewport_models(&self) -> Result<Vec<(u64, SceneModel)>, String> {
@@ -841,6 +875,12 @@ impl Panel {
         if editor.game() != EditorGame::MeshNavigation {
             return None;
         }
+        if self.prefab.busy() {
+            return Some("Wait for the prop prefab worker before Play".into());
+        }
+        if self.pending_prefab() {
+            return Some("Add, update, or discard the loaded prop prefab before Play".into());
+        }
         if self.gesture.is_some() {
             return Some("Finish or cancel the active mesh prop move before Play".into());
         }
@@ -877,12 +917,19 @@ impl Panel {
         self.gesture.is_some()
             || self.placement.is_some()
             || self.material_slots.dirty()
+            || self.prefab.busy()
+            || self.pending_prefab()
             || self.current_history_id() != self.saved_history_id
     }
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
         if editor.game() != EditorGame::MeshNavigation {
             return None;
+        }
+        if self.prefab.busy() || self.pending_prefab() {
+            return Some(
+                "Finish loading, then add, update, or discard the prop prefab before saving".into(),
+            );
         }
         if self.document_pending {
             return Some("Wait for the requested admitted mesh scene before saving props".into());
@@ -1007,6 +1054,7 @@ impl Panel {
             graph_revision,
         ) {
             Ok(snapshot) => {
+                self.prefab_candidate = false;
                 self.copy_snapshot_fields(&snapshot);
                 self.candidate = Some(snapshot);
                 self.error = None;
@@ -1018,6 +1066,55 @@ impl Panel {
                 self.error = Some(format!("Prop package load failed: {error}"));
             }
         }
+    }
+
+    fn pending_prefab(&self) -> bool {
+        self.prefab_candidate && self.candidate.is_some()
+    }
+
+    fn accept_prefab(&mut self, editor: &Editor, template: crate::mesh_prop_prefab::Template) {
+        if !self.can_edit(editor) || self.unapplied_form_dirty() || self.material_slots.dirty() {
+            self.error = Some(
+                "Prop prefab candidate was discarded because the editable prop context changed"
+                    .into(),
+            );
+            return;
+        }
+        if let Err(error) = self.stage_prefab(template) {
+            self.error = Some(error);
+        }
+    }
+
+    fn stage_prefab(&mut self, template: crate::mesh_prop_prefab::Template) -> Result<(), String> {
+        if self.graph_revision != Some(template.art().graph_revision()) {
+            return Err("Prop prefab does not match the admitted target mesh graph".into());
+        }
+        let name = if self
+            .document
+            .props
+            .iter()
+            .all(|prop| prop.name != template.name())
+        {
+            template.name().to_owned()
+        } else {
+            (1..=MAX_PROPS + 1)
+                .map(|index| format!("Prefab {index}"))
+                .find(|name| self.document.props.iter().all(|prop| prop.name != *name))
+                .ok_or("No unique prop prefab name is available")?
+        };
+        self.copy_snapshot_fields(template.art());
+        self.name = name;
+        self.candidate = Some(template.art().clone());
+        self.prefab_candidate = true;
+        self.package_root.clear();
+        self.asset.clear();
+        self.license.clear();
+        self.license_acknowledged = false;
+        self.move_enabled = false;
+        self.confirm_remove = false;
+        self.error = None;
+        self.status = "Prop prefab loaded as a candidate; Add, Update, or Discard explicitly. Applied props and scene are unchanged.".into();
+        Ok(())
     }
 
     fn duplicate_selected_prop(&mut self) {
@@ -1054,6 +1151,11 @@ impl Panel {
     }
 
     fn begin_placement(&mut self, editor: &Editor, agent_pick_busy: bool) {
+        if self.pending_prefab() {
+            self.error =
+                Some("Add, update, or discard the loaded prop prefab before placement".into());
+            return;
+        }
         if agent_pick_busy {
             self.error = Some("Finish or cancel endpoint picking before placing a prop".into());
             return;
@@ -1210,6 +1312,7 @@ impl Panel {
         }
         self.push_document(document);
         self.material_slots.acknowledge();
+        self.prefab_candidate = false;
         self.next_prop_id = id.checked_add(1).unwrap_or(1);
         self.selected = Some(id);
         self.confirm_remove = false;
@@ -1278,6 +1381,7 @@ impl Panel {
         }
         self.push_document(document);
         self.material_slots.acknowledge();
+        self.prefab_candidate = false;
         self.error = None;
         self.status = "Updated mesh prop in memory; save explicitly to persist.".into();
     }
@@ -1303,6 +1407,12 @@ impl Panel {
     }
 
     fn save(&mut self, editor: &Editor) {
+        if self.prefab.busy() || self.pending_prefab() {
+            self.error = Some(
+                "Finish loading, then add, update, or discard the prop prefab before saving".into(),
+            );
+            return;
+        }
         if self.material_slots.dirty() {
             self.error = Some("Update or reset prop material slots before saving".into());
             return;
@@ -1410,6 +1520,7 @@ impl Panel {
 
     fn can_discard_changes(&self, editor: &Editor) -> bool {
         let editable_context = editor.game() == EditorGame::MeshNavigation
+            && !self.prefab.busy()
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -1498,6 +1609,7 @@ impl Panel {
 
     fn can_edit(&self, editor: &Editor) -> bool {
         self.gesture.is_none()
+            && !self.prefab.busy()
             && self.placement.is_none()
             && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
@@ -1506,6 +1618,8 @@ impl Panel {
 
     fn can_change_history(&self, editor: &Editor) -> bool {
         self.gesture.is_none()
+            && !self.prefab.busy()
+            && !self.pending_prefab()
             && self.placement.is_none()
             && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
@@ -1541,9 +1655,16 @@ impl Panel {
         let (position, scale, rotation) =
             parse_transform(&self.position, &self.scale, &self.rotation)?;
         let tint = parse_tint(&self.tint)?;
+        let preserve_rotation = self.pending_prefab()
+            && crate::mesh_rotation::to_degrees(snapshot.rotation())
+                .is_ok_and(|angles| angles.map(format_number) == self.rotation);
+        let snapshot = snapshot.with_transform(position, scale)?;
+        let snapshot = if preserve_rotation {
+            snapshot
+        } else {
+            snapshot.with_rotation(crate::mesh_rotation::from_degrees(rotation)?)?
+        };
         snapshot
-            .with_transform(position, scale)?
-            .with_rotation(crate::mesh_rotation::from_degrees(rotation)?)?
             .with_tint(tint)?
             .with_surface(parse_surface(
                 self.surface_enabled,
@@ -1646,6 +1767,7 @@ impl Panel {
 
     fn copy_selection_fields(&mut self) {
         self.candidate = None;
+        self.prefab_candidate = false;
         if let Some((name, snapshot)) = self
             .selected_prop()
             .map(|prop| (prop.name.clone(), prop.art.clone()))
@@ -1695,6 +1817,15 @@ impl Panel {
             self.surface_pivot = ["0".into(), "0".into(), "0".into()];
         }
     }
+}
+
+fn prefab_context(editor: &Editor) -> Option<crate::mesh_prop_prefab_panel::Context> {
+    let (scene, graph_revision) = current_identity(editor)?;
+    Some(crate::mesh_prop_prefab_panel::Context {
+        scene,
+        scene_epoch: editor.scene_load_epoch(),
+        graph_revision,
+    })
 }
 
 fn parse_tint(values: &[String; 4]) -> Result<[f32; 4], String> {
