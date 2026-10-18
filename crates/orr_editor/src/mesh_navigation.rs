@@ -12,6 +12,12 @@ use orr_remote::mesh_navigation::{
 use serde_json::json;
 use std::{fs, fs::OpenOptions, io::Read, path::PathBuf, sync::Arc};
 
+#[cfg(feature = "mesh-hazards")]
+#[path = "mesh_navigation/hazards_view.rs"]
+mod hazards_view;
+#[cfg(feature = "mesh-hazards")]
+pub(crate) use hazards_view::status as hazard_status;
+
 #[path = "mesh_model.rs"]
 mod mesh_model;
 #[path = "mesh_navigation/agent_viewport.rs"]
@@ -168,7 +174,7 @@ impl Panel {
         self.sync_agent_picking(editor);
         self.art.sync(editor);
         self.props.sync(editor);
-        if editor.game() != EditorGame::MeshNavigation {
+        if !editor.game().has_mesh_view() {
             self.clear_host_view();
             return;
         }
@@ -179,6 +185,12 @@ impl Panel {
             return;
         };
         let frame = snapshot.predicted();
+        if editor.spec().is_local()
+            && !scene.as_ref().is_some_and(|path| crate::mesh_context::reported_scene_matches_request(editor.spec(), editor.game(), path))
+        {
+            self.clear_host_view();
+            return;
+        }
         #[cfg(feature = "mesh-mission")]
         {
             self.mission_bound = !frame
@@ -265,6 +277,13 @@ impl Panel {
                     .and_then(|mission| mission_view::build(&view, mission.as_ref()));
                 #[cfg(not(feature = "mesh-mission"))]
                 let model = build_view_model(&view.graph, &view.agent.path, view.agent.position);
+                #[cfg(feature = "mesh-hazards")]
+                let model = if editor.game().is_mesh_hazards() {
+                    model.and_then(|base| {
+                        hazards_view::read(editor.game(), frame)
+                            .and_then(|hazards| hazards_view::build(base, &view, hazards.as_ref()))
+                    })
+                } else { model };
                 self.view_model = model
                         .map(Arc::new)
                         .map_err(|error| self.error = Some(error))

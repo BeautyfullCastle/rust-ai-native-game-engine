@@ -55,7 +55,7 @@ fn key_event(key: egui::Key, pressed: bool, repeat: bool) -> egui::Event {
 
 fn read_direction(context: &egui::Context, events: Vec<egui::Event>) -> [i8; 2] {
     let mut direction = [0, 0];
-    let _output = context.run_ui(
+    let output = context.run_ui(
         egui::RawInput {
             events,
             focused: true,
@@ -63,6 +63,8 @@ fn read_direction(context: &egui::Context, events: Vec<egui::Event>) -> [i8; 2] 
         },
         |ui| direction = ui.input(keyboard_direction),
     );
+    // Input-only fixture has no renderer; explicitly finish egui texture-delta ownership.
+    output.drop_without_applying_deltas();
     direction
 }
 

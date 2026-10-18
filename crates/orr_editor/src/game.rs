@@ -23,6 +23,8 @@ pub enum EditorGame {
     NavigationYard3D,
     #[cfg(feature = "mesh-navigation")]
     MeshNavigation,
+    #[cfg(feature = "mesh-hazards")]
+    MeshHazardsV1,
 }
 
 impl EditorGame {
@@ -42,6 +44,8 @@ impl EditorGame {
             "navigation-yard3d" => Ok(Self::NavigationYard3D),
             #[cfg(feature = "mesh-navigation")]
             "mesh-navigation" => Ok(Self::MeshNavigation),
+            #[cfg(feature = "mesh-hazards")]
+            "mesh-hazards-v1" => Ok(Self::MeshHazardsV1),
             _ => Err(format!("unsupported local game '{name}'; expected physics, arena or yard3d")),
         }
     }
@@ -62,12 +66,14 @@ impl EditorGame {
             "NavigationYard3D" => Ok(Self::NavigationYard3D),
             #[cfg(feature = "mesh-navigation")]
             "MeshNavigation" => Ok(Self::MeshNavigation),
+            #[cfg(feature = "mesh-hazards")]
+            "MeshHazardsV1" => Ok(Self::MeshHazardsV1),
             _ => Err(format!("unsupported editor game '{name}'; expected explicit PhysGame, Arena or Yard3D")),
         }
     }
 
     pub fn name(self) -> &'static str {
-        match self { Self::PhysGame => "PhysGame", Self::Arena => "Arena", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1", #[cfg(feature = "room-project")] Self::RoomEscape => "RoomEscapeV1", Self::Yard3D => "Yard3D", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "TerrainYard3D", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationYard3D", #[cfg(feature = "mesh-navigation")] Self::MeshNavigation => "MeshNavigation" }
+        match self { Self::PhysGame => "PhysGame", Self::Arena => "Arena", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1", #[cfg(feature = "room-project")] Self::RoomEscape => "RoomEscapeV1", Self::Yard3D => "Yard3D", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "TerrainYard3D", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationYard3D", #[cfg(feature = "mesh-navigation")] Self::MeshNavigation => "MeshNavigation", #[cfg(feature = "mesh-hazards")] Self::MeshHazardsV1 => "MeshHazardsV1" }
     }
 
     pub fn is_collect(self) -> bool {
@@ -81,13 +87,25 @@ impl EditorGame {
     pub fn has_keyboard(self) -> bool { self == Self::Arena || self.is_collect() || self.is_room() }
     pub fn position_field(self) -> &'static str { if self.is_collect() { "position" } else { "pos" } }
     pub fn is_3d(self) -> bool {
-        self == Self::Yard3D || self.is_room() || self.is_terrain() || self.is_navigation() || self.is_mesh_navigation()
+        self == Self::Yard3D || self.is_room() || self.is_terrain() || self.is_navigation() || self.has_mesh_view()
     }
 
     pub fn is_mesh_navigation(self) -> bool {
         #[cfg(feature = "mesh-navigation")]
         { self == Self::MeshNavigation }
         #[cfg(not(feature = "mesh-navigation"))]
+        { false }
+    }
+
+    /// Shared rendering/input capability; never an export or workspace admission check.
+    pub fn has_mesh_view(self) -> bool {
+        self.is_mesh_navigation() || self.is_mesh_hazards()
+    }
+
+    pub fn is_mesh_hazards(self) -> bool {
+        #[cfg(feature = "mesh-hazards")]
+        { self == Self::MeshHazardsV1 }
+        #[cfg(not(feature = "mesh-hazards"))]
         { false }
     }
 
@@ -125,6 +143,8 @@ impl EditorGame {
             Self::NavigationYard3D => return orr_remote::navigation_yard3d::navigation_yard3d_types(),
             #[cfg(feature = "mesh-navigation")]
             Self::MeshNavigation => return orr_remote::mesh_navigation::mesh_navigation_types(),
+            #[cfg(feature = "mesh-hazards")]
+            Self::MeshHazardsV1 => return orr_remote::mesh_navigation::hazards::hazards_types(),
         }
         types
     }
@@ -144,11 +164,13 @@ impl EditorGame {
             Self::NavigationYard3D => Vec::new(),
             #[cfg(feature = "mesh-navigation")]
             Self::MeshNavigation => Vec::new(),
+            #[cfg(feature = "mesh-hazards")]
+            Self::MeshHazardsV1 => Vec::new(),
         }
     }
 
     pub fn position_component(self) -> &'static str {
-        match self { Self::PhysGame => "orr_physics::Body", Self::Arena => "Position", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1::Actor", #[cfg(feature = "room-project")] Self::RoomEscape => "orr_physics3d::Body", Self::Yard3D => "orr_physics3d::Body", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "orr_physics3d::Body", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationAgent", #[cfg(feature = "mesh-navigation")] Self::MeshNavigation => "MeshAgent" }
+        match self { Self::PhysGame => "orr_physics::Body", Self::Arena => "Position", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1::Actor", #[cfg(feature = "room-project")] Self::RoomEscape => "orr_physics3d::Body", Self::Yard3D => "orr_physics3d::Body", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "orr_physics3d::Body", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationAgent", #[cfg(feature = "mesh-navigation")] Self::MeshNavigation => "MeshAgent", #[cfg(feature = "mesh-hazards")] Self::MeshHazardsV1 => "MeshAgent" }
     }
 
     /// Default scene for a locally started game, preferring the current
@@ -168,6 +190,8 @@ impl EditorGame {
             Self::NavigationYard3D => "navigation_blank.scene.yaml",
             #[cfg(feature = "mesh-navigation")]
             Self::MeshNavigation => "mesh_navigation_blank.scene.yaml",
+            #[cfg(feature = "mesh-hazards")]
+            Self::MeshHazardsV1 => "mesh_navigation_blank.scene.yaml",
         };
         let local = PathBuf::from("scenes").join(filename);
         if local.exists() {
@@ -192,6 +216,8 @@ pub enum EditorStream {
     NavigationYard3D(RemoteBridge<orr_remote::navigation_yard3d::NavigationYard3D>),
     #[cfg(feature = "mesh-navigation")]
     MeshNavigation(RemoteBridge<orr_remote::mesh_navigation::MeshNavigation>),
+    #[cfg(feature = "mesh-hazards")]
+    MeshHazards(RemoteBridge<orr_remote::mesh_navigation::hazards::MeshHazardNavigation>),
 }
 
 impl EditorStream {
@@ -210,6 +236,8 @@ impl EditorStream {
             EditorGame::NavigationYard3D => RemoteBridge::connect(cfg).map(Self::NavigationYard3D),
             #[cfg(feature = "mesh-navigation")]
             EditorGame::MeshNavigation => RemoteBridge::connect(cfg).map(Self::MeshNavigation),
+            #[cfg(feature = "mesh-hazards")]
+            EditorGame::MeshHazardsV1 => RemoteBridge::connect(cfg).map(Self::MeshHazards),
         }
     }
 
@@ -228,33 +256,35 @@ impl EditorStream {
             EditorGame::NavigationYard3D => RemoteBridge::connect_transport(transport, cfg).map(Self::NavigationYard3D),
             #[cfg(feature = "mesh-navigation")]
             EditorGame::MeshNavigation => RemoteBridge::connect_transport(transport, cfg).map(Self::MeshNavigation),
+            #[cfg(feature = "mesh-hazards")]
+            EditorGame::MeshHazardsV1 => RemoteBridge::connect_transport(transport, cfg).map(Self::MeshHazards),
         }
     }
 
     pub fn poll_view(&mut self) -> ViewUpdate<()> {
-        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => normalize(s.poll_view()), #[cfg(feature = "room-project")] Self::RoomEscape(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => normalize(s.poll_view()) }
+        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => normalize(s.poll_view()), #[cfg(feature = "room-project")] Self::RoomEscape(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => normalize(s.poll_view()), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => normalize(s.poll_view()) }
     }
 
     #[cfg(test)]
     pub fn snapshot(&self) -> Option<orr_bridge::Snapshot> {
-        match self { Self::Phys(s) => s.snapshot(), Self::Arena(s) => s.snapshot(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.snapshot(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.snapshot(), Self::Yard3D(s) => s.snapshot(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.snapshot(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.snapshot(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.snapshot() }
+        match self { Self::Phys(s) => s.snapshot(), Self::Arena(s) => s.snapshot(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.snapshot(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.snapshot(), Self::Yard3D(s) => s.snapshot(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.snapshot(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.snapshot(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.snapshot(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.snapshot() }
     }
 
     #[cfg(test)]
     pub fn request(&self, method: &str, params: serde_json::Value) -> Result<(), orr_bridge::BridgeError> {
-        match self { Self::Phys(s) => s.request(method, params), Self::Arena(s) => s.request(method, params), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.request(method, params), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.request(method, params), Self::Yard3D(s) => s.request(method, params), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.request(method, params), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.request(method, params), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.request(method, params) }
+        match self { Self::Phys(s) => s.request(method, params), Self::Arena(s) => s.request(method, params), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.request(method, params), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.request(method, params), Self::Yard3D(s) => s.request(method, params), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.request(method, params), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.request(method, params), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.request(method, params), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.request(method, params) }
     }
 
     pub fn take_errors(&self) -> Vec<RpcError> {
-        match self { Self::Phys(s) => s.take_errors(), Self::Arena(s) => s.take_errors(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.take_errors(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.take_errors(), Self::Yard3D(s) => s.take_errors(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.take_errors(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.take_errors(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.take_errors() }
+        match self { Self::Phys(s) => s.take_errors(), Self::Arena(s) => s.take_errors(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.take_errors(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.take_errors(), Self::Yard3D(s) => s.take_errors(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.take_errors(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.take_errors(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.take_errors(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.take_errors() }
     }
 
     pub fn is_alive(&self) -> bool {
-        match self { Self::Phys(s) => s.is_alive(), Self::Arena(s) => s.is_alive(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.is_alive(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.is_alive(), Self::Yard3D(s) => s.is_alive(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.is_alive(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.is_alive(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.is_alive() }
+        match self { Self::Phys(s) => s.is_alive(), Self::Arena(s) => s.is_alive(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.is_alive(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.is_alive(), Self::Yard3D(s) => s.is_alive(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.is_alive(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.is_alive(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.is_alive(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.is_alive() }
     }
 
     pub fn view_delivery(&self) -> RemoteViewDelivery {
-        match self { Self::Phys(s) => s.view_delivery(), Self::Arena(s) => s.view_delivery(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.view_delivery(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.view_delivery(), Self::Yard3D(s) => s.view_delivery(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.view_delivery(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.view_delivery(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.view_delivery() }
+        match self { Self::Phys(s) => s.view_delivery(), Self::Arena(s) => s.view_delivery(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.view_delivery(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.view_delivery(), Self::Yard3D(s) => s.view_delivery(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.view_delivery(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.view_delivery(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.view_delivery(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.view_delivery() }
     }
 }
 
@@ -267,5 +297,26 @@ fn normalize<E>(update: ViewUpdate<E>) -> ViewUpdate<()> {
             BridgeEvent::Lifecycle(life) => Some(BridgeEvent::Lifecycle(life)),
             _ => None,
         }).collect(),
+    }
+}
+
+#[cfg(all(test, feature = "mesh-hazards"))]
+mod mesh_hazards_identity_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_hazard_identity_never_changes_legacy_identity() {
+        let hazards = EditorGame::MeshHazardsV1;
+        assert_eq!(EditorGame::from_local_name("mesh-hazards-v1").unwrap(), hazards);
+        assert_eq!(EditorGame::from_name("MeshHazardsV1").unwrap(), hazards);
+        assert_eq!(hazards.name(), "MeshHazardsV1");
+        assert!(hazards.has_mesh_view() && hazards.is_3d() && hazards.is_mesh_hazards());
+        assert!(!hazards.is_mesh_navigation());
+        assert_eq!(EditorGame::from_local_name("mesh-navigation").unwrap(), EditorGame::MeshNavigation);
+        assert_eq!(EditorGame::from_name("MeshNavigation").unwrap(), EditorGame::MeshNavigation);
+        assert!(EditorGame::MeshNavigation.has_mesh_view());
+        assert!(!EditorGame::MeshNavigation.is_mesh_hazards());
+        assert!(!EditorGame::PhysGame.has_mesh_view());
+        assert!(EditorGame::from_name("mesh-hazards-v1").is_err());
     }
 }

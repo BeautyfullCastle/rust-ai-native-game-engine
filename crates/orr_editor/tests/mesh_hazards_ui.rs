@@ -1,0 +1,335 @@
+#![cfg(feature = "mesh-hazards")]
+#![allow(clippy::disallowed_types, clippy::float_arithmetic)]
+
+//! Opt-in production EditorApp acceptance with synthetic egui input and software Vulkan.
+//! This is not hardware-GPU or physical operating-system input acceptance.
+use egui::{accesskit::Role, Key, Modifiers};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
+use egui_wgpu::{wgpu, WgpuSetupCreateNew};
+use orr_editor::{
+    app::{LBL_PLAY, LBL_STOP},
+    game::EditorGame,
+    Editor, EditorApp, Mode,
+};
+use orr_fp::{fp, FP};
+use orr_navigation::{mesh::StaticMeshGraph, AgentProfile, NavigationStatus};
+use orr_remote::mesh_navigation::{
+    authoring::create_mesh_scene,
+    hazards::{self, HazardsView},
+    mesh_from_view,
+    mission::{self, MeshMission, MissionPoint, MISSION_NAME},
+    AgentSpec,
+};
+use orr_rhi::{Rhi, Wgpu, WgpuOptions};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+fn fixture(path: &Path) {
+    let graph = StaticMeshGraph::bake(
+        &[
+            [FP::ZERO; 3],
+            [fp!(4), FP::ZERO, FP::ZERO],
+            [FP::ZERO, FP::ZERO, fp!(4)],
+            [fp!(4), FP::ZERO, fp!(4)],
+        ],
+        &[[0, 2, 3], [0, 3, 1]],
+        AgentProfile::default(),
+    )
+    .unwrap();
+    let mut document = create_mesh_scene(
+        &graph,
+        AgentSpec {
+            start: [fp!(1), FP::ZERO, fp!(2)],
+            goal: [fp!(1), FP::ZERO, fp!(3)],
+            max_vertical: FP::ZERO,
+            distance_per_tick: fp!(1),
+        },
+    )
+    .unwrap();
+    let mut config = MeshMission {
+        enabled: 1,
+        count: 1,
+        graph_revision: graph.revision(),
+        exit: MissionPoint {
+            position: [fp!(1), FP::ZERO, fp!(3)],
+            radius: fp!(0.25),
+        },
+        ..Default::default()
+    };
+    config.points[0] = config.exit;
+    let value = document
+        .types()
+        .get(MISSION_NAME)
+        .unwrap()
+        .read(orr_reflect::bytemuck::bytes_of(&config));
+    document
+        .apply(
+            orr_edit::Op::SetSingletonField {
+                singleton: MISSION_NAME.into(),
+                path: String::new(),
+                value,
+            },
+            orr_edit::Origin::User,
+        )
+        .unwrap();
+    fs::write(path, document.save_yaml()).unwrap();
+}
+
+fn harness(path: &Path) -> Harness<'static, EditorApp> {
+    let gpu = Wgpu::headless(WgpuOptions::default()).expect("software Vulkan preflight");
+    assert!(
+        gpu.is_software(),
+        "software GPU required for this acceptance"
+    );
+    eprintln!("Preflight software adapter: {}", gpu.adapter_name());
+    let mut editor = Editor::open_game(path, EditorGame::MeshHazardsV1).unwrap();
+    editor.sync();
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
+    setup.native_adapter_selector = Some(Arc::new(|adapters, _| {
+        adapters
+            .iter()
+            .find(|adapter| {
+                let info = adapter.get_info();
+                info.backend == wgpu::Backend::Vulkan && info.device_type == wgpu::DeviceType::Cpu
+            })
+            .cloned()
+            .ok_or_else(|| "software Vulkan adapter required".to_owned())
+    }));
+    Harness::builder()
+        .with_size([1500.0, 1100.0])
+        .with_step_dt(1.0 / 60.0)
+        .wgpu_setup(setup.into())
+        .build_eframe(move |context| EditorApp::new(editor, context.wgpu_render_state.clone()))
+}
+
+fn settle(h: &mut Harness<'_, EditorApp>) {
+    for _ in 0..4 {
+        h.state_mut().editor.sync();
+        h.run_steps(2);
+    }
+}
+
+fn click(h: &mut Harness<'_, EditorApp>, label: &str) {
+    h.get_by_label(label).scroll_to_me();
+    h.run_steps(20);
+    h.get_by_label(label).click_accesskit();
+    settle(h);
+}
+
+fn menu(h: &mut Harness<'_, EditorApp>, name: &str, item: &str) {
+    h.get_by_label(name).click_accesskit();
+    h.run_steps(2);
+    h.get_by_label(item).click_accesskit();
+    settle(h);
+}
+
+fn field(h: &mut Harness<'_, EditorApp>, label: &str, value: &str) {
+    h.get_by_role_and_label(Role::TextInput, label)
+        .scroll_to_me();
+    h.run_steps(20);
+    h.get_by_role_and_label(Role::TextInput, label).focus();
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(2);
+    h.get_by_role_and_label(Role::TextInput, label)
+        .type_text(value);
+    settle(h);
+}
+
+fn view(h: &Harness<'_, EditorApp>) -> Option<HazardsView> {
+    hazards::from_view(h.state().editor.snapshot().unwrap().predicted()).unwrap()
+}
+
+fn capture(h: &mut Harness<'_, EditorApp>, root: &Path, name: &str) {
+    settle(h);
+    let viewport = h
+        .state()
+        .viewport3d_gpu()
+        .expect("real production 3D viewport");
+    assert!(
+        viewport
+            .gpu()
+            .adapter_name()
+            .to_lowercase()
+            .contains("llvmpipe"),
+        "this acceptance explicitly requires software GPU"
+    );
+    eprintln!("software GPU: {}", viewport.gpu().adapter_name());
+    let image = h.render().expect("production EditorApp composite");
+    let rgba = egui::ColorImage::from_rgba_unmultiplied(
+        [image.width() as usize, image.height() as usize],
+        image.as_raw(),
+    );
+    orr_editor::app::write_png(&root.join(name), &rgba).unwrap();
+}
+
+#[test]
+#[ignore = "opt-in software Vulkan EditorApp acceptance; set ORR_MESH_HAZARDS_CAPTURE_DIR"]
+fn hazards_widgets_apply_undo_save_reopen_swept_loss_and_stop_reset() {
+    assert_eq!(
+        std::env::var("ORR_MESH_HAZARDS_ACCEPTANCE").as_deref(),
+        Ok("1")
+    );
+    let root = PathBuf::from(std::env::var_os("ORR_MESH_HAZARDS_CAPTURE_DIR").unwrap());
+    assert!(root.is_absolute());
+    fs::create_dir(&root).expect("fresh evidence directory");
+    let scene = root.join("hazards.scene.yaml");
+    fixture(&scene);
+    let original = fs::read(&scene).unwrap();
+    let mut h = harness(&scene);
+    settle(&mut h);
+    assert!(h.state().has_gpu());
+    let initial = h.state().editor.checksum();
+    assert!(view(&h).is_none());
+    click(&mut h, "Mesh hazards");
+    click(&mut h, "Enable mesh hazards");
+    for (label, value) in [
+        ("Hazard count (1–8)", "1"),
+        ("Hazard 1 X", "1"),
+        ("Hazard 1 Y", "0"),
+        ("Hazard 1 Z", "2.5"),
+        ("Hazard 1 radius", "0"),
+    ] {
+        field(&mut h, label, value);
+    }
+    let history = h.state().editor.history().entries.len();
+    click(&mut h, "Apply mesh hazards");
+    assert_eq!(h.state().editor.checksum(), initial);
+    assert_eq!(h.state().editor.history().entries.len(), history);
+    assert_eq!(fs::read(&scene).unwrap(), original);
+    assert!(h.query_by_label_contains("Apply hazards failed:").is_some());
+    assert!(h
+        .get_by_role_and_label(Role::Button, LBL_PLAY)
+        .accesskit_node()
+        .is_disabled());
+    capture(&mut h, &root, "invalid-radius-warning.png");
+    field(&mut h, "Hazard 1 radius", "0.1");
+    click(&mut h, "Apply mesh hazards");
+    let applied = h.state().editor.checksum();
+    assert_ne!(applied, initial);
+    let config = view(&h).unwrap().config;
+    assert_eq!(config.count, 1);
+    assert_eq!(config.spheres[0].center, [fp!(1), FP::ZERO, fp!(2.5)]);
+    assert_eq!(config.spheres[0].radius, fp!(0.1));
+    assert_eq!(view(&h).unwrap().run.lost, 0);
+    menu(&mut h, "Edit", "Undo Ctrl+Z");
+    assert_eq!(h.state().editor.checksum(), initial);
+    assert!(view(&h).is_none());
+    menu(&mut h, "Edit", "Redo Ctrl+Y");
+    assert_eq!(h.state().editor.checksum(), applied);
+    assert_eq!(view(&h).unwrap().config, config);
+    menu(&mut h, "File", "Save Ctrl+S");
+    let saved = fs::read(&scene).unwrap();
+    assert_ne!(saved, original);
+    capture(&mut h, &root, "authored-hazard.png");
+    drop(h);
+
+    let mut h = harness(&scene);
+    settle(&mut h);
+    assert_eq!(h.state().editor.checksum(), applied);
+    assert_eq!(view(&h).unwrap().config, config);
+    // Exercise the production Open dialog as well as a fresh local host instance in this test process.
+    menu(&mut h, "File", "Open scene…");
+    field(&mut h, "Scene path", &scene.display().to_string());
+    click(&mut h, "OK");
+    assert_eq!(h.state().editor.game(), EditorGame::MeshHazardsV1);
+    assert_eq!(h.state().editor.checksum(), applied);
+    assert_eq!(view(&h).unwrap().config, config);
+    click(&mut h, "Mesh hazards");
+    capture(&mut h, &root, "reopened-hazard.png");
+    let mesh = mesh_from_view(h.state().editor.snapshot().unwrap().predicted()).unwrap();
+    assert_eq!(mesh.pin.start, [fp!(1), FP::ZERO, fp!(2)]);
+    assert_eq!(mesh.pin.goal, [fp!(1), FP::ZERO, fp!(3)]);
+    assert_eq!(mesh.pin.distance_per_tick, fp!(1));
+    assert_eq!(mesh.agent.path.points, vec![mesh.pin.start, mesh.pin.goal]);
+    assert_eq!(
+        mesh.graph
+            .movement_polyline(&mesh.agent.path, FP::ZERO, mesh.pin.distance_per_tick)
+            .unwrap(),
+        vec![mesh.pin.start, mesh.pin.goal]
+    );
+    // The one-tick path crosses the sphere; neither route endpoint is inside it.
+    assert!((config.spheres[0].center[2] - mesh.pin.start[2]).abs() > config.spheres[0].radius);
+    assert!((config.spheres[0].center[2] - mesh.pin.goal[2]).abs() > config.spheres[0].radius);
+    click(&mut h, LBL_PLAY);
+    eprintln!(
+        "After Play: mode={:?} timeline={:?} status={:?}",
+        h.state().editor.mode(),
+        h.state().editor.timeline(),
+        h.state().editor.status()
+    );
+    capture(&mut h, &root, "after-play-diagnostic.png");
+    assert_eq!(
+        h.state().editor.mode(),
+        Mode::Play,
+        "Play widget must enter Play"
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while view(&h).unwrap().run.lost == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "swept hazard loss did not occur: timeline={:?}, status={:?}, position={:?}",
+            h.state().editor.timeline(),
+            h.state().editor.status(),
+            mesh_from_view(h.state().editor.snapshot().unwrap().predicted())
+                .unwrap()
+                .agent
+                .position
+        );
+        settle(&mut h);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let lost = view(&h).unwrap().run;
+    assert_eq!(lost.hit_index, 0);
+    assert_eq!(lost.lost_tick, 1);
+    let snapshot = h.state().editor.snapshot().unwrap();
+    assert_eq!(
+        mesh_from_view(snapshot.predicted()).unwrap().agent.status,
+        NavigationStatus::Stopped
+    );
+    assert_eq!(
+        mesh_from_view(snapshot.predicted()).unwrap().agent.position,
+        mesh.pin.start
+    );
+    assert_eq!(
+        mission::from_view(snapshot.predicted())
+            .unwrap()
+            .unwrap()
+            .run
+            .won,
+        0
+    );
+    assert!(h
+        .query_all_by_label_contains("Lost · hazard 1 · tick 1")
+        .next()
+        .is_some());
+    capture(&mut h, &root, "swept-hazard-loss.png");
+    click(&mut h, LBL_STOP);
+    assert_eq!(h.state().editor.mode(), Mode::Edit);
+    assert_eq!(h.state().editor.checksum(), applied);
+    assert_eq!(view(&h).unwrap().run, Default::default());
+    assert_eq!(view(&h).unwrap().config, config);
+    assert_eq!(fs::read(&scene).unwrap(), saved);
+    capture(&mut h, &root, "stop-reset.png");
+    fs::write(
+        root.join("acceptance.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "profile": "MeshHazardsV1", "software_gpu": true, "hardware_gpu": false,
+            "physical_os_input": false, "production_editor_app": true,
+            "invalid_radius_rejected_atomically": true, "widget_apply_undo_redo_save_reopen": true,
+            "swept_loss_tick": lost.lost_tick, "endpoint_overlap": false,
+            "mission_win_suppressed": true, "stop_restores_authored_checksum": true,
+            "scene_checksum": applied,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}

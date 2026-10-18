@@ -118,6 +118,10 @@ pub mod navigation_view;
 #[cfg(feature = "mesh-navigation")]
 pub mod mesh_navigation;
 #[cfg(feature = "mesh-navigation")]
+pub(crate) mod mesh_context;
+#[cfg(feature = "mesh-hazards")]
+pub(crate) mod mesh_hazards_panel;
+#[cfg(feature = "mesh-navigation")]
 mod mesh_play_controls;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_art;

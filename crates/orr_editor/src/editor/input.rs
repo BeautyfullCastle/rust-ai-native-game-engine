@@ -246,18 +246,34 @@ impl Editor {
         else if self.preview.is_some() { "Off · proposal preview" }
         else if !self.sim.playing { "Off · start realtime Play to take control" }
         else if self.sim.head_tick != self.sim.last_tick { "Off · wait for live head" }
+        else if !self.mesh_gameplay_input_open() { "Off · gameplay ended or its authoritative state is unavailable" }
         else { "Off · explicit Take control required" }
     }
     pub fn input_cleanup_pending(&self) -> bool {
         self.input.phase == Phase::Off && self.pending.values().any(|p| matches!(p.kind, Pend::Input(..)))
     }
     pub fn can_take_control(&self) -> bool {
-        (self.game().has_keyboard() || self.game().is_mesh_navigation()) && !self.input_cleanup_pending() && self.input.enabled && self.down.is_none()
+        (self.game().has_keyboard() || self.game().has_mesh_view()) && !self.input_cleanup_pending() && self.input.enabled && self.down.is_none()
             && !self.is_viewer() && self.preview.is_none() && self.sim.mode == Mode::Play
             && self.sim.playing && self.sim.head_tick == self.sim.last_tick
+            && self.mesh_gameplay_input_open()
     }
+    /// Terminal or invalid hazard readback cannot acquire or retain managed input.
+    pub(crate) fn mesh_gameplay_input_open(&self) -> bool {
+        #[cfg(feature = "mesh-hazards")]
+        if self.game().is_mesh_hazards() {
+            let Some(snapshot) = self.snapshot() else { return false; };
+            let frame = snapshot.predicted();
+            let hazards = orr_remote::mesh_navigation::hazards::from_view(frame);
+            let mission = orr_remote::mesh_navigation::mission::from_view(frame);
+            return hazards.is_ok_and(|view| view.is_none_or(|view| view.run.lost == 0))
+                && mission.is_ok_and(|view| view.is_none_or(|view| view.run.won == 0));
+        }
+        true
+    }
+
     pub fn take_control(&mut self, player: u8, viewport_focused: bool) -> bool {
-        if !viewport_focused || self.game().is_mesh_navigation() || !self.can_take_control() || player >= self.sim.player_count || self.input.phase != Phase::Off || self.pending.values().any(|p| matches!(p.kind,Pend::Input(..))) { return false; }
+        if !viewport_focused || self.game().has_mesh_view() || !self.can_take_control() || player >= self.sim.player_count || self.input.phase != Phase::Off || self.pending.values().any(|p| matches!(p.kind,Pend::Input(..))) { return false; }
         self.state_generation += 1;
         self.input.claim(player); self.pump_input(); true
     }
@@ -267,7 +283,7 @@ impl Editor {
     pub(crate) fn mesh_play_input_phase(&self) -> Phase { self.input.phase }
     #[cfg(feature = "mesh-navigation")]
     pub(crate) fn mesh_play_input_hint(&self) -> &'static str {
-        if !self.game().is_mesh_navigation() { "Unavailable · open a mesh navigation game" }
+        if !self.game().has_mesh_view() { "Unavailable · open a mesh navigation game" }
         else if !self.input.enabled { "Unavailable · compatible managed input is not advertised by this host" }
         else if self.input.phase == Phase::Claiming { "Claiming managed player input…" }
         else if self.input.phase == Phase::Active { "Managed player input active" }
@@ -277,7 +293,7 @@ impl Editor {
     #[cfg(feature = "mesh-navigation")]
     pub(crate) fn set_mesh_play_input_enabled(&mut self, enabled: bool) -> bool {
         if !enabled { if self.input.mesh_navigation { self.release_control(); } return true; }
-        if !self.game().is_mesh_navigation() || !self.can_take_control() || self.input.phase != Phase::Off
+        if !self.game().has_mesh_view() || !self.can_take_control() || self.input.phase != Phase::Off
             || self.pending.values().any(|pending| matches!(pending.kind,Pend::Input(..))) || self.sim.player_count == 0 { return false; }
         self.input.mesh_navigation = true;
         self.state_generation += 1;
@@ -287,7 +303,7 @@ impl Editor {
     }
     #[cfg(feature = "mesh-navigation")]
     pub(crate) fn queue_mesh_play_goal(&mut self, point: [FP; 3]) -> Result<(), String> {
-        if !self.game().is_mesh_navigation() || !self.input.mesh_navigation || !self.input.wanted
+        if !self.game().has_mesh_view() || !self.input.mesh_navigation || !self.input.wanted
             || !matches!(self.input.phase, Phase::Claiming | Phase::Active) { return Err("Enable managed mesh goal input before selecting a goal".into()); }
         if !self.can_take_control() { self.release_control(); return Err("Mesh goal input requires the current live Play head".into()); }
         let bound = 256_i64 * FP::SCALE;
@@ -323,7 +339,7 @@ impl Editor {
             }
         }
         #[cfg(feature = "mesh-navigation")]
-        if self.game().is_mesh_navigation() {
+        if self.game().has_mesh_view() {
             if let (Some(snapshot), Some((_, accepted_tick))) = (self.snapshot.as_ref(), self.input.mesh_waiting_goal) {
                 let tick = snapshot.tick();
                 if tick > accepted_tick && self.input.mesh_checked_tick != Some(tick) {
@@ -454,4 +470,112 @@ mod room_input_tests {
         input.keys(Keys::default());input.keys(held);
         assert!(input.effective_keys().fire);
     }
+}
+
+#[cfg(all(test, feature = "mesh-hazards"))]
+mod mesh_hazards_control_tests {
+    use super::*;
+    use crate::game::EditorGame;
+    use orr_remote::mesh_navigation::{hazards, mesh_from_view};
+
+    fn fixture() -> (tempfile::TempDir, Editor) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hazards.scene.yaml");
+        drop(crate::mesh_workspace::mission::prepare(&path, &Default::default()).unwrap());
+        let mut editor = Editor::open_game(&path, EditorGame::MeshHazardsV1).unwrap();
+        editor.sync();
+        let view = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+        let disabled = orr_remote::mesh_navigation::mission::MeshMission::default();
+        editor.host_call("world.singleton.patch", orr_remote::mesh_navigation::mission::patch_request(&disabled, &view).unwrap()).unwrap();
+        editor.sync();
+        (directory, editor)
+    }
+
+    fn wait(editor: &mut Editor, predicate: impl Fn(&Editor) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            editor.sync();
+            if predicate(editor) { break; }
+            assert!(Instant::now() < deadline, "managed hazard input state timed out: phase={:?} can={} hint={} log={:?}", editor.input_phase(), editor.can_take_control(), editor.input_hint(), editor.log().iter().map(|m| &m.text).collect::<Vec<_>>());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn hazards_acquire_managed_control_queue_goal_and_stop_rejects_input() {
+        let (_directory, mut editor) = fixture();
+        editor.play();
+        wait(&mut editor, Editor::can_take_control);
+        assert!(!editor.take_control(0, true), "mesh profile must use managed goal input");
+        assert!(editor.set_mesh_play_input_enabled(true));
+        wait(&mut editor, |editor| editor.input_phase() == Phase::Active);
+        let view = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+        assert!(editor.queue_mesh_play_goal(view.agent.spec.start).is_ok());
+        editor.stop();
+        editor.sync();
+        assert!(!editor.can_take_control());
+        assert!(!editor.set_mesh_play_input_enabled(true));
+        assert!(editor.queue_mesh_play_goal(view.agent.spec.goal).is_err());
+    }
+
+    #[test]
+    fn terminal_hazard_loss_never_acquires_or_queues_input() {
+        let (_directory, mut editor) = fixture();
+        let view = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+        let mut config = hazards::MeshHazards {
+            enabled: 1, count: 1, graph_revision: view.graph.revision(), ..Default::default()
+        };
+        config.spheres[0] = hazards::HazardSphere { center: view.agent.position, radius: FP::from_int(1) };
+        editor.host_call("world.singleton.patch", hazards::patch_request(&config, &view).unwrap()).unwrap();
+        editor.sync();
+        editor.play();
+        wait(&mut editor, |editor| hazards::from_view(editor.snapshot().unwrap().predicted()).unwrap().is_some_and(|view| view.run.lost == 1));
+        assert!(!editor.mesh_gameplay_input_open());
+        assert!(!editor.can_take_control());
+        assert!(!editor.set_mesh_play_input_enabled(true));
+        assert!(editor.queue_mesh_play_goal(view.agent.spec.goal).is_err());
+        editor.stop();
+        editor.sync();
+        assert!(editor.mesh_gameplay_input_open());
+    }
+    #[test]
+    fn terminal_mission_win_never_acquires_or_queues_input() {
+        let (_directory, mut editor) = fixture();
+        let view = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+        use orr_remote::mesh_navigation::mission;
+        let point = mission::MissionPoint { position: view.agent.position, radius: FP::from_int(1) };
+        let mut config = mission::MeshMission {
+            enabled: 1, count: 1, exit: point, graph_revision: view.graph.revision(), ..Default::default()
+        };
+        config.points[0] = point;
+        editor.host_call("world.singleton.patch", mission::patch_request(&config, &view).unwrap()).unwrap();
+        editor.sync();
+        editor.play();
+        wait(&mut editor, |editor| mission::from_view(editor.snapshot().unwrap().predicted()).unwrap().is_some_and(|view| view.run.won == 1));
+        assert!(!editor.mesh_gameplay_input_open());
+        assert!(!editor.can_take_control());
+        assert!(!editor.set_mesh_play_input_enabled(true));
+        assert!(editor.queue_mesh_play_goal(view.agent.spec.goal).is_err());
+    }
+
+    #[test]
+    fn hazard_loss_releases_an_active_managed_grant() {
+        let (_directory, mut editor) = fixture();
+        let view = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+        let mut config = hazards::MeshHazards {
+            enabled: 1, count: 1, graph_revision: view.graph.revision(), ..Default::default()
+        };
+        config.spheres[0] = hazards::HazardSphere { center: view.agent.spec.goal, radius: FP::from_raw(FP::SCALE / 4) };
+        editor.host_call("world.singleton.patch", hazards::patch_request(&config, &view).unwrap()).unwrap();
+        editor.sync();
+        editor.play();
+        wait(&mut editor, Editor::can_take_control);
+        assert!(editor.set_mesh_play_input_enabled(true));
+        wait(&mut editor, |editor| editor.input_phase() == Phase::Active);
+        wait(&mut editor, |editor| hazards::from_view(editor.snapshot().unwrap().predicted()).unwrap().is_some_and(|view| view.run.lost == 1));
+        wait(&mut editor, |editor| editor.input_phase() == Phase::Off && !editor.input_cleanup_pending());
+        assert!(!editor.mesh_play_input_enabled());
+        assert!(editor.queue_mesh_play_goal(view.agent.spec.start).is_err());
+    }
+
 }
