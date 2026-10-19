@@ -63,6 +63,10 @@ mod collect_ui_preview;
 #[path = "app/collect_ui_position.rs"]
 mod collect_ui_position;
 #[cfg(feature = "collect-ui")]
+#[path = "app/collect_ui_alignment.rs"]
+mod collect_ui_alignment;
+
+#[cfg(feature = "collect-ui")]
 #[path = "app/collect_ui_resize.rs"]
 mod collect_ui_resize;
 

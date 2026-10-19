@@ -1415,3 +1415,6 @@ fn actual_editor_resize_gpu_stages_applies_and_cancels_sizes() {
         "native_os_window":false
     })).unwrap()).unwrap();
 }
+
+#[path = "collect_ui_alignment_acceptance_tests.rs"]
+mod alignment_acceptance;
