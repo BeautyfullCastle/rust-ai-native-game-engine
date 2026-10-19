@@ -237,6 +237,8 @@ pub mod collect_ui_panel;
 pub mod collect_ui_preview;
 #[cfg(feature = "collect-ui")]
 pub mod collect_ui_position;
+#[cfg(feature = "collect-ui")]
+pub mod collect_ui_resize;
 
 #[cfg(feature = "linked-prefabs")]
 pub mod linked_prefab_panel;
