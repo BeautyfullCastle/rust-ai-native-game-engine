@@ -2,8 +2,8 @@ use super::*;
 use crate::{backend::HostSpec, game::EditorGame};
 use orr_model_bindings::model_bindings::{self, Binding, Document, LocalTransform};
 use orr_sample::{
-    room_game::{KEY, PLAYER, RoomActor, RoomConfig, RoomEscapeV1},
-    room_project::{self, PreparedProject, PreparedScene, SEED},
+    room_game::{KEY, PLAYER, RoomActor},
+    room_project::{PreparedProject, PreparedScene},
 };
 use std::{fs, path::Path};
 
@@ -16,10 +16,7 @@ struct Fixture {
 
 fn create_admitted_fixture(root: &Path) {
     fs::create_dir(root).unwrap();
-    let sim = orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, SEED);
-    let text = orr_reflect::Scene::unbake(&room_project::types(), sim.frame(), None)
-        .unwrap()
-        .to_yaml();
+    let text = include_str!("../tests/fixtures/room_initial.scene.yaml").to_owned();
     fs::write(root.join("room.scene.yaml"), &text).unwrap();
     fs::write(
         root.join("room.camera.json"),

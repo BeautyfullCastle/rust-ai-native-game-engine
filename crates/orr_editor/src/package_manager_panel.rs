@@ -1569,18 +1569,10 @@ mod tests {
     fn mutating_removal_freezes_editor_input_through_completion_frame() {
         use crate::{Editor, EditorApp, HostSpec, Mode};
         use egui_kittest::{kittest::Queryable, Harness};
-        use orr_sample::{
-            room_game::{RoomConfig, RoomEscapeV1},
-            room_project,
-        };
         for restoring in [false, true] {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("room.scene.yaml");
-            let simulation =
-                orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, room_project::SEED);
-            let text = orr_reflect::Scene::unbake(&room_project::types(), simulation.frame(), None)
-                .unwrap()
-                .to_yaml();
+            let text = include_str!("../tests/fixtures/room_initial.scene.yaml").to_owned();
             std::fs::write(&path, &text).unwrap();
             let mut editor = Editor::start(&HostSpec::PreparedRoom {
                 scene: path.clone(),
@@ -1651,10 +1643,7 @@ mod tests {
     }
     #[test]
     fn fresh_verification_discards_real_removal_receipt_and_restoration_preview() {
-        use orr_sample::{
-            room_game::{RoomConfig, RoomEscapeV1},
-            room_project,
-        };
+        use orr_sample::room_project;
         use std::{
             fs,
             time::{Duration, Instant},
@@ -1664,11 +1653,7 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&root).unwrap();
         fs::create_dir(&source).unwrap();
-        let simulation =
-            orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, room_project::SEED);
-        let scene = orr_reflect::Scene::unbake(&room_project::types(), simulation.frame(), None)
-            .unwrap()
-            .to_yaml();
+        let scene = include_str!("../tests/fixtures/room_initial.scene.yaml");
         fs::write(root.join("room.scene.yaml"), scene).unwrap();
         fs::write(root.join("orr.project.json"),r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json"}}"#).unwrap();
         fs::write(
