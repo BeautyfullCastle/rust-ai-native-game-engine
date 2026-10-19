@@ -1,0 +1,50 @@
+name: Animation pose bake
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    name: animation pose bake (${{ matrix.mode }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {mode: cpu, os: ubuntu-22.04}
+          - {mode: cpu, os: windows-latest}
+          - {mode: gpu, os: ubuntu-22.04}
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_BUILD_JOBS: "2"
+      # Retained release producers stay within the existing runner pin limit.
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install software Vulkan
+        if: matrix.mode != 'cpu'
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libxkbcommon-dev
+      - name: Run source-bound mandatory acceptance
+        env:
+          ORR_ANIMATION_POSE_BAKE_EVIDENCE: ${{ runner.temp }}/orr-animation-pose-bake-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: python -B tools/animation_pose_bake_gate.py '${{ matrix.mode }}'
+      - name: Retain evidence and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: animation-pose-bake-${{ matrix.mode }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/orr-animation-pose-bake-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+  required:
+    name: animation pose bake required
+    if: always()
+    needs: acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ACCEPTANCE: ${{ needs.acceptance.result }}
+        run: test "$ACCEPTANCE" = success
