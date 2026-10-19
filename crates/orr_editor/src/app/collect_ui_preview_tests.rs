@@ -1418,3 +1418,6 @@ fn actual_editor_resize_gpu_stages_applies_and_cancels_sizes() {
 
 #[path = "collect_ui_alignment_acceptance_tests.rs"]
 mod alignment_acceptance;
+
+#[path = "collect_ui_distribution_acceptance_tests.rs"]
+mod distribution_acceptance;

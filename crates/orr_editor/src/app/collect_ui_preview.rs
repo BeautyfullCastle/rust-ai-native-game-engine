@@ -491,6 +491,7 @@ impl PreviewWindow {
                 } else {
                     match alignment_command {
                         AlignmentCommand::Stage(mode) if editable && self.alignment.aligning => self.alignment.stage(mode, &alignment_context, panel.document(), &mut self.state),
+                        AlignmentCommand::StageDistribution(axis) if editable && self.alignment.aligning => self.alignment.stage_distribution(axis, &alignment_context, panel.document(), &mut self.state),
                         AlignmentCommand::Apply if editable => self.alignment.apply(&alignment_context, panel, &mut self.state),
                         AlignmentCommand::Cancel => self.alignment.cancel(&mut self.state, "Alignment cancelled; accepted document restored"),
                         _ => {}

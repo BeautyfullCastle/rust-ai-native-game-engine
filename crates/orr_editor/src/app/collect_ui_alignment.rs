@@ -1,6 +1,6 @@
-//! Sibling alignment drafts, committed only through the authoring panel.
+//! Sibling alignment and equal-gap drafts, committed only through the authoring panel.
 use crate::{
-    collect_ui_alignment::{Context, Mode, State},
+    collect_ui_alignment::{Context, DistributionAxis, Mode, State},
     collect_ui_preview,
 };
 use orr_sample::authored_ui::{Document, Screen};
@@ -10,6 +10,7 @@ pub(super) enum Command {
     #[default]
     None,
     Stage(Mode),
+    StageDistribution(DistributionAxis),
     Apply,
     Cancel,
 }
@@ -35,7 +36,8 @@ impl AlignmentControls {
         // Popups hold potentially long ID lists; the strip has invariant height.
         ui.allocate_ui_with_layout(egui::vec2(660.0, 100.0), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.horizontal(|ui| {
-                ui.add_enabled(editable, egui::Checkbox::new(&mut self.aligning, "Align siblings"));
+                ui.add_enabled(editable, egui::Checkbox::new(&mut self.aligning, "Align siblings"))
+                    .on_hover_text("Enable sibling alignment and equal-gap spacing; Move and Resize are disabled");
                 egui::ComboBox::from_label("Alignment reference")
                     .width(130.0).height(180.0)
                     .selected_text(self.reference.as_deref().unwrap_or("Select reference"))
@@ -65,13 +67,24 @@ impl AlignmentControls {
             });
             ui.horizontal(|ui| {
                 for (mode, label) in [(Mode::Left,"Left"), (Mode::Center,"Center"), (Mode::Right,"Right"), (Mode::Top,"Top"), (Mode::Middle,"Middle"), (Mode::Bottom,"Bottom")] {
-                    if ui.add_enabled(editable && self.aligning && self.reference.is_some() && !self.selected.is_empty(), egui::Button::new(label)).clicked() { command = Command::Stage(mode); }
+                    if ui.add_enabled(editable && self.aligning && self.reference.is_some() && !self.selected.is_empty(), egui::Button::new(label))
+                        .on_hover_text("Align to the selected reference, which stays fixed. Integer offsets round nearest, ties away from zero; at most 0.5 px alignment error.").clicked() { command = Command::Stage(mode); }
                 }
-                if ui.add_enabled(editable && self.state.is_ready(), egui::Button::new("Apply alignment")).clicked() { command = Command::Apply; }
-                if ui.add_enabled(self.state.is_ready(), egui::Button::new("Cancel alignment")).clicked() { command = Command::Cancel; }
+                if ui.add_enabled(editable && self.state.is_ready(), egui::Button::new("Apply alignment"))
+                    .on_hover_text("Accept the staged alignment or equal-gap spacing as one undoable UI edit").clicked() { command = Command::Apply; }
+                if ui.add_enabled(self.state.is_ready(), egui::Button::new("Cancel alignment"))
+                    .on_hover_text("Discard the staged alignment or equal-gap spacing and restore the accepted document").clicked() { command = Command::Cancel; }
             });
-            ui.add(egui::Label::new("Reference stays fixed; integer offsets round nearest (ties away from zero), ≤0.5 px error").truncate());
-            ui.add(egui::Label::new(if self.status.is_empty() { "Choose a reference and at least one sibling target" } else { &self.status }).truncate());
+            ui.horizontal(|ui| {
+                for (axis, label) in [(DistributionAxis::Horizontal, "Horizontal equal gaps"), (DistributionAxis::Vertical, "Vertical equal gaps")] {
+                    if ui.add_enabled(editable && self.aligning && self.reference.is_some() && self.selected.len() >= 2, egui::Button::new(label))
+                        .on_hover_text("Select at least three siblings, including the reference. Equalize edge-to-edge gaps in spatial order, keeping the first and last siblings fixed. The reference may move when it is interior. Integer offsets round nearest, ties away from zero.")
+                        .clicked() { command = Command::StageDistribution(axis); }
+                }
+                ui.add(egui::Label::new("Fixed endpoints; interior reference may move").truncate())
+                    .on_hover_text("Equal gaps keep the spatial first and last selected siblings fixed. Left/Center/Right/Top/Middle/Bottom instead keep the selected alignment reference fixed.");
+            });
+            ui.add(egui::Label::new(if self.status.is_empty() { "Choose a reference + 1 target to align, or + 2 targets for equal gaps" } else { &self.status }).truncate());
         });
         if before != (self.aligning, self.reference.clone(), self.selected.clone()) {
             command = Command::Cancel;
@@ -135,6 +148,36 @@ impl AlignmentControls {
             self.cancel(preview, &error);
         }
     }
+    pub(super) fn stage_distribution(
+        &mut self,
+        axis: DistributionAxis,
+        context: &Context,
+        document: &Document,
+        preview: &mut collect_ui_preview::State,
+    ) {
+        self.cancel(preview, "Sibling layout cleared");
+        let Some(reference) = self.reference.as_deref() else {
+            return;
+        };
+        // The reference is a selected sibling here, not a fixed anchor.
+        let mut selected = vec![reference.to_owned()];
+        selected.extend(self.selected.clone());
+        let result = self
+            .state
+            .stage_distribution(context.clone(), document, &selected, axis)
+            .and_then(|()| {
+                if let Some(candidate) = self.state.document() {
+                    preview.stage_document(candidate)?;
+                    self.status = "Staged equal gaps: Apply to accept, or Cancel to restore".into();
+                } else {
+                    self.status = "No equal-gap change".into();
+                }
+                Ok(())
+            });
+        if let Err(error) = result {
+            self.cancel(preview, &error);
+        }
+    }
     pub(super) fn apply(
         &mut self,
         context: &Context,
@@ -149,7 +192,7 @@ impl AlignmentControls {
             Ok(()) => {
                 self.state.cancel();
                 self.status =
-                    "Alignment applied as one UI edit; Save UI document to keep it".into();
+                    "Sibling layout applied as one UI edit; Save UI document to keep it".into();
             }
             Err(error) => self.cancel(preview, &error),
         }

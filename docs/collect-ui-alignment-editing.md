@@ -81,3 +81,11 @@ Reproduce using the exact commands and inventory checks in
 [position acceptance](../.github/workflows/collect-ui-position.yml), and
 [resize acceptance](../.github/workflows/collect-ui-resize.yml). Each workflow
 retains its logs and GPU captures, including when a gate fails.
+
+## Equal-gap distribution
+
+For three or more selected siblings, the same controls also offer
+**Horizontal equal gaps** and **Vertical equal gaps**. These keep the geometrically
+first and last nodes fixed; an interior reference moves like any other interior
+node. See [equal-gap distribution](collect-ui-distribution-editing.md) for the
+rounding rules, rejection conditions and additional acceptance gates.
