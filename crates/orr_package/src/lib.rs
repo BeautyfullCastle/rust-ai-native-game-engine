@@ -820,6 +820,7 @@ fn resolve(
         version: &str,
         available: &BTreeMap<String, LockedPackage>,
         active: &mut BTreeSet<String>,
+        path: &mut Vec<String>,
         output: &mut BTreeMap<String, LockedPackage>,
     ) -> Result<()> {
         let p = available
@@ -832,7 +833,17 @@ fn resolve(
             ));
         }
         if active.contains(name) {
-            return fail(format!("dependency cycle: {name}"));
+            // The DFS path contains exactly the active ancestors. Report only
+            // the closed cycle, not the selecting prefix that led into it.
+            // All path entries already passed exact-version admission above.
+            let cycle = path
+                .iter()
+                .skip_while(|node| node.as_str() != name)
+                .map(|node| format!("{node}@{}", available[node].manifest.version))
+                .chain(std::iter::once(format!("{name}@{version}")))
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            return fail(format!("dependency cycle: {cycle}"));
         }
         if output.contains_key(name) {
             return Ok(());
@@ -841,17 +852,27 @@ fn resolve(
             return fail("package graph limit exceeded");
         }
         active.insert(name.to_string());
+        path.push(name.to_string());
         for (dep, version) in &p.manifest.dependencies {
-            visit(dep, version, available, active, output)?;
+            visit(dep, version, available, active, path, output)?;
         }
+        path.pop();
         active.remove(name);
         output.insert(name.to_string(), p.clone());
         Ok(())
     }
     let mut output = BTreeMap::new();
     let mut active = BTreeSet::new();
+    let mut path = Vec::new();
     for (name, version) in direct {
-        visit(name, version, available, &mut active, &mut output)?;
+        visit(
+            name,
+            version,
+            available,
+            &mut active,
+            &mut path,
+            &mut output,
+        )?;
     }
     Ok(output)
 }
