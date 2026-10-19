@@ -1,0 +1,428 @@
+name: Reverse animation clip acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reverse-animation-clips:
+    # Additive release acceptance; existing determinism gates remain mandatory.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-count guard self-tests
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Required reverse animation CPU acceptance
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_CLIP_EXTRACT_EVIDENCE: ${{ runner.temp }}/reverse-clips-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python -B - <<'PYCLIPCPU'
+          import hashlib, importlib.util, json, urllib.parse, os, pathlib, re, shutil, subprocess, sys, time, traceback
+          
+          repo = pathlib.Path.cwd()
+          # Reuse the reviewed stdlib lifecycle primitive; no RAW16 commands run on import.
+          sys.dont_write_bytecode = True
+          spec = importlib.util.spec_from_file_location('clip_process_lifecycle', repo / 'tools/raw16_import_gate.py')
+          lifecycle = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(lifecycle)
+          evidence = pathlib.Path(os.environ['ORR_CLIP_EXTRACT_EVIDENCE'])
+          evidence.mkdir(parents=True, exist_ok=False)
+          paths = ['Cargo.lock', 'Cargo.toml', 'tools/raw16_import_gate.py',
+                   'assets/animation_demo/animated.glb', 'crates/orr_model/tests/fixtures/animated_strip.glb',
+                   'crates/orr_model/Cargo.toml', 'crates/orr_render/Cargo.toml', 'crates/orr_model/examples/animation_clip_extract.rs',
+                   'crates/orr_model/examples/animation_clip_extract/authoring.rs',
+                   'crates/orr_model/tests/animation_clip_extract.rs',
+                   'crates/orr_render/tests/animation_clip_extract.rs', 'docs/animation-clip-extract.md', 'docs/reverse-animation-clips-verification.md',
+                   '.github/workflows/reverse-animation-clips.yml', '.github/workflows/determinism.yml']
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          identity = lambda: {name: digest(repo / name) for name in paths}
+          frozen = identity()
+          report = {'status': 'started', 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                    'tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+                    'source_sha256': frozen, 'platform': sys.platform, 'commands': []}
+          def record():
+              (evidence / 'receipt.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          def producer_fence():
+              for item in report.values():
+                  if isinstance(item, dict) and 'producer' in item:
+                      assert digest(evidence / item['file']) == item['sha256'], 'retained producer changed'
+          def run(label, command, expected=0):
+              producer_fence()
+              log = evidence / (label + '.log')
+              entry = {'label': label, 'argv': command, 'expected_exit': expected, 'log': log.name, 'state': 'running'}
+              report['commands'].append(entry)
+              record()  # A durable pending receipt exists even if the enclosing job is interrupted.
+              try:
+                  output = lifecycle.bounded_run(command, repo, os.environ.copy(), log, 1200, expected_exit=expected)
+                  entry['state'] = 'passed'
+                  print(output, flush=True)
+                  return output
+              except BaseException:
+                  entry['state'] = 'failed'
+                  raise
+              finally:
+                  producer_fence()
+                  child_receipt = log.with_suffix('.json')
+                  if child_receipt.is_file():
+                      entry['process'] = json.loads(child_receipt.read_text())
+                  record()
+          def inventory(output):
+              return re.findall(r'^([A-Za-z0-9_:]+): test$', output, re.M)
+          def executable(output, label, package, kind, features, limit):
+              artifacts = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
+              producers = [a for a in artifacts if a.get('reason') == 'compiler-artifact'
+                           and a.get('target', {}).get('name') == 'animation_clip_extract' and a.get('executable')]
+              assert len(producers) == 1, producers
+              producer = producers[0]
+              target = producer['target']
+              crate = repo / 'crates' / package
+              assert pathlib.Path(producer['manifest_path']).resolve() == (crate / 'Cargo.toml').resolve()
+              assert producer['package_id'].startswith('path+')
+              package_uri = urllib.parse.urlsplit(producer['package_id'][5:].split('#', 1)[0])
+              assert package_uri.scheme == 'file' and package_uri.netloc == ''
+              package_path = urllib.parse.unquote(package_uri.path)
+              if os.name == 'nt': package_path = package_path.lstrip('/')
+              assert pathlib.Path(package_path).resolve() == crate.resolve()
+              assert target['kind'] == [kind] and target['crate_types'] == ['bin']
+              source = crate / ('examples' if kind == 'example' else 'tests') / 'animation_clip_extract.rs'
+              assert pathlib.Path(target['src_path']).resolve() == source.resolve()
+              assert producer['profile']['test'] is (kind == 'test') and producer['profile']['opt_level'] == '3'
+              assert set(producer['features']) == set(features), producer['features']
+              original = pathlib.Path(producer['executable'])
+              assert original.is_file() and not original.is_symlink() and 0 < original.stat().st_size <= limit
+              original_hash = digest(original)
+              copy = evidence / (label + original.suffix)
+              assert not copy.exists()
+              shutil.copy2(original, copy)
+              assert digest(copy) == original_hash
+              report[label] = {'producer': producer, 'sha256': original_hash, 'file': copy.name,
+                               'bytes': copy.stat().st_size, 'max_bytes': limit}
+              record()
+              return str(copy)
+          expected = '''actual_demo_appends_one_clip_preserves_originals_and_cooks_reloads
+          semantic_json_indices_metadata_and_complete_binary_prefix_are_preserved
+          linear_translation_scale_and_shortest_arc_rotation_have_analytic_values
+          staggered_channels_single_keys_and_absent_tracks_keep_clamping_semantics
+          step_keys_jump_at_exact_start_interior_and_end_without_linear_ramps
+          interior_values_and_exact_endpoint_keys_are_retained_once
+          invalid_names_ranges_and_clip_indices_reject_without_mutation
+          zero_duration_clip_rejects_but_nonzero_single_key_clip_can_be_extracted
+          old_empty_or_duplicate_names_do_not_prevent_a_new_unique_name
+          external_data_uri_unsupported_and_unknown_sources_fail_closed
+          malformed_glb_headers_chunk_order_extra_chunks_and_truncation_reject
+          source_validation_rejects_nonfinite_values_duplicate_times_and_invalid_targets
+          appending_must_respect_clip_accessor_and_buffer_view_budgets
+          appending_must_respect_aggregate_animation_key_budget
+          cli_writes_importable_output_once_and_never_changes_source_or_existing_target
+          cli_rejects_bad_arguments_or_inputs_without_leaving_output
+          cli_rejects_unsafe_output_names_directories_and_package_store_paths
+          cli_rejects_oversized_sparse_input_before_reading_or_creating_output
+          cli_rejects_symlink_sources_targets_and_ancestors_including_dangling_targets
+          near_parallel_nonunit_quaternions_use_runtime_normalization_and_interpolation
+          retimed_linear_tracks_have_analytic_values_and_exact_generated_keys_for_every_speed
+          retimed_step_tracks_preserve_jumps_clamping_single_keys_and_rest_for_every_speed
+          retimed_demo_preserves_original_content_and_cooks_reloads_for_every_speed
+          retimed_glb_preserves_json_indices_metadata_and_complete_binary_prefix_for_every_speed
+          retiming_rejects_invalid_rates_without_mutating_source
+          retiming_rejects_overflow_and_duration_underflow_without_mutating_source
+          retiming_rejects_precision_loss_and_collapsed_interior_keys
+          retiming_preserves_exact_subnormal_times_and_adjacent_interior_keys
+          cli_accepts_each_speed_in_every_option_position_and_preserves_source
+          cli_speed_one_matches_omitted_speed_and_prior_output_bytes
+          cli_rejects_invalid_speed_tokens_duplicate_odd_extra_and_missing_options
+          cli_retiming_failures_preserve_existing_targets_sources_and_leave_no_staging_files
+          cli_direction_rejects_invalid_duplicate_missing_and_step_without_writes
+          cli_explicit_forward_preserves_default_and_pre_retiming_golden_bytes
+          reverse_cli_preserves_originals_indices_binary_and_cooks_reloads_at_every_speed
+          reverse_cli_rejects_overflow_underflow_inexact_and_collapsed_mirror_keys_atomically
+          reverse_cli_rejects_source_and_target_aliases_without_changing_bytes
+          reverse_exact_subnormal_and_adjacent_mirror_grids_remain_supported
+          reverse_linear_tracks_have_independent_analytic_oracles_at_every_speed
+          reverse_quaternion_signs_use_shortest_arc_and_preserve_exact_endpoint_keys
+          reverse_rejects_selected_step_tracks_even_when_constant_or_outside_trim
+          reverse_staggered_and_single_key_tracks_keep_clamping_at_every_speed'''.splitlines()
+          if os.name == 'nt':
+              expected.remove('cli_rejects_symlink_sources_targets_and_ancestors_including_dangling_targets')
+              expected.remove('reverse_cli_rejects_source_and_target_aliases_without_changing_bytes')
+          base = ['--locked', '--release', '-p', 'orr_model']
+          focused = ['cargo', 'test', *base, '--features', 'animation,import', '--test', 'animation_clip_extract']
+          try:
+              assert sorted(inventory(run('inventory', [*focused, '--', '--list']))) == sorted(expected)
+              assert inventory(run('ignored-inventory', [*focused, '--', '--ignored', '--list'])) == []
+              output = run('focused', [*focused, '--', '--test-threads=1'])
+              assert re.search(r'test result: ok\. ' + str(len(expected)) + r' passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;', output)
+              for name in expected:
+                  assert re.search(r'^test ' + re.escape(name) + r' \.\.\. ', output, re.M), name
+              run('model-regressions', ['cargo', 'test', *base, '--features', 'animation,import'])
+              run('strict-model', ['cargo', 'clippy', *base, '--features', 'animation,import', '--all-targets', '--', '-D', 'warnings'])
+              run('default-check', ['cargo', 'check', *base, '--all-targets'])
+              build = run('default-build', ['cargo', 'build', *base, '--no-default-features', '--example', 'animation_clip_extract', '--message-format=json'])
+              disabled = executable(build, 'feature-off-executable', 'orr_model', 'example', [], 64 * 1024**2)
+              run('feature-off-exit2', [disabled, '--help'], 2)
+              assert b'requires --features animation,import' in (evidence / 'feature-off-exit2.log').read_bytes()
+              build = run('enabled-build', ['cargo', 'build', *base, '--features', 'animation,import', '--example', 'animation_clip_extract', '--message-format=json'])
+              enabled = executable(build, 'enabled-executable', 'orr_model', 'example', ['animation', 'default', 'import'], 64 * 1024**2)
+              assert 'Usage:' in run('enabled-help', [enabled, '--help'])
+              source = repo / 'assets/animation_demo/animated.glb'
+              before = source.read_bytes()
+              output = evidence / 'authored.glb'
+              cli = [enabled, '--input', str(source), '--clip', '0', '--start', '0.25', '--end', '0.75', '--name', 'short-action', '--output', str(output)]
+              run('actual-publication', cli)
+              authored = output.read_bytes()
+              explicit = cli.copy(); explicit[-1] = str(evidence / 'explicit-forward.glb')
+              run('explicit-forward-byte-identity', [*explicit, '--direction', 'forward'])
+              assert pathlib.Path(explicit[-1]).read_bytes() == authored
+              reverse = cli.copy(); reverse[-1] = str(evidence / 'reverse.glb')
+              run('actual-reverse-publication', [*reverse, '--direction', 'reverse'])
+              assert pathlib.Path(reverse[-1]).read_bytes() != authored
+              bad_direction = cli.copy(); bad_direction[-1] = str(evidence / 'bad-direction.glb')
+              run('actual-invalid-direction', [*bad_direction, '--direction', 'backward'], 2)
+              assert not pathlib.Path(bad_direction[-1]).exists()
+
+              run('actual-no-replace', cli, 2)
+              alias = cli.copy(); alias[-1] = str(source)
+              run('actual-source-alias', alias, 2)
+              invalid = cli.copy(); invalid[-1] = str(evidence / 'invalid.glb'); invalid[invalid.index('--start') + 1] = '-1'
+              run('actual-invalid-range', invalid, 2)
+              unknown = cli.copy(); unknown[-1] = str(evidence / 'unknown.glb'); unknown.append('--force')
+              run('actual-unknown-option', unknown, 2)
+              assert not (evidence / 'invalid.glb').exists() and not (evidence / 'unknown.glb').exists()
+              assert output.read_bytes() == authored and source.read_bytes() == before
+              assert not list(evidence.glob('.orr-clip-*')), 'owned stage must be cleaned'
+              report['actual_cli'] = {'source_sha256': digest(source), 'output_sha256': digest(output),
+                                      'source_and_output_preserved_after_rejections': True}
+              run('strict-render-consumer', ['cargo', 'clippy', '--locked', '--release', '-p', 'orr_render', '--features', 'animation,imported-scene', '--test', 'animation_clip_extract', '--', '-D', 'warnings'])
+              report['status'] = 'passed'
+          except BaseException:
+              report['status'] = 'failed'
+              report['failure'] = traceback.format_exc()
+              raise
+          finally:
+              report['source_unchanged'] = identity() == frozen
+              if not report['source_unchanged']:
+                  report['status'] = 'failed'
+              record()
+              assert report['source_unchanged'], 'source or lock mutation during acceptance'
+          PYCLIPCPU
+      - name: Retain clip extraction cpu and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverse-clips-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/reverse-clips-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Install software Vulkan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1
+          runtime=$(mktemp -d "$RUNNER_TEMP/reverse-clips-xdg.XXXXXXXX")
+          chmod 700 "$runtime"
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+      - name: Required reverse animation GPU acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_CLIP_EXTRACT_EVIDENCE: ${{ runner.temp }}/reverse-clips-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python -B - <<'PYCLIPGPU'
+          import hashlib, importlib.util, json, urllib.parse, os, pathlib, re, shutil, subprocess, sys, time, traceback
+          
+          repo = pathlib.Path.cwd()
+          # Reuse the reviewed stdlib lifecycle primitive; no RAW16 commands run on import.
+          sys.dont_write_bytecode = True
+          spec = importlib.util.spec_from_file_location('clip_process_lifecycle', repo / 'tools/raw16_import_gate.py')
+          lifecycle = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(lifecycle)
+          evidence = pathlib.Path(os.environ['ORR_CLIP_EXTRACT_EVIDENCE'])
+          evidence.mkdir(parents=True, exist_ok=False)
+          captures = evidence / 'captures'
+          paths = ['Cargo.lock', 'Cargo.toml', 'tools/raw16_import_gate.py',
+                   'assets/animation_demo/animated.glb', 'crates/orr_model/tests/fixtures/animated_strip.glb',
+                   'crates/orr_model/Cargo.toml', 'crates/orr_render/Cargo.toml', 'crates/orr_model/examples/animation_clip_extract.rs',
+                   'crates/orr_model/examples/animation_clip_extract/authoring.rs',
+                   'crates/orr_model/tests/animation_clip_extract.rs',
+                   'crates/orr_render/tests/animation_clip_extract.rs', 'docs/animation-clip-extract.md', 'docs/reverse-animation-clips-verification.md',
+                   '.github/workflows/reverse-animation-clips.yml', '.github/workflows/determinism.yml']
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          identity = lambda: {name: digest(repo / name) for name in paths}
+          frozen = identity()
+          report = {'status': 'started', 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                    'tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+                    'source_sha256': frozen, 'commands': []}
+          def record():
+              (evidence / 'receipt.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+          def producer_fence():
+              for item in report.values():
+                  if isinstance(item, dict) and 'producer' in item:
+                      assert digest(evidence / item['file']) == item['sha256'], 'retained producer changed'
+          def run(label, command, expected=0):
+              producer_fence()
+              log = evidence / (label + '.log')
+              entry = {'label': label, 'argv': command, 'expected_exit': expected, 'log': log.name, 'state': 'running'}
+              report['commands'].append(entry)
+              record()  # A durable pending receipt exists even if the enclosing job is interrupted.
+              try:
+                  output = lifecycle.bounded_run(command, repo, os.environ.copy(), log, 1200, expected_exit=expected)
+                  entry['state'] = 'passed'
+                  print(output, flush=True)
+                  return output
+              except BaseException:
+                  entry['state'] = 'failed'
+                  raise
+              finally:
+                  producer_fence()
+                  child_receipt = log.with_suffix('.json')
+                  if child_receipt.is_file():
+                      entry['process'] = json.loads(child_receipt.read_text())
+                  record()
+          def executable(output, label, package, kind, features, limit):
+              artifacts = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
+              producers = [a for a in artifacts if a.get('reason') == 'compiler-artifact'
+                           and a.get('target', {}).get('name') == 'animation_clip_extract' and a.get('executable')]
+              assert len(producers) == 1, producers
+              producer = producers[0]
+              target = producer['target']
+              crate = repo / 'crates' / package
+              assert pathlib.Path(producer['manifest_path']).resolve() == (crate / 'Cargo.toml').resolve()
+              assert producer['package_id'].startswith('path+')
+              package_uri = urllib.parse.urlsplit(producer['package_id'][5:].split('#', 1)[0])
+              assert package_uri.scheme == 'file' and package_uri.netloc == ''
+              package_path = urllib.parse.unquote(package_uri.path)
+              if os.name == 'nt': package_path = package_path.lstrip('/')
+              assert pathlib.Path(package_path).resolve() == crate.resolve()
+              assert target['kind'] == [kind] and target['crate_types'] == ['bin']
+              source = crate / ('examples' if kind == 'example' else 'tests') / 'animation_clip_extract.rs'
+              assert pathlib.Path(target['src_path']).resolve() == source.resolve()
+              assert producer['profile']['test'] is (kind == 'test') and producer['profile']['opt_level'] == '3'
+              assert set(producer['features']) == set(features), producer['features']
+              original = pathlib.Path(producer['executable'])
+              assert original.is_file() and not original.is_symlink() and 0 < original.stat().st_size <= limit
+              original_hash = digest(original)
+              copy = evidence / (label + original.suffix)
+              assert not copy.exists()
+              shutil.copy2(original, copy)
+              assert digest(copy) == original_hash
+              report[label] = {'producer': producer, 'sha256': original_hash, 'file': copy.name,
+                               'bytes': copy.stat().st_size, 'max_bytes': limit}
+              record()
+              return str(copy)
+          name = 'cli_reverse_extract_installed_cooked_clip_matches_source_time_gpu_and_analytic_oracle'
+          command = ['cargo', 'test', '--locked', '--release', '-p', 'orr_render', '--features',
+                     'animation,imported-scene', '--test', 'animation_clip_extract']
+          try:
+              icds = sorted(pathlib.Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))
+              report['icds'] = [str(path) for path in icds]; record()
+              assert len(icds) == 1, 'exactly one existing Lavapipe manifest is required'
+              os.environ.update(VK_ICD_FILENAMES=str(icds[0]), VK_DRIVER_FILES=str(icds[0]),
+                                WGPU_BACKEND='vulkan', ORR_REQUIRE_GPU='1',
+                                ORR_CLIP_EXTRACT_REQUIRE_SOFTWARE='1', ORR_CLIP_EXTRACT_CAPTURE_DIR=str(captures))
+              report['device_environment'] = {key: os.environ[key] for key in [
+                  'VK_ICD_FILENAMES', 'VK_DRIVER_FILES', 'WGPU_BACKEND', 'ORR_REQUIRE_GPU',
+                  'ORR_CLIP_EXTRACT_REQUIRE_SOFTWARE', 'ORR_CLIP_EXTRACT_CAPTURE_DIR']}
+              cli_build = run('build-actual-cli', ['cargo', 'build', '--locked', '--release', '-p', 'orr_model', '--features', 'animation,import', '--example', 'animation_clip_extract', '--message-format=json'])
+              cli_binary = executable(cli_build, 'actual-cli-executable', 'orr_model', 'example', ['animation', 'default', 'import'], 64 * 1024**2)
+              os.environ['ORR_CLIP_EXTRACT_CLI'] = str(pathlib.Path(cli_binary).resolve())
+              build = run('build-render-consumer', [*command, '--no-run', '--message-format=json'])
+              test_binary = executable(build, 'device-test-executable', 'orr_render', 'test',
+                                       ['animation', 'default', 'imported-scene', 'models'], 128 * 1024**2)
+              for label, flags in [('inventory', []), ('ignored-inventory', ['--ignored'])]:
+                  output = run(label, [test_binary, *flags, '--list'])
+                  assert re.findall(r'^([A-Za-z0-9_:]+): test$', output, re.M) == sorted(['cli_extract_installed_cooked_clip_matches_source_time_gpu_and_analytic_oracle', name])
+              output = run('device', [test_binary, name, '--ignored', '--exact', '--nocapture', '--test-threads=1'])
+              assert re.search(r'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;', output)
+              assert re.search(r'^test ' + name + r' \.\.\. ', output, re.M)
+              accepted = json.loads((captures / 'reverse-acceptance.json').read_text())
+              assert accepted['status'] == 'passed'
+              assert accepted['source_hidden_after_install'] is True
+              assert accepted['cooked_reload_before_render'] is True
+              assert accepted['mandatory_gpu'] is True and accepted['required_software_vulkan'] is True
+              adapter = json.loads((captures / 'reverse-adapter.json').read_text())
+              assert adapter['backend'] == 'Vulkan' and adapter['software'] is True
+              assert accepted['adapter'] == adapter and accepted['schema_version'] == 1
+              assert accepted['cli']['path'] == os.environ['ORR_CLIP_EXTRACT_CLI']
+              assert accepted['cli']['bytes'] == report['actual-cli-executable']['bytes']
+              cases = [('quarter', 0.25), ('half', 0.5), ('unit', 1.0), ('double', 2.0), ('quadruple', 4.0)]
+              assert [(entry['label'], entry['speed']) for entry in accepted['speeds']] == cases
+              expected = {'reverse-original.glb', 'reverse-adapter.json', 'reverse-acceptance.json'}
+              for entry, (label, speed) in zip(accepted['speeds'], cases):
+                  prefix = f'reverse-{label}'
+                  assert entry == json.loads((captures / f'{prefix}.json').read_text())
+                  assert entry['status'] == 'passed' and entry['direction'] == 'reverse'
+                  assert entry['source_clip'] == 0 and entry['extracted_clip'] == 2
+                  assert entry['start'] == 0.25 and entry['end'] == 1.5 and entry['duration'] == 1.25 / speed
+                  assert entry['key_times'] == [0.0, 0.5 / speed, 1.25 / speed]
+                  install = entry['installation']
+                  assert install['exit_code'] == 0 and install['source_hidden_after_install'] is True
+                  assert install['installed_cooked_reload_before_render'] is True
+                  assert len(entry['samples']) == 6
+                  expected.update([f'{prefix}.json', f'{prefix}.glb', f'{prefix}-cli.stdout', f'{prefix}-cli.stderr',
+                                   f'{prefix}-original.glb.cooked.json', f'{prefix}-{prefix}.glb.cooked.json'])
+                  for index, (sample, offset) in enumerate(zip(entry['samples'], [0.0, 0.25, 0.5, 0.75, 1.0, 1.25])):
+                      assert sample['local_time'] == offset / speed and sample['source_time'] == 1.5 - offset
+                      assert 0 <= sample['equivalent_pixel_differences'] <= 32 and sample['preserved_pixel_differences'] == 0
+                      if index == 0: assert sample['temporal_pixel_differences'] is None
+                      else: assert sample['temporal_pixel_differences'] > 100
+                      control = sample['wrong_direction_control']
+                      if index == 1:
+                          assert control['source_time'] == 0.5 and control['pixel_differences'] > 100
+                      else: assert control is None
+                      for variant in ['source', 'reversed', 'preserved']:
+                          expected.update(f'{prefix}-{index}-{variant}.{ext}' for ext in ['rgba', 'ppm'])
+                  for variant in ['wrong-direction', 'empty-draw-clear']:
+                      expected.update(f'{prefix}-{variant}.{ext}' for ext in ['rgba', 'ppm'])
+              assert len(expected) == 233 and {path.name for path in captures.iterdir()} == expected
+              for path in captures.iterdir():
+                  assert path.is_file() and not path.is_symlink()
+                  if path.suffix == '.rgba': assert path.stat().st_size == 147456
+                  if path.suffix == '.ppm':
+                      assert path.stat().st_size == 110607 and path.read_bytes().startswith(b'P6\n192 192\n255\n')
+              assert digest(pathlib.Path(test_binary)) == report['device-test-executable']['sha256']
+              report['capture_sha256'] = {path.name: {'sha256': digest(path), 'bytes': path.stat().st_size} for path in sorted(captures.iterdir())}
+              report['status'] = 'passed'
+          except BaseException:
+              report['status'] = 'failed'
+              report['failure'] = traceback.format_exc()
+              raise
+          finally:
+              report['source_unchanged'] = identity() == frozen
+              if captures.exists():
+                  report['partial_capture_sha256'] = {path.name: {'sha256': digest(path), 'bytes': path.stat().st_size} for path in sorted(captures.iterdir()) if path.is_file() and not path.is_symlink()}
+              if not report['source_unchanged']:
+                  report['status'] = 'failed'
+              record()
+              assert report['source_unchanged'], 'source or lock mutation during acceptance'
+          PYCLIPGPU
+      - name: Retain reverse gpu and partial failure evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverse-clips-gpu
+          path: ${{ runner.temp }}/reverse-clips-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7

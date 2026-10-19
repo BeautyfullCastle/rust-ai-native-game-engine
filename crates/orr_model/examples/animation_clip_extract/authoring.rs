@@ -28,6 +28,14 @@ const MAX_TABLE_ENTRIES: usize = 1024;
 const SOURCE_ID: &str = "clip-source.glb";
 static STAGE_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Offline traversal direction; runtime playback remains unchanged.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Direction {
+    #[default]
+    Forward,
+    Reverse,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExtractOptions {
     pub clip_index: u32,
@@ -36,6 +44,7 @@ pub struct ExtractOptions {
     pub name: String,
     /// Fixed positive playback ratio; 2 means twice as fast in the authored clip.
     pub speed: f32,
+    pub direction: Direction,
 }
 
 impl ExtractOptions {
@@ -222,6 +231,18 @@ pub fn extract_glb(input: &[u8], options: &ExtractOptions) -> Result<Vec<u8>, St
         .clips
         .get(options.clip_index as usize)
         .ok_or("clip index is out of range")?;
+    // STEP holds the earlier key, so reversing its key order would put a jump
+    // on the wrong side. Reject the entire selected clip, including mixed tracks.
+    if options.direction == Direction::Reverse
+        && clip
+            .channels
+            .iter()
+            .any(|channel| channel.interpolation == Interpolation::Step)
+    {
+        return Err(
+            "reverse extraction requires LINEAR channels; selected clip contains STEP".into(),
+        );
+    }
     if options.end > clip.duration() {
         return Err("clip end exceeds the selected clip duration".into());
     }
@@ -316,18 +337,33 @@ pub fn extract_glb(input: &[u8], options: &ExtractOptions) -> Result<Vec<u8>, St
     let end_pose = model
         .sample_clip(options.clip_index, options.end)
         .map_err(|e| e.to_string())?;
+    let (first_pose, last_pose) = match options.direction {
+        Direction::Forward => (&start_pose, &end_pose),
+        Direction::Reverse => (&end_pose, &start_pose),
+    };
     let mut binary = Vec::with_capacity(binary_size);
     binary.extend_from_slice(original_binary);
     let mut samplers = Vec::with_capacity(clip.channels.len());
     let mut channels = Vec::with_capacity(clip.channels.len());
     for channel in &clip.channels {
         let mut times = vec![0.0];
-        let mut values = values_at(&channel.values, &start_pose.local()[channel.node as usize]);
-        for (i, &time) in channel.times.iter().enumerate() {
+        let mut values = values_at(&channel.values, &first_pose.local()[channel.node as usize]);
+        for position in 0..channel.times.len() {
+            let i = match options.direction {
+                Direction::Forward => position,
+                Direction::Reverse => channel.times.len() - 1 - position,
+            };
+            let time = channel.times[i];
             if time <= options.start || time >= options.end {
                 continue;
             }
-            let rebased = retime(time - options.start, options.speed)?;
+            // Preserve forward f32 subtraction exactly. Mirroring has its own
+            // f32 grid: reject collisions, without promising exact subtraction.
+            let relative = match options.direction {
+                Direction::Forward => time - options.start,
+                Direction::Reverse => options.end - time,
+            };
+            let rebased = retime(relative, options.speed)?;
             if rebased <= *times.last().expect("initial key") || rebased >= duration {
                 return Err("rebased key precision cannot preserve strict time ordering".into());
             }
@@ -342,7 +378,7 @@ pub fn extract_glb(input: &[u8], options: &ExtractOptions) -> Result<Vec<u8>, St
         times.push(duration);
         values.extend(values_at(
             &channel.values,
-            &end_pose.local()[channel.node as usize],
+            &last_pose.local()[channel.node as usize],
         ));
         let (path, width) = match &channel.values {
             ChannelValues::Translation(_) => ("translation", 3),
@@ -602,22 +638,30 @@ fn publish(output: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse six required pairs and one optional speed pair. No runtime/package writes.
+/// Parse six required pairs and optional speed/direction pairs. No runtime/package writes.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
-    let args: Vec<_> = args.into_iter().take(16).collect();
+    let args: Vec<_> = args.into_iter().take(18).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
-        return writeln!(std::io::stdout(),"Usage: animation_clip_extract --input FILE.glb --output NEW.glb --clip N --start SECONDS --end SECONDS --name NAME [--speed 0.25|0.5|1|2|4]\nSpeed defaults to 1; 2 plays twice as fast. Requires animation,import; embedded GLB STEP/LINEAR TRS only. Trusted, stable, link-free parents; output parent must exist. No overwrite/install. Exit 0: help/published (check warnings); 2: not published/error.").map_err(|e|e.to_string());
+        return writeln!(std::io::stdout(),"Usage: animation_clip_extract --input FILE.glb --output NEW.glb --clip N --start SECONDS --end SECONDS --name NAME [--speed 0.25|0.5|1|2|4] [--direction forward|reverse]\nSpeed defaults to 1; 2 plays twice as fast. Direction defaults to forward; reverse requires selected LINEAR channels. Requires animation,import; embedded GLB STEP/LINEAR TRS only. Trusted, stable, link-free parents; output parent must exist. No overwrite/install. Exit 0: help/published (check warnings); 2: not published/error.").map_err(|e|e.to_string());
     }
-    if args.len() != 12 && args.len() != 14 {
+    if args.len() != 12 && args.len() != 14 && args.len() != 16 {
         return Err(
-            "six required option/value pairs and optional --speed required; use --help".into(),
+            "six required option/value pairs and optional --speed/--direction expected; use --help"
+                .into(),
         );
     }
     let mut values = BTreeMap::new();
     for pair in args.chunks_exact(2) {
         let key = pair[0].to_str().ok_or("option names must be UTF-8")?;
         if ![
-            "--input", "--output", "--clip", "--start", "--end", "--name", "--speed",
+            "--input",
+            "--output",
+            "--clip",
+            "--start",
+            "--end",
+            "--name",
+            "--speed",
+            "--direction",
         ]
         .contains(&key)
         {
@@ -646,6 +690,14 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         start: text("--start")?.parse().map_err(|_| "invalid --start")?,
         end: text("--end")?.parse().map_err(|_| "invalid --end")?,
         name: text("--name")?.into(),
+        direction: match values.get("--direction") {
+            None => Direction::Forward,
+            Some(_) => match text("--direction")? {
+                "forward" => Direction::Forward,
+                "reverse" => Direction::Reverse,
+                _ => return Err("--direction must be forward or reverse".into()),
+            },
+        },
         speed: match values.get("--speed") {
             None => 1.0,
             Some(_) => match text("--speed")? {

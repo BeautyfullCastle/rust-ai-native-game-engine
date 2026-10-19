@@ -532,9 +532,20 @@ jobs:
           cli_accepts_each_speed_in_every_option_position_and_preserves_source
           cli_speed_one_matches_omitted_speed_and_prior_output_bytes
           cli_rejects_invalid_speed_tokens_duplicate_odd_extra_and_missing_options
-          cli_retiming_failures_preserve_existing_targets_sources_and_leave_no_staging_files'''.splitlines()
+          cli_retiming_failures_preserve_existing_targets_sources_and_leave_no_staging_files
+          cli_direction_rejects_invalid_duplicate_missing_and_step_without_writes
+          cli_explicit_forward_preserves_default_and_pre_retiming_golden_bytes
+          reverse_cli_preserves_originals_indices_binary_and_cooks_reloads_at_every_speed
+          reverse_cli_rejects_overflow_underflow_inexact_and_collapsed_mirror_keys_atomically
+          reverse_cli_rejects_source_and_target_aliases_without_changing_bytes
+          reverse_exact_subnormal_and_adjacent_mirror_grids_remain_supported
+          reverse_linear_tracks_have_independent_analytic_oracles_at_every_speed
+          reverse_quaternion_signs_use_shortest_arc_and_preserve_exact_endpoint_keys
+          reverse_rejects_selected_step_tracks_even_when_constant_or_outside_trim
+          reverse_staggered_and_single_key_tracks_keep_clamping_at_every_speed'''.splitlines()
           if os.name == 'nt':
               expected.remove('cli_rejects_symlink_sources_targets_and_ancestors_including_dangling_targets')
+              expected.remove('reverse_cli_rejects_source_and_target_aliases_without_changing_bytes')
           base = ['--locked', '--release', '-p', 'orr_model']
           focused = ['cargo', 'test', *base, '--features', 'animation,import', '--test', 'animation_clip_extract']
           try:
@@ -1200,9 +1211,9 @@ jobs:
                                        ['animation', 'default', 'imported-scene', 'models'], 128 * 1024**2)
               for label, flags in [('inventory', []), ('ignored-inventory', ['--ignored'])]:
                   output = run(label, [test_binary, *flags, '--list'])
-                  assert re.findall(r'^([A-Za-z0-9_:]+): test$', output, re.M) == [name]
+                  assert re.findall(r'^([A-Za-z0-9_:]+): test$', output, re.M) == sorted([name, 'cli_reverse_extract_installed_cooked_clip_matches_source_time_gpu_and_analytic_oracle'])
               output = run('device', [test_binary, name, '--ignored', '--exact', '--nocapture', '--test-threads=1'])
-              assert re.search(r'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;', output)
+              assert re.search(r'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;', output)
               assert re.search(r'^test ' + name + r' \.\.\. ', output, re.M)
               expected = {'original.glb', 'trimmed.glb', 'original.glb.cooked.json', 'trimmed.glb.cooked.json', 'adapter.json', 'acceptance.json'}
               for index in range(5):
