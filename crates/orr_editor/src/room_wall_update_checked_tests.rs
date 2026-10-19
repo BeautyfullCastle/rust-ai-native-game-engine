@@ -16,13 +16,9 @@ fn settle(editor: &mut Editor) {
     }
 }
 fn fixture() -> (tempfile::TempDir, Editor, String) {
-    use orr_sample::room_game::{RoomConfig, RoomEscapeV1};
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("room.scene.yaml");
-    let sim = orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, 42);
-    let text = orr_reflect::Scene::unbake(&orr_sample::room_project::types(), sim.frame(), None)
-        .unwrap()
-        .to_yaml();
+    let text = include_str!("../tests/fixtures/room_initial.scene.yaml").to_owned();
     std::fs::write(&path, &text).unwrap();
     let mut editor = Editor::start(&crate::HostSpec::PreparedRoom {
         scene: path,
