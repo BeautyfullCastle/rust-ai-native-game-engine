@@ -1,0 +1,5 @@
+# Frozen generator output: preserve exact bytes, including license CRLF.
+/LICENSE.txt -text whitespace=cr-at-eol
+/atlas.png -text
+/orr.package.json -text
+/sprites.json -text
