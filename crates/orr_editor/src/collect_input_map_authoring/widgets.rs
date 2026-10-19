@@ -56,9 +56,7 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.panel.show(ui));
-        });
+        egui::CentralPanel::default().show(ui, |ui| self.panel.show(ui));
         let pending = self.panel().has_pending_draft();
         if pending != self.title_has_pending_draft {
             let title = if pending {
@@ -75,6 +73,96 @@ impl eframe::App for App {
 
 impl Panel {
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        // Resolve physical input before any ordinary widget can use logical keys,
+        // text or paste. Keep the underlying UI disabled for the completion frame
+        // as well, so a captured Enter/Space cannot also Apply or Save.
+        let owned_on_entry = self.process_capture(ui.ctx());
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_enabled_ui(!owned_on_entry, |ui| self.show_contents(ui));
+        });
+        self.show_capture_modal(ui.ctx());
+    }
+
+    fn process_capture(&mut self, ctx: &egui::Context) -> bool {
+        let owned_on_entry = self.capture.is_listening();
+        let (events, focused) = ctx.input(|input| (input.events.clone(), input.focused));
+        let output = self.capture.process(&events, self.capture_context, focused);
+        if owned_on_entry {
+            isolate_capture_input(ctx);
+        }
+        if let Some(message) = output.message {
+            self.capture_message = message;
+        }
+        if let Some((row, key)) = output.captured {
+            // A row is always an existing draft binding. Context invalidation
+            // prevents stale captures from being applied after document edits.
+            let mut draft = self.draft().to_vec();
+            if let Some(binding) = draft.get_mut(row) {
+                *binding = Button::Keyboard { key };
+                if let Err(error) = self.replace_draft(draft) {
+                    self.capture_message = error;
+                } else {
+                    self.capture_message = format!(
+                        "Captured Key {key:?} for binding {}. Apply action to accept it.",
+                        row + 1
+                    );
+                }
+            }
+        }
+        owned_on_entry
+    }
+
+    fn begin_capture(&mut self, row: usize, ctx: &egui::Context) {
+        self.capture.begin(row, self.capture_context);
+        self.capture_message.clear();
+        isolate_capture_input(ctx);
+    }
+
+    fn show_capture_modal(&mut self, ctx: &egui::Context) {
+        let Some(row) = self.capture_row() else {
+            return;
+        };
+        egui::Modal::new(egui::Id::new("collect_physical_key_capture")).show(ctx, |ui| {
+            ui.heading("Capture physical key");
+            ui.label(format!(
+                "Action {} · Binding {}",
+                self.selected_action().name,
+                row + 1
+            ));
+            ui.label("Release held keys, then press one physical key without modifiers.");
+            ui.label("Escape cancels capture. Use the dropdown to bind Escape.");
+            if !self.capture_message().is_empty() {
+                ui.colored_label(egui::Color32::YELLOW, self.capture_message());
+            }
+            let cancel = ui.button("Cancel capture");
+            if cancel.clicked() {
+                self.capture.cancel();
+                self.capture_message = "Capture cancelled. Draft unchanged.".into();
+                cancel.surrender_focus();
+            } else {
+                // egui's logical Escape/Tab navigation must never decide capture
+                // identity or leave an underlying text field owning the keyboard.
+                if !cancel.has_focus() {
+                    cancel.request_focus();
+                }
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter(
+                        cancel.id,
+                        egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                        },
+                    )
+                });
+            }
+        });
+        // Deliberately do not use ModalResponse::should_close(): it interprets
+        // logical Escape, whereas this modal belongs to the physical key state.
+    }
+
+    fn show_contents(&mut self, ui: &mut egui::Ui) {
         ui.heading("Collect input map");
         ui.label("Six fixed actions · keyboard only · up to eight keys per action");
         ui.small("Explicit session file for Collect. This tool does not launch a game or change a project.");
@@ -164,6 +252,7 @@ impl Panel {
         }
         let mut draft = self.draft().to_vec();
         let mut remove = None;
+        let mut capture_row = None;
         for (index, binding) in draft.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 egui::ComboBox::from_label(format!("Binding {}", index + 1))
@@ -177,6 +266,12 @@ impl Panel {
                             );
                         }
                     });
+                if ui
+                    .button(format!("Capture binding {}", index + 1))
+                    .clicked()
+                {
+                    capture_row = Some(index);
+                }
                 if ui.button(format!("Remove binding {}", index + 1)).clicked() {
                     remove = Some(index);
                 }
@@ -184,6 +279,11 @@ impl Panel {
         }
         if let Some(index) = remove {
             draft.remove(index);
+        }
+        if capture_row.is_some() {
+            // Also isolate the activation frame from widgets below the row.
+            isolate_capture_input(ui.ctx());
+            ui.disable();
         }
         ui.horizontal(|ui| {
             if ui
@@ -200,6 +300,31 @@ impl Panel {
             if let Err(error) = self.replace_draft(draft) {
                 self.set_message(error);
             }
+        }
+        if let Some(row) = capture_row.filter(|&row| row < self.draft().len()) {
+            self.begin_capture(row, ui.ctx());
+        }
+        if let Err(error) = self.validate_draft() {
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("Draft error: {error}"));
+        }
+        let candidate = self.draft_candidate();
+        if self
+            .document()
+            .actions
+            .iter()
+            .chain(&candidate.actions)
+            .any(|action| {
+                action.name != "quit"
+                    && action
+                        .bindings
+                        .contains(&Button::Keyboard { key: Key::Escape })
+            })
+        {
+            ui.colored_label(egui::Color32::YELLOW,
+                "Compatibility warning: Escape on movement or restart is valid for standalone Collect, but cannot be loaded by the main editor, where Escape releases controls.");
+        }
+        if !self.capture_is_listening() && !self.capture_message().is_empty() {
+            ui.label(self.capture_message());
         }
         ui.horizontal(|ui| {
             if ui.button("Apply action").clicked() {
@@ -259,6 +384,27 @@ impl Panel {
             "Player requires collect-dodge + input-actions. Maps are window-only and session-only.",
         );
     }
+}
+
+/// Remove capture-owned keyboard-derived events for this whole frame, including
+/// events after the deciding key. Pointer input remains available to Cancel.
+fn isolate_capture_input(ctx: &egui::Context) {
+    ctx.input_mut(|input| {
+        input.events.retain(|event| {
+            !matches!(
+                event,
+                egui::Event::Key { .. }
+                    | egui::Event::Text(_)
+                    | egui::Event::Paste(_)
+                    | egui::Event::Copy
+                    | egui::Event::Cut
+                    | egui::Event::Ime(_)
+            )
+        });
+    });
+    ctx.memory_mut(|memory| {
+        memory.move_focus(egui::FocusDirection::None);
+    });
 }
 
 fn bindings_label(bindings: &[Button]) -> String {

@@ -38,6 +38,32 @@ bindings are not offered or admitted. Empty actions are valid and shown as
 an unbound quit warns to use the normal window close control. Replaced default
 keys lose their old roles.
 
+## Capture a physical key into a draft
+
+Each existing binding row has a **Capture binding N** control. Add a binding row first
+if the action is empty. Capture replaces only that row in the selected action's
+draft. It does not apply the action, save a file, add an undo entry or steal a
+binding from another action. Review the draft and press **Apply action** yourself.
+Live conflict feedback uses the same whole-map admission validator as Apply;
+conflicts remain visible in the draft without changing the accepted map.
+
+Capture requires a fresh physical key press supported by the existing keyboard
+map. Logical characters are never substituted for missing physical identity. If
+the backend supplies no physical identity, use the existing dropdown. Supported
+keys remain A–Z, arrows, Space, Escape, Enter and Tab; modifier chords, mouse and
+gamepad bindings are unsupported. Keys already held when capture starts must be
+released before a new press can be captured; repeats and activation keys cannot
+silently become bindings.
+
+**Escape cancels capture.** To explicitly bind Escape, use the dropdown. Escape
+continues to release control in the main editor. Binding Escape to movement or
+restart is valid for standalone Collect but rejected by the main editor; the
+dropdown compatibility warning explains this distinction. Cancellation,
+focus loss or a changed authoring context leaves the draft and accepted map intact.
+While capture is active, modal input isolation prevents captured key events from
+also activating authoring controls, text fields or gameplay shortcuts. This is a
+window-local egui event flow; there are no OS-global hooks.
+
 Save As never replaces an existing file or direct symlink. Choose a new path for
 another version. Open rejects malformed, oversized, nonregular or directly
 symlinked files, and rejects maps for other games. This inherits the shared
@@ -144,3 +170,51 @@ shows the default and single-binding edited layout, not a claim that every
 possible eight-key combination is visible without scrolling. The ignored test
 must actually run; listing it or passing ordinary tests cannot replace it.
 Required exact-head CI, review and development-union checks remain in force.
+
+### Physical capture acceptance
+
+The dedicated `collect-input-capture` workflow supplements the existing
+`collect-input-map-editor` and `editor-collect-controls` workflows; all remain
+required. Its gate preserves the earlier state, widget, private runtime and main
+editor integration requirements, and checks the compiled test inventories before
+execution. The `collect_input_capture` target has 17 dedicated CPU cases plus
+18 inherited document cases on Unix (16 on Windows): 35/33 total, none ignored.
+The separate `collect_input_capture_ui` target has the same inherited cases and
+one explicitly ignored capture GPU test: 19/17 total. Inherited cases are repeated
+regression checks, not additional unique capture coverage.
+
+```sh
+python -m unittest discover -s tools -p test_collect_input_capture_gate.py
+python tools/collect_input_capture_gate.py contracts --evidence /absolute/fresh/capture-evidence
+WGPU_BACKEND=vulkan python tools/collect_input_capture_gate.py gpu --evidence /absolute/fresh/capture-evidence
+```
+
+The contracts stage creates a new evidence directory and explicitly executes the
+ignored standalone authoring producer, which now authors its J/L/I/K/Enter/Q map
+using physical capture. The existing private production `Keys` consumer must
+read that exact file and attest its unchanged SHA-256 and actual file identity.
+There is no substitute map or fallback route. The GPU stage requires the completed
+CPU stage and rechecks that handoff before running either GPU acceptance. It
+explicitly runs the capture GPU test and the existing actual main `EditorApp`
+GPU victory/restart/reopen test. Listing an ignored test, counting its inherited
+cases or successfully compiling it does not constitute execution evidence.
+
+The capture GPU test retains six full 720 × 650 screenshots under
+`capture-software-gpu`: initial controls, listening modal, physical-identity
+unavailable guidance, live conflict, eighth-row scrolling and dropdown Escape
+compatibility. `collect-input-capture-acceptance.json` records the actual software
+Vulkan adapter, bounded visible widget rectangles and asserted UI behavior;
+`capture-accepted-only.json` is the accepted map saved while a conflicting draft
+remains. The gate rejects missing/duplicate frames, incorrect scope or adapter,
+invalid dimensions or widget bounds, damaged PNGs and changed saved mappings.
+Inspect the images for readability as well: rectangle and receipt assertions do
+not replace visual review.
+
+The separate main-editor GPU artifacts retain the existing full 1600 × 1000
+windows, normalized scene captures and authoritative tick/checksum receipts for
+mapped play, victory, restart and explicit reload. The producer/consumer handoff
+and these main-editor receipts remain distinct evidence. These tests exercise
+injected physical egui events and production policy, not native OS keyboard
+injection, OS-global hooks or a native-window lifecycle claim. Strict lint,
+default-feature and optional-feature boundaries, exact-head CI and review remain
+mandatory.

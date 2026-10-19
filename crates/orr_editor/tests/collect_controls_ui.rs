@@ -78,11 +78,22 @@ fn combo(h: &mut Harness<'_, App>, label: &str, choice: &str) {
         Some(choice)
     );
 }
-fn set_action(h: &mut Harness<'_, App>, name: &str, binding: &str) {
+fn set_action(h: &mut Harness<'_, App>, name: &str, binding: Key) {
     combo(h, "Action", name);
     author_click(h, "Clear action draft");
     author_click(h, "Add binding");
-    combo(h, "Binding 1", binding);
+    author_click(h, "Capture binding 1");
+    // Keep physical down/up in the same RawInput; the logical key is unrelated.
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::Key {
+            key: Key::F1,
+            physical_key: Some(binding),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    author_settle(h, "physical capture");
     author_click(h, "Apply action");
     assert!(
         h.state().panel().message().starts_with("Action applied"),
@@ -92,12 +103,12 @@ fn set_action(h: &mut Harness<'_, App>, name: &str, binding: &str) {
 }
 fn author_all(h: &mut Harness<'_, App>) {
     for (action, binding) in [
-        ("left", "Key J"),
-        ("right", "Key L"),
-        ("up", "Key I"),
-        ("down", "Key K"),
-        ("restart", "Key Enter"),
-        ("quit", "Key Q"),
+        ("left", Key::J),
+        ("right", Key::L),
+        ("up", Key::I),
+        ("down", Key::K),
+        ("restart", Key::Enter),
+        ("quit", Key::Q),
     ] {
         set_action(h, action, binding);
     }

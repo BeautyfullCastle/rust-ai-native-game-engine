@@ -6,6 +6,15 @@ use orr_input::{Action, ActionMap, Button, MAX_BINDINGS};
 use orr_sample::collect_app::input_actions::{default_map, CollectBindings};
 use std::path::Path;
 
+#[path = "collect_input_map_authoring/capture.rs"]
+mod capture;
+// CPU contracts exercise this exact production state machine, without compiling
+// a second copy of its source module into the same test target.
+#[cfg(test)]
+pub(crate) use capture::CaptureState;
+#[cfg(not(test))]
+use capture::CaptureState;
+
 #[path = "collect_input_map_authoring/widgets.rs"]
 mod widgets;
 pub use widgets::App;
@@ -23,6 +32,9 @@ pub struct Panel {
     draft: Vec<Button>,
     path: String,
     message: String,
+    capture: CaptureState,
+    capture_context: u64,
+    capture_message: String,
 }
 
 impl Default for Panel {
@@ -36,6 +48,9 @@ impl Default for Panel {
             selected: 0,
             path: String::new(),
             message: String::new(),
+            capture: CaptureState::default(),
+            capture_context: 0,
+            capture_message: String::new(),
         }
     }
 }
@@ -86,6 +101,29 @@ impl Panel {
         }
     }
 
+    /// Capture is transient UI state and never accepted document history.
+    pub fn capture_is_listening(&self) -> bool {
+        self.capture.is_listening()
+    }
+
+    pub fn capture_row(&self) -> Option<usize> {
+        self.capture.row()
+    }
+
+    pub fn capture_message(&self) -> &str {
+        &self.capture_message
+    }
+
+    fn invalidate_capture(&mut self) {
+        self.capture_context = self.capture_context.wrapping_add(1);
+        if self.capture.is_listening() {
+            self.capture.cancel();
+            self.capture_message = "Capture cancelled because the action draft changed.".into();
+        } else {
+            self.capture_message.clear();
+        }
+    }
+
     /// Changing action never discards a pending draft. Reselecting it is harmless.
     pub fn select_action(&mut self, index: usize) -> Result<(), String> {
         if index >= self.document.actions.len() {
@@ -111,12 +149,16 @@ impl Panel {
         {
             return Err("Collect supports keyboard bindings only".into());
         }
-        self.draft = draft;
+        if self.draft != draft {
+            self.invalidate_capture();
+            self.draft = draft;
+        }
         Ok(())
     }
 
     /// The sole explicit operation that discards unaccepted draft changes.
     pub fn discard_draft(&mut self) {
+        self.invalidate_capture();
         self.draft = self.selected_action().bindings.clone();
     }
 
@@ -147,13 +189,25 @@ impl Panel {
         self.discard_draft();
     }
 
-    /// Validate the entire candidate map before changing accepted state or history.
-    /// Failure, including a conflict with another action, also preserves the draft.
-    pub fn apply_draft(&mut self) -> Result<(), String> {
+    /// One candidate construction path for both live feedback and explicit Apply.
+    fn draft_candidate(&self) -> ActionMap {
         let mut candidate = self.document.clone();
         candidate.actions[self.selected]
             .bindings
             .clone_from(&self.draft);
+        candidate
+    }
+
+    /// Read-only production admission of the complete candidate. Does not change
+    /// operation status, accepted state, pending draft, capture or history.
+    pub fn validate_draft(&self) -> Result<(), String> {
+        Self::validate(&self.draft_candidate())
+    }
+
+    /// Validate the entire candidate map before changing accepted state or history.
+    /// Failure, including a conflict with another action, also preserves the draft.
+    pub fn apply_draft(&mut self) -> Result<(), String> {
+        let candidate = self.draft_candidate();
         Self::validate(&candidate)?;
         self.accept(candidate);
         Ok(())
