@@ -40,8 +40,10 @@ fn completion(
 
 #[test]
 fn matching_canonical_completion_is_returned_once_and_clears_busy() {
-    let mut panel = Panel::default();
-    panel.license_acknowledged = true;
+    let mut panel = Panel {
+        license_acknowledged: true,
+        ..Panel::default()
+    };
     queue(
         &mut panel,
         completion(
@@ -141,8 +143,10 @@ fn import_error_and_worker_disconnect_are_visible_without_success_identity() {
     assert_eq!(failed.destination_identity, None);
     assert!(failed.status().contains("import failed: invalid GLB"));
 
-    let mut disconnected = Panel::default();
-    disconnected.license_acknowledged = true;
+    let mut disconnected = Panel {
+        license_acknowledged: true,
+        ..Panel::default()
+    };
     let (sender, receiver) = mpsc::channel();
     disconnected.pending = Some(receiver);
     drop(sender);
