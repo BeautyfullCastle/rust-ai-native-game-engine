@@ -61,6 +61,16 @@ The lock is the sole activation authority. There is one version per package name
 Resolution detects missing packages, exact-version conflicts, cycles, unreachable
 lock entries, invalid content identities and incompatible runtime inventories.
 
+Cycle diagnostics show a closed path of exact package versions, for example
+`dependency cycle: a@1.0.0 -> b@2.0.0 -> a@1.0.0`. Any noncyclic selecting
+prefix is omitted. Resolution visits direct selections and dependency names in
+sorted order, so the first reported cycle is independent of source argument
+order; it does not enumerate every cycle. Missing packages and exact-version
+conflicts retain their existing traversal precedence, including a conflicting
+version on a back edge. `install --dry-run` reports cycle failures on stderr,
+exits with code 1 and emits no JSON, without changing sources, the lock, cache,
+or an existing writer reservation.
+
 ## Commands
 
 ```sh
