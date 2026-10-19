@@ -1,4 +1,7 @@
 //! Private offline sequence authoring. Directories must remain trusted during use.
+#[path = "clips.rs"]
+mod clips;
+
 use orr_sprite::{Atlas, ClipSource, Frame, PlaybackMode, Region, SpriteDocument, SpriteSource};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -60,6 +63,22 @@ struct Canvas {
 struct Offset {
     x: u32,
     y: u32,
+}
+// Normalized private authoring data. Atlas inputs and animation references have
+// independent bounds: repeating a reference never repeats PNG work or pixels.
+struct PreparedRecipe {
+    schema: u32,
+    name: String,
+    version: String,
+    license: String,
+    columns: u32,
+    canvas: Option<Canvas>,
+    frames: Vec<SourceImage>,
+    clips: Vec<ClipSource>,
+}
+struct SourceImage {
+    png: String,
+    offset: Option<Offset>,
 }
 // Absence is schema-dependent, but an explicitly supplied value must be an
 // object, never null or a positional array. Map deserialization also preserves
@@ -264,17 +283,13 @@ fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub fn import_package(request: &Request) -> Result<Report, String> {
-    let recipe_path = checked_path(&request.recipe, false)?;
-    let recipe: Recipe = serde_json::from_slice(&read_regular(&recipe_path, MAX_RECIPE_BYTES)?)
-        .map_err(|e| format!("recipe: {e}"))?;
-    if !matches!(recipe.schema, 1 | 2)
-        || !validate_name(&recipe.name)
-        || !validate_version(&recipe.version)
-    {
-        return Err(
-            "recipe requires schema 1 or 2 and valid package name/canonical version".into(),
-        );
+fn prepare_recipe(bytes: &[u8]) -> Result<PreparedRecipe, String> {
+    if clips::schema(bytes)? == 3 {
+        return clips::prepare(bytes);
+    }
+    let recipe: Recipe = serde_json::from_slice(bytes).map_err(|e| format!("recipe: {e}"))?;
+    if !matches!(recipe.schema, 1 | 2) {
+        return Err("recipe requires schema 1, 2 or 3".into());
     }
     match recipe.schema {
         1 if recipe.canvas.is_some()
@@ -291,13 +306,6 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
         }
         _ => {}
     }
-    if recipe.frames.is_empty()
-        || recipe.frames.len() > MAX_FRAMES
-        || recipe.columns == 0
-        || recipe.columns as usize > recipe.frames.len()
-    {
-        return Err("require 1..=256 frames and columns in 1..=frame count".into());
-    }
     if recipe.clip.trim().is_empty() || recipe.clip.len() > orr_sprite::MAX_CLIP_ID_BYTES {
         return Err("invalid clip name".into());
     }
@@ -309,6 +317,51 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
         duration = duration
             .checked_add(frame.duration_ms)
             .ok_or("clip duration overflow")?;
+    }
+    let clip = ClipSource {
+        id: recipe.clip,
+        mode: recipe.mode,
+        frames: recipe
+            .frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| Frame {
+                region: index as u32,
+                duration_ms: frame.duration_ms,
+            })
+            .collect(),
+    };
+    Ok(PreparedRecipe {
+        schema: recipe.schema,
+        name: recipe.name,
+        version: recipe.version,
+        license: recipe.license,
+        columns: recipe.columns,
+        canvas: recipe.canvas,
+        frames: recipe
+            .frames
+            .into_iter()
+            .map(|frame| SourceImage {
+                png: frame.png,
+                offset: frame.offset,
+            })
+            .collect(),
+        clips: vec![clip],
+    })
+}
+
+pub fn import_package(request: &Request) -> Result<Report, String> {
+    let recipe_path = checked_path(&request.recipe, false)?;
+    let recipe = prepare_recipe(&read_regular(&recipe_path, MAX_RECIPE_BYTES)?)?;
+    if !validate_name(&recipe.name) || !validate_version(&recipe.version) {
+        return Err("recipe requires valid package name/canonical version".into());
+    }
+    if recipe.frames.is_empty()
+        || recipe.frames.len() > MAX_FRAMES
+        || recipe.columns == 0
+        || recipe.columns as usize > recipe.frames.len()
+    {
+        return Err("require 1..=256 frames and columns in 1..=frame count".into());
     }
     let out = checked_path(&request.out, true)?;
     if out.try_exists().map_err(|e| e.to_string())? {
@@ -351,7 +404,7 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
             return Err("PNG frames must have equal dimensions".into());
         }
         if let Some(canvas) = recipe.canvas {
-            let offset = frame.offset.ok_or("schema 2 requires frame offset")?;
+            let offset = frame.offset.ok_or("canvas requires frame offset")?;
             // Containment is based on the complete source rectangle, including
             // transparent pixels. Reject overflow or clipping before allocation.
             if offset
@@ -389,7 +442,6 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
     // Both decoded and atlas budgets are established before PNG decoding or atlas allocation.
     let mut atlas = vec![0u8; rgba_bytes];
     let mut regions = Vec::with_capacity(recipe.frames.len());
-    let mut frames = Vec::with_capacity(recipe.frames.len());
     for (index, ((bytes, size), frame)) in images.iter().zip(&recipe.frames).enumerate() {
         // Decode one actual-size source at a time, with the existing decoder's
         // transformations. Never allocate a padded per-frame canvas.
@@ -413,10 +465,6 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
             width: frame_width,
             height: frame_height,
         });
-        frames.push(Frame {
-            region: index as u32,
-            duration_ms: frame.duration_ms,
-        });
     }
     let source = SpriteSource {
         format: orr_sprite::FORMAT.into(),
@@ -427,11 +475,7 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
             height,
         },
         regions,
-        clips: vec![ClipSource {
-            id: recipe.clip,
-            mode: recipe.mode,
-            frames,
-        }],
+        clips: recipe.clips,
     };
     SpriteDocument::new(source.clone()).map_err(|e| e.to_string())?;
     let json = json_bytes(&source)?;

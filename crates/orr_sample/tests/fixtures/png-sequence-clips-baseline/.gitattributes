@@ -1,0 +1,4 @@
+* -text
+
+schema2/input/LICENSE.txt whitespace=cr-at-eol
+schema2/output/LICENSE.txt whitespace=cr-at-eol

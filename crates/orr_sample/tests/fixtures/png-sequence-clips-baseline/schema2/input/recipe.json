@@ -1,0 +1,39 @@
+{
+  "schema": 2,
+  "name": "registered-animation",
+  "version": "1.2.3",
+  "license": "LICENSE.txt",
+  "clip": "walk",
+  "mode": "loop",
+  "columns": 2,
+  "canvas": {
+    "width": 3,
+    "height": 3
+  },
+  "frames": [
+    {
+      "png": "2.png",
+      "duration_ms": 30,
+      "offset": {
+        "x": 1,
+        "y": 1
+      }
+    },
+    {
+      "png": "0.png",
+      "duration_ms": 70,
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "png": "1.png",
+      "duration_ms": 20,
+      "offset": {
+        "x": 2,
+        "y": 0
+      }
+    }
+  ]
+}
