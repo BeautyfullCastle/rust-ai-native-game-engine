@@ -1,0 +1,163 @@
+name: Collect UI alignment acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect-ui-alignment:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_COLLECT_ALIGNMENT_CI: ${{ github.workspace }}/target/collect-ui-alignment-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-count guard self-tests
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Focused alignment state and actual EditorApp controls
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+          h = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_COLLECT_ALIGNMENT_CI"])
+          evidence.mkdir(parents=True, exist_ok=False)
+          # Existing preview/panel/runtime and original GPU gates remain required
+          # in collect-ui-screen-preview.yml; this workflow adds the alignment scope.
+          suite = "collect_ui_alignment::tests"
+          expected = {
+              "collect_ui_alignment::tests::all_context_fields_and_entire_document_are_pinned",
+              "collect_ui_alignment::tests::all_modes_root_and_nested_preserve_every_other_field_and_bound_residual",
+              "collect_ui_alignment::tests::checked_arithmetic_rejects_internal_overflow_and_huge_viewports",
+              "collect_ui_alignment::tests::exact_bounds_allowed_but_unrounded_fractional_excursions_fail",
+              "collect_ui_alignment::tests::invalid_dimensions_fail_closed_at_stage_and_apply",
+              "collect_ui_alignment::tests::invalid_selection_or_document_clears_whole_candidate",
+              "collect_ui_alignment::tests::later_target_failure_never_leaves_a_partial_candidate",
+              "collect_ui_alignment::tests::noop_and_cancel_have_no_candidate_or_identity",
+              "collect_ui_alignment::tests::rounds_final_offset_ties_away_from_zero_not_displacement",
+              "collect_ui_alignment::tests::sibling_choices_follow_document_order_and_exclude_other_parents_or_screens",
+          }
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "alignment-state.log")
+          h["validate_tests"](output, suite, 10)
+          if {name for name, status in h["CASE"].findall(output.replace("\r\n", "\n"))} != expected:
+              raise RuntimeError("Exact alignment state inventory differs from the 10 mandatory cases")
+          name = "app::collect_ui_preview::tests::alignment_acceptance::actual_editor_alignment_widgets_have_explicit_reference_and_sibling_targets"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--lib", name, "--", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "actual-alignment-controls-cpu.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or h["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected exactly one passing actual EditorApp alignment test")
+          for label, command in (
+              ("default-check", ["cargo", "check", "--locked", "-p", "orr_editor", "--lib"]),
+              ("minimal-collect-ui-check", ["cargo", "check", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui", "--lib"]),
+              ("collect-ui-strict", ["cargo", "clippy", "--locked", "-p", "orr_editor", "--features", "collect-ui", "--lib", "--tests", "--", "-D", "warnings"]),
+          ):
+              h["run_logged"](command, evidence / (label + ".log"))
+      - name: Install explicit Linux software Vulkan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$ORR_COLLECT_ALIGNMENT_CI/vulkan-install.log"
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 2>&1 | tee -a "$ORR_COLLECT_ALIGNMENT_CI/vulkan-install.log"
+          mapfile -t drivers < <(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -type f)
+          test "${#drivers[@]}" -eq 1
+          runtime=$(mktemp -d "$RUNNER_TEMP/collect-preview-xdg.XXXXXXXX")
+          chmod 700 "$runtime"
+          {
+            echo "VK_DRIVER_FILES=${drivers[0]}"
+            echo "VK_ICD_FILENAMES=${drivers[0]}"
+            echo "XDG_RUNTIME_DIR=$runtime"
+          } >> "$GITHUB_ENV"
+          printf 'Software Vulkan ICD: %s\n' "${drivers[0]}" | tee "$ORR_COLLECT_ALIGNMENT_CI/vulkan-driver.log"
+      - name: Actual EditorApp alignment staging and production renderer parity
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import runpy
+          import struct
+          h = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_COLLECT_ALIGNMENT_CI"]).resolve()
+          captures = evidence / "software-gpu"
+          captures.mkdir(exist_ok=False)
+          os.environ["ORR_COLLECT_UI_ALIGNMENT_EVIDENCE"] = str(captures)
+          name = "app::collect_ui_preview::tests::alignment_acceptance::actual_editor_alignment_gpu_stages_applies_cancels_and_reopens"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--lib", name, "--", "--ignored", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "actual-preview-gpu.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or h["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected one executed software GPU test with no skips")
+          receipt = json.loads((captures / "collect-ui-alignment-acceptance.json").read_text())
+          if (type(receipt.get("schema")) is not int or receipt["schema"] != 1
+                  or receipt.get("window_pixels") != [1800, 1200]
+                  or type(receipt.get("production_collect_ui_pixel_parity_cases")) is not int
+                  or receipt["production_collect_ui_pixel_parity_cases"] != 11):
+              raise RuntimeError("Unexpected preview receipt schema or parity inventory")
+          for flag in ("production_editor_app", "software_vulkan", "reference_fixed_multiple_checkbox_targets",
+                       "staging_changes_pixels_only", "cancel_restores_exact_pixels", "apply_one_undo",
+                       "old_and_new_button_hit_regions", "nested_ancestor_clip",
+                       "fractional_anchors_odd_sizes_six_modes_half_pixel_residual",
+                       "escape_focus_snapshot_focus_event_context_selection_mode_epoch_play_cancel",
+                       "inactive_alignment_selection_preserves_other_mode_drafts",
+                       "host_and_project_files_unchanged_before_apply", "save_reopen"):
+              if receipt.get(flag) is not True:
+                  raise RuntimeError("Missing verified alignment predicate: " + flag)
+          if type(receipt.get("portrait_display_scale")) is not float or receipt["portrait_display_scale"] != 0.75:
+              raise RuntimeError("Expected explicit 75-percent portrait scaling proof")
+          if receipt.get("native_os_window") is not False:
+              raise RuntimeError("Software-GPU synthetic input must not claim native window acceptance")
+          adapter = receipt.get("adapter")
+          if not isinstance(adapter, str) or "llvmpipe" not in adapter.lower() or "Cpu" not in adapter or "Vulkan" not in adapter:
+              raise RuntimeError("Explicit llvmpipe CPU Vulkan evidence required")
+          for name, size in (
+              ("alignment-original", (640, 360)),
+              ("alignment-staged-root", (640, 360)),
+              ("alignment-cancelled-root", (640, 360)),
+              ("alignment-applied-root", (640, 360)),
+              *(("alignment-nested-" + mode, (360, 640))
+                for mode in ("left", "center", "right", "top", "middle", "bottom")),
+              ("alignment-saved-reopened", (360, 640)),
+          ):
+              for suffix, expected in (("canvas", size), ("editor", (1800, 1200))):
+                  filename = name + "-" + suffix + ".png"
+                  raw = (captures / filename).read_bytes()
+                  if raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR" or struct.unpack(">II", raw[16:24]) != expected:
+                      raise RuntimeError("Missing or wrong-sized preview screenshot: " + filename)
+      - name: Retain exact counts, production parity captures and full controls
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collect-ui-alignment-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_COLLECT_ALIGNMENT_CI }}
+          if-no-files-found: error

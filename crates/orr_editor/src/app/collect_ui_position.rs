@@ -100,8 +100,13 @@ impl PositionControls {
     }
 
     pub(super) fn cancel(&mut self, preview: &mut collect_ui_preview::State, message: &str) {
+        let active = self.state.is_dragging() || self.state.is_ready();
         self.state.cancel();
-        self.status = match preview.cancel_staged() {
+        self.status = match if active {
+            preview.cancel_staged()
+        } else {
+            Ok(())
+        } {
             Ok(()) => message.into(),
             Err(error) => error,
         };
@@ -118,7 +123,9 @@ impl PositionControls {
             self.moving = false;
             self.cancel(preview, "Stop Play mode to edit UI positions");
         } else if let Err(error) = self.state.validate_context(context, document) {
-            self.cancel(preview, &error);
+            // Validation already cleared our draft; restore its staged preview
+            // explicitly rather than asking the now-inactive owner to cancel.
+            self.status = preview.cancel_staged().err().unwrap_or(error);
         }
     }
 
