@@ -189,7 +189,7 @@ fn context(panel: &Panel, editor: &Editor) -> Option<Context> {
         half: panel.wall_half_extents.clone(),
     })
 }
-fn ground_point(
+pub(super) fn ground_point(
     camera: &Camera3D,
     size: (u32, u32),
     pixel: Option<[f32; 2]>,
@@ -213,7 +213,7 @@ fn ground_point(
     }
     Ok([f64::from(point[0]), f64::from(point[2])])
 }
-fn checked_fixed(value: f64) -> Result<FP, String> {
+pub(super) fn checked_fixed(value: f64) -> Result<FP, String> {
     let raw = value * FP::SCALE as f64;
     // i64::MAX rounds upward in f64, so the upper endpoint is exclusive.
     if !raw.is_finite() || raw < i64::MIN as f64 || raw >= -(i64::MIN as f64) {
@@ -221,7 +221,7 @@ fn checked_fixed(value: f64) -> Result<FP, String> {
     }
     Ok(FP::from_raw(raw.trunc() as i64))
 }
-fn rectangle(a: [f64; 2], b: [f64; 2]) -> Result<([FP; 2], [FP; 2]), String> {
+pub(super) fn rectangle(a: [f64; 2], b: [f64; 2]) -> Result<([FP; 2], [FP; 2]), String> {
     let mut center = [FP::ZERO; 2];
     let mut half = center;
     for axis in 0..2 {

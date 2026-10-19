@@ -1,4 +1,4 @@
-//! One-click selected-wall X/Z draft, with retained freshness through explicit Apply.
+//! Selected-wall center/footprint drafts, with retained freshness through explicit Apply.
 use super::*;
 use orr_render::Camera3D;
 
@@ -9,8 +9,17 @@ struct Pin {
     original: RoomWall,
     fields: [String; 7],
 }
+#[derive(Clone, Copy, Default)]
+enum Gesture {
+    #[default]
+    Move,
+    Resize {
+        first: Option<[f64; 2]>,
+    },
+}
 #[derive(Default)]
 pub(super) struct State {
+    gesture: Gesture,
     pending: Option<Pin>,
     staged: Option<Pin>,
 }
@@ -54,6 +63,7 @@ impl Panel {
     }
     pub(crate) fn cancel_wall_placement(&mut self) {
         if self.wall_placement.pending.take().is_some() {
+            self.wall_placement.gesture = Gesture::Move;
             self.status = "Wall placement canceled; selected wall fields preserved.".into();
         }
     }
@@ -131,8 +141,17 @@ impl Panel {
         {
             return false;
         }
+        self.wall_placement.gesture = Gesture::Move;
         self.wall_placement.pending = self.wall_pin(editor);
         self.wall_placement_busy()
+    }
+    fn begin_wall_resize(&mut self, editor: &Editor) -> bool {
+        if !self.begin_wall_placement(editor) {
+            return false;
+        }
+        self.wall_placement.gesture = Gesture::Resize { first: None };
+        self.status = "Click the first selected-wall corner on Y=0; grid Off.".into();
+        true
     }
     pub(super) fn show_wall_placement(&mut self, ui: &mut egui::Ui, editor: &Editor) {
         self.sync_wall_placement(editor);
@@ -150,6 +169,21 @@ impl Panel {
                 }
             });
             self.begin_wall_placement(editor);
+        }
+        ui.small("Resize uses two opposite ground-plane corners, grid Off. Only X/Z center and size are staged; Apply Room wall commits.");
+        if ui
+            .add_enabled(
+                self.wall_apply_ready(editor) && self.placement_fields_clean(editor),
+                egui::Button::new("Resize selected wall in viewport"),
+            )
+            .clicked()
+        {
+            ui.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+            self.begin_wall_resize(editor);
         }
         if self.wall_placement_busy() && ui.button("Cancel wall placement").clicked() {
             self.cancel_wall_placement();
@@ -173,6 +207,14 @@ impl Panel {
         if !self.wall_placement_busy() || !input.clicked {
             return true;
         }
+        if let Gesture::Resize { first } = self.wall_placement.gesture {
+            let result = super::wall_footprint::ground_point(camera, size, input.pixel)
+                .and_then(|point| self.accept_resize_corner(editor, first, point));
+            if let Err(error) = result {
+                self.status = error;
+            }
+            return true;
+        }
         match ground_position(camera, size, input.pixel) {
             Ok(position) => {
                 self.wall_placement.pending = None;
@@ -183,6 +225,39 @@ impl Panel {
             Err(error) => self.status = error,
         }
         true
+    }
+    fn accept_resize_corner(
+        &mut self,
+        editor: &Editor,
+        first: Option<[f64; 2]>,
+        point: [f64; 2],
+    ) -> Result<(), String> {
+        // The same checked conversion as new-wall footprints; no rounding/clamping fork.
+        for value in point {
+            super::wall_footprint::checked_fixed(value)?;
+        }
+        let Some(first) = first else {
+            self.wall_placement.gesture = Gesture::Resize { first: Some(point) };
+            self.status =
+                "Click the opposite selected-wall corner; no changes until Apply Room wall.".into();
+            return Ok(());
+        };
+        let (center, half) = super::wall_footprint::rectangle(first, point)?;
+        let bound = orr_sample::room_game::CENTER_BOUND;
+        if center.iter().any(|value| *value < -bound || *value > bound)
+            || half
+                .iter()
+                .any(|value| *value < orr_fp::fp!(0.1) || *value > orr_fp::fp!(8))
+        {
+            return Err("Room wall center must be within -16..=16 and half extents within 0.1..=8; no clamping is applied.".into());
+        }
+        self.selected_wall_center = center.map(format_fixed);
+        self.selected_wall_half_extents = half.map(format_fixed);
+        self.wall_placement.pending = None;
+        self.wall_placement.gesture = Gesture::Move;
+        self.wall_placement.staged = self.wall_pin(editor);
+        self.status = "Selected wall footprint staged. Apply Room wall commits; name and vertical size unchanged.".into();
+        Ok(())
     }
 }
 fn ground_position(
@@ -221,3 +296,6 @@ fn ground_position(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod resize_tests;
