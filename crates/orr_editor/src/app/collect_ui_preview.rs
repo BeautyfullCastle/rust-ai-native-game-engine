@@ -1,6 +1,7 @@
 //! Isolated authored Collect screen preview. It shares the editor GPU device,
 //! but owns its egui context, renderer, texture and pointer gesture.
 use super::collect_ui_position::{Command, PositionControls};
+use super::collect_ui_resize::{Command as ResizeCommand, ResizeControls};
 use super::EditorApp;
 use crate::collect_ui_position::Context;
 use crate::collect_ui_preview::{Frame, State, MAX_SCORE};
@@ -175,6 +176,7 @@ pub(super) struct PreviewWindow {
     canvas: Option<egui::Rect>,
     pointer_down: bool,
     position: PositionControls,
+    resize: ResizeControls,
 }
 impl PreviewWindow {
     fn release_gpu(&mut self) {
@@ -185,6 +187,7 @@ impl PreviewWindow {
     fn close(&mut self) {
         self.position
             .cancel(&mut self.state, "Position edit cancelled");
+        self.resize.cancel(&mut self.state, "Size edit cancelled");
         self.state.close();
         self.release_gpu();
     }
@@ -193,7 +196,7 @@ impl PreviewWindow {
         ui: &mut egui::Ui,
         document: &orr_sample::authored_ui::Document,
         editable: bool,
-    ) -> (bool, Command) {
+    ) -> (bool, Command, ResizeCommand) {
         let mut settings = self.state.settings().clone();
         ui.horizontal_wrapped(|ui| {
             ui.label("Screen");
@@ -239,6 +242,10 @@ impl PreviewWindow {
                 &mut self.state,
                 "Preview settings changed; position edit cancelled",
             );
+            self.resize.cancel(
+                &mut self.state,
+                "Preview settings changed; size edit cancelled",
+            );
             self.error = self.state.set_settings(settings).err();
             self.pointer_down = false;
         }
@@ -258,10 +265,27 @@ impl PreviewWindow {
             )
             .truncate(),
         );
+        let was_moving = self.position.moving;
+        let was_resizing = self.resize.resizing;
         let command = self
             .position
             .show(ui, document, self.state.settings().screen, editable);
-        (ui.button("Close screen preview").clicked(), command)
+        let resize_command = self
+            .resize
+            .show(ui, document, self.state.settings().screen, editable);
+        if self.position.moving && !was_moving {
+            self.resize.resizing = false;
+            self.resize.cancel(&mut self.state, "Switched to Move mode");
+        } else if self.resize.resizing && !was_resizing {
+            self.position.moving = false;
+            self.position
+                .cancel(&mut self.state, "Switched to Resize mode");
+        }
+        (
+            ui.button("Close screen preview").clicked(),
+            command,
+            resize_command,
+        )
     }
     fn input(
         &mut self,
@@ -274,7 +298,7 @@ impl PreviewWindow {
             focused: ctx.input(|input| input.focused),
             ..Default::default()
         };
-        if self.position.moving {
+        if self.position.moving || self.resize.resizing {
             // Moving never forwards authored button presses or releases.
             self.pointer_down = false;
             self.canvas = Some(rect);
@@ -344,6 +368,20 @@ impl PreviewWindow {
             canvas: [canvas.width(), canvas.height()],
         }
     }
+    fn resize_context(
+        &self,
+        scene: &Path,
+        epoch: u64,
+        canvas: egui::Rect,
+    ) -> crate::collect_ui_resize::Context {
+        crate::collect_ui_resize::Context {
+            scene: scene.to_owned(),
+            epoch,
+            screen: self.state.settings().screen,
+            viewport: self.state.settings().viewport,
+            canvas: [canvas.width(), canvas.height()],
+        }
+    }
     fn show(
         &mut self,
         ctx: &egui::Context,
@@ -373,7 +411,8 @@ impl PreviewWindow {
             .show(ctx, |ui| {
                 ui.set_min_width(660.0);
                 let command;
-                (close, command) = self.controls(ui, panel.document(), editable);
+                let resize_command;
+                (close, command, resize_command) = self.controls(ui, panel.document(), editable);
                 if close {
                     return;
                 }
@@ -389,6 +428,8 @@ impl PreviewWindow {
                 let context = self.position_context(&scene, epoch, rect);
                 self.position
                     .validate(&context, panel.document(), editable, &mut self.state);
+                let resize_context = self.resize_context(&scene, epoch, rect);
+                self.resize.validate(&resize_context, panel.document(), editable, &mut self.state);
                 let interrupted = self.canvas != Some(rect)
                     || ctx.input(|input| {
                         !input.focused || input.key_pressed(egui::Key::Escape)
@@ -401,18 +442,25 @@ impl PreviewWindow {
                         &mut self.state,
                         "Position edit cancelled after layout or focus change",
                     );
+                    self.resize.cancel(&mut self.state, "Size edit cancelled after layout or focus change");
                 } else {
+                    match resize_command {
+                        ResizeCommand::Apply if editable => self.resize.apply(&resize_context, panel, &mut self.state),
+                        ResizeCommand::Cancel => self.resize.cancel(&mut self.state, "Size edit cancelled; accepted document restored"),
+                        _ => {}
+                    }
                     match command {
                         Command::Apply if editable => {
                             self.position.apply(&context, panel, &mut self.state)
                         }
-                        Command::Cancel => self.position.cancel(
+                        Command::Cancel if self.position.moving || self.position.state.is_dragging() || self.position.state.is_ready() => self.position.cancel(
                             &mut self.state,
                             "Position edit cancelled; accepted document restored",
                         ),
                         _ => {}
                     }
                     if editable {
+                        self.resize.input(ctx, rect, response.layer_id, &resize_context, panel.document(), &mut self.state);
                         self.position.input(
                             ctx,
                             rect,
@@ -443,6 +491,7 @@ impl PreviewWindow {
                             egui::Color32::WHITE,
                         );
                         self.position.paint_ghost(ui, rect, panel.document(), size);
+                        self.resize.paint_ghost(ui, rect, panel.document(), size);
                         response.on_hover_text("Collect screen preview canvas");
                     }
                     Err(error) => {
@@ -458,6 +507,7 @@ impl PreviewWindow {
             // Release it at the next frame, before paint commands reference it.
             self.position
                 .cancel(&mut self.state, "Position edit cancelled");
+            self.resize.cancel(&mut self.state, "Size edit cancelled");
             self.state.close();
             ctx.request_repaint();
         }
@@ -487,7 +537,18 @@ impl EditorApp {
                 self.editor.scene_load_epoch(),
                 canvas,
             );
+            let resize_context = self.collect_ui_preview.resize_context(
+                scene,
+                self.editor.scene_load_epoch(),
+                canvas,
+            );
             let preview = &mut self.collect_ui_preview;
+            preview.resize.validate(
+                &resize_context,
+                panel.document(),
+                !self.editor.is_playing_mode(),
+                &mut preview.state,
+            );
             preview.position.validate(
                 &context,
                 panel.document(),
@@ -496,6 +557,9 @@ impl EditorApp {
             );
         } else {
             let preview = &mut self.collect_ui_preview;
+            preview
+                .resize
+                .cancel(&mut preview.state, "Size edit unavailable");
             preview
                 .position
                 .cancel(&mut preview.state, "Position edit unavailable");

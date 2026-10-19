@@ -62,6 +62,9 @@ mod collect_ui_preview;
 #[cfg(feature = "collect-ui")]
 #[path = "app/collect_ui_position.rs"]
 mod collect_ui_position;
+#[cfg(feature = "collect-ui")]
+#[path = "app/collect_ui_resize.rs"]
+mod collect_ui_resize;
 
 /// Button labels (tests click them by these texts).
 pub const LBL_PLAY: &str = "\u{25B6} Play";
