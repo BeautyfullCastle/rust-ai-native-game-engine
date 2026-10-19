@@ -1,0 +1,83 @@
+name: WAV audio package import acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wav-audio-package:
+    # Additive offline import checks; existing mandatory gates remain unchanged.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_WAV_EVIDENCE: ${{ github.workspace }}/target/wav-audio-package-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Strict offline importer checks and existing cooker regressions
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          evidence = Path(os.environ['ORR_WAV_EVIDENCE'])
+          evidence.mkdir(parents=True, exist_ok=False)
+          commands = (
+              ('format', ['fmt', '-p', 'orr_asset_cook', '--check']),
+              ('example-tests', ['test', '--locked', '-p', 'orr_asset_cook', '--example', 'wav_audio_package', '--', '--format=pretty', '--color=never']),
+              ('cooker-regressions', ['test', '--locked', '-p', 'orr_asset', '-p', 'orr_asset_cook']),
+              ('strict-lint', ['clippy', '--locked', '-p', 'orr_asset_cook', '--all-targets', '--', '-D', 'warnings']),
+              ('build-importer', ['build', '--locked', '-p', 'orr_asset_cook', '--example', 'wav_audio_package']),
+              ('build-package-cli', ['build', '--locked', '-p', 'orr_package', '--bin', 'orr_pkg']),
+          )
+          for name, command in commands:
+              output = helpers['run_logged'](['cargo', *command], evidence / (name + '.log'))
+              if name == 'example-tests':
+                  output = output.replace('\r\n', '\n')
+                  expected = 20 if os.name == 'nt' else 21
+                  summaries = helpers['SUMMARY'].findall(output)
+                  cases = helpers['CASE'].findall(output)
+                  if (len(summaries) != 1 or int(summaries[0][0]) != expected
+                      or tuple(map(int, summaries[0][1:4])) != (0, 0, 0)
+                      or re.findall(r'^running (\d+) tests?$', output, re.M) != [str(expected)]
+                      or len(cases) != expected
+                      or len({name for name, _ in cases}) != len(cases)
+                      or any(status != 'ok' for _, status in cases)):
+                      raise RuntimeError('Expected complete nonempty passing parser and package tests without skips')
+      - name: Real CLI deterministic import and immutable installed verification
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          evidence = Path(os.environ['ORR_WAV_EVIDENCE'])
+          suffix = '.exe' if os.name == 'nt' else ''
+          helpers['run_logged'](['python', 'tools/check-wav-audio-package.py',
+              '--evidence', str(evidence / 'cli'),
+              '--importer', str(Path('target/debug/examples') / ('wav_audio_package' + suffix)),
+              '--package-cli', str(Path('target/debug') / ('orr_pkg' + suffix))], evidence / 'cli.log')
+      - name: Retain receipts and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wav-audio-package-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_WAV_EVIDENCE }}
+          if-no-files-found: error
