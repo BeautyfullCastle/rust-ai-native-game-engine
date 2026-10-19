@@ -24,7 +24,7 @@ The shared preset loader and publisher enforce the schema, bounds and filesystem
 admission. See their API documentation for local-file race and publication limits.
 
 Use the exact saved file in the production `particle_demo --preset FILE` workflow;
-this standalone UI deliberately does not embed a GPU preview. Runtime event origin
+the optional embedded preview is described below. Runtime event origin
 and seed are supplied by the existing presentation event adapter, not the document.
 
 Run the production preview with both explicit feature gates:
@@ -82,3 +82,45 @@ built-ins, evolved over time, and naturally expired to the exact off baseline.
 All compared genuine-input host checksums matched. The final UI capture shows the
 validated preset reopened successfully. The source cohort and dependency lockfile
 were unchanged throughout the corrected run. Remote CI remains a separate gate.
+
+## Optional embedded preview
+
+```sh
+cargo run -p orr_editor --features particle-preset-preview --bin orr_particle_preset
+```
+
+`particle-preset-preview` is default-off and enables only `particle-preset-editor`
+and the production `orr_render/particles` renderer. It does not enable
+`particle-demo` or imported scenes and adds no dependency or lockfile changes.
+
+**Preview accepted preset** explicitly captures the validated accepted document
+in a separate floating egui window. Dirty or invalid drafts are excluded. Applying,
+opening, undoing, redoing or resetting accepted state leaves the captured preview
+unchanged and marks it stale; click Preview again to refresh. Preview actions do
+not save files or add authoring history. **Restart preview** clears the isolated
+pool and replays its existing snapshot with the same fixed preview seed and origin.
+**Pause/Resume** freezes/restarts presentation time; **Close** drops the pool and
+unregisters the GPU texture. A naturally expired burst stays empty until Restart
+or Preview; there is no automatic looping.
+
+The preview uses the existing eframe device/queue and production particle renderer
+in a fixed 320×240 RGBA target, with a centered orthographic camera (10 world units
+high, eye at [0,0,20], Y up). Off-screen particles are clipped. This is an isolated
+presentation example, not a running game or simulation. Unfocused, minimized,
+occluded, collapsed and paused previews freeze. Transition frames reset their
+clock, and a single frame is bounded to 0.25 seconds without catch-up debt. Only a
+visible, focused, nonempty, playing GPU preview requests animation repaints.
+If a GPU is unavailable, authoring stays usable and the preview displays a clear
+unavailable message; it does not substitute fake particles or CPU circles.
+
+The separate `particle_preset_preview_ui` acceptance target drives the production
+widgets at explicit frame times. Its ignored software-Vulkan test uses the actual
+App's native texture and reads the production 320×240 target, checks accepted
+burst/color/time/pause/restart and dirty/stale behavior, compares natural expiry
+to an independent exact empty target, verifies full-window sampled pixels and
+checks native texture cleanup on Close and App drop. Set
+`ORR_PARTICLE_PREVIEW_EVIDENCE` to an existing absolute directory; the test writes
+`embedded-preview-full-window.png` and `embedded-preview-acceptance.json`.
+The existing authoring → saved file → runtime acceptance remains separate and
+unchanged. GPU captures establish software-rendered output, not native OS input,
+hardware GPU performance or frame pacing.

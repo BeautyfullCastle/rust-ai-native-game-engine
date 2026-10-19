@@ -8,6 +8,10 @@ fn main() -> eframe::Result {
             viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 820.0]),
             ..Default::default()
         },
-        Box::new(|_| Ok(Box::<particle_preset_authoring::App>::default())),
+        Box::new(|cc| {
+            Ok(Box::new(particle_preset_authoring::App::new(
+                cc.wgpu_render_state.clone(),
+            )))
+        }),
     )
 }

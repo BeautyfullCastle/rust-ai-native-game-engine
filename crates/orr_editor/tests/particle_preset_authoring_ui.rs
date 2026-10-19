@@ -143,7 +143,7 @@ fn widget_edits_apply_discard_history_save_reopen_exact_bytes() {
             textures_delta: Default::default(),
             builder: None,
         })
-        .build_eframe(|_| App::default());
+        .build_eframe(|cc| App::new(cc.wgpu_render_state.clone()));
     settle(&mut h);
     roundtrip(&mut h, &dir.path().join("authored.json"));
 }
@@ -184,7 +184,7 @@ fn particle_preset_widgets_have_real_gpu_pixels() {
                 .get_info();
             assert_eq!(info.device_type, wgpu::DeviceType::Cpu);
             adapter = format!("{info:?}");
-            App::default()
+            App::new(cc.wgpu_render_state.clone())
         });
     settle(&mut h);
     let before = h.render().expect("GPU readback");
