@@ -5,6 +5,12 @@ use std::path::Path;
 #[path = "particle_preset_authoring/widgets.rs"]
 mod widgets;
 pub use widgets::App;
+#[cfg(feature = "particle-preset-preview")]
+#[path = "particle_preset_authoring/preview.rs"]
+pub mod preview;
+#[cfg(feature = "particle-preset-preview")]
+#[path = "particle_preset_authoring/preview_gpu.rs"]
+pub mod preview_gpu;
 const MAX_HISTORY: usize = 32;
 
 /// Text remains untouched until explicit Apply, including malformed numeric input.
