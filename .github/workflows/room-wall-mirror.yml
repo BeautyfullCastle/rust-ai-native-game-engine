@@ -30,7 +30,6 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       PYTHONDONTWRITEBYTECODE: '1'
-      ORR_ROOM_WALL_MIRROR_EVIDENCE: ${{ runner.temp }}/room-wall-mirror-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -47,6 +46,8 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1
       - name: Require current-source mirror acceptance and preserved regressions
+        env:
+          ORR_ROOM_WALL_MIRROR_EVIDENCE: ${{ runner.temp }}/room-wall-mirror-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
@@ -57,7 +58,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: room-wall-mirror-${{ matrix.mode }}-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ORR_ROOM_WALL_MIRROR_EVIDENCE }}
+          path: ${{ runner.temp }}/room-wall-mirror-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

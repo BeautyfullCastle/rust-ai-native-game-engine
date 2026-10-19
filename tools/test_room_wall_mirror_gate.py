@@ -168,6 +168,37 @@ class MirrorGateTests(unittest.TestCase):
     def test_workflow_and_all_prior_regressions_are_pinned(self):
         with mock.patch.object(gate, 'source_root', ROOT):
             gate.workflow_contract()
+        # runner is available in step env/with, but not job env. Keep both
+        # evidence producers and always-run uploads on the identical path.
+        for filename, variable, step in (
+                ('room-wall-mirror', 'ORR_ROOM_WALL_MIRROR_EVIDENCE',
+                 'Require current-source mirror acceptance and preserved regressions'),
+                ('png-sequence-clips', 'ORR_PNG_SEQUENCE_CLIPS_EVIDENCE',
+                 'Run current-source fail-closed acceptance')):
+            path = ('${{ runner.temp }}/' + filename
+                    + '-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}')
+            header = '      - name: ' + step + '\n'
+            step_env = '        env:\n          ' + variable + ': ' + path + '\n'
+            artifact_path = '          path: ' + path + '\n'
+
+            def evidence_wiring(text):
+                for job_env in re.findall(r'(?m)^    env:\n((?:^ {6}[^\n]*\n)*)', text):
+                    self.assertNotRegex(job_env, r'\$\{\{\s*runner(?:\.|\[)')
+                self.assertIn(header + step_env, text)
+                self.assertIn(artifact_path, text)
+
+            original = (ROOT / '.github/workflows' / (filename + '.yml')).read_text()
+            with self.subTest(workflow=filename):
+                evidence_wiring(original)
+                illegal_job_env = original.replace(
+                    '    steps:\n', '      ' + variable + ': ' + path + '\n    steps:\n', 1)
+                with self.assertRaises(AssertionError):
+                    evidence_wiring(illegal_job_env)
+                with self.assertRaises(AssertionError):
+                    evidence_wiring(original.replace(step_env, ''))
+                with self.assertRaises(AssertionError):
+                    evidence_wiring(original.replace(artifact_path,
+                        '          path: ${{ env.' + variable + ' }}\n'))
         for required in ('tools/check-room-wall-group-rotation.py',
                          'crates/orr_editor/src/room_wall_stamp_store/linux_tests.rs',
                          'crates/orr_editor/tests/room_wall_stamp_ui.rs'):

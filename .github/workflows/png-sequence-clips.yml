@@ -21,7 +21,6 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
       CARGO_TERM_COLOR: never
-      ORR_PNG_SEQUENCE_CLIPS_EVIDENCE: ${{ runner.temp }}/png-sequence-clips-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,13 +33,15 @@ jobs:
         if: matrix.mode == 'gpu'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 libxkbcommon-dev
       - name: Run current-source fail-closed acceptance
+        env:
+          ORR_PNG_SEQUENCE_CLIPS_EVIDENCE: ${{ runner.temp }}/png-sequence-clips-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: python -B tools/png_sequence_clips_gate.py '${{ matrix.mode }}'
       - name: Retain compiled producers, logs, receipts and captures
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: png-sequence-clips-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ORR_PNG_SEQUENCE_CLIPS_EVIDENCE }}
+          path: ${{ runner.temp }}/png-sequence-clips-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
   required:
     name: PNG named clips required
