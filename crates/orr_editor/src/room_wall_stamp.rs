@@ -31,6 +31,8 @@ pub(crate) struct Template {
     walls: Vec<Wall>,
 }
 
+mod placement;
+
 #[cfg(test)]
 mod tests;
 

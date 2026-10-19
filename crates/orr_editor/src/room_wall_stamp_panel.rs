@@ -12,6 +12,8 @@ pub(crate) struct Panel {
     pub open: bool,
     pub stamp_file: String,
     pub offset: [String; 2],
+    pub pivot: [String; 2],
+    pub quarter_turns: u8,
     pub status: String,
     walls: Vec<RoomWall>,
     selected: BTreeSet<String>,
@@ -28,6 +30,8 @@ impl Default for Panel {
             open: false,
             stamp_file: String::new(),
             offset: ["0".into(), "0".into()],
+            pivot: ["0".into(), "0".into()],
+            quarter_turns: 0,
             status: String::new(),
             walls: Vec::new(),
             selected: BTreeSet::new(),
@@ -165,12 +169,26 @@ impl Panel {
                             Err(error) => self.status = error,
                         }
                     }
-                    position_fields(ui, &mut self.offset);
+                    ui.separator();
+                    ui.label("Stamp rotation (X/Z plane)");
+                    ui.horizontal_wrapped(|ui| {
+                        for (turns, label) in [(0, "0°"), (1, "90°"), (2, "180°"), (3, "270°")] {
+                            ui.selectable_value(&mut self.quarter_turns, turns, label);
+                        }
+                    });
+                    ui.small("+90° maps +X to +Z. Rotate around the pivot, then add the offset.");
+                    position_fields(ui, "Stamp pivot", &mut self.pivot);
+                    position_fields(ui, "Stamp offset", &mut self.offset);
                     let offset = parse_position(&self.offset);
                     if let Err(error) = &offset {
                         ui.label(error);
                     }
-                    let can_instantiate = editable && self.template.is_some() && offset.is_ok();
+                    let pivot = parse_position(&self.pivot);
+                    if let Err(error) = &pivot {
+                        ui.label(format!("Stamp pivot: {error}"));
+                    }
+                    let can_instantiate =
+                        editable && self.template.is_some() && offset.is_ok() && pivot.is_ok();
                     if ui
                         .add_enabled(
                             can_instantiate,
@@ -178,9 +196,15 @@ impl Panel {
                         )
                         .clicked()
                     {
-                        match (self.template.as_ref(), offset) {
-                            (Some(template), Ok(offset)) => {
-                                match editor.instantiate_room_wall_stamp(template, offset) {
+                        match (self.template.as_ref(), offset, pivot) {
+                            (Some(template), Ok(offset), Ok(pivot)) => {
+                                // Placement operates on a copy so saving still writes the source stamp.
+                                let result = template
+                                    .placed(self.quarter_turns, pivot, offset)
+                                    .and_then(|placed| {
+                                        editor.instantiate_room_wall_stamp(&placed, [FP::ZERO; 2])
+                                    });
+                                match result {
                                     Ok(guids) => {
                                         self.selected = guids.iter().cloned().collect();
                                         self.walls_current = false;
@@ -198,8 +222,8 @@ impl Panel {
                                     Err(error) => self.status = error,
                                 }
                             }
-                            (_, Err(error)) => self.status = error,
-                            (None, _) => self.status = "Load or capture a Room wall stamp first.".into(),
+                            (_, Err(error), _) | (_, _, Err(error)) => self.status = error,
+                            (None, _, _) => self.status = "Load or capture a Room wall stamp first.".into(),
                         }
                     }
                 });
@@ -248,15 +272,15 @@ fn text_field(ui: &mut egui::Ui, label: &str, value: &mut String, max_chars: usi
     });
 }
 
-fn position_fields(ui: &mut egui::Ui, position: &mut [String; 2]) {
-    ui.horizontal(|ui| {
-        let x_label = ui.label("Stamp offset X");
-        ui.add(egui::TextEdit::singleline(&mut position[0]).desired_width(90.0))
-            .labelled_by(x_label.id);
-        let z_label = ui.label("Stamp offset Z");
-        ui.add(egui::TextEdit::singleline(&mut position[1]).desired_width(90.0))
-            .labelled_by(z_label.id);
-    });
+fn position_fields(ui: &mut egui::Ui, prefix: &str, position: &mut [String; 2]) {
+    for (axis, value) in ["X", "Z"].into_iter().zip(position) {
+        // Separate rows keep the fields accessible in a narrow window.
+        ui.horizontal(|ui| {
+            let label = ui.label(format!("{prefix} {axis}"));
+            ui.add(egui::TextEdit::singleline(value).desired_width(ui.available_width()))
+                .labelled_by(label.id);
+        });
+    }
 }
 
 fn parse_position(values: &[String; 2]) -> Result<[FP; 2], String> {
@@ -270,4 +294,26 @@ fn parse_fixed(text: &str) -> Result<FP, String> {
     }
     orr_reflect::decimal::parse_fp(text)
         .map_err(|error| format!("Invalid fixed-point decimal: {error:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placement_defaults_preserve_unrotated_origin_and_offset() {
+        let panel = Panel::default();
+        assert_eq!(panel.quarter_turns, 0);
+        assert_eq!(parse_position(&panel.pivot).unwrap(), [FP::ZERO; 2]);
+        assert_eq!(parse_position(&panel.offset).unwrap(), [FP::ZERO; 2]);
+    }
+
+    #[test]
+    fn placement_fields_reject_invalid_fixed_point_input() {
+        for invalid in ["", "not-a-number", "NaN", "1e999"] {
+            assert!(parse_position(&[invalid.into(), "0".into()]).is_err());
+            assert!(parse_position(&["0".into(), invalid.into()]).is_err());
+        }
+        assert!(parse_fixed(&"0".repeat(49)).is_err());
+    }
 }
