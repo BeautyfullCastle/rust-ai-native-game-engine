@@ -22,7 +22,6 @@ jobs:
       CARGO_BUILD_JOBS: "2"
       # Keep retained release UI producers within the unchanged 128 MiB pin limit.
       CARGO_PROFILE_RELEASE_DEBUG: "0"
-      ORR_STATIC_RECOLOR_EVIDENCE: ${{ runner.temp }}/orr-static-recolor-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,6 +29,8 @@ jobs:
         if: matrix.mode != 'cpu'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libxkbcommon-dev
       - name: Run source-bound mandatory acceptance
+        env:
+          ORR_STATIC_RECOLOR_EVIDENCE: ${{ runner.temp }}/orr-static-recolor-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: python -B tools/static_model_recolor_gate.py '${{ matrix.mode }}'
       - name: Retain evidence and failures
@@ -37,7 +38,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: static-model-recolor-${{ matrix.mode }}-${{ matrix.os }}
-          path: ${{ env.ORR_STATIC_RECOLOR_EVIDENCE }}
+          path: ${{ runner.temp }}/orr-static-recolor-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
   required:
     name: static model recolor required

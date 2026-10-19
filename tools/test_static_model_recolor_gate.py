@@ -126,6 +126,26 @@ class GateFixtures(unittest.TestCase):
         self.assertIn('test "$ACCEPTANCE" = success',source)
         self.assertNotIn('continue-on-error',source)
         self.assertNotIn('paths-ignore:',source)
+        # GitHub resolves jobs.<id>.env before a runner exists. The runner
+        # context is valid only in the producer step env and upload step with.
+        # This workflow intentionally uses simple fixed indentation; reject a
+        # runner expression anywhere in a job-level env block.
+        job_env = False
+        for line in source.splitlines():
+            if line.startswith('    env:'):
+                job_env = True
+            elif job_env and line.strip() and not line.startswith('      '):
+                job_env = False
+            if job_env:
+                self.assertNotRegex(line, r'\$\{\{[^}]*\brunner\.')
+        producer = re.search(r'(?m)^          ORR_STATIC_RECOLOR_EVIDENCE: (.+)$', source)
+        upload = re.search(r'(?m)^          path: (.+)$', source)
+        self.assertIsNotNone(producer)
+        self.assertIsNotNone(upload)
+        self.assertEqual(producer.group(1), upload.group(1))
+        self.assertTrue(producer.group(1).startswith('${{ runner.temp }}/'))
+        self.assertEqual(source.count('${{ runner.temp }}'), 2)
+
 
 
 # Add these standard-library helpers and mixin to the independent gate fixtures.
