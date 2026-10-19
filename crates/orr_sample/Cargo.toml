@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Bounded CPU-only authored particle documents; no optional renderer integration.
+particle-preset = ["dep:serde", "dep:serde_json", "orr_view/particles"]
 # Explicit material dressing of the existing playable pickup preview.
 material-demo = ["particle-demo", "dep:orr_model", "dep:sha2", "orr_render/metallic-roughness"]
 # Explicit optional pickup/preset preview; Arena default is unchanged.

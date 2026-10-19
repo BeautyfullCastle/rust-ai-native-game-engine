@@ -13,6 +13,8 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+# Default-off standalone particle preset authoring; existing eframe/egui only.
+particle-preset-editor = ["dep:tempfile", "orr_sample/particle-preset"]
 # Standalone optional Arena input-map authoring; no default runtime/UI wiring.
 input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/input-actions"]
 # Separate default-off standalone Collect authoring; reuses existing dependencies.
@@ -117,3 +119,8 @@ bench = false
 name = "orr_collect_input_map"
 path = "src/bin/orr_collect_input_map.rs"
 required-features = ["collect-input-map-editor"]
+
+[[bin]]
+name = "orr_particle_preset"
+path = "src/bin/orr_particle_preset.rs"
+required-features = ["particle-preset-editor"]

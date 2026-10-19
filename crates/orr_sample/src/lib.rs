@@ -116,3 +116,6 @@ pub mod room_app;
 
 #[cfg(feature = "particle-demo")]
 pub mod particle_demo;
+
+#[cfg(feature = "particle-preset")]
+pub mod particle_preset;
