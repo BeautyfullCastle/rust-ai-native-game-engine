@@ -342,3 +342,6 @@ fn remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack() {
     }
     assert_eq!(keys.pending_restarts, MAX_PENDING_RESTARTS);
 }
+
+#[path = "controls_acceptance_tests.rs"]
+mod controls_acceptance_tests;
