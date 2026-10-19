@@ -35,6 +35,7 @@ jobs:
           helpers = runpy.run_path('tools/check-authoring-controls.py')
           evidence = Path(os.environ['ORR_SEQUENCE_EVIDENCE'])
           evidence.mkdir(parents=True, exist_ok=False)
+          helpers['run_logged'](['python', 'tools/check-png-canvas-receipt.py', '--self-test'], evidence / 'receipt-validator-self-tests.log')
           binary = Path('target/debug/examples/png_sequence_package').resolve()
           helpers['run_logged'](['cargo', 'build', '--locked', '-p', 'orr_sample', '--example', 'png_sequence_package'], evidence / 'default-build.log')
           absent = evidence / 'must-not-exist'
@@ -43,8 +44,8 @@ jobs:
               (evidence / ('disabled-' + label + '.log')).write_text(result.stdout + result.stderr + '\nexit=' + str(result.returncode))
               if result.returncode != 1 or result.stdout or result.stderr.strip() != 'png_sequence_package requires Linux and --features project-create' or absent.exists():
                   raise RuntimeError('Default example did not refuse before I/O')
-          helpers['run_logged'](['rustfmt', '--edition', '2021', '--check', 'crates/orr_sample/examples/png_sequence_package.rs', 'crates/orr_sample/tests/png_sequence_package_gpu.rs'], evidence / 'format.log')
-          for example, count in [('png_sequence_package', 14), ('png_sprite_package', 16)]:
+          helpers['run_logged'](['rustfmt', '--edition', '2021', '--check', 'crates/orr_sample/examples/png_sequence_package.rs', 'crates/orr_sample/tests/png_sequence_package_gpu.rs', 'crates/orr_sample/tests/png_sequence_canvas_gpu.rs'], evidence / 'format.log')
+          for example, count in [('png_sequence_package', 20), ('png_sprite_package', 16)]:
               output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--example', example, '--', '--format=pretty', '--color=never'], evidence / (example + '-tests.log')).replace('\r\n', '\n')
               summaries = helpers['SUMMARY'].findall(output)
               cases = helpers['CASE'].findall(output)
@@ -52,7 +53,7 @@ jobs:
                   or re.findall(r'^running (\d+) tests?$', output, re.M) != [str(count)]
                   or len(cases) != count or len({name for name, _ in cases}) != count or any(status != 'ok' for _, status in cases)):
                   raise RuntimeError('Exact-count CPU acceptance failed')
-          helpers['run_logged'](['cargo', 'clippy', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--example', 'png_sequence_package', '--test', 'png_sequence_package_gpu', '--', '-D', 'warnings'], evidence / 'clippy.log')
+          helpers['run_logged'](['cargo', 'clippy', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--example', 'png_sequence_package', '--test', 'png_sequence_package_gpu', '--test', 'png_sequence_canvas_gpu', '--', '-D', 'warnings'], evidence / 'clippy.log')
           helpers['run_logged'](['cargo', 'build', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--example', 'png_sequence_package'], evidence / 'cli-build.log')
       - name: Install software Vulkan
         shell: bash
@@ -82,14 +83,32 @@ jobs:
           helpers = runpy.run_path('tools/check-authoring-controls.py')
           evidence = Path(os.environ['ORR_SEQUENCE_EVIDENCE'])
           os.environ['ORR_PNG_SEQUENCE_PACKAGE_BIN'] = str(Path('target/debug/examples/png_sequence_package').resolve())
-          output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--test', 'png_sequence_package_gpu', '--', '--nocapture', '--format=pretty', '--color=never', '--test-threads=1'], evidence / 'gpu.log').replace('\r\n', '\n')
+          output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--test', 'png_sequence_package_gpu', '--', '--exact', 'cli_sequence_installed_runtime_loop_once_and_wrong_order_gpu_readback', '--nocapture', '--format=pretty', '--color=never', '--test-threads=1'], evidence / 'gpu.log').replace('\r\n', '\n')
           summaries = helpers['SUMMARY'].findall(output)
           if (len(summaries) != 1 or tuple(map(int, summaries[0][:5])) != (1, 0, 0, 0, 0)
               or re.findall(r'^running (\d+) tests?$', output, re.M) != ['1']
               or 'PNG sequence: 57 production GPU captures' not in output
-              or 'cli_sequence_installed_runtime_loop_once_and_wrong_order_gpu_readback' not in output
+              or re.findall(r'^test (\S+) \.\.\. ', output, re.M) != ['cli_sequence_installed_runtime_loop_once_and_wrong_order_gpu_readback']
               or re.search(r'\bSKIP\b', output)):
               raise RuntimeError('Required GPU acceptance skipped or incomplete')
+      - name: Required common-canvas actual GPU acceptance and hashed receipt
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: '1'
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          gate = runpy.run_path('tools/check-png-canvas-receipt.py')
+          evidence = Path(os.environ['ORR_SEQUENCE_EVIDENCE'])
+          os.environ['ORR_PNG_SEQUENCE_PACKAGE_BIN'] = str(Path('target/debug/examples/png_sequence_package').resolve())
+          canvas = evidence / 'canvas'
+          os.environ['ORR_CANVAS_EVIDENCE'] = str(canvas)
+          output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--test', 'png_sequence_canvas_gpu', '--', '--exact', gate['TEST'], '--nocapture', '--format=pretty', '--color=never', '--test-threads=1'], evidence / 'canvas-gpu.log')
+          gate['validate_log'](output)
+          helpers['run_logged'](['python', 'tools/check-png-canvas-receipt.py', str(canvas)], evidence / 'canvas-receipt-validation.log')
       - name: Retain logs on success and failure
         if: always()
         uses: actions/upload-artifact@v4

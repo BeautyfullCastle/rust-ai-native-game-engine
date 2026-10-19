@@ -36,6 +36,8 @@ struct Recipe {
     clip: String,
     mode: PlaybackMode,
     columns: u32,
+    #[serde(default, deserialize_with = "present_object")]
+    canvas: Option<Canvas>,
     #[serde(deserialize_with = "bounded_frames")]
     frames: Vec<InputFrame>,
 }
@@ -44,6 +46,40 @@ struct Recipe {
 struct InputFrame {
     png: String,
     duration_ms: u64,
+    #[serde(default, deserialize_with = "present_object")]
+    offset: Option<Offset>,
+}
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Canvas {
+    width: u32,
+    height: u32,
+}
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Offset {
+    x: u32,
+    y: u32,
+}
+// Absence is schema-dependent, but an explicitly supplied value must be an
+// object, never null or a positional array. Map deserialization also preserves
+// duplicate-key rejection instead of normalizing through serde_json::Value.
+fn present_object<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+        type Value = Option<T>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(Some)
+        }
+    }
+    deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
 }
 fn bounded_frames<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -232,8 +268,28 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
     let recipe_path = checked_path(&request.recipe, false)?;
     let recipe: Recipe = serde_json::from_slice(&read_regular(&recipe_path, MAX_RECIPE_BYTES)?)
         .map_err(|e| format!("recipe: {e}"))?;
-    if recipe.schema != 1 || !validate_name(&recipe.name) || !validate_version(&recipe.version) {
-        return Err("recipe requires schema 1 and valid package name/canonical version".into());
+    if !matches!(recipe.schema, 1 | 2)
+        || !validate_name(&recipe.name)
+        || !validate_version(&recipe.version)
+    {
+        return Err(
+            "recipe requires schema 1 or 2 and valid package name/canonical version".into(),
+        );
+    }
+    match recipe.schema {
+        1 if recipe.canvas.is_some()
+            || recipe.frames.iter().any(|frame| frame.offset.is_some()) =>
+        {
+            return Err("schema 1 does not allow canvas or frame offsets".into());
+        }
+        2 => {
+            let canvas = recipe.canvas.ok_or("schema 2 requires canvas")?;
+            rgba_size(canvas.width, canvas.height)?;
+            if recipe.frames.iter().any(|frame| frame.offset.is_none()) {
+                return Err("schema 2 requires an offset for every frame".into());
+            }
+        }
+        _ => {}
     }
     if recipe.frames.is_empty()
         || recipe.frames.len() > MAX_FRAMES
@@ -286,22 +342,42 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
     let mut dimensions = None;
     let mut actual_compressed = 0usize;
     let mut decoded_total = 0usize;
-    for path in paths {
+    for (path, frame) in paths.into_iter().zip(&recipe.frames) {
         let remaining = MAX_TOTAL_PNG_BYTES - actual_compressed;
         let bytes = read_regular(&path, remaining.min(MAX_PNG_BYTES))?;
         actual_compressed += bytes.len();
         let size = png_dimensions(&bytes)?;
-        if dimensions.is_some_and(|expected| expected != size) {
+        if recipe.schema == 1 && dimensions.is_some_and(|expected| expected != size) {
             return Err("PNG frames must have equal dimensions".into());
+        }
+        if let Some(canvas) = recipe.canvas {
+            let offset = frame.offset.ok_or("schema 2 requires frame offset")?;
+            // Containment is based on the complete source rectangle, including
+            // transparent pixels. Reject overflow or clipping before allocation.
+            if offset
+                .x
+                .checked_add(size.0)
+                .is_none_or(|x| x > canvas.width)
+                || offset
+                    .y
+                    .checked_add(size.1)
+                    .is_none_or(|y| y > canvas.height)
+            {
+                return Err("PNG frame placement exceeds canvas".into());
+            }
         }
         dimensions = Some(size);
         decoded_total = decoded_total
             .checked_add(rgba_size(size.0, size.1)?)
             .filter(|n| *n <= MAX_RGBA_BYTES)
             .ok_or("aggregate decoded RGBA budget exceeded")?;
-        images.push(bytes);
+        images.push((bytes, size));
     }
-    let (frame_width, frame_height) = dimensions.ok_or("no frames")?;
+    let (frame_width, frame_height) = recipe
+        .canvas
+        .map(|canvas| (canvas.width, canvas.height))
+        .or(dimensions)
+        .ok_or("no frames")?;
     let rows = (recipe.frames.len() as u32).div_ceil(recipe.columns);
     let width = frame_width
         .checked_mul(recipe.columns)
@@ -314,13 +390,19 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
     let mut atlas = vec![0u8; rgba_bytes];
     let mut regions = Vec::with_capacity(recipe.frames.len());
     let mut frames = Vec::with_capacity(recipe.frames.len());
-    for (index, (bytes, frame)) in images.iter().zip(&recipe.frames).enumerate() {
-        let rgba = orr_sample::project_sprites::decode_atlas(bytes, frame_width, frame_height)?;
+    for (index, ((bytes, size), frame)) in images.iter().zip(&recipe.frames).enumerate() {
+        // Decode one actual-size source at a time, with the existing decoder's
+        // transformations. Never allocate a padded per-frame canvas.
+        let rgba = orr_sample::project_sprites::decode_atlas(bytes, size.0, size.1)?;
         let x = (index as u32 % recipe.columns) * frame_width;
         let y = (index as u32 / recipe.columns) * frame_height;
-        let stride = frame_width as usize * 4;
-        for row in 0..frame_height as usize {
-            let destination = ((y as usize + row) * width as usize + x as usize) * 4;
+        let offset = frame.offset.unwrap_or(Offset { x: 0, y: 0 });
+        let stride = size.0 as usize * 4;
+        // Top-left origin, +x right and +y down. Raw RGBA copy preserves hidden
+        // RGB and partial alpha without blending; untouched padding stays zero.
+        for row in 0..size.1 as usize {
+            let destination =
+                (((y + offset.y) as usize + row) * width as usize + (x + offset.x) as usize) * 4;
             atlas[destination..destination + stride]
                 .copy_from_slice(&rgba[row * stride..(row + 1) * stride]);
         }
