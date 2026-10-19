@@ -6,6 +6,9 @@ use orr_sample::authored_ui::{Document, Node, Screen};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+mod distribution;
+pub use distribution::DistributionAxis;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Context {
     pub scene: PathBuf,
@@ -51,7 +54,7 @@ struct Draft {
     context: Context,
     original: Document,
     selected_ids: Vec<String>,
-    reference_id: String,
+    reference_id: Option<String>,
     candidate: Document,
 }
 
@@ -142,7 +145,7 @@ impl State {
             context,
             original: accepted.clone(),
             selected_ids: selected_ids.to_vec(),
-            reference_id: reference_id.into(),
+            reference_id: Some(reference_id.into()),
             candidate,
         });
         Ok(())
@@ -182,7 +185,7 @@ impl State {
         self.draft.is_some()
     }
     pub fn reference_id(&self) -> Option<&str> {
-        self.draft.as_ref().map(|d| d.reference_id.as_str())
+        self.draft.as_ref().and_then(|d| d.reference_id.as_deref())
     }
     pub fn selected_ids(&self) -> Option<&[String]> {
         self.draft.as_ref().map(|d| d.selected_ids.as_slice())
