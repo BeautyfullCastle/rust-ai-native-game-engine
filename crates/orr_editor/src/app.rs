@@ -74,6 +74,10 @@ mod collect_ui_resize;
 #[path = "app/collect_controls.rs"]
 mod collect_controls;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+#[path = "app/collect_project.rs"]
+mod collect_project;
+
 /// Button labels (tests click them by these texts).
 pub const LBL_PLAY: &str = "\u{25B6} Play";
 /// See [`LBL_PLAY`].
@@ -148,6 +152,8 @@ pub struct UiState {
     pub filter: String,
     /// Open path prompt.
     pub dialog: Option<Dialog>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+    collect_project: collect_project::Panel,
     /// Where the viewport was drawn last frame, in points.
     pub viewport_rect: Option<Rect>,
     /// Size of the viewport in pixels last frame.
@@ -927,6 +933,8 @@ impl eframe::App for EditorApp {
         self.editor.pump();
         #[cfg(feature="collect-ui")]
         self.sync_collect_ui_preview();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+        if self.collect_project_modal(&ctx) { return; }
         #[cfg(feature="package-manager")]
         self.sync_package_model_preview();
         #[cfg(feature="room-project")]
@@ -1018,6 +1026,8 @@ impl eframe::App for EditorApp {
         self.shortcuts(&ctx);
 
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+        if self.collect_project_modal(&ctx) { return; }
         if self.editor.down().is_some() {
             egui::Panel::top("down").show(ui, |ui| self.down_banner(ui));
         }
@@ -1248,6 +1258,8 @@ impl EditorApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+        if self.collect_project_dialog_open() { return; }
         #[cfg(feature="mesh-mission")]
         if self.mesh_game_creator.busy() { return; }
         #[cfg(feature="mesh-navigation")]
@@ -1278,6 +1290,8 @@ impl EditorApp {
     // Modal pointer capture does not block accessibility actions. Check both widget
     // availability and the action entry point before starting or advancing playback.
     fn playback_start_blocker(&self) -> Option<String> {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+        if self.collect_project_dialog_open() { return Some("Finish or cancel the Collect project dialog before Play or Step".into()); }
         if self.package_removal_pending() { return Some("Wait for package selection change completion before Play or Step".into()); }
         if self.hazard_pick_busy() { return Some("Finish or cancel hazard center picking before Play or Step".into()); }
         if self.hazard_export_busy() { return Some("Wait for hazard export completion before Play or Step".into()); }
@@ -1301,6 +1315,8 @@ impl EditorApp {
     }
 
     fn save(&mut self) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+        if self.collect_project_dialog_open() { return; }
         if self.package_removal_pending() { self.editor.error("Wait for package selection change completion before saving"); return; }
         if self.hazard_pick_busy() { self.editor.error("Finish or cancel hazard center picking before saving"); return; }
         if self.hazard_export_busy() { self.editor.error("Wait for hazard export completion before saving"); return; }
@@ -1339,6 +1355,8 @@ impl EditorApp {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if !(mutable) { ui.disable(); }
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+                { self.collect_project_menu(ui); if self.collect_project_dialog_open() { ui.disable(); } }
                 #[cfg(feature="mesh-mission")]
                 if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
                     && ui.add_enabled(self.mesh_workspace_blocker().is_none(), egui::Button::new("New mesh game\u{2026}")).clicked() {
@@ -1439,6 +1457,8 @@ impl EditorApp {
                     }
                 }
             });
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+            if self.collect_project_dialog_open() { ui.disable(); }
             ui.menu_button("Edit", |ui| {
                 let editing = mutable && self.editor.mode() == Mode::Edit;
                 if ui.add_enabled(editing && self.editor.history().can_undo, egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
@@ -1496,6 +1516,8 @@ impl EditorApp {
                 ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
             }
         });
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
+        if self.collect_project_dialog_open() { return; }
         #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
         self.ui.collect_controls.sync_session(self.editor.scene_load_epoch(), self.editor.game().is_collect());
         if self.editor.game().has_keyboard() {

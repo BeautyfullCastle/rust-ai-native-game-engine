@@ -2538,7 +2538,7 @@ jobs:
           PYCOUNTS
           }
           selection=()
-          check_count sample-library 63 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
+          check_count sample-library 68 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
           unset ORR_PACKAGE_FIFO_TEST_ROOT
           check_count package 29 cargo test --locked --release -p orr_package --lib
           check_count editor-collect-library 4 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --lib collect
@@ -2635,13 +2635,17 @@ jobs:
             "$@" -- --list > "$RUNNER_TEMP/collect-progress-$label-list.txt"
             test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-$label-list.txt")" -eq "$((passed + ignored))"
             "$@" -- --ignored --list > "$RUNNER_TEMP/collect-progress-$label-ignored.txt"
-            python3 - "$ignored" "$RUNNER_TEMP/collect-progress-$label-ignored.txt" <<'PYHOOKS'
+            python3 - "$ignored" "$RUNNER_TEMP/collect-progress-$label-ignored.txt" "$label" <<'PYHOOKS'
           import pathlib, re, sys
           names = re.findall(r'^([A-Za-z0-9_:]+): test$', pathlib.Path(sys.argv[2]).read_text(), re.M)
           expected = [] if int(sys.argv[1]) == 0 else [
               'collect_progress::tests::isolated_window_progress_child',
               'game_progress::tests::concurrent_process_child',
           ]
+          if sys.argv[3] == 'joint-library':
+              # The saved-map consumer runs explicitly in editor-collect-controls.yml.
+              expected.insert(0, 'collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys')
+          assert len(expected) == int(sys.argv[1])
           assert sorted(names) == sorted(expected), names
           PYHOOKS
             # Keep the ordinary parallel harness: the reviewed lock fix addresses this execution mode.
@@ -2673,7 +2677,7 @@ jobs:
           done
 
           # Positive feature-disabled regression; do not treat an absent cfg target as evidence.
-          check_library disabled-library 63 0 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
+          check_library disabled-library 68 0 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
           cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --test collect_project_export -- --ignored --list > "$RUNNER_TEMP/collect-progress-disabled-export-ignored.txt"
           python3 - "$RUNNER_TEMP/collect-progress-disabled-export-ignored.txt" <<'PYDISABLED'
           import pathlib, re, sys
@@ -2681,8 +2685,8 @@ jobs:
           assert sorted(names) == ['collect_real_export_cpu_workflow', 'collect_real_export_gpu_workflow'], names
           PYDISABLED
 
-          check_library library 89 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib
-          check_library joint-library 150 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export,player-settings --lib
+          check_library library 94 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib
+          check_library joint-library 175 3 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export,player-settings --lib
           name=game_progress::tests::stable_nonblocking_lock_and_reread_before_merge
           cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib "$name" -- --exact --list > "$RUNNER_TEMP/collect-progress-barrier-list.txt"
           test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-barrier-list.txt")" -eq 1
@@ -2756,7 +2760,7 @@ jobs:
           PYPIN
           sha256sum --check "$RUNNER_TEMP/collect-progress-tools.sha256"
           "$RUNNER_TEMP/collect-progress-tools/progress-test-harness" --list > "$RUNNER_TEMP/collect-progress-pinned-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-pinned-library-list.txt")" -eq 91
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-pinned-library-list.txt")" -eq 96
           "$RUNNER_TEMP/collect-progress-tools/progress-test-harness" --ignored --list > "$RUNNER_TEMP/collect-progress-pinned-library-ignored.txt"
           test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-pinned-library-ignored.txt")" -eq 2
           grep -Fx 'collect_progress::tests::isolated_window_progress_child: test' "$RUNNER_TEMP/collect-progress-pinned-library-ignored.txt"
@@ -3113,10 +3117,15 @@ jobs:
             "combined-library": [
               "arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device",
               "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
               "collect_app::tests::strict_cli",
@@ -3225,10 +3234,15 @@ jobs:
             "minimal-progress-library": [
               "arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device",
               "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
               "collect_app::tests::strict_cli",
@@ -3333,7 +3347,7 @@ jobs:
           check_result creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
           check_result collect-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --test new_arena_cli
           check_result arena-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli
-          check_result combined-library 108 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
+          check_result combined-library 113 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
         env:
           ORR_NEW_COLLECT_EVIDENCE: /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin exact Collect creator runtime exporter and progress harness
@@ -3415,7 +3429,7 @@ jobs:
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
           assert names('pinned-library-list.txt') == expected['minimal-progress-library']
-          assert len(names('pinned-library-list.txt')) == 64
+          assert len(names('pinned-library-list.txt')) == 69
           assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
           PYHOOKS
         env:
@@ -3542,10 +3556,36 @@ jobs:
               "authored_ui::tests::rejects_invalid_ids_and_text",
               "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
               "authored_ui::tests::rejects_unknown_fields_variants_and_expressions",
+              "collect_app::input_actions::tests::action_maps::action_order_is_irrelevant_and_multiple_restart_bindings_are_ored",
+              "collect_app::input_actions::tests::action_maps::all_shared_keyboard_identities_have_distinct_physical_keys_and_hints",
+              "collect_app::input_actions::tests::action_maps::default_map_roundtrips_existing_format_and_matches_featureless_defaults",
+              "collect_app::input_actions::tests::action_maps::duplicate_bindings_within_and_across_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::empty_actions_remain_explicitly_unbound",
+              "collect_app::input_actions::tests::action_maps::file_loading_rejects_direct_symlinks_and_preexisting_special_files",
+              "collect_app::input_actions::tests::action_maps::file_loading_retains_shared_byte_boundary_and_rejects_non_files",
+              "collect_app::input_actions::tests::action_maps::malformed_json_unknown_fields_and_unsupported_keys_fail_closed",
+              "collect_app::input_actions::tests::action_maps::missing_extra_unknown_and_duplicate_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::remapping_replaces_all_defaults_and_generates_truthful_hints",
+              "collect_app::input_actions::tests::action_maps::shared_version_action_and_binding_limits_are_preserved",
+              "collect_app::input_actions::tests::action_maps::unsupported_devices_are_rejected_not_dropped",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
+              "collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded",
+              "collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map",
+              "collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel",
+              "collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy",
+              "collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace",
+              "collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge",
+              "collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge",
+              "collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::pointer_capture_recomputes_physical_point_for_dpi_and_zoom",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
@@ -3706,6 +3746,7 @@ jobs:
               "tests::tamper_and_writer_failure_preserve_authority"
             ],
             "ignored-library-hooks": [
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
               "collect_progress::tests::isolated_window_progress_child",
               "game_progress::tests::concurrent_process_child"
             ],
@@ -3748,7 +3789,7 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-library 137 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
+          check_result ui-library 162 3 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
           check_result editor-panel 6 0 cargo test --locked --release -p orr_editor --no-default-features --features collect-ui --lib collect_ui_panel
           unset ORR_PACKAGE_FIFO_TEST_ROOT
           check_result package 29 0 cargo test --locked --release -p orr_package --lib
@@ -3836,7 +3877,7 @@ jobs:
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
           assert names('pinned-library-list.txt') == expected['ui-library']
-          assert len(names('pinned-library-list.txt')) == 139
+          assert len(names('pinned-library-list.txt')) == 165
           assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
           PYHOOKS
         env:
@@ -3951,10 +3992,36 @@ jobs:
               "authored_ui::tests::rejects_invalid_ids_and_text",
               "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
               "authored_ui::tests::rejects_unknown_fields_variants_and_expressions",
+              "collect_app::input_actions::tests::action_maps::action_order_is_irrelevant_and_multiple_restart_bindings_are_ored",
+              "collect_app::input_actions::tests::action_maps::all_shared_keyboard_identities_have_distinct_physical_keys_and_hints",
+              "collect_app::input_actions::tests::action_maps::default_map_roundtrips_existing_format_and_matches_featureless_defaults",
+              "collect_app::input_actions::tests::action_maps::duplicate_bindings_within_and_across_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::empty_actions_remain_explicitly_unbound",
+              "collect_app::input_actions::tests::action_maps::file_loading_rejects_direct_symlinks_and_preexisting_special_files",
+              "collect_app::input_actions::tests::action_maps::file_loading_retains_shared_byte_boundary_and_rejects_non_files",
+              "collect_app::input_actions::tests::action_maps::malformed_json_unknown_fields_and_unsupported_keys_fail_closed",
+              "collect_app::input_actions::tests::action_maps::missing_extra_unknown_and_duplicate_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::remapping_replaces_all_defaults_and_generates_truthful_hints",
+              "collect_app::input_actions::tests::action_maps::shared_version_action_and_binding_limits_are_preserved",
+              "collect_app::input_actions::tests::action_maps::unsupported_devices_are_rejected_not_dropped",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
+              "collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded",
+              "collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map",
+              "collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel",
+              "collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy",
+              "collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace",
+              "collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge",
+              "collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge",
+              "collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::pointer_capture_recomputes_physical_point_for_dpi_and_zoom",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
@@ -4142,10 +4209,36 @@ jobs:
               "authored_ui::tests::rejects_invalid_ids_and_text",
               "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
               "authored_ui::tests::rejects_unknown_fields_variants_and_expressions",
+              "collect_app::input_actions::tests::action_maps::action_order_is_irrelevant_and_multiple_restart_bindings_are_ored",
+              "collect_app::input_actions::tests::action_maps::all_shared_keyboard_identities_have_distinct_physical_keys_and_hints",
+              "collect_app::input_actions::tests::action_maps::default_map_roundtrips_existing_format_and_matches_featureless_defaults",
+              "collect_app::input_actions::tests::action_maps::duplicate_bindings_within_and_across_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::empty_actions_remain_explicitly_unbound",
+              "collect_app::input_actions::tests::action_maps::file_loading_rejects_direct_symlinks_and_preexisting_special_files",
+              "collect_app::input_actions::tests::action_maps::file_loading_retains_shared_byte_boundary_and_rejects_non_files",
+              "collect_app::input_actions::tests::action_maps::malformed_json_unknown_fields_and_unsupported_keys_fail_closed",
+              "collect_app::input_actions::tests::action_maps::missing_extra_unknown_and_duplicate_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::remapping_replaces_all_defaults_and_generates_truthful_hints",
+              "collect_app::input_actions::tests::action_maps::shared_version_action_and_binding_limits_are_preserved",
+              "collect_app::input_actions::tests::action_maps::unsupported_devices_are_rejected_not_dropped",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
+              "collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded",
+              "collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map",
+              "collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel",
+              "collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy",
+              "collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace",
+              "collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge",
+              "collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge",
+              "collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::pointer_capture_recomputes_physical_point_for_dpi_and_zoom",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
@@ -4240,6 +4333,7 @@ jobs:
               "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
             ],
             "ignored-library-hooks": [
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
               "collect_progress::tests::isolated_window_progress_child",
               "game_progress::tests::concurrent_process_child"
             ],
@@ -4281,7 +4375,7 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-creator-library 158 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
+          check_result ui-creator-library 183 3 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
           check_result ui-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --test new_arena_cli
           check_result non-ui-creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
         env:
@@ -4368,7 +4462,7 @@ jobs:
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
           assert names('pinned-library-list.txt') == expected['minimal-ui-progress-library']
-          assert len(names('pinned-library-list.txt')) == 112
+          assert len(names('pinned-library-list.txt')) == 138
           assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
           PYHOOKS
         env:
@@ -4564,10 +4658,36 @@ jobs:
                 "authored_ui::tests::rejects_invalid_ids_and_text",
                 "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
                 "authored_ui::tests::rejects_unknown_fields_variants_and_expressions",
+                "collect_app::input_actions::tests::action_maps::action_order_is_irrelevant_and_multiple_restart_bindings_are_ored",
+                "collect_app::input_actions::tests::action_maps::all_shared_keyboard_identities_have_distinct_physical_keys_and_hints",
+                "collect_app::input_actions::tests::action_maps::default_map_roundtrips_existing_format_and_matches_featureless_defaults",
+                "collect_app::input_actions::tests::action_maps::duplicate_bindings_within_and_across_actions_are_rejected",
+                "collect_app::input_actions::tests::action_maps::empty_actions_remain_explicitly_unbound",
+                "collect_app::input_actions::tests::action_maps::file_loading_rejects_direct_symlinks_and_preexisting_special_files",
+                "collect_app::input_actions::tests::action_maps::file_loading_retains_shared_byte_boundary_and_rejects_non_files",
+                "collect_app::input_actions::tests::action_maps::malformed_json_unknown_fields_and_unsupported_keys_fail_closed",
+                "collect_app::input_actions::tests::action_maps::missing_extra_unknown_and_duplicate_actions_are_rejected",
+                "collect_app::input_actions::tests::action_maps::remapping_replaces_all_defaults_and_generates_truthful_hints",
+                "collect_app::input_actions::tests::action_maps::shared_version_action_and_binding_limits_are_preserved",
+                "collect_app::input_actions::tests::action_maps::unsupported_devices_are_rejected_not_dropped",
+                "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+                "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+                "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+                "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
+                "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
+                "collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded",
+                "collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map",
+                "collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel",
+                "collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy",
+                "collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace",
+                "collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge",
+                "collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge",
+                "collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack",
                 "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
                 "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
                 "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
                 "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+                "collect_app::tests::input_map_cli_admission_is_explicit",
                 "collect_app::tests::pointer_capture_recomputes_physical_point_for_dpi_and_zoom",
                 "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
                 "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
@@ -4701,12 +4821,13 @@ jobs:
                 "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
               ],
               "ignored_names": [
+                "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
                 "collect_progress::tests::isolated_window_progress_child",
                 "game_progress::tests::concurrent_process_child",
                 "image_reimport::tests::reimport_real_pixels_export_relocates_with_sources_hidden_and_read_only"
               ],
-              "passed": 148,
-              "ignored": 3,
+              "passed": 173,
+              "ignored": 4,
               "children": 2,
               "features": [
                 "image-reimport",
@@ -4726,9 +4847,9 @@ jobs:
                   0
                 ],
                 [
-                  148,
+                  173,
                   0,
-                  3
+                  4
                 ]
               ]
             },

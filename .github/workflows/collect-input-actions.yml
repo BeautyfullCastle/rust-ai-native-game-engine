@@ -30,6 +30,8 @@ jobs:
           python-version: '3.12'
       - name: Exact-count guard self-tests
         run: python tools/check-authoring-controls.py --self-test
+      - name: Nested saved-map hook inventory regression
+        run: python -m unittest discover -s tools -p test_editor_collect_controls_gate.py
       - name: Focused map, production input lifecycle and real Bridge contracts
         shell: python {0}
         run: |
@@ -37,6 +39,7 @@ jobs:
           from pathlib import Path
           import runpy
           h = runpy.run_path("tools/check-authoring-controls.py")
+          controls = runpy.run_path("tools/editor_collect_controls_gate.py")
           evidence = Path(os.environ["ORR_COLLECT_INPUT_EVIDENCE"])
           evidence.mkdir(parents=True, exist_ok=False)
           # The Unix-only nonregular-file test includes symlink/device/FIFO refusal.
@@ -55,7 +58,11 @@ jobs:
                   ["cargo", "test", "--locked", "-p", "orr_sample", "--no-default-features",
                    "--features", features, "--lib", suite + "::", "--", "--format=pretty",
                    "--color=never", "--test-threads=1"], evidence / (label + ".log"))
-              h["validate_tests"](output, suite, count)
+              if label == "runtime-enabled":
+                  # The exact saved-map hook is executed by editor-collect-controls.yml.
+                  controls["validate_input_runtime_regression"](output)
+              else:
+                  h["validate_tests"](output, suite, count)
           for label, features, count in (
               ("cli-enabled", "collect-dodge,input-actions", 5),
               ("cli-disabled", "collect-dodge", 3),
