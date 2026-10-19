@@ -73,7 +73,7 @@ jobs:
               raise RuntimeError("Expected all seven checked restoration core tests to pass without skips")
           for suite, count in (
               ("package_manager::removal::tests", 20 if os.name == "nt" else 22),
-              ("package_manager_panel::tests", 13),
+              ("package_manager_panel::tests", 14),
           ):
               output = helpers["run_logged"](
                   ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "package-manager,room-animated-models",

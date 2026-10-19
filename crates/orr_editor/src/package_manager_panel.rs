@@ -1,4 +1,4 @@
-use crate::package_manager::{self, Plan, RemovalPlan, RemovalReceipt};
+use crate::package_manager::{self, Plan, RemovalPlan, RemovalReceipt, UpdatePlan};
 use egui::Context;
 use orr_model_bindings::model_bindings::ModelKind;
 use orr_package::{Lock, PackagePreview};
@@ -8,6 +8,20 @@ use std::{
 };
 
 enum Completion {
+    UpdatePreviewed {
+        root: PathBuf,
+        source_identity: String,
+        project_generation: u64,
+        source_generation: u64,
+        result: Result<UpdatePlan, String>,
+    },
+    Updated {
+        root: PathBuf,
+        source_identity: String,
+        project_generation: u64,
+        source_generation: u64,
+        result: Result<Lock, String>,
+    },
     RestorationPreviewed {
         generation: u64,
         root: PathBuf,
@@ -60,6 +74,13 @@ struct PreviewedPlan {
     source_generation: u64,
 }
 
+struct PreviewedUpdate {
+    plan: UpdatePlan,
+    source_identity: String,
+    project_generation: u64,
+    source_generation: u64,
+}
+
 struct ModelRequest {
     root: PathBuf,
     source_identity: String,
@@ -82,6 +103,7 @@ pub struct Panel {
     model_filter: String,
     verified: Option<Lock>,
     preview: Option<PreviewedPlan>,
+    update_preview: Option<PreviewedUpdate>,
     removal_name: String,
     removal_preview: Option<RemovalPlan>,
     last_removal: Option<RemovalReceipt>,
@@ -91,12 +113,14 @@ pub struct Panel {
     preview_request: Option<crate::package_model_preview::PreviewRequest>,
     pending: Option<Receiver<Completion>>,
     removing: bool,
+    updating: bool,
     model_import: crate::model_package_import_panel::Panel,
 }
 
 impl Panel {
     pub(crate) fn removal_busy(&self) -> bool {
-        self.removing && self.pending.is_some()
+        // The host uses this existing hook for its whole-frame mutation fence.
+        (self.removing || self.updating) && self.pending.is_some()
     }
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.model_import.busy()
@@ -154,7 +178,8 @@ impl Panel {
 
     fn take_current_request(&mut self) -> Option<ModelRequest> {
         let request = self.model_request.take()?;
-        if self.root.as_ref() == Some(&request.root)
+        if !self.busy()
+            && self.root.as_ref() == Some(&request.root)
             && self.source.trim() == request.source_identity.as_str()
             && self.project_generation == request.project_generation
             && self.source_generation == request.source_generation
@@ -176,6 +201,7 @@ impl Panel {
         let was_mutating = self.removal_busy();
         self.poll();
         if blocked_reason.is_some() {
+            self.update_preview = None;
             self.removal_preview = None;
             self.restoration_preview = None;
             if !was_mutating {
@@ -223,9 +249,10 @@ impl Panel {
                     ui.label(reason);
                 }
                 ui.label("Package metadata is not a byte-integrity check. A license file does not establish legal trust.");
-                ui.label("Preview does not activate content or reserve a permanent lock; Add revalidates before writing.");
+                ui.label("Preview does not activate content or reserve a permanent lock; Add and Update revalidate before writing.");
                 let field_label = ui.label("Local content package directory");
-                ui.add(
+                ui.add_enabled(
+                    !was_mutating && !self.removal_busy(),
                     egui::TextEdit::singleline(&mut self.source)
                         .desired_width(f32::INFINITY)
                         .char_limit(4096),
@@ -235,6 +262,7 @@ impl Panel {
                 self.select_source();
                 self.clear_stale_preview();
                 let matching_preview = self.matching_preview(source.is_ok());
+                let matching_update = self.matching_update(source.is_ok());
                 let source_error = source.as_ref().err();
                 if !self.source.trim().is_empty() {
                     if let Some(error) = source_error {
@@ -272,9 +300,26 @@ impl Panel {
                         self.start_add();
                     }
                 });
+                ui.label("Update only an installed direct package unused by saved Room model bindings. Supply the same package name with a different exact version; other selections and dependencies stay unchanged.");
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(can_operate && source.is_ok(), egui::Button::new("Preview update")).clicked() {
+                        if let Ok(source) = &source {
+                            self.start_update_preview(source.clone());
+                        }
+                    }
+                    if ui.add_enabled(can_operate && matching_update, egui::Button::new("Update previewed package")).clicked() {
+                        self.start_update();
+                    }
+                });
+                if let Some(preview) = &self.update_preview {
+                    if matching_update {
+                        ui.label("Update preview only; the installed revision has not changed. Update rechecks source bytes, the active lock and saved Room files before publication.");
+                        update_preview_details(ui, preview.plan.preview());
+                    }
+                }
                 self.model_import.show(
                     ui,
-                    can_operate,
+                    can_operate && !self.busy(),
                     self.root.as_deref(),
                     self.project_generation,
                     self.source_generation,
@@ -363,6 +408,7 @@ impl Panel {
             self.removal_preview = None;
             self.verified = None;
             self.preview = None;
+            self.update_preview = None;
             self.model_request = None;
             if self.pending.is_none() {
                 self.status =
@@ -374,6 +420,7 @@ impl Panel {
     fn select_source(&mut self) {
         let next_source = self.source.trim().to_owned();
         if self.source_identity != next_source {
+            self.update_preview = None;
             self.removal_preview = None;
             self.source_identity = next_source;
             self.source_generation = self.source_generation.saturating_add(1);
@@ -391,13 +438,81 @@ impl Panel {
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
                 self.removing = false;
-                self.status = "Package worker disconnected before returning a result.".into();
+                self.status = if self.updating {
+                    "Package update worker disconnected; publication outcome is uncertain. Verify installed packages before another attempt; no automatic retry or rollback was performed.".into()
+                } else {
+                    "Package worker disconnected before returning a result.".into()
+                };
+                if self.updating {
+                    self.invalidate_package_cache();
+                }
+                self.updating = false;
                 return;
             }
         };
         self.pending = None;
         self.removing = false;
+        self.updating = false;
         match completion {
+            Completion::UpdatePreviewed {
+                root,
+                source_identity,
+                project_generation,
+                source_generation,
+                result,
+            } => {
+                self.update_preview = None;
+                if self.root.as_ref() == Some(&root)
+                    && self.source.trim() == source_identity.as_str()
+                    && self.project_generation == project_generation
+                    && self.source_generation == source_generation
+                {
+                    match result {
+                        Ok(plan) if plan.root() == root => {
+                            self.update_preview = Some(PreviewedUpdate {
+                                plan,
+                                source_identity,
+                                project_generation,
+                                source_generation,
+                            });
+                            self.status = "Update preview ready. Review the exact old and new version and digest, then explicitly Update previewed package.".into();
+                        }
+                        Ok(_) => {
+                            self.status =
+                                "Package update preview identity changed; discarded.".into()
+                        }
+                        Err(error) => {
+                            self.status = format!("Package update preview failed: {error}")
+                        }
+                    }
+                } else {
+                    self.status = "Update preview completed for a prior project or source; discarded without changing packages.".into();
+                }
+            }
+            Completion::Updated {
+                root,
+                source_identity,
+                project_generation,
+                source_generation,
+                result,
+            } => {
+                self.invalidate_package_cache();
+                if self.root.as_ref() == Some(&root)
+                    && self.source.trim() == source_identity.as_str()
+                    && self.project_generation == project_generation
+                    && self.source_generation == source_generation
+                {
+                    self.status = match result {
+                        Ok(_) => "Package updated. Verify installed packages to reload the new revision, then preview or use a model and save model bindings.".into(),
+                        Err(error) => format!("Package update failed or could not be confirmed: {error}. Verify installed packages before another attempt; no automatic retry or rollback was performed."),
+                    };
+                } else {
+                    self.status = match result {
+                        Ok(_) => format!("Package update completed for prior project {} and source {}; current inventory and model previews were discarded.", root.display(), source_identity),
+                        Err(error) => format!("Package update for prior project {} and source {} failed or could not be confirmed: {error}. No automatic retry or rollback was performed.", root.display(), source_identity),
+                    };
+                }
+            }
             Completion::RestorationPreviewed {
                 generation,
                 root,
@@ -624,6 +739,7 @@ impl Panel {
         self.removal_preview = None;
         self.verified = None;
         self.preview = None;
+        self.update_preview = None;
         self.model_request = None;
     }
 
@@ -650,7 +766,109 @@ impl Panel {
             })
     }
 
+    fn matching_update(&self, source_is_valid: bool) -> bool {
+        source_is_valid
+            && self.update_preview.as_ref().is_some_and(|preview| {
+                self.root.as_deref() == Some(preview.plan.root())
+                    && self.source.trim() == preview.source_identity.as_str()
+                    && self.project_generation == preview.project_generation
+                    && self.source_generation == preview.source_generation
+            })
+    }
+
+    fn start_update_preview(&mut self, source: PathBuf) {
+        if self.busy() {
+            return;
+        }
+        let Some(root) = self.root.clone() else {
+            self.status = "Open a Room project before previewing a package update.".into();
+            return;
+        };
+        let source_identity = self.source.trim().to_owned();
+        let project_generation = self.project_generation;
+        let source_generation = self.source_generation;
+        self.update_preview = None;
+        self.preview = None;
+        self.removal_preview = None;
+        self.last_removal = None;
+        self.restoration_preview = None;
+        self.restoration_generation = self.restoration_generation.saturating_add(1);
+        self.model_request = None;
+        self.preview_request = None;
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("orr-package-update-preview".into())
+            .spawn(move || {
+                let result = package_manager::plan_update(&root, &source);
+                let _ = sender.send(Completion::UpdatePreviewed {
+                    root,
+                    source_identity,
+                    project_generation,
+                    source_generation,
+                    result,
+                });
+            }) {
+            Ok(_) => {
+                self.pending = Some(receiver);
+                self.status = "Checking the exact package revision and saved Room references for an update preview…".into();
+            }
+            Err(error) => self.status = format!("Cannot start package update preview: {error}"),
+        }
+    }
+
+    fn start_update(&mut self) {
+        if self.busy() {
+            return;
+        }
+        if let Err(error) = parse_source_path(&self.source) {
+            self.update_preview = None;
+            self.status = error;
+            return;
+        }
+        if !self.matching_update(true) {
+            self.update_preview = None;
+            self.status = "Project or package source changed, or no update was previewed; preview the update again.".into();
+            return;
+        }
+        let Some(preview) = self.update_preview.take() else {
+            return;
+        };
+        let root = preview.plan.root().to_path_buf();
+        let source_identity = preview.source_identity;
+        let project_generation = self.project_generation;
+        let source_generation = self.source_generation;
+        let plan = preview.plan;
+        // Discard every selection/preview/receipt before publication can begin.
+        // A failure may occur after the new lock was published, so none of these
+        // may be used as a retry or implicit rollback ticket.
+        self.invalidate_package_cache();
+        self.restoration_generation = self.restoration_generation.saturating_add(1);
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("orr-package-update".into())
+            .spawn(move || {
+                let result = package_manager::apply_update(&plan);
+                let _ = sender.send(Completion::Updated {
+                    root,
+                    source_identity,
+                    project_generation,
+                    source_generation,
+                    result,
+                });
+            }) {
+            Ok(_) => {
+                self.pending = Some(receiver);
+                self.updating = true;
+                self.status = "Updating the previewed package revision with locked source and saved Room revalidation…".into();
+            }
+            Err(error) => {
+                self.status = format!("Cannot start package update; preview it again: {error}")
+            }
+        }
+    }
+
     fn start_removal_preview(&mut self) {
+        self.update_preview = None;
         if self.busy() {
             return;
         }
@@ -689,6 +907,7 @@ impl Panel {
     }
 
     fn start_remove(&mut self) {
+        self.update_preview = None;
         if self.busy() {
             return;
         }
@@ -730,6 +949,7 @@ impl Panel {
     }
 
     fn start_restoration_preview(&mut self) {
+        self.update_preview = None;
         if self.busy() {
             return;
         }
@@ -766,6 +986,7 @@ impl Panel {
     }
 
     fn start_restore(&mut self) {
+        self.update_preview = None;
         if self.busy() || self.restoration_preview.is_none() {
             return;
         }
@@ -802,6 +1023,7 @@ impl Panel {
     }
 
     fn start_verify(&mut self) {
+        self.update_preview = None;
         self.removal_preview = None;
         if self.busy() {
             return;
@@ -835,6 +1057,7 @@ impl Panel {
     }
 
     fn start_preview(&mut self, source: PathBuf) {
+        self.update_preview = None;
         if self.busy() {
             return;
         }
@@ -870,6 +1093,7 @@ impl Panel {
     }
 
     fn start_add(&mut self) {
+        self.update_preview = None;
         self.last_removal = None;
         self.restoration_preview = None;
         self.removal_preview = None;
@@ -1160,6 +1384,20 @@ fn preview_table(ui: &mut egui::Ui, preview: &PackagePreview) {
                 ui.end_row();
             }
         });
+}
+
+fn update_preview_details(ui: &mut egui::Ui, preview: &PackagePreview) {
+    for (name, change) in &preview.changes {
+        ui.label(format!("Update package: {name}"));
+        if let Some(before) = &change.before {
+            ui.label(format!("Installed version: {}", before.version));
+            ui.label(format!("Installed SHA-256: {}", before.digest));
+        }
+        if let Some(after) = &change.after {
+            ui.label(format!("Proposed version: {}", after.version));
+            ui.label(format!("Proposed SHA-256: {}", after.digest));
+        }
+    }
 }
 
 fn compact_digest(digest: &str) -> String {
@@ -1738,5 +1976,444 @@ mod tests {
         assert!(panel.last_removal.is_none());
         assert!(panel.restoration_preview.is_none());
         assert!(panel.verified.is_some());
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    use std::{
+        collections::BTreeMap,
+        fs,
+        time::{Duration, Instant},
+    };
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        source: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("room");
+            let old_source = temp.path().join("v1");
+            let source = temp.path().join("v2");
+            fs::create_dir(&root).unwrap();
+            fs::write(
+                root.join("room.scene.yaml"),
+                include_str!("../tests/fixtures/room_initial.scene.yaml"),
+            )
+            .unwrap();
+            fs::write(root.join("orr.project.json"), r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json"}}"#).unwrap();
+            fs::write(
+                root.join("room.models.json"),
+                r#"{"version":2,"scene":"room.scene.yaml","project":".","bindings":{}}"#,
+            )
+            .unwrap();
+            write_package(&old_source, "art", "1.0.0");
+            write_package(&source, "art", "2.0.0");
+            orr_package::Project::open_for_install(
+                &root,
+                orr_package::Runtime::content_only().engine_version,
+            )
+            .unwrap()
+            .install(&[
+                old_source,
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../assets/imported_scene_demo")
+                    .canonicalize()
+                    .unwrap(),
+            ])
+            .unwrap();
+            let scene = orr_sample::room_project::PreparedScene::parse(include_str!(
+                "../tests/fixtures/room_initial.scene.yaml"
+            ))
+            .unwrap();
+            let player = scene
+                .frame()
+                .entities()
+                .find(|entity| {
+                    scene
+                        .frame()
+                        .get::<orr_sample::room_game::RoomActor>(*entity)
+                        .is_some_and(|actor| actor.kind == orr_sample::room_game::PLAYER)
+                })
+                .unwrap();
+            let asset = orr_model_bindings::model_bindings::load_asset(
+                &root,
+                "sample-imported-scene",
+                "foreground.glb",
+            )
+            .unwrap();
+            let binding = orr_model_bindings::model_bindings::Binding::from_asset(
+                "sample-imported-scene".into(),
+                "foreground.glb".into(),
+                &asset,
+                orr_model_bindings::model_bindings::LocalTransform::default(),
+            )
+            .unwrap();
+            let document = orr_model_bindings::model_bindings::Document {
+                version: 2,
+                scene: "room.scene.yaml".into(),
+                project: ".".into(),
+                bindings: [(scene.index().guid(player).unwrap().to_string(), binding)]
+                    .into_iter()
+                    .collect(),
+            };
+            fs::write(
+                root.join("room.models.json"),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+            Self {
+                _temp: temp,
+                root,
+                source,
+            }
+        }
+
+        fn panel(&self) -> Panel {
+            let mut panel = Panel {
+                root: Some(self.root.clone()),
+                source: self.source.display().to_string(),
+                source_identity: self.source.display().to_string(),
+                project_generation: 4,
+                source_generation: 7,
+                verified: Some(package_manager::inspect(&self.root).unwrap()),
+                ..Panel::default()
+            };
+            panel.update_preview = Some(self.preview());
+            panel
+        }
+
+        fn preview(&self) -> PreviewedUpdate {
+            PreviewedUpdate {
+                plan: package_manager::plan_update(&self.root, &self.source).unwrap(),
+                source_identity: self.source.display().to_string(),
+                project_generation: 4,
+                source_generation: 7,
+            }
+        }
+    }
+
+    fn write_package(path: &Path, name: &str, version: &str) {
+        fs::create_dir(path).unwrap();
+        fs::write(path.join("LICENSE.txt"), format!("Owned fixture {version}")).unwrap();
+        fs::write(path.join("orr.package.json"), serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "name": name, "version": version, "engine": "*", "capabilities": [], "dependencies": {}, "files": ["LICENSE.txt"]
+        })).unwrap()).unwrap();
+    }
+
+    fn empty_lock() -> Lock {
+        Lock {
+            schema: 1,
+            direct: BTreeMap::new(),
+            packages: BTreeMap::new(),
+        }
+    }
+
+    fn wait_for_panel(panel: &mut Panel) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while panel.busy() {
+            panel.poll();
+            assert!(Instant::now() < deadline, "{}", panel.status);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn cached_model_request(panel: &Panel, kind: ModelKind) -> ModelRequest {
+        ModelRequest {
+            root: panel.root.clone().unwrap(),
+            source_identity: panel.source_identity.clone(),
+            project_generation: panel.project_generation,
+            source_generation: panel.source_generation,
+            package: "art".into(),
+            asset: "hero.glb".into(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn update_requires_current_explicit_preview_before_dispatch() {
+        let fixture = Fixture::new();
+        let before = package_manager::inspect(&fixture.root).unwrap();
+        let mut panel = fixture.panel();
+        panel.update_preview = None;
+        panel.start_update();
+        assert!(!panel.busy());
+        assert!(panel.status.contains("preview the update again"));
+        panel.update_preview = Some(fixture.preview());
+        panel.source_generation += 1;
+        panel.start_update();
+        assert!(!panel.busy());
+        assert!(panel.update_preview.is_none());
+        assert_eq!(package_manager::inspect(&fixture.root).unwrap(), before);
+    }
+
+    #[test]
+    fn update_preview_completion_rejects_project_source_and_aba_changes() {
+        let fixture = Fixture::new();
+        for mismatch in 0..4 {
+            let mut panel = fixture.panel();
+            let preview = panel.update_preview.take().unwrap();
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Completion::UpdatePreviewed {
+                    root: fixture.root.clone(),
+                    source_identity: panel.source_identity.clone(),
+                    project_generation: panel.project_generation,
+                    source_generation: panel.source_generation,
+                    result: Ok(preview.plan),
+                })
+                .unwrap();
+            panel.pending = Some(receiver);
+            match mismatch {
+                0 => panel.select_project(Some(Path::new("prior-room"))),
+                1 => {
+                    panel.source = "other-source".into();
+                    panel.select_source();
+                }
+                2 => panel.project_generation += 1,
+                _ => panel.source_generation += 1,
+            }
+            panel.poll();
+            assert!(panel.update_preview.is_none());
+            assert!(panel.status.contains("prior project or source"));
+        }
+    }
+
+    #[test]
+    fn update_completion_discards_cached_state_for_success_failure_and_stale_identity() {
+        let fixture = Fixture::new();
+        for stale in [false, true] {
+            for succeeds in [false, true] {
+                let mut panel = fixture.panel();
+                panel.model_request = Some(cached_model_request(&panel, ModelKind::Static));
+                let (sender, receiver) = mpsc::channel();
+                sender
+                    .send(Completion::Updated {
+                        root: fixture.root.clone(),
+                        source_identity: panel.source_identity.clone(),
+                        project_generation: panel.project_generation,
+                        source_generation: panel.source_generation,
+                        result: if succeeds {
+                            Ok(empty_lock())
+                        } else {
+                            Err("published lock retained; post-publication check uncertain".into())
+                        },
+                    })
+                    .unwrap();
+                panel.pending = Some(receiver);
+                panel.updating = true;
+                if stale {
+                    panel.source_generation += 1;
+                }
+                panel.poll();
+                assert!(panel.verified.is_none());
+                assert!(panel.update_preview.is_none());
+                assert!(panel.model_request.is_none());
+                assert!(panel.preview_request.is_none());
+                assert!(!panel.removal_busy());
+                if stale {
+                    assert!(panel.status.contains("prior project"));
+                }
+                if !succeeds {
+                    assert!(
+                        panel.status.contains("No automatic retry or rollback")
+                            || panel.status.contains("no automatic retry or rollback")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn update_disconnect_discards_inventory_and_reports_publication_uncertainty() {
+        let fixture = Fixture::new();
+        let mut panel = fixture.panel();
+        panel.model_request = Some(cached_model_request(&panel, ModelKind::Static));
+        let (sender, receiver) = mpsc::channel();
+        panel.pending = Some(receiver);
+        panel.updating = true;
+        drop(sender);
+        panel.poll();
+        assert!(!panel.busy());
+        assert!(!panel.updating);
+        assert!(panel.verified.is_none());
+        assert!(panel.update_preview.is_none());
+        assert!(panel.model_request.is_none());
+        assert!(panel.status.contains("publication outcome is uncertain"));
+        assert!(panel.status.contains("no automatic retry or rollback"));
+    }
+
+    #[test]
+    fn update_preview_clears_on_project_source_or_authoring_blocker() {
+        use egui_kittest::Harness;
+        let fixture = Fixture::new();
+        let mut panel = fixture.panel();
+        panel.select_project(Some(Path::new("another-room")));
+        assert!(panel.update_preview.is_none());
+        let mut panel = fixture.panel();
+        panel.source = "other-source".into();
+        panel.select_source();
+        assert!(panel.update_preview.is_none());
+        let root = fixture.root.clone();
+        let mut harness = Harness::builder().build_ui_state(
+            move |ui, panel: &mut Panel| {
+                panel.show(ui.ctx(), Some(&root), Some("Save the changed Room first"));
+            },
+            fixture.panel(),
+        );
+        harness.run_steps(2);
+        assert!(harness.state().update_preview.is_none());
+    }
+
+    #[test]
+    fn update_dispatch_discards_removal_receipt_inventory_and_model_requests() {
+        let fixture = Fixture::new();
+        let removable = fixture._temp.path().join("removable");
+        write_package(&removable, "unused", "1.0.0");
+        package_manager::apply_add(&package_manager::plan_add(&fixture.root, &removable).unwrap())
+            .unwrap();
+        let (_, receipt) = package_manager::apply_remove_with_receipt(
+            &package_manager::plan_remove(&fixture.root, "unused").unwrap(),
+        )
+        .unwrap();
+        let restoration_preview = package_manager::plan_restore(&receipt).unwrap();
+        let mut panel = fixture.panel();
+        panel.last_removal = Some(receipt);
+        panel.restoration_preview = Some(restoration_preview);
+        panel.model_request = Some(cached_model_request(&panel, ModelKind::Static));
+        let generation = panel.restoration_generation;
+        panel.start_update();
+        assert!(panel.removal_busy());
+        assert!(panel.last_removal.is_none());
+        assert!(panel.restoration_preview.is_none());
+        assert!(panel.restoration_generation > generation);
+        assert!(panel.verified.is_none());
+        assert!(panel.update_preview.is_none());
+        assert!(panel.model_request.is_none());
+        wait_for_panel(&mut panel);
+        assert!(
+            panel.status.starts_with("Package updated."),
+            "{}",
+            panel.status
+        );
+        assert!(panel.verified.is_none());
+        assert_eq!(
+            package_manager::inspect(&fixture.root).unwrap().packages["art"]
+                .manifest
+                .version,
+            "2.0.0"
+        );
+    }
+
+    #[test]
+    fn update_preview_widgets_show_full_identities_without_publishing() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let fixture = Fixture::new();
+        let mut panel = fixture.panel();
+        panel.open = true;
+        let preview = panel.update_preview.as_ref().unwrap().plan.preview();
+        let before = preview.previous.clone();
+        let old_digest = before.packages["art"].digest.clone();
+        let new_digest = preview.candidate.packages["art"].digest.clone();
+        let root = fixture.root.clone();
+        let mut harness = Harness::builder()
+            .with_size([1200.0, 1400.0])
+            .build_ui_state(
+                move |ui, panel: &mut Panel| {
+                    panel.show(ui.ctx(), Some(&root), None);
+                },
+                panel,
+            );
+        harness.run_steps(3);
+        assert!(harness.query_by_label("Preview update").is_some());
+        assert!(harness.query_by_label("Update previewed package").is_some());
+        assert!(harness.query_by_label("Installed version: 1.0.0").is_some());
+        assert!(harness.query_by_label("Proposed version: 2.0.0").is_some());
+        assert!(harness
+            .query_by_label(&format!("Installed SHA-256: {old_digest}"))
+            .is_some());
+        assert!(harness
+            .query_by_label(&format!("Proposed SHA-256: {new_digest}"))
+            .is_some());
+        assert!(!harness.state().busy());
+        assert_eq!(package_manager::inspect(&fixture.root).unwrap(), before);
+    }
+
+    #[test]
+    fn update_pending_rejects_static_and_animated_assignment_requests() {
+        let fixture = Fixture::new();
+        for kind in [ModelKind::Static, ModelKind::Animated] {
+            let mut panel = fixture.panel();
+            panel.model_request = Some(cached_model_request(&panel, kind));
+            let (_sender, receiver) = mpsc::channel();
+            panel.pending = Some(receiver);
+            panel.updating = true;
+            assert!(panel.take_model_asset_request().is_none());
+        }
+    }
+
+    #[test]
+    fn update_pending_and_completion_freeze_entire_editor_frame() {
+        use crate::{Editor, EditorApp, HostSpec, Mode};
+        use egui_kittest::{kittest::Queryable, Harness};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("room.scene.yaml");
+        let text = include_str!("../tests/fixtures/room_initial.scene.yaml").to_owned();
+        fs::write(&path, &text).unwrap();
+        let mut editor = Editor::start(&HostSpec::PreparedRoom {
+            scene: path.clone(),
+            text,
+            listen: None,
+            debug_hooks: false,
+        })
+        .unwrap();
+        editor.sync();
+        let checksum = editor.checksum();
+        let history = editor.history().clone();
+        let before = fs::read(&path).unwrap();
+        let mut harness = Harness::builder()
+            .with_size([1200.0, 800.0])
+            .build_eframe(move |_| EditorApp::new(editor, None));
+        harness.run_steps(3);
+        harness.get_by_label(crate::app::LBL_PLAY).click_accesskit();
+        let (sender, receiver) = mpsc::channel();
+        harness.state_mut().package_manager.pending = Some(receiver);
+        harness.state_mut().package_manager.updating = true;
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        harness.key_press(egui::Key::Delete);
+        harness.run_steps(3);
+        assert!(harness.query_by_label(crate::app::LBL_PLAY).is_none());
+        assert!(harness.query_by_label(crate::app::LBL_STEP).is_none());
+        assert_eq!(harness.state().editor.mode(), Mode::Edit);
+        assert_eq!(harness.state().editor.checksum(), checksum);
+        assert_eq!(harness.state().editor.history(), &history);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        sender
+            .send(Completion::Updated {
+                root: temp.path().into(),
+                source_identity: "held-source".into(),
+                project_generation: 0,
+                source_generation: 0,
+                result: Err("held update worker released".into()),
+            })
+            .unwrap();
+        harness.run_steps(1);
+        assert!(!harness.state().package_manager.removal_busy());
+        assert!(
+            harness.query_by_label(crate::app::LBL_PLAY).is_none(),
+            "completion frame must remain frozen"
+        );
+        harness.run_steps(2);
+        assert!(harness.query_by_label(crate::app::LBL_PLAY).is_some());
+        assert_eq!(harness.state().editor.mode(), Mode::Edit);
+        assert_eq!(harness.state().editor.checksum(), checksum);
+        assert_eq!(harness.state().editor.history(), &history);
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 }
