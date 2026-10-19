@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def workflow_contract(text):
-    assert text.startswith('name: Checked package update\non:\n  push:\n  pull_request:\n')
+    assert text.startswith("name: Checked package update\non:\n  push:\n    branches: [main, su/engine-correctness-hardening]\n    tags: ['**']\n  pull_request:\npermissions:\n")
     assert 'permissions:\n  contents: read\n' in text
     assert re.findall(r'^  ([a-z]+):$', text[text.index('jobs:\n'):], re.M) == ['acceptance', 'required']
     for marker in ('    runs-on: ${{ matrix.os }}\n', '    timeout-minutes: 90\n',
@@ -31,7 +31,7 @@ def workflow_contract(text):
         assert marker in text, marker
     assert re.findall(r'          - \{mode: (\w+), os: ([\w.-]+)\}', text) == list(gate.WORKFLOW_ROWS)
     assert text.count('      matrix:\n') == 1
-    for marker in ('continue-on-error', 'paths-ignore', 'paths:', 'branches:', 'cargo test', 'rust-cache'):
+    for marker in ('continue-on-error', 'paths-ignore', 'paths:', 'branches-ignore:', 'cargo test', 'rust-cache'):
         assert marker not in text
     assert [line.strip() for line in text.splitlines() if line.strip().startswith('if:')] == [
         "if: matrix.mode == 'ui'", 'if: always()', 'if: always()']
@@ -60,6 +60,21 @@ class Fixtures(unittest.TestCase):
 
     def test_workflow_negative_mutations(self):
         original = (ROOT / '.github/workflows/package-update.yml').read_text()
+        # Trigger changes must preserve every PR and tag while avoiding feature-push duplicates.
+        trigger_filters = "    branches: [main, su/engine-correctness-hardening]\n    tags: ['**']\n"
+        for old, new in [
+            (trigger_filters, ''),
+            ('branches: [main, su/engine-correctness-hardening]', "branches: ['**']"),
+            ('branches: [main, su/engine-correctness-hardening]', 'branches: [main]'),
+            ('branches: [main, su/engine-correctness-hardening]', 'branches: [su/engine-correctness-hardening]'),
+            ("    tags: ['**']\n", ''),
+            ("tags: ['**']", "tags: ['v*']"),
+            ('  pull_request:\n', ''),
+            ('  pull_request:\n', '  pull_request:\n    branches: [main]\n'),
+            ('  pull_request:\n', '  pull_request:\n    paths: [src/**]\n'),
+        ]:
+            with self.subTest(trigger=old), self.assertRaises(AssertionError):
+                workflow_contract(original.replace(old, new, 1))
         for old, new in [('mode: ui', 'mode: cpu'), ('windows-latest', 'ubuntu-22.04'),
                          ('if-no-files-found: error', 'if-no-files-found: warn'),
                          ('include-hidden-files: true', 'include-hidden-files: false'),
