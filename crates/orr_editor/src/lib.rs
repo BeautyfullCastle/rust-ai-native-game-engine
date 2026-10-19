@@ -211,11 +211,11 @@ pub mod windows_export_panel;
 pub mod windows_project_panel;
 #[cfg(feature="room-authoring")]
 pub mod room_authoring_panel;
-#[cfg(all(feature="room-authoring", any(test, all(windows, target_arch="x86_64"))))]
+#[cfg(all(feature="room-authoring", any(test, all(any(windows, target_os="linux"), target_arch="x86_64"))))]
 mod room_wall_stamp;
-#[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))]
+#[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))]
 mod room_wall_stamp_store;
-#[cfg(all(windows,target_arch="x86_64",feature="room-authoring"))]
+#[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))]
 mod room_wall_stamp_panel;
 #[cfg(feature="package-manager")]
 pub mod package_manager;
