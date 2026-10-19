@@ -4,7 +4,7 @@ This optional Room-authoring tool captures only ordinary static walls and their 
 
 Room wall groups let you save a selected set of ordinary Room walls as a reusable local stamp, then instantiate translated copies in another part of a Room scene. They are expanded actors, not linked prefabs: after instantiation, the scene contains independent wall entities with newly allocated GUIDs and the original wall components. The game schema and runtime do not gain a stamp dependency.
 
-The optional `room-authoring` feature enables this panel on Windows and Linux x86_64. Other targets remain gated. Translation is supported; quarter-turn rotation is not part of this feature.
+The optional `room-authoring` feature enables this panel on Windows and Linux x86_64. Other targets remain gated. Translation and exact X/Z quarter-turn placement (0°, 90°, 180°, 270°) are supported; see [quarter-turn placement and acceptance](room-wall-group-rotation.md). Arbitrary-angle rotation remains out of scope.
 
 ## Workflow
 

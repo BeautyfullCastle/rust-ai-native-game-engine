@@ -240,6 +240,8 @@ fn invalid_selection_offsets_and_wall_count_refusals_preserve_document_and_histo
         .editor
         .instantiate_room_wall_stamp(&template, [FP::MAX, FP::ZERO])
         .is_err());
+    // ERP notifications may lag; refresh caches before observing rollback.
+    fixture.editor.sync();
     assert_eq!(fixture.editor.checksum(), checksum);
     assert_eq!(fixture.editor.history().entries.len(), history_len);
     assert!(!fixture.editor.history().in_tx);
@@ -249,6 +251,8 @@ fn invalid_selection_offsets_and_wall_count_refusals_preserve_document_and_histo
         .editor
         .instantiate_room_wall_stamp(&template, [FP::from_int(20), FP::ZERO])
         .is_err());
+    // ERP notifications may lag; refresh caches before observing rollback.
+    fixture.editor.sync();
     assert_eq!(fixture.editor.checksum(), checksum);
     assert_eq!(fixture.editor.history().entries.len(), history_len);
     assert!(!fixture.editor.history().in_tx);
@@ -265,6 +269,8 @@ fn invalid_selection_offsets_and_wall_count_refusals_preserve_document_and_histo
         .editor
         .instantiate_room_wall_stamp(&oversized, [FP::ZERO; 2])
         .is_err());
+    // ERP notifications may lag; refresh caches before observing rollback.
+    fixture.editor.sync();
     assert_eq!(fixture.editor.checksum(), checksum);
     assert_eq!(fixture.editor.history().entries.len(), history_len);
     assert!(!fixture.editor.history().in_tx);
