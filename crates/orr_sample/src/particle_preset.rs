@@ -1,4 +1,4 @@
-//! Bounded, burst-only particle authoring documents. No simulation state or renderer.
+//! Bounded, versioned particle authoring documents. No simulation state or renderer.
 //!
 //! File operations require a trusted directory tree: static final-component symlinks
 //! and nonregular inputs are rejected, but parent symlinks and concurrent path
@@ -10,7 +10,11 @@ use orr_view::{
     particles::{EmitterDesc, ParticleBlend},
     Vec3,
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, MapAccess, Visitor},
+    ser::SerializeStruct,
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 use std::{
     fmt,
     fs::{self, File, OpenOptions},
@@ -20,6 +24,7 @@ use std::{
 
 pub const MAX_PRESET_BYTES: usize = 64 * 1024;
 pub const PRESET_SCHEMA: u32 = 1;
+pub const TIMED_PRESET_SCHEMA: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -28,13 +33,15 @@ pub enum PresetBlend {
     Additive,
 }
 
-/// Schema 1 requires every field, rejects unknown/duplicate fields, and stores no
-/// event identity, origin, seed, continuous emission rate, or duration.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Normalized authoring data. Schema 1 omits timed fields on the wire and requires
+/// them to be zero in memory; schema 2 requires both fields, even when zero.
+/// Neither schema stores runtime event identity, origin, or seed.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParticlePreset {
     pub schema: u32,
     pub burst: u32,
+    pub rate: f32,
+    pub duration: f32,
     pub lifetime: f32,
     pub velocity: [f32; 3],
     pub velocity_jitter: [f32; 3],
@@ -49,6 +56,8 @@ impl Default for ParticlePreset {
         Self {
             schema: PRESET_SCHEMA,
             burst: 16,
+            rate: 0.0,
+            duration: 0.0,
             lifetime: 0.5,
             velocity: [0.0, 1.0, 0.0],
             velocity_jitter: [1.1, 0.8, 1.1],
@@ -58,6 +67,124 @@ impl Default for ParticlePreset {
             color_end: [1.0, 0.3, 0.05, 0.0],
             blend: PresetBlend::Additive,
         }
+    }
+}
+
+// Keep these strict wire types separate from normalized public state. In particular,
+// a V1 document cannot sneak in timed fields with zero or null values.
+macro_rules! wire_type {
+    ($name:ident { $($extra:tt)* }) => {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct $name {
+            schema: u32,
+            burst: u32,
+            lifetime: f32,
+            velocity: [f32; 3],
+            velocity_jitter: [f32; 3],
+            size_start: f32,
+            size_end: f32,
+            color_start: [f32; 4],
+            color_end: [f32; 4],
+            blend: PresetBlend,
+            $($extra)*
+        }
+    };
+}
+wire_type!(WireV1 {});
+wire_type!(WireV2 {
+    rate: f32,
+    duration: f32,
+});
+wire_type!(WireEither {
+    #[serde(default, deserialize_with = "present_number")]
+    rate: Option<f32>,
+    #[serde(default, deserialize_with = "present_number")]
+    duration: Option<f32>,
+});
+
+fn present_number<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
+    // Absence is distinct from null; null must never stand for a missing field.
+    f32::deserialize(d).map(Some)
+}
+
+macro_rules! normalize_wire {
+    ($wire:expr, $rate:expr, $duration:expr) => {{
+        let wire = $wire;
+        ParticlePreset {
+            schema: wire.schema,
+            burst: wire.burst,
+            rate: $rate,
+            duration: $duration,
+            lifetime: wire.lifetime,
+            velocity: wire.velocity,
+            velocity_jitter: wire.velocity_jitter,
+            size_start: wire.size_start,
+            size_end: wire.size_end,
+            color_start: wire.color_start,
+            color_end: wire.color_end,
+            blend: wire.blend,
+        }
+    }};
+}
+
+impl Serialize for ParticlePreset {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let timed = self.schema == TIMED_PRESET_SCHEMA;
+        let mut state =
+            serializer.serialize_struct("ParticlePreset", if timed { 12 } else { 10 })?;
+        // Preserve the original V1 serialized field order exactly.
+        state.serialize_field("schema", &self.schema)?;
+        state.serialize_field("burst", &self.burst)?;
+        state.serialize_field("lifetime", &self.lifetime)?;
+        state.serialize_field("velocity", &self.velocity)?;
+        state.serialize_field("velocity_jitter", &self.velocity_jitter)?;
+        state.serialize_field("size_start", &self.size_start)?;
+        state.serialize_field("size_end", &self.size_end)?;
+        state.serialize_field("color_start", &self.color_start)?;
+        state.serialize_field("color_end", &self.color_end)?;
+        state.serialize_field("blend", &self.blend)?;
+        if timed {
+            state.serialize_field("rate", &self.rate)?;
+            state.serialize_field("duration", &self.duration)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ParticlePreset {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PresetVisitor;
+        impl<'de> Visitor<'de> for PresetVisitor {
+            type Value = ParticlePreset;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a schema 1 or 2 particle preset object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                // Consume the original map, preserving duplicate-field detection.
+                let wire = WireEither::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                let (rate, duration) = match wire.schema {
+                    PRESET_SCHEMA if wire.rate.is_none() && wire.duration.is_none() => (0.0, 0.0),
+                    PRESET_SCHEMA => {
+                        return Err(de::Error::custom("schema 1 forbids rate and duration"))
+                    }
+                    TIMED_PRESET_SCHEMA => (
+                        wire.rate.ok_or_else(|| de::Error::missing_field("rate"))?,
+                        wire.duration
+                            .ok_or_else(|| de::Error::missing_field("duration"))?,
+                    ),
+                    schema => {
+                        return Err(de::Error::custom(PresetError::UnsupportedSchema(schema)))
+                    }
+                };
+                let preset = normalize_wire!(wire, rate, duration);
+                preset.validate().map_err(de::Error::custom)?;
+                Ok(preset)
+            }
+        }
+        // Unlike a derived struct deserializer, never accept positional arrays.
+        deserializer.deserialize_map(PresetVisitor)
     }
 }
 
@@ -82,11 +209,12 @@ impl fmt::Display for PresetError {
                 f.write_str("particle preset must be a regular file, not a symlink")
             }
             Self::UnsupportedSchema(schema) => {
-                write!(f, "unsupported particle preset schema {schema}; expected 1")
+                write!(
+                    f,
+                    "unsupported particle preset schema {schema}; expected 1 or 2"
+                )
             }
-            Self::InvalidEmitter => {
-                f.write_str("particle preset violates burst-only emitter bounds")
-            }
+            Self::InvalidEmitter => f.write_str("particle preset violates emitter bounds"),
         }
     }
 }
@@ -114,12 +242,14 @@ impl ParticlePreset {
     pub fn validate(&self) -> Result<(), PresetError> {
         self.to_emitter(Vec3::new(0.0, 0.0, 0.0), 0).map(|_| ())
     }
-    /// Runtime supplies the event's origin and seed. Rate and duration are always zero.
+    /// Runtime supplies the event's origin and seed; authoring supplies emission timing.
     pub fn to_emitter(&self, origin: Vec3, seed: u64) -> Result<EmitterDesc, PresetError> {
-        if self.schema != PRESET_SCHEMA {
+        if !matches!(self.schema, PRESET_SCHEMA | TIMED_PRESET_SCHEMA) {
             return Err(PresetError::UnsupportedSchema(self.schema));
         }
-        if self.burst == 0 {
+        if (self.schema == PRESET_SCHEMA && (self.rate != 0.0 || self.duration != 0.0))
+            || (self.burst == 0 && !(self.rate > 0.0 && self.duration > 0.0))
+        {
             return Err(PresetError::InvalidEmitter);
         }
         let emitter = EmitterDesc {
@@ -133,8 +263,8 @@ impl ParticlePreset {
                 self.velocity_jitter[1],
                 self.velocity_jitter[2],
             ),
-            rate: 0.0,
-            duration: 0.0,
+            rate: self.rate,
+            duration: self.duration,
             size_start: self.size_start,
             size_end: self.size_end,
             color_start: self.color_start,
@@ -163,7 +293,25 @@ impl ParticlePreset {
         {
             return Err(PresetError::InvalidRoot);
         }
-        let preset: Self = serde_json::from_slice(bytes)?;
+        #[derive(Deserialize)]
+        struct Header {
+            schema: u32,
+        }
+        // Dispatch is bounded by MAX_PRESET_BYTES. Reparse ORIGINAL bytes with a
+        // strict version-specific type: no Value map can discard duplicate keys.
+        let header: Header = serde_json::from_slice(bytes)?;
+        let preset = match header.schema {
+            PRESET_SCHEMA => {
+                let wire: WireV1 = serde_json::from_slice(bytes)?;
+                normalize_wire!(wire, 0.0, 0.0)
+            }
+            TIMED_PRESET_SCHEMA => {
+                let wire: WireV2 = serde_json::from_slice(bytes)?;
+                let (rate, duration) = (wire.rate, wire.duration);
+                normalize_wire!(wire, rate, duration)
+            }
+            schema => return Err(PresetError::UnsupportedSchema(schema)),
+        };
         preset.validate()?;
         Ok(preset)
     }
@@ -216,6 +364,220 @@ impl ParticlePreset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Literal historical V1 document: independent of the current serializer.
+    const OLD_V1: &str = r#"{"schema":1,"burst":16,"lifetime":0.5,"velocity":[0.0,1.0,0.0],"velocity_jitter":[1.1,0.8,1.1],"size_start":0.12,"size_end":0.0,"color_start":[1.0,0.72,0.15,0.9],"color_end":[1.0,0.3,0.05,0.0],"blend":"additive"}"#;
+
+    fn assert_rejected_by_both(text: &str) {
+        assert!(
+            ParticlePreset::from_bytes(text.as_bytes()).is_err(),
+            "{text}"
+        );
+        assert!(
+            serde_json::from_str::<ParticlePreset>(text).is_err(),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn historical_v1_literal_and_field_order_are_unchanged() {
+        let preset = ParticlePreset::from_bytes(OLD_V1.as_bytes()).unwrap();
+        assert_eq!(preset, ParticlePreset::default());
+        assert_eq!((preset.schema, preset.burst), (1, 16));
+        assert_eq!((preset.rate, preset.duration), (0.0, 0.0));
+        assert_eq!(serde_json::to_string(&preset).unwrap(), OLD_V1);
+        assert_eq!(
+            serde_json::from_str::<ParticlePreset>(OLD_V1).unwrap(),
+            preset
+        );
+        assert_eq!(
+            ParticlePreset::from_bytes(&preset.to_bytes().unwrap()).unwrap(),
+            preset
+        );
+        for field in ["rate", "duration"] {
+            for value in ["0", "null", "1"] {
+                assert_rejected_by_both(&OLD_V1.replacen(
+                    '{',
+                    &format!("{{\"{field}\":{value},"),
+                    1,
+                ));
+            }
+            let mut invalid = preset.clone();
+            if field == "rate" {
+                invalid.rate = 1.0;
+            } else {
+                invalid.duration = 1.0;
+            }
+            assert!(invalid.validate().is_err());
+            assert!(invalid.to_bytes().is_err());
+            assert!(serde_json::to_string(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn timed_schema_round_trip_and_inactive_dimensions_preserve_version() {
+        for blend in [PresetBlend::Alpha, PresetBlend::Additive] {
+            for (burst, rate, duration) in [
+                (0, 12.0, 0.5),
+                (16, 0.0, 0.0),
+                (16, 12.0, 0.0),
+                (16, 0.0, 0.5),
+            ] {
+                let preset = ParticlePreset {
+                    schema: TIMED_PRESET_SCHEMA,
+                    burst,
+                    rate,
+                    duration,
+                    blend,
+                    ..ParticlePreset::default()
+                };
+                let bytes = preset.to_bytes().unwrap();
+                let text = std::str::from_utf8(&bytes).unwrap();
+                assert_eq!(ParticlePreset::from_bytes(&bytes).unwrap(), preset);
+                assert_eq!(
+                    serde_json::from_slice::<ParticlePreset>(&bytes).unwrap(),
+                    preset
+                );
+                assert!(text.contains("\"schema\": 2"));
+                assert!(text.contains("\"rate\":"));
+                assert!(text.contains("\"duration\":"));
+                assert!(!text.contains("origin"));
+                assert!(!text.contains("seed"));
+                let emitter = preset.to_emitter(Vec3::new(1.0, 2.0, 3.0), 42).unwrap();
+                assert_eq!(
+                    (emitter.burst, emitter.rate, emitter.duration),
+                    (burst, rate, duration)
+                );
+                assert_eq!(emitter.origin, Vec3::new(1.0, 2.0, 3.0));
+                assert_eq!(emitter.seed, 42);
+                assert_eq!(
+                    emitter.blend,
+                    match blend {
+                        PresetBlend::Alpha => ParticleBlend::Alpha,
+                        PresetBlend::Additive => ParticleBlend::Additive,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn timed_schema_strict_fields_and_direct_serde_contract() {
+        let base = OLD_V1.replace("\"schema\":1", "\"schema\":2");
+        assert_rejected_by_both(&base);
+        let valid = base.replacen('{', "{\"rate\":12,\"duration\":0.5,", 1);
+        assert!(ParticlePreset::from_bytes(valid.as_bytes()).is_ok());
+        for (old, replacement) in [
+            ("\"rate\":12,", ""),
+            ("\"duration\":0.5,", ""),
+            ("\"rate\":12", "\"rate\":null"),
+            ("\"duration\":0.5", "\"duration\":null"),
+            ("\"rate\":12", "\"rate\":\"12\""),
+            ("\"duration\":0.5", "\"duration\":false"),
+            ("\"schema\":2", "\"schema\":3"),
+        ] {
+            assert_rejected_by_both(&valid.replace(old, replacement));
+        }
+        for member in [
+            "\"rate\":12",
+            "\"duration\":0.5",
+            "\"schema\":2",
+            "\"burst\":16",
+            "\"extra\":0",
+            "\"origin\":[0,0,0]",
+            "\"seed\":42",
+        ] {
+            assert_rejected_by_both(&valid.replacen('{', &format!("{{{member},"), 1));
+        }
+        // A schema field at the end also works, with no order-dependent defaults.
+        let last_schema = valid
+            .replace("\"schema\":2,", "")
+            .replace('}', ",\"schema\":2}");
+        assert!(serde_json::from_str::<ParticlePreset>(&last_schema).is_ok());
+        assert!(ParticlePreset::from_bytes(last_schema.as_bytes()).is_ok());
+        assert_rejected_by_both(&format!("{valid} {{}}"));
+        for invalid in [
+            "[]",
+            "null",
+            "true",
+            r#"[2,16,0.5,[0,1,0],[1,1,1],0.12,0,[1,1,1,1],[1,1,1,0],"additive",12,0.5]"#,
+        ] {
+            assert_rejected_by_both(invalid);
+        }
+    }
+
+    #[test]
+    fn timed_emitter_boundaries_and_nonfinite_values_are_rejected_consistently() {
+        let boundary = ParticlePreset {
+            schema: TIMED_PRESET_SCHEMA,
+            burst: 1024,
+            rate: 4096.0,
+            duration: 10.0,
+            lifetime: 10.0,
+            ..ParticlePreset::default()
+        };
+        assert!(boundary.validate().is_ok());
+        for (burst, rate, duration, lifetime) in [
+            (0, 1.0, 0.001, 0.001),
+            (1024, 4096.0, 10.0, 10.0),
+            (1, 0.0, 0.0, 0.001),
+        ] {
+            let preset = ParticlePreset {
+                burst,
+                rate,
+                duration,
+                lifetime,
+                ..boundary.clone()
+            };
+            assert_eq!(
+                ParticlePreset::from_bytes(&preset.to_bytes().unwrap()).unwrap(),
+                preset
+            );
+        }
+        for (burst, rate, duration) in [
+            (0, 0.0, 1.0),
+            (0, 1.0, 0.0),
+            (0, 0.0, 0.0),
+            (1025, 1.0, 1.0),
+        ] {
+            let invalid = ParticlePreset {
+                burst,
+                rate,
+                duration,
+                ..boundary.clone()
+            };
+            assert!(invalid.validate().is_err());
+            assert!(serde_json::to_string(&invalid).is_err());
+        }
+        for field in ["rate", "duration", "lifetime"] {
+            for value in [
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                -0.001,
+                100_001.0,
+            ] {
+                let mut invalid = boundary.clone();
+                match field {
+                    "rate" => invalid.rate = value,
+                    "duration" => invalid.duration = value,
+                    _ => invalid.lifetime = value,
+                }
+                assert!(invalid.validate().is_err(), "{field}={value}");
+                assert!(invalid.to_bytes().is_err());
+                assert!(serde_json::to_string(&invalid).is_err());
+            }
+        }
+        for (rate, duration) in [(4096.001, 10.0), (4096.0, 10.001)] {
+            assert!(ParticlePreset {
+                rate,
+                duration,
+                ..boundary.clone()
+            }
+            .validate()
+            .is_err());
+        }
+    }
 
     #[test]
     fn round_trip_preserves_every_field_and_runtime_inputs_are_not_serialized() {

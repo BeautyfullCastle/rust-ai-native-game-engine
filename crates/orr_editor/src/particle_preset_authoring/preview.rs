@@ -1,4 +1,4 @@
-//! Pure, isolated burst playback of an explicitly accepted document snapshot.
+//! Pure, isolated particle playback of an explicitly accepted document snapshot.
 //!
 //! The preview origin is world zero and the seed is fixed across starts/restarts.
 //! Repeatability is for the same snapshot and delta sequence, not simulation state.
@@ -50,9 +50,9 @@ impl Preview {
         self.playing = false;
     }
 
-    /// An expired burst stays stopped; use Restart to emit it again.
+    /// An expired session stays stopped; use Restart to emit it again.
     pub fn resume(&mut self) {
-        self.playing = self.active() && self.pool.particle_count() > 0;
+        self.playing = self.active() && self.live();
     }
 
     /// Closing discards the snapshot, particles, and all event bookkeeping.
@@ -72,10 +72,14 @@ impl Preview {
             return Ok(());
         }
         self.pool.advance(dt.min(MAX_STEP))?;
-        if self.pool.particle_count() == 0 {
+        if !self.live() {
             self.playing = false;
         }
         Ok(())
+    }
+
+    fn live(&self) -> bool {
+        self.pool.particle_count() > 0 || self.pool.emitter_count() > 0
     }
 
     pub fn draws(&self) -> impl ExactSizeIterator<Item = ParticleDraw> + '_ {
@@ -256,5 +260,89 @@ mod tests {
         assert_eq!(preview.draws().len(), 0);
         preview.start(&ParticlePreset::default()).unwrap();
         assert_eq!(draws(&preview), draws(&started()));
+    }
+    fn timed(rate: f32, duration: f32, lifetime: f32) -> ParticlePreset {
+        ParticlePreset {
+            schema: 2,
+            burst: 0,
+            rate,
+            duration,
+            lifetime,
+            ..ParticlePreset::default()
+        }
+    }
+
+    #[test]
+    fn timed_empty_start_gaps_and_last_particle_remain_live() {
+        let mut p = Preview::default();
+        p.start(&timed(4.0, 1.0, 0.125)).unwrap();
+        assert!(p.playing());
+        assert_eq!(p.draws().len(), 0);
+        p.pause();
+        p.resume();
+        assert!(p.playing());
+        for (count, emitters, playing) in [
+            (0, 1, true),
+            (1, 1, true),
+            (0, 1, true),
+            (1, 1, true),
+            (0, 1, true),
+            (1, 1, true),
+            (0, 1, true),
+            (1, 0, true),
+            (0, 0, false),
+        ] {
+            p.advance(0.125, true, true).unwrap();
+            assert_eq!(p.draws().len(), count);
+            assert_eq!(p.pool.emitter_count(), emitters);
+            assert_eq!(p.playing(), playing);
+        }
+        p.resume();
+        assert!(!p.playing());
+        p.restart().unwrap();
+        assert!(p.playing());
+        assert_eq!(p.draws().len(), 0);
+    }
+
+    #[test]
+    fn timed_subparticle_rate_expires_without_drawing_and_budget_is_bounded() {
+        let mut p = Preview::default();
+        p.start(&timed(0.5, 1.0, 0.125)).unwrap();
+        for n in 1..=4 {
+            p.advance(0.25, true, true).unwrap();
+            assert_eq!(p.draws().len(), 0);
+            assert_eq!(p.playing(), n < 4);
+        }
+        p.start(&timed(4096.0, 10.0, 10.0)).unwrap();
+        for _ in 0..40 {
+            p.advance(0.25, true, true).unwrap();
+            assert_eq!(p.draws().len(), 1024);
+        }
+    }
+
+    #[test]
+    fn timed_pause_focus_and_restart_preserve_same_sequence() {
+        let preset = timed(4.0, 1.0, 0.125);
+        let mut p = Preview::default();
+        let mut reference = Preview::default();
+        p.start(&preset).unwrap();
+        reference.start(&preset).unwrap();
+        p.advance(0.125, true, true).unwrap();
+        reference.advance(0.125, true, true).unwrap();
+        p.pause();
+        p.advance(100.0, true, true).unwrap();
+        p.resume();
+        for (focused, visible) in [(false, true), (true, false), (false, false)] {
+            p.advance(100.0, focused, visible).unwrap();
+        }
+        p.advance(0.125, true, true).unwrap();
+        reference.advance(0.125, true, true).unwrap();
+        assert_eq!(draws(&p), draws(&reference));
+        assert_eq!(p.pool.emitter_count(), reference.pool.emitter_count());
+        let emitted = draws(&p);
+        p.restart().unwrap();
+        p.advance(0.125, true, true).unwrap();
+        p.advance(0.125, true, true).unwrap();
+        assert_eq!(draws(&p), emitted);
     }
 }

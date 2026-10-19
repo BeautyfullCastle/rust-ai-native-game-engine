@@ -677,3 +677,7 @@ mod showcase_tests;
 #[cfg(all(test, feature = "particle-preset"))]
 #[path = "particle_preset_runtime_tests.rs"]
 mod preset_tests;
+
+#[cfg(all(test, feature = "particle-preset"))]
+#[path = "particle_timed_runtime_tests.rs"]
+mod timed_preset_tests;

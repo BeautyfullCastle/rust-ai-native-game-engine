@@ -1,6 +1,6 @@
 # Standalone particle preset authoring
 
-The default-off editor authors presentation-only burst presets. It does not
+The default-off editor authors presentation-only particle presets. It does not
 modify a project, simulation, runtime origin/seed, particle pool, or main editor.
 Existing eframe/egui dependencies are reused; no new external dependency is needed.
 
@@ -109,7 +109,7 @@ high, eye at [0,0,20], Y up). Off-screen particles are clipped. This is an isola
 presentation example, not a running game or simulation. Unfocused, minimized,
 occluded, collapsed and paused previews freeze. Transition frames reset their
 clock, and a single frame is bounded to 0.25 seconds without catch-up debt. Only a
-visible, focused, nonempty, playing GPU preview requests animation repaints.
+visible, focused, playing preview requests animation repaints.
 If a GPU is unavailable, authoring stays usable and the preview displays a clear
 unavailable message; it does not substitute fake particles or CPU circles.
 
@@ -124,3 +124,34 @@ checks native texture cleanup on Close and App drop. Set
 The existing authoring → saved file → runtime acceptance remains separate and
 unchanged. GPU captures establish software-rendered output, not native OS input,
 hardware GPU performance or frame pacing.
+
+## Timed emission (schema 2)
+
+The draft-only **Emission mode** selector chooses **Burst (schema 1)** or
+**Timed (schema 2)**. Timed mode exposes **Rate per second** and **Emitter duration
+seconds**; particle lifetime remains separate. Apply is the only acceptance step.
+Defaults remain schema 1. Opening/editing a schema-2 document retains its version.
+Switching to schema 1 with nonzero timed fields fails Apply rather than dropping
+them; switch back to Timed, zero both fields and choose a positive burst first.
+A zero burst is valid in schema 2 when rate and duration are both positive.
+
+The accepted summary distinguishes burst count, emission rate, emitter duration,
+and particle lifetime. Dirty drafts, snapshot isolation, bounded 32-edit history,
+Undo/Redo, accepted-only Save As, no-overwrite and invalid-Open atomicity apply to
+both versions. Schema-1 documents keep their original wire format and behavior.
+
+Preview stays playing while either emitters or particles remain. Empty initial
+frames and gaps between short-lived particles still request animation repaints.
+An emitter can expire without ever drawing (for example rate 0.5/s for one second).
+Pause/focus/visibility clock freezing and explicit restart are unchanged. The
+existing pool caps concurrent particles at 1024 even at rate 4096/s for 10 seconds.
+
+The additive `particle_preset_timed_ui` test drives actual production widgets,
+checks empty-frame repaint output (not only forced manual stepping), and exercises
+schema/history/draft/file regressions. Its ignored
+`timed_preview_widgets_have_real_gpu_pixels` acceptance requires software Vulkan,
+`ORR_PARTICLE_TIMED_EVIDENCE` (existing absolute directory), and
+`ORR_PARTICLE_TIMED_ACCEPTANCE_FILE` (new absolute filename). It saves a real
+widget-authored schema-2 document for runtime acceptance and captures exact empty,
+first-emission, live-gap and expired GPU targets plus the full editor window.
+The old schema-1 UI/preview acceptance tests remain unchanged.

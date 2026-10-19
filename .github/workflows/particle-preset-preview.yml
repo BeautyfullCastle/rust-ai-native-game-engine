@@ -98,12 +98,12 @@ jobs:
           preview = ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features",
                      "--features", "particle-preset-preview", "--test", "particle_preset_preview_ui"]
           # Counts are pinned to this acceptance contract; zero-test filters fail.
-          schema_gpu = inventory("schema", sample, "particle_preset::tests::", 6, 0)
+          schema_gpu = inventory("schema", sample, "particle_preset::tests::", 10, 0)
           runtime_gpu = inventory("runtime", sample, "particle_demo::preset_tests::", 3, 1)
-          editor_gpu = inventory("editor", editor, "", 6, 1)
+          editor_gpu = inventory("editor", editor, "", 7, 1)
           if editor_gpu != ["particle_preset_widgets_have_real_gpu_pixels"]:
               raise RuntimeError("Unexpected editor GPU inventory")
-          preview_gpu = inventory("preview", preview, "", 13, 1)
+          preview_gpu = inventory("preview", preview, "", 17, 1)
           if preview_gpu != ["embedded_preview_widgets_have_real_gpu_pixels"]:
               raise RuntimeError("Unexpected preview GPU inventory")
           for label, package, args in (
