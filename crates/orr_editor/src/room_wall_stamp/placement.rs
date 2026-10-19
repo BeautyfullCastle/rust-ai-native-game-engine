@@ -12,6 +12,20 @@ impl Template {
         pivot: [FP; 2],
         offset: [FP; 2],
     ) -> Result<Self, String> {
+        self.placed_with_mirror(quarter_turns, false, pivot, offset)
+    }
+
+    /// Place a copy after optionally reflecting its local X axis around `pivot`.
+    /// Mirroring happens before the quarter-turn, then the pivot is restored and
+    /// the offset is added. Only odd quarter-turns swap X/Z extents; static physics and the
+    /// source template stay unchanged.
+    pub(crate) fn placed_with_mirror(
+        &self,
+        quarter_turns: u8,
+        mirror_x: bool,
+        pivot: [FP; 2],
+        offset: [FP; 2],
+    ) -> Result<Self, String> {
         if quarter_turns > 3 {
             return Err("wall stamp quarter-turns must be in 0..=3".into());
         }
@@ -23,7 +37,7 @@ impl Template {
                 .as_array_mut()
                 .ok_or("wall Body.pos must be a vector")?;
             let center = [fixed(&position[0])?, fixed(&position[2])?];
-            let transformed = place_center(center, quarter_turns, pivot, offset)?;
+            let transformed = place_center(center, quarter_turns, mirror_x, pivot, offset)?;
             for (index, before, after) in [
                 (0, center[0], transformed[0]),
                 (2, center[1], transformed[1]),
@@ -51,6 +65,7 @@ impl Template {
 fn place_center(
     center: [FP; 2],
     quarter_turns: u8,
+    mirror_x: bool,
     pivot: [FP; 2],
     offset: [FP; 2],
 ) -> Result<[FP; 2], String> {
@@ -59,6 +74,11 @@ fn place_center(
     let dx = i128::from(center[0].raw())
         .checked_sub(i128::from(pivot[0].raw()))
         .ok_or(OVERFLOW)?;
+    let dx = if mirror_x {
+        dx.checked_neg().ok_or(OVERFLOW)?
+    } else {
+        dx
+    };
     let dz = i128::from(center[1].raw())
         .checked_sub(i128::from(pivot[1].raw()))
         .ok_or(OVERFLOW)?;

@@ -14,6 +14,7 @@ pub(crate) struct Panel {
     pub offset: [String; 2],
     pub pivot: [String; 2],
     pub quarter_turns: u8,
+    pub mirror_x: bool,
     pub status: String,
     walls: Vec<RoomWall>,
     selected: BTreeSet<String>,
@@ -32,6 +33,7 @@ impl Default for Panel {
             offset: ["0".into(), "0".into()],
             pivot: ["0".into(), "0".into()],
             quarter_turns: 0,
+            mirror_x: false,
             status: String::new(),
             walls: Vec::new(),
             selected: BTreeSet::new(),
@@ -176,7 +178,8 @@ impl Panel {
                             ui.selectable_value(&mut self.quarter_turns, turns, label);
                         }
                     });
-                    ui.small("+90° maps +X to +Z. Rotate around the pivot, then add the offset.");
+                    ui.checkbox(&mut self.mirror_x, "Mirror X around pivot");
+                    ui.small("+90° maps +X to +Z. Mirror local X first, then rotate around the pivot and add the offset.");
                     position_fields(ui, "Stamp pivot", &mut self.pivot);
                     position_fields(ui, "Stamp offset", &mut self.offset);
                     let offset = parse_position(&self.offset);
@@ -199,11 +202,14 @@ impl Panel {
                         match (self.template.as_ref(), offset, pivot) {
                             (Some(template), Ok(offset), Ok(pivot)) => {
                                 // Placement operates on a copy so saving still writes the source stamp.
-                                let result = template
-                                    .placed(self.quarter_turns, pivot, offset)
-                                    .and_then(|placed| {
-                                        editor.instantiate_room_wall_stamp(&placed, [FP::ZERO; 2])
-                                    });
+                                let placed = if self.mirror_x {
+                                    template.placed_with_mirror(self.quarter_turns, true, pivot, offset)
+                                } else {
+                                    template.placed(self.quarter_turns, pivot, offset)
+                                };
+                                let result = placed.and_then(|placed| {
+                                    editor.instantiate_room_wall_stamp(&placed, [FP::ZERO; 2])
+                                });
                                 match result {
                                     Ok(guids) => {
                                         self.selected = guids.iter().cloned().collect();
@@ -304,6 +310,7 @@ mod tests {
     fn placement_defaults_preserve_unrotated_origin_and_offset() {
         let panel = Panel::default();
         assert_eq!(panel.quarter_turns, 0);
+        assert!(!panel.mirror_x);
         assert_eq!(parse_position(&panel.pivot).unwrap(), [FP::ZERO; 2]);
         assert_eq!(parse_position(&panel.offset).unwrap(), [FP::ZERO; 2]);
     }

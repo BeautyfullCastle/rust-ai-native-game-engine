@@ -1,0 +1,72 @@
+name: Room wall mirror additive CPU and Linux UI acceptance
+on:
+  pull_request:
+  push:
+    branches: [su/engine-correctness-hardening]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  room-wall-mirror:
+    # Additive only: existing rotation/store/Windows hardware UI gates remain required.
+    # These hosted routes supply no Windows hardware-Vulkan or physical-input proof.
+    name: room wall mirror (${{ matrix.mode }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: cpu
+            os: ubuntu-22.04
+          - mode: cpu
+            os: windows-latest
+          - mode: gpu
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      PYTHONDONTWRITEBYTECODE: '1'
+      ORR_ROOM_WALL_MIRROR_EVIDENCE: ${{ runner.temp }}/room-wall-mirror-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux software Vulkan for the mandatory UI route
+        if: matrix.mode == 'gpu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1
+      - name: Require current-source mirror acceptance and preserved regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset PYTHONOPTIMIZE
+          python -B tools/room_wall_mirror_gate.py "${{ matrix.mode }}" --evidence "$ORR_ROOM_WALL_MIRROR_EVIDENCE"
+      - name: Retain producers, screenshots, receipts and partial failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-wall-mirror-${{ matrix.mode }}-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_ROOM_WALL_MIRROR_EVIDENCE }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+  room-wall-mirror-required:
+    if: always()
+    needs: [room-wall-mirror]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require all three additive mirror routes
+        env:
+          MIRROR_RESULT: ${{ needs.room-wall-mirror.result }}
+        run: test "$MIRROR_RESULT" = success
