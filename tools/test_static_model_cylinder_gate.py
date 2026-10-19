@@ -21,14 +21,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def workflow_contract(text):
-    assert text.startswith('name: Static model cylinder\non:\n  push:\n  pull_request:\n')
+    assert text.startswith("name: Static model cylinder\non:\n  push:\n    branches: [main, su/engine-correctness-hardening]\n    tags: ['**']\n  pull_request:\npermissions:\n")
     assert 'permissions:\n  contents: read\n' in text
     assert re.findall(r'^  ([a-z]+):$', text[text.index('jobs:\n'):], re.M) == ['acceptance', 'required']
     assert '    runs-on: ${{ matrix.os }}\n' in text
     assert '    timeout-minutes: 90\n' in text
     assert text.count('      matrix:\n') == 1
     assert re.findall(r'          - \{mode: (\w+), os: ([\w.-]+)\}', text) == list(gate.WORKFLOW_ROWS)
-    assert 'continue-on-error' not in text and 'paths-ignore' not in text and '\n    branches:' not in text
+    assert 'continue-on-error' not in text and 'paths-ignore' not in text and 'branches-ignore:' not in text
     assert '      fail-fast: false\n' in text
     assert '      PYTHONDONTWRITEBYTECODE: "1"\n' in text
     assert '      CARGO_PROFILE_RELEASE_DEBUG: "0"\n' in text
@@ -80,6 +80,21 @@ class Fixtures(unittest.TestCase):
 
     def test_workflow_negative_mutations(self):
         original=(ROOT/'.github/workflows/static-model-cylinder.yml').read_text()
+        # Trigger changes must preserve every PR and tag while avoiding feature-push duplicates.
+        trigger_filters = "    branches: [main, su/engine-correctness-hardening]\n    tags: ['**']\n"
+        for old, new in [
+            (trigger_filters, ''),
+            ('branches: [main, su/engine-correctness-hardening]', "branches: ['**']"),
+            ('branches: [main, su/engine-correctness-hardening]', 'branches: [main]'),
+            ('branches: [main, su/engine-correctness-hardening]', 'branches: [su/engine-correctness-hardening]'),
+            ("    tags: ['**']\n", ''),
+            ("tags: ['**']", "tags: ['v*']"),
+            ('  pull_request:\n', ''),
+            ('  pull_request:\n', '  pull_request:\n    branches: [main]\n'),
+            ('  pull_request:\n', '  pull_request:\n    paths: [src/**]\n'),
+        ]:
+            with self.subTest(trigger=old), self.assertRaises(AssertionError):
+                workflow_contract(original.replace(old, new, 1))
         for old,new in [('mode: gpu','mode: cpu'),('mode: ui','mode: gpu'),('if-no-files-found: error','if-no-files-found: warn'),
                         ('if: always()','if: success()'),('test "$ACCEPTANCE" = success','true'),
                         ('PYTHONDONTWRITEBYTECODE: "1"','PYTHONDONTWRITEBYTECODE: "0"'),

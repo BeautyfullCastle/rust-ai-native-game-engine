@@ -1,8 +1,10 @@
 mod removal;
+mod update;
 pub use removal::{
     apply_remove, apply_remove_with_receipt, apply_restore, plan_remove, plan_restore, RemovalPlan,
     RemovalReceipt,
 };
+pub use update::{apply_update, plan_update, UpdatePlan};
 
 use orr_package::{Lock, LockedPackage, PackagePreview, Project, Runtime};
 use std::{

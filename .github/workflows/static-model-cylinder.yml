@@ -1,6 +1,8 @@
 name: Static model cylinder
 on:
   push:
+    branches: [main, su/engine-correctness-hardening]
+    tags: ['**']
   pull_request:
 permissions:
   contents: read

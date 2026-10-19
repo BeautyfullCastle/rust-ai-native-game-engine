@@ -42,7 +42,7 @@ impl RemovalReceipt {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Snapshot {
+pub(super) struct Snapshot {
     root_identity: RootIdentity,
     files: BTreeMap<PathBuf, Vec<u8>>,
     frame: Vec<u8>,
@@ -202,7 +202,11 @@ fn validate_removal(name: &str, previous: &Lock, candidate: &Lock) -> Result<(),
     Ok(())
 }
 
-fn admit_candidate(root: &Path, expected: &Lock, candidate: &Lock) -> Result<Snapshot, String> {
+pub(super) fn admit_candidate(
+    root: &Path,
+    expected: &Lock,
+    candidate: &Lock,
+) -> Result<Snapshot, String> {
     let checked = checked_directory(root, "Room project")?;
     if checked != root {
         return Err("Room project path identity changed before package publication".into());
@@ -305,7 +309,7 @@ fn read_room_files(project: &Project) -> Result<BTreeMap<PathBuf, Vec<u8>>, Stri
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct RootIdentity {
+pub(super) struct RootIdentity {
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -314,7 +318,7 @@ struct RootIdentity {
     created: std::time::SystemTime,
 }
 
-fn root_identity(root: &Path) -> Result<RootIdentity, String> {
+pub(super) fn root_identity(root: &Path) -> Result<RootIdentity, String> {
     let metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
     super::ensure_directory(&metadata, "Room project")?;
     #[cfg(unix)]
@@ -335,7 +339,7 @@ fn root_identity(root: &Path) -> Result<RootIdentity, String> {
     }
 }
 
-fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+pub(super) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     let parent = path.parent().ok_or("Room file parent missing")?;
     if checked_directory(parent, "Room file parent")? != parent {
         return Err("Room file parent identity changed".into());
