@@ -2,7 +2,7 @@
 //! The optional file adapter only translates bindings; tick delivery, focus and
 //! capture remain owned by the player's existing input lifecycle.
 use std::collections::BTreeSet;
-use winit::keyboard::KeyCode;
+pub use winit::keyboard::KeyCode;
 
 #[cfg(feature = "input-actions")]
 use orr_input::{Action, ActionMap, Button, Key};

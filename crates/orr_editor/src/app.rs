@@ -70,6 +70,10 @@ mod collect_ui_alignment;
 #[path = "app/collect_ui_resize.rs"]
 mod collect_ui_resize;
 
+#[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+#[path = "app/collect_controls.rs"]
+mod collect_controls;
+
 /// Button labels (tests click them by these texts).
 pub const LBL_PLAY: &str = "\u{25B6} Play";
 /// See [`LBL_PLAY`].
@@ -162,6 +166,8 @@ pub struct UiState {
     yard_quat: [String;4],
     input_player: u8,
     take_control: bool,
+    #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+    collect_controls: collect_controls::CollectControls,
     #[cfg(feature = "animated-models")]
     animated_window: bool,
 }
@@ -881,7 +887,40 @@ impl eframe::App for EditorApp {
         let input_focus = ctx.memory(|m| m.focused()) == Some(egui::Id::new(keyboard_viewport));
         let outside_click = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !self.ui.viewport_rect.is_some_and(|r| r.contains(p))));
         let keyboard_focus_lost = !self.editor.game().has_mesh_view() && (!input_focus || outside_click);
-        if keyboard_focus_lost || self.ui.dialog.is_some() || self.editor.previewing().is_some() || ctx.input(|input| !input.focused || input.key_pressed(Key::Escape)) {
+        #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+        let mapped_collect = self.editor.game().is_collect();
+        #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
+        let mapped_collect = false;
+        let collect_owned_on_entry = mapped_collect && input_focus && !outside_click
+            && self.ui.dialog.is_none() && ctx.input(|input| input.focused)
+            && matches!(self.editor.input_phase(), crate::editor::input::Phase::Claiming | crate::editor::input::Phase::Active);
+        #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+        let mapped_release = if mapped_collect {
+            self.ui.collect_controls.sync_session(self.editor.scene_load_epoch(), true);
+            let enabled = input_focus && !outside_click && self.ui.dialog.is_none()
+                && self.editor.previewing().is_none() && self.editor.can_take_control()
+                && matches!(self.editor.input_phase(), crate::editor::input::Phase::Claiming | crate::editor::input::Phase::Active);
+            let release = ctx.input(|input| self.ui.collect_controls.release_requested(&input.events, enabled && input.focused));
+            if release {
+                // Commit the release frame once before pump: retain physical
+                // quarantine, discard gameplay intents, and keep Quit out of UI shortcuts.
+                let routed = ctx.input(|input| self.ui.collect_controls.route(&input.events, enabled && input.focused));
+                ctx.input_mut(|input| {
+                    let mut index = 0;
+                    input.events.retain(|_| {
+                        let keep = routed.consumed.binary_search(&index).is_err();
+                        index += 1;
+                        keep
+                    });
+                });
+                ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new(keyboard_viewport)));
+            }
+            release
+        } else { false };
+        #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
+        let mapped_release = false;
+        if keyboard_focus_lost || self.ui.dialog.is_some() || self.editor.previewing().is_some()
+            || ctx.input(|input| !input.focused || (!mapped_collect && input.key_pressed(Key::Escape))) || mapped_release {
             self.editor.release_control();
         }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
@@ -944,7 +983,10 @@ impl eframe::App for EditorApp {
         if self.editor.is_playing_mode() && self.editor.timeline().is_some_and(|t| t.playing) {
             ctx.request_repaint();
         }
-        if ctx.input(|i| i.key_pressed(Key::Escape) || !i.focused) {
+        // Managed Collect resolves physical Escape before pump; a logical
+        // Escape on another physical key must not cancel authoring or selection.
+        let editor_escape = !collect_owned_on_entry && ctx.input(|i| i.key_pressed(Key::Escape));
+        if editor_escape || ctx.input(|i| !i.focused) {
             // Escape cancels an active drag without changing its inspection
             // target. With no gesture, Escape clears the GUID selection.
             let cancelling_gesture = self.editor.in_gesture();
@@ -965,7 +1007,7 @@ impl eframe::App for EditorApp {
                 cancelling_gesture || moving
             };
             self.editor.cancel_edit();
-            if !cancelling_gesture && ctx.input(|i| i.key_pressed(Key::Escape)) { self.editor.select(None); }
+            if !cancelling_gesture && editor_escape { self.editor.select(None); }
             // Focus loss may hide the physical release. Forget egui's drag
             // ownership so later moves cannot revive it; a fresh press starts
             // a fresh gesture even when the old pointer-up never arrived.
@@ -1454,6 +1496,8 @@ impl EditorApp {
                 ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
             }
         });
+        #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+        self.ui.collect_controls.sync_session(self.editor.scene_load_epoch(), self.editor.game().is_collect());
         if self.editor.game().has_keyboard() {
             ui.horizontal_wrapped(|ui| {
                 use crate::editor::input::Phase;
@@ -1476,8 +1520,30 @@ impl EditorApp {
                 }
                 if ui.add_enabled(phase != Phase::Off, egui::Button::new("Release control")).clicked() { self.editor.release_control(); }
                 if self.editor.input_cleanup_pending() && ui.button("Reconnect control").clicked() { self.editor.restart(); }
-                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if self.editor.game().is_room() { "Active · WASD/arrows · E interact · Escape releases" } else if self.editor.game().is_collect() { "Active · WASD/arrows · press Space to restart · Escape releases" } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
+                #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+                let mapped_collect_hint = self.editor.game().is_collect().then(|| format!("Active · {}", self.ui.collect_controls.hint()));
+                #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
+                let mapped_collect_hint: Option<String> = None;
+                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if self.editor.game().is_room() { "Active · WASD/arrows · E interact · Escape releases" } else if self.editor.game().is_collect() { mapped_collect_hint.as_deref().unwrap_or("Active · WASD/arrows · press Space to restart · Escape releases") } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
             });
+            #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+            if self.editor.game().is_collect() {
+                ui.horizontal_wrapped(|ui| {
+                    let controls_label = ui.label("Collect controls");
+                    let editable = self.editor.mode() == Mode::Edit
+                        && self.editor.input_phase() == crate::editor::input::Phase::Off;
+                    ui.add_enabled_ui(editable, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.ui.collect_controls.path)
+                            .hint_text("Input-map JSON path").desired_width(240.0)).labelled_by(controls_label.id);
+                        if ui.button("Load controls").clicked() { self.ui.collect_controls.load(); }
+                        if ui.button("Default controls").clicked() { self.ui.collect_controls.use_defaults(); }
+                    });
+                    if !editable { ui.weak("Edit mode and released control required to change bindings"); }
+                    if let Some(error) = &self.ui.collect_controls.error {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                });
+            }
         }
     }
 
@@ -2209,30 +2275,72 @@ impl EditorApp {
                 self.editor.take_control(self.ui.input_player, true);
             }
         }
-        let focused = resp.has_focus() && self.ui.dialog.is_none() && ui.input(|i| i.focused && !i.key_pressed(Key::Escape));
-        let keys = ui.input(|i| crate::editor::input::Keys {
-            x: i8::from(i.key_down(Key::D) || i.key_down(Key::ArrowRight)) - i8::from(i.key_down(Key::A) || i.key_down(Key::ArrowLeft)),
-            y: i8::from(i.key_down(Key::W) || i.key_down(Key::ArrowUp)) - i8::from(i.key_down(Key::S) || i.key_down(Key::ArrowDown)),
-            fire: i.key_down(Key::Space),
-        });
-        if self.editor.game().is_collect() && focused {
-            let edges = ui.input(|i| i.events.iter().filter_map(|event| match event {
-                egui::Event::Key { key:Key::Space, pressed, repeat:false, .. } => Some(*pressed), _ => None,
-            }).collect::<Vec<_>>());
-            for pressed in edges {
-                self.editor.collect_space_event(focused, pressed);
+        #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+        let mapped_collect = self.editor.game().is_collect();
+        #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
+        let mapped_collect = false;
+        // Collect resolves Escape by physical key, just like its action map.
+        // Keep the legacy logical-key release rule for all other games.
+        let focused = resp.has_focus() && self.ui.dialog.is_none()
+            && ui.input(|i| i.focused && (mapped_collect || !i.key_pressed(Key::Escape)));
+        #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
+        if mapped_collect {
+            use crate::editor::input::Phase;
+            self.ui.collect_controls.sync_session(self.editor.scene_load_epoch(), true);
+            let phase = self.editor.input_phase();
+            let enabled = focused && self.editor.can_take_control()
+                && matches!(phase, Phase::Claiming | Phase::Active);
+            let events = ui.input(|i| i.events.clone());
+            let routed = self.ui.collect_controls.route(&events, enabled);
+            if routed.release {
+                self.editor.release_control();
+                resp.surrender_focus();
+            } else {
+                for pressed in routed.restart_transitions {
+                    self.editor.collect_space_event(enabled, pressed);
+                }
+            }
+            self.editor.arena_keys(enabled && !routed.release, routed.keys);
+            if enabled && phase == Phase::Active {
+                ui.input_mut(|i| {
+                    let mut index = 0;
+                    i.events.retain(|_| {
+                        let keep = routed.consumed.binary_search(&index).is_err();
+                        index += 1;
+                        keep
+                    });
+                });
             }
         }
-        self.editor.arena_keys(focused, keys);
+        if !mapped_collect {
+            let keys = ui.input(|i| crate::editor::input::Keys {
+                x: i8::from(i.key_down(Key::D) || i.key_down(Key::ArrowRight)) - i8::from(i.key_down(Key::A) || i.key_down(Key::ArrowLeft)),
+                y: i8::from(i.key_down(Key::W) || i.key_down(Key::ArrowUp)) - i8::from(i.key_down(Key::S) || i.key_down(Key::ArrowDown)),
+                fire: i.key_down(Key::Space),
+            });
+            if self.editor.game().is_collect() && focused {
+                let edges = ui.input(|i| i.events.iter().filter_map(|event| match event {
+                    egui::Event::Key { key:Key::Space, pressed, repeat:false, .. } => Some(*pressed), _ => None,
+                }).collect::<Vec<_>>());
+                for pressed in edges {
+                    self.editor.collect_space_event(focused, pressed);
+                }
+            }
+            self.editor.arena_keys(focused, keys);
+        }
         if self.editor.game().has_keyboard() && resp.has_focus() {
-            // Arrow movement belongs to managed gameplay, not egui's focus
-            // navigation. Tab/Escape still release focus normally.
+            // Collect's physical routing owns Escape/Tab while claiming or
+            // active; egui must not drop focus first based on the logical key.
+            // Other games retain their existing arrow-only focus lock.
             let controlled = focused && self.editor.input_phase() == crate::editor::input::Phase::Active;
+            let collect_controlled = mapped_collect && focused && matches!(self.editor.input_phase(),
+                crate::editor::input::Phase::Claiming | crate::editor::input::Phase::Active);
             ui.memory_mut(|memory| memory.set_focus_lock_filter(resp.id, egui::EventFilter {
-                horizontal_arrows: controlled, vertical_arrows: controlled, ..Default::default()
+                horizontal_arrows: controlled, vertical_arrows: controlled,
+                escape: collect_controlled, tab: collect_controlled,
             }));
         }
-        if focused && self.editor.input_phase() == crate::editor::input::Phase::Active {
+        if !mapped_collect && focused && self.editor.input_phase() == crate::editor::input::Phase::Active {
             ui.input_mut(|i| i.events.retain(|event| !matches!(event, egui::Event::Key { key: Key::W | Key::A | Key::S | Key::D | Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight | Key::Space, .. })));
         }
         let ppp = ui.ctx().pixels_per_point();
