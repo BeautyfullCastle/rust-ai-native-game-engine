@@ -106,3 +106,35 @@ fn invalid_open_preserves_state_and_valid_open_is_undoable() {
     p.redo().unwrap();
     assert_eq!(p.document.burst, 17);
 }
+
+#[test]
+fn timed_draft_version_history_and_downgrade_are_explicit() {
+    let mut p = Panel::default();
+    p.draft.schema = orr_sample::particle_preset::TIMED_PRESET_SCHEMA;
+    p.draft.burst = "0".into();
+    p.draft.rate = "4".into();
+    p.draft.duration = "1".into();
+    p.draft.lifetime = "0.125".into();
+    assert_eq!(p.document.schema, 1);
+    p.apply_draft().unwrap();
+    let timed = p.document.clone();
+    p.draft.schema = 1;
+    p.draft.burst = "1".into();
+    let before = snapshot(&p);
+    assert!(p.apply_draft().is_err());
+    assert_eq!(snapshot(&p), before);
+    p.discard_draft();
+    p.undo().unwrap();
+    assert_eq!(p.document, ParticlePreset::default());
+    p.redo().unwrap();
+    assert_eq!(p.document, timed);
+    for n in 1..=40 {
+        p.draft.rate = n.to_string();
+        p.apply_draft().unwrap();
+    }
+    assert_eq!(p.undo.len(), 32);
+    p.use_defaults().unwrap();
+    assert_eq!(p.document.schema, 1);
+    p.undo().unwrap();
+    assert_eq!(p.document.schema, 2);
+}

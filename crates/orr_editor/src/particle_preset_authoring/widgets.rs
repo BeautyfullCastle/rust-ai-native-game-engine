@@ -1,5 +1,5 @@
 use super::Panel;
-use orr_sample::particle_preset::PresetBlend;
+use orr_sample::particle_preset::{PresetBlend, PRESET_SCHEMA, TIMED_PRESET_SCHEMA};
 use std::path::PathBuf;
 
 /// Production standalone authoring; optional preview is isolated presentation state.
@@ -74,11 +74,14 @@ fn field(ui: &mut egui::Ui, label: &str, value: &mut String) {
 impl Panel {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         ui.heading("Particle preset authoring");
-        ui.label("Presentation-only burst preset. Runtime owns origin and seed.");
+        ui.label("Presentation-only particle preset. Runtime owns origin and seed.");
         ui.strong("Accepted preset · only this state is saved");
         ui.label(format!(
-            "{} particles · {} seconds · {:?}",
+            "Schema {} · burst {} · rate {}/s · emitter duration {} s · particle lifetime {} s · {:?}",
+            self.document().schema,
             self.document().burst,
+            self.document().rate,
+            self.document().duration,
             self.document().lifetime,
             self.document().blend
         ));
@@ -118,6 +121,26 @@ impl Panel {
         } else {
             "Draft · matches accepted preset"
         });
+        egui::ComboBox::from_label("Emission mode")
+            .selected_text(if self.draft.schema == TIMED_PRESET_SCHEMA {
+                "Timed (schema 2)"
+            } else {
+                "Burst (schema 1)"
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.draft.schema, PRESET_SCHEMA, "Burst (schema 1)");
+                ui.selectable_value(
+                    &mut self.draft.schema,
+                    TIMED_PRESET_SCHEMA,
+                    "Timed (schema 2)",
+                );
+            });
+        if self.draft.schema == TIMED_PRESET_SCHEMA {
+            field(ui, "Rate per second", &mut self.draft.rate);
+            field(ui, "Emitter duration seconds", &mut self.draft.duration);
+        } else if self.draft.rate != "0" || self.draft.duration != "0" {
+            ui.small("Schema 1 requires zero rate and duration. Switch to Timed to clear them before Apply.");
+        }
         field(ui, "Burst", &mut self.draft.burst);
         field(ui, "Lifetime seconds", &mut self.draft.lifetime);
         for (index, axis) in ["X", "Y", "Z"].iter().enumerate() {
@@ -321,9 +344,9 @@ impl App {
                     }
                     let (width, height) = gpu.size();
                     ui.image((gpu.texture_id(), egui::vec2(width as f32, height as f32)));
-                    if visible && focused && self.preview.playing() && !draws.is_empty() {
-                        ctx.request_repaint();
-                    }
+                }
+                if visible && focused && self.preview.playing() {
+                    ctx.request_repaint();
                 }
                 if !self.preview_error.is_empty() {
                     ui.label(&self.preview_error);

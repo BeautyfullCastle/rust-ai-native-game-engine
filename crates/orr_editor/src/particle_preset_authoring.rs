@@ -16,6 +16,9 @@ const MAX_HISTORY: usize = 32;
 /// Text remains untouched until explicit Apply, including malformed numeric input.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draft {
+    pub schema: u32,
+    pub rate: String,
+    pub duration: String,
     pub burst: String,
     pub lifetime: String,
     pub velocity: [String; 3],
@@ -29,6 +32,9 @@ pub struct Draft {
 impl From<&ParticlePreset> for Draft {
     fn from(p: &ParticlePreset) -> Self {
         Self {
+            schema: p.schema,
+            rate: p.rate.to_string(),
+            duration: p.duration.to_string(),
             burst: p.burst.to_string(),
             lifetime: p.lifetime.to_string(),
             velocity: p.velocity.map(|v| v.to_string()),
@@ -56,6 +62,9 @@ impl Draft {
             Ok(values)
         }
         let candidate = ParticlePreset {
+            schema: self.schema,
+            rate: number(&self.rate, "rate")?,
+            duration: number(&self.duration, "emitter duration")?,
             burst: number(&self.burst, "burst")?,
             lifetime: number(&self.lifetime, "lifetime")?,
             velocity: vector(&self.velocity, "velocity")?,
@@ -65,7 +74,6 @@ impl Draft {
             color_start: vector(&self.color_start, "start RGBA")?,
             color_end: vector(&self.color_end, "end RGBA")?,
             blend: self.blend,
-            ..ParticlePreset::default()
         };
         candidate.validate().map_err(|e| e.to_string())?;
         Ok(candidate)
