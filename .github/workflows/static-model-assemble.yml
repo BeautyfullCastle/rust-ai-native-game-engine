@@ -1,0 +1,49 @@
+name: Static model assemble
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    name: static model assemble (${{ matrix.mode }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {mode: cpu, os: ubuntu-22.04}
+          - {mode: cpu, os: windows-latest}
+          - {mode: gpu, os: ubuntu-22.04}
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install software Vulkan
+        if: matrix.mode == 'gpu'
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libxkbcommon-dev
+      - name: Run source-bound mandatory acceptance
+        env:
+          ORR_STATIC_ASSEMBLE_EVIDENCE: ${{ runner.temp }}/orr-static-assemble-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: python -B tools/static_model_assemble_gate.py '${{ matrix.mode }}'
+      - name: Retain evidence and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-model-assemble-${{ matrix.mode }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/orr-static-assemble-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+  required:
+    name: static model assemble required
+    if: always()
+    needs: acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ACCEPTANCE: ${{ needs.acceptance.result }}
+        run: test "$ACCEPTANCE" = success
