@@ -25,6 +25,18 @@ PRODUCER = "authoring_app_exports_standalone_acceptance_map"
 GPU = "authored_map_drives_actual_editor_gpu_victory_restart_reopen"
 CONSUMER = "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys"
 
+# Ordinary production-input coverage; the saved-map consumer runs explicitly in contracts.
+INPUT_RUNTIME_CASES = {
+    'collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded',
+    'collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map',
+    'collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel',
+    'collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy',
+    'collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace',
+    'collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge',
+    'collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge',
+    'collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack',
+}
+
 
 def validate_exact(output, expected):
     """Reject zero, duplicate, ignored, failed, extra or missing test cases."""
@@ -39,6 +51,21 @@ def validate_exact(output, expected):
             or len(cases) != len(expected) or {n for n, _ in cases} != expected
             or any(status != "ok" for _, status in cases)):
         raise ValueError("Expected exactly these executed passing cases: " + repr(sorted(expected)))
+
+
+def validate_input_runtime_regression(output):
+    """Pin eight passing regressions and the separately executed saved-map hook."""
+    output = output.replace("\r\n", "\n")
+    expected = {name: "ok" for name in INPUT_RUNTIME_CASES}
+    expected[CONSUMER] = "ignored"
+    cases = re.findall(r"^test (\S+) \.\.\. (ok|FAILED|ignored)(?:, .*)?$", output, re.M)
+    summaries = HELPERS["SUMMARY"].findall(output)
+    if (output.count("test result:") != 1 or len(summaries) != 1
+            or tuple(map(int, summaries[0][:4])) != (8, 0, 1, 0)
+            or re.findall(r"^running (\d+) tests?$", output, re.M) != ["9"]
+            or len(re.findall(r"^test (?!result:)", output, re.M)) != len(expected)
+            or len(cases) != len(expected) or dict(cases) != expected):
+        raise ValueError("Expected eight exact passing input regressions and only the saved-map hook ignored")
 
 
 def run_case(base, name, evidence, label, ignored=False):

@@ -32,6 +32,35 @@ class GateTests(unittest.TestCase):
             with self.subTest(output=output), self.assertRaises(ValueError):
                 gate.validate_exact(output, {"suite::case"})
 
+    def test_input_runtime_inventory_preserves_nested_acceptance_hook_boundary(self):
+        ordinary = sorted(gate.INPUT_RUNTIME_CASES)
+        output = ("running 9 tests\n"
+                  + "".join(f"test {name} ... ok\n" for name in ordinary)
+                  + f"test {gate.CONSUMER} ... ignored, requires actual authoring App bytes\n"
+                  + "test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 50 filtered out; finished in 0.1s\n")
+        gate.validate_input_runtime_regression(output)
+        gate.validate_input_runtime_regression(output.replace("\n", "\r\n"))
+        for invalid in (
+            output.replace(gate.CONSUMER, gate.CONSUMER + "_unexpected"),
+            output.replace(ordinary[0], ordinary[1]),
+            output.replace(f"test {ordinary[0]} ... ok\n", ""),
+            output.replace(f"test {ordinary[0]} ... ok", f"test {ordinary[0]} ... ignored"),
+            output.replace(f"test {ordinary[0]} ... ok", f"test {ordinary[0]} ... FAILED"),
+            output.replace(f"test {gate.CONSUMER} ... ignored", f"test {gate.CONSUMER} ... ok"),
+            output.replace(f"test {ordinary[0]} ... ok", f"test {ordinary[0]} ... ignored")
+                  .replace(f"test {gate.CONSUMER} ... ignored", f"test {gate.CONSUMER} ... ok"),
+            output.replace("8 passed", "9 passed"),
+            output.replace("1 ignored", "0 ignored"),
+            output.replace("running 9 tests", "running 8 tests"),
+            output + "test unexpected::nested ... ignored\n",
+            output + "test unexpected::nested ... unknown\n",
+            output + "test result: malformed\n",
+            output + output,
+            "",
+        ):
+            with self.subTest(output=invalid), self.assertRaises(ValueError):
+                gate.validate_input_runtime_regression(invalid)
+
     def test_handoff_requires_exact_path_bytes_and_proof(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory).resolve() / "map.json"
