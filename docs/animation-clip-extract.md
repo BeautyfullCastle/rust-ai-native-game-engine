@@ -2,8 +2,8 @@
 
 This optional offline authoring tool appends one named subclip to an existing,
 self-contained GLB. Use it when an imported take contains several actions, or
-when a shorter interval should loop or play faster/slower. The output is a
-normal GLB accepted by the existing animation importer. No new runtime format or
+when a shorter interval should loop, play faster/slower, or run in reverse. The
+output is a normal GLB accepted by the existing animation importer. No new runtime format or
 public runtime API
 is introduced. This is a bounded part of #100, not a complete animation editor.
 
@@ -20,6 +20,11 @@ The six options are required and may appear in any order. Optional
 spellings are accepted. It defaults to `1`. A speed of `2` makes the appended
 clip twice as fast, while `0.5` makes it half as fast. For example, add
 `--speed 0.5` to produce a one-second clip from the half-second interval above.
+Optional `--direction forward|reverse` defaults to `forward`; only these exact
+spellings are accepted. It can be combined with any supported speed, for example
+`--direction reverse --speed 0.5`. Reverse requires every channel of the selected
+clip to be LINEAR. Even a mixed LINEAR/STEP selection is rejected before output
+publication; STEP tracks in other original clips remain allowed and unchanged.
 `--help` is supported alone. Without both Cargo features, the example exits with
 a clear error. Time
 is in seconds, parsed as finite `f32`; the range must satisfy
@@ -31,16 +36,20 @@ index, avoiding ambiguous original names. The new name must be nonblank, at most
 
 - All original animation indices and animation JSON are preserved. Exactly one
   new clip is appended. It begins at time zero and ends at `(end - start) / speed`
-- Original interior keys strictly within the selected interval are retained with
-  times `(original time - start) / speed`. Sampled start/end values preserve the
-  existing per-channel clamp behavior, including late-starting, early-ending
-  and single-key channels
-- Translation/scale use the existing LINEAR or STEP semantics. Quaternion tracks
-  use the existing normalized shortest-arc interpolation. Floating-point
+- Forward retains original interior keys strictly within the selected interval
+  with times `(original time - start) / speed`. Reverse traverses those keys in
+  descending source order, with times `(end - original time) / speed`
+- Endpoints are sampled by the existing production sampler. Forward writes the
+  sampled start then end; reverse writes the sampled end then start. Existing
+  per-channel clamping, including late-starting, early-ending and single-key
+  channels, is preserved
+- Forward translation/scale use the existing LINEAR or STEP semantics; reverse
+  uses LINEAR only. Quaternion tracks use the existing normalized shortest-arc
+  interpolation. Floating-point
   subdivision can introduce rounding differences; this is not bit-identical pose
   sampling across different key representations
-- A STEP jump exactly at the start is already applied at new time zero. A jump
-  exactly at the end appears at the final key. Loop playback follows the existing
+- In forward mode, a STEP jump exactly at the start is already applied at new
+  time zero. A jump exactly at the end appears at the final key. Loop playback follows the existing
   player, so looping at duration starts again from zero
 - Original node, hierarchy, geometry, skin, material, texture, image and accessor
   indices are retained. Original BIN bytes, including padding, remain an exact
@@ -48,8 +57,10 @@ index, avoiding ambiguous original names. The new name must be nonblank, at most
 - Existing JSON metadata, including supported `extras`, is preserved as JSON
   values. Whitespace and object-key order are reserialized; the output is not a
   byte-for-byte source copy. Source files are never changed
-- Omitting `--speed` and explicitly choosing `1` produce identical output bytes
-  to the original extraction behavior. The five positive powers-of-two speeds
+- Omitting `--direction` and explicitly choosing `forward` produce identical
+  output bytes to the prior forward extraction behavior at each supported speed.
+  Omitting `--speed` and explicitly choosing `1` retain the original extraction
+  behavior. The five positive powers-of-two speeds
   change only newly authored times and their accessor bounds; sampled values,
   interpolation and all original clips retain their existing meaning
 
@@ -66,15 +77,41 @@ any output file is published. Existing source limits remain: 64 MiB file,
 4 MiB GLB JSON, 32 clips, 256 channels per clip, 262,144 aggregate animation keys,
 16 MiB animation data and 1,024 accessor/buffer-view entries. The tool checks
 original plus appended counts, including unused original samplers, before
-allocating generated keys. Non-increasing rebased keys are rejected. Retimed
-duration must remain finite and positive. Rebasing retains the original `f32`
-subtraction and its rounding; dividing each resulting rebased `f32` time by the
-chosen speed must then be exactly representable as `f32`. Overflow, underflow
+allocating generated keys. Interior times must be strictly positive, strictly
+increasing and strictly below the authored duration; collisions are rejected.
+Retimed duration must remain finite and positive. Rebasing retains the original `f32`
+subtraction and its rounding (reverse uses `end - original time`); dividing each
+resulting rebased `f32` time by the chosen speed must then be exactly representable as `f32`. Overflow, underflow
 and rounded subnormal times introduced by that division are
 rejected before output publication, even when rounding would still leave two
 distinct positive times. Exactly representable subnormal times retain the
-existing importer/sampler contract. Negative speed/reverse playback, arbitrary
-rates and time-warp curves are outside this tool.
+existing importer/sampler contract. Negative speeds, arbitrary rates, runtime
+reverse-playback controls and time-warp curves are outside this tool.
+
+### Reverse interpolation and floating-point limits
+
+[Khronos glTF interpolation](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#appendix-c-animation-sampler-interpolation-modes)
+specifies that STEP holds the earlier key between keys and uses the keyed value
+at an exact key time. Reversing STEP keys would therefore move the held value to
+the wrong side of a jump. This tool rejects every selected STEP channel rather
+than approximating jumps with epsilon-offset keys or changing the runtime.
+
+LINEAR translation/scale and quaternion spherical interpolation permit reversed
+traversal. Quaternion endpoints use the unchanged normalized shortest-arc
+production sampler; interior quaternion values retain their original components,
+without introducing new sign or interpolation rules. Khronos describes the
+short-path quaternion rule and allows implementation approximations in
+[its spherical interpolation section](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#appendix-c-animation-sampler-interpolation-modes).
+
+This is finite-key authoring, not a bit-exact identity for every continuously
+sampled pose. Mirroring by `end - time` rounds onto a different `f32` time grid:
+two distinct source keys can collide, or an interior key can round onto an
+endpoint. Such cases fail before publication. Accepted keys can still carry
+subtraction rounding; exact division by speed does not undo it. Endpoint cuts,
+interpolation arithmetic and the sampler's near-parallel quaternion approximation
+can also introduce differences when a segment is subdivided or reversed. Compare
+poses with an appropriate tolerance; do not assume bit-identical quaternion
+components or all-time mirror equivalence.
 
 ## Filesystem and publication contract
 

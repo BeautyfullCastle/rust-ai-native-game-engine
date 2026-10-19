@@ -4,7 +4,7 @@
 #[path = "../examples/animation_clip_extract/authoring.rs"]
 mod authoring;
 
-use authoring::{extract_glb, ExtractOptions};
+use authoring::{extract_glb, Direction, ExtractOptions};
 use orr_model::{
     animation::{AnimatedModel, ChannelValues, Interpolation, Pose, MAX_ANIMATION_KEYS, MAX_CLIPS},
     animation_import::import_with_resolver,
@@ -77,6 +77,7 @@ fn options(start: f32, end: f32) -> ExtractOptions {
         end,
         name: "extracted".into(),
         speed: 1.0,
+        direction: Direction::Forward,
     }
 }
 
@@ -1660,4 +1661,545 @@ fn cli_retiming_failures_preserve_existing_targets_sources_and_leave_no_staging_
             "publication left staging files"
         );
     }
+}
+
+fn reverse_options(start: f32, end: f32, speed: f32) -> ExtractOptions {
+    let mut opts = speed_options(start, end, speed);
+    opts.direction = Direction::Reverse;
+    opts
+}
+
+#[test]
+fn reverse_linear_tracks_have_independent_analytic_oracles_at_every_speed() {
+    let mut fixture = Fixture::new();
+    fixture.track(
+        0,
+        "translation",
+        "LINEAR",
+        &[0.0, 2.0, 4.0],
+        &[0.0, 2.0, 4.0, 4.0, -2.0, 8.0, 0.0, 6.0, 12.0],
+    );
+    fixture.track(
+        1,
+        "scale",
+        "LINEAR",
+        &[0.0, 1.0, 4.0],
+        &[1.0, 2.0, 3.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    );
+    let theta = std::f32::consts::PI / 3.0;
+    fixture.track(
+        2,
+        "rotation",
+        "LINEAR",
+        &[0.0, 2.0],
+        &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -theta.sin(), -theta.cos()],
+    );
+    let bytes = fixture.bytes();
+    for speed in SPEEDS {
+        let opts = reverse_options(0.5, 3.0, speed);
+        let output = extract_glb(&bytes, &opts).unwrap();
+        assert_eq!(extract_glb(&bytes, &opts).unwrap(), output);
+        let model = import(&output);
+        let clip = &model.source().clips[1];
+        assert_eq!(clip.duration(), 2.5 / speed);
+        assert_eq!(clip.channels[0].times, [0.0, 1.0 / speed, 2.5 / speed]);
+        assert_eq!(clip.channels[1].times, [0.0, 2.0 / speed, 2.5 / speed]);
+        assert_eq!(clip.channels[2].times, [0.0, 1.0 / speed, 2.5 / speed]);
+        assert_eq!(
+            clip.channels[0].values,
+            ChannelValues::Translation(vec![[2.0, 2.0, 10.0], [4.0, -2.0, 8.0], [1.0, 1.0, 5.0]])
+        );
+        assert_eq!(
+            clip.channels[1].values,
+            ChannelValues::Scale(vec![[5.0, 6.0, 7.0], [3.0, 4.0, 5.0], [2.0, 3.0, 4.0]])
+        );
+        assert_generated_payload(&output, &model, 1);
+        let cooked = model.to_bytes().unwrap();
+        let reloaded = AnimatedModel::from_bytes(&cooked).unwrap();
+        assert_eq!(reloaded.to_bytes().unwrap(), cooked);
+        // Independent hand-computed values, rather than producer/helper sampling.
+        // These binary-fraction points lie on the representable f32 mirror grid;
+        // arbitrary continuous times are not claimed to be bit-exact under reversal.
+        for (elapsed, translation, scale, half_angle) in [
+            (0.0, [2.0, 2.0, 10.0], [5.0, 6.0, 7.0], theta),
+            (0.5, [3.0, 0.0, 9.0], [4.5, 5.5, 6.5], theta),
+            (1.0, [4.0, -2.0, 8.0], [4.0, 5.0, 6.0], theta),
+            (1.5, [3.0, -1.0, 7.0], [3.5, 4.5, 5.5], theta * 0.75),
+            (2.0, [2.0, 0.0, 6.0], [3.0, 4.0, 5.0], theta * 0.5),
+            (2.5, [1.0, 1.0, 5.0], [2.0, 3.0, 4.0], theta * 0.25),
+        ] {
+            let pose = reloaded.sample_clip(1, elapsed / speed).unwrap();
+            close_array(pose.local()[0].translation, translation);
+            close_array(pose.local()[1].scale, scale);
+            close_array(
+                pose.local()[2].matrix()[0],
+                [(2.0 * half_angle).cos(), (2.0 * half_angle).sin(), 0.0, 0.0],
+            );
+            assert_eq!(pose.local()[3], reloaded.source().nodes[3].rest);
+        }
+        assert_eq!(bytes, fixture.bytes());
+    }
+}
+
+#[test]
+fn reverse_staggered_and_single_key_tracks_keep_clamping_at_every_speed() {
+    let mut fixture = Fixture::new();
+    fixture.track(
+        0,
+        "translation",
+        "LINEAR",
+        &[2.0, 4.0],
+        &[2.0, 0.0, 0.0, 4.0, 0.0, 0.0],
+    );
+    fixture.track(1, "scale", "LINEAR", &[3.0], &[2.0, 3.0, 4.0]);
+    fixture.track(
+        2,
+        "translation",
+        "LINEAR",
+        &[0.0, 6.0],
+        &[0.0, 1.5, 0.0, 0.0, 7.5, 0.0],
+    );
+    for speed in SPEEDS {
+        let model =
+            import(&extract_glb(&fixture.bytes(), &reverse_options(1.0, 5.0, speed)).unwrap());
+        assert_eq!(
+            model.source().clips[1].channels[0].times,
+            [0.0, 1.0 / speed, 3.0 / speed, 4.0 / speed]
+        );
+        assert_eq!(
+            model.source().clips[1].channels[1].times,
+            [0.0, 2.0 / speed, 4.0 / speed]
+        );
+        for elapsed in [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0] {
+            let pose = model.sample_clip(1, elapsed / speed).unwrap();
+            close_array(
+                pose.local()[0].translation,
+                [(5.0 - elapsed).clamp(2.0, 4.0), 0.0, 0.0],
+            );
+            close_array(pose.local()[1].scale, [2.0, 3.0, 4.0]);
+            close_array(pose.local()[2].translation, [0.0, 6.5 - elapsed, 0.0]);
+            assert_eq!(pose.local()[3], model.source().nodes[3].rest);
+        }
+        close_pose(
+            &model.sample_clip(1, -1.0).unwrap(),
+            &model.sample_clip(1, 0.0).unwrap(),
+        );
+        close_pose(
+            &model.sample_clip(1, 4.0 / speed + 1.0).unwrap(),
+            &model.sample_clip(1, 4.0 / speed).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn reverse_quaternion_signs_use_shortest_arc_and_preserve_exact_endpoint_keys() {
+    for (angle, sign) in [(0.02f32, -1.0f32), (1.0, -1.0), (1.0, 1.0)] {
+        let mut fixture = Fixture::new();
+        let first = [0.0, 0.0, 0.0, 1.0];
+        let last = [0.0, 0.0, angle.sin() * sign, angle.cos() * sign];
+        fixture.track(
+            2,
+            "rotation",
+            "LINEAR",
+            &[0.0, 2.0],
+            &[first, last].concat(),
+        );
+        let source = import(&fixture.bytes());
+        assert_eq!(
+            source.source().clips[0].channels[0].values,
+            ChannelValues::Rotation(vec![first, last])
+        );
+        // Exact endpoint sampling still normalizes rotations through runtime slerp.
+        // sin/cos f32 source keys need not have an exactly unit squared length.
+        // The authoring contract stores those sampled endpoints, not raw source bits.
+        let sampled_endpoints = [
+            source.sample_clip(0, 2.0).unwrap().local()[2].rotation,
+            source.sample_clip(0, 0.0).unwrap().local()[2].rotation,
+        ];
+        let expected_bits: Vec<_> = sampled_endpoints
+            .iter()
+            .flatten()
+            .map(|value| value.to_bits())
+            .collect();
+        for speed in SPEEDS {
+            let output = extract_glb(&fixture.bytes(), &reverse_options(0.0, 2.0, speed)).unwrap();
+            let (document, binary) = split_glb(&output);
+            let accessor = document["animations"][1]["samplers"][0]["output"]
+                .as_u64()
+                .unwrap() as usize;
+            let payload = generated_accessor(&document, &binary, accessor);
+            assert_eq!(
+                payload
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_bits
+            );
+            let model = import(&output);
+            let ChannelValues::Rotation(values) = &model.source().clips[1].channels[0].values
+            else {
+                panic!("rotation channel changed type");
+            };
+            assert_eq!(
+                values
+                    .iter()
+                    .flatten()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_bits
+            );
+            // The following trigonometric geometry oracle is independent of runtime
+            // sampling and remains unchanged, including the near-parallel case.
+            for (elapsed, fraction) in
+                [(0.0, 1.0), (0.5, 0.75), (1.0, 0.5), (1.5, 0.25), (2.0, 0.0)]
+            {
+                let pose = model.sample_clip(1, elapsed / speed).unwrap();
+                let half_angle = angle * fraction;
+                close_array(
+                    pose.local()[2].matrix()[0],
+                    [(2.0 * half_angle).cos(), (2.0 * half_angle).sin(), 0.0, 0.0],
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn reverse_cli_preserves_originals_indices_binary_and_cooks_reloads_at_every_speed() {
+    let temp = TempDir::new();
+    let input = temp.join("source.glb");
+    let (mut doc, bin) = split_glb(DEMO);
+    doc["extras"] = json!({"retained":123456789012345u64});
+    doc["animations"][0]["extras"] = json!({"author":"original"});
+    let source = pack_glb(&doc, &bin);
+    fs::write(&input, &source).unwrap();
+    let original = import(&source);
+    for (index, speed) in SPEEDS.into_iter().enumerate() {
+        let output = temp.join(&format!("reverse-{index}.glb"));
+        let mut args = cli_args(&input, &output);
+        args[9] = OsString::from("0.75");
+        args.extend([
+            OsString::from("--speed"),
+            OsString::from(speed.to_string()),
+            OsString::from("--direction"),
+            OsString::from("reverse"),
+        ]);
+        authoring::run(args.clone()).unwrap();
+        let generated = fs::read(&output).unwrap();
+        let (new_doc, new_bin) = split_glb(&generated);
+        assert!(new_bin.starts_with(&bin));
+        for (key, value) in doc.as_object().unwrap() {
+            match key.as_str() {
+                "animations" | "bufferViews" | "accessors" => {
+                    let old = value.as_array().unwrap();
+                    assert_eq!(
+                        &new_doc[key].as_array().unwrap()[..old.len()],
+                        old.as_slice()
+                    );
+                }
+                "buffers" => {
+                    let mut expected = value.clone();
+                    expected[0]["byteLength"] = new_doc[key][0]["byteLength"].clone();
+                    assert_eq!(new_doc[key], expected);
+                }
+                _ => assert_eq!(&new_doc[key], value),
+            }
+        }
+        let model = import(&generated);
+        assert_eq!(model.source().clips.len(), 3);
+        assert_eq!(
+            &model.source().clips[..2],
+            original.source().clips.as_slice()
+        );
+        assert_generated_payload(&generated, &model, 2);
+        let cooked = model.to_bytes().unwrap();
+        let reloaded = AnimatedModel::from_bytes(&cooked).unwrap();
+        assert_eq!(reloaded.to_bytes().unwrap(), cooked);
+        for elapsed in [0.0, 0.0625, 0.125, 0.25, 0.375, 0.5] {
+            close_deformation(&reloaded, 2, elapsed / speed, &original, 0, 0.75 - elapsed);
+        }
+        for old_index in 0..2 {
+            for time in [-1.0, 0.0, 0.5, 1.0, 2.0, 3.0] {
+                close_deformation(&reloaded, old_index, time, &original, old_index, time);
+            }
+        }
+        assert!(authoring::run(args.clone()).is_err());
+        assert_eq!(fs::read(&output).unwrap(), generated);
+        args[3] = input.as_os_str().to_owned();
+        assert!(authoring::run(args).is_err());
+        assert_eq!(fs::read(&input).unwrap(), source);
+    }
+    assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 6);
+}
+
+#[test]
+fn cli_explicit_forward_preserves_default_and_pre_retiming_golden_bytes() {
+    let temp = TempDir::new();
+    let input = temp.join("source.glb");
+    fs::write(&input, DEMO).unwrap();
+    for speed in SPEEDS {
+        let default = temp.join(&format!("default-{speed}.glb"));
+        let forward = temp.join(&format!("forward-{speed}.glb"));
+        let mut args = cli_args(&input, &default);
+        args[9] = OsString::from("0.75");
+        args[11] = OsString::from("short-action");
+        args.extend([OsString::from("--speed"), OsString::from(speed.to_string())]);
+        authoring::run(args.clone()).unwrap();
+        args[3] = forward.as_os_str().to_owned();
+        args.extend([OsString::from("--direction"), OsString::from("forward")]);
+        authoring::run(args).unwrap();
+        let bytes = fs::read(&default).unwrap();
+        assert_eq!(fs::read(&forward).unwrap(), bytes);
+        if speed == 1.0 {
+            let digest: String = Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(bytes.len(), 4292);
+            assert_eq!(
+                digest,
+                "fb9f3e53c02e69bd46798b7af2d92e712137fb9a091f92eecfefa83a01a9ac57"
+            );
+        }
+    }
+    assert_eq!(fs::read(&input).unwrap(), DEMO);
+}
+
+#[test]
+fn reverse_rejects_selected_step_tracks_even_when_constant_or_outside_trim() {
+    // An unrelated STEP clip is retained by the successful demo test above.
+    let mut opts = reverse_options(0.25, 0.75, 1.0);
+    opts.clip_index = 1;
+    assert!(extract_glb(DEMO, &opts).is_err());
+    for (times, values) in [
+        (vec![2.0], vec![3.0, 4.0, 5.0]),
+        (
+            vec![0.0, 1.0, 2.0],
+            vec![3.0, 4.0, 5.0, 3.0, 4.0, 5.0, 9.0, 8.0, 7.0],
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.track(0, "translation", "STEP", &times, &values);
+        let bytes = fixture.bytes();
+        for speed in SPEEDS {
+            assert!(extract_glb(&bytes, &reverse_options(0.25, 0.75, speed)).is_err());
+            assert!(extract_glb(&bytes, &speed_options(0.25, 0.75, speed)).is_ok());
+            assert_eq!(bytes, fixture.bytes());
+        }
+    }
+}
+
+#[test]
+fn cli_direction_rejects_invalid_duplicate_missing_and_step_without_writes() {
+    let temp = TempDir::new();
+    let input = temp.join("source.glb");
+    let output = temp.join("clip.glb");
+    let existing = temp.join("existing.glb");
+    fs::write(&input, FIXTURE).unwrap();
+    fs::write(&existing, b"retain target").unwrap();
+    let good = cli_args(&input, &output);
+    let mut cases = Vec::new();
+    for value in [
+        "", "Reverse", "FORWARD", "backward", "-1", " reverse", "reverse ", "--speed",
+    ] {
+        let mut args = good.clone();
+        args.extend([OsString::from("--direction"), OsString::from(value)]);
+        cases.push(args);
+    }
+    for values in [
+        vec!["--direction"],
+        vec!["--direction", "reverse", "--direction", "forward"],
+        vec!["--direction", "reverse", "--direction", "reverse"],
+    ] {
+        let mut args = good.clone();
+        args.extend(values.into_iter().map(OsString::from));
+        cases.push(args);
+    }
+    let mut step = good.clone();
+    step[5] = OsString::from("1");
+    step.extend([OsString::from("--direction"), OsString::from("reverse")]);
+    cases.push(step);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut args = good.clone();
+        args.extend([
+            OsString::from("--direction"),
+            OsString::from_vec(vec![0xff]),
+        ]);
+        cases.push(args);
+    }
+    for args in cases {
+        assert!(authoring::run(args.clone()).is_err());
+        assert!(!output.exists());
+        let mut args = args;
+        args[3] = existing.as_os_str().to_owned();
+        assert!(authoring::run(args).is_err());
+        assert_eq!(fs::read(&input).unwrap(), FIXTURE);
+        assert_eq!(fs::read(&existing).unwrap(), b"retain target");
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 2);
+    }
+    // Both accepted direction tokens work anywhere among the required pairs.
+    for direction in ["forward", "reverse"] {
+        for position in 0..=6 {
+            let output = temp.join(&format!("{direction}-{position}.glb"));
+            let mut args = cli_args(&input, &output);
+            args.splice(
+                position * 2..position * 2,
+                [OsString::from("--direction"), OsString::from(direction)],
+            );
+            authoring::run(args).unwrap();
+            assert_eq!(import(&fs::read(&output).unwrap()).source().clips.len(), 3);
+        }
+    }
+    assert_eq!(fs::read(&input).unwrap(), FIXTURE);
+}
+
+fn linear_timing_fixture(times: &[f32]) -> Vec<u8> {
+    let mut fixture = Fixture::new();
+    let values: Vec<f32> = (0..times.len())
+        .flat_map(|i| [i as f32, 0.0, 0.0])
+        .collect();
+    fixture.track(0, "translation", "LINEAR", times, &values);
+    fixture.bytes()
+}
+
+#[test]
+fn reverse_cli_rejects_overflow_underflow_inexact_and_collapsed_mirror_keys_atomically() {
+    for (times, speed) in [
+        (vec![0.0, f32::MAX], 0.25),
+        (vec![0.0, f32::MAX], 0.5),
+        (vec![0.0, f32::from_bits(1)], 2.0),
+        (vec![0.0, f32::from_bits(2)], 4.0),
+        (vec![0.0, f32::from_bits(3)], 2.0),
+        (vec![0.0, f32::from_bits(5)], 4.0),
+        (vec![0.0, f32::from_bits(3), f32::from_bits(8)], 2.0),
+        (
+            vec![0.0, f32::from_bits(4), f32::from_bits(5), f32::from_bits(8)],
+            4.0,
+        ),
+        // Distinct source keys collapse when mirrored about a much later end.
+        (vec![0.0, f32::from_bits(1), 1.0], 1.0),
+        (vec![0.0, 1.0, f32::MAX], 4.0),
+    ] {
+        let temp = TempDir::new();
+        let input = temp.join("source.glb");
+        let output = temp.join("clip.glb");
+        let existing = temp.join("existing.glb");
+        let bytes = linear_timing_fixture(&times);
+        import(&bytes);
+        let end = *times.last().unwrap();
+        assert!(
+            extract_glb(&bytes, &reverse_options(0.0, end, speed)).is_err(),
+            "accepted reverse timing failure {times:?} at {speed}"
+        );
+        fs::write(&input, &bytes).unwrap();
+        fs::write(&existing, b"retain existing").unwrap();
+        let mut args = cli_args(&input, &output);
+        args[7] = OsString::from("0");
+        args[9] = OsString::from(format!("{end:e}"));
+        args.extend([
+            OsString::from("--speed"),
+            OsString::from(speed.to_string()),
+            OsString::from("--direction"),
+            OsString::from("reverse"),
+        ]);
+        assert!(authoring::run(args.clone()).is_err());
+        assert!(!output.exists());
+        args[3] = existing.as_os_str().to_owned();
+        assert!(authoring::run(args.clone()).is_err());
+        args[3] = input.as_os_str().to_owned();
+        assert!(authoring::run(args).is_err());
+        assert_eq!(fs::read(&input).unwrap(), bytes);
+        assert_eq!(fs::read(&existing).unwrap(), b"retain existing");
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn reverse_exact_subnormal_and_adjacent_mirror_grids_remain_supported() {
+    for times in [
+        vec![0, 4, 8, 12, 16]
+            .into_iter()
+            .map(f32::from_bits)
+            .collect::<Vec<_>>(),
+        vec![
+            1.0,
+            f32::from_bits(1.0f32.to_bits() + 1),
+            f32::from_bits(1.0f32.to_bits() + 2),
+        ],
+    ] {
+        let bytes = linear_timing_fixture(&times);
+        let start = times[0];
+        let end = *times.last().unwrap();
+        for speed in SPEEDS {
+            let output = extract_glb(&bytes, &reverse_options(start, end, speed)).unwrap();
+            let model = import(&output);
+            let channel = &model.source().clips[1].channels[0];
+            let expected_times: Vec<f32> = times
+                .iter()
+                .rev()
+                .map(|time| (end - time) / speed)
+                .collect();
+            assert_eq!(
+                channel
+                    .times
+                    .iter()
+                    .map(|t| t.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_times
+                    .iter()
+                    .map(|t| t.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            let expected_values: Vec<_> = (0..times.len())
+                .rev()
+                .map(|i| [i as f32, 0.0, 0.0])
+                .collect();
+            assert_eq!(
+                channel.values,
+                ChannelValues::Translation(expected_values.clone())
+            );
+            assert_generated_payload(&output, &model, 1);
+            let cooked = model.to_bytes().unwrap();
+            let reloaded = AnimatedModel::from_bytes(&cooked).unwrap();
+            assert_eq!(reloaded.to_bytes().unwrap(), cooked);
+            for (time, expected) in expected_times.into_iter().zip(expected_values) {
+                close_array(
+                    reloaded.sample_clip(1, time).unwrap().local()[0].translation,
+                    expected,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_cli_rejects_source_and_target_aliases_without_changing_bytes() {
+    use std::os::unix::fs::symlink;
+    let temp = TempDir::new();
+    let input = temp.join("source.glb");
+    let alias = temp.join("alias.glb");
+    let output = temp.join("clip.glb");
+    fs::write(&input, FIXTURE).unwrap();
+    fs::hard_link(&input, &alias).unwrap();
+    let reverse_args = |input: &Path, output: &Path| {
+        let mut args = cli_args(input, output);
+        args.extend([OsString::from("--direction"), OsString::from("reverse")]);
+        args
+    };
+    assert!(authoring::run(reverse_args(&input, &alias)).is_err());
+    assert_eq!(fs::read(&alias).unwrap(), FIXTURE);
+    fs::remove_file(&alias).unwrap();
+    symlink(&input, &alias).unwrap();
+    assert!(authoring::run(reverse_args(&input, &alias)).is_err());
+    assert!(authoring::run(reverse_args(&alias, &output)).is_err());
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), FIXTURE);
+    assert!(fs::symlink_metadata(&alias)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 2);
 }
