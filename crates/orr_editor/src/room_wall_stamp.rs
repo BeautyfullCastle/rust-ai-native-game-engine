@@ -36,6 +36,10 @@ mod placement;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[path = "room_wall_stamp/placement/mirror_tests.rs"]
+mod mirror_tests;
+
 impl Template {
     pub(crate) fn capture(rows: Vec<(String, Value)>) -> Result<Self, String> {
         if rows.is_empty() || rows.len() > MAX_WALLS {
