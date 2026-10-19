@@ -172,6 +172,8 @@ impl Drop for PreviewGpu {
 #[derive(Default)]
 pub(super) struct PreviewWindow {
     state: State,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
+    source: Option<(PathBuf, u64)>,
     gpu: Option<PreviewGpu>,
     error: Option<String>,
     canvas: Option<egui::Rect>,
@@ -568,6 +570,39 @@ impl PreviewWindow {
     }
 }
 impl EditorApp {
+    /// A project switch must not discard accepted unsaved UI or staged gestures.
+    /// This is read-only: cancellation and failure retain the document and undo.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
+    pub(super) fn collect_ui_project_switch_guard(&self) -> Result<(), String> {
+        let preview = &self.collect_ui_preview;
+        if preview.pointer_down
+            || preview.position.state.is_dragging()
+            || preview.position.state.is_ready()
+            || preview.resize.state.is_dragging()
+            || preview.resize.state.is_ready()
+            || preview.alignment.state.is_ready()
+        {
+            return Err("Apply or cancel the staged Collect UI gesture before changing projects".into());
+        }
+        let Some(panel) = self.collect_ui.as_ref() else {
+            return if preview.state.admitted_path().is_some() {
+                Err("Collect UI admission has no authoring panel; reopen the current project".into())
+            } else {
+                Ok(())
+            };
+        };
+        if preview.source.as_ref()
+            != self.editor.path().map(|path| (path, self.editor.scene_load_epoch())).as_ref()
+            || preview.source.is_none()
+        {
+            return Err("Collect UI belongs to a different scene or host; reopen the current project".into());
+        }
+        let path = preview.state.admitted_path().ok_or(
+            "Collect UI has no admitted saved document; reopen the current project before switching",
+        )?;
+        crate::editor::collect_project::saved_ui_matches(path, panel.document())
+    }
+
     pub(crate) fn install_collect_ui_preview(&mut self, prepared: &PreparedCollectUi) {
         self.collect_ui_preview.close();
         self.collect_ui_preview.error = match self.editor.path() {
@@ -578,6 +613,14 @@ impl EditorApp {
                 .err(),
             None => Some("Open a saved Collect project to preview its authored screens".into()),
         };
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
+        {
+            self.collect_ui_preview.source = if self.collect_ui_preview.error.is_none() {
+                self.editor.path().map(|path| (path, self.editor.scene_load_epoch()))
+            } else {
+                None
+            };
+        }
     }
     pub(super) fn sync_collect_ui_preview(&mut self) {
         let scene = self.editor.path();
@@ -672,3 +715,7 @@ impl EditorApp {
 #[cfg(test)]
 #[path = "collect_ui_preview_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
+#[path = "collect_ui_project_switch_tests.rs"]
+mod project_switch_tests;
