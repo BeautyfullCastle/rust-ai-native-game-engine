@@ -41,17 +41,29 @@ fn authored_map(path: &Path) -> ActionMap {
         .build_eframe(|_| collect_input_map_authoring::App::default());
     settle(&mut h);
     for (action, binding) in [
-        ("left", "Key J"),
-        ("right", "Key L"),
-        ("up", "Key I"),
-        ("down", "Key K"),
-        ("restart", "Key Enter"),
-        ("quit", "Key Q"),
+        ("left", Key::J),
+        ("right", Key::L),
+        ("up", Key::I),
+        ("down", Key::K),
+        ("restart", Key::Enter),
+        ("quit", Key::Q),
     ] {
         author_combo(&mut h, "Action", action);
         author_click(&mut h, "Clear action draft");
         author_click(&mut h, "Add binding");
-        author_combo(&mut h, "Binding 1", binding);
+        author_click(&mut h, "Capture binding 1");
+        // A physical edge, deliberately distinct from its logical layout key.
+        // Down/up belong to one RawInput batch, not Harness::event queued frames.
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::Key {
+                key: Key::F1,
+                physical_key: Some(binding),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        settle(&mut h);
         author_click(&mut h, "Apply action");
         assert!(h.state().panel().message().starts_with("Action applied"));
     }
