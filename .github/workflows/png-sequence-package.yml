@@ -62,7 +62,7 @@ jobs:
                   or re.findall(r'^running (\d+) tests?$', block, re.M) != [str(count)]
                   or len(cases) != count or len({name for name, _ in cases}) != count or any(status != 'ok' for _, status in cases)):
                   raise RuntimeError('Exact-count CPU acceptance failed')
-          helpers['run_logged'](['cargo', 'clippy', '--locked', '-p', 'orr_sample', '--features', 'project-create', *selectors, '--test', 'png_sequence_package_gpu', '--test', 'png_sequence_canvas_gpu', '--', '-D', 'warnings'], evidence / 'clippy.log')
+          helpers['run_logged'](['cargo', 'clippy', '--locked', '-p', 'orr_sample', '--features', 'project-create', *selectors, '--test', 'png_sequence_package_gpu', '--test', 'png_sequence_canvas_gpu', '--test', 'png_grid_package_gpu', '--', '-D', 'warnings'], evidence / 'clippy.log')
           helpers['run_logged'](['cargo', 'clippy', '--locked', '-p', 'orr_editor', '--features', 'sprites', '--test', 'png_grid_package_consumer', '--', '-D', 'warnings'], evidence / 'grid-consumer-clippy.log')
           helpers['run_logged'](['cargo', 'build', '--locked', '-p', 'orr_sample', '--features', 'project-create', *selectors], evidence / 'cli-build.log')
           os.environ['ORR_PNG_GRID_PACKAGE_BIN'] = str(Path('target/debug/examples/png_grid_package').resolve())
@@ -128,6 +128,75 @@ jobs:
           output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--test', 'png_sequence_canvas_gpu', '--', '--exact', gate['TEST'], '--nocapture', '--format=pretty', '--color=never', '--test-threads=1'], evidence / 'canvas-gpu.log')
           gate['validate_log'](output)
           helpers['run_logged'](['python', 'tools/check-png-canvas-receipt.py', str(canvas)], evidence / 'canvas-receipt-validation.log')
+      - name: Required grid installed pixels and authoritative parity
+        env:
+          WGPU_BACKEND: vulkan
+          ORR_REQUIRE_GPU: '1'
+        shell: python {0}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          test = 'grid_cli_installed_locomotion_twelve_capture_pixels_and_frame_parity'
+          marker = 'PNG grid: 12 Vulkan captures; 54 authoritative parity checks; source-hidden installed packages; Loop/Once and wrong-cell control'
+          def require(condition, message):
+              if not condition:
+                  raise RuntimeError(message)
+          def unique_pairs(pairs):
+              result = {}
+              for key, value in pairs:
+                  require(key not in result, 'Duplicate receipt key')
+                  result[key] = value
+              return result
+          def digest(path):
+              require(path.is_file() and not path.is_symlink(), 'Missing or linked artifact')
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          def validate_grid(output, pixels, producer_hash):
+              output = output.replace('\r\n', '\n')
+              summaries = helpers['SUMMARY'].findall(output)
+              require(len(summaries) == 1 and tuple(map(int, summaries[0][:5])) == (1, 0, 0, 0, 0), 'Grid exact-one test summary failed')
+              require(re.findall(r'^running (\d+) tests?$', output, re.M) == ['1'], 'Grid test census failed')
+              require(re.findall(r'^test (\S+) \.\.\. ', output, re.M) == [test], 'Grid test identity failed')
+              require(output.count(marker) == 1 and not re.search(r'\bSKIP\b', output), 'Grid success marker missing or skipped')
+              receipt_path = pixels / 'receipt.json'
+              receipt_hash = digest(receipt_path)
+              receipt = json.loads(receipt_path.read_text(), object_pairs_hook=unique_pairs)
+              require(type(receipt.get('schema')) is int and receipt['schema'] == 1 and receipt.get('test') == test, 'Wrong grid receipt schema/test')
+              require(type(receipt.get('capture_count')) is int and receipt['capture_count'] == 12 and type(receipt.get('parity_checks')) is int and receipt['parity_checks'] == 54, 'Incomplete grid receipt')
+              require(receipt.get('source_hidden') is True and receipt.get('installed_bytes_preserved') is True, 'Grid source/install claims missing')
+              require(receipt.get('backend') == 'Vulkan' and isinstance(receipt.get('adapter'), str) and receipt['adapter'].strip(), 'Missing Vulkan adapter record')
+              require(receipt.get('device_type') in ('Other', 'IntegratedGpu', 'DiscreteGpu', 'VirtualGpu', 'Cpu') and type(receipt.get('is_software')) is bool, 'Missing device classification')
+              require(receipt.get('producer_sha256') == producer_hash and re.fullmatch(r'[0-9a-f]{64}', receipt.get('source_png_sha256', '')) is not None, 'Grid producer/source digest mismatch')
+              expected = [(f'grid-good-tick-{tick}.png', tick, cell, False) for tick, cell in ((0, 0), (5, 0), (6, 1), (11, 1), (12, 0), (13, 2), (18, 2), (19, 3), (24, 3), (25, 3), (26, 0))]
+              expected.append(('grid-wrong-order-tick-19.png', 19, 2, True))
+              captures = receipt.get('captures')
+              require(isinstance(captures, list) and len(captures) == 12, 'Wrong grid capture inventory')
+              require(set(path.name for path in pixels.iterdir()) == {name for name, *_ in expected} | {'receipt.json', 'partial-receipt.json', 'grid-good-cli.log', 'grid-wrong-order-cli.log'}, 'Unexpected or missing grid artifacts')
+              hashes = []
+              for row, (name, tick, cell, wrong) in zip(captures, expected):
+                  require(isinstance(row, dict) and row.get('file') == name and type(row.get('tick')) is int and row['tick'] == tick and type(row.get('cell')) is int and row['cell'] == cell and row.get('wrong_order') is wrong, 'Wrong grid capture identity/order')
+                  path = pixels / name
+                  actual = digest(path)
+                  require(row.get('sha256') == actual, 'Grid capture digest mismatch')
+                  header = path.read_bytes()[:24]
+                  require(header[:8] == b'\x89PNG\r\n\x1a\n' and header[12:16] == b'IHDR' and header[16:24] == (64).to_bytes(4, 'big') * 2, 'Wrong grid PNG dimensions')
+                  hashes.append({'file': name, 'sha256': actual})
+              return {'receipt_sha256': receipt_hash, 'partial_receipt_sha256': digest(pixels / 'partial-receipt.json'), 'cli_logs': [{'file': name, 'sha256': digest(pixels / name)} for name in ('grid-good-cli.log', 'grid-wrong-order-cli.log')], 'producer_sha256': producer_hash, 'captures': hashes, 'adapter': receipt['adapter'], 'backend': receipt['backend'], 'device_type': receipt['device_type'], 'is_software': receipt['is_software']}
+          evidence = Path(os.environ['ORR_SEQUENCE_EVIDENCE'])
+          binary = Path('target/debug/examples/png_grid_package').resolve()
+          producer_hash = digest(binary)
+          os.environ['ORR_PNG_GRID_PACKAGE_BIN'] = str(binary)
+          pixels = evidence / 'grid-pixels'
+          require(not pixels.exists(), 'Grid evidence must be fresh')
+          os.environ['ORR_GRID_PIXEL_EVIDENCE'] = str(pixels)
+          output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--test', 'png_grid_package_gpu', '--', '--ignored', '--exact', test, '--nocapture', '--format=pretty', '--color=never', '--test-threads=1'], evidence / 'grid-gpu.log')
+          require(digest(binary) == producer_hash, 'Grid CLI changed during GPU acceptance')
+          verified = validate_grid(output, pixels, producer_hash)
+          (evidence / 'grid-pixels-verified.json').write_text(json.dumps(verified, sort_keys=True, indent=2) + '\n')
       - name: Retain logs on success and failure
         if: always()
         uses: actions/upload-artifact@v4

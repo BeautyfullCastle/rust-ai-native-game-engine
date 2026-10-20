@@ -75,3 +75,20 @@ reported separately with actual evidence.
 Format reference: [W3C PNG Third Edition, Recommendation 2025-06-24](https://www.w3.org/TR/png-3/)
 defines both static and animated raster images. This tool accepts static sheets
 only; animated PNG is intentionally unsupported, not invalid PNG in general.
+
+## Focused production-pixel acceptance
+
+The explicit ignored test `grid_cli_installed_locomotion_twelve_capture_pixels_and_frame_parity`
+uses the real CLI, installed snapshots, `PreparedRuntime`/PlayHost and production
+`ProjectCompositor`. A 2x2 grid of internally asymmetric 2x2 cells covers idle Loop
+and walk Once boundaries, return-to-idle reset and one wrong-cell-order control.
+It records exactly 12 Vulkan readbacks while checking authoritative frame bytes
+and checksums on every tick (54 checks across normal and negative runs). Expected
+pixels come from literal input texels, not generated regions or prior captures.
+No 675-image matrix or native widget acceptance is implied.
+
+Explicit execution requires `ORR_REQUIRE_GPU=1`, `ORR_PNG_GRID_PACKAGE_BIN` pointing
+to the built CLI, and `ORR_GRID_PIXEL_EVIDENCE` naming a new directory whose parent
+exists. Run this test with `--ignored --exact`; missing CLI/GPU or evidence reuse
+fails. The default ignored state is not GPU success. Keep raw captures and receipt,
+and report the actual adapter (including software rendering) and execution result.
