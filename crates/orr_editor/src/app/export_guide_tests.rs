@@ -1,6 +1,8 @@
 //! CPU actual-App/widget evidence, not native OS input or target-player execution.
 use super::*;
 use crate::game::EditorGame;
+#[cfg(feature = "mesh-export")]
+use egui_kittest::kittest::NodeT;
 use egui_kittest::{kittest::Queryable, Harness};
 use std::fs;
 
