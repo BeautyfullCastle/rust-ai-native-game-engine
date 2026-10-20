@@ -19,6 +19,10 @@ use crate::inspector::{show_component, InspEvent};
 use crate::model::{EntityRow, Target};
 use crate::viewport::{self, GpuViewport};
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+#[path = "app/arena_export.rs"]
+mod arena_export;
+
 #[path = "app/close_review.rs"]
 mod close_review;
 #[path = "app/work_status.rs"]
@@ -126,6 +130,8 @@ pub const LBL_RECONNECT: &str = "Reconnect";
 /// Which tab the bottom panel shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum BottomTab {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+    ArenaExport,
     /// Play controls and the scrub bar.
     #[default]
     Timeline,
@@ -304,6 +310,8 @@ impl ScreenshotJob {
 
 /// The editor window.
 pub struct EditorApp {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+    arena_export: arena_export::State,
     /// The state machine.
     pub editor: Editor,
     /// Window-only state.
@@ -404,7 +412,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain_ramp: terrain_ramp::State::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))] arena_export: arena_export::State::default(), editor, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain_ramp: terrain_ramp::State::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -1082,6 +1090,8 @@ impl EditorApp {
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         // The Agent tab needs more room than the timeline; each has its own remembered height.
         let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 470.0) } else { ("bottom", 120.0) };
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+        let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::ArenaExport { ("bottom_arena_export", 350.0) } else { (bottom_id, bottom_h) };
         egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).show(ui, |ui| self.bottom(ui));
         egui::Panel::left("hierarchy").resizable(true).default_size(230.0).show(ui, |ui| self.hierarchy(ui));
         let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0);
@@ -2596,6 +2606,8 @@ impl EditorApp {
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::Agent, "Agent");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::UnsavedWork, "Unsaved work details");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::ExportGuide, "Export guide");
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+            ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::ArenaExport, "Arena export");
             let unseen = self.editor.feed().unseen();
             if unseen > 0 && self.ui.bottom_tab != BottomTab::Agent {
                 // Badge: what agents did since the tab was last shown (reads excluded).
@@ -2607,6 +2619,8 @@ impl EditorApp {
         match self.ui.bottom_tab {
             BottomTab::UnsavedWork => self.show_close_review(ui),
             BottomTab::ExportGuide => self.show_export_guide(ui),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+            BottomTab::ArenaExport => { egui::ScrollArea::vertical().id_salt("arena_export_scroll").show(ui, |ui| self.show_arena_export(ui)); },
             BottomTab::Timeline => self.timeline(ui),
             BottomTab::History => self.history(ui),
             BottomTab::Agent => {

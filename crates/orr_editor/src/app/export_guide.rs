@@ -5,6 +5,8 @@ use crate::game::EditorGame;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Settings {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+    Arena,
     #[cfg(feature = "mesh-export")]
     Mesh,
     #[cfg(feature = "mesh-hazards-export")]
@@ -60,7 +62,7 @@ pub(super) fn route(game: EditorGame) -> Route {
         },
         #[cfg(feature = "room-project")]
         EditorGame::RoomEscape => room_route(),
-        EditorGame::Arena => cli_route("orr_export_arena"),
+        EditorGame::Arena => arena_route(),
         #[cfg(feature = "collect-dodge")]
         EditorGame::CollectDodge => cli_route("orr_export_collect"),
         _ => Route {
@@ -71,6 +73,18 @@ pub(super) fn route(game: EditorGame) -> Route {
             settings: None,
         },
     }
+}
+
+fn arena_route() -> Route {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+    { Route {
+        title: "Arena export", target: "Editor route: Linux x86-64 host and player only.",
+        instructions: "Open the inline Arena export tab to export the explicitly saved project.",
+        limits: "Scenes and sprites only. Verification executes that runtime; its hash does not establish trust. No automatic save, launch, focus or popup.",
+        settings: Some(Settings::Arena),
+    } }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export")))]
+    { cli_route("orr_export_arena") }
 }
 
 // These are separate CLI tools, not features inferred to be linked into this editor.
@@ -122,6 +136,8 @@ impl EditorApp {
                 let can_open = can_open && (settings != Settings::Room || !self.package_work_pending());
                 if ui.add_enabled(can_open, egui::Button::new("Open export settings")).clicked() {
                     match settings {
+                        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+                        Settings::Arena => self.ui.bottom_tab = super::BottomTab::ArenaExport,
                         #[cfg(feature = "mesh-export")]
                         Settings::Mesh => self.mesh_export.open = true,
                         #[cfg(feature = "mesh-hazards-export")]

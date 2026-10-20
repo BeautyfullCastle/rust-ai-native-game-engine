@@ -26,7 +26,11 @@ impl EditorApp {
         let root_close = ctx.input(|input| {
             input.raw.viewport_id == ViewportId::ROOT && input.viewport().close_requested()
         });
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+        self.poll_arena_export(&ctx);
         draw(self, ui);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+        self.poll_arena_export(&ctx);
         let observed = self.work_status_domains(Inspection::Observation);
         self.publish_work_status(observed.clone());
         if root_close {
@@ -46,6 +50,8 @@ impl EditorApp {
             self.ui.close_review.blocked = (self.editor.spec().is_local()
                 && self.editor.is_dirty())
                 || closing.iter().any(|row| row.is_blocker());
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+            if self.arena_export.busy() { self.ui.close_review.blocked = true; }
             if self.ui.close_review.blocked {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             }
@@ -76,6 +82,10 @@ impl EditorApp {
     /// The latter are historical UI details, not current API facts or close vetoes.
     pub(super) fn close_review_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+        if self.arena_export.busy() {
+            items.push(Item { name: "Arena export · worker owned", action: "Wait for export worker completion and join, then explicitly close again. Editing remains available.", last_close: false });
+        }
         if self.editor.spec().is_local() && self.editor.is_dirty() {
             items.push(Item {
                 name: "Scene · unsaved",

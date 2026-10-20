@@ -53,6 +53,8 @@ use crate::backend::{Backend, HostSpec};
 use crate::diagnostics::{EditorDiagnostics, Telemetry};
 use crate::model::{ClientInfo, EntityRow, GuidSelection, History, ProposalDetail, ProposalInfo, SimState, Stopped, Target};
 pub use crate::model::Mode;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+pub(crate) mod arena_export;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "collect-ui", feature = "project-create"))]
 pub(crate) mod collect_project;
 #[cfg(feature="room-authoring")]
@@ -232,7 +234,7 @@ pub struct Editor {
     navigation_blocker: Option<String>,
     #[cfg(feature = "mesh-navigation")]
     mesh_navigation_blocker: Option<String>,
-    #[cfg(any(feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     scene_load_epoch: u64,
     #[cfg(feature = "tilemap")]
     tilemap_start_scene: Option<(crate::project::PreparedArenaScene, u64)>,
@@ -284,7 +286,7 @@ pub struct Editor {
     script_owner: BTreeMap<String, String>,
 }
 
-#[cfg(any(feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+#[cfg(any(feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
 fn next_scene_load_epoch() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -371,7 +373,7 @@ impl Editor {
             navigation_blocker: None,
             #[cfg(feature = "mesh-navigation")]
             mesh_navigation_blocker: None,
-            #[cfg(any(feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+            #[cfg(any(feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
             scene_load_epoch: next_scene_load_epoch(),
             #[cfg(feature = "tilemap")]
             tilemap_start_scene: None,
@@ -1893,7 +1895,7 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
-                #[cfg(any(feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+                #[cfg(any(feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
                 { self.scene_load_epoch = next_scene_load_epoch(); }
                 self.clear_room_camera();
                 self.select(None);
@@ -2154,7 +2156,7 @@ impl Editor {
         #[cfg(feature = "tilemap")]
         let changed_source = method == "scene.load" || (method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true));
         let result = self.call(method, params);
-        #[cfg(any(feature = "terrain", feature = "tilemap"))]
+        #[cfg(any(feature = "arena-project-export", feature = "terrain", feature = "tilemap"))]
         if method == "scene.load" && result.is_ok() { self.scene_load_epoch = next_scene_load_epoch(); }
         #[cfg(feature = "tilemap")]
         if changed_source && result.is_ok() { self.tilemap_start_scene = None; }
@@ -2240,7 +2242,7 @@ impl Editor {
     pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
     #[cfg(feature = "mesh-navigation")]
     pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
-    #[cfg(any(feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
     #[cfg(feature = "tilemap")]
     pub(crate) fn admitted_tilemap_scene_matches(&self, expected: &crate::project::PreparedArenaScene) -> bool {

@@ -63,6 +63,17 @@ impl Default for SpritePanel {
     }
 }
 impl SpritePanel {
+    /// Compare only referenced cached assets; never reload or mutate the renderer cache.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+    pub(crate) fn arena_export_assets_match(&self, admitted: &BTreeMap<(String,String),Asset>) -> Result<(),String> {
+        for (key, asset) in admitted {
+            let cached = self.loaded.get(key).ok_or("Referenced sprite is absent from the editor cache; reopen explicitly")?;
+            if cached.asset.document.to_json().map_err(|e| e.to_string())? != asset.document.to_json().map_err(|e| e.to_string())? || cached.asset.rgba != asset.rgba {
+                return Err("Referenced cached sprite document or pixels differ from saved project assets; reopen explicitly".into());
+            }
+        }
+        Ok(())
+    }
     fn require_unpinned(&self) -> Result<(), String> {
         if self.tilemap_pinned {
             return Err("tilemap owns the shared atlas set; reopen the complete project instead of changing sprite bindings/assets".into());

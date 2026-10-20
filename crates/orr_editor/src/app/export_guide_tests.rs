@@ -67,8 +67,12 @@ fn routes_do_not_invent_default_or_cli_editor_export() {
         assert!(route.instructions.contains("no fallback"));
     }
     let route = export_guide::route(EditorGame::Arena);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+    assert!(matches!(route.settings, Some(export_guide::Settings::Arena)));
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export")))]
     assert!(route.settings.is_none());
     assert!(route.target.contains("Linux x86-64 host and player only"));
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export")))]
     assert!(route.instructions.contains("orr_export_arena"));
     assert!(route.limits.contains("executes that runtime"));
 }
