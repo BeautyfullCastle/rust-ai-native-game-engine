@@ -294,8 +294,8 @@ pub fn consume(bundle: &Path, evidence: &Path) {
 
 fn korean_glyph_masks(
     gpu: &Wgpu,
-    compositor: &mut ProjectCompositor,
-    target: &OffscreenTarget,
+    compositor: &mut ProjectCompositor<Wgpu>,
+    target: &OffscreenTarget<Wgpu>,
     presentation: &orr_sample::project_runtime::ProjectPresentation,
     font: Vec<u8>,
     evidence: &Path,
