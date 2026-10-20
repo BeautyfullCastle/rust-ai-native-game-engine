@@ -361,9 +361,23 @@ fn actual_widget_runtime_hash_changes_clear_trust_and_inspection_does_not_retry(
     for label in ["Runtime path", "Expected lowercase SHA256"] {
         h.state_mut().arena_export.trusted = true;
         h.get_by_role_and_label(egui::accesskit::Role::TextInput, label)
+            .focus();
+        h.run_steps(2);
+        let before = if label == "Runtime path" {
+            h.state().arena_export.runtime.clone()
+        } else {
+            h.state().arena_export.hash.clone()
+        };
+        h.get_by_role_and_label(egui::accesskit::Role::TextInput, label)
             .type_text("x");
         h.run_steps(2);
         assert!(!h.state().arena_export.trusted);
+        let after = if label == "Runtime path" {
+            &h.state().arena_export.runtime
+        } else {
+            &h.state().arena_export.hash
+        };
+        assert_ne!(after, &before);
     }
     h.get_by_label("Inspect previous destination").click();
     h.run_steps(2);
@@ -524,4 +538,61 @@ fn active_arena_job_refuses_mesh_creation_replacement() {
     assert!(app.arena_export.busy());
     release.send(()).unwrap();
     reap(&mut app);
+}
+#[cfg(feature = "package-manager")]
+#[test]
+fn actual_package_verification_worker_blocks_arena_export_without_cancellation() {
+    let (dir, mut app) = fixture();
+    app.package_manager.open = true;
+    let root = dir.path().to_owned();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size([1200.0, 1000.0])
+        .build_ui_state(
+            move |ui, state: &mut (EditorApp, bool)| {
+                state.0.package_manager.show(ui.ctx(), Some(&root), None);
+                if state.0.package_manager.busy() {
+                    assert!(state
+                        .0
+                        .arena_export_dispatch()
+                        .unwrap_err()
+                        .contains("pending content"));
+                    assert!(
+                        state.0.package_manager.busy(),
+                        "export does not cancel content worker"
+                    );
+                    state.1 = true;
+                }
+            },
+            (app, false),
+        );
+    h.run_steps(2);
+    h.get_by_label("Verify installed packages").click();
+    h.run_steps(1);
+    assert!(h.state().1, "real package worker dispatch must be observed");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.state().0.package_manager.busy() {
+        assert!(Instant::now() < deadline);
+        h.run_steps(1);
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+#[cfg(all(feature = "collect-ui", feature = "project-create"))]
+#[test]
+fn active_arena_job_retains_app_through_disabled_collect_replacement_menu() {
+    use egui_kittest::kittest::NodeT;
+    let (dir, mut app) = fixture();
+    let release = synthetic_job(&mut app, dir.path());
+    let mut h = egui_kittest::Harness::builder()
+        .build_ui_state(|ui, app: &mut EditorApp| app.collect_project_menu(ui), app);
+    h.run_steps(2);
+    for label in ["New Collect project…", "Open Collect project…"] {
+        assert!(h.get_by_label(label).accesskit_node().is_disabled());
+        h.get_by_label(label).click();
+        h.run_steps(1);
+        assert!(!h.state().collect_project_dialog_open());
+        assert_eq!(h.state().editor.game(), EditorGame::Arena);
+        assert!(h.state().arena_export.busy());
+    }
+    release.send(()).unwrap();
+    reap(h.state_mut());
 }

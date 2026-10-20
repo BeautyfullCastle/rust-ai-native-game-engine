@@ -88,6 +88,7 @@ fn arena_route() -> Route {
 }
 
 // These are separate CLI tools, not features inferred to be linked into this editor.
+#[cfg(any(not(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export")), feature = "collect-dodge", feature = "room-project"))]
 fn cli_route(binary: &'static str) -> Route {
     Route {
         title: binary,

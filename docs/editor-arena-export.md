@@ -45,7 +45,9 @@ CPU tests exercise source mismatches, cache identity, ownership and actual egui
 root close/tab events. These do not prove native GPU rendering or a delivered
 player. The separate ignored acceptance test `arena_editor_export` requires
 `arena-project-export,project-create`, `ORR_ARENA_EXPORT_RUNTIME` pointing to a
-separately built matching Linux player, bubblewrap and a working production
+separately built matching Linux player, `ORR_ARENA_EXPORT_EVIDENCE_DIR` naming
+a fresh absolute retained evidence directory outside source/runtime directories,
+bubblewrap and a working production
 capture adapter. Run it explicitly with `--ignored --exact
 actual_widget_generated_edited_project_relocates_and_runs_with_sprites`.
 It creates and edits a starter, saves/reopens/plays, clicks the real export widget,
@@ -56,3 +58,8 @@ sprite pixels. It does not treat zero-tick smoke alone as acceptance.
 No new test pass is implied by this document. Record source SHA, exact commands,
 results and GPU adapter separately; Linux software GPU evidence is not Windows,
 native-window or physical-GPU evidence.
+
+The acceptance directory retains command stdout/stderr, incremental stage outcomes,
+producer/source hashes, source and bundle inventories, and both PNG captures even
+when an assertion fails. A final receipt is written only after joined success,
+source hiding, read-only write denial, replay/pixel and source-preservation checks.
