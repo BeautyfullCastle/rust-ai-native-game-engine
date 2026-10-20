@@ -5418,7 +5418,7 @@ jobs:
     # runs must build and actually execute in Chromium: transport, rollback,
     # native/wasm checksums and GPU canvas pixels are mandatory below.
     name: wasm32-unknown-unknown (browser runtime)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
