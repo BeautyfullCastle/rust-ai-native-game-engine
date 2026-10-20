@@ -13,7 +13,7 @@ viewport. Fill changes the four-connected area matching the clicked cell's
 exact value with one click. Diagonals are not connected. Choose Erase to clear
 the painted cell or filled area; empty cells and region ID zero remain distinct.
 Fill runs only on the initial unobstructed viewport press, never repeatedly
-while holding or dragging. Changing Paint/Fill mode ends an active stroke.
+while holding or dragging. Changing Paint/Fill/Rectangle mode ends an active stroke.
 
 A complete fill is one Undo tile / Redo tile entry in the separate, bounded
 128-edit history, not the scene document's Undo. Filling with the same value is
@@ -21,6 +21,21 @@ a no-op and preserves redo and the saved marker. Traversal is iterative and
 bounded by the admitted grid's 4096 cells. The complete candidate is validated
 against the installed atlas and the combined tile/actor budget before committing;
 a failure leaves the document, history and saved marker unchanged.
+
+Rectangle paints or erases the inclusive area between two cells, in either drag
+direction. Press inside an unobstructed editable viewport to capture the selected
+region (or Erase), drag to preview the bounds, then release inside a valid cell.
+The preview never changes the document; one valid release commits at most one
+Undo tile entry. Same-value rectangles preserve redo and the saved marker.
+Escape, window focus loss, tool/mode changes, stale scene/epoch/source, lost
+capture, a skipped viewport frame, or an outside/obstructed release cancel the
+pending rectangle. Resize and Undo/Redo also cancel it. Rectangle rechecks the
+existing source stamp (manifest, lock, tilemap and actor sidecar bytes, plus
+root/scene path identity) while a gesture is active. It also compares bounded
+scene-file bytes from press to release. Installed asset bytes are still verified
+by explicit Save, not continuously by the gesture. Rectangle validates the complete
+candidate against the atlas and combined actor/tile budget before committing.
+Selection is fixed at press, and saved files change only through explicit Save.
 
 Width and Height are draft whole-number inputs (1 through 64). Only the explicit
 Resize button applies them; typing or pressing Enter does not change the map.
@@ -38,10 +53,10 @@ verify the saved presentation, then Play. Unsaved tiles must be saved or undone
 before Play or closing. Scene Save does not save tile data; scene Open and Save
 As do not retarget the installed tilemap. The app refuses those operations while
 the map is installed. Proposal preview, replay, disconnected hosts and mismatched
-scene identity cannot paint, fill or resize. While enabled, the tile tool reserves viewport
+scene identity cannot paint, fill, rectangle or resize. While enabled, the tile tool reserves viewport
 pointer input, including when an edit is refused, rather than moving actors.
 A paint or fill gesture must start inside the unobstructed viewport. Pressing elsewhere
-and dragging in does not paint. Palette buttons expose Static region N labels; mode buttons expose Paint and Fill labels.
+and dragging in does not paint. Palette buttons expose Static region N labels; mode buttons expose Paint, Fill and Rectangle labels.
 
 This visual layer replaces the runtime Arena floor presentation only. Empty and
 transparent texels show the normal clear background. Tiles do not create actors,
@@ -164,3 +179,29 @@ CI, whose gate requires llvmpipe. Native OS input, Windows, hosted required CI a
 exported-player behavior remain outside this acceptance; export remains
 unsupported. See
 [issue #263](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/263).
+
+## Rectangle implementation status (2026-10-20)
+
+The Rectangle adapter and focused candidate/App acceptance sources are implemented
+under [issue #284](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/284).
+They do not introduce a core/schema, Cargo/dependency, package, runtime or export
+change. The feature remains default-off; no popup, autofocus or autosave is added.
+The implementation source is not yet execution acceptance: CPU, native/software
+GPU and required hosted CI evidence must be reported separately. Earlier
+Paint/Fill/Resize failures and acceptance records above remain unchanged.
+
+Source review initially rejected final-pointer-position dispatch: coalesced
+outside press/release followed by an inside move could be misinterpreted. The
+revised dispatch uses actual primary-button event positions and rejects
+ambiguous multiple transitions. Review also added transient focus-loss events
+and an exact bounded scene-byte comparison between press and release. These are
+source-review findings and corrections, not claims of executed test acceptance.
+
+The new source includes 13 non-ignored CPU cases (six candidate/history cases
+and seven installed-panel egui cases), plus one explicitly ignored software-GPU
+App acceptance that must be invoked explicitly. The latter exercises real
+proposal preview, Play and same-path scene-reload transitions. It does not
+manufacture a same-admission replay-viewer transition: attaching a viewer uses a
+different host/epoch and is already outside the admitted editable lifecycle.
+None of these new cases has been executed in the source-only implementation
+stage; counts are authored test inventory, not passing results.

@@ -14,12 +14,24 @@ use std::{
     path::{Path, PathBuf},
 };
 mod fill;
+mod rectangle;
 mod resize;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolMode {
     Paint,
     Fill,
+    Rectangle,
+}
+
+/// An uncommitted gesture: selection is fixed at press, not at release.
+struct RectangleGesture {
+    start: CellCoord,
+    end: CellCoord,
+    region: Option<u32>,
+    source: ValidatedDocument,
+    scene_bytes: Vec<u8>,
+    frame: u64,
 }
 
 const HISTORY: usize = 128;
@@ -143,6 +155,7 @@ pub struct TilemapPanel {
     tool: bool,
     mode: ToolMode,
     painting: bool,
+    rectangle: Option<RectangleGesture>,
     selected: Option<u32>,
     draft_width: String,
     draft_height: String,
@@ -216,6 +229,7 @@ impl TilemapPanel {
             tool: false,
             mode: ToolMode::Paint,
             painting: false,
+            rectangle: None,
             selected: None,
             error: None,
             compositor: None,
@@ -343,14 +357,19 @@ impl TilemapPanel {
             ToolMode::Fill => {
                 fill::candidate(&self.history.current, cell, region, &asset.document)?.0
             }
+            ToolMode::Rectangle => return Err("Rectangle requires a complete gesture".into()),
         };
         Self::budget(&next, Self::actor_count(sprites))?;
         Ok(self.history.commit(next))
     }
+    fn cancel_gesture(&mut self) {
+        self.painting = false;
+        self.rectangle = None;
+    }
     fn sync_dimensions(&mut self) {
         self.draft_width = self.history.current.document().width.to_string();
         self.draft_height = self.history.current.document().height.to_string();
-        self.painting = false;
+        self.cancel_gesture();
     }
     fn undo(&mut self) {
         self.history.undo();
@@ -362,7 +381,7 @@ impl TilemapPanel {
     }
     /// Explicit apply only: editing a draft never mutates the document.
     fn resize(&mut self, editor: &Editor, sprites: &SpritePanel) -> Result<bool, String> {
-        self.painting = false;
+        self.cancel_gesture();
         if !self.editable(editor) {
             return Err("tilemap Resize requires the matching editable Arena project".into());
         }
@@ -476,7 +495,12 @@ impl TilemapPanel {
         ui.heading("Tile background");
         ui.label("Replaces Arena floor presentation only. Empty / transparent cells show clear background, not collision or navmesh.");
         ui.label("Scene Save / Save As does not save or retarget this tilemap. Package mutation and export are unsupported in v1.");
-        ui.checkbox(&mut self.tool, "Tile tool (owns viewport clicks)");
+        if ui
+            .checkbox(&mut self.tool, "Tile tool (owns viewport clicks)")
+            .changed()
+        {
+            self.cancel_gesture();
+        }
         ui.label(if self.dirty() {
             "Unsaved tiles: Save or Undo before Play, switching or closing."
         } else {
@@ -487,11 +511,12 @@ impl TilemapPanel {
             ui.horizontal(|ui| {
                 let paint = ui.selectable_value(&mut self.mode, ToolMode::Paint, "Paint");
                 let fill = ui.selectable_value(&mut self.mode, ToolMode::Fill, "Fill");
-                if paint.changed() || fill.changed() {
-                    self.painting = false;
+                let rectangle = ui.selectable_value(&mut self.mode, ToolMode::Rectangle, "Rectangle");
+                if paint.changed() || fill.changed() || rectangle.changed() {
+                    self.cancel_gesture();
                 }
             });
-            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells.");
+            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Rectangle: drag, then release to apply once.");
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -561,7 +586,7 @@ impl TilemapPanel {
             }
         });
         if !editable {
-            ui.label("Paint, Fill, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
+            ui.label("Paint, Fill, Rectangle, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
         }
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
@@ -577,7 +602,7 @@ impl TilemapPanel {
         pixels: (u32, u32),
     ) -> bool {
         if !self.tool {
-            self.painting = false;
+            self.cancel_gesture();
             return false;
         }
         if !self.editable(editor)
@@ -586,9 +611,14 @@ impl TilemapPanel {
             || rect.width() <= 0.
             || rect.height() <= 0.
         {
-            self.painting = false;
+            self.cancel_gesture();
             return true;
         }
+        if self.mode == ToolMode::Rectangle {
+            self.rectangle_viewport(ui, editor, sprites, rect, pixels);
+            return true;
+        }
+        self.rectangle = None;
         let (pos, pressed, down) = ui.input(|i| {
             (
                 i.pointer.interact_pos(),
@@ -619,6 +649,156 @@ impl TilemapPanel {
         }
         true
     }
+    /// No document mutation occurs until an actual primary release passes every guard.
+    fn rectangle_viewport(
+        &mut self,
+        ui: &egui::Ui,
+        editor: &Editor,
+        sprites: &SpritePanel,
+        rect: egui::Rect,
+        pixels: (u32, u32),
+    ) {
+        self.painting = false;
+        let (pos, down, press_pos, release_pos, cancel) = ui.input(|i| {
+            let mut press = None;
+            let mut release = None;
+            let mut ambiguous = false;
+            for event in &i.events {
+                if let egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    ..
+                } = event
+                {
+                    if *pressed {
+                        ambiguous |= press.is_some() || release.is_some();
+                        press = Some(*pos);
+                    } else {
+                        ambiguous |= release.is_some();
+                        release = Some(*pos);
+                    }
+                }
+            }
+            (
+                i.pointer.interact_pos(),
+                i.pointer.primary_down(),
+                press,
+                release,
+                ambiguous
+                    || !i.focused
+                    || i.key_pressed(egui::Key::Escape)
+                    || i.events
+                        .iter()
+                        .any(|event| matches!(event, egui::Event::WindowFocused(false))),
+            )
+        });
+        let pressed = press_pos.is_some();
+        let released = release_pos.is_some();
+        if cancel || !ui.is_enabled() {
+            self.rectangle = None;
+            return;
+        }
+        let frame = ui.ctx().cumulative_frame_nr();
+        if self
+            .rectangle
+            .as_ref()
+            .is_some_and(|g| g.source != self.history.current || frame > g.frame.saturating_add(1))
+        {
+            self.rectangle = None;
+            return;
+        }
+        // Source changes invalidate a pending gesture, not merely its later Save.
+        // Read only while starting/continuing a gesture; never refresh the stamp.
+        if pressed || self.rectangle.is_some() {
+            if let Err(error) = self.check_stamp() {
+                self.rectangle = None;
+                self.error = Some(error);
+                return;
+            }
+        }
+        // Button coordinates belong to the event, not the final pointer location:
+        // a later move in the same frame must not turn an outside edge into an edit.
+        let cell_at_pointer = |pos: Option<egui::Pos2>| {
+            pos.filter(|p| {
+                rect.contains(*p)
+                    && ui.clip_rect().contains(*p)
+                    && ui.ctx().layer_id_at(*p) == Some(ui.layer_id())
+            })
+            .and_then(|pos| {
+                let screen = [
+                    (pos.x - rect.min.x) * pixels.0 as f32 / rect.width(),
+                    (pos.y - rect.min.y) * pixels.1 as f32 / rect.height(),
+                ];
+                self.cell_at(editor.camera.screen_to_world(screen, pixels))
+            })
+        };
+        let cell = cell_at_pointer(pos);
+        let start_cell = cell_at_pointer(press_pos);
+        let release_cell = cell_at_pointer(release_pos);
+        if pressed {
+            self.rectangle = None;
+            if let Some(start) = start_cell {
+                match regular(
+                    &self.stamp.scene,
+                    orr_sample::project::MAX_SCENE_BYTES as usize,
+                ) {
+                    Ok(scene_bytes) => {
+                        self.rectangle = Some(RectangleGesture {
+                            start,
+                            end: start,
+                            region: self.selected,
+                            source: self.history.current.clone(),
+                            scene_bytes,
+                            frame,
+                        });
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                }
+            }
+        }
+        if let Some(gesture) = &mut self.rectangle {
+            gesture.frame = frame;
+            if let Some(end) = cell {
+                gesture.end = end;
+            }
+        }
+        if released {
+            if let (Some(gesture), Some(end)) = (self.rectangle.take(), release_cell) {
+                self.error = (|| {
+                    if regular(
+                        &self.stamp.scene,
+                        orr_sample::project::MAX_SCENE_BYTES as usize,
+                    )? != gesture.scene_bytes
+                    {
+                        return Err(
+                            "scene source changed during Rectangle; reopen full project".into()
+                        );
+                    }
+                    let (asset, _) = sprites
+                        .tilemap_asset(&self.key())
+                        .ok_or("shared atlas missing")?;
+                    let next = rectangle::candidate(
+                        &self.history.current,
+                        gesture.start,
+                        end,
+                        gesture.region,
+                        &asset.document,
+                    )?;
+                    Self::budget(&next, Self::actor_count(sprites))?;
+                    self.history.commit(next);
+                    Ok::<_, String>(())
+                })()
+                .err();
+            }
+        } else if !down {
+            // Lost capture/focus is cancellation, never an implicit release.
+            self.rectangle = None;
+        }
+    }
     /// Draw after the viewport image, so the authoring grid stays visible.
     pub fn paint_grid(&self, ui: &egui::Ui, editor: &Editor, rect: egui::Rect, pixels: (u32, u32)) {
         if !self.tool || !self.editable(editor) || pixels.0 == 0 || pixels.1 == 0 {
@@ -639,6 +819,34 @@ impl TilemapPanel {
             1.0,
             egui::Color32::from_rgba_unmultiplied(90, 180, 200, 100),
         );
+        if let Some(gesture) = &self.rectangle {
+            let left = gesture.start.column.min(gesture.end.column);
+            let right = gesture.start.column.max(gesture.end.column) + 1;
+            let top = gesture.start.row.min(gesture.end.row);
+            let bottom = gesture.start.row.max(gesture.end.row) + 1;
+            let preview = egui::Rect::from_two_pos(
+                to_pos([
+                    d.origin[0] + left as f32 * size[0],
+                    d.origin[1] - top as f32 * size[1],
+                ]),
+                to_pos([
+                    d.origin[0] + right as f32 * size[0],
+                    d.origin[1] - bottom as f32 * size[1],
+                ]),
+            );
+            let color = if gesture.region.is_some() {
+                egui::Color32::from_rgba_unmultiplied(70, 190, 230, 55)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(230, 100, 70, 55)
+            };
+            painter.rect_filled(preview, 0.0, color);
+            painter.rect_stroke(
+                preview,
+                0.0,
+                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        }
         for column in 0..=d.width {
             let x = d.origin[0] + column as f32 * size[0];
             painter.line_segment(
