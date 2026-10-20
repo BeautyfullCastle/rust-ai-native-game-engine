@@ -80,8 +80,33 @@ jobs:
                    "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
                   evidence / (suite.replace("::", "-") + ".log"))
               helpers["validate_tests"](output, suite, count)
+          # The same saved-usage cases run through an example harness to avoid
+          # integration-test-driven linking of unrelated sample executables.
+          for room_features in ("room-project", "room-animated-models"):
+              output = helpers["run_logged"](
+                  ["cargo", "test", "--locked", "-p", "orr_sample", "--no-default-features",
+                   "--features", room_features, "--example", "room_package_usage", "--",
+                   "--format=pretty", "--color=never", "--test-threads=1"],
+                  evidence / ("room-usage-" + room_features + ".log"))
+              helpers["validate_tests"](output, "tests", 12 if os.name == "nt" else 13)
+          consumer = "saved_usage_guides_partial_then_complete_editor_reassignment_and_checked_removal"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features",
+               "--features", "package-manager,room-animated-models",
+               "--test", "room_package_usage_consumer", "--",
+               "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "room-usage-consumer.log").replace("\r\n", "\n")
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(consumer, "ok")]):
+              raise RuntimeError("Expected exactly one passing saved Room usage consumer test")
           for name, package, args in (
               ("package-core-lint", "orr_package", ["clippy", "--all-targets", "--", "-D", "warnings"]),
+              ("room-usage-static-lint", "orr_sample", ["clippy", "--no-default-features", "--features", "room-project", "--example", "room_package_usage", "--test", "room_package_usage", "--", "-D", "warnings"]),
+              ("room-usage-animated-lint", "orr_sample", ["clippy", "--no-default-features", "--features", "room-animated-models", "--example", "room_package_usage", "--test", "room_package_usage", "--", "-D", "warnings"]),
+              ("room-usage-default-off-lint", "orr_sample", ["clippy", "--no-default-features", "--example", "room_package_usage", "--", "-D", "warnings"]),
+              ("room-usage-consumer-lint", "orr_editor", ["clippy", "--no-default-features", "--features", "package-manager,room-animated-models", "--test", "room_package_usage_consumer", "--", "-D", "warnings"]),
               ("without-package-manager-check", "orr_editor", ["check", "--lib", "--features", "room-animated-models"]),
               ("package-manager-check", "orr_editor", ["check", "--lib", "--features", "package-manager"]),
               ("package-manager-lint", "orr_editor", ["clippy", "--lib", "--features", "package-manager,room-animated-models", "--", "-D", "warnings"]),
