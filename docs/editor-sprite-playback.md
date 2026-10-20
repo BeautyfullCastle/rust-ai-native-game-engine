@@ -95,3 +95,29 @@ not native-window interaction, physical-device coverage, or Windows validation.
 The bounded design follows the common explicit idle/move animation approach in
 [Godot's official 2D sprite animation guide](https://docs.godotengine.org/en/stable/tutorials/2d/2d_sprite_animation.html),
 while reusing this engine's existing `CameraFollow` and package contracts.
+
+## Reuse or edit selected sprite settings
+
+In the matching, settled Edit scene, select one live entity with an admitted
+sprite binding and choose **Use selected sprite settings**. This explicit action
+copies its package, document, Region/Clip/Idle-walk choice and scale into the
+assignment draft. Merely changing selection never overwrites your draft. The
+scale control preserves the already supported range through 100 world units per
+pixel. Picking stops the draft preview but does not reload assets, assign, save,
+or change the scene or either authoring history.
+
+To edit that same entity, adjust the draft and choose **Assign sprite to
+selection**. To reuse its appearance, select another entity first, then Assign.
+Assignment still validates installed asset bytes. Use **Undo binding** or
+**Redo binding** to review the change, then **Save bindings** and reopen the
+sidecar. Scene Save remains separate.
+
+Unavailable, unbound or multiple selections, stale scenes, Play and invalid cached
+bindings are rejected without changing the draft. Tilemap-owned shared atlases
+also reject picking through the public API before mutation; reopen the complete
+project rather than bypassing the shared-atlas guard.
+
+This is a bounded integration of the existing PR165 picker, owned by dot and
+coordinated by su, from commit `8e7545d646cbe1126b87504a188be443dfad3a94`.
+[Original handoff](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/165#issuecomment-6103776184).
+It is not a full PR165 merge and does not include PR170 orientation/schema work.
