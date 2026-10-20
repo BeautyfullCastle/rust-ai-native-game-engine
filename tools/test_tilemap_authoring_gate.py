@@ -73,6 +73,50 @@ class GateTests(unittest.TestCase):
             return gate.capture(path, (2, 2))
         return gate.validate_receipts(self.runtime, self.editor, self.root, 'a' * 64, 'b' * 64, loader or small)
 
+    def test_fill_census_and_explicit_fingerprint_contract(self):
+        self.assertEqual(len(gate.FILL), 5)
+        self.assertEqual(len(set(gate.FILL)), 5)
+        self.assertTrue(all(name.startswith('tilemap_panel::fill') for name in gate.FILL))
+        self.assertTrue(set(gate.FILL).isdisjoint(gate.PANEL))
+        self.assertEqual(gate.CPU_COUNT, sum(map(len, [gate.CONSUMER, gate.PACKAGE,
+            gate.CORE, gate.ADMISSION, gate.PANEL, gate.FILL])) + 2)
+        self.assertEqual(gate.fnv1a64(b'hello'), 'a430d84680aabd0b')
+        self.assertNotEqual(gate.fnv1a64(b'hello'), hashlib.sha256(b'hello').hexdigest())
+
+    def test_scoped_source_fence_detects_changes_and_new_sources(self):
+        root = self.root / 'source'; root.mkdir()
+        for name in ('orr_editor', 'orr_tilemap', 'orr_sample', 'orr_package',
+                     'orr_sprite', 'orr_sim', 'orr_session', 'orr_render', 'orr_rhi',
+                     'orr_view', 'orr_bridge', 'orr_ecs', 'orr_fp'):
+            folder = root / 'crates' / name; folder.mkdir(parents=True)
+            (folder / 'Cargo.toml').write_text('manifest')
+        for name in ('Cargo.toml', 'Cargo.lock', 'tools/tilemap_authoring_gate.py',
+                     'tools/test_tilemap_authoring_gate.py',
+                     'crates/orr_editor/src/app/tilemap_fill_tests.rs',
+                     'crates/orr_editor/src/tilemap_panel/fill.rs'):
+            path = root / name; path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('source')
+        before = gate.source_fence(root)
+        (root / 'Cargo.lock').write_text('changed')
+        self.assertNotEqual(before, gate.source_fence(root))
+        (root / 'Cargo.lock').write_text('source')
+        self.assertEqual(before, gate.source_fence(root))
+        (root / 'crates/orr_editor/src/extra.rs').write_text('new source')
+        self.assertNotEqual(before, gate.source_fence(root))
+
+    def test_fill_json_and_file_integrity_fail_closed(self):
+        path = self.root / 'fill.json'
+        path.write_text('{"complete": true, "complete": false}')
+        with self.assertRaisesRegex(RuntimeError, 'Duplicate'):
+            gate.evidence_json(path)
+        path.write_bytes(b'')
+        with self.assertRaises(RuntimeError): gate.evidence_bytes(path)
+        path.unlink()
+        with self.assertRaises(RuntimeError): gate.evidence_bytes(path)
+        path.symlink_to(self.runtime / 'saved.png')
+        with self.assertRaises(RuntimeError): gate.evidence_bytes(path)
+
+
     def test_native_stderr_interleave_actual_static_gpu_log(self):
         text = ACTUAL_INTERLEAVE
         name = 'gpu_asymmetric_three_by_two_blank_shape_actor_and_wrong_region'
@@ -191,6 +235,106 @@ class GateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): self.check_receipts()
         self.r['windows'] = False; self.ep['size'] = [1800, 1200]
         with self.assertRaises(RuntimeError): self.check_receipts()
+
+
+class FillReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='fill-gate-fixture-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.fill = self.root / 'fill'; self.fill.mkdir()
+        self.identities = {'creator_fnv1a64': b'creator', 'test_source_fnv1a64': b'source'}
+        self.rows = []
+        for index, name in enumerate(gate.FILL_PHASES):
+            size = [1, 1] if index < 8 else [224, 224]
+            rgba = bytearray(size[0] * size[1] * 4)
+            if index == 9:
+                for x in range(72, 80): rgba[(64 * 224 + x) * 4] = 255
+            frame = b'actual-frame-zero' if index < 7 else b'actual-frame-one'
+            row = {'name': name, 'size': size, 'files': [name + x for x in
+                (['.rgba', '.png', '.frame', '-app.png'] if index < 8 else ['.rgba', '.png', '.frame'])],
+                'rgba_fnv1a64': gate.fnv1a64(rgba), 'frame_fnv1a64': gate.fnv1a64(frame),
+                'tick': 0 if index < 7 else 1, 'checksum': 100 if index < 7 else 101}
+            (self.fill / (name + '.rgba')).write_bytes(rgba)
+            (self.fill / (name + '.png')).write_bytes(png_bytes(rgba, tuple(size)))
+            (self.fill / (name + '.frame')).write_bytes(frame)
+            if index < 8:
+                row.update(scope='actual App viewport; authoring grid, no pixel verdict', adapter='llvmpipe (LLVM)', backend='Vulkan', device_type='Cpu',
+                    frame_source='watch.subscribe source=view matched to predicted tick/checksum',
+                    cells=copy.deepcopy(gate.FILL_BEFORE if index in (0, 1, 3) else gate.FILL_CELLS))
+                (self.fill / (name + '-app.png')).write_bytes(b'app-png-fixture')
+            else:
+                row.update(scope='actual saved PreparedRuntime PlayHost production compositor', pixel_verdict_pending=False, oracle_pixels_checked=10752)
+            self.rows.append(row)
+        self.receipt = {'completed': True, 'captures': self.rows, 'literal_cells': gate.FILL_CELLS,
+            'oracle_pixels_per_runtime_capture': 10752, 'wrong_region_visible_pixels': 8,
+            'native_os_input': False, 'export': False, 'windows': False}
+        self.receipt.update({k: gate.fnv1a64(v) for k, v in self.identities.items()})
+        for filename, cells in [('saved.tilemap.json', gate.FILL_CELLS),
+                ('wrong-region.tilemap.json', [*gate.FILL_CELLS[:8], 10, *gate.FILL_CELLS[9:]])]:
+            (self.fill / filename).write_text(json.dumps({'width': 7, 'height': 6,
+                'origin': [-56., 144.], 'cells': cells}))
+        (self.fill / 'creator.log').write_bytes(b'')
+
+    def write(self):
+        (self.fill / 'receipt.json').write_text(json.dumps(self.receipt))
+        partial = copy.deepcopy(self.rows)
+        partial[-1]['pixel_verdict_pending'] = True
+        partial[-1].pop('oracle_pixels_checked', None)
+        (self.fill / 'partial-receipt.json').write_text(json.dumps(
+            {'completed': False, 'captures': partial, 'native_os_input': False}))
+
+    def check(self, adapter='llvmpipe'):
+        self.write()
+        def loader(path, size):
+            # Whole-App PNG decoder is already tested above; avoid a 14MB fixture.
+            if path.name.endswith('-app.png'):
+                self.assertEqual(size, (1800, 2000)); return 'fixture', b''
+            return gate.capture(path, size)
+        return gate.validate_fill(self.fill, self.root, self.identities, loader, adapter)
+
+    def test_all_retained_artifacts_have_external_sha256(self):
+        hashes = self.check()
+        self.assertEqual(len(hashes), 43)
+        for name, digest in hashes.items():
+            self.assertEqual(digest, hashlib.sha256((self.root / name).read_bytes()).hexdigest())
+
+    def test_incomplete_census_sources_and_unsupported_scope_rejected(self):
+        for field, bad in [('completed', False), ('windows', True), ('creator_fnv1a64', '0'*16),
+                           ('literal_cells', [None]*42), ('wrong_region_visible_pixels', 0)]:
+            old = self.receipt[field]; self.receipt[field] = bad
+            with self.subTest(field=field), self.assertRaises(RuntimeError): self.check()
+            self.receipt[field] = old
+        old = self.rows[-1]['name']; self.rows[-1]['name'] = 'runtime-saved'
+        with self.assertRaises(RuntimeError): self.check()
+        self.rows[-1]['name'] = old
+        (self.fill / 'unexpected').write_bytes(b'x')
+        with self.assertRaisesRegex(RuntimeError, 'census'): self.check()
+
+    def test_local_adapter_never_substitutes_hosted_acceptance(self):
+        for row in self.rows[:8]: row['adapter'] = 'SwiftShader Device (Subzero)'
+        with self.assertRaisesRegex(RuntimeError, 'llvmpipe'): self.check()
+        self.assertEqual(len(self.check(adapter='SwiftShader')), 43)
+
+    def test_frame_parity_png_and_visible_pixel_tamper_rejected(self):
+        path = self.fill / 'redo.frame'; old = path.read_bytes()
+        path.write_bytes(b'changed-frame')
+        self.rows[4]['frame_fnv1a64'] = gate.fnv1a64(path.read_bytes())
+        with self.assertRaisesRegex(RuntimeError, 'parity'): self.check()
+        path.write_bytes(old); self.rows[4]['frame_fnv1a64'] = gate.fnv1a64(old)
+        path = self.fill / 'saved.png'; old = path.read_bytes()
+        path.write_bytes(png_bytes(bytes([1, 2, 3, 4]), (1, 1)))
+        with self.assertRaisesRegex(RuntimeError, 'PNG/raw'): self.check()
+        path.write_bytes(old)
+        self.receipt['wrong_region_visible_pixels'] = 9
+        with self.assertRaisesRegex(RuntimeError, 'pixel verdict'): self.check()
+
+    def test_missing_evidence_and_pending_runtime_verdict_rejected(self):
+        self.rows[-1]['pixel_verdict_pending'] = True
+        with self.assertRaisesRegex(RuntimeError, 'oracle incomplete'): self.check()
+        self.rows[-1]['pixel_verdict_pending'] = False
+        (self.fill / 'runtime-wrong-region.frame').unlink()
+        with self.assertRaises(RuntimeError): self.check()
 
 
 if __name__ == '__main__':

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Issue258 bounded, exact-inventory CPU + hosted llvmpipe acceptance.
+"""Issues258/261 bounded, exact-inventory CPU + hosted llvmpipe acceptance.
 
 Run CPU then GPU on the same checked-out head/target directory. No retries,
 no hidden refreshes, no success substitution after an original failure.
@@ -18,7 +18,7 @@ import zlib
 FEATURES = 'tilemap,project-create'
 CONSUMER = ['project_tilemap::tests::' + n for n in ('cache_reuse_budget_and_failure_are_transactional', 'cache_hit_still_checks_lock_tamper_and_installer_authority')]
 PACKAGE = ['tests::' + n for n in ('tilemap_declaration_and_all_lock_writers_fail_closed', 'tilemap_added_inside_checked_callback_cannot_publish')]
-CPU_COUNT = 25
+CPU_COUNT = 30
 CORE = ['tests::' + n for n in (
     'strict_json_and_resource_bounds', 'structural_bounds_and_finite_world_arithmetic',
     'region_validation_and_failure_preserving_edits', 'asymmetric_literal_world_and_uv_oracle')]
@@ -33,6 +33,14 @@ RECORDING = 'recording_batch_proves_pass_order_atomic_admission_and_clear_restor
 COMPOSITOR = 'gpu_asymmetric_three_by_two_blank_shape_actor_and_wrong_region'
 RUNTIME = 'cli_saved_map_four_captures_playhost_frame_parity'
 EDITOR = 'app::tilemap_tests::actual_cli_editor_palette_paint_save_reopen_play'
+FILL_EDITOR = 'app::tilemap_fill_tests::actual_cli_fill_save_reopen_play_literal_cells'
+FILL = ['tilemap_panel::fill::tests::' + n for n in (
+    'literal_components_distinguish_empty_zero_diagonals_and_row_edges',
+    'maximum_component_fill_and_erase_are_bounded_and_immutable',
+    'noops_and_invalid_bounds_or_regions_preserve_source')]
+FILL += ['tilemap_panel::fill_history_tests::' + n for n in (
+    'installed_fill_dispatch_is_atomic_for_budget_error_and_noop',
+    'grouped_fill_undo_redo_noop_and_budget_failure_preserve_history')]
 CREATOR = 'project_create::tilemap::tests::tilemap_creator_is_real_bounded_and_atomic'
 PANEL = ['tilemap_panel::tests::' + n for n in (
     'paint_erase_noop_undo_and_redo_saved_bytes', 'history_is_bounded_and_budget_is_atomic')]
@@ -194,6 +202,151 @@ def validate_receipts(runtime, editor, evidence, creator_hash, source_hash, load
     return files
 
 
+
+def source_fence(root):
+    """Scoped acceptance sources, not a claim of whole-workspace identity."""
+    paths = {root / name for name in ('Cargo.toml', 'Cargo.lock',
+        'tools/tilemap_authoring_gate.py', 'tools/test_tilemap_authoring_gate.py',
+        'crates/orr_editor/src/app/tilemap_fill_tests.rs',
+        'crates/orr_editor/src/tilemap_panel/fill.rs')}
+    # Includes original acceptance test dependencies, candidate validation,
+    # producer templates, renderer/Frame dependencies and relevant manifests.
+    for name in ('orr_editor', 'orr_tilemap', 'orr_sample', 'orr_package',
+                 'orr_sprite', 'orr_sim', 'orr_session', 'orr_render', 'orr_rhi',
+                 'orr_view', 'orr_bridge', 'orr_ecs', 'orr_fp'):
+        directory = root / 'crates' / name
+        if not directory.is_dir():
+            raise RuntimeError('Missing scoped source directory: ' + name)
+        paths.add(directory / 'Cargo.toml')
+        for child in ('src', 'tests'):
+            paths.update(p for p in (directory / child).rglob('*') if p.is_file())
+    paths.update(p for p in (root / 'assets/sprite_demo').rglob('*') if p.is_file())
+    return {str(p.relative_to(root)): sha(p) for p in sorted(paths)}
+
+
+def fnv1a64(data):
+    """Rust's explicitly labeled lightweight fingerprint; never called SHA256."""
+    value = 0xcbf29ce484222325
+    for byte in data:
+        value = ((value ^ byte) * 0x100000001b3) & 0xffffffffffffffff
+    return f'{value:016x}'
+
+
+def evidence_bytes(path):
+    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 64 * 1024 * 1024:
+        raise RuntimeError('Missing or invalid regular Fill evidence: ' + str(path))
+    return path.read_bytes()
+
+
+def evidence_json(path):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise RuntimeError('Duplicate Fill receipt key')
+            result[key] = value
+        return result
+    return json.loads(evidence_bytes(path), object_pairs_hook=unique)
+
+
+FILL_PHASES = ['before', 'outside-origin', 'filled-held-drag', 'undo', 'redo',
+               'saved', 'fresh-reopen', 'play', 'runtime-saved', 'runtime-wrong-region']
+FILL_BEFORE = [20] * 42
+for _index in (8, 9, 16, 17, 23, 25, 41):
+    FILL_BEFORE[_index] = None
+FILL_CELLS = FILL_BEFORE.copy()
+for _index in (8, 9, 16, 17, 23):
+    FILL_CELLS[_index] = 11
+
+
+def validate_fill(directory, evidence, identities, load_capture=capture, expected_adapter="llvmpipe"):
+    """Audit retained artifacts independently; Rust certifies Frame decode/oracle."""
+    def require(condition, message):
+        if not condition:
+            raise RuntimeError('Fill ' + message)
+    receipt = evidence_json(directory / 'receipt.json')
+    partial = evidence_json(directory / 'partial-receipt.json')
+    require(receipt.get('completed') is True and all(receipt.get(k) is False
+        for k in ('native_os_input', 'export', 'windows')), 'incomplete or overclaimed scope')
+    require(receipt.get('literal_cells') == FILL_CELLS and
+        receipt.get('oracle_pixels_per_runtime_capture') == 10752, 'literal cell/oracle contract')
+    require(type(receipt.get('wrong_region_visible_pixels')) is int and
+        8 <= receipt['wrong_region_visible_pixels'] <= 256, 'wrong-region verdict')
+    for field, data in identities.items():
+        require(receipt.get(field) == fnv1a64(data), 'source/creator fingerprint mismatch: ' + field)
+    rows = receipt.get('captures')
+    require(isinstance(rows, list) and [r.get('name') for r in rows] == FILL_PHASES,
+            'capture census/order mismatch')
+    # The last partial intentionally records the last oracle as pending before
+    # assertions. It must never substitute for the final completed receipt.
+    expected_partial = json.loads(json.dumps(rows))
+    expected_partial[-1]['pixel_verdict_pending'] = True
+    expected_partial[-1].pop('oracle_pixels_checked', None)
+    require(partial == {'completed': False, 'captures': expected_partial, 'native_os_input': False},
+            'partial capture history mismatch')
+    expected_files = {'receipt.json', 'partial-receipt.json', 'saved.tilemap.json',
+                      'wrong-region.tilemap.json', 'creator.log'}
+    frames, pixels, checksums, files = {}, {}, {}, {}
+    for index, row in enumerate(rows):
+        name = row['name']
+        suffixes = ['.rgba', '.png', '.frame'] + (['-app.png'] if index < 8 else [])
+        require(row.get('files') == [name + suffix for suffix in suffixes], 'file manifest mismatch')
+        expected_files.update(row['files'])
+        size = row.get('size')
+        require(isinstance(size, list) and len(size) == 2 and
+            all(type(n) is int and 1 <= n <= 4096 for n in size), 'invalid capture dimensions')
+        rgba = evidence_bytes(directory / (name + '.rgba'))
+        require(len(rgba) == size[0] * size[1] * 4 and fnv1a64(rgba) == row.get('rgba_fnv1a64'),
+                'raw RGBA fingerprint/size mismatch')
+        require(load_capture(directory / (name + '.png'), tuple(size))[1] == rgba,
+                'PNG/raw RGBA mismatch')
+        frame = evidence_bytes(directory / (name + '.frame'))
+        require(fnv1a64(frame) == row.get('frame_fnv1a64'), 'Frame fingerprint mismatch')
+        require(type(row.get('tick')) is int and row['tick'] == (0 if index < 7 else 1) and
+            type(row.get('checksum')) is int and 0 <= row['checksum'] < 2**64, 'Frame identity mismatch')
+        if index < 8:
+            require(row.get('scope') == 'actual App viewport; authoring grid, no pixel verdict',
+                    'App capture scope mismatch')
+            require(expected_adapter.lower() in row.get('adapter', '').lower() and row.get('backend') == 'Vulkan'
+                and row.get('device_type') == 'Cpu', 'hosted llvmpipe required; local SwiftShader is not equivalent')
+            require(row.get('frame_source') == 'watch.subscribe source=view matched to predicted tick/checksum',
+                    'actual authoritative Frame source missing')
+            require(row.get('cells') == (FILL_BEFORE if index in (0, 1, 3) else FILL_CELLS),
+                    'actual App literal cells mismatch')
+            load_capture(directory / (name + '-app.png'), (1800, 2000))
+        else:
+            require(row.get('scope') == 'actual saved PreparedRuntime PlayHost production compositor',
+                    'runtime capture scope mismatch')
+            require(size == [224, 224] and row.get('pixel_verdict_pending') is False and
+                row.get('oracle_pixels_checked') == 10752, 'runtime pixel oracle incomplete')
+        frames[name], pixels[name], checksums[name] = frame, rgba, row['checksum']
+    for names in (FILL_PHASES[:7], FILL_PHASES[7:]):
+        require(all(frames[n] == frames[names[0]] and checksums[n] == checksums[names[0]] for n in names),
+                'actual Frame byte/checksum parity mismatch')
+    good, wrong = pixels['runtime-saved'], pixels['runtime-wrong-region']
+    changed = sum(any(abs(good[i+c] - wrong[i+c]) > 3 for c in range(4))
+                  for y in range(64, 80) for x in range(72, 88) for i in [(y * 224 + x) * 4])
+    require(changed == receipt['wrong_region_visible_pixels'], 'retained wrong-region pixel verdict mismatch')
+    saved = evidence_json(directory / 'saved.tilemap.json')
+    wrong_map = evidence_json(directory / 'wrong-region.tilemap.json')
+    expected_wrong = FILL_CELLS.copy(); expected_wrong[8] = 10
+    for doc, cells in ((saved, FILL_CELLS), (wrong_map, expected_wrong)):
+        require(doc.get('cells') == cells and doc.get('width') == 7 and doc.get('height') == 6
+            and doc.get('origin') == [-56., 144.], 'retained literal map mismatch')
+    require({p.name for p in directory.iterdir()} == expected_files, 'retained artifact census mismatch')
+    for name in sorted(expected_files):
+        path = directory / name
+        # CLI stdout may legitimately be empty; it is still retained and hashed.
+        if name == 'creator.log':
+            require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 64 * 1024**2,
+                    'missing creator log')
+            data = path.read_bytes()
+        else:
+            data = evidence_bytes(path)
+        files[str(path.relative_to(evidence))] = hashlib.sha256(data).hexdigest()
+    return files
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=('cpu', 'gpu'))
@@ -227,6 +380,28 @@ def main():
         return output
 
     manifest = evidence / 'executables.json'
+    sources = evidence / 'sources.json'
+    initial_sources = source_fence(root)
+    if args.mode == 'cpu':
+        sources.write_text(json.dumps(initial_sources, indent=2))
+    elif evidence_json(sources) != initial_sources:
+        raise RuntimeError('Scoped acceptance sources changed since CPU build')
+
+    def fenced_cases(*args, **kwargs):
+        if source_fence(root) != initial_sources:
+            raise RuntimeError('Scoped acceptance sources changed before test execution')
+        binary = Path(args[1])
+        built = evidence_json(manifest)
+        matching = [v['sha256'] for v in built.values() if v['path'] == str(binary)]
+        if matching != [sha(binary)]:
+            raise RuntimeError('Test executable changed before execution')
+        result = cases(*args, **kwargs)
+        if matching != [sha(binary)]:
+            raise RuntimeError('Test executable changed during execution')
+        if source_fence(root) != initial_sources:
+            raise RuntimeError('Scoped acceptance sources changed during test execution')
+        return result
+
     if args.mode == 'cpu':
         bins = {}
         for package, targets in [
@@ -263,6 +438,8 @@ def main():
         inventory('runtime', bins['project_tilemap_runtime'], '', [RUNTIME], [RUNTIME])
         inventory('panel', bins['orr_editor'], 'tilemap_panel::tests::', PANEL, [])
         inventory('editor', bins['orr_editor'], 'app::tilemap_tests::', [EDITOR], [EDITOR])
+        inventory('fill', bins['orr_editor'], 'tilemap_panel::fill', FILL, [])
+        inventory('fill-editor', bins['orr_editor'], 'app::tilemap_fill_tests::', [FILL_EDITOR], [FILL_EDITOR])
         inventory('creator', bins['orr_sample'], 'project_create::tilemap::tests::', [CREATOR], [])
         for label, target_name, selector, expected, exact in [
             ('consumer', 'orr_sample', 'project_tilemap::tests::', CONSUMER, False),
@@ -271,15 +448,18 @@ def main():
             ('admission', 'project_tilemap', '', ADMISSION, False),
             ('recording', 'project_tilemap_compositor', RECORDING, [RECORDING], True),
             ('panel', 'orr_editor', 'tilemap_panel::tests::', PANEL, False),
+            ('fill', 'orr_editor', 'tilemap_panel::fill', FILL, False),
             ('creator', 'orr_sample', CREATOR, [CREATOR], True),
         ]:
-            cases(label, bins[target_name], selector, expected, exact=exact)
+            fenced_cases(label, bins[target_name], selector, expected, exact=exact)
         run('strict-libs', ['cargo', 'clippy', '--locked', '-p', 'orr_tilemap', '-p', 'orr_sample', '-p', 'orr_editor', '--no-default-features', '--features', 'orr_sample/tilemap,orr_sample/project-create,orr_editor/tilemap,orr_editor/project-create', '--lib', '--', '-D', 'warnings'])
-        (evidence / 'cpu-complete.json').write_text(json.dumps({'passed': CPU_COUNT, 'executables_sha256': sha(manifest)}))
+        if source_fence(root) != initial_sources:
+            raise RuntimeError('Scoped acceptance sources changed during CPU gate')
+        (evidence / 'cpu-complete.json').write_text(json.dumps({'passed': CPU_COUNT, 'executables_sha256': sha(manifest), 'sources_sha256': sha(sources)}))
         return
 
     complete = json.loads((evidence / 'cpu-complete.json').read_text())
-    if complete != {'passed': CPU_COUNT, 'executables_sha256': sha(manifest)}:
+    if complete != {'passed': CPU_COUNT, 'executables_sha256': sha(manifest), 'sources_sha256': sha(sources)}:
         raise RuntimeError('CPU gate did not finish with the exact executable manifest')
     records = json.loads(manifest.read_text())
     bins = {}
@@ -292,19 +472,30 @@ def main():
     if not icd.is_file():
         raise RuntimeError('Hosted Mesa lavapipe ICD is required')
     os.environ.update(VK_ICD_FILENAMES=str(icd), WGPU_BACKEND='vulkan', ORR_REQUIRE_GPU='1', ORR_NEW_ARENA_BIN=bins['creator'])
-    runtime, editor = phase / 'runtime', phase / 'editor'
-    runtime.mkdir(); editor.mkdir()
-    os.environ.update(ORR_TILEMAP_RUNTIME_EVIDENCE=str(runtime), ORR_TILEMAP_EDITOR_EVIDENCE=str(editor))
-    output = cases('compositor', bins['project_tilemap_compositor'], COMPOSITOR, [COMPOSITOR], exact=True)
+    runtime, editor, fill = phase / 'runtime', phase / 'editor', phase / 'fill'
+    runtime.mkdir(); editor.mkdir(); fill.mkdir()
+    os.environ.update(ORR_TILEMAP_RUNTIME_EVIDENCE=str(runtime), ORR_TILEMAP_EDITOR_EVIDENCE=str(editor), ORR_TILEMAP_FILL_EVIDENCE=str(fill))
+    output = fenced_cases('compositor', bins['project_tilemap_compositor'], COMPOSITOR, [COMPOSITOR], exact=True)
     adapter_lines = re.findall(r'^tile background GPU: (.+)$', output, re.M)
     if len(adapter_lines) != 1 or 'llvmpipe' not in adapter_lines[0].lower():
         raise RuntimeError('Compositor did not record hosted llvmpipe')
-    cases('runtime', bins['project_tilemap_runtime'], RUNTIME, [RUNTIME], ignored=True, exact=True)
-    cases('editor', bins['orr_editor'], EDITOR, [EDITOR], ignored=True, exact=True)
+    fenced_cases('runtime', bins['project_tilemap_runtime'], RUNTIME, [RUNTIME], ignored=True, exact=True)
+    fenced_cases('editor', bins['orr_editor'], EDITOR, [EDITOR], ignored=True, exact=True)
+
+    fenced_cases('fill-editor', bins['orr_editor'], FILL_EDITOR, [FILL_EDITOR], ignored=True, exact=True)
 
     files = validate_receipts(runtime, editor, evidence, records['creator']['sha256'],
                               sha(root / 'assets/sprite_demo/lantern_keeper.rgba'))
-    (phase / 'verified.json').write_text(json.dumps({'gpu_tests_passed': 3, 'capture_sha256': files,
+    identities = {
+        'creator_fnv1a64': Path(bins['creator']).read_bytes(),
+        'test_source_fnv1a64': (root / 'crates/orr_editor/src/app/tilemap_fill_tests.rs').read_bytes(),
+        'panel_source_fnv1a64': (root / 'crates/orr_editor/src/tilemap_panel.rs').read_bytes(),
+        'panel_fill_source_fnv1a64': (root / 'crates/orr_editor/src/tilemap_panel/fill.rs').read_bytes(),
+        'core_source_fnv1a64': (root / 'crates/orr_tilemap/src/lib.rs').read_bytes(),
+        'source_rgba_fnv1a64': (root / 'assets/sprite_demo/lantern_keeper.rgba').read_bytes(),
+    }
+    files.update(validate_fill(fill, evidence, identities))
+    (phase / 'verified.json').write_text(json.dumps({'gpu_tests_passed': 4, 'capture_sha256': files,
         'scope': 'Linux hosted llvmpipe; no native OS input, exported player, or Windows GPU claim'}, indent=2))
 
 
