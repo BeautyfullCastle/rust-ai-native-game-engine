@@ -289,8 +289,11 @@ fn actual_editor_reparent_stage_cancel_apply_undo_save_reopen_play() {
         events,
         ..Default::default()
     };
-    runtime.show(raw(vec![]), Hud::default());
-    runtime.show(
+    // These runtime frames probe saved actions, not rendering. Preview pixels
+    // are checked above; explicitly discard this separate runtime's atlas deltas.
+    let (mut output, _) = runtime.show(raw(vec![]), Hud::default());
+    output.textures_delta.clear();
+    let (mut output, _) = runtime.show(
         raw(vec![
             egui::Event::PointerMoved(play),
             egui::Event::PointerButton {
@@ -302,7 +305,8 @@ fn actual_editor_reparent_stage_cancel_apply_undo_save_reopen_play() {
         ]),
         Hud::default(),
     );
-    let (_, action) = runtime.show(
+    output.textures_delta.clear();
+    let (mut output, action) = runtime.show(
         raw(vec![egui::Event::PointerButton {
             pos: play,
             button: egui::PointerButton::Primary,
@@ -311,6 +315,7 @@ fn actual_editor_reparent_stage_cancel_apply_undo_save_reopen_play() {
         }]),
         Hud::default(),
     );
+    output.textures_delta.clear();
     assert_eq!(
         action,
         Some(Action::Play),
@@ -318,7 +323,7 @@ fn actual_editor_reparent_stage_cancel_apply_undo_save_reopen_play() {
     );
     runtime.apply(action.unwrap());
     assert_eq!(runtime.screen(), Screen::Playing);
-    let (output, action) = runtime.show(
+    let (mut output, action) = runtime.show(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -332,6 +337,7 @@ fn actual_editor_reparent_stage_cancel_apply_undo_save_reopen_play() {
             best: "2".into(),
         },
     );
+    output.textures_delta.clear();
     assert!(!output.shapes.is_empty());
     assert_eq!(action, None);
 
