@@ -41,7 +41,7 @@ LEGACY_COUNTS = {"export-unit":25, "authored-ui":73, "player-settings":111,
  "new-arena":64, "collect-authored":68, "progress-disabled":68,
  "progress":94, "progress-joint":175, "progress-pinned":96,
  "collect-creator":113, "collect-ui":162, "collect-ui-creator":183}
-FIXTURE_COUNT = 16
+FIXTURE_COUNT = 20
 
 
 def run(label, command, seconds=1200):
@@ -53,10 +53,40 @@ def run(label, command, seconds=1200):
     return output
 
 
-def fresh_target(label):
-    runner.target_dir = runner.new_target("cpu")
-    os.environ["CARGO_TARGET_DIR"] = str(runner.target_dir)
-    runner.report.setdefault("fresh_targets", {})[label] = str(runner.target_dir)
+def select_target(label, package, target_name, kind, features):
+    """Reuse only this phase's private CPU dependencies, never a stale producer.
+
+    Initialization owns one empty target. CPU selections have distinct root
+    identities; native runtime uses that initial root and its harness gets a
+    second independently empty root. Producer fresh:false remains mandatory.
+    """
+    mode = runner.report["mode"]
+    assert mode in {"cpu", "native"} and kind in {"lib", "test", "bin"}
+    initial = Path(runner.report["private_target"]["path"])
+    assert initial.is_absolute() and initial == initial.resolve() and not initial.is_symlink()
+    assert initial.parent == runner.repo / "target" and initial.is_dir()
+    metadata = initial.stat()
+    assert (metadata.st_dev, metadata.st_ino) == (runner.report["private_target"]["device"], runner.report["private_target"]["inode"])
+    assert runner.report["private_target"]["fresh_empty"] is True
+    assert runner.target_dir == initial and os.environ.get("CARGO_TARGET_DIR") == str(initial)
+    selections = runner.report.setdefault("producer_target_selections", [])
+    identity = {"package":package, "target_name":target_name, "kind":kind,
+        "profile":{"opt_level":"3", "test":kind != "bin"}, "features":sorted(features)}
+    assert len(features) == len(set(features)), "duplicate feature identity"
+    assert all(row["label"] != label and row["identity"] != identity for row in selections), "duplicate selected producer identity"
+    if not selections:
+        assert not list(initial.iterdir()), "phase must start with an empty private target"
+    if mode == "native":
+        assert [row["label"] for row in selections] == ([] if label == "runtime" else ["runtime"])
+        assert label in {"runtime", "native-harness"}
+        if label == "native-harness":
+            runner.target_dir = runner.new_target("cpu")
+            assert runner.target_dir != initial
+            os.environ["CARGO_TARGET_DIR"] = str(runner.target_dir)
+    reused = any(row["target"] == str(runner.target_dir) for row in selections)
+    selections.append({"label":label, "identity":identity, "target":str(runner.target_dir),
+        "new_empty_root_selected":not reused, "phase_dependency_reuse":reused,
+        "selected_executable_must_be_fresh":True})
     runner.record()
 
 
@@ -119,7 +149,7 @@ def selected(label, binary, names, total):
 
 
 def library(label, package, requested, features, names, supported=True):
-    fresh_target(label)
+    select_target(label, package, package, "lib", features)
     command = ["cargo", "test", "--locked", "--release", "-p", package, "--no-default-features"]
     if requested:
         command += ["--features", requested]
@@ -149,7 +179,7 @@ def cpu():
         close.inventory(run("close-inventory", [binary, close.PREFIX, "--list"]), close.NAMES)
         selected("close-interaction", binary, close.NAMES, len(names))
     else:
-        fresh_target("unsupported-integration")
+        select_target("unsupported-integration", "orr_editor", "arena_editor_export", "test", ["arena-project-export", "project-create", "sprites"])
         binary = producer(run("unsupported-build", ["cargo", "test", "--locked", "--release", "-p", "orr_editor", "--no-default-features", "--features", baseline, "--test", "arena_editor_export", "--no-run", "--message-format=json"]),
             "unsupported-integration", "orr_editor", "arena_editor_export", "test", ["arena-project-export", "project-create", "sprites"])
         close.inventory(run("unsupported-list", [binary, "--list"]), [])
@@ -325,13 +355,13 @@ def native():
     assert sys.platform == "linux" and platform.machine() == "x86_64" and os.geteuid() != 0
     run("bwrap-preflight", ["bwrap", "--ro-bind", "/", "/", "--", "/bin/true"])
     runner.software()
-    fresh_target("runtime")
+    select_target("runtime", "orr_sample", "arena", "bin", ["project", "sprites"])
     runtime = producer(run("runtime-build", ["cargo", "build", "--locked", "--release", "-p", "orr_sample", "--no-default-features", "--features", "project", "--bin", "arena", "--message-format=json"]), "runtime", "orr_sample", "arena", "bin", ["project", "sprites"])
     directory = runner.evidence / "runtime-files"; directory.mkdir()
     path = directory / "arena"; Path(runtime).rename(path)
     runner.report["producers"]["runtime"]["file"] = "runtime-files/arena"
     runner.record()
-    fresh_target("native-harness")
+    select_target("native-harness", "orr_editor", "arena_editor_export", "test", ["arena-project-export", "project-create", "sprites"])
     binary = producer(run("harness-build", ["cargo", "test", "--locked", "--release", "-p", "orr_editor", "--no-default-features", "--features", "arena-project-export,project-create", "--test", "arena_editor_export", "--no-run", "--message-format=json"]), "native-harness", "orr_editor", "arena_editor_export", "test", ["arena-project-export", "project-create", "sprites"])
     close.inventory(run("native-list", [binary, "--list"]), [NATIVE])
     close.inventory(run("native-ignored", [binary, "--ignored", "--list"]), [NATIVE])

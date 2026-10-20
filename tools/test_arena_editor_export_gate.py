@@ -232,6 +232,78 @@ class Tests(unittest.TestCase):
             with self.assertRaises(AssertionError):gate.verify_receipt(root)
             path.write_text(original)
 
+    def phase(self, mode):
+        gate.runner.initialize(gate.runner.repo, self.root / ('phase-' + mode), 'cpu')
+        gate.runner.report.update(mode=mode, coverage={})
+        return gate.runner.target_dir
+
+    def exercise_cpu(self, supported):
+        initial=self.phase('cpu')
+        observed=[]
+        def pin(output,label,package,target,kind,features):
+            observed.append((label,gate.runner.target_dir,kind))
+            return str(gate.runner.evidence/label)
+        inventories={'default':[], 'sprites':[], 'baseline':gate.BASELINE if supported else [],
+            'extended':gate.APP+gate.EDITOR+gate.NEW_APP, 'sample':gate.SAMPLE,
+            'close':gate.BASELINE+tuple(n for n in gate.EXTENDED_ONLY if 'loaded_' in n)+(gate.NEW_APP[1],)}
+        def names(label):
+            return list(inventories[label.removesuffix('-full-list')]) if label.endswith('-full-list') else []
+        with mock.patch.object(gate.sys,'platform','linux' if supported else 'win32'), mock.patch.object(gate.platform,'machine',return_value='x86_64'), mock.patch.object(gate,'run',side_effect=lambda label,*args:label), mock.patch.object(gate,'producer',side_effect=pin), mock.patch.object(gate,'inventory',side_effect=names), mock.patch.object(gate,'selected'), mock.patch.object(gate.close,'inventory'):
+            gate.cpu()
+        self.assertEqual([row[0] for row in observed],['default','sprites','baseline','extended','sample','close'] if supported else ['default','sprites','baseline','unsupported-integration'])
+        self.assertEqual({row[1] for row in observed},{initial})
+        self.assertEqual(list((gate.runner.repo/'target').iterdir()),[initial])
+        rows=gate.runner.report['producer_target_selections']
+        self.assertEqual([row['new_empty_root_selected'] for row in rows],[True]+[False]*(len(rows)-1))
+        self.assertEqual([row['phase_dependency_reuse'] for row in rows],[False]+[True]*(len(rows)-1))
+        self.assertEqual(len({json.dumps(row['identity'],sort_keys=True) for row in rows}),len(rows))
+        self.assertTrue(all(row['selected_executable_must_be_fresh'] for row in rows))
+
+    def test_cpu_six_unique_producers_share_one_initial_private_target(self):
+        with mock.patch.dict(gate.os.environ):
+            self.exercise_cpu(True)
+
+    def test_windows_cpu_integration_uses_same_private_target_distinct_kind(self):
+        with mock.patch.dict(gate.os.environ):
+            self.exercise_cpu(False)
+        rows=gate.runner.report['producer_target_selections']
+        self.assertEqual(rows[2]['identity']['features'],rows[3]['identity']['features'])
+        self.assertEqual((rows[2]['identity']['kind'],rows[3]['identity']['kind']),('lib','test'))
+
+    def test_native_runtime_and_harness_keep_two_independently_empty_targets(self):
+        with mock.patch.dict(gate.os.environ):
+            initial=self.phase('native');observed=[]
+            def pin(output,label,package,target,kind,features):
+                observed.append(gate.runner.target_dir)
+                self.assertEqual(list(gate.runner.target_dir.iterdir()),[])
+                path=gate.runner.evidence/label;path.write_bytes(b'fixture-only')
+                gate.runner.report['producers'][label]={'file':path.name,'sha256':gate.runner.digest(path),'bytes':path.stat().st_size}
+                return str(path)
+            with mock.patch.object(gate.sys,'platform','linux'), mock.patch.object(gate.platform,'machine',return_value='x86_64'), mock.patch.object(gate.os,'geteuid',return_value=1000,create=True), mock.patch.object(gate,'run',return_value='fixture'), mock.patch.object(gate.runner,'software'), mock.patch.object(gate,'producer',side_effect=pin), mock.patch.object(gate.close,'inventory'), mock.patch.object(gate.runner,'result'), mock.patch.object(gate,'verify_receipt'):
+                gate.native()
+            self.assertEqual(observed[0],initial)
+            self.assertNotEqual(observed[0],observed[1])
+            self.assertEqual(set((gate.runner.repo/'target').iterdir()),set(observed))
+            rows=gate.runner.report['producer_target_selections']
+            self.assertEqual([row['new_empty_root_selected'] for row in rows],[True,True])
+            self.assertEqual([row['phase_dependency_reuse'] for row in rows],[False,False])
+
+    def test_phase_target_rejects_external_or_repeated_identity_and_stale_root(self):
+        with mock.patch.dict(gate.os.environ):
+            initial=self.phase('cpu')
+            gate.os.environ['CARGO_TARGET_DIR']=str(self.root/'external')
+            with self.assertRaises(AssertionError):gate.select_target('one','orr_editor','orr_editor','lib',[])
+            gate.os.environ['CARGO_TARGET_DIR']=str(initial)
+            (initial/'preexisting').write_text('not an empty origin')
+            with self.assertRaises(AssertionError):gate.select_target('one','orr_editor','orr_editor','lib',[])
+            (initial/'preexisting').unlink()
+            gate.select_target('one','orr_editor','orr_editor','lib',[])
+            with self.assertRaises(AssertionError):gate.select_target('different-label','orr_editor','orr_editor','lib',[])
+            # Actual Cargo freshness remains independently enforced after reuse.
+            item=self.artifact();item['fresh']=True
+            with self.assertRaises(AssertionError):self.pin(self.cargo(item))
+            self.assertEqual(len(gate.runner.report['producer_target_selections']),1)
+
     def test_workflow_requires_both_pairs_and_preserves_matrix(self):
         text=(Path(__file__).resolve().parents[1]/'.github/workflows/determinism.yml').read_text()
         for mode in ['cpu','native']:
