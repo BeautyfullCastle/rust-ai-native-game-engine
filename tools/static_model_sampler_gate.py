@@ -46,7 +46,7 @@ INFRA_PATHS = ('Cargo.toml', 'Cargo.lock', 'tools/static_model_extract_gate.py',
 BINDINGS_TEST = 'installed_static_sampler_variants_keep_distinct_bindings_and_source_geometry'
 GPU_TEST = 'static_sampler_variants_match_independent_gpu_oracle'
 UI_TEST = 'installed_sampler_variants_preview_read_only_and_reopen_identity'
-FIXTURE_COUNT = 12
+FIXTURE_COUNT = 14
 source_root = None
 frozen = None
 mode = None
@@ -200,6 +200,26 @@ def build_cli():
 CLI_TEST = 'pinned_cli_publishes_exact_bytes_and_rejects_before_output'
 
 
+def exact_model_result(output, name, inventory):
+    """Validate one --exact run against the already verified binary census."""
+    assert inventory and len(inventory) == len(set(inventory)), 'unique binary inventory'
+    assert name in inventory, 'selected test belongs to verified inventory'
+    expected = len(inventory) - 1
+    output = output.replace('\r\n', '\n')
+    summaries = re.findall(r'^test result:.*$', output, re.M)
+    assert len(summaries) == 1, 'single exact-run summary'
+    summary = summaries[0]
+    assert re.fullmatch(
+        r'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; '
+        + str(expected) + r' filtered out; finished in [0-9]+(?:\.[0-9]+)?s',
+        summary), 'exact inventory-derived filtered count'
+    # Preserve the shared parser's strict record/name/order/skip checks and
+    # its zero-filter default for full-suite callers. Only the proven summary
+    # count is normalized, never arbitrary output or a loosely matched number.
+    normalized = summary.replace(f'; {expected} filtered out;', '; 0 filtered out;')
+    runner.result(output.replace(summary, normalized, 1), [name])
+
+
 def model_tests(platform):
     assert platform in {'linux', 'darwin', 'win32'}
     names = ['strict_recipe_types_duplicates_shapes_and_exact_enums', 'portable_paths_and_identity_reject_before_resolution', 'full_source_admission_used_slot_and_bounded_resolution', 'replacement_preserves_every_unowned_float_bit_including_signed_zero', 'provenance_exact_bytes_distinct_ids_same_sampler_and_nested_variants', 'all_eighteen_filter_wrap_combinations_preserve_every_other_bit', 'exact_recipe_path_and_model_table_budgets', 'cli_publishes_once_without_overwrite_and_preserves_all_inputs', 'cli_help_and_three_unique_pairs_are_bounded', 'cli_bad_arguments_fail_without_output_or_staging', 'cli_portable_output_names_and_package_store_rejection', 'cli_missing_nonregular_and_oversized_inputs_leave_no_output', 'cli_resolver_is_anchored_to_recipe_parent', 'cli_parent_traversal_preserves_raw_spelling_and_never_publishes', 'exact_aggregate_input_budget_accepts_boundary_and_rejects_next_byte', 'sampler_composes_after_validated_retexture_and_uv_outputs', 'selecting_used_nonzero_material_preserves_slot_zero_and_shared_image']
@@ -223,11 +243,12 @@ def model():
                                     '--test', 'static_model_sampler', '--no-run', '--message-format=json'])
     binary = pin(output, 'model-test', 'orr_model', 'static_model_sampler', 'test', ['import'])
     names = model_tests(sys.platform)
-    runner.inventory(run('model-inventory', [binary, '--list']), names + [CLI_TEST])
+    inventory = names + [CLI_TEST]
+    runner.inventory(run('model-inventory', [binary, '--list']), inventory)
     runner.inventory(run('model-ignored', [binary, '--ignored', '--list']), [CLI_TEST])
     for name in names:
-        runner.result(run('model-' + name, [binary, '--exact', name, '--test-threads=1']), [name])
-    runner.result(run('model-real-cli', [binary, '--ignored', '--exact', CLI_TEST, '--test-threads=1']), [CLI_TEST])
+        exact_model_result(run('model-' + name, [binary, '--exact', name, '--test-threads=1']), name, inventory)
+    exact_model_result(run('model-real-cli', [binary, '--ignored', '--exact', CLI_TEST, '--test-threads=1']), CLI_TEST, inventory)
     # Full original model regression suites remain mandatory, including Unix
     # socket refusal fixtures; restricted local execution is not a waiver.
     run('model-full-regressions', ['cargo', 'test', *flags, '--features', 'import', '--tests', '--', '--test-threads=1'])

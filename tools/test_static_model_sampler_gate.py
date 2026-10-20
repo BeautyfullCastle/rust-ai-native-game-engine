@@ -43,6 +43,40 @@ def fixture(root):
 
 
 class Fixtures(unittest.TestCase):
+    def test_exact_model_result_platform_and_ignored_census(self):
+        for platform in ('linux', 'darwin', 'win32'):
+            inventory = gate.model_tests(platform) + [gate.CLI_TEST]
+            for name in inventory:
+                output = passed([name]).replace('0 filtered out', f'{len(inventory)-1} filtered out')
+                gate.exact_model_result(output, name, inventory)
+                gate.exact_model_result(output.replace('\n', '\r\n'), name, inventory)
+        # The shared parser remains fail-closed for a full-suite caller.
+        with self.assertRaises(AssertionError):
+            gate.runner.result(passed(['real']).replace('0 filtered out', '1 filtered out'), ['real'])
+
+    def test_exact_model_result_rejects_forged_census(self):
+        inventory = ['real', 'other', gate.CLI_TEST]
+        valid = passed(['real']).replace('0 filtered out', '2 filtered out')
+        invalid = [
+            valid.replace('2 filtered out', '0 filtered out'),
+            valid.replace('2 filtered out', '1 filtered out'),
+            valid.replace('2 filtered out', '3 filtered out'),
+            valid.replace('test real ...', 'test other ...'),
+            valid.replace('1 passed', '0 passed'),
+            valid.replace('0 ignored', '1 ignored'),
+            valid.replace('0 failed', '1 failed'),
+            valid + valid,
+            valid + '\nSKIP: missing producer',
+            valid.replace('test real ... ok', 'test real ... ok\ntest real ... ok'),
+            valid.replace('running 1 test', 'running 0 tests'),
+        ]
+        for output in invalid:
+            with self.subTest(output=output), self.assertRaises(AssertionError):
+                gate.exact_model_result(output, 'real', inventory)
+        for names in ([], ['real', 'real'], ['other']):
+            with self.assertRaises(AssertionError):
+                gate.exact_model_result(valid, 'real', names)
+
     def test_exact_current_rust_census(self):
         source=(ROOT/'crates/orr_model/tests/static_model_sampler.rs').read_text()
         declarations=re.findall(r'#\[test\](?:\n#\[ignore[^\n]*\])?\nfn (\w+)\(',source)
