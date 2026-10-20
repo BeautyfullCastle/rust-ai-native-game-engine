@@ -27,7 +27,10 @@ impl Preview {
             orr_sample::project_export::ArenaUiSource::new(
                 prepared.descriptor.clone(),
                 font_bytes as u64,
-                format!("{:x}", Sha256::digest(&prepared.font)),
+                Sha256::digest(&prepared.font)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
             )
             .ok()
         };
@@ -125,7 +128,10 @@ mod tests {
         assert_eq!(identity.font_bytes(), p.font.len() as u64);
         assert_eq!(
             identity.font_sha256(),
-            format!("{:x}", Sha256::digest(&p.font))
+            Sha256::digest(&p.font)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
         );
         preview.descriptor.font.asset = "different.otf".into();
         assert!(preview.arena_export_identity().is_err());

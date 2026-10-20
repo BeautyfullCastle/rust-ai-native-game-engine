@@ -88,8 +88,8 @@ case inside the same isolation, rather than treating an ignored listing as a pas
 Bubblewrap isolation and a working production
 capture adapter are mandatory; there is no skip-to-success fallback.
 
-This acceptance uses actual editor Save/reopen/Play and export widgets, preserves
-source bytes, checks font/OFL/copyright closure, and runs the relocated player
+This acceptance exercises Save/reopen/Play through direct production Editor
+method calls, then clicks the actual export widgets. It preserves source bytes, checks font/OFL/copyright closure, and runs the relocated player
 with sources hidden and its bundle read-only. A separate isolated consumer opens
 that bundle through the production admission/compositor/UI modules, clicks real
 egui Play/Menu/Continue/Restart buttons, and captures title, HUD and menu pixels.

@@ -149,7 +149,10 @@ impl Editor {
                 let fresh = ArenaUiSource::new(
                     admitted.descriptor.clone(),
                     admitted.font.len() as u64,
-                    format!("{:x}", Sha256::digest(&admitted.font)),
+                    Sha256::digest(&admitted.font)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
                 )?;
                 if declared != &admitted.descriptor || &fresh != installed {
                     return Err(

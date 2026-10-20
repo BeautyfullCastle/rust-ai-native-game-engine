@@ -572,9 +572,17 @@ fn relocated_bundle_real_widgets_restart_original_scene() {
         let reset = app.bridge.snapshot().unwrap();
         assert_eq!(reset.tick(), 0);
         assert_eq!(reset.predicted().checksum(), initial_checksum);
+        assert_eq!(reset.predicted().alive_count(), initial.alive_count());
+        assert!(initial_entities
+            .iter()
+            .all(|entity| reset.predicted().exists(*entity)));
         assert_eq!(
-            reset.predicted().entities().collect::<Vec<_>>(),
-            initial_entities
+            reset.predicted().dense::<Position>().0,
+            initial.dense::<Position>().0
+        );
+        assert_eq!(
+            reset.predicted().dense::<PlayerTag>().0,
+            initial.dense::<PlayerTag>().0
         );
         assert_eq!(reset.predicted().dense::<Position>().1, initial_positions);
         assert_eq!(reset.predicted().dense::<PlayerTag>().1, initial_players);

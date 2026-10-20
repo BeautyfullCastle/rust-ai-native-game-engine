@@ -9,7 +9,7 @@
 ))]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 use egui_kittest::{kittest::Queryable, Harness};
-use orr_editor::{editor::Owner, Editor, EditorApp};
+use orr_editor::{editor::Owner, Editor};
 use std::{
     fs,
     path::{Path, PathBuf},
