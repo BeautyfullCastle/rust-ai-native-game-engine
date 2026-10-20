@@ -8,6 +8,15 @@ use std::{
 
 const LOCK: &str = "orr.packages.lock.json";
 
+fn fixture_dir() -> tempfile::TempDir {
+    // Resolve only the trusted system-temp root before creating fixture content.
+    // macOS /var may be a symlink; production must still reject input aliases.
+    let root = std::env::temp_dir();
+    #[cfg(unix)]
+    let root = fs::canonicalize(root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
+}
+
 fn source(root: &Path, name: &str, dependencies: &[(&str, &str)]) -> PathBuf {
     let path = root.join(name);
     fs::create_dir(&path).unwrap();
@@ -52,7 +61,7 @@ fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 #[test]
 fn restores_root_and_orphaned_dependency_without_original_sources() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let dep = source(dir.path(), "dep", &[]);
     let art = source(dir.path(), "art", &[("dep", "1.0.0")]);
     let p = project(dir.path());
@@ -60,6 +69,19 @@ fn restores_root_and_orphaned_dependency_without_original_sources() {
         .install_with_dependencies(std::slice::from_ref(&art), std::slice::from_ref(&dep))
         .unwrap();
     let expected = p.remove("art").unwrap();
+    #[cfg(unix)]
+    {
+        let before = files(p.root());
+        let alias = dir.path().join("project-alias");
+        std::os::unix::fs::symlink(p.root(), &alias).unwrap();
+        let error = Project::open(&alias, Runtime::content_only())
+            .err()
+            .expect("project symlink must remain rejected");
+        assert!(error.to_string().contains("symlink rejected"));
+        assert_eq!(files(p.root()), before);
+        assert_eq!(fs::read_link(&alias).unwrap(), p.root());
+        fs::remove_file(&alias).unwrap();
+    }
     fs::rename(art, dir.path().join("hidden-art")).unwrap();
     fs::rename(dep, dir.path().join("hidden-dep")).unwrap();
     let before = files(dir.path());
@@ -86,7 +108,7 @@ fn restores_root_and_orphaned_dependency_without_original_sources() {
 #[test]
 fn restores_shared_dependency_and_retained_transitive_root_flags_exactly() {
     for remove in ["a", "dep"] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = fixture_dir();
         let dep = source(dir.path(), "dep", &[]);
         let a = source(dir.path(), "a", &[("dep", "1.0.0")]);
         let b = source(dir.path(), "b", &[("dep", "1.0.0")]);
@@ -110,7 +132,7 @@ fn restores_shared_dependency_and_retained_transitive_root_flags_exactly() {
 
 #[test]
 fn stale_active_lock_cannot_be_overwritten_by_old_receipt() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let a = source(dir.path(), "a", &[]);
     let b = source(dir.path(), "b", &[]);
     let p = project(dir.path());
@@ -127,7 +149,7 @@ fn stale_active_lock_cannot_be_overwritten_by_old_receipt() {
 
 #[test]
 fn rejects_non_inverse_and_forged_identity_before_callback() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let a = source(dir.path(), "a", &[]);
     let p = project(dir.path());
     let restore = p.install(&[a]).unwrap();
@@ -151,7 +173,7 @@ fn rejects_non_inverse_and_forged_identity_before_callback() {
 #[test]
 fn missing_or_tampered_cache_refuses_preview_and_commit() {
     for missing in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = fixture_dir();
         let a = source(dir.path(), "a", &[]);
         let p = project(dir.path());
         let restore = p.install(&[a]).unwrap();
@@ -176,7 +198,7 @@ fn missing_or_tampered_cache_refuses_preview_and_commit() {
 
 #[test]
 fn callback_failure_and_competing_writer_preserve_current_lock() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let a = source(dir.path(), "a", &[]);
     let p = project(dir.path());
     let restore = p.install(&[a]).unwrap();
@@ -202,7 +224,7 @@ fn callback_failure_and_competing_writer_preserve_current_lock() {
 
 #[test]
 fn existing_writer_is_retained_and_preview_remains_read_only() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let a = source(dir.path(), "a", &[]);
     let p = project(dir.path());
     let restore = p.install(&[a]).unwrap();
