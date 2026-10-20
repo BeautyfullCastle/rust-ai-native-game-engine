@@ -72,8 +72,10 @@ fn strict_json_rejects_nonobjects_unknown_duplicate_trailing_and_oversized_data(
 
 #[test]
 fn text_and_font_constraints_are_enforced() {
-    let mut invalid = Document::default();
-    invalid.title = "\n".into();
+    let mut invalid = Document {
+        title: "\n".into(),
+        ..Default::default()
+    };
     assert!(invalid.validate().is_err());
     invalid.title = "x".repeat(81);
     assert!(invalid.validate().is_err());

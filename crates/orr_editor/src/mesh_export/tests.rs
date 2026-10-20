@@ -901,7 +901,7 @@ fn dense_props_require_capability_and_new_runtime_reopens_source_free_bundle() {
     let receipt = export(&scene, checksum, &destination, &dense_runtime).unwrap();
     assert_eq!(fs::read(&props_path).unwrap(), props_before);
     assert_eq!(
-        fs::read(&receipt.root.join(format!("walk.scene.yaml{PROPS_SUFFIX}"))).unwrap(),
+        fs::read(receipt.root.join(format!("walk.scene.yaml{PROPS_SUFFIX}"))).unwrap(),
         props_before
     );
     let prepared = open_bundle(&destination).unwrap();

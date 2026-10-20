@@ -44,12 +44,13 @@ fn workspace_save_is_explicit_and_preserves_external_conflicts() {
 }
 
 fn panel_with_scene(scene: &Path) -> Panel {
-    let mut panel = Panel::default();
-    panel.scene = Some(scene.to_path_buf());
-    panel.scene_epoch = Some(1);
-    panel.graph_revision = Some([7; 32]);
-    panel.document_pending = false;
-    panel
+    Panel {
+        scene: Some(scene.to_path_buf()),
+        scene_epoch: Some(1),
+        graph_revision: Some([7; 32]),
+        document_pending: false,
+        ..Default::default()
+    }
 }
 
 #[test]

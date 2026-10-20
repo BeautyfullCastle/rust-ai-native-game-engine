@@ -89,8 +89,10 @@ fn malformed_hud_and_missing_runtime_capability_fail_before_output() {
     assert!(!destination.exists());
 
     fs::remove_file(&hud_path).unwrap();
-    let mut disabled = Document::default();
-    disabled.enabled = false;
+    let disabled = Document {
+        enabled: false,
+        ..Default::default()
+    };
     mesh_hud_store::save(&scene, Some(&disabled), None, revision)
         .unwrap()
         .unwrap();

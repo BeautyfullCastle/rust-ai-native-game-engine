@@ -127,11 +127,13 @@ fn failed_import_preserves_the_form_and_returns_no_candidate() {
 
 #[test]
 fn reset_clears_pending_fields_and_acknowledgements() {
-    let mut panel = Panel::default();
-    panel.package_root = "some-package".into();
-    panel.license_acknowledged = true;
-    panel.replace_confirmed = true;
-    panel.dirty = true;
+    let mut panel = Panel {
+        package_root: "some-package".into(),
+        license_acknowledged: true,
+        replace_confirmed: true,
+        dirty: true,
+        ..Default::default()
+    };
 
     panel.reset();
 
@@ -143,10 +145,12 @@ fn reset_clears_pending_fields_and_acknowledgements() {
 
 #[test]
 fn acknowledge_is_the_only_operation_that_consumes_confirmations() {
-    let mut panel = Panel::default();
-    panel.license_acknowledged = true;
-    panel.replace_confirmed = true;
-    panel.dirty = true;
+    let mut panel = Panel {
+        license_acknowledged: true,
+        replace_confirmed: true,
+        dirty: true,
+        ..Default::default()
+    };
 
     panel.acknowledge();
 
