@@ -154,7 +154,7 @@ pub fn consume(bundle: &Path, evidence: &Path) {
     let prepared = PreparedRuntime::open(&project).unwrap();
     let (seed, mut presentation, font) = prepared.into_launch_parts();
     let font = font.expect("bundle's admitted saved Korean preset");
-    let admitted_font = font.font.clone();
+    let admitted_ui = font.clone();
     let mut ui = GameUi::from_font(font.font, true).unwrap();
     let bridge = seed.bridge().unwrap();
     let snapshot = bridge.snapshot().unwrap();
@@ -187,7 +187,7 @@ pub fn consume(bundle: &Path, evidence: &Path) {
         &mut compositor,
         &target,
         &presentation,
-        admitted_font,
+        admitted_ui,
         evidence,
     );
     let mut overlay = GpuOverlay::new(&gpu, format);
@@ -297,12 +297,24 @@ fn korean_glyph_masks(
     compositor: &mut ProjectCompositor<Wgpu>,
     target: &OffscreenTarget<Wgpu>,
     presentation: &orr_sample::project_runtime::ProjectPresentation,
-    font: Vec<u8>,
+    prepared_ui: orr_sample::project::PreparedUi,
     evidence: &Path,
 ) {
     // Separate font-glyph oracle, not a claim about the preset's layout. Every
     // font byte comes from the relocated admitted bundle, never a test include.
-    let glyph_ui = GameUi::from_font(font, true).unwrap();
+    use sha2::{Digest, Sha256};
+    let font_sha256: String = Sha256::digest(&prepared_ui.font)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let font_bytes = prepared_ui.font.len();
+    let descriptor = prepared_ui.descriptor;
+    assert_eq!(
+        descriptor.profile,
+        orr_package::ProjectUiProfile::ArenaKoreanV1
+    );
+    assert!(descriptor.document.is_none());
+    let glyph_ui = GameUi::from_font(prepared_ui.font, true).unwrap();
     compositor
         .draw(
             target.render_view(),
@@ -364,12 +376,38 @@ fn korean_glyph_masks(
         .collect();
     assert!(counts.iter().all(|count| *count > 40));
     assert!(
-        masks.windows(2).all(|pair| pair[0] != pair[1]),
-        "distinct Korean masks, not repeated tofu"
+        all_masks_distinct(&masks),
+        "all five Korean masks must be pairwise distinct, not repeated tofu"
     );
     let outside = (300 * 512 + 300) * 4;
     assert_eq!(before[outside..outside + 4], after[outside..outside + 4]);
     fs::write(evidence.join("ui-glyph-oracle.json"),serde_json::to_vec_pretty(&serde_json::json!({
-        "before":"ui-glyphs-before.png","after":"ui-glyphs-after.png","before_sha256":super::evidence::digest(&evidence.join("ui-glyphs-before.png")),"after_sha256":super::evidence::digest(&evidence.join("ui-glyphs-after.png")),"width":512,"height":512,"glyphs":["오","러","리","메","뉴"],"regions_xywh":(0..5).map(|i| [10+i*42,100,40,40]).collect::<Vec<_>>(),"changed_pixels":counts,"minimum_changed_exclusive":40,"adjacent_masks_distinct":true,"unchanged_pixel_xy":[300,300],"font_source":"relocated bundle admission","claim":"five distinct glyph masks, separate from actual preset text oracle"
+        "before":"ui-glyphs-before.png","after":"ui-glyphs-after.png","before_sha256":super::evidence::digest(&evidence.join("ui-glyphs-before.png")),"after_sha256":super::evidence::digest(&evidence.join("ui-glyphs-after.png")),"width":512,"height":512,"glyphs":["오","러","리","메","뉴"],"regions_xywh":(0..5).map(|i| [10+i*42,100,40,40]).collect::<Vec<_>>(),"changed_pixels":counts,"minimum_changed_exclusive":40,"all_masks_pairwise_distinct":true,"pair_comparisons":10,"unchanged_pixel_xy":[300,300],"font_source":"relocated bundle admission","font_sha256":font_sha256,"font_bytes":font_bytes,"descriptor":descriptor,"claim":"five distinct glyph masks, separate from actual preset text oracle"
     })).unwrap()).unwrap();
+}
+
+fn all_masks_distinct(masks: &[Vec<bool>]) -> bool {
+    masks
+        .iter()
+        .enumerate()
+        .all(|(i, left)| masks[i + 1..].iter().all(|right| left != right))
+}
+
+#[test]
+fn korean_mask_oracle_rejects_nonadjacent_repeats() {
+    let a = vec![true, false, false, false, false];
+    let b = vec![false, true, false, false, false];
+    let repeated = vec![a.clone(), b.clone(), a.clone(), b.clone(), a.clone()];
+    assert!(
+        repeated.windows(2).all(|pair| pair[0] != pair[1]),
+        "the old adjacent-only check is insufficient"
+    );
+    assert!(!all_masks_distinct(&repeated));
+    assert!(all_masks_distinct(&[
+        a,
+        b,
+        vec![false, false, true, false, false],
+        vec![false, false, false, true, false],
+        vec![false, false, false, false, true]
+    ]));
 }
