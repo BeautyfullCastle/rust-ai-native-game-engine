@@ -69,7 +69,7 @@ class Prerequisites(unittest.TestCase):
     def test_native_prepare_then_verify_unique_labels_and_jobs(self):
         identity = ('a'*40, 'b'*40, {'source': {'sha256': 'c'*64}})
         with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
+            root = pathlib.Path(directory).resolve()
             evidence = root / 'evidence'
             env = root / 'env'
             events = []
