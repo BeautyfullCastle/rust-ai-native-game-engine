@@ -450,6 +450,10 @@ jobs:
           evidence = pathlib.Path(os.environ['ORR_CLIP_EXTRACT_EVIDENCE'])
           evidence.mkdir(parents=True, exist_ok=False)
           paths = ['Cargo.lock', 'Cargo.toml', 'tools/raw16_import_gate.py',
+                   '.github/workflows/determinism.yml', 'tools/test_animation_clip_extract_gate.py',
+                   'crates/orr_model/examples/static_model_assemble.rs',
+                   'crates/orr_model/examples/static_model_assemble/authoring.rs',
+                   'crates/orr_model/tests/static_model_assemble.rs',
                    'crates/orr_model/Cargo.toml', 'crates/orr_render/Cargo.toml', 'crates/orr_model/examples/animation_clip_extract.rs',
                    'crates/orr_model/examples/animation_clip_extract/authoring.rs',
                    'crates/orr_model/tests/animation_clip_extract.rs',
@@ -488,10 +492,14 @@ jobs:
                   record()
           def inventory(output):
               return re.findall(r'^([A-Za-z0-9_:]+): test$', output, re.M)
-          def executable(output, label, package, kind, features, limit):
+          def executable(output, label, package, kind, features, limit, target_name='animation_clip_extract'):
+              assert target_name in {'animation_clip_extract', 'static_model_assemble'}
+              if target_name == 'static_model_assemble':
+                  assert package == 'orr_model' and kind == 'example'
+                  assert set(features) == {'animation', 'default', 'import'}
               artifacts = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
               producers = [a for a in artifacts if a.get('reason') == 'compiler-artifact'
-                           and a.get('target', {}).get('name') == 'animation_clip_extract' and a.get('executable')]
+                           and a.get('target', {}).get('name') == target_name and a.get('executable')]
               assert len(producers) == 1, producers
               producer = producers[0]
               target = producer['target']
@@ -504,7 +512,7 @@ jobs:
               if os.name == 'nt': package_path = package_path.lstrip('/')
               assert pathlib.Path(package_path).resolve() == crate.resolve()
               assert target['kind'] == [kind] and target['crate_types'] == ['bin']
-              source = crate / ('examples' if kind == 'example' else 'tests') / 'animation_clip_extract.rs'
+              source = crate / ('examples' if kind == 'example' else 'tests') / (target_name + '.rs')
               assert pathlib.Path(target['src_path']).resolve() == source.resolve()
               assert producer['profile']['test'] is (kind == 'test') and producer['profile']['opt_level'] == '3'
               assert set(producer['features']) == set(features), producer['features']
@@ -519,6 +527,15 @@ jobs:
                                'bytes': copy.stat().st_size, 'max_bytes': limit}
               record()
               return str(copy)
+          def build_regression_cli():
+              build = run('assemble-regression-build', ['cargo', 'build', *base,
+                          '--features', 'animation,import', '--example',
+                          'static_model_assemble', '--message-format=json'])
+              binary = executable(build, 'assemble-regression-cli', 'orr_model', 'example',
+                                  ['animation', 'default', 'import'], 64 * 1024**2,
+                                  target_name='static_model_assemble')
+              os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'] = binary
+              return binary
           expected = '''actual_demo_appends_one_clip_preserves_originals_and_cooks_reloads
           semantic_json_indices_metadata_and_complete_binary_prefix_are_preserved
           linear_translation_scale_and_shortest_arc_rotation_have_analytic_values
@@ -556,12 +573,16 @@ jobs:
           base = ['--locked', '--release', '-p', 'orr_model']
           focused = ['cargo', 'test', *base, '--features', 'animation,import', '--test', 'animation_clip_extract']
           try:
+              checked = run('assemble-prerequisite-fixtures', [sys.executable, '-B',
+                            str(repo / 'tools/test_animation_clip_extract_gate.py')])
+              assert checked.rstrip().endswith('CLIP_EXTRACT_PREREQUISITES: 8 passed; 0 failed; 0 skipped')
               assert sorted(inventory(run('inventory', [*focused, '--', '--list']))) == sorted(expected)
               assert inventory(run('ignored-inventory', [*focused, '--', '--ignored', '--list'])) == []
               output = run('focused', [*focused, '--', '--test-threads=1'])
               assert re.search(r'test result: ok\. ' + str(len(expected)) + r' passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;', output)
               for name in expected:
                   assert re.search(r'^test ' + re.escape(name) + r' \.\.\. ', output, re.M), name
+              build_regression_cli()
               run('model-regressions', ['cargo', 'test', *base, '--features', 'animation,import'])
               run('strict-model', ['cargo', 'clippy', *base, '--features', 'animation,import', '--all-targets', '--', '-D', 'warnings'])
               run('default-check', ['cargo', 'check', *base, '--all-targets'])
