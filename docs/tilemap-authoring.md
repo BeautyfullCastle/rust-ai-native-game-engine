@@ -22,12 +22,23 @@ bounded by the admitted grid's 4096 cells. The complete candidate is validated
 against the installed atlas and the combined tile/actor budget before committing;
 a failure leaves the document, history and saved marker unchanged.
 
+Width and Height are draft whole-number inputs (1 through 64). Only the explicit
+Resize button applies them; typing or pressing Enter does not change the map.
+Resize keeps the grid origin and retained cell coordinates fixed, including their
+world placement, tile size and scale. New cells are empty. Shrinking is refused
+if any occupied cell would be removed: explicitly Erase those cells first.
+A resize is one tile-history entry. Same-size Resize is a no-op preserving redo
+and the saved marker. Undo/Redo resets the dimension drafts to the restored map;
+Resize and Undo/Redo also end any active paint stroke. Resize uses the same Edit,
+scene/epoch and atlas/combined-budget checks as other tile editing, and Save
+retains the existing source-stamp checks. No new sidecar format is introduced.
+
 Save tilemap writes the complete sidecar. Close and reopen the full project to
 verify the saved presentation, then Play. Unsaved tiles must be saved or undone
 before Play or closing. Scene Save does not save tile data; scene Open and Save
 As do not retarget the installed tilemap. The app refuses those operations while
 the map is installed. Proposal preview, replay, disconnected hosts and mismatched
-scene identity cannot paint or fill. While enabled, the tile tool reserves viewport
+scene identity cannot paint, fill or resize. While enabled, the tile tool reserves viewport
 pointer input, including when an edit is refused, rather than moving actors.
 A paint or fill gesture must start inside the unobstructed viewport. Pressing elsewhere
 and dragging in does not paint. Palette buttons expose Static region N labels; mode buttons expose Paint and Fill labels.
@@ -79,7 +90,7 @@ wrong-region control whose differing texels were actor-occluded. The oracle was
 corrected without changing production rendering, tolerance or excluded edges;
 the final negative control explicitly checks five visible differing pixels.
 
-The existing Linux CI job reuses a CPU25/GPU3 batch and fail-closed evidence gate,
+At the original Paint acceptance, the Linux CI job reused a CPU25/GPU3 batch and fail-closed evidence gate,
 with 17 pure-Python gate tests. Hosted validation requires llvmpipe; local
 SwiftShader is not that result. Native OS input, Windows, hosted required CI,
 shared development integration and main reflection are separate, unverified
@@ -109,9 +120,47 @@ or runtime refusal tests. Two original App-test compile errors and a pre-launch
 collector-name collision are retained in the validation history, not erased by
 the successful retry.
 
-The existing tilemap gate now specifies CPU30/GPU4 and passes 25 pure-Python
-validator tests, without changing a workflow or creating a new job. Local
+At the Fill acceptance, the existing tilemap gate specified CPU30/GPU4 and
+passed 25 pure-Python validator tests, without changing a workflow or creating a
+new job. Local
 SwiftShader results are not hosted required-CI results: that gate requires
 llvmpipe. Native OS input, Windows and exported-player behavior remain outside
 this acceptance; export remains unsupported. See
 [issue #261](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/261).
+
+## Resize local verification scope (2026-10-20)
+
+The Paint and Fill sections above record their historical acceptance runs. The
+Resize run passed 39 local Linux CPU cases: all 30 prior mandatory cases, five
+new Resize cases (three pure-candidate and two panel/history cases), and four
+retained creator regressions. Five software Vulkan cases passed on SwiftShader:
+all four prior cases plus the actual EditorApp Resize sequence.
+
+The Resize sequence exercises the accessible Width/Height drafts and explicit
+Resize button, painting a newly added cell, grouped Undo/Redo, same-size no-op,
+occupied-crop refusal, explicit Erase followed by trim, Save, fresh reopen and
+Play. Literal cell arrays, retained world positions, history/saved markers and
+source/scene/lock preservation are checked independently of screenshots.
+
+Resize evidence contains exactly 68 artifacts and 16 captures: 14 whole-App
+captures and two runtime captures. The saved-runtime and deliberately wrong-stride
+runtime captures each pass an independent original-texel oracle checking 3,840
+pixels; the wrong-stride control differs visibly from the correct map at 91
+pixels.
+Actual Frame-byte parity is checked against the bare simulation control. App
+screenshots are visual evidence, not a replacement for pixel or Frame assertions.
+
+Strict Clippy passed for the selected production editor library both with
+`tilemap,project-create` and with default features disabled. This does not claim
+editor `cfg(test)`, full-workspace Clippy or feature-disabled runtime/CLI refusal
+acceptance. No failures or retries
+occurred in this Resize validation run; the earlier Paint/Fill failures recorded
+above remain part of their historical validation records.
+
+The existing tilemap gate specifies CPU35/GPU5. Its 35 pure-Python validator tests
+and the applied gate against the actual local evidence passed, without adding or
+changing a workflow or job. Local SwiftShader validation is not hosted required
+CI, whose gate requires llvmpipe. Native OS input, Windows, hosted required CI and
+exported-player behavior remain outside this acceptance; export remains
+unsupported. See
+[issue #263](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/263).
