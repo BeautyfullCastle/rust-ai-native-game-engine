@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use orr_mcp::{serve, Bridge, McpServer, ToolGroups, GROUPS};
 
+mod redact;
+
 const USAGE: &str = "usage: orr_mcp [--erp URL] [--token TOKEN] [--tools GROUPS] [--print-agents-md] [--verbose]\n\
 \n\
   --erp URL           the ERP endpoint of the host (default: $ORR_ERP_URL or ws://127.0.0.1:7777)\n\
@@ -61,7 +63,7 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     if !a.erp.starts_with("ws://") && !a.erp.starts_with("wss://") {
-        return Err(format!("--erp must be a WebSocket URL like ws://127.0.0.1:7777, not '{}'", a.erp));
+        return Err(format!("--erp must be a WebSocket URL like ws://127.0.0.1:7777, not '{}'", redact::text(&a.erp, a.token.as_deref())));
     }
     Ok(a)
 }
@@ -99,7 +101,7 @@ fn main() -> ExitCode {
     eprintln!(
         "orr_mcp {}: MCP on stdio, engine at {}, tool groups: {} (of {})",
         env!("CARGO_PKG_VERSION"),
-        args.erp,
+        redact::text(&args.erp, args.token.as_deref()),
         args.tools.names().join(","),
         GROUPS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(",")
     );

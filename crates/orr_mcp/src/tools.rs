@@ -6,7 +6,7 @@
 
 use serde_json::{json, Map, Value as J};
 
-use crate::bridge::{Bridge, Fail};
+use crate::bridge::{Bridge, DetailedFail, Fail};
 use crate::report;
 
 /// The tool groups and what each is for.
@@ -387,6 +387,10 @@ impl<'a> Args<'a> {
 
 /// Runs the tool `name` with `arguments` (a JSON object).
 pub fn run(bridge: &mut Bridge, name: &str, arguments: &Map<String, J>) -> Result<Out, Fail> {
+    run_detailed(bridge, name, arguments).map_err(DetailedFail::into_legacy)
+}
+
+pub(crate) fn run_detailed(bridge: &mut Bridge, name: &str, arguments: &Map<String, J>) -> Result<Out, DetailedFail> {
     let a = Args(arguments);
     match name {
         "scene_overview" => scene_overview(bridge, &a),
@@ -401,11 +405,15 @@ pub fn run(bridge: &mut Bridge, name: &str, arguments: &Map<String, J>) -> Resul
         "sim_input" => sim_input(bridge, &a),
         "history" => history(bridge),
         "undo" => undo(bridge),
-        other => Err(Fail(format!("unknown tool '{other}'"))),
+        other => Err(DetailedFail::new(format!("unknown tool '{other}'"))),
     }
+    .map_err(|mut fail| {
+        fail.legacy.0 = bridge.redact(&fail.legacy.0);
+        fail
+    })
 }
 
-fn text_out(text: String, structured: J) -> Result<Out, Fail> {
+fn text_out(text: String, structured: J) -> Result<Out, DetailedFail> {
     Ok(Out { text, structured })
 }
 
@@ -413,7 +421,7 @@ fn s(v: &J) -> &str {
     v.as_str().unwrap_or("")
 }
 
-fn scene_overview(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn scene_overview(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     let mut p = Map::new();
     p.insert("limit".into(), json!(a.opt_u64("limit")?.unwrap_or(200)));
     if let Some(o) = a.opt_u64("offset")? {
@@ -426,20 +434,15 @@ fn scene_overview(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
         p.insert("components".into(), c.clone());
     }
     let offset = a.opt_u64("offset")?.unwrap_or(0);
-    let q = b.call("world.query", J::Object(p))?;
-    let singles = b.call("world.singleton.get", json!({}))?;
-    let state = b.call("sim.state", J::Null)?;
+    let q = b.call_detailed("world.query", J::Object(p))?;
+    let singles = b.call_detailed("world.singleton.get", json!({}))?;
+    let state = b.call_detailed("sim.state", J::Null)?;
     let entities: Vec<J> = q["entities"]
         .as_array()
         .map(|list| list.iter().map(|e| json!({"id": e["id"], "name": e["name"], "components": e["components"]})).collect())
         .unwrap_or_default();
     let total = q["total"].as_u64().unwrap_or(0);
-    let mut text = format!(
-        "Scene ({} mode): {} entities, checksum {}.\n",
-        s(&state["mode"]),
-        state["entities"],
-        s(&q["checksum"])
-    );
+    let mut text = format!("Scene ({} mode): {} entities, checksum {}.\n", s(&state["mode"]), state["entities"], s(&q["checksum"]));
     let names: Vec<&str> = singles["singletons"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
     text.push_str(&format!("Singletons: {}\n", if names.is_empty() { "none".to_string() } else { names.join(", ") }));
     if let Some(m) = singles["singletons"].as_object() {
@@ -462,7 +465,7 @@ fn scene_overview(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     )
 }
 
-fn get_entity(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn get_entity(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     let mut p = Map::new();
     p.insert("entity".into(), json!(a.str("entity")?));
     for k in ["component", "path"] {
@@ -473,24 +476,24 @@ fn get_entity(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     let r = match a.opt_str("proposal_id")? {
         Some(id) => {
             p.insert("id".into(), json!(id));
-            b.call("proposal.preview", J::Object(p))?
+            b.call_detailed("proposal.preview", J::Object(p))?
         }
-        None => b.call("world.get", J::Object(p))?,
+        None => b.call_detailed("world.get", J::Object(p))?,
     };
     let text = serde_json::to_string_pretty(&r).unwrap_or_default();
     text_out(text, if r.is_object() { r } else { json!({"value": r}) })
 }
 
-fn get_schema(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn get_schema(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     if a.opt_bool("input")? == Some(true) {
         if a.raw("type").is_some() || a.opt_bool("list_types")? == Some(true) {
-            return Err(Fail::new("argument 'input' cannot be combined with 'type' or 'list_types'"));
+            return Err(DetailedFail::new("argument 'input' cannot be combined with 'type' or 'list_types'"));
         }
-        let r = b.call("registry.input", J::Null)?;
+        let r = b.call_detailed("registry.input", J::Null)?;
         return text_out(serde_json::to_string_pretty(&r).unwrap_or_default(), r);
     }
     if a.opt_bool("list_types")? == Some(true) {
-        let r = b.call("registry.types", J::Null)?;
+        let r = b.call_detailed("registry.types", J::Null)?;
         let mut text = String::new();
         for t in r["types"].as_array().map(Vec::as_slice).unwrap_or_default() {
             text.push_str(&format!("{} ({}): {}\n", s(&t["name"]), s(&t["kind"]), s(&t["doc"])));
@@ -501,7 +504,7 @@ fn get_schema(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     if let Some(t) = a.opt_str("type")? {
         p.insert("type".into(), json!(t));
     }
-    let r = b.call("registry.schema", J::Object(p))?;
+    let r = b.call_detailed("registry.schema", J::Object(p))?;
     let schema = strip_fixed_docs(&r["schema"]);
     let text = serde_json::to_string(&schema).unwrap_or_default();
     text_out(text, json!({"schema": schema, "value_format": r["value_format"]}))
@@ -534,40 +537,51 @@ pub struct Staged {
 }
 
 /// Stages `ops` on a proposal: a new one named `label`, or the open one `existing`.
-/// All ops apply or none: on failure a proposal made here is discarded again
-/// and the error says so.
+/// All ops apply or none on a confirmed ordinary ERP rejection. On failure,
+/// cleanup is attempted for a proposal made here; the error reports whether
+/// cleanup was confirmed. A lost response or internal error is not proof that
+/// applying the ops had no effect.
 pub fn stage_proposal(b: &mut Bridge, label: &str, ops: J, existing: Option<&str>) -> Result<Staged, Fail> {
+    stage_proposal_detailed(b, label, ops, existing).map_err(DetailedFail::into_legacy)
+}
+
+fn stage_proposal_detailed(b: &mut Bridge, label: &str, ops: J, existing: Option<&str>) -> Result<Staged, DetailedFail> {
     let (id, created) = match existing {
         Some(id) => (id.to_string(), false),
         None => {
-            let r = b.call("proposal.begin", json!({"label": label}))?;
+            let r = b.call_detailed("proposal.begin", json!({"label": label}))?;
             (s(&r["id"]).to_string(), true)
         }
     };
-    let applied = match b.call("proposal.apply", json!({"id": id, "ops": ops})) {
+    let applied = match b.call_detailed("proposal.apply", json!({"id": id, "ops": ops})) {
         Ok(v) => v,
         Err(mut f) => {
             if created {
-                let _ = b.call("proposal.reject", json!({"id": id}));
-                f.0.push_str(" (Nothing was staged; the proposal was discarded.)");
+                match b.call_detailed("proposal.reject", json!({"id": id})) {
+                    Ok(_) if f.known_apply_rejection() => f.legacy.0.push_str(" (Nothing was staged; the proposal was discarded.)"),
+                    Ok(_) => f.legacy.0.push_str(" (The proposal was discarded; the apply outcome was not confirmed.)"),
+                    Err(_) => f.legacy.0.push_str(" (Proposal cleanup was not confirmed; inspect the proposal before continuing.)"),
+                }
+            } else if f.known_apply_rejection() {
+                f.legacy.0.push_str(" (None of the ops of this call was staged.)");
             } else {
-                f.0.push_str(" (None of the ops of this call was staged.)");
+                f.legacy.0.push_str(" (The apply outcome was not confirmed; inspect the proposal before continuing.)");
             }
             return Err(f);
         }
     };
-    let got = b.call("proposal.get", json!({"id": id}))?;
+    let got = b.call_detailed("proposal.get", json!({"id": id}))?;
     Ok(Staged { id, got, spawned: applied["spawned"].clone() })
 }
 
-fn propose_changes(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn propose_changes(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     let ops = match a.raw("ops") {
         Some(J::Array(list)) => J::Array(list.clone()),
-        Some(_) => return Err(Fail::new("argument 'ops' must be a list of op objects")),
-        None => return Err(Fail::new("missing argument 'ops'")),
+        Some(_) => return Err(DetailedFail::new("argument 'ops' must be a list of op objects")),
+        None => return Err(DetailedFail::new("missing argument 'ops'")),
     };
     let label = a.opt_str("label")?.unwrap_or("agent changes");
-    let Staged { id, got, spawned } = stage_proposal(b, label, ops, a.opt_str("proposal_id")?)?;
+    let Staged { id, got, spawned } = stage_proposal_detailed(b, label, ops, a.opt_str("proposal_id")?)?;
     let mut text = report::describe_proposal(&id, &got);
     text.push_str(&report::spawned_text(&spawned));
     text.push_str(&format!(
@@ -578,16 +592,16 @@ fn propose_changes(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     text_out(text, structured)
 }
 
-fn list_proposals(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn list_proposals(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     if let Some(id) = a.opt_str("proposal_id")? {
-        let got = b.call("proposal.get", json!({"id": id}))?;
+        let got = b.call_detailed("proposal.get", json!({"id": id}))?;
         let mut text = report::describe_proposal(id, &got);
         if got["stale"] == true {
             text.push_str("The scene changed since this proposal was made.\n");
         }
         return text_out(text, got);
     }
-    let r = b.call("proposal.list", J::Null)?;
+    let r = b.call_detailed("proposal.list", J::Null)?;
     let list = r["proposals"].as_array().map(Vec::as_slice).unwrap_or_default();
     let mut text = if list.is_empty() { "No open proposals.\n".to_string() } else { format!("{} open proposal(s):\n", list.len()) };
     for p in list {
@@ -603,31 +617,35 @@ fn list_proposals(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     text_out(text, r)
 }
 
-fn accept_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn accept_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     let id = a.str("proposal_id")?;
-    let before = b.call("proposal.list", J::Null).ok();
+    let before = b.call_detailed("proposal.list", J::Null).ok();
     // Args::raw treats null as absent for ordinary optional arguments.
     // A supplied but invalid guard must never select manual acceptance.
     let r = match a.0.get("verified_state") {
-        Some(state) => b.call("proposal.accept_verified", json!({"id": id, "verified_state": state}))?,
-        None => b.call("proposal.accept", json!({"id": id}))?,
+        Some(state) => b.call_detailed("proposal.accept_verified", json!({"id": id, "verified_state": state}))?,
+        None => b.call_detailed("proposal.accept", json!({"id": id}))?,
     };
     let info = before.as_ref().and_then(|l| l["proposals"].as_array()).and_then(|l| l.iter().find(|p| s(&p["id"]) == id));
     let who = info.map(|p| format!(" \"{}\" by {}", s(&p["label"]), s(&p["origin"]))).unwrap_or_default();
     let text = match r["history_id"].as_u64() {
-        Some(h) => format!("Accepted {id}{who}: applied {} op(s) as history entry #{h}. Scene checksum {}. Use `undo` to take it back.\n", r["applied"], s(&r["checksum"])),
+        Some(h) => format!(
+            "Accepted {id}{who}: applied {} op(s) as history entry #{h}. Scene checksum {}. Use `undo` to take it back.\n",
+            r["applied"],
+            s(&r["checksum"])
+        ),
         None => format!("Accepted {id}{who}, but its ops changed nothing (no history entry). Scene checksum {}.\n", s(&r["checksum"])),
     };
     text_out(text, r)
 }
 
-fn reject_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn reject_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     let id = a.str("proposal_id")?;
-    let r = b.call("proposal.reject", json!({"id": id}))?;
+    let r = b.call_detailed("proposal.reject", json!({"id": id}))?;
     text_out(format!("Rejected {id}. The scene was not changed.\n"), r)
 }
 
-fn verify_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn verify_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     let mut p = Map::new();
     let id = a.opt_str("proposal_id")?;
     if let Some(id) = id {
@@ -651,30 +669,30 @@ fn verify_proposal(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
     if let Some(v) = a.opt_bool("series")? {
         p.insert("series".into(), json!(v));
     }
-    let r = b.call(if id.is_some() { "proposal.verify" } else { "verify.self" }, J::Object(p))?;
+    let r = b.call_detailed(if id.is_some() { "proposal.verify" } else { "verify.self" }, J::Object(p))?;
     text_out(report::verify_text(&r), r)
 }
 
-fn sim_run(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn sim_run(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     let action = a.str("action")?;
     let r = match action {
-        "state" => b.call("sim.state", J::Null)?,
+        "state" => b.call_detailed("sim.state", J::Null)?,
         "start" => {
             let mut p = Map::new();
             if let Some(n) = a.opt_u64("player_count")? {
                 p.insert("player_count".into(), json!(n));
             }
-            b.call("sim.start", J::Object(p))?
+            b.call_detailed("sim.start", J::Object(p))?
         }
-        "step" => b.call("sim.step", json!({"n": a.opt_u64("n")?.unwrap_or(1)}))?,
+        "step" => b.call_detailed("sim.step", json!({"n": a.opt_u64("n")?.unwrap_or(1)}))?,
         "seek" => match a.opt_u64("tick")? {
-            Some(t) => b.call("sim.seek", json!({"tick": t}))?,
-            None => return Err(Fail::new("action 'seek' needs argument 'tick'")),
+            Some(t) => b.call_detailed("sim.seek", json!({"tick": t}))?,
+            None => return Err(DetailedFail::new("action 'seek' needs argument 'tick'")),
         },
-        "play" => b.call("sim.play", J::Null)?,
-        "pause" => b.call("sim.pause", J::Null)?,
+        "play" => b.call_detailed("sim.play", J::Null)?,
+        "pause" => b.call_detailed("sim.pause", J::Null)?,
         "stop" => {
-            let r = b.call("sim.stop", json!({}))?;
+            let r = b.call_detailed("sim.stop", json!({}))?;
             let text = format!(
                 "Play stopped at tick {}, checksum {}. The recording ({} bytes) is kept: verify_proposal with inputs {{\"kind\":\"last_play\"}} replays it.\n",
                 r["tick"],
@@ -683,30 +701,30 @@ fn sim_run(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
             );
             return text_out(text, r);
         }
-        other => return Err(Fail(format!("unknown action '{other}' (state, start, step, seek, play, pause, stop)"))),
+        other => return Err(DetailedFail::new(format!("unknown action '{other}' (state, start, step, seek, play, pause, stop)"))),
     };
     text_out(report::state_text(&r), r)
 }
 
-fn sim_input(b: &mut Bridge, a: &Args<'_>) -> Result<Out, Fail> {
+fn sim_input(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {
     let player = a.opt_u64("player")?.ok_or_else(|| Fail::new("missing argument 'player'"))?;
     let value = a.raw("value").ok_or_else(|| Fail::new("missing argument 'value'"))?;
     if !value.is_object() {
-        return Err(Fail::new("argument 'value' must be an object"));
+        return Err(DetailedFail::new("argument 'value' must be an object"));
     }
-    let r = b.call("sim.input_value", json!({"player": player, "value": value}))?;
+    let r = b.call_detailed("sim.input_value", json!({"player": player, "value": value}))?;
     text_out(format!("Player {player} input set for subsequent ticks.\n"), r)
 }
 
-fn history(b: &mut Bridge) -> Result<Out, Fail> {
-    let r = b.call("history.list", J::Null)?;
+fn history(b: &mut Bridge) -> Result<Out, DetailedFail> {
+    let r = b.call_detailed("history.list", J::Null)?;
     text_out(report::history_text(&r), r)
 }
 
-fn undo(b: &mut Bridge) -> Result<Out, Fail> {
-    let before = b.call("history.list", J::Null)?;
+fn undo(b: &mut Bridge) -> Result<Out, DetailedFail> {
+    let before = b.call_detailed("history.list", J::Null)?;
     let top = before["entries"].as_array().and_then(|l| l.iter().rev().find(|e| e["undone"] == false)).cloned();
-    let r = b.call("history.undo", J::Null)?;
+    let r = b.call_detailed("history.undo", J::Null)?;
     let text = match top {
         Some(e) => format!("Undid entry #{} \"{}\" by {}. Scene checksum {}.\n", e["id"], s(&e["label"]), s(&e["origin"]), s(&r["checksum"])),
         None => format!("Undid the last entry. Scene checksum {}.\n", s(&r["checksum"])),
